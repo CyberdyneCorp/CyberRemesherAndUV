@@ -52,6 +52,10 @@ Extraction SHALL trace integer isolines into a connection graph, simplify it (di
 - **WHEN** the pure-quad option is enabled
 - **THEN** the output SHALL contain only quads, or the report SHALL explicitly list the residual non-quads that could not be resolved
 
+#### Scenario: Pure-quad element quality
+- **WHEN** the pure-quad option is enabled
+- **THEN** the construction (quad-dominant remesh at a fraction of the target density, then one linear subdivision) SHALL be followed by a tangential-relaxation de-slivering pass — interior vertices slide toward their 1-ring centroid within the tangent plane, re-projecting onto the source surface each iteration, with feature (sharp-crease) and boundary vertices held fixed — so the quads are well shaped (no slivers or collapsed edges) rather than merely all four-sided, while the silhouette follows the source curvature
+
 ### Requirement: Explicit cleanup policies
 Hole filling, small-patch removal, and non-manifold face removal SHALL be governed by named, documented policies with user-visible parameters (maximum hole-boundary length; minimum patch size or keep-all), not hard-coded constants. Defaults SHALL be recorded in remeshing-parameters.
 

@@ -49,6 +49,74 @@ Mesh extractIsland(const Mesh& source, const std::vector<FaceId>& faces) {
     return Mesh::fromIndexed(positions, faceLists);
 }
 
+// Tangential Laplacian step for an interior vertex: move toward the 1-ring
+// centroid, keeping only the component in the vertex's tangent plane so the
+// vertex slides across the surface without denting it inward.
+Vec3 tangentialTarget(const Mesh& mesh, VertexId v, float lambda) {
+    const auto edges = mesh.vertexEdges(v);
+    Vec3 centroid{};
+    for (const EdgeId e : edges) {
+        const auto [a, b] = mesh.edgeVertices(e);
+        centroid += mesh.position(a == v ? b : a);
+    }
+    centroid = centroid / static_cast<float>(edges.size());
+    Vec3 normal{};
+    for (const FaceId f : mesh.vertexFaces(v)) {
+        normal += mesh.faceNormal(f);
+    }
+    normal = normalized(normal);
+    const Vec3 p = mesh.position(v);
+    Vec3 delta = (centroid - p) * lambda;
+    delta = delta - normal * dot(delta, normal);  // keep only the tangential slide
+    return p + delta;
+}
+
+// Relaxes a quad mesh, re-projecting onto the source surface every iteration.
+// Linear subdivision followed by closest-point snapping leaves many degenerate
+// quads — adjacent vertices land nearly on top of one another (near-zero edges,
+// ~0-degree corners), so a pure-quad result is clean topologically but riddled
+// with slivers. Interior vertices slide toward their 1-ring centroid to
+// equalize quad shape while the per-iteration projection keeps them on the
+// source surface, so the silhouette is preserved while element quality
+// improves. Feature (sharp crease) and boundary vertices are frozen so creases
+// and open borders keep their subdivided positions — sliding them along the
+// faceted crease instead reprojects erratically and creates new slivers.
+void relaxQuadMesh(Mesh& mesh, const ReferenceSurface& reference, float sharpEdgeDegrees,
+                   int iterations, float lambda) {
+    mesh.tagFeatureEdges(sharpEdgeDegrees);
+    std::vector<bool> constrained(mesh.vertexCapacity(), false);
+    for (Index ei = 0; ei < mesh.edgeCapacity(); ++ei) {
+        const EdgeId e{ei};
+        if (!mesh.isAlive(e) || !(mesh.isFeatureEdge(e) || mesh.isBoundaryEdge(e))) {
+            continue;
+        }
+        const auto [a, b] = mesh.edgeVertices(e);
+        constrained[a.value] = true;
+        constrained[b.value] = true;
+    }
+
+    std::vector<Vec3> newPos(mesh.vertexCapacity());
+    std::vector<bool> move(mesh.vertexCapacity(), false);
+    for (int it = 0; it < iterations; ++it) {
+        std::fill(move.begin(), move.end(), false);
+        for (Index i = 0; i < mesh.vertexCapacity(); ++i) {
+            const VertexId v{i};
+            if (!mesh.isAlive(v) || constrained[i] || mesh.vertexEdges(v).empty()) {
+                continue;
+            }
+            newPos[i] = tangentialTarget(mesh, v, lambda);
+            move[i] = true;
+        }
+        for (Index i = 0; i < mesh.vertexCapacity(); ++i) {
+            if (!move[i]) {
+                continue;
+            }
+            mesh.setPosition(VertexId{i},
+                             reference.empty() ? newPos[i] : reference.project(newPos[i]));
+        }
+    }
+}
+
 void countFaces(const Mesh& mesh, Statistics& stats) {
     stats.vertexCount = mesh.vertexCount();
     stats.quadCount = 0;
@@ -266,16 +334,20 @@ PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSi
         result.mesh = result.mesh.linearSubdivide();
         // Linear subdivision only splits faces — the new vertices sit on the
         // coarse (quarter-density) base's flat facets, so the silhouette stays
-        // faceted/jagged. Snap every vertex back onto the source surface so the
-        // pure-quad result follows the original curvature.
-        const Bvh sourceSurface(work);
+        // faceted/jagged AND the split leaves many degenerate slivers. Build a
+        // reference surface over the (triangulated) source, seed every vertex
+        // onto it, then run tangential relaxation to de-sliver the quads while
+        // following the original curvature (see relaxQuadMesh).
+        const ReferenceSurface sourceSurface(work, params.smoothNormalDegrees);
         if (!sourceSurface.empty()) {
             for (Index vi = 0; vi < result.mesh.vertexCapacity(); ++vi) {
                 const VertexId v{vi};
                 if (result.mesh.isAlive(v)) {
-                    result.mesh.setPosition(v, sourceSurface.closestPoint(result.mesh.position(v)).point);
+                    result.mesh.setPosition(v, sourceSurface.project(result.mesh.position(v)));
                 }
             }
+            relaxQuadMesh(result.mesh, sourceSurface, params.sharpEdgeDegrees,
+                          /*iterations=*/20, /*lambda=*/0.5f);
         }
     }
     countFaces(result.mesh, result.stats);
