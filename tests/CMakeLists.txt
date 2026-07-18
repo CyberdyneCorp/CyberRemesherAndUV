@@ -3,6 +3,7 @@ target_include_directories(cyber_doctest SYSTEM INTERFACE ${CMAKE_SOURCE_DIR}/th
 
 add_executable(cyber_tests
     main.cpp
+    bake/test_bake.cpp
     core/test_bvh.cpp
     core/test_golden.cpp
     core/test_holes.cpp
@@ -19,7 +20,7 @@ add_executable(cyber_tests
     accel/test_gpu_parity.cpp
     accel/test_primitives.cpp
 )
-target_link_libraries(cyber_tests PRIVATE cyber_accel cyber_doctest)
+target_link_libraries(cyber_tests PRIVATE cyber_accel cyber_bake cyber_doctest)
 if(TARGET cyber_net)
     target_sources(cyber_tests PRIVATE net/test_bridge.cpp)
     target_link_libraries(cyber_tests PRIVATE cyber_net)

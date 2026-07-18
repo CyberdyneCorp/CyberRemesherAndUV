@@ -164,7 +164,7 @@ biggest single item). 5.9 (golden corpus) is cheap and pays off immediately.
 
 ## 11. surface-baking
 
-- [ ] 11.1 Bake core: tangent-space normal, AO, displacement, color (vertex colors + texture-to-texture), GPU rays with CPU fallback, cancellable
+- [x] 11.1 Bake core: tangent-space normal, AO, displacement, color (vertex colors + texture-to-texture), GPU rays with CPU fallback, cancellable — `src/bake` (`cyber_bake`): UV rasterization + tangent frames, projection-cage rays, maps for tangent-space **normal / AO (hemisphere) / displacement / position / color (Target vertex colors)**; rays dispatch through the accel layer (`accel::raycast`, CPU reference, GPU-overridable), cancellable + progress. Numeric tests in `tests/bake/test_bake.cpp`, ASan-clean. **EXCEPT** texture-to-texture color source (sampling a Target texture — deferred with image I/O 3.4) and a GPU raycast primitive override (currently CPU fallback)
 - [ ] 11.2 Editable cage (falloff tweak, per-vertex distance, relax, reset) persisted in document
 - [ ] 11.3 Component links (draw high→low, X-to-bake per component); nearest-surface default
 - [ ] 11.4 Bake preview with movable light; exported-tangent-basis consistency test in a standard glTF viewer

@@ -23,6 +23,7 @@ include(cmake/CompilerWarnings.cmake)
 
 add_subdirectory(src/core)
 add_subdirectory(src/accel)
+add_subdirectory(src/bake)
 
 # The local network bridge uses POSIX sockets; a Winsock shim is a follow-up.
 if(CYBER_BUILD_NET AND NOT WIN32)
