@@ -102,8 +102,8 @@ biggest single item). 5.9 (golden corpus) is cheap and pays off immediately.
 
 ## 4. compute-acceleration
 
-- [ ] 4.1 Backend abstraction: typed buffers + primitive set (map/reduce/scan/sort/BVH/spmv/closest-point/raycast)
-- [ ] 4.2 CPU reference backend (work-stealing pool or std::execution) — contract implementation (seed exists: `IBackend` + CPU `parallelFor` + registry in `src/accel`)
+- [x] 4.1 Backend abstraction: typed buffers + primitive set (map/reduce/scan/sort/BVH/spmv/closest-point/raycast) — `Buffer<T>` (`accel/buffer.hpp`) + `accel/primitives.hpp` (all primitives dispatch through `IBackend::parallelFor`)
+- [x] 4.2 CPU reference backend — the primitive set above is the CPU reference (defines correct results); built on the existing `IBackend`/`parallelFor`/registry; covered by `tests/accel/test_primitives.cpp`
 - [ ] 4.3 Metal backend (tier-1) + device enumeration/selection/override
 - [ ] 4.4 CUDA backend (tier-1)
 - [ ] 4.5 OpenCL backend (tier-2, graceful absence)

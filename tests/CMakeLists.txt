@@ -14,6 +14,7 @@ add_executable(cyber_tests
     core/test_mesh_property.cpp
     core/test_version.cpp
     accel/test_cpu_backend.cpp
+    accel/test_primitives.cpp
 )
 target_link_libraries(cyber_tests PRIVATE cyber_accel cyber_doctest)
 cyber_set_warnings(cyber_tests)
