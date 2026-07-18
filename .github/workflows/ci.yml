@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  format:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: clang-format check
+        run: |
+          sudo apt-get update && sudo apt-get install -y clang-format
+          find src apps tests -name '*.hpp' -o -name '*.cpp' | xargs clang-format --dry-run --Werror
+
+  license-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: License audit
+        run: python3 tools/license_audit.py
+
+  openspec:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm install -g @fission-ai/openspec@latest
+      - run: openspec validate --all --strict
+
+  build-test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: lukka/get-cmake@latest
+      - name: Configure (cpu-headless)
+        run: cmake --preset cpu-headless
+      - name: Build
+        run: cmake --build --preset cpu-headless
+      - name: Test
+        run: ctest --preset cpu-headless
+      - name: CLI smoke
+        shell: bash
+        run: |
+          ./build/cpu-headless/apps/cli/cyberremesh --version
+          ./build/cpu-headless/apps/cli/cyberremesh --list-backends

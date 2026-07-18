@@ -1,0 +1,44 @@
+{
+  "allowedLicenses": ["MIT", "BSD-2-Clause", "BSD-3-Clause", "Apache-2.0", "MPL-2.0", "Zlib", "BSL-1.0", "Unlicense"],
+  "dependencies": [
+    {
+      "name": "doctest",
+      "version": "2.4.11",
+      "license": "MIT",
+      "path": "doctest",
+      "url": "https://github.com/doctest/doctest",
+      "usedBy": "tests"
+    },
+    {
+      "name": "tinyobjloader",
+      "version": "2.0.0rc13",
+      "license": "MIT",
+      "path": "tinyobjloader",
+      "url": "https://github.com/tinyobjloader/tinyobjloader",
+      "usedBy": "mesh-io OBJ import"
+    },
+    {
+      "name": "happly",
+      "version": "master-2024",
+      "license": "MIT",
+      "path": "happly",
+      "url": "https://github.com/nmwsharp/happly",
+      "usedBy": "mesh-io PLY import/export"
+    },
+    {
+      "name": "tinygltf",
+      "version": "2.9.5",
+      "license": "MIT",
+      "path": "tinygltf",
+      "url": "https://github.com/syoyo/tinygltf",
+      "usedBy": "mesh-io glTF 2.0 import/export (bundles nlohmann json.hpp, MIT)"
+    }
+  ],
+  "planned": [
+    { "name": "eigen", "license": "MPL-2.0", "usedBy": "core (solver math, task 5.4)" },
+    { "name": "tinygltf", "license": "MIT", "usedBy": "mesh-io (task 3.2)" },
+    { "name": "stb", "license": "MIT", "usedBy": "mesh-io image output (task 3.4)" },
+    { "name": "miniz", "license": "MIT", "usedBy": "mesh-io ZIP packaging (task 3.4)" },
+    { "name": "geogram (exploragram slice)", "license": "BSD-3-Clause", "usedBy": "parameterizer port (task 5.4)" }
+  ]
+}

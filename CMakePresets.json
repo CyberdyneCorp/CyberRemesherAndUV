@@ -1,0 +1,98 @@
+{
+  "version": 6,
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      }
+    },
+    {
+      "name": "cpu-headless",
+      "displayName": "CPU-only headless (core + accel + CLI + tests)",
+      "inherits": "base"
+    },
+    {
+      "name": "cpu-headless-debug",
+      "displayName": "CPU-only headless, Debug with sanitizers",
+      "inherits": "base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_CXX_FLAGS": "-fsanitize=address,undefined -fno-omit-frame-pointer"
+      }
+    },
+    {
+      "name": "macos-metal",
+      "displayName": "macOS with Metal backend and renderer",
+      "inherits": "base",
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Darwin" },
+      "cacheVariables": {
+        "CYBER_ENABLE_METAL": "ON",
+        "CYBER_BUILD_RENDER": "ON"
+      }
+    },
+    {
+      "name": "linux-cuda",
+      "displayName": "Linux with CUDA backend",
+      "inherits": "base",
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux" },
+      "cacheVariables": {
+        "CYBER_ENABLE_CUDA": "ON"
+      }
+    },
+    {
+      "name": "windows-cuda",
+      "displayName": "Windows with CUDA backend",
+      "inherits": "base",
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows" },
+      "cacheVariables": {
+        "CYBER_ENABLE_CUDA": "ON"
+      }
+    },
+    {
+      "name": "ios",
+      "displayName": "iPadOS/iOS (Metal, no CLI/tests)",
+      "inherits": "base",
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Darwin" },
+      "cacheVariables": {
+        "CMAKE_SYSTEM_NAME": "iOS",
+        "CYBER_ENABLE_METAL": "ON",
+        "CYBER_BUILD_RENDER": "ON",
+        "CYBER_BUILD_CLI": "OFF",
+        "CYBER_BUILD_TESTS": "OFF"
+      }
+    },
+    {
+      "name": "android",
+      "displayName": "Android (Vulkan render, OpenCL where present)",
+      "inherits": "base",
+      "cacheVariables": {
+        "CMAKE_SYSTEM_NAME": "Android",
+        "CYBER_ENABLE_OPENCL": "ON",
+        "CYBER_BUILD_RENDER": "ON",
+        "CYBER_BUILD_CLI": "OFF",
+        "CYBER_BUILD_TESTS": "OFF"
+      }
+    }
+  ],
+  "buildPresets": [
+    { "name": "cpu-headless", "configurePreset": "cpu-headless" },
+    { "name": "cpu-headless-debug", "configurePreset": "cpu-headless-debug" },
+    { "name": "macos-metal", "configurePreset": "macos-metal" }
+  ],
+  "testPresets": [
+    {
+      "name": "cpu-headless",
+      "configurePreset": "cpu-headless",
+      "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "cpu-headless-debug",
+      "configurePreset": "cpu-headless-debug",
+      "output": { "outputOnFailure": true }
+    }
+  ]
+}
