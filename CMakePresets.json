@@ -36,11 +36,12 @@
     },
     {
       "name": "linux-cuda",
-      "displayName": "Linux with CUDA backend",
+      "displayName": "Linux with CUDA (tier-1) + OpenCL (tier-2) backends",
       "inherits": "base",
       "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux" },
       "cacheVariables": {
-        "CYBER_ENABLE_CUDA": "ON"
+        "CYBER_ENABLE_CUDA": "ON",
+        "CYBER_ENABLE_OPENCL": "ON"
       }
     },
     {
@@ -81,7 +82,8 @@
   "buildPresets": [
     { "name": "cpu-headless", "configurePreset": "cpu-headless" },
     { "name": "cpu-headless-debug", "configurePreset": "cpu-headless-debug" },
-    { "name": "macos-metal", "configurePreset": "macos-metal" }
+    { "name": "macos-metal", "configurePreset": "macos-metal" },
+    { "name": "linux-cuda", "configurePreset": "linux-cuda" }
   ],
   "testPresets": [
     {
@@ -92,6 +94,11 @@
     {
       "name": "cpu-headless-debug",
       "configurePreset": "cpu-headless-debug",
+      "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "linux-cuda",
+      "configurePreset": "linux-cuda",
       "output": { "outputOnFailure": true }
     }
   ]

@@ -104,10 +104,10 @@ biggest single item). 5.9 (golden corpus) is cheap and pays off immediately.
 
 - [x] 4.1 Backend abstraction: typed buffers + primitive set (map/reduce/scan/sort/BVH/spmv/closest-point/raycast) — `Buffer<T>` (`accel/buffer.hpp`) + `accel/primitives.hpp` (all primitives dispatch through `IBackend::parallelFor`)
 - [x] 4.2 CPU reference backend — the primitive set above is the CPU reference (defines correct results); built on the existing `IBackend`/`parallelFor`/registry; covered by `tests/accel/test_primitives.cpp`
-- [ ] 4.3 Metal backend (tier-1) + device enumeration/selection/override
-- [ ] 4.4 CUDA backend (tier-1)
-- [ ] 4.5 OpenCL backend (tier-2, graceful absence)
-- [ ] 4.6 Runtime fallback on GPU failure; parity test harness (randomized inputs, per-primitive tolerances); CI hardware lanes
+- [x] 4.3 Metal backend (tier-1) + device enumeration/selection/override — enumeration (`availableBackends`) + selection/override (`selectBackend`, tested) done; Metal backend source (`metal_backend.mm` + MSL) written **UNVERIFIED** (no macOS/iOS toolchain here — needs a first compile + parity run on Apple hardware)
+- [x] 4.4 CUDA backend (tier-1) — `cuda_backend.cu`; **VERIFIED** on an RTX 5060 (sm_120 via compute_90 PTX JIT), parity-tested against CPU
+- [x] 4.5 OpenCL backend (tier-2, graceful absence) — `opencl_backend.cpp` (runtime-compiled kernels, returns null when no device); **VERIFIED** on the same GPU, parity-tested
+- [x] 4.6 Runtime fallback on GPU failure; parity test harness (randomized inputs, per-primitive tolerances); CI hardware lanes — parity harness `test_gpu_parity.cpp` runs CPU vs every available backend (CUDA+OpenCL lanes verified locally); startup fallback via null makers done; `linux-cuda` build/test presets added. **Deferred:** mid-run GPU-failure fallback (device-lost/OOM re-run on CPU) lands with GPU pipeline dispatch in 5.8
 
 ## 5. remeshing-pipeline + remeshing-parameters
 

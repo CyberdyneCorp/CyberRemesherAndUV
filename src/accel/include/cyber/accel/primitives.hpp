@@ -99,21 +99,14 @@ struct SparseMatrix {
     std::vector<float> value;           // size nnz
 };
 
-// Sparse matrix-vector product y = A * x, one row per parallel task.
+// Sparse matrix-vector product y = A * x. Dispatches to IBackend::spmvCsr so a
+// GPU backend's device kernel runs when one is selected; the CPU reference is
+// the base-class implementation.
 inline void spmv(IBackend& backend, const SparseMatrix& a, const Buffer<float>& x,
                  Buffer<float>& y) {
     y.resize(a.rows);
-    const float* xd = x.data();
-    float* yd = y.data();
-    backend.parallelFor(0, a.rows, [&a, xd, yd](std::size_t lo, std::size_t hi) {
-        for (std::size_t row = lo; row < hi; ++row) {
-            float sum = 0.0f;
-            for (std::size_t k = a.rowStart[row]; k < a.rowStart[row + 1]; ++k) {
-                sum += a.value[k] * xd[a.colIndex[k]];
-            }
-            yd[row] = sum;
-        }
-    });
+    backend.spmvCsr(a.rows, a.rowStart.data(), a.colIndex.data(), a.value.data(), x.data(),
+                    y.data());
 }
 
 // Batched closest-point projection: out[i] = closest point on `bvh` to
