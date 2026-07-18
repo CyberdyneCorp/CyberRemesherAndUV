@@ -4,6 +4,7 @@ target_include_directories(cyber_doctest SYSTEM INTERFACE ${CMAKE_SOURCE_DIR}/th
 add_executable(cyber_tests
     main.cpp
     core/test_bvh.cpp
+    core/test_golden.cpp
     core/test_io_formats.cpp
     core/test_io_obj.cpp
     core/test_isotropic.cpp

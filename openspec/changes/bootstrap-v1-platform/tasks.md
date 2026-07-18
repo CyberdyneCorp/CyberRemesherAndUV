@@ -119,7 +119,7 @@ biggest single item). 5.9 (golden corpus) is cheap and pays off immediately.
 - [ ] 5.6 Cleanup policies (hole fill limit, patch policy) as parameters; per-island failure diagnostics; partial-run status — done EXCEPT hole filling itself (parameter plumbed; implementation belongs to the 5.5 extractor)
 - [x] 5.7 ProgressSink/CancelToken plumbing (≤100 ms cancel latency, atomic commit)
 - [ ] 5.8 GPU dispatch of hot spots (projection, field smoothing, spmv) via accel layer
-- [ ] 5.9 Golden-mesh regression suite (permissive corpus incl. armadillo) with recorded baselines
+- [x] 5.9 Golden-mesh regression suite (permissive corpus incl. armadillo) with recorded baselines — `tests/core/test_golden.cpp`: procedural corpus (cube, sphere, torus/genus-1), baselines assert manifold-valid + quad-dominant (≥0.55 greedy floor) + density band + shape-bounds preservation + exact-topology determinism + pure-quad all-quad. Corpus is procedural (permissive, reproducible); an armadillo-class asset drops into the same harness later
 
 ## 6. cli-headless
 
