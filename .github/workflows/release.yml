@@ -1,0 +1,138 @@
+# UNVERIFIED: release lane. Requires platform runners (macOS/Windows) and
+# signing secrets that are unavailable in the headless Linux CI validated by
+# ci.yml. Additive to ci.yml (which is unchanged). Implements build-and-
+# packaging tasks 14.1 (versioned platform packages from a single version
+# source) and 14.3 (GitHub Release publication on tags).
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version_override:
+        description: "Override version (defaults to project() VERSION)"
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  # Resolve the one true version and assert the tag agrees with it.
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      tag: ${{ steps.v.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        name: Resolve single-source version
+        env:
+          CYBER_VERSION_OVERRIDE: ${{ inputs.version_override }}
+        run: |
+          chmod +x packaging/version.sh
+          packaging/version.sh --github-output
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            packaging/version.sh --verify-tag "${GITHUB_REF_NAME}"
+          fi
+
+  package:
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: macos
+            os: macos-latest
+            script: packaging/macos/build_dmg.sh
+          - target: linux
+            os: ubuntu-latest
+            script: packaging/linux/appimage.sh
+          - target: windows-zip
+            os: windows-latest
+            script: packaging/windows/build_zip.ps1
+          - target: windows-installer
+            os: windows-latest
+            script: packaging/windows/build_installer.ps1
+          - target: ios
+            os: macos-latest
+            script: packaging/ios/build_archive.sh
+          - target: android
+            os: ubuntu-latest
+            script: packaging/android/build_aab.sh
+    runs-on: ${{ matrix.os }}
+    env:
+      CYBER_VERSION_OVERRIDE: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install CMake/Ninja
+        uses: lukka/get-cmake@latest
+
+      - name: Set up Linux packaging tools
+        if: runner.os == 'Linux' && startsWith(matrix.target, 'linux')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libfuse2 desktop-file-utils
+          curl -fsSL -o /usr/local/bin/appimagetool \
+            https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x /usr/local/bin/appimagetool
+
+      - name: Set up JDK/Android
+        if: matrix.target == 'android'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Build and package (${{ matrix.target }})
+        shell: bash
+        env:
+          MACOS_CODESIGN_IDENTITY: ${{ secrets.MACOS_CODESIGN_IDENTITY }}
+          MACOS_NOTARY_KEYCHAIN_PROFILE: ${{ secrets.MACOS_NOTARY_KEYCHAIN_PROFILE }}
+          WINDOWS_CERT_PFX: ${{ secrets.WINDOWS_CERT_PFX }}
+          WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+          IOS_TEAM_ID: ${{ secrets.IOS_TEAM_ID }}
+          ANDROID_KEYSTORE_PATH: ${{ secrets.ANDROID_KEYSTORE_PATH }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          case "${{ matrix.script }}" in
+            *.ps1) pwsh -File "${{ matrix.script }}" ;;
+            *)     chmod +x "${{ matrix.script }}"; "${{ matrix.script }}" ;;
+          esac
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cyberremesh-${{ matrix.target }}
+          path: dist/cyberremesh-*
+          if-no-files-found: error
+          retention-days: 14
+
+  # Publish a GitHub Release with every platform artifact attached (14.3).
+  release:
+    needs: [version, package]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts
+          merge-multiple: true
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.version.outputs.tag }}
+          name: CyberRemesher ${{ needs.version.outputs.version }}
+          draft: false
+          prerelease: false
+          fail_on_unmatched_files: true
+          files: release-artifacts/cyberremesh-*

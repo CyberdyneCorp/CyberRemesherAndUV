@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=CyberRemesher
+Comment=Quad remeshing, retopology, UV and baking engine
+Exec=CyberRemesher
+Icon=cyberremesher
+Categories=Graphics;3DGraphics;
+Terminal=false

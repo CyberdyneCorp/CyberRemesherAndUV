@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- UNVERIFIED: WiX authoring compiled by packaging/windows/build_installer.ps1.
+     $(var.Version) is passed via -dVersion from the single version source so
+     the MSI ProductVersion matches the binary --version and artifact name. -->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Product Id="*"
+           Name="CyberRemesher"
+           Language="1033"
+           Version="$(var.Version)"
+           Manufacturer="CyberRemesher"
+           UpgradeCode="6f2f2b7e-4d1e-4c0a-9c3f-7c9c9d5e1a01">
+    <Package InstallerVersion="500" Compressed="yes" InstallScope="perMachine" />
+    <MajorUpgrade DowngradeErrorMessage="A newer version of CyberRemesher is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <Feature Id="MainFeature" Title="CyberRemesher" Level="1">
+      <ComponentGroupRef Id="AppComponents" />
+    </Feature>
+
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="ProgramFiles64Folder">
+        <Directory Id="INSTALLFOLDER" Name="CyberRemesher" />
+      </Directory>
+    </Directory>
+
+    <ComponentGroup Id="AppComponents" Directory="INSTALLFOLDER">
+      <Component Id="CliExe" Guid="*">
+        <File Id="cyberremesh.exe" Source="$(var.StageDir)\cyberremesh.exe" KeyPath="yes" />
+      </Component>
+      <Component Id="DesktopExe" Guid="*">
+        <File Id="CyberRemesher.exe" Source="$(var.StageDir)\CyberRemesher.exe" KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+  </Product>
+</Wix>

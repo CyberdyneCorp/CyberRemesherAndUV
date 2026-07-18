@@ -1,0 +1,125 @@
+/*
+ * CyberRemesher C ABI (capi module, task 13.1).
+ *
+ * A stable, pure-C facade over the C++20 remeshing pipeline. This is the
+ * single surface that language bindings (Python, Swift, C#, ...) link
+ * against: opaque handles, integer status codes, plain-old-data parameter
+ * structs and C function pointers for progress/cancellation. No C++ types,
+ * exceptions or name mangling cross this boundary.
+ */
+#ifndef CYBER_CAPI_H
+#define CYBER_CAPI_H
+
+#include <stddef.h> /* size_t */
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* Opaque mesh handle wrapping the internal cyber::Mesh. Only ever passed by
+ * pointer; created by cyber_mesh_load_obj / cyber_remesh, released with
+ * cyber_mesh_free. */
+typedef struct CyberMesh CyberMesh;
+
+/* Return code for every fallible entry point. CYBER_OK is guaranteed 0 so
+ * callers may test `if (status)` for failure. */
+typedef enum CyberStatus {
+    CYBER_OK = 0,
+    CYBER_ERR_IO,            /* file missing, unreadable, or unwritable */
+    CYBER_ERR_INVALID_ARG,   /* a required pointer argument was NULL */
+    CYBER_ERR_INVALID_PARAM, /* remesh parameters were unusable (NaN, etc.) */
+    CYBER_ERR_EMPTY,         /* mesh had no geometry */
+    CYBER_ERR_RUNTIME        /* pipeline failed or was cancelled */
+} CyberStatus;
+
+/* Engine semantic version (mirrors the CMake project() version). */
+void cyber_version(int* major, int* minor, int* patch);
+
+/* Human-readable, static string for a status code. Never NULL. */
+const char* cyber_status_string(CyberStatus status);
+
+/* Thread-local description of the most recent failure on the calling thread,
+ * or an empty string if the last call succeeded. Never NULL. The pointer is
+ * valid until the next capi call on this thread. */
+const char* cyber_last_error(void);
+
+/* ---- mesh I/O -------------------------------------------------------- */
+
+/* Loads a Wavefront OBJ. On success *out receives a newly allocated handle
+ * the caller must release with cyber_mesh_free. */
+CyberStatus cyber_mesh_load_obj(const char* path, CyberMesh** out);
+
+/* Writes a mesh to a Wavefront OBJ (a sibling .mtl may be written too). */
+CyberStatus cyber_mesh_save_obj(const CyberMesh* mesh, const char* path);
+
+/* Releases a handle. NULL is ignored. */
+void cyber_mesh_free(CyberMesh* mesh);
+
+/* ---- remeshing ------------------------------------------------------- */
+
+/* Canonical user-facing remesh parameters (POD mirror of the C++ struct).
+ * Fill with cyber_default_params, then override fields as needed. */
+typedef struct CyberRemeshParams {
+    int targetQuads;           /* desired output quad count */
+    float edgeScale;           /* multiplier on the derived edge length */
+    float sharpEdgeDegrees;    /* dihedral threshold for feature edges */
+    float smoothNormalDegrees; /* normal-smoothing angle */
+    float adaptivity;          /* 0 uniform .. 1 fully curvature-adaptive */
+    int pureQuads;             /* non-zero: forbid residual triangles */
+    int holeFillMaxBoundary;   /* max boundary edges of holes to fill; 0 off */
+} CyberRemeshParams;
+
+/* Fills params with the engine defaults. No-op on NULL. */
+void cyber_default_params(CyberRemeshParams* params);
+
+/* Cancellation callback: return non-zero to request cooperative cancel. */
+typedef int (*CyberCancelCb)(void* user);
+
+/* Progress callback: fraction in [0,1] and a short stage label. */
+typedef void (*CyberProgressCb)(float fraction, const char* stage, void* user);
+
+/* Runs the automatic remeshing pipeline. `in` is never modified. On success
+ * *out receives a newly allocated result handle (release with
+ * cyber_mesh_free). Either callback may be NULL; `user` is passed through to
+ * both. */
+CyberStatus cyber_remesh(const CyberMesh* in, const CyberRemeshParams* params,
+                         CyberProgressCb progress, CyberCancelCb cancel, void* user,
+                         CyberMesh** out);
+
+/* ---- statistics ------------------------------------------------------ */
+
+/* Topology summary of a mesh. */
+typedef struct CyberStats {
+    size_t vertices;
+    size_t quads;
+    size_t triangles;
+    size_t other;         /* faces that are neither triangles nor quads */
+    size_t islands;       /* connected components */
+    size_t islandsFailed; /* islands the pipeline could not remesh (0 for
+                             meshes not produced by cyber_remesh) */
+} CyberStats;
+
+/* Computes topology statistics for a mesh. */
+CyberStatus cyber_mesh_stats(const CyberMesh* mesh, CyberStats* out);
+
+/* --- Accessors used by the language bindings (Python, Swift) ------------- */
+
+/* Creates an empty mesh handle (release with cyber_mesh_destroy/free). */
+CyberMesh* cyber_mesh_create(void);
+/* Alias of cyber_mesh_free (the bindings use the create/destroy pairing). */
+void cyber_mesh_destroy(CyberMesh* mesh);
+/* Number of live vertices / faces. */
+size_t cyber_mesh_vertex_count(const CyberMesh* mesh);
+size_t cyber_mesh_face_count(const CyberMesh* mesh);
+/* Copies compacted vertex positions (x,y,z per vertex) into `out`, writing at
+ * most `max_floats`; returns the number of floats written. Pass out=NULL to
+ * query the required count (3 * vertex_count). */
+size_t cyber_mesh_copy_positions(const CyberMesh* mesh, float* out, size_t max_floats);
+/* Alias of cyber_default_params. */
+void cyber_remesh_params_default(CyberRemeshParams* params);
+
+#ifdef __cplusplus
+} /* extern "C" */
+#endif
+
+#endif /* CYBER_CAPI_H */

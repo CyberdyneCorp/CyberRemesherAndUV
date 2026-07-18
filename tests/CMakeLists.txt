@@ -25,11 +25,36 @@ if(TARGET cyber_net)
     target_sources(cyber_tests PRIVATE net/test_bridge.cpp)
     target_link_libraries(cyber_tests PRIVATE cyber_net)
 endif()
+# Batch-authored modules: their tests build only when the module is enabled.
+if(TARGET cyber_imageio)
+    target_sources(cyber_tests PRIVATE imageio/test_imageio.cpp)
+    target_link_libraries(cyber_tests PRIVATE cyber_imageio)
+endif()
+if(TARGET cyber_capi)
+    target_sources(cyber_tests PRIVATE capi/test_capi.cpp)
+    target_link_libraries(cyber_tests PRIVATE cyber_capi)
+endif()
+if(TARGET cyber_app)
+    target_sources(cyber_tests PRIVATE app/test_app.cpp)
+    target_link_libraries(cyber_tests PRIVATE cyber_app)
+endif()
+if(TARGET cyber_uv)
+    target_sources(cyber_tests PRIVATE uv/test_uv.cpp)
+    target_link_libraries(cyber_tests PRIVATE cyber_uv)
+endif()
+if(TARGET cyber_retopo)
+    target_sources(cyber_tests PRIVATE retopo/test_retopo.cpp)
+    target_link_libraries(cyber_tests PRIVATE cyber_retopo)
+endif()
+if(TARGET cyber_bakecage)
+    target_sources(cyber_tests PRIVATE bakecage/test_bakecage.cpp)
+    target_link_libraries(cyber_tests PRIVATE cyber_bakecage)
+endif()
 cyber_set_warnings(cyber_tests)
 
 add_test(NAME unit COMMAND cyber_tests)
 
-if(CYBER_BUILD_CLI OR TARGET cyberbridge-server)
+if(CYBER_BUILD_CLI OR TARGET cyberbridge-server OR TARGET cyber_capi_shared)
     find_package(Python3 COMPONENTS Interpreter)
 endif()
 
@@ -44,4 +69,15 @@ if(TARGET cyberbridge-server AND Python3_FOUND)
         COMMAND ${Python3_EXECUTABLE}
                 ${CMAKE_CURRENT_SOURCE_DIR}/../python/tests/test_integration.py
                 $<TARGET_FILE:cyberbridge-server>)
+endif()
+
+# Python ctypes bindings over the C ABI shared library. The test self-skips
+# (exit 0) if it cannot load the lib, so it runs for real in a clean CI and
+# degrades gracefully in environments with a conflicting libstdc++.
+if(TARGET cyber_capi_shared AND Python3_FOUND)
+    add_test(NAME python_bindings
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/../python/cyberremesh/tests/test_api.py)
+    set_tests_properties(python_bindings PROPERTIES
+        ENVIRONMENT "CYBER_CAPI_LIB=$<TARGET_FILE:cyber_capi_shared>")
 endif()

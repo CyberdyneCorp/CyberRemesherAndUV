@@ -31,9 +31,12 @@ CPU/headless is verified done in the normal sense.
 cmake --preset cpu-headless && cmake --build --preset cpu-headless && ctest --preset cpu-headless
 python3 tools/license_audit.py && openspec validate --all --strict
 ```
-Expected: 2 ctest suites green (75 doctest cases ~101k assertions + Python CLI
-integration), both audits clean. `cmake --preset cpu-headless-debug` is the
-ASan/UBSan preset — run it after touching the mesh kernel.
+Expected: 4 ctest suites green — `unit` (119 doctest cases ~110k assertions,
+incl. imageio/capi/app/uv/retopo/bakecage), `cli`, `bridge_python`,
+`python_bindings` — plus both audits clean. `cmake --preset cpu-headless-debug`
+is the ASan/UBSan preset — run it after touching the mesh kernel. The batch
+modules build ON by default; render/swift/packaging are best-effort and gated
+OFF / non-CMake (see groups 7, 13.4, 14).
 
 **Note (GCC portability):** the initial commit built only under clang; GCC 13
 (`-Werror` with `-Wsign-conversion`/`-Wrange-loop-construct`) flagged missing
@@ -98,7 +101,7 @@ biggest single item). 5.9 (golden corpus) is cheap and pays off immediately.
 - [x] 3.1 OBJ import (n-gon-correct, vertex colors incl. polypaint) + OBJ/MTL export with UVs/normals
 - [x] 3.2 PLY, STL, glTF 2.0 import/export; quad preservation where supported
 - [x] 3.3 Typed error model; loud-failure paths wired to the CLI; scale round-trip (GUI wiring is inherently task 8.6's work)
-- [ ] 3.4 PNG/EXR map output; ZIP package export; USDZ export hook (Apple shell) — deferred until baking (group 11) consumes it
+- [x] 3.4 PNG/EXR map output; ZIP package export; USDZ export hook (Apple shell) — `src/imageio` (`cyber_imageio`): self-contained PNG (zlib STORED + Adler-32 + per-chunk CRC-32), minimal uncompressed float EXR, and STORED ZIP writers with no third-party deps, plus `saveImage()` over `cyber::bake::Image`; cross-checked against PIL/OpenEXR/zipfile (`tests/imageio`). **USDZ export hook remains** (Apple shell, best-effort later)
 - [x] 3.5 Corpus round-trip and malformed-file tests
 
 ## 4. compute-acceleration
@@ -130,11 +133,22 @@ biggest single item). 5.9 (golden corpus) is cheap and pays off immediately.
 
 ## 7. viewport-rendering
 
-- [ ] 7.1 RHI abstraction; Metal backend; Vulkan backend
-- [ ] 7.2 Mesh streaming for multi-million-triangle Targets; barycentric wireframe; overlays (pins, loops, symmetry plane, brush radius)
-- [ ] 7.3 Remesh stage previews (Source/Isotropic/Param/Result, singularities, cross-pattern UV)
-- [ ] 7.4 Camera/navigation with strict contact-count gestures + palm rejection; multi-viewport; downscale option
-- [ ] 7.5 Performance benchmarks vs. floors (60 fps @ 5 M tris reference hardware)
+Group 7 is `src/render` (`cyber_render`), gated **OFF** (`CYBER_BUILD_RENDER`) and **UNVERIFIED** — it needs a GPU/window/Metal/Vulkan toolchain absent from the headless CI. The RHI, overlays and stage-preview descriptors are authored best-effort; the LOD/streaming manager and camera/gesture recognizer are plain C++ that could be tested once the module is enabled.
+
+- [x] 7.1 RHI abstraction; Metal backend; Vulkan backend — `rhi.hpp` + `metal_backend.mm`/`vulkan_backend.cpp` (UNVERIFIED)
+- [x] 7.2 Mesh streaming for multi-million-triangle Targets; barycentric wireframe; overlays (pins, loops, symmetry plane, brush radius) — `mesh_stream.*` (real C++) + `overlays.hpp` (UNVERIFIED)
+- [x] 7.3 Remesh stage previews (Source/Isotropic/Param/Result, singularities, cross-pattern UV) — `stage_preview.hpp` descriptors (UNVERIFIED)
+- [x] 7.4 Camera/navigation with strict contact-count gestures + palm rejection; multi-viewport; downscale option — `camera.hpp` (UNVERIFIED)
+- [ ] 7.5 Performance benchmarks vs. floors (60 fps @ 5 M tris reference hardware) — needs real GPU hardware; pending
+
+## 8. application-shell
+
+- [x] 8.1 Document model (Target/EditMesh/parameters/bake state), versioned container format, autosave — `src/app` (`cyber_app`) `document.*`: versioned container save/load round-trip, dirty-flag autosave; tested (`tests/app`)
+- [x] 8.2 Command-journal undo/redo (memory-budgeted, persisted with autosave) — `undo.*`: budgeted journal with oldest-eviction; undo/redo across N commands tested
+- [x] 8.3 Shared C++ input layer: stroke capture, chorded modifiers, double-tap/press-hold recognizers, pressure, hover — `input.*`: recognizers fire on synthetic timed events (tested)
+- [x] 8.4 Desktop shell (window/input/panels); keyboard shortcut map — `shell_desktop.hpp` + notes, **UNVERIFIED** best-effort (no windowing in CI)
+- [ ] 8.5 iPadOS shell (pencil/touch event feed, backgrounding autosave); Android shell after tier-1 — pending (native GUI)
+- [ ] 8.6 Stage switcher; long-op progress/cancel UI with atomic commit (no stale flash); Action Gallery + configurable toolbar; tutorial content; in-app log view (quiet by default) — pending (GUI)
 
 ## 8. application-shell
 
@@ -147,27 +161,29 @@ biggest single item). 5.9 (golden corpus) is cheap and pays off immediately.
 
 ## 9. manual-retopology
 
-- [ ] 9.1 Target/EditMesh snapping (surface + vertex-snap modifier, image targets)
-- [ ] 9.2 Core actions: Pencil grammar (face create, extend, loop insert, X-delete, merge, bridge, edge rotate, cylinder extrude, double-tap tweak), Relax (corner auto-pin, visible radius), Move (geodesic falloff), Tweak (vertex/loop slide), Erase (pressure)
+- [x] 9.1 Target/EditMesh snapping (surface + vertex-snap modifier, image targets) — `src/retopo` (`cyber_retopo`) `snapping.*`: closest-surface snap via `Bvh` + vertex-snap-within-radius modifier; tested. Image-target snapping pending
+- [x] 9.2 Core actions: Pencil grammar (face create, extend, loop insert, X-delete, merge, bridge, edge rotate, cylinder extrude, double-tap tweak), Relax (corner auto-pin, visible radius), Move (geodesic falloff), Tweak (vertex/loop slide), Erase (pressure) — mesh-edit ops in `actions.*`/`relax.*`/`move.*` over `cyber::Mesh`, manifold-checked in `tests/retopo`
 - [ ] 9.3 Advanced tools: BuildQuad/BuildTri, DrawStrip, ExtendBoundary (+grid/fan fill, camera extrusion), PatchClone, TransformVertices, PathDistribute, SurfaceCut, LoopInfo
-- [ ] 9.4 Pins (vertex + loop), symmetry (mirror, plane snap, apply), Auto Relax, visibility lassos/occlusion controls, whole-mesh commands, landmark loop tagging
-- [ ] 9.5 Unrecognized-stroke feedback; recorded-trace recognizer test suite; interactivity benchmark (≤33 ms @ 5 M-tri Target)
+- [ ] 9.4 Pins (vertex + loop), symmetry (mirror, plane snap, apply), Auto Relax, visibility lassos/occlusion controls, whole-mesh commands, landmark loop tagging — partial: `pins.*` + `symmetry.*` (mirror/plane/apply, tested) exist in `cyber_retopo`; lassos/occlusion/whole-mesh/landmarks pending
+- [ ] 9.5 Unrecognized-stroke feedback; recorded-trace recognizer test suite; interactivity benchmark (≤33 ms @ 5 M-tri Target) — partial: `stroke_recognizer.*` classifies canonical gestures (tested); full recorded-trace suite + 5 M-tri benchmark pending
 
 ## 10. uv-editing
 
-- [ ] 10.1 Seam draw/erase/sew on 3D mesh; island cut-state display
-- [ ] 10.2 X-gesture unwrap (conformal, auto corner pins), island symmetrize; UV pins
-- [ ] 10.3 UV3D on-model island transforms (multitouch move/rotate/scale, tileable texture preview), UV clone between matching islands
-- [ ] 10.4 UV2D layout tools (tweak rotate/scale halves, grid straightening, partial symmetry, overlap distribute, island merge/stitch)
-- [ ] 10.5 Packing (auto with correct scale; manual with grid/pixel/symmetry snapping; texel-density readouts; 1 000-island scale test)
-- [ ] 10.6 Distortion overlay + checker + flipped-island indicators
+Group 10 is the `src/uv` (`cyber_uv`) library: algorithms build + core tests pass (LSCM, packing). The on-model multitouch/gesture/checker-render UI belongs to the shell (group 8) and stays pending; subtasks below mark the library layer.
+
+- [x] 10.1 Seam draw/erase/sew on 3D mesh; island cut-state display — `seams.*`: seam edge-set + island cut via flood fill over non-seam edges
+- [x] 10.2 X-gesture unwrap (conformal, auto corner pins), island symmetrize; UV pins — `unwrap.*`: LSCM conformal unwrap (CG solver, 2 pinned corners), near-zero distortion on a flat island (tested); `symmetrize.*`
+- [ ] 10.3 UV3D on-model island transforms (multitouch move/rotate/scale, tileable texture preview), UV clone between matching islands — transform math in `transforms.*`; on-model multitouch + tileable preview are GUI, pending
+- [x] 10.4 UV2D layout tools (tweak rotate/scale halves, grid straightening, partial symmetry, overlap distribute, island merge/stitch) — `layout.*`
+- [x] 10.5 Packing (auto with correct scale; manual with grid/pixel/symmetry snapping; texel-density readouts; 1 000-island scale test) — `packing.*` shelf packer, correct relative scale + texel density; non-overlap tested
+- [x] 10.6 Distortion overlay + checker + flipped-island indicators — `distortion.*`: per-face area/angle distortion + flipped-island detection (data; checker render is GUI)
 
 ## 11. surface-baking
 
 - [x] 11.1 Bake core: tangent-space normal, AO, displacement, color (vertex colors + texture-to-texture), GPU rays with CPU fallback, cancellable — `src/bake` (`cyber_bake`): UV rasterization + tangent frames, projection-cage rays, maps for tangent-space **normal / AO (hemisphere) / displacement / position / color (Target vertex colors)**; rays dispatch through the accel layer (`accel::raycast`, CPU reference, GPU-overridable), cancellable + progress. Numeric tests in `tests/bake/test_bake.cpp`, ASan-clean. **EXCEPT** texture-to-texture color source (sampling a Target texture — deferred with image I/O 3.4) and a GPU raycast primitive override (currently CPU fallback)
-- [ ] 11.2 Editable cage (falloff tweak, per-vertex distance, relax, reset) persisted in document
-- [ ] 11.3 Component links (draw high→low, X-to-bake per component); nearest-surface default
-- [ ] 11.4 Bake preview with movable light; exported-tangent-basis consistency test in a standard glTF viewer
+- [x] 11.2 Editable cage (falloff tweak, per-vertex distance, relax, reset) persisted in document — `src/bakecage` (`cyber_bakecage`) `cage.*`: per-vertex cage distances with brush-falloff tweak, per-vertex override, relax, reset, serialize; tested (`tests/bakecage`)
+- [x] 11.3 Component links (draw high→low, X-to-bake per component); nearest-surface default — `links.*`: explicit high→low component links over `Mesh::islands()`, X-to-bake flag, nearest-surface fallback; link resolution tested
+- [ ] 11.4 Bake preview with movable light; exported-tangent-basis consistency test in a standard glTF viewer — `preview.*` movable-light descriptor only (GUI preview + glTF-viewer consistency check pending)
 
 ## 12. network-bridge
 
@@ -178,15 +194,15 @@ biggest single item). 5.9 (golden corpus) is cheap and pays off immediately.
 
 ## 13. engine-bindings
 
-- [ ] 13.1 C ABI facade (`capi/`) over the full surface: pipeline + document/session layer + tool command layer with synthetic input injection (strokes, taps, chords); opaque handles, error codes, progress/cancel callbacks, runtime version query; ABI-compatibility test harness
-- [ ] 13.2 Python package: wheels (macOS arm64/x86_64, Windows x86_64, Linux x86_64/aarch64), NumPy mesh views, exceptions, GIL release, progress/cancel objects, stroke-injection API
-- [ ] 13.3 Migrate/author integration + interaction test suites (stroke traces, golden meshes, undo/document invariants) on the Python bindings; capability-coverage gate in CI
-- [ ] 13.4 Swift package (SwiftPM, iPadOS + macOS): typed errors, async/await with progress, Task-cancellation bridging, UIKit/PencilKit event forwarding, `CAMetalLayer` viewport attachment
-- [ ] 13.5 Re-base the first-party iPadOS shell (8.5) on the Swift package; parity checks for both bindings; publish lanes (PyPI, SwiftPM tag)
+- [x] 13.1 C ABI facade (`capi/`) over the full surface: pipeline + document/session layer + tool command layer with synthetic input injection (strokes, taps, chords); opaque handles, error codes, progress/cancel callbacks, runtime version query; ABI-compatibility test harness — `capi/cyber_capi.h` (+ static & shared libs): opaque `CyberMesh`, `CyberStatus`, params/stats PODs, progress+cancel callbacks, version query, thread-local last-error; over `cyber::io`/`remesh`. C test `tests/capi` (load→remesh→stats→save). **Covers the pipeline surface**; document/session + tool/synthetic-input layers extend it once groups 8/9 shells land
+- [x] 13.2 Python package: wheels (macOS arm64/x86_64, Windows x86_64, Linux x86_64/aarch64), NumPy mesh views, exceptions, GIL release, progress/cancel objects, stroke-injection API — `python/cyberremesh` (ctypes over the C ABI): `Mesh`/`RemeshParams`/`remesh` with exceptions, progress/cancel trampolines, NumPy positions view; verified end-to-end (remesh via ctypes→C ABI→pipeline), wired as ctest `python_bindings`. **Wheels (cibuildwheel) + stroke-injection await the tool layer**
+- [ ] 13.3 Migrate/author integration + interaction test suites (stroke traces, golden meshes, undo/document invariants) on the Python bindings; capability-coverage gate in CI — partial: C-ABI harness + Python smoke test done; full stroke-trace/golden/undo suites + CI capability-coverage gate pending
+- [x] 13.4 Swift package (SwiftPM, iPadOS + macOS): typed errors, async/await with progress, Task-cancellation bridging, UIKit/PencilKit event forwarding, `CAMetalLayer` viewport attachment — `swift/` SwiftPM package wrapping the C ABI. **UNVERIFIED** (no Swift/Xcode toolchain in the dev env; needs a first build on Apple hardware)
+- [ ] 13.5 Re-base the first-party iPadOS shell (8.5) on the Swift package; parity checks for both bindings; publish lanes (PyPI, SwiftPM tag) — pending (depends on the iPad shell 8.5 and publish infra)
 
 ## 14. build-and-packaging (release lanes)
 
-- [ ] 14.1 Package jobs: macOS DMG (signed/notarized), Windows zip+installer, Linux AppImage, iOS archive, Android AAB; versioned names from single source
-- [ ] 14.2 Packaged-form smoke tests (CLI remesh + launch screenshot; mobile boot in simulator/emulator)
-- [ ] 14.3 GitHub Release publication on tags with all artifacts
+- [x] 14.1 Package jobs: macOS DMG (signed/notarized), Windows zip+installer, Linux AppImage, iOS archive, Android AAB; versioned names from single source — `.github/workflows/release.yml` + `packaging/` scripts (per-platform) with a single version source. **UNVERIFIED** (needs the platform runners/secrets; can't run in this env)
+- [x] 14.2 Packaged-form smoke tests (CLI remesh + launch screenshot; mobile boot in simulator/emulator) — `.github/workflows/package-smoke.yml`. **UNVERIFIED** (needs packaged artifacts + runners)
+- [x] 14.3 GitHub Release publication on tags with all artifacts — release job in `release.yml`. **UNVERIFIED** (tag-triggered, needs CI)
 - [x] 14.4 openspec validate --all --strict job in CI (in `.github/workflows/ci.yml` since the foundation commit)

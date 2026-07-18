@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cyberremesh"
+version = "0.1.0"
+description = "Python bindings for the CyberRemesher quad-remeshing engine (ctypes over the C ABI)"
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+authors = [{ name = "Cyberdyne Corp" }]
+keywords = ["retopology", "remeshing", "quad", "uv", "ctypes"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: MIT License",
+  "Topic :: Multimedia :: Graphics :: 3D Modeling",
+]
+
+[project.optional-dependencies]
+numpy = ["numpy>=1.20"]
+
+[tool.setuptools]
+packages = ["cyberremesh"]

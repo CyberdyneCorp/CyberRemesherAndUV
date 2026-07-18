@@ -1,0 +1,8 @@
+// UNVERIFIED: system-library module map for the CyberRemesher C ABI facade.
+// The referenced `cyber_capi` library and the `cyber_capi.h` pulled in by
+// shim.h are produced by the capi/ module; neither is present in headless CI.
+module CCyberRemesher [system] {
+    header "shim.h"
+    link "cyber_capi"
+    export *
+}

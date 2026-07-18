@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- UNVERIFIED: macOS app bundle manifest template. @CYBER_VERSION@ is
+     substituted by packaging/macos/build_dmg.sh from the single version
+     source so the bundle version matches --version and the DMG filename. -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+    "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>CyberRemesher</string>
+    <key>CFBundleDisplayName</key>
+    <string>CyberRemesher</string>
+    <key>CFBundleIdentifier</key>
+    <string>ai.cyberremesher.desktop</string>
+    <key>CFBundleExecutable</key>
+    <string>CyberRemesher</string>
+    <key>CFBundleShortVersionString</key>
+    <string>@CYBER_VERSION@</string>
+    <key>CFBundleVersion</key>
+    <string>@CYBER_VERSION@</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>13.0</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+</dict>
+</plist>

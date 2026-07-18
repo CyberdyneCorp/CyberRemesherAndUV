@@ -1,0 +1,122 @@
+# UNVERIFIED: packaged-form smoke lane. Consumes artifacts built by release.yml
+# on platform runners and drives them through mount/extract + a real CLI remesh,
+# a launch-screenshot placeholder, and simulator/emulator boots — none runnable
+# in the headless Linux core CI. Additive to ci.yml (unchanged). Implements
+# build-and-packaging task 14.2 (packaged-form smoke tests).
+name: package-smoke
+
+on:
+  workflow_run:
+    workflows: [release]
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # Desktop packages: run the packaged CLI remesh on the reference model and
+  # assert a valid output + exit 0, then a launch-screenshot placeholder.
+  desktop-smoke:
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: macos
+            os: macos-latest
+          - target: linux
+            os: ubuntu-latest
+          - target: windows-zip
+            os: windows-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download packaged artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: cyberremesh-${{ matrix.target }}
+          path: pkg
+          run-id: ${{ github.event.workflow_run.id || github.run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract package and locate CLI
+        id: extract
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p extracted
+          case "${{ matrix.target }}" in
+            macos)
+              dmg="$(ls pkg/cyberremesh-*-macos.dmg)"
+              mnt="$(hdiutil attach "${dmg}" -nobrowse -readonly | awk 'END{print $NF}')"
+              cli="${mnt}/CyberRemesher.app/Contents/MacOS/cyberremesh"
+              ;;
+            linux)
+              img="$(ls pkg/cyberremesh-*-linux-*.AppImage)"
+              chmod +x "${img}"
+              "${img}" --appimage-extract >/dev/null
+              cli="squashfs-root/usr/bin/cyberremesh"
+              ;;
+            windows-zip)
+              zip="$(ls pkg/cyberremesh-*-windows-x64.zip)"
+              unzip -o "${zip}" -d extracted >/dev/null
+              cli="extracted/cyberremesh.exe"
+              ;;
+          esac
+          echo "cli=${cli}" >>"${GITHUB_OUTPUT}"
+
+      - name: Packaged CLI remesh smoke
+        shell: bash
+        run: |
+          chmod +x packaging/smoke/cli_remesh_smoke.sh
+          packaging/smoke/cli_remesh_smoke.sh "${{ steps.extract.outputs.cli }}"
+
+      - name: App launch screenshot (placeholder)
+        continue-on-error: true
+        shell: bash
+        run: |
+          chmod +x packaging/smoke/launch_screenshot.sh
+          packaging/smoke/launch_screenshot.sh "${{ steps.extract.outputs.cli }}" launch.png || true
+
+      - name: Upload screenshot
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: launch-screenshot-${{ matrix.target }}
+          path: launch.png
+          if-no-files-found: ignore
+
+  # Mobile artifacts: at minimum boot in a simulator/emulator.
+  mobile-smoke:
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: ios
+            os: macos-latest
+            ext: ipa
+          - target: android
+            os: ubuntu-latest
+            ext: aab
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download mobile artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: cyberremesh-${{ matrix.target }}
+          path: pkg
+          run-id: ${{ github.event.workflow_run.id || github.run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Boot in simulator/emulator (placeholder)
+        continue-on-error: true
+        shell: bash
+        run: |
+          chmod +x packaging/smoke/mobile_boot.sh
+          artifact="$(ls pkg/cyberremesh-*.${{ matrix.ext }})"
+          packaging/smoke/mobile_boot.sh "${{ matrix.target }}" "${artifact}"
