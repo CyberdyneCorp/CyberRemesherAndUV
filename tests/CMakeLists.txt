@@ -5,6 +5,7 @@ add_executable(cyber_tests
     main.cpp
     bake/test_bake.cpp
     quadrangulate/test_crossfield.cpp
+    quadrangulate/test_field_quadrangulator.cpp
     core/test_bvh.cpp
     core/test_golden.cpp
     core/test_holes.cpp

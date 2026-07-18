@@ -98,7 +98,7 @@ void applySmallPatchPolicy(Mesh& mesh, SmallPatchPolicy policy, int minFaces) {
 }
 
 PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSink* progress,
-                      const CancelToken* cancel) {
+                      const CancelToken* cancel, const QuadrangulatorFactory& quadrangulator) {
     PipelineResult result;
 
     // Stage 0: parameters (validated at every entry point — spec).
@@ -196,13 +196,15 @@ PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSi
             continue;
         }
 
-        // Quadrangulation stage: 0.3-0.9 of this island's slice.
-        auto quadrangulator = makeGreedyPairingQuadrangulator();
+        // Quadrangulation stage: 0.3-0.9 of this island's slice. Use the
+        // injected quadrangulator (field-aligned) when provided, else greedy.
+        std::unique_ptr<IQuadrangulator> quad =
+            quadrangulator ? quadrangulator() : makeGreedyPairingQuadrangulator();
         ProgressSink quadSink =
             progress ? progress->subrange(progressBase + weight * 0.3f,
                                           progressBase + weight * 0.9f, "quadrangulate")
                      : ProgressSink{};
-        const auto quadOutcome = quadrangulator->quadrangulate(
+        const auto quadOutcome = quad->quadrangulate(
             outcome.mesh, lengthResult.edgeLength, progress ? &quadSink : nullptr, cancel);
         if (quadOutcome.cancelled) {
             result.status = RunStatus::Cancelled;

@@ -1,10 +1,13 @@
 #pragma once
 
+#include <functional>
+#include <memory>
 #include <string>
 #include <vector>
 
 #include "cyber/core/mesh.hpp"
 #include "cyber/core/progress.hpp"
+#include "cyber/core/quadrangulate.hpp"
 #include "cyber/core/remesh_params.hpp"
 
 namespace cyber::remesh {
@@ -45,9 +48,17 @@ struct PipelineResult {
 
 // Progress mapping across stages: isotropic 0.0-0.3, quadrangulation
 // 0.3-0.9, merge/cleanup 0.9-1.0 (weighted by island face count).
+//
+// `quadrangulator` selects the quad stage: nullptr uses the built-in greedy
+// pairing baseline (keeps golden baselines stable), or pass a factory so the
+// caller can inject the field-aligned quadrangulator (which lives in the
+// accel-dependent quadrangulate module). The factory is called once per island
+// so each island gets an independent instance.
+using QuadrangulatorFactory = std::function<std::unique_ptr<IQuadrangulator>()>;
 [[nodiscard]] PipelineResult remesh(const Mesh& input, const Parameters& rawParams,
                                     ProgressSink* progress = nullptr,
-                                    const CancelToken* cancel = nullptr);
+                                    const CancelToken* cancel = nullptr,
+                                    const QuadrangulatorFactory& quadrangulator = {});
 
 // Cleanup policy from the canonical parameters, applied per island result:
 // KeepLargest keeps only the biggest connected patch, KeepAll keeps

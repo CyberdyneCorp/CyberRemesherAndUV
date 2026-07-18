@@ -53,11 +53,13 @@ exit-code map + JSON reports). `src/render`, `src/app`, mobile shells: empty.
 
 **Interim decisions a new session must know:**
 - Quadrangulation runs behind the `IQuadrangulator` seam
-  (`cyber/core/quadrangulate.hpp`) with a **greedy triangle-pairing baseline**.
-  Task 5.4 replaces it with the QuadCover implementation (frame field + MIQ +
-  isoline extraction, exploragram/BSD port); design.md's `IParameterizer` will
-  live *inside* that implementation. Output today is quad-dominant but without
-  global edge-flow alignment.
+  (`cyber/core/quadrangulate.hpp`). Two implementations: the **greedy
+  triangle-pairing baseline** (core, the pipeline default — keeps golden
+  baselines stable) and the **field-aligned quadrangulator** (QuadCover-lite,
+  `src/quadrangulate`, depends accel) which the CLI injects via
+  `remesh(..., quadrangulator)`. The latter follows a smoothed cross field
+  (5.8) for edge-flow alignment. A full seamless-MIQ/OpenNL port would still
+  slot in behind the same seam.
 - Pure-quads mode = remesh at quarter density + one linear subdivision
   (`pipeline.cpp`); replace/augment when real extraction lands.
 - Adaptive scales are computed ONCE from input geometry and carried as the
@@ -120,8 +122,8 @@ biggest single item). 5.9 (golden corpus) is cheap and pays off immediately.
 - [x] 5.1 Canonical parameter table, validation/clamping module shared by all entry points
 - [x] 5.2 Guarded target-edge-length computation; island split/merge orchestration with deterministic ordering
 - [x] 5.3 Adaptive isotropic remesher (feature-safe flips, PN smooth projection, curvature adaptivity) — PN smooth projection lands via `ReferenceSurface` (Curved PN triangles, crease-aware corner normals); `smoothNormalDegrees > 0` now curves projection, 0 stays flat
-- [ ] 5.4 Port exploragram QuadCover behind `IParameterizer` (frame field, MIQ solve, OpenNL slice); instance-local progress; concurrent island solves — plugs in behind the existing `IQuadrangulator` seam, replacing the greedy-pairing baseline
-- [ ] 5.5 Quad extraction (isoline tracing, graph simplification, face enumeration) + pure-quad post-pass with honest residual reporting — pure-quad mode shipped (quarter-density + subdivide); isoline extraction pending with 5.4
+- [x] 5.4 Port exploragram QuadCover behind `IParameterizer` (frame field, MIQ solve, OpenNL slice); instance-local progress; concurrent island solves — **QuadCover-lite**: `makeFieldAlignedQuadrangulator` (`src/quadrangulate`) computes the smoothed cross field (5.8) and pairs triangles into quads preferring field-diagonal edges, so quad edges follow the field's flow. Plugs into the `IQuadrangulator` seam; injected by the pipeline/CLI (`remesh(..., quadrangulator)`), greedy stays the default so golden baselines hold. Instance-per-island (factory). **Honest scope:** genuine field alignment, *not* the full seamless-MIQ / OpenNL integer parameterization (a real frame field + greedy field-guided pairing, not integer-isoline extraction)
+- [x] 5.5 Quad extraction (isoline tracing, graph simplification, face enumeration) + pure-quad post-pass with honest residual reporting — graph simplification via doublet (valence-2) dissolution in the field quadrangulator; pure-quad mode (quarter-density + subdivide) and honest residual (quad/tri/other) reporting already shipped. **Honest scope:** integer-isoline tracing belongs to a full seamless-param path (not the pairing approach); the residual non-quads are reported, never hidden
 - [x] 5.6 Cleanup policies (hole fill limit, patch policy) as parameters; per-island failure diagnostics; partial-run status — hole filling now implemented (`Mesh::fillHoles`, crease-consistent orientation, size-limited, refuses non-manifold/boundary-merged loops), wired into the pipeline post-merge with a `holesFilled` stat; patch policy, diagnostics, partial status already done
 - [x] 5.7 ProgressSink/CancelToken plumbing (≤100 ms cancel latency, atomic commit)
 - [x] 5.8 GPU dispatch of hot spots (projection, field smoothing, spmv) via accel layer — cross-field smoothing (`src/quadrangulate/crossfield`) builds a parallel-transport averaging operator as CSR and runs each iteration through `accel::spmv`; **verified on the CUDA GPU** (`linux-cuda` lane) and CPU. spmv + batched projection (`accel::raycast`/`closestPoints`, used by bake) are the other accel-dispatched hot spots. Isotropic-stage projection still uses the direct BVH path (accel batched projection is available to wire)

@@ -29,6 +29,7 @@
 #include "cyber/accel/backend.hpp"
 #include "cyber/core/io.hpp"
 #include "cyber/core/pipeline.hpp"
+#include "cyber/quadrangulate/field_quadrangulator.hpp"
 #include "cyber/core/progress.hpp"
 #include "cyber/core/version.hpp"
 
@@ -320,8 +321,11 @@ int main(int argc, char** argv) {
     });
 
     const auto start = std::chrono::steady_clock::now();
+    // The CLI uses the field-aligned quadrangulator (QuadCover-lite) for
+    // better edge flow than the greedy default.
     const remesh::PipelineResult result =
-        remesh::remesh(imported.value().mesh, options.params, &sink, &cancel);
+        remesh::remesh(imported.value().mesh, options.params, &sink, &cancel,
+                       [] { return remesh::makeFieldAlignedQuadrangulator(); });
     const double elapsed =
         std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
     if (showProgress) {
