@@ -130,8 +130,8 @@ TEST_CASE("splitEdge inserts a vertex into edge and faces") {
         if (!mesh.isAlive(FaceId{i})) {
             continue;
         }
-        five += mesh.faceSize(FaceId{i}) == 5 ? 1 : 0;
-        four += mesh.faceSize(FaceId{i}) == 4 ? 1 : 0;
+        five += mesh.faceSize(FaceId{i}) == 5 ? 1u : 0u;
+        four += mesh.faceSize(FaceId{i}) == 4 ? 1u : 0u;
     }
     REQUIRE(five == 1);
     REQUIRE(four == 1);

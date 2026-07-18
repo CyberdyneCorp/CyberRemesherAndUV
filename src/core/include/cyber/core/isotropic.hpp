@@ -1,8 +1,8 @@
 #pragma once
 
-#include "cyber/core/bvh.hpp"
 #include "cyber/core/mesh.hpp"
 #include "cyber/core/progress.hpp"
+#include "cyber/core/reference_surface.hpp"
 
 namespace cyber::remesh {
 
@@ -19,15 +19,18 @@ namespace cyber::remesh {
 struct IsotropicOptions {
     float targetEdgeLength = 0.0f;  // required, > 0
     int iterations = 3;
-    float adaptivity = 0.0f;  // 0 = uniform; curvature-adaptive otherwise
+    float adaptivity = 0.0f;         // 0 = uniform; curvature-adaptive otherwise
+    float smoothNormalDegrees = 0.0f;  // 0 = flat projection; > 0 = PN-triangle smoothing
 };
 
 enum class IsotropicStatus { Success, Cancelled, InvalidInput };
 
-// `reference` is the surface to project onto (usually a BVH of the input
-// mesh built before remeshing). The mesh must be triangulated.
-IsotropicStatus isotropicRemesh(Mesh& mesh, const Bvh& reference, const IsotropicOptions& options,
-                                ProgressSink* progress = nullptr,
+// `reference` is the surface to project onto (usually built from the input
+// mesh before remeshing). Pass the same smoothNormalDegrees used to build it
+// in `options` so the smoothing threshold is consistent. The mesh must be
+// triangulated.
+IsotropicStatus isotropicRemesh(Mesh& mesh, const ReferenceSurface& reference,
+                                const IsotropicOptions& options, ProgressSink* progress = nullptr,
                                 const CancelToken* cancel = nullptr);
 
 }  // namespace cyber::remesh

@@ -3,9 +3,9 @@
 #include <algorithm>
 #include <cmath>
 
-#include "cyber/core/bvh.hpp"
 #include "cyber/core/isotropic.hpp"
 #include "cyber/core/quadrangulate.hpp"
+#include "cyber/core/reference_surface.hpp"
 
 namespace cyber::remesh {
 
@@ -171,12 +171,13 @@ PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSi
 
         outcome.mesh = extractIsland(work, islandFaces[i]);
         outcome.mesh.tagFeatureEdges(params.sharpEdgeDegrees);
-        const Bvh reference(outcome.mesh);
+        const ReferenceSurface reference(outcome.mesh, params.smoothNormalDegrees);
 
         // Isotropic stage: overall 0.0-0.3 of this island's slice.
         IsotropicOptions iso;
         iso.targetEdgeLength = lengthResult.edgeLength;
         iso.adaptivity = params.adaptivity;
+        iso.smoothNormalDegrees = params.smoothNormalDegrees;
         ProgressSink isoSink =
             progress ? progress->subrange(progressBase, progressBase + weight * 0.3f, "isotropic")
                      : ProgressSink{};

@@ -3,11 +3,10 @@
 #include <cmath>
 #include <vector>
 
-#include "cyber/core/bvh.hpp"
 #include "cyber/core/isotropic.hpp"
 #include "cyber/core/mesh.hpp"
+#include "cyber/core/reference_surface.hpp"
 
-using cyber::Bvh;
 using cyber::CancelToken;
 using cyber::EdgeId;
 using cyber::FaceId;
@@ -93,7 +92,7 @@ EdgeStats edgeStats(const Mesh& mesh) {
 
 TEST_CASE("isotropic remesh converges edge lengths and stays on the sphere") {
     Mesh mesh = makeSphere(12, 18);
-    const Bvh reference(mesh);
+    const remesh::ReferenceSurface reference(mesh, 0.0f);
     constexpr float kTarget = 0.25f;
 
     remesh::IsotropicOptions options;
@@ -121,7 +120,7 @@ TEST_CASE("isotropic remesh converges edge lengths and stays on the sphere") {
 TEST_CASE("feature vertices and edges survive remeshing (spec: feature-preserving)") {
     Mesh mesh = makeTriangulatedCube();
     mesh.tagFeatureEdges(90.0f);
-    const Bvh reference(mesh);
+    const remesh::ReferenceSurface reference(mesh, 0.0f);
 
     remesh::IsotropicOptions options;
     options.targetEdgeLength = 0.3f;
@@ -170,7 +169,7 @@ TEST_CASE("adaptivity zero means uniform targets (spec: remeshing-parameters)") 
     // corners) result differs. Both must stay valid.
     Mesh uniform = makeTriangulatedCube();
     uniform.tagFeatureEdges(90.0f);
-    const Bvh refU(uniform);
+    const remesh::ReferenceSurface refU(uniform, 0.0f);
     remesh::IsotropicOptions options;
     options.targetEdgeLength = 0.35f;
     options.adaptivity = 0.0f;
@@ -178,7 +177,7 @@ TEST_CASE("adaptivity zero means uniform targets (spec: remeshing-parameters)") 
 
     Mesh adaptive = makeTriangulatedCube();
     adaptive.tagFeatureEdges(90.0f);
-    const Bvh refA(adaptive);
+    const remesh::ReferenceSurface refA(adaptive, 0.0f);
     options.adaptivity = 1.0f;
     REQUIRE(remesh::isotropicRemesh(adaptive, refA, options) == remesh::IsotropicStatus::Success);
     REQUIRE(uniform.validate().empty());
@@ -187,7 +186,7 @@ TEST_CASE("adaptivity zero means uniform targets (spec: remeshing-parameters)") 
 
 TEST_CASE("pre-cancelled token aborts immediately (spec: cancellation)") {
     Mesh mesh = makeSphere(12, 18);
-    const Bvh reference(mesh);
+    const remesh::ReferenceSurface reference(mesh, 0.0f);
     const CancelToken cancel;
     cancel.requestCancel();
 
@@ -199,7 +198,7 @@ TEST_CASE("pre-cancelled token aborts immediately (spec: cancellation)") {
 
 TEST_CASE("progress is monotonic and reaches 1.0") {
     Mesh mesh = makeSphere(8, 12);
-    const Bvh reference(mesh);
+    const remesh::ReferenceSurface reference(mesh, 0.0f);
     std::vector<float> values;
     ProgressSink sink([&values](float p, std::string_view) { values.push_back(p); });
 
@@ -216,11 +215,11 @@ TEST_CASE("progress is monotonic and reaches 1.0") {
 
 TEST_CASE("invalid inputs are rejected") {
     Mesh mesh = makeSphere(6, 8);
-    const Bvh reference(mesh);
+    const remesh::ReferenceSurface reference(mesh, 0.0f);
     remesh::IsotropicOptions options;  // targetEdgeLength unset
     REQUIRE(remesh::isotropicRemesh(mesh, reference, options) ==
             remesh::IsotropicStatus::InvalidInput);
-    const Bvh empty{};
+    const remesh::ReferenceSurface empty{};
     options.targetEdgeLength = 0.3f;
     REQUIRE(remesh::isotropicRemesh(mesh, empty, options) == remesh::IsotropicStatus::InvalidInput);
 }
@@ -228,7 +227,7 @@ TEST_CASE("invalid inputs are rejected") {
 TEST_CASE("isotropic remesh is deterministic") {
     auto run = [] {
         Mesh mesh = makeSphere(10, 14);
-        const Bvh reference(mesh);
+        const remesh::ReferenceSurface reference(mesh, 0.0f);
         remesh::IsotropicOptions options;
         options.targetEdgeLength = 0.3f;
         REQUIRE(remesh::isotropicRemesh(mesh, reference, options) ==

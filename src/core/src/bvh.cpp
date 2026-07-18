@@ -60,7 +60,7 @@ float distanceSquaredToBox(Vec3 p, Vec3 lo, Vec3 hi) {
 
 bool rayIntersectsBox(Vec3 origin, Vec3 invDir, Vec3 lo, Vec3 hi, float maxT) {
     float tmin = 0.0f, tmax = maxT;
-    for (const auto [o, inv, l, h] :
+    for (const auto& [o, inv, l, h] :
          {std::tuple{origin.x, invDir.x, lo.x, hi.x}, std::tuple{origin.y, invDir.y, lo.y, hi.y},
           std::tuple{origin.z, invDir.z, lo.z, hi.z}}) {
         const float t1 = (l - o) * inv;

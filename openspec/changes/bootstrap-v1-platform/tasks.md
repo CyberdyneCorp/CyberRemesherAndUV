@@ -9,9 +9,15 @@ Ordered by dependency; groups 2–5 unlock everything else. Each group ends with
 cmake --preset cpu-headless && cmake --build --preset cpu-headless && ctest --preset cpu-headless
 python3 tools/license_audit.py && openspec validate --all --strict
 ```
-Expected: 2 ctest suites green (70 doctest cases ~101k assertions + Python CLI
+Expected: 2 ctest suites green (75 doctest cases ~101k assertions + Python CLI
 integration), both audits clean. `cmake --preset cpu-headless-debug` is the
 ASan/UBSan preset — run it after touching the mesh kernel.
+
+**Note (GCC portability):** the initial commit built only under clang; GCC 13
+(`-Werror` with `-Wsign-conversion`/`-Wrange-loop-construct`) flagged missing
+`<algorithm>` includes, a `std::array` brace-init, a tuple range-loop copy and
+a signed literal in a test. All fixed — the tree now builds warning-clean on
+both toolchains.
 
 **What exists:** `src/core` (radial-edge half-edge kernel, BVH, OBJ/PLY/STL/glTF
 I/O with typed errors, parameters, isotropic remesher, pipeline), `src/accel`
@@ -30,8 +36,11 @@ exit-code map + JSON reports). `src/render`, `src/app`, mobile shells: empty.
 - Adaptive scales are computed ONCE from input geometry and carried as the
   `__isotropicTargetScale` vertex attribute (per-iteration recompute compounds
   refinement and runs away — see the regression test in `test_pipeline.cpp`).
-- `smoothNormalDegrees` is accepted+clamped but the PN-triangle projection is
-  not implemented yet (rest of 5.3 is done).
+- `smoothNormalDegrees` drives Curved PN-triangle projection in the isotropic
+  stage (`cyber/core/reference_surface.hpp`): the isotropic remesher now
+  projects onto a `ReferenceSurface` that reconstructs the hit triangle as a
+  Vlachos PN patch, with the angle as a crease threshold for corner-normal
+  averaging. 0 degrades exactly to flat closest-point projection (5.3 done).
 - `holeFillMaxBoundary` is accepted+clamped but hole filling itself belongs to
   the 5.5 extractor (rest of 5.6 — patch policies, island diagnostics,
   partial status — is done).
@@ -82,7 +91,7 @@ biggest single item). 5.9 (golden corpus) is cheap and pays off immediately.
 
 - [x] 5.1 Canonical parameter table, validation/clamping module shared by all entry points
 - [x] 5.2 Guarded target-edge-length computation; island split/merge orchestration with deterministic ordering
-- [ ] 5.3 Adaptive isotropic remesher (feature-safe flips, PN smooth projection, curvature adaptivity) — done and tested EXCEPT PN smooth projection (`smoothNormalDegrees` currently inert past validation)
+- [x] 5.3 Adaptive isotropic remesher (feature-safe flips, PN smooth projection, curvature adaptivity) — PN smooth projection lands via `ReferenceSurface` (Curved PN triangles, crease-aware corner normals); `smoothNormalDegrees > 0` now curves projection, 0 stays flat
 - [ ] 5.4 Port exploragram QuadCover behind `IParameterizer` (frame field, MIQ solve, OpenNL slice); instance-local progress; concurrent island solves — plugs in behind the existing `IQuadrangulator` seam, replacing the greedy-pairing baseline
 - [ ] 5.5 Quad extraction (isoline tracing, graph simplification, face enumeration) + pure-quad post-pass with honest residual reporting — pure-quad mode shipped (quarter-density + subdivide); isoline extraction pending with 5.4
 - [ ] 5.6 Cleanup policies (hole fill limit, patch policy) as parameters; per-island failure diagnostics; partial-run status — done EXCEPT hole filling itself (parameter plumbed; implementation belongs to the 5.5 extractor)

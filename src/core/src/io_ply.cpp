@@ -1,5 +1,6 @@
 #include <happly.h>
 
+#include <algorithm>
 #include <exception>
 
 #include "io_internal.hpp"
@@ -100,7 +101,7 @@ Status exportPly(const Mesh& mesh, const std::filesystem::path& path,
                 auto clamp255 = [](float v) {
                     return static_cast<unsigned char>(std::clamp(v, 0.0f, 1.0f) * 255.0f + 0.5f);
                 };
-                plyColors.push_back({clamp255(c.x), clamp255(c.y), clamp255(c.z)});
+                plyColors.push_back({{clamp255(c.x), clamp255(c.y), clamp255(c.z)}});
             }
             ply.addVertexColors(plyColors);
         }

@@ -297,7 +297,8 @@ private:
 
 class SmoothAndProjectPass : public Pass {
 public:
-    SmoothAndProjectPass(Mesh& mesh, const IsotropicOptions& options, const Bvh& reference)
+    SmoothAndProjectPass(Mesh& mesh, const IsotropicOptions& options,
+                         const ReferenceSurface& reference)
         : Pass(mesh, options), m_reference(reference) {}
 
     void run(const CancelToken* cancel) {
@@ -336,8 +337,7 @@ public:
             if (!move[i]) {
                 continue;
             }
-            const auto hit = m_reference.closestPoint(newPositions[i]);
-            m_mesh.setPosition(VertexId{i}, hit.point);
+            m_mesh.setPosition(VertexId{i}, m_reference.project(newPositions[i]));
         }
     }
 
@@ -350,13 +350,14 @@ private:
         return normalized(n);
     }
 
-    const Bvh& m_reference;
+    const ReferenceSurface& m_reference;
 };
 
 }  // namespace
 
-IsotropicStatus isotropicRemesh(Mesh& mesh, const Bvh& reference, const IsotropicOptions& options,
-                                ProgressSink* progress, const CancelToken* cancel) {
+IsotropicStatus isotropicRemesh(Mesh& mesh, const ReferenceSurface& reference,
+                                const IsotropicOptions& options, ProgressSink* progress,
+                                const CancelToken* cancel) {
     if (options.targetEdgeLength <= 0.0f || !std::isfinite(options.targetEdgeLength) ||
         options.iterations <= 0 || reference.empty()) {
         return IsotropicStatus::InvalidInput;
