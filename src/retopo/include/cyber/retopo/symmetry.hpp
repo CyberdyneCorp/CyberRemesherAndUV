@@ -67,7 +67,14 @@ inline std::size_t applySymmetry(Mesh& mesh, const Symmetry& sym,
         const bool onWorkingSide = std::all_of(verts.begin(), verts.end(), [&](VertexId v) {
             return workingSideDistance(sym, mesh.position(v)) >= -sym.weldTolerance;
         });
-        if (onWorkingSide) {
+        // A face lying entirely on the mirror plane welds all its vertices back
+        // onto themselves, so mirroring it just re-adds the same face with
+        // reversed winding — a coincident, degenerate duplicate. Require at
+        // least one vertex strictly off the plane before mirroring.
+        const bool anyOffPlane = std::any_of(verts.begin(), verts.end(), [&](VertexId v) {
+            return std::fabs(signedDistance(sym.plane, mesh.position(v))) > sym.weldTolerance;
+        });
+        if (onWorkingSide && anyOffPlane) {
             toMirror.push_back(verts);
         }
     }

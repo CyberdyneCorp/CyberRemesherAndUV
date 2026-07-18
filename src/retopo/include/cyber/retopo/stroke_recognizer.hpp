@@ -109,13 +109,27 @@ inline StrokeStats analyze(std::span<const Vec3> pts, const StrokeParams& params
         s.pathLength += length(pts[i] - pts[i - 1]);
     }
     s.endpointDistance = length(pts.back() - pts.front());
-    for (std::size_t i = 1; i + 1 < pts.size(); ++i) {
-        const Vec3 in = normalized(pts[i] - pts[i - 1]);
-        const Vec3 out = normalized(pts[i + 1] - pts[i]);
-        const float angle = std::acos(std::clamp(dot(in, out), -1.0f, 1.0f));
-        if (angle > params.cornerRadians) {
-            ++s.corners;
+    // Count corners between consecutive non-degenerate segment directions.
+    // Skipping zero-length segments (from duplicate/coincident samples) by
+    // direction rather than by index keeps a real corner whose apex vertex was
+    // sampled twice: its turn still registers between the last real incoming
+    // direction and the next real outgoing one, instead of a phantom acos(0)=90°.
+    bool havePrevDir = false;
+    Vec3 prevDir{};
+    for (std::size_t i = 1; i < pts.size(); ++i) {
+        const Vec3 seg = pts[i] - pts[i - 1];
+        if (lengthSquared(seg) < 1e-12f) {
+            continue;  // coincident samples carry no direction
         }
+        const Vec3 dir = normalized(seg);
+        if (havePrevDir) {
+            const float angle = std::acos(std::clamp(dot(prevDir, dir), -1.0f, 1.0f));
+            if (angle > params.cornerRadians) {
+                ++s.corners;
+            }
+        }
+        prevDir = dir;
+        havePrevDir = true;
     }
     Vec3 centroid{};
     for (const Vec3 p : pts) centroid += p;

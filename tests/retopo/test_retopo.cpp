@@ -124,6 +124,22 @@ TEST_CASE("recognizeStroke classifies canonical gestures") {
     CHECK(retopo::recognizeStroke(tap).action == retopo::StrokeAction::Tweak);
 }
 
+// Regression: a duplicated (coincident) sample makes one segment zero-length.
+// Its normalized direction is {0,0,0}, so the old code scored acos(0)=90° as a
+// spurious corner, turning a 3-sided closed stroke into a 4-sided one
+// (CreateTri -> CreateQuad). Such junctions must be skipped.
+TEST_CASE("recognizeStroke ignores zero-length segments from duplicate points") {
+    // Closed triangle stroke: two interior corners -> three sides -> CreateTri.
+    const std::vector<Vec3> tri = {{0, 0, 0}, {2, 0, 0}, {1, 1.5f, 0}, {0.01f, 0.01f, 0}};
+    REQUIRE(retopo::recognizeStroke(tri).action == retopo::StrokeAction::CreateTri);
+
+    // Same triangle with a corner sample duplicated: still a triangle, not a
+    // quad, because the coincident point does not invent a corner.
+    const std::vector<Vec3> triDup = {{0, 0, 0},      {2, 0, 0},        {2, 0, 0},
+                                      {1, 1.5f, 0},   {0.01f, 0.01f, 0}};
+    CHECK(retopo::recognizeStroke(triDup).action == retopo::StrokeAction::CreateTri);
+}
+
 TEST_CASE("applySymmetry mirrors working-side faces across the plane") {
     Mesh edit;
     // A quad entirely on the +x side of the x = 0 plane.
@@ -136,4 +152,21 @@ TEST_CASE("applySymmetry mirrors working-side faces across the plane") {
     const std::size_t added = retopo::applySymmetry(edit, sym);
     CHECK(added == 1);
     CHECK(edit.faceCount() == 2);
+}
+
+// Regression: a face lying entirely on the mirror plane welds every vertex back
+// onto itself, so mirroring it would re-add the same face with reversed winding
+// -- a coincident, degenerate duplicate. Such faces must be skipped.
+TEST_CASE("applySymmetry skips faces lying on the mirror plane") {
+    Mesh edit;
+    // A quad entirely on the x = 0 plane.
+    const std::array<Vec3, 4> onPlane = {Vec3{0, 0, 0}, Vec3{0, 1, 0}, Vec3{0, 1, 1},
+                                         Vec3{0, 0, 1}};
+    REQUIRE(retopo::createFace(edit, onPlane).valid());
+
+    retopo::Symmetry sym;
+    sym.plane = {{0, 0, 0}, {1, 0, 0}};  // x = 0
+    const std::size_t added = retopo::applySymmetry(edit, sym);
+    CHECK(added == 0);
+    CHECK(edit.faceCount() == 1);  // no degenerate duplicate created
 }

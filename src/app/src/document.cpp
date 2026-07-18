@@ -36,7 +36,14 @@ std::vector<std::uint8_t> serializeMesh(const Mesh& mesh) {
 }
 
 std::optional<Mesh> readMesh(ByteReader& r) {
+    // Validate every length field against the bytes actually left before
+    // reserving — a corrupt/malicious file (e.g. vertexCount = 0xFFFFFFFF)
+    // would otherwise throw bad_alloc/length_error and abort. Each vertex is
+    // 12 bytes (3 floats); each face is at least its 4-byte arity field.
     const std::uint32_t vertexCount = r.u32();
+    if (vertexCount > r.remaining() / 12u) {
+        return std::nullopt;
+    }
     std::vector<Vec3> positions;
     positions.reserve(vertexCount);
     for (std::uint32_t i = 0; i < vertexCount; ++i) {
@@ -47,10 +54,16 @@ std::optional<Mesh> readMesh(ByteReader& r) {
     }
 
     const std::uint32_t faceCount = r.u32();
+    if (faceCount > r.remaining() / 4u) {
+        return std::nullopt;
+    }
     std::vector<std::vector<Index>> faces;
     faces.reserve(faceCount);
     for (std::uint32_t i = 0; i < faceCount; ++i) {
         const std::uint32_t arity = r.u32();
+        if (arity > r.remaining() / 4u) {
+            return std::nullopt;
+        }
         std::vector<Index> face;
         face.reserve(arity);
         for (std::uint32_t j = 0; j < arity; ++j) {

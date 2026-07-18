@@ -41,6 +41,7 @@ bool UndoStack::redo() {
     cmd->apply();
     m_used += cmd->estimatedBytes();
     m_undo.push_back(std::move(cmd));
+    enforceBudget();  // redo re-grows m_used; keep it within the same budget as push()
     return true;
 }
 

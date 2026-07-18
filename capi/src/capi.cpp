@@ -323,7 +323,11 @@ size_t cyber_mesh_copy_positions(const CyberMesh* mesh, float* out, size_t max_f
     }
     std::vector<cyber::Vec3> positions;
     std::vector<std::vector<cyber::Index>> faces;
-    mesh->mesh.toIndexed(positions, faces);
+    try {
+        mesh->mesh.toIndexed(positions, faces);
+    } catch (...) {
+        return 0;  // never let an allocation failure cross the C boundary
+    }
     const size_t need = positions.size() * 3;
     if (out == nullptr) {
         return need;  // query mode
@@ -453,6 +457,9 @@ CyberStatus cyber_image_save_png(const CyberImage* image, const char* path) {
         return CYBER_OK;
     } catch (const std::exception& e) {
         setError(std::string("cyber_image_save_png: ") + e.what());
+        return CYBER_ERR_IO;
+    } catch (...) {
+        setError("cyber_image_save_png: unknown error");
         return CYBER_ERR_IO;
     }
 }

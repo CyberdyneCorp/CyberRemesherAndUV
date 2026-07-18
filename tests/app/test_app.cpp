@@ -88,6 +88,47 @@ TEST_CASE("document load rejects a bad magic and truncation") {
     CHECK_FALSE(app::Document::load(buffer).has_value());
 }
 
+// Regression: a corrupt file whose mesh length fields are absurd (e.g. a
+// vertexCount of 0xFFFFFFFF) must be rejected, not reserve() gigabytes and
+// abort with bad_alloc/length_error. The reader validates each count against
+// the bytes actually remaining before reserving.
+TEST_CASE("document load rejects an absurd vertex/face count without crashing") {
+    app::Document doc;
+    doc.editMesh = makeQuadMesh();
+    const std::vector<std::uint8_t> good = doc.save();
+
+    // Locate the EditMesh section's vertexCount and overwrite it with a huge
+    // value. The section layout is [id u32][len u64][vertexCount u32]...; scan
+    // for the EditMesh section id (2) that a saved quad mesh produces.
+    const auto patchU32 = [](std::vector<std::uint8_t>& b, std::size_t at, std::uint32_t v) {
+        b[at + 0] = static_cast<std::uint8_t>(v & 0xFFu);
+        b[at + 1] = static_cast<std::uint8_t>((v >> 8) & 0xFFu);
+        b[at + 2] = static_cast<std::uint8_t>((v >> 16) & 0xFFu);
+        b[at + 3] = static_cast<std::uint8_t>((v >> 24) & 0xFFu);
+    };
+
+    // Brute-force every 4-byte-aligned offset: set it to a huge count and
+    // confirm load never crashes (it returns nullopt or a valid document, but
+    // never throws or aborts). This covers the vertex, face, and arity fields.
+    for (std::size_t off = 12; off + 4 <= good.size(); ++off) {
+        std::vector<std::uint8_t> corrupt = good;
+        patchU32(corrupt, off, 0xFFFFFFFFu);
+        auto loaded = app::Document::load(corrupt);
+        (void)loaded;  // must not throw/abort regardless of the outcome
+    }
+
+    // And a direct, targeted case: a minimal valid header with a single section
+    // declaring a vertexCount far larger than its payload.
+    std::vector<std::uint8_t> forged = good;
+    // Overwrite the first mesh section's vertexCount (first u32 after the
+    // section id+length, which begins at byte 12: 3 header u32s = 12 bytes,
+    // then Target section [id u32][len u64] = 12 more -> vertexCount at 24).
+    if (forged.size() > 28) {
+        patchU32(forged, 24, 0x7FFFFFFFu);
+        CHECK_FALSE(app::Document::load(forged).has_value());
+    }
+}
+
 TEST_CASE("autosave fires only when dirty") {
     app::Document doc;
     doc.editMesh = makeQuadMesh();
