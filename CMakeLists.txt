@@ -27,6 +27,7 @@ add_subdirectory(src/accel)
 # The local network bridge uses POSIX sockets; a Winsock shim is a follow-up.
 if(CYBER_BUILD_NET AND NOT WIN32)
     add_subdirectory(src/net)
+    add_subdirectory(apps/bridge)
 endif()
 
 if(CYBER_BUILD_CLI)

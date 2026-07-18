@@ -28,11 +28,19 @@ cyber_set_warnings(cyber_tests)
 
 add_test(NAME unit COMMAND cyber_tests)
 
-if(CYBER_BUILD_CLI)
+if(CYBER_BUILD_CLI OR TARGET cyberbridge-server)
     find_package(Python3 COMPONENTS Interpreter)
-    if(Python3_FOUND)
-        add_test(NAME cli
-            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/cli/test_cli.py
-                    $<TARGET_FILE:cyberremesh>)
-    endif()
+endif()
+
+if(CYBER_BUILD_CLI AND Python3_FOUND)
+    add_test(NAME cli
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/cli/test_cli.py
+                $<TARGET_FILE:cyberremesh>)
+endif()
+
+if(TARGET cyberbridge-server AND Python3_FOUND)
+    add_test(NAME bridge_python
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/../python/tests/test_integration.py
+                $<TARGET_FILE:cyberbridge-server>)
 endif()

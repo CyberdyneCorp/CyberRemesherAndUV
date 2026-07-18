@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cyberbridge"
+version = "0.1.0"
+description = "Reference Python client for the CyberRemesher local DCC bridge"
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+authors = [{ name = "Cyberdyne Corp" }]
+keywords = ["retopology", "remeshing", "dcc", "blender"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Topic :: Multimedia :: Graphics :: 3D Modeling",
+]
+
+[project.scripts]
+cyberbridge = "cyberbridge.__main__:main"
+
+[tool.setuptools]
+packages = ["cyberbridge"]

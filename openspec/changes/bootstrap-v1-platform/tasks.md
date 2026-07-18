@@ -173,8 +173,8 @@ biggest single item). 5.9 (golden corpus) is cheap and pays off immediately.
 
 - [x] 12.1 Protocol spec + versioned handshake; opt-in server with listening indicator, local-only binding, malformed-message hardening — `src/net` (`cyber_net`): length-prefixed JSON framing, hello/welcome/reject handshake, POSIX server bound to 127.0.0.1 only, off until `start()`, per-connection threads, oversized/malformed frames rejected without alloc/crash. `isListening()` backs the UI indicator (the visible widget itself is group 8)
 - [x] 12.2 Command set (push/pull meshes+textures, scene ops, messages, remote actions, symmetry/change queries, camera stream) — push/pull target + editmesh (positions, faces, **UVs, vertex colors**), clear/close, message, add/remove/press/poll actions, set/query symmetry, change-marker query, set/get camera. **Texture blob transport is a follow-up** (geometry+UV+color round-trip done, verified over a live local socket in `test_bridge.cpp`)
-- [ ] 12.3 Python client package + CLI; protocol integration tests
-- [ ] 12.4 Blender addon (thin consumer of the Python client)
+- [x] 12.3 Python client package + CLI; protocol integration tests — `python/cyberbridge` (pip-installable, `Client` + OBJ helpers + `python -m cyberbridge` CLI). Integration test (`python/tests/test_integration.py`, wired as ctest `bridge_python`) launches the `cyberbridge-server` harness and drives the full command set incl. OBJ scripted-push, UV round-trip, rejection path — green under ASan
+- [x] 12.4 Blender addon (thin consumer of the Python client) — `blender/cyberremesh_bridge` (bl_info + panel/operators: ping, push-selected-as-Target, pull-EditMesh) delegating all protocol to `cyberbridge`. **UNVERIFIED** (no Blender in the dev env; parses clean, needs a first run inside Blender)
 
 ## 13. engine-bindings
 
