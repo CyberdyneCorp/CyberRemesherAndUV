@@ -5,6 +5,7 @@ add_executable(cyber_tests
     main.cpp
     core/test_bvh.cpp
     core/test_golden.cpp
+    core/test_holes.cpp
     core/test_io_formats.cpp
     core/test_io_obj.cpp
     core/test_isotropic.cpp

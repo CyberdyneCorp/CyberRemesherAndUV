@@ -252,6 +252,13 @@ PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSi
     }
 
     result.mesh = Mesh::fromIndexed(positions, faces);
+    // Cleanup: fill holes up to the boundary-length limit before the optional
+    // pure-quad subdivision, so filled patches subdivide into quads too
+    // (remeshing-parameters spec, "holeFillMaxBoundary"; 0/<3 disables).
+    if (params.holeFillMaxBoundary >= 3 && result.mesh.faceCount() > 0) {
+        result.stats.holesFilled =
+            result.mesh.fillHoles(static_cast<std::size_t>(params.holeFillMaxBoundary));
+    }
     if (params.pureQuads && result.mesh.faceCount() > 0) {
         result.mesh = result.mesh.linearSubdivide();
     }

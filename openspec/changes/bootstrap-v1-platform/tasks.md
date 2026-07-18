@@ -63,9 +63,10 @@ exit-code map + JSON reports). `src/render`, `src/app`, mobile shells: empty.
   projects onto a `ReferenceSurface` that reconstructs the hit triangle as a
   Vlachos PN patch, with the angle as a crease threshold for corner-normal
   averaging. 0 degrades exactly to flat closest-point projection (5.3 done).
-- `holeFillMaxBoundary` is accepted+clamped but hole filling itself belongs to
-  the 5.5 extractor (rest of 5.6 — patch policies, island diagnostics,
-  partial status — is done).
+- `holeFillMaxBoundary` drives `Mesh::fillHoles` as a pipeline post-merge
+  cleanup pass (traces boundary loops via half-edge direction, fills loops
+  within the limit with one orientation-consistent n-gon, refuses non-manifold
+  or boundary-merged loops); reported via the `holesFilled` stat (5.6 done).
 - Vendored deps so far: doctest, tinyobjloader, happly, tinygltf (manifest at
   `thirdparty/manifest.json`, enforced by `tools/license_audit.py`). Eigen,
   stb, miniz, geogram-slice get vendored when their consumer tasks start.
@@ -116,7 +117,7 @@ biggest single item). 5.9 (golden corpus) is cheap and pays off immediately.
 - [x] 5.3 Adaptive isotropic remesher (feature-safe flips, PN smooth projection, curvature adaptivity) — PN smooth projection lands via `ReferenceSurface` (Curved PN triangles, crease-aware corner normals); `smoothNormalDegrees > 0` now curves projection, 0 stays flat
 - [ ] 5.4 Port exploragram QuadCover behind `IParameterizer` (frame field, MIQ solve, OpenNL slice); instance-local progress; concurrent island solves — plugs in behind the existing `IQuadrangulator` seam, replacing the greedy-pairing baseline
 - [ ] 5.5 Quad extraction (isoline tracing, graph simplification, face enumeration) + pure-quad post-pass with honest residual reporting — pure-quad mode shipped (quarter-density + subdivide); isoline extraction pending with 5.4
-- [ ] 5.6 Cleanup policies (hole fill limit, patch policy) as parameters; per-island failure diagnostics; partial-run status — done EXCEPT hole filling itself (parameter plumbed; implementation belongs to the 5.5 extractor)
+- [x] 5.6 Cleanup policies (hole fill limit, patch policy) as parameters; per-island failure diagnostics; partial-run status — hole filling now implemented (`Mesh::fillHoles`, crease-consistent orientation, size-limited, refuses non-manifold/boundary-merged loops), wired into the pipeline post-merge with a `holesFilled` stat; patch policy, diagnostics, partial status already done
 - [x] 5.7 ProgressSink/CancelToken plumbing (≤100 ms cancel latency, atomic commit)
 - [ ] 5.8 GPU dispatch of hot spots (projection, field smoothing, spmv) via accel layer
 - [x] 5.9 Golden-mesh regression suite (permissive corpus incl. armadillo) with recorded baselines — `tests/core/test_golden.cpp`: procedural corpus (cube, sphere, torus/genus-1), baselines assert manifold-valid + quad-dominant (≥0.55 greedy floor) + density band + shape-bounds preservation + exact-topology determinism + pure-quad all-quad. Corpus is procedural (permissive, reproducible); an armadillo-class asset drops into the same harness later

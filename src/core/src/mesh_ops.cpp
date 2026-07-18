@@ -1,5 +1,7 @@
 #include <algorithm>
 #include <cassert>
+#include <unordered_map>
+#include <unordered_set>
 
 #include "cyber/core/mesh.hpp"
 
@@ -368,6 +370,71 @@ void Mesh::triangulate() {
             triangulateFace({i});
         }
     }
+}
+
+std::size_t Mesh::fillHoles(std::size_t maxBoundaryEdges) {
+    if (maxBoundaryEdges < 3) {
+        return 0;
+    }
+    // Directed hole edges: for each boundary loop L the incident face traverses
+    // its edge a -> b, so the hole (open) side runs b -> a. succ[b] = a chains
+    // those directed edges around the hole; a vertex that would get two
+    // successors marks a non-manifold (branching) boundary we refuse to fill.
+    std::unordered_map<Index, Index> succ;
+    std::unordered_set<Index> ambiguous;
+    for (Index fi = 0; fi < m_faces.size(); ++fi) {
+        if (!m_faces[fi].alive) {
+            continue;
+        }
+        for (const LoopId l : faceLoops(FaceId{fi})) {
+            if (edgeFaceCount(m_loops[l.value].edge) != 1) {
+                continue;
+            }
+            const Index a = m_loops[l.value].vertex.value;
+            const Index b = m_loops[m_loops[l.value].next.value].vertex.value;
+            if (!succ.emplace(b, a).second) {
+                ambiguous.insert(b);
+            }
+        }
+    }
+
+    std::size_t filled = 0;
+    std::unordered_set<Index> visited;
+    for (const auto& [start, unused] : succ) {
+        (void)unused;
+        if (visited.count(start)) {
+            continue;
+        }
+        std::vector<VertexId> loop;
+        Index cur = start;
+        bool ok = true;
+        while (true) {
+            if (ambiguous.count(cur)) {
+                ok = false;
+                break;
+            }
+            visited.insert(cur);
+            loop.push_back(VertexId{cur});
+            const auto it = succ.find(cur);
+            if (it == succ.end()) {
+                ok = false;  // open chain, not a closed hole
+                break;
+            }
+            cur = it->second;
+            if (cur == start) {
+                break;  // closed the loop
+            }
+            if (loop.size() > maxBoundaryEdges) {
+                ok = false;  // hole larger than the limit
+                break;
+            }
+        }
+        if (ok && loop.size() >= 3 && loop.size() <= maxBoundaryEdges &&
+            addFace(loop).valid()) {
+            ++filled;
+        }
+    }
+    return filled;
 }
 
 Mesh Mesh::linearSubdivide() const {

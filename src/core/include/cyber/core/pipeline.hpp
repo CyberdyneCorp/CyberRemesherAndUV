@@ -30,6 +30,7 @@ struct Statistics {
     std::size_t otherPolygonCount = 0;
     std::size_t islandCount = 0;
     std::size_t islandsFailed = 0;
+    std::size_t holesFilled = 0;
     float targetEdgeLength = 0.0f;
 };
 

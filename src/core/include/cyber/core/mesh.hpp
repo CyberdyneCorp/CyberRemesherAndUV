@@ -86,6 +86,13 @@ public:
     FaceId splitFace(FaceId face, VertexId a, VertexId b);
     void triangulateFace(FaceId face);
     void triangulate();
+    // Fills boundary loops (holes) of at most `maxBoundaryEdges` edges with a
+    // single n-gon face oriented consistently with the surrounding surface.
+    // Loops longer than the limit, and non-manifold (pinched/branching)
+    // boundaries, are left untouched. maxBoundaryEdges < 3 disables filling.
+    // Returns the number of holes filled (remeshing-parameters spec,
+    // "holeFillMaxBoundary").
+    std::size_t fillHoles(std::size_t maxBoundaryEdges);
     // Linear (Catmull-Clark topology, no smoothing) subdivision into quads.
     // Vertex/edge/face/corner attributes propagate per the documented
     // policy. Returns a new mesh.
