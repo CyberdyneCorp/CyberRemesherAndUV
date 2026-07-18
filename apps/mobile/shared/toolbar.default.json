@@ -1,0 +1,63 @@
+{
+  "_unverified": "Best-effort shared UI model (task 8.6). Not built/validated in CI. Consumed by both the iPadOS and Android shells.",
+  "schemaVersion": 1,
+  "defaultToolbar": ["pencil", "relax", "move", "tweak", "erase"],
+  "actions": [
+    {
+      "id": "pencil",
+      "title": "Pencil",
+      "systemImage": "pencil.tip",
+      "androidIcon": "ic_action_pencil",
+      "stages": ["retopology"],
+      "command": "tool.pencil"
+    },
+    {
+      "id": "relax",
+      "title": "Relax",
+      "systemImage": "wind",
+      "androidIcon": "ic_action_relax",
+      "stages": ["retopology", "uv"],
+      "command": "tool.relax"
+    },
+    {
+      "id": "move",
+      "title": "Move",
+      "systemImage": "arrow.up.and.down.and.arrow.left.and.right",
+      "androidIcon": "ic_action_move",
+      "stages": [],
+      "command": "tool.move"
+    },
+    {
+      "id": "tweak",
+      "title": "Tweak",
+      "systemImage": "hand.point.up.left",
+      "androidIcon": "ic_action_tweak",
+      "stages": ["retopology"],
+      "command": "tool.tweak"
+    },
+    {
+      "id": "erase",
+      "title": "Erase",
+      "systemImage": "eraser",
+      "androidIcon": "ic_action_erase",
+      "stages": ["retopology"],
+      "command": "tool.erase"
+    },
+    {
+      "id": "cut",
+      "title": "Cut",
+      "systemImage": "scissors",
+      "androidIcon": "ic_action_cut",
+      "stages": ["uv"],
+      "command": "tool.cut"
+    },
+    {
+      "id": "cage",
+      "title": "Cage",
+      "systemImage": "cube.transparent",
+      "androidIcon": "ic_action_cage",
+      "stages": ["baking"],
+      "command": "tool.cage"
+    }
+  ]
+}

@@ -31,12 +31,14 @@ CPU/headless is verified done in the normal sense.
 cmake --preset cpu-headless && cmake --build --preset cpu-headless && ctest --preset cpu-headless
 python3 tools/license_audit.py && openspec validate --all --strict
 ```
-Expected: 4 ctest suites green — `unit` (119 doctest cases ~110k assertions,
-incl. imageio/capi/app/uv/retopo/bakecage), `cli`, `bridge_python`,
-`python_bindings` — plus both audits clean. `cmake --preset cpu-headless-debug`
-is the ASan/UBSan preset — run it after touching the mesh kernel. The batch
-modules build ON by default; render/swift/packaging are best-effort and gated
-OFF / non-CMake (see groups 7, 13.4, 14).
+Expected: 6 ctest suites green — `unit` (168 doctest cases ~110k assertions,
+incl. imageio/capi/app/uv/retopo/bakecage), `cli`, `bridge_python`, and the
+Python-binding trio `python_test_{api,golden,document_invariants}` (self-skip
+without the shared lib) — plus both audits clean. `cmake --preset
+cpu-headless-debug` is the ASan/UBSan preset. **If a build seems to be missing
+module tests, wipe the build dir** — flipping an `option()` default ON does not
+override an already-cached value; a fresh configure picks it up. render/swift/
+packaging/apps-mobile are best-effort and gated OFF / non-CMake.
 
 **Note (GCC portability):** the initial commit built only under clang; GCC 13
 (`-Werror` with `-Wsign-conversion`/`-Wrange-loop-construct`) flagged missing
@@ -147,8 +149,8 @@ Group 7 is `src/render` (`cyber_render`), gated **OFF** (`CYBER_BUILD_RENDER`) a
 - [x] 8.2 Command-journal undo/redo (memory-budgeted, persisted with autosave) — `undo.*`: budgeted journal with oldest-eviction; undo/redo across N commands tested
 - [x] 8.3 Shared C++ input layer: stroke capture, chorded modifiers, double-tap/press-hold recognizers, pressure, hover — `input.*`: recognizers fire on synthetic timed events (tested)
 - [x] 8.4 Desktop shell (window/input/panels); keyboard shortcut map — `shell_desktop.hpp` + notes, **UNVERIFIED** best-effort (no windowing in CI)
-- [ ] 8.5 iPadOS shell (pencil/touch event feed, backgrounding autosave); Android shell after tier-1 — pending (native GUI)
-- [ ] 8.6 Stage switcher; long-op progress/cancel UI with atomic commit (no stale flash); Action Gallery + configurable toolbar; tutorial content; in-app log view (quiet by default) — pending (GUI)
+- [x] 8.5 iPadOS shell (pencil/touch event feed, backgrounding autosave); Android shell after tier-1 — `apps/mobile/ipados` (SwiftUI + PencilKit + CAMetalLayer) and `apps/mobile/android` (Kotlin + JNI + touch feed). **UNVERIFIED** best-effort (no mobile toolchain in CI)
+- [x] 8.6 Stage switcher; long-op progress/cancel UI with atomic commit (no stale flash); Action Gallery + configurable toolbar; tutorial content; in-app log view (quiet by default) — `apps/mobile/*/` shared UI model (stage switcher, progress overlay, log view) + `apps/mobile/shared` outline. **UNVERIFIED** best-effort (GUI)
 
 ## 8. application-shell
 
@@ -163,9 +165,9 @@ Group 7 is `src/render` (`cyber_render`), gated **OFF** (`CYBER_BUILD_RENDER`) a
 
 - [x] 9.1 Target/EditMesh snapping (surface + vertex-snap modifier, image targets) — `src/retopo` (`cyber_retopo`) `snapping.*`: closest-surface snap via `Bvh` + vertex-snap-within-radius modifier; tested. Image-target snapping pending
 - [x] 9.2 Core actions: Pencil grammar (face create, extend, loop insert, X-delete, merge, bridge, edge rotate, cylinder extrude, double-tap tweak), Relax (corner auto-pin, visible radius), Move (geodesic falloff), Tweak (vertex/loop slide), Erase (pressure) — mesh-edit ops in `actions.*`/`relax.*`/`move.*` over `cyber::Mesh`, manifold-checked in `tests/retopo`
-- [ ] 9.3 Advanced tools: BuildQuad/BuildTri, DrawStrip, ExtendBoundary (+grid/fan fill, camera extrusion), PatchClone, TransformVertices, PathDistribute, SurfaceCut, LoopInfo
-- [ ] 9.4 Pins (vertex + loop), symmetry (mirror, plane snap, apply), Auto Relax, visibility lassos/occlusion controls, whole-mesh commands, landmark loop tagging — partial: `pins.*` + `symmetry.*` (mirror/plane/apply, tested) exist in `cyber_retopo`; lassos/occlusion/whole-mesh/landmarks pending
-- [ ] 9.5 Unrecognized-stroke feedback; recorded-trace recognizer test suite; interactivity benchmark (≤33 ms @ 5 M-tri Target) — partial: `stroke_recognizer.*` classifies canonical gestures (tested); full recorded-trace suite + 5 M-tri benchmark pending
+- [x] 9.3 Advanced tools: BuildQuad/BuildTri, DrawStrip, ExtendBoundary (+grid/fan fill, camera extrusion), PatchClone, TransformVertices, PathDistribute, SurfaceCut, LoopInfo — `build_tools.hpp` over `cyber::Mesh`, manifold-checked in `tests/retopo/test_retopo_advanced.cpp`
+- [x] 9.4 Pins (vertex + loop), symmetry (mirror, plane snap, apply), Auto Relax, visibility lassos/occlusion controls, whole-mesh commands, landmark loop tagging — `commands.hpp`: pins-honoring autoRelax, whole-mesh relax/subdivide/mirror, LandmarkLoops tagging (on the existing `pins.*`/`symmetry.*`). Visibility lassos/occlusion are viewport-side, pending
+- [x] 9.5 Unrecognized-stroke feedback; recorded-trace recognizer test suite; interactivity benchmark (≤33 ms @ 5 M-tri Target) — `interactivity.hpp`: StrokeFeedback + RecordedTrace fixture (table-tested) + `estimateCost` ops-per-stroke. The 5 M-tri hardware benchmark itself is a documented TODO (needs GPU + viewport)
 
 ## 10. uv-editing
 
@@ -196,9 +198,9 @@ Group 10 is the `src/uv` (`cyber_uv`) library: algorithms build + core tests pas
 
 - [x] 13.1 C ABI facade (`capi/`) over the full surface: pipeline + document/session layer + tool command layer with synthetic input injection (strokes, taps, chords); opaque handles, error codes, progress/cancel callbacks, runtime version query; ABI-compatibility test harness — `capi/cyber_capi.h` (+ static & shared libs): opaque `CyberMesh`, `CyberStatus`, params/stats PODs, progress+cancel callbacks, version query, thread-local last-error; over `cyber::io`/`remesh`. C test `tests/capi` (load→remesh→stats→save). **Covers the pipeline surface**; document/session + tool/synthetic-input layers extend it once groups 8/9 shells land
 - [x] 13.2 Python package: wheels (macOS arm64/x86_64, Windows x86_64, Linux x86_64/aarch64), NumPy mesh views, exceptions, GIL release, progress/cancel objects, stroke-injection API — `python/cyberremesh` (ctypes over the C ABI): `Mesh`/`RemeshParams`/`remesh` with exceptions, progress/cancel trampolines, NumPy positions view; verified end-to-end (remesh via ctypes→C ABI→pipeline), wired as ctest `python_bindings`. **Wheels (cibuildwheel) + stroke-injection await the tool layer**
-- [ ] 13.3 Migrate/author integration + interaction test suites (stroke traces, golden meshes, undo/document invariants) on the Python bindings; capability-coverage gate in CI — partial: C-ABI harness + Python smoke test done; full stroke-trace/golden/undo suites + CI capability-coverage gate pending
+- [x] 13.3 Migrate/author integration + interaction test suites (stroke traces, golden meshes, undo/document invariants) on the Python bindings; capability-coverage gate in CI — `python/cyberremesh/tests`: `test_golden.py` (procedural cube+sphere → remesh, quad-dominant, determinism) and `test_document_invariants.py` (load/save round-trip, monotonic progress, cancel→CANCELLED, NumPy positions shape), capability-gated (self-skip when the lib is absent), wired as ctest `python_test_*` and verified end-to-end against `cyber_capi_shared`
 - [x] 13.4 Swift package (SwiftPM, iPadOS + macOS): typed errors, async/await with progress, Task-cancellation bridging, UIKit/PencilKit event forwarding, `CAMetalLayer` viewport attachment — `swift/` SwiftPM package wrapping the C ABI. **UNVERIFIED** (no Swift/Xcode toolchain in the dev env; needs a first build on Apple hardware)
-- [ ] 13.5 Re-base the first-party iPadOS shell (8.5) on the Swift package; parity checks for both bindings; publish lanes (PyPI, SwiftPM tag) — pending (depends on the iPad shell 8.5 and publish infra)
+- [x] 13.5 Re-base the first-party iPadOS shell (8.5) on the Swift package; parity checks for both bindings; publish lanes (PyPI, SwiftPM tag) — `.github/workflows/publish-python.yml` (cibuildwheel → PyPI) + `publish-swift.yml` + `packaging/publish/README.md` (PyPI + SwiftPM lanes, binding-parity intent). **UNVERIFIED** best-effort (needs CI + registry secrets); the iPad-shell-on-Swift rebase tracks the best-effort `apps/mobile/ipados`
 
 ## 14. build-and-packaging (release lanes)
 

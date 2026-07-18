@@ -1,0 +1,43 @@
+{
+  "_unverified": "Best-effort tutorial content outline (task 8.6). Not built/validated in CI.",
+  "schemaVersion": 1,
+  "chapters": [
+    {
+      "id": "welcome",
+      "title": "Welcome",
+      "steps": [
+        "Import an OBJ (with vertex colors) as your read-only Target.",
+        "Understand the three stages: Retopology, UV, Baking.",
+        "Pencil draws; fingers navigate — the camera is a tool."
+      ]
+    },
+    {
+      "id": "retopology",
+      "title": "Retopology",
+      "steps": [
+        "Pencil: sketch edge loops; the EditMesh snaps to the Target surface.",
+        "Relax: even out quad spacing along a stroke.",
+        "Tweak / Move: nudge vertices; Erase removes topology.",
+        "Undo up to 30 steps; autosave protects you on backgrounding."
+      ]
+    },
+    {
+      "id": "uv",
+      "title": "UV",
+      "steps": [
+        "Cut: draw seams to split the mesh into islands.",
+        "Flatten and inspect distortion.",
+        "Relax UVs to reduce stretch."
+      ]
+    },
+    {
+      "id": "baking",
+      "title": "Baking",
+      "steps": [
+        "Adjust the editable cage to control ray casting.",
+        "Bake tangent-space normals and color from the Target.",
+        "Export OBJ/STL/ZIP or bridge over the local network."
+      ]
+    }
+  ]
+}

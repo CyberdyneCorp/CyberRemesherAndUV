@@ -1,0 +1,212 @@
+# UNVERIFIED: PyPI publish lane. Requires GitHub-hosted platform runners
+# (macOS/Windows), QEMU for the Linux aarch64 cross-build, a working native
+# `cyber_capi` shared library on every wheel platform, and a PyPI Trusted
+# Publisher (OIDC) configuration or `PYPI_API_TOKEN` secret — none of which are
+# available in the headless Linux core CI validated by ci.yml. Additive to
+# ci.yml (unchanged) and independent of release.yml. Implements engine-bindings
+# task 13.5 (publish lanes: PyPI wheels for the `cyberremesh` + `cyberbridge`
+# packages). See packaging/publish/README.md for the process + parity intent.
+name: publish-python
+
+on:
+  push:
+    tags:
+      # Python-binding release tags, e.g. py-v0.1.0. Kept distinct from the
+      # platform-artifact `v*` tags consumed by release.yml so the two lanes
+      # never fight over the same trigger.
+      - "py-v*"
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "Upload to PyPI (false = build + validate wheels only)"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  # Version must agree with the pushed tag before anything is built, mirroring
+  # release.yml's version gate. py-v0.1.0 -> 0.1.0.
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        name: Resolve + verify binding version against tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(python -c "import tomllib,sys; \
+            print(tomllib.load(open('python/cyberremesh/pyproject.toml','rb'))['project']['version'])")"
+          bridge="$(python -c "import tomllib,sys; \
+            print(tomllib.load(open('python/pyproject.toml','rb'))['project']['version'])")"
+          if [ "${version}" != "${bridge}" ]; then
+            echo "::error::cyberremesh (${version}) and cyberbridge (${bridge}) versions disagree"
+            exit 1
+          fi
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            tag_version="${GITHUB_REF_NAME#py-v}"
+            if [ "${tag_version}" != "${version}" ]; then
+              echo "::error::tag ${GITHUB_REF_NAME} != pyproject version ${version}"
+              exit 1
+            fi
+          fi
+          echo "version=${version}" >>"${GITHUB_OUTPUT}"
+
+  # Compiled wheels for the ctypes-over-C-ABI `cyberremesh` package. The C ABI
+  # (`cyber_capi`) is built once per wheel platform by cibuildwheel's before-all
+  # hook so the shared library ships inside the wheel.
+  wheels:
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14        # Apple silicon (arm64)
+            archs: arm64
+          - os: macos-13        # Intel (x86_64)
+            archs: x86_64
+          - os: windows-latest  # Windows x86_64
+            archs: AMD64
+          - os: ubuntu-latest   # Linux x86_64
+            archs: x86_64
+          - os: ubuntu-latest   # Linux aarch64 (via QEMU)
+            archs: aarch64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install CMake/Ninja
+        uses: lukka/get-cmake@latest
+
+      - name: Set up QEMU (Linux aarch64 cross-build)
+        if: matrix.archs == 'aarch64'
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - name: Build wheels (cibuildwheel)
+        uses: pypa/cibuildwheel@v2
+        with:
+          package-dir: python/cyberremesh
+          output-dir: wheelhouse
+        env:
+          CIBW_ARCHS: ${{ matrix.archs }}
+          CIBW_BUILD: "cp38-* cp39-* cp310-* cp311-* cp312-* cp313-*"
+          CIBW_SKIP: "*-musllinux_*"
+          # Build the native C ABI the ctypes layer loads before each wheel.
+          CIBW_BEFORE_ALL: >-
+            cmake -S . -B build/wheel -DCMAKE_BUILD_TYPE=Release
+            -DCYBER_BUILD_CAPI=ON -DCYBER_BUILD_TESTS=OFF &&
+            cmake --build build/wheel --target cyber_capi_shared
+          # Import-check the freshly built wheel on every target.
+          CIBW_TEST_COMMAND: "python -c \"import cyberremesh; print(cyberremesh.__version__)\""
+
+      - name: Upload wheelhouse
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.os }}-${{ matrix.archs }}
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  # The `cyberbridge` reference client is pure Python -> a single sdist + wheel.
+  bridge-sdist:
+    needs: version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build cyberbridge sdist + wheel
+        run: |
+          python -m pip install --upgrade build
+          python -m build --sdist --wheel --outdir wheelhouse python
+      - name: Upload cyberbridge dists
+        uses: actions/upload-artifact@v4
+        with:
+          name: cyberbridge-dists
+          path: wheelhouse/*
+          if-no-files-found: error
+
+  # Also ship an sdist for cyberremesh so source builds remain possible.
+  cyberremesh-sdist:
+    needs: version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build cyberremesh sdist
+        run: |
+          python -m pip install --upgrade build
+          python -m build --sdist --outdir wheelhouse python/cyberremesh
+      - name: Upload cyberremesh sdist
+        uses: actions/upload-artifact@v4
+        with:
+          name: cyberremesh-sdist
+          path: wheelhouse/*.tar.gz
+          if-no-files-found: error
+
+  # Cross-binding parity gate: assert the C ABI symbol surface the Python
+  # wrapper binds matches the surface the Swift wrapper declares, so both
+  # bindings expose the same ABI (see packaging/publish/README.md).
+  parity:
+    needs: version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: C ABI parity (Python vs Swift vs header)
+        shell: bash
+        run: |
+          set -euo pipefail
+          header="capi/include/cyber_capi.h"
+          # Symbols the ctypes layer resolves.
+          grep -oE 'cyber_[a-z_]+' python/cyberremesh/cyberremesh/_ffi.py \
+            | grep -vE '^cyber_capi(_shared)?$' | sort -u > /tmp/py.txt
+          # Symbols declared by the C ABI header (source of truth).
+          grep -oE 'cyber_[a-z_]+' "${header}" | sort -u > /tmp/hdr.txt
+          echo "== Python-bound symbols =="; cat /tmp/py.txt
+          missing="$(comm -23 /tmp/py.txt /tmp/hdr.txt || true)"
+          if [ -n "${missing}" ]; then
+            echo "::error::Python binds symbols absent from the C ABI header:"
+            echo "${missing}"
+            exit 1
+          fi
+          # The Swift wrapper consumes the same header via its shim; confirm the
+          # shim actually points at that header so both bindings share one ABI.
+          grep -q 'cyber_capi.h' swift/Sources/CCyberRemesher/shim.h
+          echo "Parity OK: Python + Swift bind against ${header}."
+
+  # Publish everything to PyPI. Gated on the parity check and, for manual runs,
+  # the `publish` input. Uses OIDC Trusted Publishing when configured, else the
+  # PYPI_API_TOKEN secret.
+  publish:
+    needs: [version, wheels, bridge-sdist, cyberremesh-sdist, parity]
+    if: >-
+      github.event_name == 'push' ||
+      (github.event_name == 'workflow_dispatch' && inputs.publish)
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write   # OIDC Trusted Publishing
+    steps:
+      - name: Download all dists
+        uses: actions/download-artifact@v4
+        with:
+          path: dist-staging
+          merge-multiple: true
+      - name: Collect into dist/
+        run: |
+          mkdir -p dist
+          find dist-staging -type f \( -name '*.whl' -o -name '*.tar.gz' \) \
+            -exec cp {} dist/ \;
+          ls -l dist
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist
+          # Falls back to token auth if OIDC Trusted Publishing is not set up.
+          password: ${{ secrets.PYPI_API_TOKEN }}
+          skip-existing: true

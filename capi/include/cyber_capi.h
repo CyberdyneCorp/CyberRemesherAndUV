@@ -29,7 +29,8 @@ typedef enum CyberStatus {
     CYBER_ERR_INVALID_ARG,   /* a required pointer argument was NULL */
     CYBER_ERR_INVALID_PARAM, /* remesh parameters were unusable (NaN, etc.) */
     CYBER_ERR_EMPTY,         /* mesh had no geometry */
-    CYBER_ERR_RUNTIME        /* pipeline failed or was cancelled */
+    CYBER_ERR_RUNTIME,       /* pipeline failed */
+    CYBER_ERR_CANCELLED      /* the operation was cooperatively cancelled */
 } CyberStatus;
 
 /* Engine semantic version (mirrors the CMake project() version). */

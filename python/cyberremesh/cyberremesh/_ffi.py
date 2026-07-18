@@ -36,18 +36,24 @@ from typing import List, Optional
 
 # cyber_status enum (cyber_capi.h). 0 is success; every other value is an error
 # carrying a message retrievable via cyber_last_error().
+# These MUST match CyberStatus in capi/include/cyber_capi.h.
 STATUS_OK = 0
-STATUS_ERROR = 1
-STATUS_CANCELLED = 2
-STATUS_INVALID_ARGUMENT = 3
-STATUS_IO_ERROR = 4
+STATUS_IO_ERROR = 1
+STATUS_INVALID_ARGUMENT = 2
+STATUS_INVALID_PARAM = 3
+STATUS_EMPTY = 4
+STATUS_RUNTIME = 5
+STATUS_CANCELLED = 6
+STATUS_ERROR = STATUS_RUNTIME  # generic-failure alias used by the wrapper
 
 _STATUS_NAMES = {
     STATUS_OK: "OK",
-    STATUS_ERROR: "ERROR",
-    STATUS_CANCELLED: "CANCELLED",
-    STATUS_INVALID_ARGUMENT: "INVALID_ARGUMENT",
     STATUS_IO_ERROR: "IO_ERROR",
+    STATUS_INVALID_ARGUMENT: "INVALID_ARGUMENT",
+    STATUS_INVALID_PARAM: "INVALID_PARAM",
+    STATUS_EMPTY: "EMPTY",
+    STATUS_RUNTIME: "RUNTIME",
+    STATUS_CANCELLED: "CANCELLED",
 }
 
 # cyber_small_patch_policy enum — mirrors cyber::remesh::SmallPatchPolicy.

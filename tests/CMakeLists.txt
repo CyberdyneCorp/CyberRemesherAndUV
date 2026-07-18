@@ -43,7 +43,7 @@ if(TARGET cyber_uv)
     target_link_libraries(cyber_tests PRIVATE cyber_uv)
 endif()
 if(TARGET cyber_retopo)
-    target_sources(cyber_tests PRIVATE retopo/test_retopo.cpp)
+    target_sources(cyber_tests PRIVATE retopo/test_retopo.cpp retopo/test_retopo_advanced.cpp)
     target_link_libraries(cyber_tests PRIVATE cyber_retopo)
 endif()
 if(TARGET cyber_bakecage)
@@ -75,9 +75,11 @@ endif()
 # (exit 0) if it cannot load the lib, so it runs for real in a clean CI and
 # degrades gracefully in environments with a conflicting libstdc++.
 if(TARGET cyber_capi_shared AND Python3_FOUND)
-    add_test(NAME python_bindings
-        COMMAND ${Python3_EXECUTABLE}
-                ${CMAKE_CURRENT_SOURCE_DIR}/../python/cyberremesh/tests/test_api.py)
-    set_tests_properties(python_bindings PROPERTIES
-        ENVIRONMENT "CYBER_CAPI_LIB=$<TARGET_FILE:cyber_capi_shared>")
+    set(_pydir ${CMAKE_CURRENT_SOURCE_DIR}/../python/cyberremesh/tests)
+    foreach(_pyt test_api test_golden test_document_invariants)
+        add_test(NAME python_${_pyt}
+            COMMAND ${Python3_EXECUTABLE} ${_pydir}/${_pyt}.py)
+        set_tests_properties(python_${_pyt} PROPERTIES
+            ENVIRONMENT "CYBER_CAPI_LIB=$<TARGET_FILE:cyber_capi_shared>")
+    endforeach()
 endif()

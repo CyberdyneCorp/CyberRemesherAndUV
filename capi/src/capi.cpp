@@ -127,6 +127,8 @@ const char* cyber_status_string(CyberStatus status) {
             return "empty mesh";
         case CYBER_ERR_RUNTIME:
             return "runtime error";
+        case CYBER_ERR_CANCELLED:
+            return "cancelled";
     }
     return "unknown status";
 }
@@ -224,7 +226,7 @@ CyberStatus cyber_remesh(const CyberMesh* in, const CyberRemeshParams* params,
             }
             case cyber::remesh::RunStatus::Cancelled:
                 setError("cyber_remesh: cancelled");
-                return CYBER_ERR_RUNTIME;
+                return CYBER_ERR_CANCELLED;
             case cyber::remesh::RunStatus::Error:
                 break;
         }

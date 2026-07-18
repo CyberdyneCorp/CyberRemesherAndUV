@@ -1,0 +1,133 @@
+# UNVERIFIED: SwiftPM publish lane. Requires an Apple toolchain (Swift 5.9 /
+# Xcode 15+ on macOS) to resolve and validate the package, plus the native
+# `cyber_capi` library + header the package links against — neither is
+# available in the headless Linux core CI validated by ci.yml. SwiftPM has no
+# central registry upload step; "publishing" a Swift package is publishing a
+# git release tag that consumers resolve by version. This lane validates the
+# package and (best-effort) pushes that release tag. Additive to ci.yml
+# (unchanged). Implements engine-bindings task 13.5 (publish lanes: SwiftPM
+# tag). See packaging/publish/README.md.
+name: publish-swift
+
+on:
+  push:
+    tags:
+      # Swift-package release tags, e.g. swift-v0.1.0. Distinct from the
+      # platform-artifact `v*` and Python `py-v*` tags so each binding releases
+      # independently.
+      - "swift-v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "SwiftPM release tag to validate + push (e.g. swift-v0.1.0)"
+        required: true
+        type: string
+      push_tag:
+        description: "Push the release tag (false = validate only)"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write   # pushing the release tag
+
+jobs:
+  validate:
+    runs-on: macos-14
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
+      version: ${{ steps.resolve.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Select Xcode
+        run: sudo xcode-select -switch /Applications/Xcode_15.4.app
+
+      - name: Resolve tag + version
+        id: resolve
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            tag="${GITHUB_REF_NAME}"
+          else
+            tag="${{ inputs.tag }}"
+          fi
+          version="${tag#swift-v}"
+          echo "tag=${tag}" >>"${GITHUB_OUTPUT}"
+          echo "version=${version}" >>"${GITHUB_OUTPUT}"
+
+      - name: Build the native C ABI the package links
+        shell: bash
+        run: |
+          cmake -S . -B build/swift -DCMAKE_BUILD_TYPE=Release \
+            -DCYBER_BUILD_CAPI=ON -DCYBER_BUILD_TESTS=OFF
+          cmake --build build/swift --target cyber_capi_shared
+
+      # `swift package dump-package` + `swift build` prove the manifest resolves
+      # and the C ABI shim + Swift surface compile against the built library.
+      - name: Validate SwiftPM manifest + build
+        shell: bash
+        working-directory: swift
+        run: |
+          set -euo pipefail
+          swift package dump-package >/dev/null
+          swift build -c release \
+            -Xcc -I"${GITHUB_WORKSPACE}/capi/include" \
+            -Xlinker -L"${GITHUB_WORKSPACE}/build/swift/capi"
+
+      # Cross-binding parity: the Swift shim and the Python ctypes layer must
+      # bind the same C ABI header. Guards against the two wrappers drifting.
+      - name: C ABI parity (Swift shim vs header)
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -q 'cyber_capi.h' swift/Sources/CCyberRemesher/shim.h
+          test -f capi/include/cyber_capi.h
+          echo "Parity OK: Swift shim consumes the C ABI header."
+
+  # Best-effort: push the release tag consumers resolve the package by. On a
+  # tag-triggered run the tag already exists; this step is a no-op guard there.
+  tag:
+    needs: validate
+    if: >-
+      github.event_name == 'push' ||
+      (github.event_name == 'workflow_dispatch' && inputs.push_tag)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Create + push release tag (best-effort)
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ needs.validate.outputs.tag }}"
+          if git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
+            echo "Tag ${tag} already exists (tag-triggered run); nothing to push."
+            exit 0
+          fi
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "${tag}" -m "CyberRemesher Swift package ${tag}"
+          git push origin "${tag}"
+
+  # Attach a lightweight GitHub Release so the SwiftPM tag is discoverable.
+  release:
+    needs: [validate, tag]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Publish SwiftPM GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.validate.outputs.tag }}
+          name: CyberRemesher Swift package ${{ needs.validate.outputs.version }}
+          body: |
+            SwiftPM package release. Add via:
+            `.package(url: "https://github.com/${{ github.repository }}.git", from: "${{ needs.validate.outputs.version }}")`
+          draft: false
+          prerelease: false

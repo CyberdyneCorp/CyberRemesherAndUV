@@ -1,0 +1,27 @@
+{
+  "_unverified": "Best-effort shared UI model (task 8.6). Not built/validated in CI. Consumed by both the iPadOS and Android shells.",
+  "schemaVersion": 1,
+  "stages": [
+    {
+      "id": "retopology",
+      "title": "Retopology",
+      "systemImage": "scribble.variable",
+      "androidIcon": "ic_stage_retopology",
+      "summary": "Draw new quad topology over the read-only Target with an EditMesh snapped to its surface."
+    },
+    {
+      "id": "uv",
+      "title": "UV",
+      "systemImage": "map",
+      "androidIcon": "ic_stage_uv",
+      "summary": "Cut seams and flatten the retopologized mesh into UV islands."
+    },
+    {
+      "id": "baking",
+      "title": "Baking",
+      "systemImage": "paintbrush.pointed",
+      "androidIcon": "ic_stage_baking",
+      "summary": "Bake tangent-space normals and color from the Target onto the new mesh with an editable cage."
+    }
+  ]
+}
