@@ -2,7 +2,29 @@
 
 Ordered by dependency; groups 2–5 unlock everything else. Each group ends with its capability's spec scenarios turned into tests.
 
-## Session handoff (state as of 2026-07-18, commit 0ca6c26)
+## Autonomous completion loop (resume protocol)
+
+Goal: drive this roadmap to completion in a resumable loop. **Durable state =
+these checkboxes + one git commit per task.** If a session is interrupted
+(token/context depletion), resume like this:
+
+1. `git pull` and read this file top-to-bottom.
+2. Run the verify block below; it must be green before new work.
+3. Pick the **first unchecked `[ ]` task** in group order (2→14). Skip only
+   tasks whose entire scope is hardware/platform-blocked *and* already noted
+   as best-effort below.
+4. Implement it; for verifiable tasks build + test + ASan + audits must pass;
+   commit (`feat(<area>): <task> — …`) and push. Then tick the box in the same
+   or next commit. One task per commit keeps resume boundaries clean.
+
+**Scope decision (user, 2026-07-18):** close the *whole* roadmap. Tasks that
+cannot be compiled/run in this headless Linux CLI env (GPU Metal/CUDA/OpenCL,
+Vulkan/Metal render, desktop/iPad/Android GUI shells, Apple USDZ/Swift, signed
+release lanes) get **best-effort source, explicitly marked UNVERIFIED** in the
+task note and commit body — real hardware must still validate them. Everything
+CPU/headless is verified done in the normal sense.
+
+## Session handoff (state as of 2026-07-18)
 
 **Verify the checkout works before continuing:**
 ```sh
