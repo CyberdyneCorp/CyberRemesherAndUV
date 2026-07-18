@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 
+#include "cyber/core/bvh.hpp"
 #include "cyber/core/isotropic.hpp"
 #include "cyber/core/quadrangulate.hpp"
 #include "cyber/core/reference_surface.hpp"
@@ -263,6 +264,19 @@ PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSi
     }
     if (params.pureQuads && result.mesh.faceCount() > 0) {
         result.mesh = result.mesh.linearSubdivide();
+        // Linear subdivision only splits faces — the new vertices sit on the
+        // coarse (quarter-density) base's flat facets, so the silhouette stays
+        // faceted/jagged. Snap every vertex back onto the source surface so the
+        // pure-quad result follows the original curvature.
+        const Bvh sourceSurface(work);
+        if (!sourceSurface.empty()) {
+            for (Index vi = 0; vi < result.mesh.vertexCapacity(); ++vi) {
+                const VertexId v{vi};
+                if (result.mesh.isAlive(v)) {
+                    result.mesh.setPosition(v, sourceSurface.closestPoint(result.mesh.position(v)).point);
+                }
+            }
+        }
     }
     countFaces(result.mesh, result.stats);
 
