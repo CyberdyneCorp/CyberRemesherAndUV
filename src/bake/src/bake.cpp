@@ -211,6 +211,16 @@ std::vector<Texel> rasterize(const Mesh& mesh, const std::vector<Vec3>& vnormals
     return texels;
 }
 
+// An arbitrary unit tangent orthogonal to `n` (Duff et al. branchless frame).
+// Used to build the hemisphere basis when AO fires around a high-poly hit
+// normal that carries no UV-derived tangent of its own.
+Vec3 anyTangent(Vec3 n) {
+    const float sign = std::copysign(1.0f, n.z);
+    const float a = -1.0f / (sign + n.z);
+    const float bxy = n.x * n.y * a;
+    return normalized(Vec3{1.0f + sign * n.x * n.x * a, sign * bxy, -sign * n.x});
+}
+
 // Cosine-weighted hemisphere direction from a Hammersley pair, in tangent
 // space (deterministic — no RNG, so AO bakes are reproducible).
 Vec3 hemisphereDir(std::size_t i, std::size_t n, Vec3 t, Vec3 b, Vec3 nrm) {
@@ -286,13 +296,26 @@ BakeResult bake(const Mesh& lowPoly, const Mesh& highPoly, BakeMap map, const Ba
         const Texel& tx = texels[i];
 
         if (map == BakeMap::AmbientOcclusion) {
+            // Project the low-poly texel onto the high-poly first (same cage ray
+            // as normal/displacement), then fire the AO hemisphere from the
+            // HIGH-poly hit so occlusion captures the high-poly's crevices, not
+            // the low-poly's smooth surface. Fall back to the low-poly frame
+            // when the projection misses the cage.
+            const Vec3 projOrigin = tx.position + tx.normal * params.cageDistance;
+            const std::optional<Bvh::RayHit> proj = bvh.raycast(projOrigin, tx.normal * -1.0f);
+            const bool projValid = proj.has_value() && proj->t <= 2.0f * params.cageDistance;
+            const Vec3 aoNormal = projValid ? hitNormal(highPoly, *proj, highNormals) : tx.normal;
+            const Vec3 aoPosition = projValid ? proj->point : tx.position;
+            const Vec3 aoTangent = anyTangent(aoNormal);
+            const Vec3 aoBitangent = cross(aoNormal, aoTangent);
+
             accel::Buffer<Vec3> origins(static_cast<std::size_t>(params.aoSamples));
             accel::Buffer<Vec3> dirs(static_cast<std::size_t>(params.aoSamples));
             for (int k = 0; k < params.aoSamples; ++k) {
-                origins[static_cast<std::size_t>(k)] = tx.position + tx.normal * params.aoBias;
+                origins[static_cast<std::size_t>(k)] = aoPosition + aoNormal * params.aoBias;
                 dirs[static_cast<std::size_t>(k)] = hemisphereDir(static_cast<std::size_t>(k),
                                                                   static_cast<std::size_t>(params.aoSamples),
-                                                                  tx.tangent, tx.bitangent, tx.normal);
+                                                                  aoTangent, aoBitangent, aoNormal);
             }
             accel::Buffer<std::optional<Bvh::RayHit>> hits;
             accel::raycast(backend, bvh, origins, dirs, hits);

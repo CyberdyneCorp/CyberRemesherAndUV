@@ -8,15 +8,16 @@
 #include <string>
 #include <vector>
 
-// Minimal, dependency-free PNG reader complementing the writer in png.hpp
-// (roadmap 3.4 / 11.1). It decodes exactly the byte layout this project's
-// writer emits: 8-bit RGB/RGBA, a zlib stream of STORED (uncompressed) DEFLATE
-// blocks, and filter type 0 (None) on every scanline. The zlib header,
-// Adler-32 trailer and per-chunk CRC-32 are all validated; a general
-// dynamic-Huffman/interlaced/paletted decoder is deliberately out of scope, so
-// PNGs using any other compression, filter or colour layout are rejected
-// cleanly (loadPng returns std::nullopt). This keeps the load/save round-trip
-// self-contained with zero third-party code.
+// Dependency-free general 8-bit PNG reader complementing the writer in png.hpp
+// (roadmap 3.4 / 11.1). It decodes real-world PNGs (e.g. written by PIL /
+// matplotlib): a full RFC 1951 inflate (stored + fixed- and dynamic-Huffman
+// blocks with LZ77 back-references), all five scanline filters (None, Sub, Up,
+// Average, Paeth), and colour types 0 (grayscale), 2 (RGB), 6 (RGBA) and 3
+// (palette via PLTE, honouring tRNS). Grayscale and palette expand to RGB(A);
+// output has 3 or 4 channels. The zlib header, Adler-32 trailer and per-chunk
+// CRC-32 are all validated. 16-bit depth and interlaced PNGs are rejected
+// cleanly (loadPng returns std::nullopt), as is any corrupt stream. The
+// writer's own STORED-DEFLATE / filter-None output still round-trips.
 namespace cyber::imageio {
 
 // Decoded image: row-major pixels, one float per channel, normalised to [0,1].

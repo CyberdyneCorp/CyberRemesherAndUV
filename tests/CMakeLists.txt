@@ -5,11 +5,13 @@ add_executable(cyber_tests
     main.cpp
     bake/test_bake.cpp
     bake/test_tangent.cpp
+    bake/test_ao_projected.cpp
     quadrangulate/test_crossfield.cpp
     quadrangulate/test_field_quadrangulator.cpp
     quadrangulate/test_quad_cleanup.cpp
     core/test_bvh.cpp
     core/test_golden.cpp
+    core/test_golden_organic.cpp
     core/test_holes.cpp
     core/test_io_formats.cpp
     core/test_io_obj.cpp
@@ -35,7 +37,7 @@ if(TARGET cyber_imageio)
     # test_load: imageio PNG reader; test_texture_bake: bake's texture color
     # source (uses imageio's LoadedImage) — both need cyber_imageio linked.
     target_sources(cyber_tests PRIVATE imageio/test_imageio.cpp imageio/test_load.cpp
-                                        bake/test_texture_bake.cpp)
+                                        imageio/test_load_general.cpp bake/test_texture_bake.cpp)
     target_link_libraries(cyber_tests PRIVATE cyber_imageio)
 endif()
 if(TARGET cyber_capi)
