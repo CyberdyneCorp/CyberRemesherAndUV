@@ -154,15 +154,6 @@ Group 7 is `src/render` (`cyber_render`), gated **OFF** (`CYBER_BUILD_RENDER`) a
 - [x] 8.5 iPadOS shell (pencil/touch event feed, backgrounding autosave); Android shell after tier-1 — `apps/mobile/ipados` (SwiftUI + PencilKit + CAMetalLayer) and `apps/mobile/android` (Kotlin + JNI + touch feed). **UNVERIFIED** best-effort (no mobile toolchain in CI)
 - [x] 8.6 Stage switcher; long-op progress/cancel UI with atomic commit (no stale flash); Action Gallery + configurable toolbar; tutorial content; in-app log view (quiet by default) — `apps/mobile/*/` shared UI model (stage switcher, progress overlay, log view) + `apps/mobile/shared` outline. **UNVERIFIED** best-effort (GUI)
 
-## 8. application-shell
-
-- [ ] 8.1 Document model (Target/EditMesh/parameters/bake state), versioned container format, autosave
-- [ ] 8.2 Command-journal undo/redo (memory-budgeted, persisted with autosave)
-- [ ] 8.3 Shared C++ input layer: stroke capture, chorded modifiers, double-tap/press-hold recognizers, pressure, hover
-- [ ] 8.4 Desktop shell (window/input/panels); keyboard shortcut map
-- [ ] 8.5 iPadOS shell (pencil/touch event feed, backgrounding autosave); Android shell after tier-1
-- [ ] 8.6 Stage switcher; long-op progress/cancel UI with atomic commit (no stale flash); Action Gallery + configurable toolbar; tutorial content; in-app log view (quiet by default)
-
 ## 9. manual-retopology
 
 - [x] 9.1 Target/EditMesh snapping (surface + vertex-snap modifier, image targets) — `src/retopo` (`cyber_retopo`) `snapping.*`: closest-surface snap via `Bvh` + vertex-snap-within-radius modifier; tested. Image-target snapping pending
