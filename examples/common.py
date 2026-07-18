@@ -221,6 +221,66 @@ def uv_sphere_obj(path: str, rings: int = 24, segments: int = 48, radius: float 
             fh.write("f " + " ".join(f"{i + 1}/{i + 1}" for i in f) + "\n")
 
 
+def torus_knot_obj(path: str, p: int = 3, q: int = 2, curve_segments: int = 200,
+                   tube_segments: int = 16, tube_radius: float = 0.22) -> None:
+    """A triangulated (p, q) torus-knot tube — a non-trivial 'model' to convert
+    to quads. The tube frame is parallel-transported so it stays untwisted."""
+    n = curve_segments
+    curve = np.zeros((n, 3))
+    for i in range(n):
+        t = 2.0 * math.pi * i / n
+        r = 2.0 + math.cos(q * t)
+        curve[i] = [r * math.cos(p * t), r * math.sin(p * t), -math.sin(q * t)]
+
+    tangents = np.zeros((n, 3))
+    for i in range(n):
+        tangents[i] = curve[(i + 1) % n] - curve[(i - 1) % n]
+        tangents[i] /= np.linalg.norm(tangents[i]) + 1e-12
+
+    ref = np.array([0.0, 0.0, 1.0])
+    first = np.cross(tangents[0], ref)
+    if np.linalg.norm(first) < 1e-6:
+        first = np.cross(tangents[0], np.array([0.0, 1.0, 0.0]))
+    normals = [first / np.linalg.norm(first)]
+    for i in range(1, n):  # parallel transport
+        v = normals[-1] - tangents[i] * float(np.dot(normals[-1], tangents[i]))
+        norm = np.linalg.norm(v)
+        normals.append(v / norm if norm > 1e-9 else normals[-1])
+    normals_arr = np.array(normals)
+    binormals = np.cross(tangents, normals_arr)
+
+    verts: List[Vec3] = []
+    for i in range(n):
+        for j in range(tube_segments):
+            a = 2.0 * math.pi * j / tube_segments
+            offset = (normals_arr[i] * math.cos(a) + binormals[i] * math.sin(a)) * tube_radius
+            pt = curve[i] + offset
+            verts.append((float(pt[0]), float(pt[1]), float(pt[2])))
+
+    def idx(i: int, j: int) -> int:
+        return (i % n) * tube_segments + (j % tube_segments)
+
+    faces: List[List[int]] = []
+    for i in range(n):
+        for j in range(tube_segments):
+            a, b, c, d = idx(i, j), idx(i + 1, j), idx(i + 1, j + 1), idx(i, j + 1)
+            faces.append([a, b, c])  # triangulated so the demo is a real tri->quad conversion
+            faces.append([a, c, d])
+    _write_obj(path, verts, faces)
+
+
+def load_any(path: str) -> MeshData:
+    """Load any engine-supported mesh (OBJ / PLY / STL / glTF) for rendering by
+    routing it through the engine (load -> export OBJ -> parse)."""
+    with Mesh.load_obj(path) as mesh:
+        with tempfile.NamedTemporaryFile(suffix=".obj", delete=False) as tmp:
+            out = tmp.name
+        mesh.save_obj(out)
+    data = load_obj(out)
+    os.unlink(out)
+    return data
+
+
 def plane_with_hole_obj(path: str, n: int = 12) -> None:
     """A flat grid with a square hole punched in the middle (for hole-fill)."""
     verts: List[Vec3] = [

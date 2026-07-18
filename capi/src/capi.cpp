@@ -213,6 +213,10 @@ CyberStatus cyber_remesh(const CyberMesh* in, const CyberRemeshParams* params,
         const cyber::CancelToken token;
         cyber::ProgressSink sink = makeSink(progress, cancel, user, token);
 
+        // Greedy pairing keeps the strongest quad-dominance for a general
+        // "convert to quads" load; the field-aligned quadrangulator trades some
+        // quad-dominance for edge flow (used by the CLI). Pure-quad mode
+        // (params.pureQuads) yields a 100%-quad result on top of either.
         cyber::remesh::PipelineResult result =
             cyber::remesh::remesh(in->mesh, cppParams, &sink, &token);
 

@@ -20,7 +20,20 @@ so quad-dominance reads at a glance.
 | `05_pure_quads.py` | `pure_quads` eliminates residual triangles | `output/05_pure_quads.png` |
 | `06_hole_fill.py` | `hole_fill_max_boundary` cleanup pass | `output/06_hole_fill.png` |
 | `07_baking.py` | surface baking: normal / AO / displacement maps | `output/07_baking.png` (+ `07_bake_*.png`) |
+| `08_load_model.py` | load a model → quad-dominant + 100% pure-quads | `output/08_load_model.png` |
 | `run_all.py` | runs all of the above + a stitched `output/gallery.png` | `output/gallery.png` |
+
+`08_load_model.py` loads a mesh and converts it to quads. It defaults to a
+procedural torus knot but takes `--input <file>` for your own model:
+
+```sh
+examples/run.sh examples/08_load_model.py --input model.obj --target-quads 8000 --output quads.obj
+```
+
+**Supported input formats: OBJ, PLY, STL, glTF/GLB** (the loader dispatches by
+extension). **FBX is not supported** — convert it to one of the above first
+(e.g. in Blender). Two results are produced: *quad-dominant* (a few residual
+triangles at irregular vertices) and *pure quads* (100% quads via subdivision).
 
 `07_baking.py` bakes a bumpy high-poly sphere onto a smooth low-poly's UV
 layout (tangent-space normal + displacement) and the detailed surface's own

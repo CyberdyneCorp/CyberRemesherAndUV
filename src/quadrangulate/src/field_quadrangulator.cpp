@@ -125,6 +125,54 @@ std::size_t removeDoublets(Mesh& mesh) {
     return removed;
 }
 
+// Quality-only greedy pass that pairs the triangles the field-guided pass left
+// behind, so the output stays strongly quad-dominant without disturbing the
+// field-aligned quads already formed (those faces are no longer triangles).
+void mergeRemainingTriangles(Mesh& mesh) {
+    struct Cand {
+        float quality;
+        Index edge;
+    };
+    std::vector<Cand> cands;
+    for (Index i = 0; i < mesh.edgeCapacity(); ++i) {
+        const EdgeId e{i};
+        if (!mesh.isAlive(e) || mesh.isFeatureEdge(e) || mesh.edgeFaceCount(e) != 2) {
+            continue;
+        }
+        const auto faces = mesh.edgeFaces(e);
+        if (mesh.faceSize(faces[0]) != 3 || mesh.faceSize(faces[1]) != 3) {
+            continue;
+        }
+        const auto [a, b] = mesh.edgeVertices(e);
+        const VertexId c = opposite(mesh, faces[0], a, b);
+        const VertexId d = opposite(mesh, faces[1], a, b);
+        if (!c.valid() || !d.valid() || c == d) {
+            continue;
+        }
+        const float q = quadQuality(mesh, a, b, c, d);
+        if (q > 0.2f) {
+            cands.push_back({q, i});
+        }
+    }
+    std::sort(cands.begin(), cands.end(), [](const Cand& x, const Cand& y) {
+        if (x.quality != y.quality) {
+            return x.quality > y.quality;
+        }
+        return x.edge < y.edge;
+    });
+    for (const Cand& cand : cands) {
+        const EdgeId e{cand.edge};
+        if (!mesh.isAlive(e) || mesh.edgeFaceCount(e) != 2) {
+            continue;
+        }
+        const auto faces = mesh.edgeFaces(e);
+        if (mesh.faceSize(faces[0]) != 3 || mesh.faceSize(faces[1]) != 3) {
+            continue;
+        }
+        mergePair(mesh, e, faces[0], faces[1]);
+    }
+}
+
 // ---- valence cleanup (roadmap 5.4/5.5) -------------------------------------
 
 int valence(const Mesh& mesh, VertexId v) {
@@ -338,7 +386,9 @@ public:
             const Vec3 de = normalized(mesh.position(b) - mesh.position(a));
             const float diag = 0.5f * (diagonalness(de, field.direction(faces[0])) +
                                        diagonalness(de, field.direction(faces[1])));
-            // Weight geometry and field alignment; a diagonal edge scores best.
+            // Weight geometry x field alignment: a field-diagonal edge (a good
+            // quad diagonal) scores best, so the surviving quad edges follow the
+            // field's flow. The greedy mop-up below recovers quad-dominance.
             candidates.push_back({quality * (0.25f + 0.75f * diag), i});
         }
 
@@ -368,7 +418,8 @@ public:
             }
         }
 
-        removeDoublets(mesh);          // graph simplification (5.5)
+        mergeRemainingTriangles(mesh);     // quality-only mop-up for quad-dominance
+        removeDoublets(mesh);              // graph simplification (5.5)
         quadValenceCleanup(mesh, &field);  // valence cleanup (5.4/5.5)
         if (progress) {
             progress->report(1.0f, "quadrangulate");
