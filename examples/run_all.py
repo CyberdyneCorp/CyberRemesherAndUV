@@ -19,6 +19,7 @@ EXAMPLES = [
     ("04_sharp_edges", "04_sharp_edges.png"),
     ("05_pure_quads", "05_pure_quads.png"),
     ("06_hole_fill", "06_hole_fill.png"),
+    ("07_baking", "07_baking.png"),
 ]
 
 

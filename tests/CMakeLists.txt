@@ -84,7 +84,7 @@ endif()
 # degrades gracefully in environments with a conflicting libstdc++.
 if(TARGET cyber_capi_shared AND Python3_FOUND)
     set(_pydir ${CMAKE_CURRENT_SOURCE_DIR}/../python/cyberremesh/tests)
-    foreach(_pyt test_api test_golden test_document_invariants)
+    foreach(_pyt test_api test_golden test_document_invariants test_bake)
         add_test(NAME python_${_pyt}
             COMMAND ${Python3_EXECUTABLE} ${_pydir}/${_pyt}.py)
         set_tests_properties(python_${_pyt} PROPERTIES

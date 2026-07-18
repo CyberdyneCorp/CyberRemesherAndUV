@@ -101,6 +101,26 @@ class CyberStatistics(Structure):
     ]
 
 
+# CyberBakeMap values (must match the enum in cyber_capi.h).
+BAKE_NORMAL = 0
+BAKE_AO = 1
+BAKE_DISPLACEMENT = 2
+BAKE_POSITION = 3
+BAKE_COLOR = 4
+
+
+class CyberBakeParams(Structure):
+    """Mirror of ``CyberBakeParams`` in capi/include/cyber_capi.h."""
+
+    _fields_ = [
+        ("width", c_int32),
+        ("height", c_int32),
+        ("cage_distance", c_float),
+        ("ao_samples", c_int32),
+        ("ao_radius", c_float),
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Callback trampolines
 # ---------------------------------------------------------------------------
@@ -247,6 +267,29 @@ def _declare(lib: ctypes.CDLL) -> None:
         POINTER(c_void_p),
     ]
     lib.cyber_remesh.restype = c_int32
+
+    # -- surface baking ------------------------------------------------------
+    lib.cyber_default_bake_params.argtypes = [POINTER(CyberBakeParams)]
+    lib.cyber_default_bake_params.restype = None
+    # CyberStatus cyber_bake(const CyberMesh* low, const CyberMesh* high,
+    #                        CyberBakeMap map, const CyberBakeParams*, CyberImage** out)
+    lib.cyber_bake.argtypes = [
+        c_void_p,
+        c_void_p,
+        c_int32,
+        POINTER(CyberBakeParams),
+        POINTER(c_void_p),
+    ]
+    lib.cyber_bake.restype = c_int32
+    lib.cyber_image_free.argtypes = [c_void_p]
+    lib.cyber_image_free.restype = None
+    for accessor in ("cyber_image_width", "cyber_image_height", "cyber_image_channels"):
+        getattr(lib, accessor).argtypes = [c_void_p]
+        getattr(lib, accessor).restype = c_int32
+    lib.cyber_image_copy_pixels.argtypes = [c_void_p, POINTER(c_float), c_size_t]
+    lib.cyber_image_copy_pixels.restype = c_size_t
+    lib.cyber_image_save_png.argtypes = [c_void_p, c_char_p]
+    lib.cyber_image_save_png.restype = c_int32
 
 
 # ---------------------------------------------------------------------------

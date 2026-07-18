@@ -33,6 +33,10 @@ __all__ = [
     "version",
     "is_available",
     "HAVE_NUMPY",
+    "BakeMap",
+    "BakeParams",
+    "Image",
+    "bake",
 ]
 
 
@@ -300,3 +304,120 @@ def remesh(
     if lib.cyber_mesh_stats(result.handle, ctypes.byref(c_stats)) == _ffi.STATUS_OK:
         result._stats = Statistics._from_c(c_stats)
     return result
+
+
+# ---------------------------------------------------------------------------
+# Surface baking
+# ---------------------------------------------------------------------------
+class BakeMap:
+    """Bakeable map types (mirror of ``CyberBakeMap``)."""
+
+    NORMAL = _ffi.BAKE_NORMAL
+    AO = _ffi.BAKE_AO
+    DISPLACEMENT = _ffi.BAKE_DISPLACEMENT
+    POSITION = _ffi.BAKE_POSITION
+    COLOR = _ffi.BAKE_COLOR
+
+
+@dataclass
+class BakeParams:
+    """Bake settings (mirror of ``CyberBakeParams``)."""
+
+    width: int = 512
+    height: int = 512
+    cage_distance: float = 0.1
+    ao_samples: int = 16
+    ao_radius: float = 1.0
+
+    def _to_c(self) -> "_ffi.CyberBakeParams":
+        return _ffi.CyberBakeParams(
+            width=int(self.width),
+            height=int(self.height),
+            cage_distance=float(self.cage_distance),
+            ao_samples=int(self.ao_samples),
+            ao_radius=float(self.ao_radius),
+        )
+
+
+class Image:
+    """A baked map: row-major float pixels with ``channels`` per texel.
+
+    Read it with :meth:`to_numpy` (an ``(h, w, channels)`` array) or write it
+    straight to PNG with :meth:`save_png`. Released on :meth:`close` / GC.
+    """
+
+    __slots__ = ("_handle",)
+
+    def __init__(self, handle: int):
+        self._handle = handle
+
+    @property
+    def handle(self) -> int:
+        if self._handle is None:
+            raise ValueError("operation on a closed Image")
+        return self._handle
+
+    @property
+    def width(self) -> int:
+        return int(_ffi.get_lib().cyber_image_width(self.handle))
+
+    @property
+    def height(self) -> int:
+        return int(_ffi.get_lib().cyber_image_height(self.handle))
+
+    @property
+    def channels(self) -> int:
+        return int(_ffi.get_lib().cyber_image_channels(self.handle))
+
+    def save_png(self, path: str) -> None:
+        """Write the map to an 8-bit PNG (tonemapped)."""
+        _check(_ffi.get_lib().cyber_image_save_png(self.handle, str(path).encode("utf-8")))
+
+    def to_numpy(self):
+        """Return the map as an ``(height, width, channels)`` float32 ndarray."""
+        if not HAVE_NUMPY:
+            raise RuntimeError("numpy is required for Image.to_numpy()")
+        lib = _ffi.get_lib()
+        n = int(lib.cyber_image_copy_pixels(self.handle, None, 0))
+        buf = (ctypes.c_float * n)()
+        lib.cyber_image_copy_pixels(self.handle, buf, n)
+        arr = _np.frombuffer(buf, dtype=_np.float32).copy()
+        return arr.reshape((self.height, self.width, self.channels))
+
+    def close(self) -> None:
+        if self._handle is not None:
+            _ffi.get_lib().cyber_image_free(self._handle)
+            self._handle = None
+
+    def __del__(self):  # pragma: no cover - GC timing dependent
+        try:
+            self.close()
+        except Exception:
+            pass
+
+    def __enter__(self) -> "Image":
+        return self
+
+    def __exit__(self, *_exc) -> None:
+        self.close()
+
+
+def bake(low: "Mesh", high: "Mesh", bake_map: int = BakeMap.NORMAL,
+         params: Optional[BakeParams] = None) -> Image:
+    """Bake ``bake_map`` from ``high`` (the Target) onto ``low``'s UV layout.
+
+    ``low`` must carry UVs (load an OBJ with ``vt`` coordinates). Returns an
+    :class:`Image`; a ``CyberError`` is raised on failure.
+    """
+    if params is None:
+        params = BakeParams()
+    lib = _ffi.get_lib()
+    c_params = params._to_c()
+    out = ctypes.c_void_p()
+    status = lib.cyber_bake(
+        low.handle, high.handle, int(bake_map), ctypes.byref(c_params), ctypes.byref(out)
+    )
+    _check(status)
+    if not out.value:
+        raise CyberError(_ffi.STATUS_ERROR, _last_error() or "bake produced no image")
+    return Image(out.value)

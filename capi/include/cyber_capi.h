@@ -119,6 +119,49 @@ size_t cyber_mesh_copy_positions(const CyberMesh* mesh, float* out, size_t max_f
 /* Alias of cyber_default_params. */
 void cyber_remesh_params_default(CyberRemeshParams* params);
 
+/* ---- surface baking (group 11) --------------------------------------- */
+
+/* Bakeable map types (surface-baking spec). */
+typedef enum CyberBakeMap {
+    CYBER_BAKE_NORMAL = 0,    /* tangent-space normal map (RGB, encoded [0,1]) */
+    CYBER_BAKE_AO,            /* ambient occlusion / openness (1 channel) */
+    CYBER_BAKE_DISPLACEMENT,  /* signed height along the low-poly normal (1 ch) */
+    CYBER_BAKE_POSITION,      /* Target hit position, world space (RGB) */
+    CYBER_BAKE_COLOR          /* Target vertex color at the hit (RGB) */
+} CyberBakeMap;
+
+typedef struct CyberBakeParams {
+    int width;           /* output resolution */
+    int height;
+    float cageDistance;  /* rays start at surface + normal*cageDistance, cast inward 2x */
+    int aoSamples;       /* hemisphere rays per texel for AO */
+    float aoRadius;      /* an AO ray hit beyond this does not occlude */
+} CyberBakeParams;
+
+/* Fills params with the engine defaults. No-op on NULL. */
+void cyber_default_bake_params(CyberBakeParams* params);
+
+/* Opaque baked image: row-major float pixels, `channels` per texel. Release
+ * with cyber_image_free. */
+typedef struct CyberImage CyberImage;
+
+/* Bakes `map` from `high` (the Target / high-poly) onto the per-corner UV
+ * layout of `low` (the EditMesh / low-poly). `low` MUST carry UVs (load an OBJ
+ * with vt coordinates). On success *out receives a new CyberImage. */
+CyberStatus cyber_bake(const CyberMesh* low, const CyberMesh* high, CyberBakeMap map,
+                       const CyberBakeParams* params, CyberImage** out);
+
+void cyber_image_free(CyberImage* image);
+int cyber_image_width(const CyberImage* image);
+int cyber_image_height(const CyberImage* image);
+int cyber_image_channels(const CyberImage* image);
+/* Copies the row-major float pixels (width*height*channels) into `out`, at most
+ * `max_floats`; returns the number of floats written. Pass out=NULL to query
+ * the required count. */
+size_t cyber_image_copy_pixels(const CyberImage* image, float* out, size_t max_floats);
+/* Writes the image to an 8-bit PNG (tonemapped). */
+CyberStatus cyber_image_save_png(const CyberImage* image, const char* path);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif

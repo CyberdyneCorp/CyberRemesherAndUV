@@ -18,9 +18,11 @@
 #include <string>
 #include <string_view>
 
+#include "cyber/bake/bake.hpp"
 #include "cyber/core/io.hpp"
 #include "cyber/core/mesh.hpp"
 #include "cyber/core/pipeline.hpp"
+#include "cyber/imageio/image.hpp"
 #include "cyber/core/progress.hpp"
 #include "cyber/core/remesh_params.hpp"
 
@@ -335,3 +337,118 @@ size_t cyber_mesh_copy_positions(const CyberMesh* mesh, float* out, size_t max_f
 }
 
 void cyber_remesh_params_default(CyberRemeshParams* params) { cyber_default_params(params); }
+
+// ---- surface baking ------------------------------------------------------
+
+struct CyberImage {
+    cyber::bake::Image image;
+};
+
+void cyber_default_bake_params(CyberBakeParams* params) {
+    if (params == nullptr) {
+        return;
+    }
+    const cyber::bake::BakeParams d;
+    params->width = d.width;
+    params->height = d.height;
+    params->cageDistance = d.cageDistance;
+    params->aoSamples = d.aoSamples;
+    params->aoRadius = d.aoRadius;
+}
+
+CyberStatus cyber_bake(const CyberMesh* low, const CyberMesh* high, CyberBakeMap map,
+                       const CyberBakeParams* params, CyberImage** out) {
+    if (low == nullptr || high == nullptr || out == nullptr) {
+        setError("cyber_bake: null argument");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    try {
+        cyber::bake::BakeParams p;
+        if (params != nullptr) {
+            p.width = params->width;
+            p.height = params->height;
+            p.cageDistance = params->cageDistance;
+            p.aoSamples = params->aoSamples;
+            p.aoRadius = params->aoRadius;
+        }
+        cyber::bake::BakeMap m{};
+        switch (map) {
+            case CYBER_BAKE_NORMAL:
+                m = cyber::bake::BakeMap::Normal;
+                break;
+            case CYBER_BAKE_AO:
+                m = cyber::bake::BakeMap::AmbientOcclusion;
+                break;
+            case CYBER_BAKE_DISPLACEMENT:
+                m = cyber::bake::BakeMap::Displacement;
+                break;
+            case CYBER_BAKE_POSITION:
+                m = cyber::bake::BakeMap::Position;
+                break;
+            case CYBER_BAKE_COLOR:
+                m = cyber::bake::BakeMap::Color;
+                break;
+            default:
+                setError("cyber_bake: unknown map type");
+                return CYBER_ERR_INVALID_ARG;
+        }
+        cyber::bake::BakeResult result = cyber::bake::bake(low->mesh, high->mesh, m, p);
+        if (result.image.pixels.empty()) {
+            setError("cyber_bake: empty result (the low-poly needs UVs and the Target geometry)");
+            return CYBER_ERR_EMPTY;
+        }
+        auto handle = std::make_unique<CyberImage>();
+        handle->image = std::move(result.image);
+        clearError();
+        *out = handle.release();
+        return CYBER_OK;
+    } catch (const std::exception& e) {
+        setError(std::string("cyber_bake: ") + e.what());
+        return CYBER_ERR_RUNTIME;
+    } catch (...) {
+        setError("cyber_bake: unknown error");
+        return CYBER_ERR_RUNTIME;
+    }
+}
+
+void cyber_image_free(CyberImage* image) { delete image; }
+
+int cyber_image_width(const CyberImage* image) { return image == nullptr ? 0 : image->image.width; }
+int cyber_image_height(const CyberImage* image) {
+    return image == nullptr ? 0 : image->image.height;
+}
+int cyber_image_channels(const CyberImage* image) {
+    return image == nullptr ? 0 : image->image.channels;
+}
+
+size_t cyber_image_copy_pixels(const CyberImage* image, float* out, size_t max_floats) {
+    if (image == nullptr) {
+        return 0;
+    }
+    const std::vector<float>& px = image->image.pixels;
+    if (out == nullptr) {
+        return px.size();
+    }
+    const size_t n = std::min(px.size(), max_floats);
+    std::copy(px.begin(), px.begin() + static_cast<std::ptrdiff_t>(n), out);
+    return n;
+}
+
+CyberStatus cyber_image_save_png(const CyberImage* image, const char* path) {
+    if (image == nullptr || path == nullptr) {
+        setError("cyber_image_save_png: null argument");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    try {
+        if (!cyber::imageio::saveImage(std::string(path), image->image,
+                                       cyber::imageio::ImageFormat::Png)) {
+            setError("cyber_image_save_png: write failed");
+            return CYBER_ERR_IO;
+        }
+        clearError();
+        return CYBER_OK;
+    } catch (const std::exception& e) {
+        setError(std::string("cyber_image_save_png: ") + e.what());
+        return CYBER_ERR_IO;
+    }
+}

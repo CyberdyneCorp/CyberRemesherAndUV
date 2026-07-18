@@ -181,6 +181,46 @@ def bumpy_sphere_obj(path: str, rings: int = 32, segments: int = 48) -> None:
     _write_obj(path, verts, faces)
 
 
+def uv_sphere_obj(path: str, rings: int = 24, segments: int = 48, radius: float = 1.0,
+                  bump: float = 0.0) -> None:
+    """A UV sphere as a quad grid with per-corner UVs (vt) — needed as the
+    low-poly bake target. `bump` adds a dimpled displacement (use it for the
+    high-poly Target so the baked maps have detail to capture)."""
+    verts: List[Vec3] = []
+    uvs: List[Tuple[float, float]] = []
+    for r in range(rings + 1):
+        phi = math.pi * r / rings
+        v = r / rings
+        for s in range(segments + 1):  # duplicate seam column for clean UVs
+            theta = 2.0 * math.pi * s / segments
+            # Outward-only dimples (0..bump): the smooth low-poly (bump=0) is the
+            # base and detail rises above it, so baked AO darkens in the valleys
+            # rather than flipping hard where the surface pokes through.
+            disp = bump * 0.5 * (1.0 + math.sin(7.0 * phi) * math.cos(9.0 * theta))
+            rad = radius + disp
+            verts.append(
+                (math.sin(phi) * math.cos(theta) * rad, math.sin(phi) * math.sin(theta) * rad,
+                 math.cos(phi) * rad)
+            )
+            uvs.append((s / segments, v))
+
+    def idx(r: int, s: int) -> int:
+        return r * (segments + 1) + s
+
+    faces: List[List[int]] = []
+    for r in range(rings):
+        for s in range(segments):
+            faces.append([idx(r, s), idx(r + 1, s), idx(r + 1, s + 1), idx(r, s + 1)])
+
+    with open(path, "w", encoding="utf-8") as fh:
+        for p in verts:
+            fh.write(f"v {p[0]} {p[1]} {p[2]}\n")
+        for t in uvs:
+            fh.write(f"vt {t[0]} {t[1]}\n")
+        for f in faces:
+            fh.write("f " + " ".join(f"{i + 1}/{i + 1}" for i in f) + "\n")
+
+
 def plane_with_hole_obj(path: str, n: int = 12) -> None:
     """A flat grid with a square hole punched in the middle (for hole-fill)."""
     verts: List[Vec3] = [
@@ -289,6 +329,34 @@ def render_panels(meshes: List[MeshData], titles: List[str], path: str, suptitle
         ax = fig.add_subplot(1, n, k + 1, projection="3d")
         _draw(ax, mesh, title)
     fig.tight_layout(rect=(0, 0, 1, 0.95))
+    fig.savefig(path, bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+    print(f"  wrote {os.path.relpath(path, _REPO)}")
+
+
+def render_maps(maps: List[Tuple[str, "np.ndarray"]], path: str, suptitle: str = "") -> None:
+    """Render baked maps as image panels. RGB maps show directly; single-channel
+    maps (AO, displacement) are min-max normalised to greyscale."""
+    n = len(maps)
+    fig, axes = plt.subplots(1, n, figsize=(3.7 * n, 4.0), dpi=130)
+    if n == 1:
+        axes = [axes]
+    if suptitle:
+        fig.suptitle(suptitle, fontsize=13, fontweight="bold", color="#12233a")
+    for ax, (title, arr) in zip(axes, maps):
+        a = np.asarray(arr, dtype=float)
+        if a.ndim == 3 and a.shape[2] >= 3:
+            ax.imshow(np.clip(a[..., :3], 0.0, 1.0))
+        else:
+            g = a.reshape(a.shape[0], a.shape[1])
+            lo, hi = float(g.min()), float(g.max())
+            if hi > lo:
+                g = (g - lo) / (hi - lo)
+            ax.imshow(g, cmap="gray")
+        ax.set_title(title, fontsize=11, color="#20262e")
+        ax.set_xticks([])
+        ax.set_yticks([])
+    fig.tight_layout(rect=(0, 0, 1, 0.94))
     fig.savefig(path, bbox_inches="tight", facecolor="white")
     plt.close(fig)
     print(f"  wrote {os.path.relpath(path, _REPO)}")

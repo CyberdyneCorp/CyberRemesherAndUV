@@ -8,6 +8,8 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <system_error>
+#include <vector>
 
 #include "cyber_capi.h"
 
@@ -117,4 +119,60 @@ TEST_CASE("capi loads, remeshes and reports stats for a cube") {
     std::error_code ec;
     std::filesystem::remove(objPath, ec);
     std::filesystem::remove(savePath, ec);
+}
+
+namespace {
+// Two-triangle unit plane in z=0 with per-corner UVs (vt) — usable as both the
+// low-poly (needs UVs) and the coincident high-poly for a bake smoke test.
+std::filesystem::path writeUvPlaneObj() {
+    const std::filesystem::path path =
+        std::filesystem::temp_directory_path() / "cyber_capi_uvplane.obj";
+    std::ofstream out(path);
+    out << "v 0 0 0\nv 1 0 0\nv 1 1 0\nv 0 1 0\n"
+           "vt 0 0\nvt 1 0\nvt 1 1\nvt 0 1\n"
+           "f 1/1 2/2 3/3\nf 1/1 3/3 4/4\n";
+    return path;
+}
+}  // namespace
+
+TEST_CASE("capi bakes a normal map onto a UV plane") {
+    const std::filesystem::path objPath = writeUvPlaneObj();
+    CyberMesh* low = nullptr;
+    CyberMesh* high = nullptr;
+    REQUIRE(cyber_mesh_load_obj(objPath.string().c_str(), &low) == CYBER_OK);
+    REQUIRE(cyber_mesh_load_obj(objPath.string().c_str(), &high) == CYBER_OK);
+
+    CyberBakeParams params{};
+    cyber_default_bake_params(&params);
+    params.width = 16;
+    params.height = 16;
+
+    CyberImage* image = nullptr;
+    REQUIRE(cyber_bake(low, high, CYBER_BAKE_NORMAL, &params, &image) == CYBER_OK);
+    REQUIRE(image != nullptr);
+    REQUIRE(cyber_image_width(image) == 16);
+    REQUIRE(cyber_image_height(image) == 16);
+    REQUIRE(cyber_image_channels(image) == 3);
+
+    const size_t needed = cyber_image_copy_pixels(image, nullptr, 0);
+    REQUIRE(needed == 16u * 16u * 3u);
+    std::vector<float> pixels(needed);
+    REQUIRE(cyber_image_copy_pixels(image, pixels.data(), pixels.size()) == needed);
+    // Coincident flat planes -> tangent-space up -> centre texel ~ (0.5,0.5,1).
+    const size_t centre = (8u * 16u + 8u) * 3u;
+    REQUIRE(pixels[centre + 2] == doctest::Approx(1.0f).epsilon(0.05));
+
+    const std::filesystem::path pngPath =
+        std::filesystem::temp_directory_path() / "cyber_capi_bake.png";
+    REQUIRE(cyber_image_save_png(image, pngPath.string().c_str()) == CYBER_OK);
+    REQUIRE(std::filesystem::exists(pngPath));
+
+    cyber_image_free(image);
+    cyber_image_free(nullptr);  // tolerated
+    cyber_mesh_free(low);
+    cyber_mesh_free(high);
+
+    std::error_code ec;
+    std::filesystem::remove(objPath, ec);
+    std::filesystem::remove(pngPath, ec);
 }

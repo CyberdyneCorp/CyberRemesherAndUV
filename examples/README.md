@@ -19,7 +19,15 @@ so quad-dominance reads at a glance.
 | `04_sharp_edges.py` | `sharp_edge_degrees` feature preservation on a cube | `output/04_sharp_edges.png` |
 | `05_pure_quads.py` | `pure_quads` eliminates residual triangles | `output/05_pure_quads.png` |
 | `06_hole_fill.py` | `hole_fill_max_boundary` cleanup pass | `output/06_hole_fill.png` |
+| `07_baking.py` | surface baking: normal / AO / displacement maps | `output/07_baking.png` (+ `07_bake_*.png`) |
 | `run_all.py` | runs all of the above + a stitched `output/gallery.png` | `output/gallery.png` |
+
+`07_baking.py` bakes a bumpy high-poly sphere onto a smooth low-poly's UV
+layout (tangent-space normal + displacement) and the detailed surface's own
+ambient occlusion, via `bake(low, high, BakeMap.NORMAL, BakeParams(...))`. Ray
+casting dispatches through the accel layer, so a `linux-cuda` build runs the
+bake on the GPU. Each map is also written straight to PNG by the engine
+(`Image.save_png`).
 
 ## Running
 

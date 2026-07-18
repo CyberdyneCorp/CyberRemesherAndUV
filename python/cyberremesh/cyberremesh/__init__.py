@@ -14,11 +14,15 @@ imports cleanly on a machine where the engine has not been built.
 """
 
 from .api import (
+    BakeMap,
+    BakeParams,
     CyberError,
     HAVE_NUMPY,
+    Image,
     Mesh,
     RemeshParams,
     Statistics,
+    bake,
     is_available,
     remesh,
     version,
@@ -33,5 +37,9 @@ __all__ = [
     "is_available",
     "version",
     "HAVE_NUMPY",
+    "BakeMap",
+    "BakeParams",
+    "Image",
+    "bake",
 ]
 __version__ = "0.1.0"
