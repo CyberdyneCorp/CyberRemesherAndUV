@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <optional>
 #include <vector>
 
@@ -7,6 +8,33 @@
 #include "cyber/core/mesh.hpp"
 
 namespace cyber {
+
+// Flat, device-uploadable image of a Bvh (roadmap 4.6/5.8/11.1): plain-old-data
+// arrays a GPU backend can memcpy verbatim, so closest-point and raycast can run
+// on-device. Produced by Bvh::flatten(); core stays free of any accel/GPU
+// dependency (the accel layer depends on core, never the reverse).
+//
+// Node encoding mirrors the internal Bvh::Node: triCount > 0 marks a leaf whose
+// triangles are tris[leftFirst .. leftFirst+triCount); triCount == 0 marks an
+// internal node whose two children are nodes[leftFirst] and nodes[leftFirst+1].
+struct FlatBvhNode {
+    float boundsMin[3];
+    float boundsMax[3];
+    std::uint32_t leftFirst;
+    std::uint32_t triCount;
+};
+
+struct FlatBvhTri {
+    float a[3];
+    float b[3];
+    float c[3];
+    std::uint32_t face;  // owning FaceId::value
+};
+
+struct FlatBvh {
+    std::vector<FlatBvhNode> nodes;
+    std::vector<FlatBvhTri> tris;
+};
 
 // Bounding volume hierarchy over the triangles of a mesh (n-gons are
 // fan-triangulated internally; hits report the owning FaceId). Supports the
@@ -36,6 +64,11 @@ public:
     [[nodiscard]] ClosestHit closestPoint(Vec3 query) const;
     [[nodiscard]] std::optional<RayHit> raycast(Vec3 origin, Vec3 direction,
                                                 float maxDistance = 1e30f) const;
+
+    // Snapshot the hierarchy as flat POD arrays for device upload. The result
+    // is self-contained (no back-references into the Bvh) and stays valid after
+    // the Bvh is destroyed.
+    [[nodiscard]] FlatBvh flatten() const;
 
 private:
     struct Triangle {

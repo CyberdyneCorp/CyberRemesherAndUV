@@ -110,31 +110,46 @@ inline void spmv(IBackend& backend, const SparseMatrix& a, const Buffer<float>& 
 }
 
 // Batched closest-point projection: out[i] = closest point on `bvh` to
-// queries[i]. Wraps the core BVH's per-query traversal across the backend.
+// queries[i]. Flattens the BVH once and dispatches through the backend's
+// closestPointsBvh, so a GPU backend runs the traversal on-device; the CPU
+// reference produces identical results. Vec3 is three contiguous floats, so the
+// query/out buffers upload without a repack.
 inline void closestPoints(IBackend& backend, const Bvh& bvh, const Buffer<Vec3>& queries,
                           Buffer<Vec3>& out) {
     out.resize(queries.size());
-    const Vec3* q = queries.data();
-    Vec3* dst = out.data();
-    backend.parallelFor(0, queries.size(), [&bvh, q, dst](std::size_t lo, std::size_t hi) {
-        for (std::size_t i = lo; i < hi; ++i) {
-            dst[i] = bvh.closestPoint(q[i]).point;
-        }
-    });
+    const FlatBvh flat = bvh.flatten();
+    backend.closestPointsBvh(flat.nodes.data(), flat.nodes.size(), flat.tris.data(),
+                             flat.tris.size(),
+                             reinterpret_cast<const float*>(queries.data()), queries.size(),
+                             reinterpret_cast<float*>(out.data()));
 }
 
 // Batched ray cast: out[i] holds the hit for ray i, or nullopt on a miss.
+// Dispatches through the backend's raycastBvh and rebuilds the RayHit records
+// (t is the distance from the origin to the returned hit point).
 inline void raycast(IBackend& backend, const Bvh& bvh, const Buffer<Vec3>& origins,
                     const Buffer<Vec3>& directions, Buffer<std::optional<Bvh::RayHit>>& out) {
-    out.resize(origins.size());
-    const Vec3* o = origins.data();
-    const Vec3* d = directions.data();
-    std::optional<Bvh::RayHit>* dst = out.data();
-    backend.parallelFor(0, origins.size(), [&bvh, o, d, dst](std::size_t lo, std::size_t hi) {
-        for (std::size_t i = lo; i < hi; ++i) {
-            dst[i] = bvh.raycast(o[i], d[i]);
+    const std::size_t n = origins.size();
+    out.resize(n);
+    if (n == 0) {
+        return;
+    }
+    const FlatBvh flat = bvh.flatten();
+    std::vector<float> hitXYZ(n * 3);
+    std::vector<int> faces(n);
+    backend.raycastBvh(flat.nodes.data(), flat.nodes.size(), flat.tris.data(), flat.tris.size(),
+                       reinterpret_cast<const float*>(origins.data()),
+                       reinterpret_cast<const float*>(directions.data()), n, hitXYZ.data(),
+                       faces.data());
+    for (std::size_t i = 0; i < n; ++i) {
+        if (faces[i] < 0) {
+            out[i] = std::nullopt;
+            continue;
         }
-    });
+        const Vec3 point{hitXYZ[i * 3], hitXYZ[i * 3 + 1], hitXYZ[i * 3 + 2]};
+        const float t = length(point - origins[i]);
+        out[i] = Bvh::RayHit{point, t, FaceId{static_cast<Index>(faces[i])}};
+    }
 }
 
 }  // namespace cyber::accel

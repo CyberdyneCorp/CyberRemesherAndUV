@@ -3,6 +3,7 @@ add_library(cyber_imageio STATIC
     src/exr.cpp
     src/zip.cpp
     src/image.cpp
+    src/load.cpp
 )
 add_library(cyber::imageio ALIAS cyber_imageio)
 

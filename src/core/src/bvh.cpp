@@ -246,4 +246,42 @@ std::optional<Bvh::RayHit> Bvh::raycast(Vec3 origin, Vec3 direction, float maxDi
     return best;
 }
 
+FlatBvh Bvh::flatten() const {
+    FlatBvh flat;
+    flat.nodes.reserve(m_nodes.size());
+    for (const Node& node : m_nodes) {
+        FlatBvhNode out{};
+        out.boundsMin[0] = node.boundsMin.x;
+        out.boundsMin[1] = node.boundsMin.y;
+        out.boundsMin[2] = node.boundsMin.z;
+        out.boundsMax[0] = node.boundsMax.x;
+        out.boundsMax[1] = node.boundsMax.y;
+        out.boundsMax[2] = node.boundsMax.z;
+        if (node.isLeaf()) {
+            out.leftFirst = node.firstTriangle;
+            out.triCount = node.triangleCount;
+        } else {
+            out.leftFirst = node.leftChild;  // children at leftChild and leftChild + 1
+            out.triCount = 0;
+        }
+        flat.nodes.push_back(out);
+    }
+    flat.tris.reserve(m_triangles.size());
+    for (const Triangle& tri : m_triangles) {
+        FlatBvhTri out{};
+        out.a[0] = tri.a.x;
+        out.a[1] = tri.a.y;
+        out.a[2] = tri.a.z;
+        out.b[0] = tri.b.x;
+        out.b[1] = tri.b.y;
+        out.b[2] = tri.b.z;
+        out.c[0] = tri.c.x;
+        out.c[1] = tri.c.y;
+        out.c[2] = tri.c.z;
+        out.face = tri.face.value;
+        flat.tris.push_back(out);
+    }
+    return flat;
+}
+
 }  // namespace cyber

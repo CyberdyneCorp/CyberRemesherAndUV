@@ -18,7 +18,6 @@ option(CYBER_BUILD_CLI "Build the headless CLI" ON)
 option(CYBER_BUILD_RENDER "Build the viewport renderer" OFF)
 option(CYBER_BUILD_APPS "Build desktop/mobile application shells" OFF)
 option(CYBER_BUILD_NET "Build the local network bridge" ON)
-option(CYBER_BUILD_IMAGEIO "Build the imageio PNG/EXR/ZIP map & package export module" ON)
 option(CYBER_BUILD_CAPI "Build the C ABI facade over the pipeline" ON)
 # Library modules (document/undo/input, UV editing, retopology geometry, bake
 # cage) — build + tested clean under the strict flags, so ON by default. Their
@@ -36,11 +35,11 @@ include(cmake/CompilerWarnings.cmake)
 add_subdirectory(src/core)
 add_subdirectory(src/accel)
 add_subdirectory(src/bake)
+# imageio depends on bake (saveImage) and bake uses imageio's header (texture
+# baking) — always built, right after bake, so both resolve.
+add_subdirectory(src/imageio)
 add_subdirectory(src/quadrangulate)
 
-if(CYBER_BUILD_IMAGEIO)
-    add_subdirectory(src/imageio)
-endif()
 if(CYBER_BUILD_CAPI)
     add_subdirectory(capi)
 endif()

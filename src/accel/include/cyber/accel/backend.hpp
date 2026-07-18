@@ -6,6 +6,8 @@
 #include <string>
 #include <vector>
 
+#include "cyber/core/bvh.hpp"  // FlatBvhNode / FlatBvhTri (accel depends on core)
+
 namespace cyber::accel {
 
 enum class BackendKind { Cpu, Metal, Cuda, OpenCl };
@@ -42,6 +44,28 @@ public:
     virtual void spmvCsr(std::size_t rows, const std::size_t* rowStart,
                          const std::size_t* colIndex, const float* value, const float* x,
                          float* y);
+
+    // Batched geometry queries over a flattened BVH (roadmap 4.6/5.8/11.1), so
+    // baking and surface projection run on the GPU. Inputs are host pointers to
+    // the flat arrays from Bvh::flatten() plus packed xyz query streams; a GPU
+    // backend stages its own device copies, one thread per query doing an
+    // iterative fixed-stack traversal. The base class provides the CPU
+    // reference (host stack traversal), which defines correct results and is
+    // what the parity tests hold GPU overrides to.
+
+    // outXYZ[i] = closest point on the BVH surface to queriesXYZ[i]
+    // (queriesXYZ / outXYZ are 3*n contiguous floats). Empty BVH -> {0,0,0}.
+    virtual void closestPointsBvh(const FlatBvhNode* nodes, std::size_t nodeCount,
+                                  const FlatBvhTri* tris, std::size_t triCount,
+                                  const float* queriesXYZ, std::size_t n, float* outXYZ);
+
+    // Casts n rays; outHitXYZ[i] holds the nearest hit point and outFace[i] the
+    // owning FaceId::value, or outFace[i] = -1 on a miss (directions need not be
+    // normalized; nearest positive t along the ray is kept).
+    virtual void raycastBvh(const FlatBvhNode* nodes, std::size_t nodeCount,
+                            const FlatBvhTri* tris, std::size_t triCount,
+                            const float* originsXYZ, const float* dirsXYZ, std::size_t n,
+                            float* outHitXYZ, int* outFace);
 };
 
 // Enumerates available backends, best first (Metal/CUDA > OpenCL > CPU).

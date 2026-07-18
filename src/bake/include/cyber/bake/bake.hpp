@@ -5,6 +5,7 @@
 
 #include "cyber/core/mesh.hpp"
 #include "cyber/core/progress.hpp"
+#include "cyber/imageio/load.hpp"
 
 // High-to-low surface baking (surface-baking spec). Bakes detail from a Target
 // (high-poly) onto the UV layout of an EditMesh (low-poly). Ray casting is
@@ -42,6 +43,17 @@ struct Image {
     }
 };
 
+// Selects where BakeMap::Color reads the Target's color from. VertexColors
+// (the default) samples the Target's per-vertex "color" attribute; Texture
+// samples `texture` at the Target UV interpolated from the hit face's per-corner
+// "uv" attribute. Texture falls back to vertex colors when `texture` is null or
+// the Target carries no UVs, so existing bakes are unchanged (roadmap 11.1).
+struct ColorSource {
+    enum Kind { VertexColors, Texture };
+    Kind kind = VertexColors;
+    const cyber::imageio::LoadedImage* texture = nullptr;
+};
+
 struct BakeParams {
     int width = 512;
     int height = 512;
@@ -52,6 +64,7 @@ struct BakeParams {
     int aoSamples = 16;       // hemisphere rays per texel for AO
     float aoRadius = 1.0f;    // an AO ray hit beyond this does not occlude
     float aoBias = 1e-3f;     // start offset to avoid self-hits
+    ColorSource colorSource;  // BakeMap::Color source (default: Target vertex colors)
 };
 
 struct BakeResult {

@@ -7,6 +7,7 @@ add_executable(cyber_tests
     bake/test_tangent.cpp
     quadrangulate/test_crossfield.cpp
     quadrangulate/test_field_quadrangulator.cpp
+    quadrangulate/test_quad_cleanup.cpp
     core/test_bvh.cpp
     core/test_golden.cpp
     core/test_holes.cpp
@@ -21,6 +22,7 @@ add_executable(cyber_tests
     core/test_version.cpp
     accel/test_cpu_backend.cpp
     accel/test_gpu_parity.cpp
+    accel/test_gpu_geometry.cpp
     accel/test_primitives.cpp
 )
 target_link_libraries(cyber_tests PRIVATE cyber_accel cyber_bake cyber_quadrangulate cyber_doctest)
@@ -30,7 +32,10 @@ if(TARGET cyber_net)
 endif()
 # Batch-authored modules: their tests build only when the module is enabled.
 if(TARGET cyber_imageio)
-    target_sources(cyber_tests PRIVATE imageio/test_imageio.cpp)
+    # test_load: imageio PNG reader; test_texture_bake: bake's texture color
+    # source (uses imageio's LoadedImage) — both need cyber_imageio linked.
+    target_sources(cyber_tests PRIVATE imageio/test_imageio.cpp imageio/test_load.cpp
+                                        bake/test_texture_bake.cpp)
     target_link_libraries(cyber_tests PRIVATE cyber_imageio)
 endif()
 if(TARGET cyber_capi)

@@ -125,6 +125,180 @@ std::size_t removeDoublets(Mesh& mesh) {
     return removed;
 }
 
+// ---- valence cleanup (roadmap 5.4/5.5) -------------------------------------
+
+int valence(const Mesh& mesh, VertexId v) {
+    return static_cast<int>(mesh.vertexEdges(v).size());
+}
+
+int deviation(int val) {
+    const int d = val - 4;
+    return d < 0 ? -d : d;
+}
+
+// A vertex is eligible for valence editing only when it is fully interior
+// (every incident edge is a manifold, non-feature edge) and quad-only (every
+// incident face is a quad). Editing such a vertex can never invalidate a
+// boundary, feature or non-quad neighbourhood, and it always belongs to the
+// "interior quad-only" set the metric measures.
+bool eligibleVertex(const Mesh& mesh, VertexId v) {
+    for (const EdgeId e : mesh.vertexEdges(v)) {
+        if (mesh.isFeatureEdge(e) || mesh.edgeFaceCount(e) != 2) {
+            return false;
+        }
+    }
+    for (const FaceId f : mesh.vertexFaces(v)) {
+        if (mesh.faceSize(f) != 4) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// The two quads sharing an interior edge, unrolled into an oriented hexagon.
+// f0 walks v0 -> v1 -> p -> q; f1 (opposite orientation on the shared edge)
+// walks v1 -> v0 -> r -> s. Removing the shared diagonal v0-v1 leaves the
+// hexagon [v1, p, q, v0, r, s]; a rotation re-splits it with the diagonal p-r
+// (Rot::PR) or q-s (Rot::QS), so both faces remain quads.
+struct QuadPair {
+    VertexId v0, v1, p, q, r, s;
+};
+enum class Rot { PR, QS };
+
+VertexId cyclic(const std::vector<VertexId>& v, int k) {
+    return v[static_cast<std::size_t>(((k % 4) + 4) % 4)];
+}
+
+bool extractQuadPair(const Mesh& mesh, EdgeId e, FaceId f0, FaceId f1, QuadPair& out) {
+    const std::vector<VertexId> a = mesh.faceVertices(f0);
+    const std::vector<VertexId> b = mesh.faceVertices(f1);
+    if (a.size() != 4 || b.size() != 4) {
+        return false;
+    }
+    const auto [ea, eb] = mesh.edgeVertices(e);
+    int i0 = -1;
+    for (int k = 0; k < 4; ++k) {
+        const VertexId x = cyclic(a, k), y = cyclic(a, k + 1);
+        if ((x == ea && y == eb) || (x == eb && y == ea)) {
+            i0 = k;
+            break;
+        }
+    }
+    if (i0 < 0) {
+        return false;
+    }
+    out.v0 = cyclic(a, i0);
+    out.v1 = cyclic(a, i0 + 1);
+    out.p = cyclic(a, i0 + 2);
+    out.q = cyclic(a, i0 + 3);
+    int j0 = -1;
+    for (int k = 0; k < 4; ++k) {
+        if (cyclic(b, k) == out.v1 && cyclic(b, k + 1) == out.v0) {
+            j0 = k;
+            break;
+        }
+    }
+    if (j0 < 0) {
+        return false;
+    }
+    out.r = cyclic(b, j0 + 2);
+    out.s = cyclic(b, j0 + 3);
+    return true;
+}
+
+bool sixDistinct(const QuadPair& qp) {
+    const std::array<VertexId, 6> v{qp.v0, qp.v1, qp.p, qp.q, qp.r, qp.s};
+    for (std::size_t i = 0; i < v.size(); ++i) {
+        for (std::size_t j = i + 1; j < v.size(); ++j) {
+            if (v[i] == v[j]) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+// Best-effort field alignment hint (tie-break only, never affects validity): 1
+// when the prospective new edge sits on a field axis, 0 when it is diagonal.
+// The field is indexed by original face id, so it is guarded and only consulted
+// opportunistically.
+float fieldAlignment(const Mesh& mesh, VertexId m0, VertexId m1, FaceId f0, FaceId f1,
+                     const CrossField* field) {
+    if (field == nullptr || f0.value >= field->size() || f1.value >= field->size()) {
+        return 0.0f;
+    }
+    const Vec3 d = normalized(mesh.position(m1) - mesh.position(m0));
+    const float a0 = 1.0f - diagonalness(d, field->direction(f0));
+    const float a1 = 1.0f - diagonalness(d, field->direction(f1));
+    return 0.5f * (a0 + a1);
+}
+
+struct FlipChoice {
+    bool apply = false;
+    Rot rot = Rot::PR;
+    int improvement = 0;
+    float align = 0.0f;
+};
+
+// Picks the strictly-improving rotation (if any) for one quad pair. Both shared
+// endpoints always lose a valence; the chosen receiving pair gains one each.
+FlipChoice evaluate(const Mesh& mesh, const QuadPair& qp, FaceId f0, FaceId f1,
+                    const CrossField* field) {
+    FlipChoice best;
+    const int shOld = deviation(valence(mesh, qp.v0)) + deviation(valence(mesh, qp.v1));
+    const int shNew = deviation(valence(mesh, qp.v0) - 1) + deviation(valence(mesh, qp.v1) - 1);
+    const auto consider = [&](Rot rot, VertexId m0, VertexId m1) {
+        if (!eligibleVertex(mesh, m0) || !eligibleVertex(mesh, m1)) {
+            return;
+        }
+        const int oldC = shOld + deviation(valence(mesh, m0)) + deviation(valence(mesh, m1));
+        const int newC = shNew + deviation(valence(mesh, m0) + 1) + deviation(valence(mesh, m1) + 1);
+        const int imp = oldC - newC;
+        if (imp <= 0) {
+            return;
+        }
+        const float al = fieldAlignment(mesh, m0, m1, f0, f1, field);
+        if (imp > best.improvement || (imp == best.improvement && al > best.align + 1e-6f)) {
+            best = {true, rot, imp, al};
+        }
+    };
+    consider(Rot::PR, qp.p, qp.r);
+    consider(Rot::QS, qp.q, qp.s);
+    return best;
+}
+
+// Applies a rotation by removing the two quads and re-adding the two rotated
+// quads over the same hexagon with a different internal diagonal. Fully guarded:
+// bails (leaving the mesh untouched) if the new diagonal already exists or the
+// shared edge is no longer a clean 2-quad edge. All corner vertices are distinct
+// and alive, so both addFace calls succeed and face/quad counts are preserved.
+bool applyRotation(Mesh& mesh, const QuadPair& qp, Rot rot) {
+    const VertexId n0 = (rot == Rot::PR) ? qp.p : qp.q;
+    const VertexId n1 = (rot == Rot::PR) ? qp.r : qp.s;
+    if (mesh.edgeBetween(n0, n1).valid()) {
+        return false;
+    }
+    const EdgeId shared = mesh.edgeBetween(qp.v0, qp.v1);
+    if (!shared.valid() || mesh.edgeFaceCount(shared) != 2) {
+        return false;
+    }
+    const auto faces = mesh.edgeFaces(shared);
+    if (mesh.faceSize(faces[0]) != 4 || mesh.faceSize(faces[1]) != 4) {
+        return false;
+    }
+    mesh.removeFace(faces[0]);
+    mesh.removeFace(faces[1]);
+    FaceId g0, g1;
+    if (rot == Rot::PR) {
+        g0 = mesh.addFace(std::array{qp.p, qp.q, qp.v0, qp.r});
+        g1 = mesh.addFace(std::array{qp.r, qp.s, qp.v1, qp.p});
+    } else {
+        g0 = mesh.addFace(std::array{qp.q, qp.v0, qp.r, qp.s});
+        g1 = mesh.addFace(std::array{qp.s, qp.v1, qp.p, qp.q});
+    }
+    return g0.valid() && g1.valid();
+}
+
 class FieldAlignedQuadrangulator final : public IQuadrangulator {
 public:
     explicit FieldAlignedQuadrangulator(int iterations) : m_iterations(iterations) {}
@@ -194,7 +368,8 @@ public:
             }
         }
 
-        removeDoublets(mesh);  // graph simplification (5.5)
+        removeDoublets(mesh);          // graph simplification (5.5)
+        quadValenceCleanup(mesh, &field);  // valence cleanup (5.4/5.5)
         if (progress) {
             progress->report(1.0f, "quadrangulate");
         }
@@ -208,6 +383,39 @@ private:
 };
 
 }  // namespace
+
+std::size_t quadValenceCleanup(Mesh& mesh, const CrossField* field, int maxPasses) {
+    std::size_t applied = 0;
+    for (int pass = 0; pass < maxPasses; ++pass) {
+        std::size_t passApplied = 0;
+        for (Index i = 0; i < mesh.edgeCapacity(); ++i) {
+            const EdgeId e{i};
+            if (!mesh.isAlive(e) || mesh.isFeatureEdge(e) || mesh.edgeFaceCount(e) != 2) {
+                continue;
+            }
+            const auto faces = mesh.edgeFaces(e);
+            if (mesh.faceSize(faces[0]) != 4 || mesh.faceSize(faces[1]) != 4) {
+                continue;
+            }
+            QuadPair qp;
+            if (!extractQuadPair(mesh, e, faces[0], faces[1], qp) || !sixDistinct(qp)) {
+                continue;
+            }
+            if (!eligibleVertex(mesh, qp.v0) || !eligibleVertex(mesh, qp.v1)) {
+                continue;
+            }
+            const FlipChoice choice = evaluate(mesh, qp, faces[0], faces[1], field);
+            if (choice.apply && applyRotation(mesh, qp, choice.rot)) {
+                ++passApplied;
+            }
+        }
+        applied += passApplied;
+        if (passApplied == 0) {
+            break;  // fixed point reached
+        }
+    }
+    return applied;
+}
 
 std::unique_ptr<IQuadrangulator> makeFieldAlignedQuadrangulator(int fieldIterations) {
     return std::make_unique<FieldAlignedQuadrangulator>(fieldIterations);

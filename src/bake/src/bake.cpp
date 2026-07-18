@@ -10,6 +10,7 @@
 #include "cyber/bake/tangent.hpp"
 #include "cyber/core/bvh.hpp"
 #include "cyber/core/io.hpp"
+#include "cyber/imageio/load.hpp"
 
 namespace cyber::bake {
 
@@ -85,6 +86,43 @@ Vec3 hitColor(const Mesh& mesh, const Bvh::RayHit& hit, const std::vector<Vec3>*
                                                 mesh.position(verts[1]), mesh.position(verts[2]));
     return (*colors)[verts[0].value] * bc[0] + (*colors)[verts[1].value] * bc[1] +
            (*colors)[verts[2].value] * bc[2];
+}
+
+// Interpolated Target UV at a ray hit, from the hit face's per-corner "uv"
+// attribute (n-gon faces fall back to the corner-average UV, mirroring
+// hitColor()).
+Vec2 hitUv(const Mesh& mesh, const Bvh::RayHit& hit, const std::vector<Vec2>& uvs) {
+    const std::vector<LoopId> loops = mesh.faceLoops(hit.face);
+    const std::size_t n = loops.size();
+    if (n < 3) {
+        return uvs[loops[0].value];
+    }
+    // Fan-triangulate (loops[0], loops[i], loops[i+1]) as the BVH does and
+    // interpolate from the sub-triangle that best contains the hit — averaging
+    // an n-gon's corner UVs would flatten the mapping (constant UV per face).
+    Vec2 best{};
+    float bestScore = -1e30f;
+    for (std::size_t i = 1; i + 1 < n; ++i) {
+        const std::array<float, 3> bc = barycentric(
+            hit.point, mesh.position(mesh.loopVertex(loops[0])),
+            mesh.position(mesh.loopVertex(loops[i])), mesh.position(mesh.loopVertex(loops[i + 1])));
+        const float score = std::min({bc[0], bc[1], bc[2]});  // least clamping = inside
+        if (score > bestScore) {
+            bestScore = score;
+            best = uvs[loops[0].value] * bc[0] + uvs[loops[i].value] * bc[1] +
+                   uvs[loops[i + 1].value] * bc[2];
+        }
+    }
+    return best;
+}
+
+// Target color at a ray hit sampled from `texture` at the interpolated Target
+// UV (bilinear). Returns the RGB channels of the RGBA sample.
+Vec3 hitTextureColor(const Mesh& mesh, const Bvh::RayHit& hit, const std::vector<Vec2>& uvs,
+                     const imageio::LoadedImage& texture) {
+    const Vec2 uv = hitUv(mesh, hit, uvs);
+    const std::array<float, 4> rgba = imageio::sampleBilinear(texture, uv.x, uv.y);
+    return Vec3{rgba[0], rgba[1], rgba[2]};
 }
 
 // Tangent from a triangle's position/UV gradient — delegates to the shared
@@ -228,6 +266,11 @@ BakeResult bake(const Mesh& lowPoly, const Mesh& highPoly, BakeMap map, const Ba
     const std::vector<Vec3> lowNormals = vertexNormals(lowPoly);
     const std::vector<Vec3> highNormals = vertexNormals(highPoly);
     const auto* colors = highPoly.vertexAttributes().find<Vec3>(io::kColorAttribute);
+    const auto* highUvs = highPoly.cornerAttributes().find<Vec2>(io::kUvAttribute);
+    // Texture color source is only usable when a texture and Target UVs both
+    // exist; otherwise the Color bake falls back to Target vertex colors.
+    const bool useTexture = params.colorSource.kind == ColorSource::Texture &&
+                            params.colorSource.texture != nullptr && highUvs != nullptr;
 
     const std::vector<Texel> texels = rasterize(lowPoly, lowNormals, *uvs, params.width, params.height);
     result.texelsCovered = texels.size();
@@ -297,7 +340,12 @@ BakeResult bake(const Mesh& lowPoly, const Mesh& highPoly, BakeMap map, const Ba
                 break;
             }
             case BakeMap::Color: {
-                const Vec3 c = valid ? hitColor(highPoly, *hit, colors) : Vec3{1, 1, 1};
+                Vec3 c{1, 1, 1};
+                if (valid) {
+                    c = useTexture
+                            ? hitTextureColor(highPoly, *hit, *highUvs, *params.colorSource.texture)
+                            : hitColor(highPoly, *hit, colors);
+                }
                 result.image.at(tx.px, tx.py, 0) = c.x;
                 result.image.at(tx.px, tx.py, 1) = c.y;
                 result.image.at(tx.px, tx.py, 2) = c.z;
