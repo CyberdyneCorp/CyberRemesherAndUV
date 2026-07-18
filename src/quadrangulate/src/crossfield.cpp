@@ -1,0 +1,172 @@
+#include "cyber/quadrangulate/crossfield.hpp"
+
+#include <cmath>
+#include <utility>
+#include <vector>
+
+#include "cyber/accel/primitives.hpp"
+
+namespace cyber::remesh {
+
+namespace {
+
+// Unit reference tangent of a face: its first edge, projected into the face
+// plane and orthonormalised against the face normal.
+Vec3 faceTangent(const Mesh& mesh, FaceId f, Vec3 normal) {
+    const std::vector<VertexId> verts = mesh.faceVertices(f);
+    Vec3 t = mesh.position(verts[1]) - mesh.position(verts[0]);
+    t = t - normal * dot(normal, t);
+    return normalized(t);
+}
+
+// Angle of world direction `d` in the (t, b) tangent frame.
+float frameAngle(Vec3 d, Vec3 t, Vec3 b) { return std::atan2(dot(d, b), dot(d, t)); }
+
+}  // namespace
+
+Vec3 CrossField::direction(FaceId f) const {
+    // Recover theta from the 4-symmetry representation u = e^{i*4*theta}.
+    const float theta = std::atan2(imag[f.value], real[f.value]) / 4.0f;
+    return tangent[f.value] * std::cos(theta) + bitangent[f.value] * std::sin(theta);
+}
+
+float CrossField::angle(FaceId f) const {
+    float theta = std::atan2(imag[f.value], real[f.value]) / 4.0f;
+    if (theta < 0.0f) {
+        theta += kPi / 2.0f;
+    }
+    return theta;
+}
+
+CrossField computeCrossField(const Mesh& mesh, int iterations, accel::IBackend& backend) {
+    const std::size_t cap = mesh.faceCapacity();
+    CrossField field;
+    field.tangent.assign(cap, Vec3{1, 0, 0});
+    field.bitangent.assign(cap, Vec3{0, 1, 0});
+    field.real.assign(cap, 1.0f);
+    field.imag.assign(cap, 0.0f);
+
+    // Per-face frame; collect the live faces.
+    std::vector<FaceId> faces;
+    for (Index i = 0; i < cap; ++i) {
+        const FaceId f{i};
+        if (!mesh.isAlive(f) || mesh.faceSize(f) != 3) {
+            continue;
+        }
+        const Vec3 n = mesh.faceNormal(f);
+        const Vec3 t = faceTangent(mesh, f, n);
+        field.tangent[i] = t;
+        field.bitangent[i] = cross(n, t);
+        faces.push_back(f);
+    }
+    const std::size_t nf = faces.size();
+    if (nf == 0) {
+        return field;
+    }
+
+    // Compact index per live face.
+    std::vector<Index> compact(cap, kInvalidIndex);
+    for (std::size_t c = 0; c < nf; ++c) {
+        compact[faces[c].value] = static_cast<Index>(c);
+    }
+
+    // Constrain faces touching a feature or boundary edge to align with it.
+    std::vector<char> constrained(nf, 0);
+    for (std::size_t c = 0; c < nf; ++c) {
+        const FaceId f = faces[c];
+        const std::vector<VertexId> fv = mesh.faceVertices(f);
+        for (std::size_t k = 0; k < fv.size(); ++k) {
+            const EdgeId e = mesh.edgeBetween(fv[k], fv[(k + 1) % fv.size()]);
+            if (!e.valid() || (!mesh.isFeatureEdge(e) && mesh.edgeFaceCount(e) == 2)) {
+                continue;  // interior non-feature edge imposes no constraint
+            }
+            const auto [a, b] = mesh.edgeVertices(e);
+            const Vec3 d = normalized(mesh.position(b) - mesh.position(a));
+            const float alpha = frameAngle(d, field.tangent[f.value], field.bitangent[f.value]);
+            field.real[f.value] = std::cos(4.0f * alpha);
+            field.imag[f.value] = std::sin(4.0f * alpha);
+            constrained[c] = 1;
+            break;
+        }
+    }
+
+    // Build the 2F x 2F transport-averaging operator as CSR: row 2c/2c+1 hold
+    // the real/imag equations for face c. Diagonal keeps the face's own value;
+    // each interior non-feature neighbour contributes a 2x2 rotation that
+    // transports its cross into this face's frame.
+    constexpr float kSelf = 1.0f;
+    std::vector<std::vector<std::pair<std::size_t, float>>> rows(2 * nf);
+    for (std::size_t c = 0; c < nf; ++c) {
+        rows[2 * c].emplace_back(2 * c, kSelf);
+        rows[2 * c + 1].emplace_back(2 * c + 1, kSelf);
+    }
+    for (Index ei = 0; ei < mesh.edgeCapacity(); ++ei) {
+        const EdgeId e{ei};
+        if (!mesh.isAlive(e) || mesh.isFeatureEdge(e) || mesh.edgeFaceCount(e) != 2) {
+            continue;
+        }
+        const auto ef = mesh.edgeFaces(e);
+        const Index cf = compact[ef[0].value];
+        const Index cg = compact[ef[1].value];
+        if (cf == kInvalidIndex || cg == kInvalidIndex) {
+            continue;
+        }
+        const auto [a, b] = mesh.edgeVertices(e);
+        const Vec3 d = normalized(mesh.position(b) - mesh.position(a));
+        const float af = frameAngle(d, field.tangent[ef[0].value], field.bitangent[ef[0].value]);
+        const float ag = frameAngle(d, field.tangent[ef[1].value], field.bitangent[ef[1].value]);
+        // Transport g -> f rotates by 4*(af-ag); f -> g by the negative.
+        const auto addBlock = [&rows](Index row, Index col, float phi) {
+            const float cphi = std::cos(phi), sphi = std::sin(phi);
+            rows[2 * row].emplace_back(2 * col, cphi);
+            rows[2 * row].emplace_back(2 * col + 1, -sphi);
+            rows[2 * row + 1].emplace_back(2 * col, sphi);
+            rows[2 * row + 1].emplace_back(2 * col + 1, cphi);
+        };
+        addBlock(cf, cg, 4.0f * (af - ag));
+        addBlock(cg, cf, 4.0f * (ag - af));
+    }
+
+    accel::SparseMatrix mat;
+    mat.rows = 2 * nf;
+    mat.rowStart.reserve(2 * nf + 1);
+    mat.rowStart.push_back(0);
+    for (const auto& row : rows) {
+        for (const auto& [col, val] : row) {
+            mat.colIndex.push_back(col);
+            mat.value.push_back(val);
+        }
+        mat.rowStart.push_back(mat.colIndex.size());
+    }
+
+    // Iterate: y = A * u (dispatched through the accel layer), renormalise each
+    // face's cross, and re-pin the constrained faces.
+    accel::Buffer<float> u(2 * nf), y;
+    for (std::size_t c = 0; c < nf; ++c) {
+        u[2 * c] = field.real[faces[c].value];
+        u[2 * c + 1] = field.imag[faces[c].value];
+    }
+    for (int it = 0; it < iterations; ++it) {
+        accel::spmv(backend, mat, u, y);
+        for (std::size_t c = 0; c < nf; ++c) {
+            if (constrained[c]) {
+                continue;
+            }
+            const float re = y[2 * c];
+            const float im = y[2 * c + 1];
+            const float len = std::sqrt(re * re + im * im);
+            if (len > 1e-12f) {
+                u[2 * c] = re / len;
+                u[2 * c + 1] = im / len;
+            }
+        }
+    }
+
+    for (std::size_t c = 0; c < nf; ++c) {
+        field.real[faces[c].value] = u[2 * c];
+        field.imag[faces[c].value] = u[2 * c + 1];
+    }
+    return field;
+}
+
+}  // namespace cyber::remesh
