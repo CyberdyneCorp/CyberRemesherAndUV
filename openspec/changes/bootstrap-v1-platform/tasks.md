@@ -2,11 +2,54 @@
 
 Ordered by dependency; groups 2–5 unlock everything else. Each group ends with its capability's spec scenarios turned into tests.
 
+## Session handoff (state as of 2026-07-18, commit 0ca6c26)
+
+**Verify the checkout works before continuing:**
+```sh
+cmake --preset cpu-headless && cmake --build --preset cpu-headless && ctest --preset cpu-headless
+python3 tools/license_audit.py && openspec validate --all --strict
+```
+Expected: 2 ctest suites green (70 doctest cases ~101k assertions + Python CLI
+integration), both audits clean. `cmake --preset cpu-headless-debug` is the
+ASan/UBSan preset — run it after touching the mesh kernel.
+
+**What exists:** `src/core` (radial-edge half-edge kernel, BVH, OBJ/PLY/STL/glTF
+I/O with typed errors, parameters, isotropic remesher, pipeline), `src/accel`
+(backend interface + CPU parallelFor seed), `apps/cli` (cyberremesh, full
+exit-code map + JSON reports). `src/render`, `src/app`, mobile shells: empty.
+
+**Interim decisions a new session must know:**
+- Quadrangulation runs behind the `IQuadrangulator` seam
+  (`cyber/core/quadrangulate.hpp`) with a **greedy triangle-pairing baseline**.
+  Task 5.4 replaces it with the QuadCover implementation (frame field + MIQ +
+  isoline extraction, exploragram/BSD port); design.md's `IParameterizer` will
+  live *inside* that implementation. Output today is quad-dominant but without
+  global edge-flow alignment.
+- Pure-quads mode = remesh at quarter density + one linear subdivision
+  (`pipeline.cpp`); replace/augment when real extraction lands.
+- Adaptive scales are computed ONCE from input geometry and carried as the
+  `__isotropicTargetScale` vertex attribute (per-iteration recompute compounds
+  refinement and runs away — see the regression test in `test_pipeline.cpp`).
+- `smoothNormalDegrees` is accepted+clamped but the PN-triangle projection is
+  not implemented yet (rest of 5.3 is done).
+- `holeFillMaxBoundary` is accepted+clamped but hole filling itself belongs to
+  the 5.5 extractor (rest of 5.6 — patch policies, island diagnostics,
+  partial status — is done).
+- Vendored deps so far: doctest, tinyobjloader, happly, tinygltf (manifest at
+  `thirdparty/manifest.json`, enforced by `tools/license_audit.py`). Eigen,
+  stb, miniz, geogram-slice get vendored when their consumer tasks start.
+
+**Recommended next steps on a GPU machine:** group 4 (`linux-cuda` /
+`windows-cuda` presets already exist; `CYBER_ENABLE_CUDA` currently only sets a
+define — 4.1's buffer/primitive abstraction comes first, then the CUDA backend
+and the CPU-vs-GPU parity harness of 4.6), or 5.4 (QuadCover port, CPU-only,
+biggest single item). 5.9 (golden corpus) is cheap and pays off immediately.
+
 ## 1. Foundation
 
 - [x] 1.1 Repo scaffolding: `src/core`, `src/accel`, `src/render`, `src/app`, `apps/{desktop,mobile,cli}`, `tests/`, `thirdparty/`
 - [x] 1.2 CMake + presets (cpu-headless, macos-metal, windows-cuda, linux-cuda, ios, android), C++20, warnings-as-errors
-- [x] 1.3 Third-party manifest + vendored permissive deps (Eigen, tinyobjloader, tinygltf, stb/miniz, test framework); automated license audit script
+- [x] 1.3 Third-party manifest + license audit script; deps vendored on demand (so far: doctest, tinyobjloader, happly, tinygltf — Eigen/stb/miniz arrive with their consumer tasks)
 - [x] 1.4 CI skeleton: build matrix, clang-format + clang-tidy gates, license audit job, unit-test job on the cpu-headless preset
 
 ## 2. mesh-core
@@ -22,14 +65,14 @@ Ordered by dependency; groups 2–5 unlock everything else. Each group ends with
 
 - [x] 3.1 OBJ import (n-gon-correct, vertex colors incl. polypaint) + OBJ/MTL export with UVs/normals
 - [x] 3.2 PLY, STL, glTF 2.0 import/export; quad preservation where supported
-- [ ] 3.3 Typed error model; loud-failure paths wired to CLI/GUI; scale round-trip
-- [ ] 3.4 PNG/EXR map output; ZIP package export; USDZ export hook (Apple shell)
+- [x] 3.3 Typed error model; loud-failure paths wired to the CLI; scale round-trip (GUI wiring is inherently task 8.6's work)
+- [ ] 3.4 PNG/EXR map output; ZIP package export; USDZ export hook (Apple shell) — deferred until baking (group 11) consumes it
 - [x] 3.5 Corpus round-trip and malformed-file tests
 
 ## 4. compute-acceleration
 
 - [ ] 4.1 Backend abstraction: typed buffers + primitive set (map/reduce/scan/sort/BVH/spmv/closest-point/raycast)
-- [ ] 4.2 CPU reference backend (work-stealing pool or std::execution) — contract implementation
+- [ ] 4.2 CPU reference backend (work-stealing pool or std::execution) — contract implementation (seed exists: `IBackend` + CPU `parallelFor` + registry in `src/accel`)
 - [ ] 4.3 Metal backend (tier-1) + device enumeration/selection/override
 - [ ] 4.4 CUDA backend (tier-1)
 - [ ] 4.5 OpenCL backend (tier-2, graceful absence)
@@ -39,10 +82,10 @@ Ordered by dependency; groups 2–5 unlock everything else. Each group ends with
 
 - [x] 5.1 Canonical parameter table, validation/clamping module shared by all entry points
 - [x] 5.2 Guarded target-edge-length computation; island split/merge orchestration with deterministic ordering
-- [ ] 5.3 Adaptive isotropic remesher (feature-safe flips, PN smooth projection, curvature adaptivity)
-- [ ] 5.4 Port exploragram QuadCover behind `IParameterizer` (frame field, MIQ solve, OpenNL slice); instance-local progress; concurrent island solves
-- [ ] 5.5 Quad extraction (isoline tracing, graph simplification, face enumeration) + pure-quad post-pass with honest residual reporting
-- [ ] 5.6 Cleanup policies (hole fill limit, patch policy) as parameters; per-island failure diagnostics; partial-run status
+- [ ] 5.3 Adaptive isotropic remesher (feature-safe flips, PN smooth projection, curvature adaptivity) — done and tested EXCEPT PN smooth projection (`smoothNormalDegrees` currently inert past validation)
+- [ ] 5.4 Port exploragram QuadCover behind `IParameterizer` (frame field, MIQ solve, OpenNL slice); instance-local progress; concurrent island solves — plugs in behind the existing `IQuadrangulator` seam, replacing the greedy-pairing baseline
+- [ ] 5.5 Quad extraction (isoline tracing, graph simplification, face enumeration) + pure-quad post-pass with honest residual reporting — pure-quad mode shipped (quarter-density + subdivide); isoline extraction pending with 5.4
+- [ ] 5.6 Cleanup policies (hole fill limit, patch policy) as parameters; per-island failure diagnostics; partial-run status — done EXCEPT hole filling itself (parameter plumbed; implementation belongs to the 5.5 extractor)
 - [x] 5.7 ProgressSink/CancelToken plumbing (≤100 ms cancel latency, atomic commit)
 - [ ] 5.8 GPU dispatch of hot spots (projection, field smoothing, spmv) via accel layer
 - [ ] 5.9 Golden-mesh regression suite (permissive corpus incl. armadillo) with recorded baselines
@@ -111,7 +154,7 @@ Ordered by dependency; groups 2–5 unlock everything else. Each group ends with
 
 ## 14. build-and-packaging (release lanes)
 
-- [ ] 13.1 Package jobs: macOS DMG (signed/notarized), Windows zip+installer, Linux AppImage, iOS archive, Android AAB; versioned names from single source
-- [ ] 13.2 Packaged-form smoke tests (CLI remesh + launch screenshot; mobile boot in simulator/emulator)
-- [ ] 13.3 GitHub Release publication on tags with all artifacts
-- [ ] 13.4 openspec validate --all --strict job in CI
+- [ ] 14.1 Package jobs: macOS DMG (signed/notarized), Windows zip+installer, Linux AppImage, iOS archive, Android AAB; versioned names from single source
+- [ ] 14.2 Packaged-form smoke tests (CLI remesh + launch screenshot; mobile boot in simulator/emulator)
+- [ ] 14.3 GitHub Release publication on tags with all artifacts
+- [x] 14.4 openspec validate --all --strict job in CI (in `.github/workflows/ci.yml` since the foundation commit)
