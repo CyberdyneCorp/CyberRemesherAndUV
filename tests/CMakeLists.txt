@@ -4,6 +4,7 @@ target_include_directories(cyber_doctest SYSTEM INTERFACE ${CMAKE_SOURCE_DIR}/th
 add_executable(cyber_tests
     main.cpp
     bake/test_bake.cpp
+    bake/test_tangent.cpp
     quadrangulate/test_crossfield.cpp
     quadrangulate/test_field_quadrangulator.cpp
     core/test_bvh.cpp
@@ -41,7 +42,7 @@ if(TARGET cyber_app)
     target_link_libraries(cyber_tests PRIVATE cyber_app)
 endif()
 if(TARGET cyber_uv)
-    target_sources(cyber_tests PRIVATE uv/test_uv.cpp)
+    target_sources(cyber_tests PRIVATE uv/test_uv.cpp uv/test_uv_clone.cpp)
     target_link_libraries(cyber_tests PRIVATE cyber_uv)
 endif()
 if(TARGET cyber_retopo)

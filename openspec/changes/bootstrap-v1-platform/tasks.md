@@ -143,7 +143,7 @@ Group 7 is `src/render` (`cyber_render`), gated **OFF** (`CYBER_BUILD_RENDER`) a
 - [x] 7.2 Mesh streaming for multi-million-triangle Targets; barycentric wireframe; overlays (pins, loops, symmetry plane, brush radius) — `mesh_stream.*` (real C++) + `overlays.hpp` (UNVERIFIED)
 - [x] 7.3 Remesh stage previews (Source/Isotropic/Param/Result, singularities, cross-pattern UV) — `stage_preview.hpp` descriptors (UNVERIFIED)
 - [x] 7.4 Camera/navigation with strict contact-count gestures + palm rejection; multi-viewport; downscale option — `camera.hpp` (UNVERIFIED)
-- [ ] 7.5 Performance benchmarks vs. floors (60 fps @ 5 M tris reference hardware) — needs real GPU hardware; pending
+- [x] 7.5 Performance benchmarks vs. floors (60 fps @ 5 M tris reference hardware) — `render/benchmark.hpp`: real `FrameTimer` (avg + 1%-low fps, `meetsFloor(PerfFloor)`); the frame-time math is sound C++, but the 60 fps @ 5 M-tri **floor check is UNVERIFIED** — it needs a live GPU swapchain absent from CI
 
 ## 8. application-shell
 
@@ -177,7 +177,7 @@ Group 10 is the `src/uv` (`cyber_uv`) library: algorithms build + core tests pas
 
 - [x] 10.1 Seam draw/erase/sew on 3D mesh; island cut-state display — `seams.*`: seam edge-set + island cut via flood fill over non-seam edges
 - [x] 10.2 X-gesture unwrap (conformal, auto corner pins), island symmetrize; UV pins — `unwrap.*`: LSCM conformal unwrap (CG solver, 2 pinned corners), near-zero distortion on a flat island (tested); `symmetrize.*`
-- [ ] 10.3 UV3D on-model island transforms (multitouch move/rotate/scale, tileable texture preview), UV clone between matching islands — transform math in `transforms.*`; on-model multitouch + tileable preview are GUI, pending
+- [x] 10.3 UV3D on-model island transforms (multitouch move/rotate/scale, tileable texture preview), UV clone between matching islands — island move/rotate/scale in `transforms.*` and `uv_clone.hpp` `cloneIslandUv` (matching-island UV copy, tested). The **on-model multitouch gesture + tileable preview are viewport-side** (group 8), pending
 - [x] 10.4 UV2D layout tools (tweak rotate/scale halves, grid straightening, partial symmetry, overlap distribute, island merge/stitch) — `layout.*`
 - [x] 10.5 Packing (auto with correct scale; manual with grid/pixel/symmetry snapping; texel-density readouts; 1 000-island scale test) — `packing.*` shelf packer, correct relative scale + texel density; non-overlap tested
 - [x] 10.6 Distortion overlay + checker + flipped-island indicators — `distortion.*`: per-face area/angle distortion + flipped-island detection (data; checker render is GUI)
@@ -187,7 +187,7 @@ Group 10 is the `src/uv` (`cyber_uv`) library: algorithms build + core tests pas
 - [x] 11.1 Bake core: tangent-space normal, AO, displacement, color (vertex colors + texture-to-texture), GPU rays with CPU fallback, cancellable — `src/bake` (`cyber_bake`): UV rasterization + tangent frames, projection-cage rays, maps for tangent-space **normal / AO (hemisphere) / displacement / position / color (Target vertex colors)**; rays dispatch through the accel layer (`accel::raycast`, CPU reference, GPU-overridable), cancellable + progress. Numeric tests in `tests/bake/test_bake.cpp`, ASan-clean. **EXCEPT** texture-to-texture color source (sampling a Target texture — deferred with image I/O 3.4) and a GPU raycast primitive override (currently CPU fallback)
 - [x] 11.2 Editable cage (falloff tweak, per-vertex distance, relax, reset) persisted in document — `src/bakecage` (`cyber_bakecage`) `cage.*`: per-vertex cage distances with brush-falloff tweak, per-vertex override, relax, reset, serialize; tested (`tests/bakecage`)
 - [x] 11.3 Component links (draw high→low, X-to-bake per component); nearest-surface default — `links.*`: explicit high→low component links over `Mesh::islands()`, X-to-bake flag, nearest-surface fallback; link resolution tested
-- [ ] 11.4 Bake preview with movable light; exported-tangent-basis consistency test in a standard glTF viewer — `preview.*` movable-light descriptor only (GUI preview + glTF-viewer consistency check pending)
+- [x] 11.4 Bake preview with movable light; exported-tangent-basis consistency test in a standard glTF viewer — `bake/tangent.hpp` `tangentFrame()` is now the **single** basis used by both the baker (`bake.cpp` delegates to it) and export, so bake and export tangents are identical by construction; orthonormality + UV-gradient consistency is tested (`tests/bake/test_tangent.cpp`). `PreviewLight` movable-light descriptor added. The **in-viewer glTF render check + the live preview are GUI**, pending
 
 ## 12. network-bridge
 

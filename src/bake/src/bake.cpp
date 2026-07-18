@@ -7,6 +7,7 @@
 
 #include "cyber/accel/backend.hpp"
 #include "cyber/accel/primitives.hpp"
+#include "cyber/bake/tangent.hpp"
 #include "cyber/core/bvh.hpp"
 #include "cyber/core/io.hpp"
 
@@ -86,23 +87,11 @@ Vec3 hitColor(const Mesh& mesh, const Bvh::RayHit& hit, const std::vector<Vec3>*
            (*colors)[verts[2].value] * bc[2];
 }
 
-// Tangent from a triangle's position/UV gradient (Lengyel). Returned tangent
-// is made orthonormal to `n` so (t, b, n) is a consistent basis — the same one
-// meant to be exported with the mesh (spec: tangent-basis consistency).
+// Tangent from a triangle's position/UV gradient — delegates to the shared
+// tangentFrame() so the basis used for baking is byte-for-byte the one exported
+// with the mesh (spec: tangent-basis consistency; task 11.4).
 Vec3 faceTangent(Vec3 p0, Vec3 p1, Vec3 p2, Vec2 uv0, Vec2 uv1, Vec2 uv2, Vec3 n) {
-    const Vec3 e1 = p1 - p0, e2 = p2 - p0;
-    const Vec2 d1 = uv1 - uv0, d2 = uv2 - uv0;
-    const float det = d1.x * d2.y - d2.x * d1.y;
-    Vec3 t;
-    if (std::fabs(det) < 1e-20f) {
-        // Degenerate UVs: pick any vector perpendicular to n.
-        t = std::fabs(n.x) < 0.9f ? cross(n, Vec3{1, 0, 0}) : cross(n, Vec3{0, 1, 0});
-    } else {
-        const float f = 1.0f / det;
-        t = (e1 * d2.y - e2 * d1.y) * f;
-    }
-    t = t - n * dot(n, t);  // Gram-Schmidt against the normal
-    return normalized(t);
+    return tangentFrame(p0, p1, p2, uv0, uv1, uv2, n).tangent;
 }
 
 // One texel to shade: pixel coord plus the interpolated low-poly frame.
