@@ -171,8 +171,8 @@ biggest single item). 5.9 (golden corpus) is cheap and pays off immediately.
 
 ## 12. network-bridge
 
-- [ ] 12.1 Protocol spec + versioned handshake; opt-in server with listening indicator, local-only binding, malformed-message hardening
-- [ ] 12.2 Command set (push/pull meshes+textures, scene ops, messages, remote actions, symmetry/change queries, camera stream)
+- [x] 12.1 Protocol spec + versioned handshake; opt-in server with listening indicator, local-only binding, malformed-message hardening — `src/net` (`cyber_net`): length-prefixed JSON framing, hello/welcome/reject handshake, POSIX server bound to 127.0.0.1 only, off until `start()`, per-connection threads, oversized/malformed frames rejected without alloc/crash. `isListening()` backs the UI indicator (the visible widget itself is group 8)
+- [x] 12.2 Command set (push/pull meshes+textures, scene ops, messages, remote actions, symmetry/change queries, camera stream) — push/pull target + editmesh (positions, faces, **UVs, vertex colors**), clear/close, message, add/remove/press/poll actions, set/query symmetry, change-marker query, set/get camera. **Texture blob transport is a follow-up** (geometry+UV+color round-trip done, verified over a live local socket in `test_bridge.cpp`)
 - [ ] 12.3 Python client package + CLI; protocol integration tests
 - [ ] 12.4 Blender addon (thin consumer of the Python client)
 

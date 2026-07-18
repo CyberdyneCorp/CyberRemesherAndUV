@@ -20,6 +20,10 @@ add_executable(cyber_tests
     accel/test_primitives.cpp
 )
 target_link_libraries(cyber_tests PRIVATE cyber_accel cyber_doctest)
+if(TARGET cyber_net)
+    target_sources(cyber_tests PRIVATE net/test_bridge.cpp)
+    target_link_libraries(cyber_tests PRIVATE cyber_net)
+endif()
 cyber_set_warnings(cyber_tests)
 
 add_test(NAME unit COMMAND cyber_tests)
