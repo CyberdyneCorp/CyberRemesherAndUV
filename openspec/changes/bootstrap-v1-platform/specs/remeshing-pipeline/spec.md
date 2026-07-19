@@ -48,6 +48,10 @@ Extraction SHALL trace integer isolines into a connection graph, simplify it (di
 - **WHEN** any remesh completes
 - **THEN** the report SHALL state quad count, non-quad count by arity, vertex count, and singularity count
 
+#### Scenario: Field-aligned pairing maximizes quad-dominance
+- **WHEN** the field-aligned quadrangulator pairs triangles into quads
+- **THEN** it SHALL compute a maximum matching on the triangle-adjacency graph (a weighted-greedy seed that prefers field-diagonal, high-quality merges, followed by augmenting-path improvement that rescues triangles a greedy pass would strand), so quad-dominance is maximized (~95%+ on clean input) rather than left at the ~76–84% a greedy maximal matching produces, while surviving quad edges still follow the cross field. The field-aligned quadrangulator is the default for the CLI and C ABI / bindings.
+
 #### Scenario: Pure-quad post-pass
 - **WHEN** the pure-quad option is enabled
 - **THEN** the output SHALL contain only quads, or the report SHALL explicitly list the residual non-quads that could not be resolved
