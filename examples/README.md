@@ -23,6 +23,7 @@ so quad-dominance reads at a glance.
 | `08_load_model.py` | load a model → quad-dominant + 100% pure-quads | `output/08_load_model.png` |
 | `09_test_models.py` | remesh real community test models (spot, fandisk, bunny…) | `output/09_gallery.png` (+ `09_<model>.png`) |
 | `10_vs_reference.py` | side-by-side vs the QuadriFlow reference (both quadrangulators) | `output/10_vs_<model>.png` |
+| `11_benchmark.py` | scored corpus benchmark vs QuadriFlow (surface fidelity, angles, singularities, adaptivity) | `output/11_benchmark.png` |
 | `run_all.py` | runs all of the above + a stitched `output/gallery.png` | `output/gallery.png` |
 
 `08_load_model.py` loads a mesh and converts it to quads. It defaults to a
@@ -61,6 +62,19 @@ QuadriFlow on edge-length uniformity and trails it slightly on median angle.
 
 ```sh
 examples/run.sh examples/10_vs_reference.py --models spot fandisk
+```
+
+`11_benchmark.py` is the retopology **benchmark harness** (roadmap Phase 1). It
+scores CyberRemesher (both quadrangulators) against QuadriFlow across the model
+corpus on metrics that capture *real* quality — surface deviation and normal
+error (how faithfully the quads follow the source, sampled with a KD-tree),
+median quad angle, edge-length CV, and irregular-vertex % (singularity
+cleanliness). It also runs the **quality-per-polygon** comparison: ours with
+curvature-adaptive sizing vs QuadriFlow's uniform grid at the *same output quad
+count*, where lower surface deviation means better fidelity per polygon.
+
+```sh
+examples/run.sh examples/11_benchmark.py --models spot fandisk --target-quads 3000
 ```
 
 ## Quadrangulators

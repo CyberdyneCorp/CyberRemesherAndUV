@@ -84,6 +84,33 @@ def quadriflow_remesh(binary: str, model_path: str, faces: int) -> MeshData:
     return data
 
 
+def quadriflow_try(binary: "str | None", model_path: str, faces: int) -> "MeshData | None":
+    """Run QuadriFlow but never raise: returns the remeshed MeshData, or None if
+    the reference is unavailable or fails on this input (it can crash on some
+    meshes). Lets every example show a QuadriFlow panel when possible and fall
+    back gracefully when not."""
+    if not binary:
+        return None
+    try:
+        return quadriflow_remesh(binary, model_path, faces)
+    except Exception:  # noqa: BLE001 - QuadriFlow failure -> no reference panel
+        return None
+
+
+def quad_label(engine: str, mesh: MeshData, *, vs_source: "MeshData | None" = None) -> str:
+    """A two/three-line panel title with quad count, angle/uniformity quality,
+    and (when a source is given) surface-fidelity. Shared by every example so the
+    CyberRemesher and QuadriFlow panels read identically."""
+    q, t, _ = face_counts(mesh)
+    qq = quad_quality(mesh)
+    line = (f"{engine} · {q} quads\nmedian {qq['median']:.0f}° · "
+            f"slivers {qq['slivers']:.0f}% · CV {qq['cv']:.2f}")
+    if vs_source is not None:
+        sm = surface_metrics(mesh, vs_source)
+        line += f"\ndev {sm['rms']:.2f}% · Nerr {sm['normal_err']:.0f}°"
+    return line
+
+
 def quad_quality(mesh: MeshData) -> "Dict[str, float]":
     """Quad-mesh quality summary. Keys: 'median' (median of each quad's smallest
     interior angle, deg — higher/closer to 90 is better), 'slivers' (% of quads
@@ -113,6 +140,88 @@ def quad_quality(mesh: MeshData) -> "Dict[str, float]":
         "slivers": float(100.0 * np.mean(ang < 20.0)),
         "cv": float(len_arr.std() / (len_arr.mean() + 1e-12)),
     }
+
+
+# ---------------------------------------------------------------------------
+# Geometry metrics (Phase 1 benchmark) — quality that captures REAL retopology
+# fidelity, not just quad angles: how closely the output follows the source
+# surface (rewards spending polygons where curvature is), how well it aligns to
+# sharp features, and how clean its singularity structure is.
+# ---------------------------------------------------------------------------
+def _triangles(mesh: MeshData) -> "Tuple[np.ndarray, np.ndarray]":
+    """(positions, Nx3 int triangle indices) — every face fan-triangulated."""
+    P = mesh["positions"]  # type: ignore[index]
+    tris: List[Tuple[int, int, int]] = []
+    for f in mesh["faces"]:  # type: ignore[index]
+        for k in range(1, len(f) - 1):
+            tris.append((f[0], f[k], f[k + 1]))
+    return P, np.array(tris, dtype=int) if tris else np.zeros((0, 3), dtype=int)
+
+
+def _sample_surface(mesh: MeshData, n: int, rng: "np.random.Generator"
+                    ) -> "Tuple[np.ndarray, np.ndarray]":
+    """Area-weighted uniform sample of `n` points on a mesh surface, with the
+    face normal at each point. Deterministic for a given rng."""
+    P, T = _triangles(mesh)
+    if len(T) == 0:
+        return np.zeros((0, 3)), np.zeros((0, 3))
+    a, b, c = P[T[:, 0]], P[T[:, 1]], P[T[:, 2]]
+    cross = np.cross(b - a, c - a)
+    area = 0.5 * np.linalg.norm(cross, axis=1)
+    normals = cross / (np.linalg.norm(cross, axis=1, keepdims=True) + 1e-12)
+    total = float(area.sum())
+    if total <= 0.0:
+        return a, normals
+    idx = rng.choice(len(T), size=n, p=area / total)
+    u, v = rng.random(n), rng.random(n)
+    flip = u + v > 1.0
+    u[flip], v[flip] = 1.0 - u[flip], 1.0 - v[flip]
+    pts = a[idx] + (b[idx] - a[idx]) * u[:, None] + (c[idx] - a[idx]) * v[:, None]
+    return pts, normals[idx]
+
+
+def surface_metrics(out_mesh: MeshData, src_mesh: MeshData, n: int = 50_000,
+                    seed: int = 1234) -> "Dict[str, float]":
+    """How faithfully `out_mesh` reproduces the `src_mesh` surface. Distances are
+    reported as a percentage of the source bounding-box diagonal (scale-free, so
+    comparable across models and to QuadriFlow):
+      'hausdorff' — 99th-percentile output→source distance (robust to a stray point)
+      'rms'       — root-mean-square output→source distance
+      'normal_err'— mean angle (deg) between output and nearest-source normals
+    Lower is better on all three. At a matched polygon count these reward putting
+    polygons where the surface actually bends — QuadriFlow's uniform sizing can't."""
+    from scipy.spatial import cKDTree
+    rng = np.random.default_rng(seed)
+    sp, sn = _sample_surface(src_mesh, n, rng)
+    op, on = _sample_surface(out_mesh, n, rng)
+    if len(sp) == 0 or len(op) == 0:
+        return {"hausdorff": float("nan"), "rms": float("nan"), "normal_err": float("nan")}
+    P = src_mesh["positions"]  # type: ignore[index]
+    diag = float(np.linalg.norm(P.max(axis=0) - P.min(axis=0))) + 1e-12
+    tree = cKDTree(sp)
+    dist, near = tree.query(op)
+    dots = np.abs(np.sum(on * sn[near], axis=1))  # abs: orientation-agnostic
+    nerr = np.degrees(np.arccos(np.clip(dots, 0.0, 1.0)))
+    return {
+        "hausdorff": float(np.percentile(dist, 99) / diag * 100.0),
+        "rms": float(np.sqrt(np.mean(dist ** 2)) / diag * 100.0),
+        "normal_err": float(np.mean(nerr)),
+    }
+
+
+def irregular_pct(mesh: MeshData) -> float:
+    """Percentage of quad-incident vertices whose valence != 4. Irregular vertices
+    (singularities) are where a quad mesh loses its clean grid; fewer, sparser
+    ones = higher median angle and a more editable mesh."""
+    val: Dict[int, int] = {}
+    for f in mesh["faces"]:  # type: ignore[index]
+        if len(f) != 4:
+            continue
+        for v in f:
+            val[v] = val.get(v, 0) + 1
+    if not val:
+        return 0.0
+    return 100.0 * sum(1 for c in val.values() if c != 4) / len(val)
 
 
 def download_model(name: str, models_dir: str = MODELS_DIR) -> str:
