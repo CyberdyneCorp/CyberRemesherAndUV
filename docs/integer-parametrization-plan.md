@@ -65,18 +65,30 @@ malformed-orbit holes, no post-hoc rotation.
 
 ## Milestones (each its own focused session / workflow)
 
-1. **Coordinates + defect measurement** — Stage 1 + report per-loop holonomy on
-   the corpus. Confirms the field is consistent enough for the solve (the ~20°
-   edge-vs-axis misalignment measured this session is the risk to watch).
-2. **Integer solve** — Stage 2 min-cost-flow; verify defects drop to a sparse set.
-3. **Extraction** — Stage 3; measure irregular % (target < 15%) and validity
+1. ✅ **Coordinates + defect measurement — DONE** (`measureIntegerConsistency`,
+   commit 4451261). Per-face holonomy of the field connection. **Finding: the
+   field is VIABLE for the solve.** The orientation field is clean — only 24–48
+   singular faces on the corpus (cylinder 0), so the earlier fear (from a
+   measurement bug) is unfounded. Remaining defects are *translation*, small and
+   local (meanDefect ~0.7–1.7, mostly ±1 at cell boundaries — the position-field
+   round(0.5) noise), which is exactly what Stage 2 resolves. Two connection-math
+   fixes were needed and are locked by the cylinder test: rotation index =
+   `bb − ba` (aligned-rep index difference), and per-FACE (contractible) holonomy
+   rather than spanning-tree loops (a cylinder's circumference legitimately wraps).
+2. ◻ **Integer solve** — Stage 2 min-cost-flow over the face dual; push flow to
+   cancel the ±1 translation defects; verify residual singularities drop to a
+   sparse set. **This is the next focused session.** Reuse the field connection
+   already built in Milestone 1.
+3. ◻ **Extraction** — Stage 3; measure irregular % (target < 15%) and validity
    (watertight, manifold) vs the current extractor.
-4. **Quality + promote** — median/CV/feature/robustness vs QuadriFlow; if it
+4. ◻ **Quality + promote** — median/CV/feature/robustness vs QuadriFlow; if it
    wins, make it the extractor default and retire the collapse-and-walk path.
 
-## Open risk
+## Open risk (revised after Milestone 1)
 
-The field's ~20° edge-vs-axis misalignment (measured this session) may make the
-integer offsets noisy enough that the solve leaves many residual defects. If so,
-Stage 0 becomes "strengthen the orientation field" (Phase 5) first. Milestone 1
-is designed to surface this early, cheaply.
+The Milestone-1 finding *lowers* the top risk: the orientation field is clean and
+the position defects are small/local, so the solve has a tractable job. Residual
+watch item: the cylinder is only ~63% clean-face (position-field boundary noise),
+so Stage 2 must handle a fair density of ±1 defects — expected, but confirm the
+flow scales. The acceptance test for Milestone 1's math is the cylinder
+orientation holonomy = 0 (regression added).
