@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <functional>
 #include <vector>
 
 #include "cyber/accel/backend.hpp"
@@ -125,15 +126,30 @@ std::size_t removeDoublets(Mesh& mesh) {
     return removed;
 }
 
-// Quality-only greedy pass that pairs the triangles the field-guided pass left
-// behind, so the output stays strongly quad-dominant without disturbing the
-// field-aligned quads already formed (those faces are no longer triangles).
-void mergeRemainingTriangles(Mesh& mesh) {
-    struct Cand {
-        float quality;
-        Index edge;
-    };
-    std::vector<Cand> cands;
+// A pairable edge in the triangle-adjacency graph: the shared edge between two
+// triangles, the two triangle node indices, and a merge weight (geometry x
+// field alignment). Higher weight = a better / more field-aligned quad.
+struct PairEdge {
+    Index edge;    // EdgeId::value of the shared triangle-triangle edge
+    int t0, t1;    // triangle node indices
+    float weight;  // merge quality x field-diagonal preference
+};
+
+// Assigns each alive triangle a compact node index (nodeFace[node] = FaceId)
+// and collects every legal triangle-triangle merge as a weighted graph edge.
+// With a cross field the weight folds in field-diagonal preference so surviving
+// quad edges follow the field; otherwise it is pure geometry quality.
+std::vector<PairEdge> collectPairEdges(const Mesh& mesh, const CrossField* field,
+                                       std::vector<FaceId>& nodeFace) {
+    std::vector<Index> faceNode(mesh.faceCapacity(), kInvalidIndex);
+    for (Index i = 0; i < mesh.faceCapacity(); ++i) {
+        const FaceId f{i};
+        if (mesh.isAlive(f) && mesh.faceSize(f) == 3) {
+            faceNode[i] = static_cast<Index>(nodeFace.size());
+            nodeFace.push_back(f);
+        }
+    }
+    std::vector<PairEdge> edges;
     for (Index i = 0; i < mesh.edgeCapacity(); ++i) {
         const EdgeId e{i};
         if (!mesh.isAlive(e) || mesh.isFeatureEdge(e) || mesh.edgeFaceCount(e) != 2) {
@@ -149,28 +165,95 @@ void mergeRemainingTriangles(Mesh& mesh) {
         if (!c.valid() || !d.valid() || c == d) {
             continue;
         }
-        const float q = quadQuality(mesh, a, b, c, d);
-        if (q > 0.2f) {
-            cands.push_back({q, i});
+        const float quality = quadQuality(mesh, a, b, c, d);
+        if (quality <= 0.2f) {
+            continue;
         }
+        float weight = quality;
+        if (field != nullptr && faces[0].value < field->size() && faces[1].value < field->size()) {
+            const Vec3 de = normalized(mesh.position(b) - mesh.position(a));
+            const float diag = 0.5f * (diagonalness(de, field->direction(faces[0])) +
+                                       diagonalness(de, field->direction(faces[1])));
+            weight = quality * (0.25f + 0.75f * diag);  // prefer field-diagonal merges
+        }
+        edges.push_back({i, static_cast<int>(faceNode[faces[0].value]),
+                         static_cast<int>(faceNode[faces[1].value]), weight});
     }
-    std::sort(cands.begin(), cands.end(), [](const Cand& x, const Cand& y) {
-        if (x.quality != y.quality) {
-            return x.quality > y.quality;
-        }
-        return x.edge < y.edge;
+    return edges;
+}
+
+// Maximum triangle pairing: seed a matching greedily in descending weight order
+// (so field-aligned, high-quality quads form first), then raise its cardinality
+// with augmenting-path search so triangles the greedy seed would have stranded
+// still get paired. This turns the maximal (greedy) matching into a near-maximum
+// one — every rescued pair is one more quad and two fewer stranded triangles —
+// while keeping the field-aligned quads the seed formed. The matching itself is
+// heuristic (no blossom contraction, so odd cycles may leave a pair unmatched),
+// but each merged pair is a disjoint two-triangle group, so the resulting mesh
+// edits are always valid. Returns the shared edges to merge, in node order.
+std::vector<EdgeId> maximumTrianglePairing(std::vector<PairEdge> edges, std::size_t nodeCount) {
+    std::sort(edges.begin(), edges.end(), [](const PairEdge& x, const PairEdge& y) {
+        return x.weight != y.weight ? x.weight > y.weight : x.edge < y.edge;
     });
-    for (const Cand& cand : cands) {
-        const EdgeId e{cand.edge};
-        if (!mesh.isAlive(e) || mesh.edgeFaceCount(e) != 2) {
-            continue;
-        }
-        const auto faces = mesh.edgeFaces(e);
-        if (mesh.faceSize(faces[0]) != 3 || mesh.faceSize(faces[1]) != 3) {
-            continue;
-        }
-        mergePair(mesh, e, faces[0], faces[1]);
+    std::vector<std::vector<std::size_t>> adj(nodeCount);  // node -> sorted edge indices
+    for (std::size_t i = 0; i < edges.size(); ++i) {
+        adj[static_cast<std::size_t>(edges[i].t0)].push_back(i);
+        adj[static_cast<std::size_t>(edges[i].t1)].push_back(i);
     }
+    std::vector<int> match(nodeCount, -1);  // node -> partner node, or -1
+    std::vector<Index> matchEdge(nodeCount, kInvalidIndex);
+    const auto setMatch = [&](std::size_t u, std::size_t v, Index e) {
+        match[u] = static_cast<int>(v);
+        match[v] = static_cast<int>(u);
+        matchEdge[u] = e;
+        matchEdge[v] = e;
+    };
+    for (const PairEdge& pe : edges) {  // weighted-greedy seed
+        const auto u = static_cast<std::size_t>(pe.t0);
+        const auto v = static_cast<std::size_t>(pe.t1);
+        if (match[u] < 0 && match[v] < 0) {
+            setMatch(u, v, pe.edge);
+        }
+    }
+    // Depth-capped augmenting DFS. The greedy seed is maximal, so real improving
+    // paths are short; the cap only bounds the stack for pathological inputs.
+    std::vector<char> visited(nodeCount, 0);
+    std::function<bool(std::size_t, int)> augment = [&](std::size_t u, int depth) {
+        if (depth > 64) {
+            return false;
+        }
+        for (const std::size_t ei : adj[u]) {
+            const PairEdge& pe = edges[ei];
+            const auto w = (static_cast<std::size_t>(pe.t0) == u) ? static_cast<std::size_t>(pe.t1)
+                                                                  : static_cast<std::size_t>(pe.t0);
+            if (visited[w]) {
+                continue;
+            }
+            visited[w] = 1;
+            if (match[w] < 0 || augment(static_cast<std::size_t>(match[w]), depth + 1)) {
+                setMatch(u, w, pe.edge);
+                return true;
+            }
+        }
+        return false;
+    };
+    for (std::size_t u = 0; u < nodeCount; ++u) {
+        if (match[u] < 0) {
+            std::fill(visited.begin(), visited.end(), 0);
+            visited[u] = 1;
+            augment(u, 0);
+        }
+    }
+    std::vector<EdgeId> merges;
+    std::vector<char> emitted(nodeCount, 0);
+    for (std::size_t u = 0; u < nodeCount; ++u) {
+        if (match[u] >= 0 && !emitted[u] && !emitted[static_cast<std::size_t>(match[u])]) {
+            emitted[u] = 1;
+            emitted[static_cast<std::size_t>(match[u])] = 1;
+            merges.push_back(EdgeId{matchEdge[u]});
+        }
+    }
+    return merges;
 }
 
 // ---- valence cleanup (roadmap 5.4/5.5) -------------------------------------
@@ -355,56 +438,24 @@ public:
                           const CancelToken* cancel) override {
         auto backend = accel::defaultBackend();
         const CrossField field = computeCrossField(mesh, m_iterations, *backend);
-
-        struct Candidate {
-            float score;
-            Index edge;
-        };
-        std::vector<Candidate> candidates;
-        for (Index i = 0; i < mesh.edgeCapacity(); ++i) {
-            if (cancel && i % kCancelStride == 0 && cancel->isCancelled()) {
-                return {.success = false, .cancelled = true, .failureReason = "cancelled"};
-            }
-            const EdgeId e{i};
-            if (!mesh.isAlive(e) || mesh.isFeatureEdge(e) || mesh.edgeFaceCount(e) != 2) {
-                continue;
-            }
-            const auto faces = mesh.edgeFaces(e);
-            if (mesh.faceSize(faces[0]) != 3 || mesh.faceSize(faces[1]) != 3) {
-                continue;
-            }
-            const auto [a, b] = mesh.edgeVertices(e);
-            const VertexId c = opposite(mesh, faces[0], a, b);
-            const VertexId d = opposite(mesh, faces[1], a, b);
-            if (!c.valid() || !d.valid() || c == d) {
-                continue;
-            }
-            const float quality = quadQuality(mesh, a, b, c, d);
-            if (quality <= 0.2f) {
-                continue;
-            }
-            const Vec3 de = normalized(mesh.position(b) - mesh.position(a));
-            const float diag = 0.5f * (diagonalness(de, field.direction(faces[0])) +
-                                       diagonalness(de, field.direction(faces[1])));
-            // Weight geometry x field alignment: a field-diagonal edge (a good
-            // quad diagonal) scores best, so the surviving quad edges follow the
-            // field's flow. The greedy mop-up below recovers quad-dominance.
-            candidates.push_back({quality * (0.25f + 0.75f * diag), i});
+        if (cancel && cancel->isCancelled()) {
+            return {.success = false, .cancelled = true, .failureReason = "cancelled"};
         }
 
-        std::sort(candidates.begin(), candidates.end(), [](const Candidate& x, const Candidate& y) {
-            if (x.score != y.score) {
-                return x.score > y.score;
-            }
-            return x.edge < y.edge;
-        });
-
-        const std::size_t total = candidates.size();
+        // Pair triangles into field-aligned quads via a maximum matching on the
+        // triangle-adjacency graph (weighted toward field-diagonal merges). This
+        // both follows the field AND minimizes stranded triangles — the greedy
+        // pass this replaces left far more triangles unpaired.
+        std::vector<FaceId> nodeFace;
+        std::vector<PairEdge> pairEdges = collectPairEdges(mesh, &field, nodeFace);
+        const std::vector<EdgeId> merges = maximumTrianglePairing(std::move(pairEdges),
+                                                                  nodeFace.size());
+        const std::size_t total = merges.size();
         for (std::size_t k = 0; k < total; ++k) {
             if (cancel && k % kCancelStride == 0 && cancel->isCancelled()) {
                 return {.success = false, .cancelled = true, .failureReason = "cancelled"};
             }
-            const EdgeId e{candidates[k].edge};
+            const EdgeId e = merges[k];
             if (!mesh.isAlive(e) || mesh.edgeFaceCount(e) != 2) {
                 continue;
             }
@@ -418,7 +469,6 @@ public:
             }
         }
 
-        mergeRemainingTriangles(mesh);     // quality-only mop-up for quad-dominance
         removeDoublets(mesh);              // graph simplification (5.5)
         quadValenceCleanup(mesh, &field);  // valence cleanup (5.4/5.5)
         if (progress) {

@@ -1,8 +1,14 @@
 #include <doctest.h>
 
+#include <array>
+#include <cmath>
+#include <map>
+#include <utility>
 #include <vector>
 
+#include "cyber/core/math.hpp"
 #include "cyber/core/mesh.hpp"
+#include "cyber/core/quadrangulate.hpp"
 #include "cyber/quadrangulate/field_quadrangulator.hpp"
 
 using cyber::FaceId;
@@ -12,6 +18,55 @@ using cyber::Vec3;
 namespace remesh = cyber::remesh;
 
 namespace {
+
+// Clean icosphere (subdivided icosahedron): a closed, irregular triangulation
+// where a greedy pairing strands many triangles but a maximum matching does not.
+Mesh makeIcosphere(int subdivisions) {
+    const float t = (1.0f + std::sqrt(5.0f)) / 2.0f;
+    std::vector<Vec3> pos = {{-1, t, 0}, {1, t, 0},  {-1, -t, 0}, {1, -t, 0},
+                             {0, -1, t}, {0, 1, t},  {0, -1, -t}, {0, 1, -t},
+                             {t, 0, -1}, {t, 0, 1},  {-t, 0, -1}, {-t, 0, 1}};
+    std::vector<std::array<int, 3>> tris = {
+        {0, 11, 5}, {0, 5, 1},  {0, 1, 7},  {0, 7, 10}, {0, 10, 11}, {1, 5, 9},   {5, 11, 4},
+        {11, 10, 2}, {10, 7, 6}, {7, 1, 8}, {3, 9, 4},  {3, 4, 2},   {3, 2, 6},   {3, 6, 8},
+        {3, 8, 9},   {4, 9, 5},  {2, 4, 11}, {6, 2, 10}, {8, 6, 7},   {9, 8, 1}};
+    for (int s = 0; s < subdivisions; ++s) {
+        std::vector<std::array<int, 3>> next;
+        std::map<std::pair<int, int>, int> mid;
+        auto midpoint = [&](int a, int b) {
+            const auto key = std::minmax(a, b);
+            const auto it = mid.find({key.first, key.second});
+            if (it != mid.end()) {
+                return it->second;
+            }
+            const int idx = static_cast<int>(pos.size());
+            pos.push_back((pos[static_cast<std::size_t>(a)] + pos[static_cast<std::size_t>(b)]) *
+                          0.5f);
+            mid[{key.first, key.second}] = idx;
+            return idx;
+        };
+        for (const auto& tr : tris) {
+            const int a = midpoint(tr[0], tr[1]);
+            const int b = midpoint(tr[1], tr[2]);
+            const int c = midpoint(tr[2], tr[0]);
+            next.push_back({tr[0], a, c});
+            next.push_back({tr[1], b, a});
+            next.push_back({tr[2], c, b});
+            next.push_back({a, b, c});
+        }
+        tris = std::move(next);
+    }
+    std::vector<Vec3> np;
+    std::vector<std::vector<Index>> faces;
+    for (const Vec3& p : pos) {
+        np.push_back(cyber::normalized(p));
+    }
+    for (const auto& tr : tris) {
+        faces.push_back({static_cast<Index>(tr[0]), static_cast<Index>(tr[1]),
+                         static_cast<Index>(tr[2])});
+    }
+    return Mesh::fromIndexed(np, faces);
+}
 
 // Triangulated n x n grid in the z = 0 plane.
 Mesh makeTriGrid(int n) {
@@ -58,10 +113,36 @@ TEST_CASE("field-aligned quadrangulator produces a valid quad-dominant mesh") {
     const std::size_t quads = quadCount(mesh);
     const std::size_t faces = mesh.faceCount();
     REQUIRE(faces > 0);
-    // A regular grid pairs almost entirely into quads.
+    // A regular grid admits a perfect triangle matching, so the maximum-matching
+    // pass pairs essentially every triangle into a quad.
     REQUIRE(quads > 0);
-    REQUIRE(static_cast<double>(quads) / static_cast<double>(faces) > 0.8);
+    REQUIRE(static_cast<double>(quads) / static_cast<double>(faces) > 0.98);
     REQUIRE(faces < tris);  // merging reduced the face count
+}
+
+// Regression for the maximum-matching triangle pairing: on a closed, irregular
+// mesh the field-aligned quadrangulator must reach high quad-dominance and
+// strictly beat the greedy pairing baseline it replaces. Before the maximum
+// matching, greedy weighting stranded triangles and could fall *below* greedy
+// (~76% vs ~81% at high density); the matching lifts it to ~95%+.
+TEST_CASE("field-aligned quadrangulator beats greedy quad-dominance via max matching") {
+    const Mesh base = makeIcosphere(3);  // 1280 triangles, closed
+
+    const auto dominance = [](Mesh m, std::unique_ptr<remesh::IQuadrangulator> q) {
+        m.tagFeatureEdges(90.0f);
+        const auto outcome = q->quadrangulate(m, 1.0f, nullptr, nullptr);
+        REQUIRE(outcome.success);
+        REQUIRE(m.validate().empty());
+        return static_cast<double>(quadCount(m)) / static_cast<double>(m.faceCount());
+    };
+
+    const double greedyDom = dominance(base, remesh::makeGreedyPairingQuadrangulator());
+    const double fieldDom = dominance(base, remesh::makeFieldAlignedQuadrangulator());
+
+    CAPTURE(greedyDom);
+    CAPTURE(fieldDom);
+    CHECK(fieldDom > 0.90);          // near-fully quad
+    CHECK(fieldDom > greedyDom);     // strictly better than the greedy baseline
 }
 
 TEST_CASE("field-aligned quadrangulator honours cancellation") {
