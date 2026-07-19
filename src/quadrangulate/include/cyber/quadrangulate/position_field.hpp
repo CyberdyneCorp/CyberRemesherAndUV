@@ -47,4 +47,18 @@ struct PositionField {
 // module is the field foundation for a future Instant-Meshes-style extractor.
 [[nodiscard]] PositionField computePositionField(const Mesh& mesh, float spacing, int iterations);
 
+// Extracts a quad-dominant mesh from the fields (Instant-Meshes mesh
+// extraction: lattice-cell collapse + local face tracing — see quad_extract.cpp
+// and THIRD_PARTY_NOTICES.md). Returns a fresh mesh; the input is not modified.
+[[nodiscard]] Mesh extractQuadMesh(const Mesh& mesh, const PositionField& field);
+
+// Diagnostic for the collapse stage (Stage A): number of lattice-cell nodes and
+// undirected lattice edges the collapse produces. Used by tests to confirm the
+// collapse yields ~area/spacing^2 cells rather than over-merging.
+struct CollapsedGraphStats {
+    std::size_t nodes = 0;
+    std::size_t latticeEdges = 0;
+};
+[[nodiscard]] CollapsedGraphStats debugCollapse(const Mesh& mesh, const PositionField& field);
+
 }  // namespace cyber::remesh

@@ -121,5 +121,34 @@ TEST_CASE("position field: representatives stay near their vertices") {
         }
     }
     CAPTURE(maxDrift);
-    CHECK(maxDrift < 3.0f * spacing);  // bounded near the vertex, no runaway drift
+    CHECK(maxDrift < spacing);  // representative stays within a cell of its vertex
+}
+
+// Full extraction on a developable surface (a cylinder, no singularities) with
+// the mesh already at ~target edge length — the regime the pipeline's isotropic
+// stage produces. The position-field extraction must yield a valid, fully
+// quad-dominant grid. (Surfaces with singularities need the Stage-C handling
+// and are exercised separately once that lands.)
+TEST_CASE("position field: extraction gives a clean quad grid on a cylinder") {
+    const float spacing = 0.25f;
+    const int rings = 12;     // height 3 / spacing
+    const int segments = 25;  // circumference 2*pi / spacing
+    const Mesh cyl = cylinder(1.0f, 3.0f, rings, segments);
+    const remesh::PositionField field = remesh::computePositionField(cyl, spacing, 60);
+    const Mesh quads = remesh::extractQuadMesh(cyl, field);
+
+    std::vector<Vec3> P;
+    std::vector<std::vector<Index>> F;
+    quads.toIndexed(P, F);
+    std::size_t quadCount = 0;
+    for (const auto& f : F) {
+        if (f.size() == 4) {
+            ++quadCount;
+        }
+    }
+    CAPTURE(F.size());
+    CAPTURE(quadCount);
+    REQUIRE(F.size() > 0);
+    CHECK(quads.validate().empty());                                             // manifold
+    CHECK(static_cast<double>(quadCount) / static_cast<double>(F.size()) > 0.95);  // quad grid
 }

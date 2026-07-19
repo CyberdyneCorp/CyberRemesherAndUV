@@ -117,12 +117,15 @@ void smoothOrientation(const Frames& fr, std::vector<Vec3>& q) {
     q.swap(next);
 }
 
-// One Jacobi sweep of the position field: snap each neighbour's lattice point
-// into this vertex's cell (integer offset in the local q/q_perp frame) and
-// average. The result is kept in the vertex tangent plane near p (so it stays a
-// representative of this vertex's cell).
+// One Jacobi sweep of the position field. For each neighbour, snap its lattice
+// point into this vertex's cell (integer offset in the local q / q_perp frame)
+// and average; then re-anchor the average to the lattice point nearest the
+// vertex (position_round_4). Same-cell vertices thus converge to one shared
+// lattice point (crisp cells for the collapse), while cross-cell neighbours,
+// snapped back by a full step, reinforce the target spacing instead of merging.
 void smoothPosition(const Frames& fr, const Mesh& mesh, const std::vector<Vec3>& q, float s,
                     std::vector<Vec3>& o) {
+    const float invS = 1.0f / s;
     std::vector<Vec3> next(o.size());
     for (std::size_t i = 0; i < o.size(); ++i) {
         const VertexId vi{static_cast<Index>(i)};
@@ -131,21 +134,26 @@ void smoothPosition(const Frames& fr, const Mesh& mesh, const std::vector<Vec3>&
             continue;
         }
         const Vec3 qi = q[i];
-        const Vec3 qp = cross(fr.normal[i], qi);
-        Vec3 acc = o[i];
+        const Vec3 ti = cross(fr.normal[i], qi);
+        Vec3 sum = o[i];
         float w = 1.0f;
         for (const Index jn : fr.neighbours[i]) {
             const Vec3 diff = o[static_cast<std::size_t>(jn)] - o[i];
-            const float a = std::round(dot(diff, qi) / s);
-            const float b = std::round(dot(diff, qp) / s);
-            const Vec3 aligned = o[static_cast<std::size_t>(jn)] - (qi * (a * s) + qp * (b * s));
-            acc += aligned;
+            const float a = std::round(dot(diff, qi) * invS);
+            const float b = std::round(dot(diff, ti) * invS);
+            const Vec3 aligned = o[static_cast<std::size_t>(jn)] - (qi * (a * s) + ti * (b * s));
+            sum += aligned;
             w += 1.0f;
         }
-        Vec3 result = acc / w;
-        // Keep the representative in the tangent plane near the vertex.
+        sum = sum / w;
+        // position_round_4: shift `sum` by whole lattice steps to the cell of p,
+        // then remove the normal drift so the representative stays on the surface
+        // (pure averaging sinks o toward the centroid on curved regions).
         const Vec3 p = mesh.position(vi);
-        Vec3 rel = result - p;
+        const Vec3 d = p - sum;
+        const Vec3 anchored = sum + qi * (std::round(dot(qi, d) * invS) * s) +
+                              ti * (std::round(dot(ti, d) * invS) * s);
+        Vec3 rel = anchored - p;
         rel = rel - fr.normal[i] * dot(fr.normal[i], rel);
         next[i] = p + rel;
     }

@@ -2,6 +2,7 @@ add_library(cyber_quadrangulate STATIC
     src/crossfield.cpp
     src/field_quadrangulator.cpp
     src/position_field.cpp
+    src/quad_extract.cpp
 )
 add_library(cyber::quadrangulate ALIAS cyber_quadrangulate)
 
