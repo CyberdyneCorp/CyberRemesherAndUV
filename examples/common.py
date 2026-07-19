@@ -55,6 +55,58 @@ COMMON_3D_MODELS: Dict[str, str] = {
 }
 
 
+def quadriflow_binary() -> "str | None":
+    """Build (once, cached) and return the path to the QuadriFlow reference
+    binary, or None if it cannot be built (offline / no Eigen / no toolchain).
+    QuadriFlow is a field-based quad remesher standing in for AutoRemesher (which
+    is GUI-only). See reference/build_quadriflow.sh."""
+    import subprocess
+    script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "reference",
+                          "build_quadriflow.sh")
+    try:
+        out = subprocess.run(["bash", script], capture_output=True, text=True, timeout=900)
+        lines = [ln for ln in out.stdout.strip().splitlines() if ln.strip()]
+        path = lines[-1] if lines else ""
+        return path if path and os.path.exists(path) else None
+    except Exception:  # noqa: BLE001 - any build/network failure -> unavailable
+        return None
+
+
+def quadriflow_remesh(binary: str, model_path: str, faces: int) -> MeshData:
+    """Remesh `model_path` to ~`faces` quads with the QuadriFlow reference."""
+    import subprocess
+    with tempfile.NamedTemporaryFile(suffix=".obj", delete=False) as tmp:
+        out = tmp.name
+    subprocess.run([binary, "-i", model_path, "-o", out, "-f", str(faces)],
+                   check=True, capture_output=True, timeout=300)
+    data = load_obj(out)
+    os.unlink(out)
+    return data
+
+
+def quad_quality(mesh: MeshData) -> "Tuple[float, float]":
+    """(worst quad interior angle in degrees — 90 is ideal, higher=better;
+    edge-length coefficient of variation — lower=more uniform) over the quads."""
+    P = mesh["positions"]
+    worst = 90.0
+    lengths: List[float] = []
+    for f in mesh["faces"]:
+        if len(f) != 4:
+            continue
+        for k in range(4):
+            a, b, prev = P[f[k]], P[f[(k + 1) % 4]], P[f[(k + 3) % 4]]
+            e1, e2 = b - a, prev - a
+            lengths.append(float(np.linalg.norm(e1)))
+            c = float(np.dot(e1, e2) / (np.linalg.norm(e1) * np.linalg.norm(e2) + 1e-12))
+            ang = math.degrees(math.acos(max(-1.0, min(1.0, c))))
+            worst = min(worst, ang)
+    if not lengths:
+        return (0.0, 0.0)
+    arr = np.array(lengths)
+    cv = float(arr.std() / (arr.mean() + 1e-12))
+    return (worst, cv)
+
+
 def download_model(name: str, models_dir: str = MODELS_DIR) -> str:
     """Return a local path to a common-3d-test-model, downloading it (once) on
     demand. Raises KeyError for an unknown name."""

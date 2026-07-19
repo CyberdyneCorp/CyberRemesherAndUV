@@ -7,3 +7,4 @@ __pycache__/
 
 # Downloaded on demand by examples/09_test_models.py (see common.download_model).
 examples/models/
+examples/reference/QuadriFlow/
