@@ -495,6 +495,50 @@ Graph buildCollapsedGraph(const Mesh& mesh, const PositionField& field) {
 // and so leaves large holes on curved / singular surfaces. Orbits of size 3-11
 // become faces (quads / tris / small n-gons filling holes around singularities);
 // larger orbits are open-boundary loops and are dropped.
+// Greedy-cut an orbit loop into quads (Instant Meshes fill_face): repeatedly cut
+// off the four consecutive corners whose quad angles are closest to 90 degrees,
+// removing that quad's two interior corners (the cut edge joins its endpoints),
+// until four or fewer remain. Uses only the orbit's own vertices — no centroid —
+// so hole quads are well-shaped instead of the pie slices a centroid fan leaves.
+void fillFace(std::vector<Index> loop, const std::vector<Vec3>& pos,
+              std::vector<std::vector<Index>>& faces) {
+    const auto angle = [&](Index prev, Index cur, Index next) {
+        const Vec3 a = normalized(pos[prev] - pos[cur]);
+        const Vec3 b = normalized(pos[next] - pos[cur]);
+        return std::acos(std::clamp(dot(a, b), -1.0f, 1.0f));
+    };
+    while (loop.size() > 4) {
+        const std::size_t n = loop.size();
+        float best = 1e30f;
+        std::size_t bestI = 0;
+        for (std::size_t i = 0; i < n; ++i) {
+            const Index a = loop[i], b = loop[(i + 1) % n], c = loop[(i + 2) % n],
+                        d = loop[(i + 3) % n];
+            const float score = std::fabs(angle(d, a, b) - kPi / 2.0f) +
+                                std::fabs(angle(a, b, c) - kPi / 2.0f) +
+                                std::fabs(angle(b, c, d) - kPi / 2.0f) +
+                                std::fabs(angle(c, d, a) - kPi / 2.0f);
+            if (score < best) {
+                best = score;
+                bestI = i;
+            }
+        }
+        faces.push_back({loop[bestI], loop[(bestI + 1) % n], loop[(bestI + 2) % n],
+                         loop[(bestI + 3) % n]});
+        const std::size_t r1 = (bestI + 1) % n, r2 = (bestI + 2) % n;
+        std::vector<Index> rest;
+        for (std::size_t k = 0; k < n; ++k) {
+            if (k != r1 && k != r2) {
+                rest.push_back(loop[k]);
+            }
+        }
+        loop = std::move(rest);
+    }
+    if (loop.size() >= 3) {
+        faces.push_back(std::move(loop));
+    }
+}
+
 Mesh extractFaces(const Graph& g) {
     const std::size_t nN = g.pos.size();
 
@@ -531,7 +575,6 @@ Mesh extractFaces(const Graph& g) {
 
     constexpr std::size_t kBoundaryLoop = 12;  // orbits >= this are open boundaries
     std::vector<char> used(dartCount, 0);
-    std::vector<Vec3> outP = g.pos;  // fan-split centroids are appended
     std::vector<std::vector<Index>> faces;
     for (int start = 0; start < static_cast<int>(dartCount); ++start) {
         if (used[static_cast<std::size_t>(start)]) {
@@ -565,26 +608,11 @@ Mesh extractFaces(const Graph& g) {
             faces.push_back(std::move(loop));
             continue;
         }
-        // Fan-split a hole orbit (5..11): add a centroid and pair consecutive
-        // edges into quads (an odd orbit leaves one boundary triangle). This
-        // fills singularity/hole regions with quads instead of an n-gon, keeping
-        // the orbit's boundary edges so the mesh stays manifold.
-        Vec3 c{};
-        for (const Index v : loop) {
-            c += g.pos[v];
-        }
-        const Index cIdx = static_cast<Index>(outP.size());
-        outP.push_back(c / static_cast<float>(n));
-        std::size_t covered = 0;
-        for (std::size_t k = 0; 2 * k + 1 < n; ++k) {
-            faces.push_back({loop[2 * k], loop[2 * k + 1], loop[(2 * k + 2) % n], cIdx});
-            covered = 2 * k + 2;
-        }
-        if (covered < n) {  // odd orbit: last edge closes with a triangle
-            faces.push_back({loop[n - 1], loop[0], cIdx});
-        }
+        // Greedy-cut a hole orbit (5..11) into well-shaped quads using only its
+        // own vertices — no centroid, so no pie-slice slivers (see fillFace).
+        fillFace(std::move(loop), g.pos, faces);
     }
-    return Mesh::fromIndexed(outP, faces);
+    return Mesh::fromIndexed(g.pos, faces);
 }
 
 }  // namespace

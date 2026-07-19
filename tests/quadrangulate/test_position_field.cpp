@@ -37,6 +37,31 @@ Mesh cylinder(float radius, float height, int rings, int segments) {
     return Mesh::fromIndexed(p, f);
 }
 
+// Closed UV sphere. Its two poles are 4-RoSy singularities, so the extractor's
+// face walk produces n-gon orbits there — the regime that exercises the
+// greedy-cut hole fill (fillFace), unlike the developable cylinder.
+Mesh uvSphere(float radius, int rings, int segments) {
+    std::vector<Vec3> p;
+    std::vector<std::vector<Index>> f;
+    const auto id = [&](int i, int j) { return static_cast<Index>(i * segments + (j % segments)); };
+    for (int i = 0; i <= rings; ++i) {
+        const float theta = 3.14159265358979323846f * static_cast<float>(i) / static_cast<float>(rings);
+        for (int j = 0; j < segments; ++j) {
+            const float phi = 2.0f * 3.14159265358979323846f * static_cast<float>(j) /
+                              static_cast<float>(segments);
+            p.push_back({radius * std::sin(theta) * std::cos(phi),
+                         radius * std::sin(theta) * std::sin(phi), radius * std::cos(theta)});
+        }
+    }
+    for (int i = 0; i < rings; ++i) {
+        for (int j = 0; j < segments; ++j) {
+            f.push_back({id(i, j), id(i + 1, j), id(i + 1, j + 1)});
+            f.push_back({id(i, j), id(i + 1, j + 1), id(i, j + 1)});
+        }
+    }
+    return Mesh::fromIndexed(p, f);
+}
+
 // Best 4-RoSy agreement between two tangent-plane directions about normal n.
 float rosyAgreement(Vec3 a, Vec3 b, Vec3 n) {
     float best = -1.0f;
@@ -179,4 +204,51 @@ TEST_CASE("position field: extraction gives a clean quad grid on a cylinder") {
     REQUIRE(F.size() > 0);
     CHECK(quads.validate().empty());                                             // manifold
     CHECK(static_cast<double>(quadCount) / static_cast<double>(F.size()) > 0.90);  // quad grid
+}
+
+// Regression for the greedy-cut hole fill (fillFace). A UV sphere's poles are
+// singularities, so extraction produces n-gon orbits there. The old centroid
+// fan-split filled them with pie-slice quads (many corners well under 30 deg);
+// greedy-cut instead emits near-90-deg quads from the orbit's own vertices. The
+// result must stay manifold and quad-dominant, and only a small fraction of
+// quads may have a sharp (< 30 deg) corner — a centroid fan would blow past this.
+TEST_CASE("position field: greedy-cut hole fill avoids pie-slice slivers") {
+    const Mesh sphere = uvSphere(1.0f, 24, 30);
+    const remesh::PositionField field = remesh::computePositionField(sphere, 0.14f, 40);
+    const Mesh quads = remesh::extractQuadMesh(sphere, field);
+
+    std::vector<Vec3> P;
+    std::vector<std::vector<Index>> F;
+    quads.toIndexed(P, F);
+    REQUIRE(F.size() > 0);
+    CHECK(quads.validate().empty());  // manifold
+
+    std::size_t quadCount = 0;
+    std::size_t slivers = 0;  // quads with a corner < 30 deg
+    for (const auto& f : F) {
+        if (f.size() != 4) {
+            continue;
+        }
+        ++quadCount;
+        float worst = 180.0f;
+        for (int k = 0; k < 4; ++k) {
+            const Vec3 a = P[f[static_cast<std::size_t>(k)]];
+            const Vec3 b = P[f[static_cast<std::size_t>((k + 1) % 4)]];
+            const Vec3 pr = P[f[static_cast<std::size_t>((k + 3) % 4)]];
+            const Vec3 e1 = b - a, e2 = pr - a;
+            const float c = dot(e1, e2) / (length(e1) * length(e2) + 1e-6f);
+            worst = std::fmin(worst, std::acos(std::clamp(c, -1.0f, 1.0f)) * 180.0f / 3.14159265f);
+        }
+        if (worst < 30.0f) {
+            ++slivers;
+        }
+    }
+    REQUIRE(quadCount > 0);
+    const double quadFrac = static_cast<double>(quadCount) / static_cast<double>(F.size());
+    const double sliverFrac = static_cast<double>(slivers) / static_cast<double>(quadCount);
+    CAPTURE(F.size());
+    CAPTURE(quadFrac);
+    CAPTURE(sliverFrac);
+    CHECK(quadFrac > 0.75);       // strongly quad-dominant despite the two poles
+    CHECK(sliverFrac < 0.10);     // greedy-cut keeps pie-slice slivers rare
 }
