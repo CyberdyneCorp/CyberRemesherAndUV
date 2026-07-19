@@ -19,6 +19,7 @@
 #include <map>
 #include <numeric>
 #include <set>
+#include <utility>
 #include <vector>
 
 namespace cyber::remesh {
@@ -728,6 +729,103 @@ CollapsedGraphStats debugCollapse(const Mesh& mesh, const PositionField& field) 
         edges += a.size();
     }
     return {g.pos.size(), edges / 2};
+}
+
+IntegerConsistency measureIntegerConsistency(const Mesh& mesh, const PositionField& field) {
+    IntegerConsistency r;
+
+    // Rotate an integer 2-D vector by k * 90 degrees.
+    const auto rot90 = [](Int2 t, int k) {
+        for (int i = 0; i < (k & 3); ++i) {
+            t = Int2{-t.y, t.x};
+        }
+        return t;
+    };
+    // The u->v field connection: 4-RoSy rotation index (0..3) and integer
+    // translation, from the same orientation / lattice-position matching the
+    // collapse uses.
+    const auto connection = [&](Index u, Index v, int& rotOut, Int2& tOut) {
+        // Rotation index: pick the aligned representative pair (index ba for u,
+        // bb for v) as compatOrientation does, but keep the indices. The transition
+        // rotation is (bb - ba), plus 2 (a 180-degree turn) when the match needed a
+        // sign flip. This is the 90-degree turn count taking u's frame to v's.
+        const Vec3 nu = field.normal[u], nv = field.normal[v];
+        const std::array<Vec3, 4> a{field.q[u], cross(nu, field.q[u]),
+                                    field.q[u] * -1.0f, cross(nu, field.q[u]) * -1.0f};
+        const std::array<Vec3, 4> b{field.q[v], cross(nv, field.q[v]),
+                                    field.q[v] * -1.0f, cross(nv, field.q[v]) * -1.0f};
+        int ba = 0, bb = 0;
+        float best = -2.0f;
+        for (int i = 0; i < 4; ++i) {
+            for (int j = 0; j < 4; ++j) {
+                const float dt = dot(a[static_cast<std::size_t>(i)], b[static_cast<std::size_t>(j)]);
+                if (dt > best) {
+                    best = dt;
+                    ba = i;
+                    bb = j;
+                }
+            }
+        }
+        rotOut = (bb - ba) & 3;
+        const Vec3 q0 = a[static_cast<std::size_t>(ba)];
+        const Vec3 q1 = b[static_cast<std::size_t>(bb)];
+        const float sU = field.scale.empty() ? field.spacing : field.spacing * field.scale[u];
+        const float sV = field.scale.empty() ? field.spacing : field.spacing * field.scale[v];
+        const float s = 0.5f * (sU + sV);
+        const PosCompat pc =
+            compatPosition(mesh.position(VertexId{u}), field.normal[u], q0, field.o[u],
+                           mesh.position(VertexId{v}), field.normal[v], q1, field.o[v], s, 1.0f / s);
+        tOut = Int2{pc.i1.x - pc.i0.x, pc.i1.y - pc.i0.y};
+    };
+
+    // Per-FACE holonomy: a triangle is always contractible, so accumulating the
+    // connection (rotation + translation) around its three edges must return to
+    // the identity (rotation 0, translation 0) UNLESS the face contains a true
+    // field singularity. This avoids the non-contractible-loop confound of a
+    // spanning-tree walk (e.g. a cylinder's circumference legitimately wraps).
+    // The fraction of clean faces measures how ready the field is for the
+    // Stage-2 integer solve; the singular faces are its singularities.
+    double defSum = 0.0;
+    std::size_t clean = 0;
+    for (Index fi = 0; fi < mesh.faceCapacity(); ++fi) {
+        const FaceId f{fi};
+        if (!mesh.isAlive(f) || mesh.faceSize(f) != 3) {
+            continue;
+        }
+        const auto verts = mesh.faceVertices(f);
+        if (!field.valid[verts[0].value] || !field.valid[verts[1].value] ||
+            !field.valid[verts[2].value]) {
+            continue;
+        }
+        int g = 0;
+        Int2 c{0, 0};
+        for (std::size_t k = 0; k < 3; ++k) {
+            const Index u = verts[k].value, v = verts[(k + 1) % 3].value;
+            int rot = 0;
+            Int2 t{};
+            connection(u, v, rot, t);
+            const Int2 rt = rot90(t, g);
+            c = Int2{c.x + rt.x, c.y + rt.y};
+            g = (g + rot) & 3;
+        }
+        ++r.loopEdges;  // faces tested
+        ++r.vertices;
+        const bool rotOk = (g == 0);
+        const int d1 = std::abs(c.x) + std::abs(c.y);
+        if (!rotOk) {
+            ++r.rotSingular;
+        }
+        if (d1 != 0) {
+            ++r.transDefect;
+        }
+        if (rotOk && d1 == 0) {
+            ++clean;
+        }
+        defSum += static_cast<double>(d1);
+    }
+    r.meanDefect = r.loopEdges ? defSum / static_cast<double>(r.loopEdges) : 0.0;
+    r.closedFraction = r.loopEdges ? static_cast<double>(clean) / static_cast<double>(r.loopEdges) : 1.0;
+    return r;
 }
 
 }  // namespace cyber::remesh

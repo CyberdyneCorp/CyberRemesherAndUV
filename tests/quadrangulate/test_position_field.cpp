@@ -331,6 +331,22 @@ TEST_CASE("position field: per-vertex scale tracks local density") {
     CHECK(uMax < 1.25f);
 }
 
+// Integer-parametrization rewrite, Milestone 1: the per-face holonomy of the
+// field connection must find NO orientation singularities on a developable
+// cylinder (its 4-RoSy field is clean). This locks in the connection rotation
+// math (rotation index = difference of the aligned representative indices) that
+// the Stage-2 integer solve will build on. Translation defects may be nonzero
+// (position-field boundary noise) — that is what the integer solve resolves.
+TEST_CASE("integer consistency: orientation field is singularity-clean on a cylinder") {
+    const Mesh cyl = cylinder(1.0f, 3.0f, 40, 40);
+    const remesh::PositionField field = remesh::computePositionField(cyl, 0.16f, 40);
+    const remesh::IntegerConsistency ic = remesh::measureIntegerConsistency(cyl, field);
+    CAPTURE(ic.loopEdges);  // faces tested
+    CAPTURE(ic.rotSingular);
+    REQUIRE(ic.loopEdges > 0);
+    CHECK(ic.rotSingular == 0);  // developable surface: zero orientation holonomy
+}
+
 // Regression for the post-collapse lattice-edge recovery (A4b). Per-vertex
 // field noise misclassifies some real lattice edges as diagonals, dropping the
 // collapsed graph's average valence below the grid ideal of 4. Recovery re-tests

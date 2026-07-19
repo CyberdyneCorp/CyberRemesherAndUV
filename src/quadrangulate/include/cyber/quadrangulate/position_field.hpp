@@ -70,4 +70,23 @@ struct CollapsedGraphStats {
 };
 [[nodiscard]] CollapsedGraphStats debugCollapse(const Mesh& mesh, const PositionField& field);
 
+// Integer-parametrization rewrite, Milestone 1 (see
+// docs/integer-parametrization-plan.md). Assigns each vertex a global integer
+// 2-D coordinate by spanning-tree integration of the field connection (per-edge
+// 4-RoSy rotation + integer translation), then measures how well the mesh's
+// independent loops close. Small/sparse holonomy defects mean the field is
+// consistent enough for the Stage-2 integer solve; large/dense defects mean the
+// orientation field must be strengthened (Phase 5) first. Pure measurement — it
+// does not modify the mesh and is not yet on the production path.
+struct IntegerConsistency {
+    std::size_t vertices = 0;      // vertices reached by the spanning tree
+    std::size_t loopEdges = 0;     // non-tree (independent-loop) interior edges tested
+    std::size_t rotSingular = 0;   // loop edges where the orientation index disagrees
+    std::size_t transDefect = 0;   // loop edges whose integer translation defect != 0
+    double meanDefect = 0.0;       // mean L1 translation defect over loop edges
+    double closedFraction = 0.0;   // fraction of loop edges with zero defect (higher = better)
+};
+[[nodiscard]] IntegerConsistency measureIntegerConsistency(const Mesh& mesh,
+                                                           const PositionField& field);
+
 }  // namespace cyber::remesh
