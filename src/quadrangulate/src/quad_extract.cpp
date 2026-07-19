@@ -967,8 +967,30 @@ std::size_t debugPositionSingularities(const Mesh& mesh, const PositionField& fi
     return singular;
 }
 
-IntegerSolveStats debugIntegerSolve(const Mesh& mesh, const PositionField& field) {
-    IntegerSolveStats st;
+namespace {
+
+// The corrected integer grid: triangles, half-edge opposite (e2e), per-undirected-
+// edge integer jump (edgeDiff, post-flow), per-face edge ids + globally-aligned
+// edge orientations, and the pre-solve position singularities. This is the state
+// the min-cost flow leaves behind (QuadriFlow's post-ComputeMaxFlow state) and the
+// input to subdivision + quad extraction.
+struct IntegerGrid {
+    std::vector<std::array<Index, 3>> tris;
+    std::vector<int> e2e;
+    std::vector<Int2> edgeDiff;
+    std::vector<std::array<int, 3>> faceEdgeIds;
+    std::vector<std::array<int, 3>> orients;
+    std::set<int> singular;
+    int flow = 0;
+    int supply = 0;
+    std::size_t residualMismatch = 0;
+};
+
+// Runs the Stage-2 integer solve and returns the corrected grid (does not modify
+// the mesh). Post-solve, edge_diff is globally consistent except at the sparse
+// true singularities.
+IntegerGrid computeIntegerGrid(const Mesh& mesh, const PositionField& field) {
+    std::size_t residualMismatch = 0;
 
     // 1. Triangles + half-edge opposite map (E2E), undirected edge implied later.
     std::vector<std::array<Index, 3>> tris;
@@ -983,7 +1005,6 @@ IntegerSolveStats debugIntegerSolve(const Mesh& mesh, const PositionField& field
         }
     }
     const int nTri = static_cast<int>(tris.size());
-    st.faces = tris.size();
     std::map<std::pair<Index, Index>, int> heMap;
     for (int t = 0; t < nTri; ++t) {
         for (int j = 0; j < 3; ++j) {
@@ -1060,7 +1081,6 @@ IntegerSolveStats debugIntegerSolve(const Mesh& mesh, const PositionField& field
             singular.insert(t);
         }
     }
-    st.preSingular = singular.size();
 
     // 3. BuildEdgeInfo: undirected edge ids + edge_diff.
     std::vector<Int2> edgeDiff;
@@ -1191,7 +1211,7 @@ IntegerSolveStats debugIntegerSolve(const Mesh& mesh, const PositionField& field
         }
         const bool isSing = (res.x != 0 || res.y != 0);
         if (isSing != (singular.count(t) != 0)) {
-            ++st.residualMismatch;
+            ++residualMismatch;
         }
     }
 
@@ -1211,7 +1231,6 @@ IntegerSolveStats debugIntegerSolve(const Mesh& mesh, const PositionField& field
             flow.addEdge(e, sink, -initial[static_cast<std::size_t>(e)], 0);
         }
     }
-    st.supply = supply;
     struct VarArc {
         int edgeId, comp, arcFwd;  // flow eq(+)->eq(-) decreases edge_diff[edgeId][comp]
     };
@@ -1229,7 +1248,6 @@ IntegerSolveStats debugIntegerSolve(const Mesh& mesh, const PositionField& field
         varArcs.push_back(VarArc{static_cast<int>(ind) / 2, static_cast<int>(ind) % 2, fwd});
     }
     const auto res = flow.solve(source, sink);
-    st.flow = res.first;
 
     // Apply: flow eq(+)->eq(-) on a variable arc decreases that edge_diff component.
     for (const VarArc& va : varArcs) {
@@ -1243,19 +1261,50 @@ IntegerSolveStats debugIntegerSolve(const Mesh& mesh, const PositionField& field
         }
     }
 
-    // Post-solve residual per face.
-    for (int t = 0; t < nTri; ++t) {
+    IntegerGrid g;
+    g.tris = std::move(tris);
+    g.e2e = std::move(e2e);
+    g.edgeDiff = std::move(edgeDiff);
+    g.faceEdgeIds = std::move(faceEdgeIds);
+    g.orients = std::move(orients);
+    g.singular = std::move(singular);
+    g.flow = res.first;
+    g.supply = supply;
+    g.residualMismatch = residualMismatch;
+    return g;
+}
+
+// Per-face residual of the (possibly corrected) grid: faces whose three aligned
+// edge diffs do not sum to zero. Pre-solve == position singularities; post-solve
+// == the sparse true singularities that survive the flow.
+std::size_t countResidualSingularities(const IntegerGrid& g) {
+    std::size_t singular = 0;
+    for (std::size_t t = 0; t < g.tris.size(); ++t) {
         Int2 r{0, 0};
         for (int j = 0; j < 3; ++j) {
-            const Int2 contrib = rshift90i(edgeDiff[static_cast<std::size_t>(faceEdgeIds[static_cast<std::size_t>(t)][static_cast<std::size_t>(j)])],
-                                           orients[static_cast<std::size_t>(t)][static_cast<std::size_t>(j)]);
+            const Int2 contrib = rshift90i(g.edgeDiff[static_cast<std::size_t>(g.faceEdgeIds[t][static_cast<std::size_t>(j)])],
+                                           g.orients[t][static_cast<std::size_t>(j)]);
             r.x += contrib.x;
             r.y += contrib.y;
         }
         if (r.x != 0 || r.y != 0) {
-            ++st.postSingular;
+            ++singular;
         }
     }
+    return singular;
+}
+
+}  // namespace
+
+IntegerSolveStats debugIntegerSolve(const Mesh& mesh, const PositionField& field) {
+    const IntegerGrid g = computeIntegerGrid(mesh, field);
+    IntegerSolveStats st;
+    st.faces = g.tris.size();
+    st.preSingular = g.singular.size();
+    st.residualMismatch = g.residualMismatch;
+    st.flow = g.flow;
+    st.supply = g.supply;
+    st.postSingular = countResidualSingularities(g);
     return st;
 }
 
