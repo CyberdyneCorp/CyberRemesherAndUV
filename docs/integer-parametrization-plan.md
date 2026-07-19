@@ -199,12 +199,71 @@ malformed-orbit holes, no post-hoc rotation.
      and orientation holonomy is what SETS quad valence (val3/5), *not* the position
      residual (82) that the earlier note compared against. Yet extraction yields
      **388 interior irregular** on spot — ~9× the 44 field singularities. So ~344
-     spurious val3/val5 are baked into the **grid connectivity by the subdivide +
-     collapse stage**: coarser spacing (more subdivision) is strictly worse, native
-     (≈1 cell/edge, least subdivision) is best — confirming subdivision as the noise
-     source. **Next: localize subdivide vs collapse; determine whether a clean
-     single-level grid construction is achievable, else port the multi-res
-     `DownsampleEdgeGraph`.** The direct lever to &lt;15% / QuadriFlow parity.
+     spurious val3/val5 are baked into the **grid connectivity** — round 2 (below)
+     pins this as a quantization limit of the single-level collapse, resolved only
+     by the multi-res `DownsampleEdgeGraph`.
+   - 🔬 **Bug-hunt round 2 (workflow) — VERDICT: fundamental single-level limit, no
+     fixable bug.** All three lenses agreed (conf 0.62–0.78); the pinpoint agent's
+     decisive test settles it. The ~9× excess is **quantization**, not a discrete
+     defect: irregular density scales *smoothly and inversely* with subdivision
+     amount (spot 0.8× spacing → 3324 midpoints → 15.6% density; 1.4× → 968 →
+     20.7%) — a knob, not a bug. The val3/val5 come as **adjacent dipole
+     staircases** (55–61% of interior val3 sit next to a val5; v3≈v5 counts), the
+     signature of a coarse grid, plus high-valence **collapse hubs**. This also
+     *overturned* round 1's guess that subdivision was the culprit: `subdivide`
+     is conforming and clean (each split's sub-face diffs sum to zero); the driver
+     is the **zero-diff collapse**. Root cause: the collapse merges only vertices
+     joined by a *direct* zero-diff edge, but two vertices share a grid cell iff
+     *some path* between them has diffs summing to zero (net-zero equivalence, e.g.
+     +1 then −1 around a corner). Local transitivity ⊊ lattice equivalence → some
+     true grid vertices split (val3) and neighbours over-merge (val5/hubs). We have
+     **no flip-repair layer at all**; QuadriFlow closes exactly this with
+     `FixFlipHierarchy` over a coarsened `DownsampleEdgeGraph`. → **Phase 5.**
+
+5. ◻ **Field/grid foundation — the multi-resolution flip-repair layer (Phase 5).**
+   The one remaining lever to beat QuadriFlow on singularities / median angle. It
+   slots **between** the (done, validated) integer solve and the (done, validated)
+   extraction — build a coarsened edge-graph hierarchy, repair flipped cells
+   coarse-to-fine so the finest collapse is flip-free = one clean node per cell,
+   then extract as today. QuadriFlow is MIT → clean-room port is licence-clean.
+
+   **Port surface** (from `examples/reference/QuadriFlow/src`):
+
+   | Piece | Source | ~Lines | Notes |
+   |---|---|---|---|
+   | `Hierarchy::DownsampleEdgeGraph` | hierarchy.cpp:417 | ~200 | build coarsened `(F2E,E2F,EdgeDiff,FQ)` levels |
+   | `Hierarchy::FixFlip` (greedy) | hierarchy.cpp:923 | ~150 | detect (signed-area<0) + repair flipped cells |
+   | `Hierarchy::UpdateGraphValue` | hierarchy.cpp:410 | ~40 | push repaired diffs back to the fine level |
+   | `FixFlipSat` + `localsat` | hierarchy.cpp:640 + localsat.cpp | ~350 | **optional** SAT refinement — defer |
+
+   ~400 lines for the greedy path (skip the SAT variant first) — the most
+   index-heavy code in the project; genuinely multi-session.
+
+   **Sub-milestones:**
+   - **5a** — port `DownsampleEdgeGraph`; validate one coarsened level round-trips.
+   - **5b** — port `FixFlip` + `UpdateGraphValue`; wire `solve → downsample →
+     FixFlip → update-back → subdivide → extract`.
+   - **5c** — measure on the corpus; the dipole staircases should collapse toward
+     the ~44 true singularities (spot 388 → double digits = go/no-go).
+   - **5d** — *optional* `FixFlipSat` for residual hard cases.
+
+   **Exit:** interior irregular approaches the field's true singularity count —
+   **irregular % < 15% and median angle ≥ QuadriFlow** on the corpus (gated on
+   `examples/11_benchmark.py`), promoting the integer extractor to default.
+
+   **Risk — high, specific:** (1) the hierarchy is intricate (cross-level union-find
+   + orientation bookkeeping). (2) M3 dropped the canonical `edge_diff`/
+   `face_edgeOrients` mirror (works on per-half-edge *local-frame* diffs, since the
+   single-level pairing tests are rotation-invariant); `DownsampleEdgeGraph` threads
+   the canonical `EdgeDiff`/`FQ` through levels, so Phase 5 likely forces carrying
+   that mirror after all — partially reworking `computeIntegerGrid`'s output.
+
+   **Recommended entry:** a time-boxed **5a+5b spike** — the smallest slice that can
+   show spot's dipoles collapsing — as a go/no-go before committing the full port.
+   No cheaper alternative exists: the only single-level-fixable slice (midpoint
+   T-junctions) is ~45% co-located but only ~1.3× enriched, so it can't dent the 9×
+   gap. Weigh against the wins already banked (adaptivity 4/5, hard-surface
+   robustness) — Phase 5 buys the *median-angle* axis specifically.
 
 ## Open risk (revised after Milestone 1)
 
