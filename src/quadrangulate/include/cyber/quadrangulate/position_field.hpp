@@ -89,4 +89,10 @@ struct IntegerConsistency {
 [[nodiscard]] IntegerConsistency measureIntegerConsistency(const Mesh& mesh,
                                                            const PositionField& field);
 
+// Self-test for the Stage-2 min-cost max-flow engine (the solver that will
+// balance per-face coordinate divergences in the integer optimization). Returns
+// true iff it reproduces known-answer flow problems. A validation hook while the
+// integer solve is built; not on the production path.
+[[nodiscard]] bool debugMinCostFlow();
+
 }  // namespace cyber::remesh

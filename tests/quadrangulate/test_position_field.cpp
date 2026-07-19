@@ -331,6 +331,13 @@ TEST_CASE("position field: per-vertex scale tracks local density") {
     CHECK(uMax < 1.25f);
 }
 
+// Integer-parametrization rewrite, Milestone 2: the min-cost max-flow engine
+// that will balance per-face coordinate divergences in the integer solve must
+// reproduce known-answer flow problems (cheapest-paths routing).
+TEST_CASE("integer solve: min-cost max-flow engine is correct") {
+    CHECK(remesh::debugMinCostFlow());
+}
+
 // Integer-parametrization rewrite, Milestone 1: the per-face holonomy of the
 // field connection must find NO orientation singularities on a developable
 // cylinder (its 4-RoSy field is clean). This locks in the connection rotation
