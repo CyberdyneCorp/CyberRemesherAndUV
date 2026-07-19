@@ -52,6 +52,14 @@ Mesh extractIsland(const Mesh& source, const std::vector<FaceId>& faces) {
 // Tangential Laplacian step for an interior vertex: move toward the 1-ring
 // centroid, keeping only the component in the vertex's tangent plane so the
 // vertex slides across the surface without denting it inward.
+Vec3 vertexNormal(const Mesh& mesh, VertexId v) {
+    Vec3 normal{};
+    for (const FaceId f : mesh.vertexFaces(v)) {
+        normal += mesh.faceNormal(f);
+    }
+    return normalized(normal);
+}
+
 Vec3 tangentialTarget(const Mesh& mesh, VertexId v, float lambda) {
     const auto edges = mesh.vertexEdges(v);
     Vec3 centroid{};
@@ -60,14 +68,48 @@ Vec3 tangentialTarget(const Mesh& mesh, VertexId v, float lambda) {
         centroid += mesh.position(a == v ? b : a);
     }
     centroid = centroid / static_cast<float>(edges.size());
-    Vec3 normal{};
-    for (const FaceId f : mesh.vertexFaces(v)) {
-        normal += mesh.faceNormal(f);
-    }
-    normal = normalized(normal);
+    const Vec3 normal = vertexNormal(mesh, v);
     const Vec3 p = mesh.position(v);
     Vec3 delta = (centroid - p) * lambda;
     delta = delta - normal * dot(delta, normal);  // keep only the tangential slide
+    return p + delta;
+}
+
+// Blended relaxation target: mixes a 1-ring centroid pull (which regularises
+// quad SHAPE / angles) with an edge-length-equalizing spring (each neighbour
+// pulls v along the edge in proportion to how far that edge deviates from the
+// incident mean, which regularises edge LENGTH). `beta` in [0,1] trades the two:
+// 0 is pure centroid (best angles, poor uniformity), 1 is pure length-equalize
+// (uniform edges but sheared angles). A middle value gets both — the balance
+// QuadriFlow's smoothing achieves. The result stays tangential to the surface.
+Vec3 blendedRelaxTarget(const Mesh& mesh, VertexId v, float lambda, float beta) {
+    const auto edges = mesh.vertexEdges(v);
+    const Vec3 p = mesh.position(v);
+    Vec3 centroid{};
+    float meanLen = 0.0f;
+    for (const EdgeId e : edges) {
+        const auto [a, b] = mesh.edgeVertices(e);
+        const Vec3 np = mesh.position(a == v ? b : a);
+        centroid += np;
+        meanLen += length(np - p);
+    }
+    const float n = static_cast<float>(edges.size());
+    centroid = centroid / n;
+    meanLen /= n;
+    Vec3 lengthForce{};
+    for (const EdgeId e : edges) {
+        const auto [a, b] = mesh.edgeVertices(e);
+        const Vec3 d = mesh.position(a == v ? b : a) - p;
+        const float len = length(d);
+        if (len > 1e-8f) {
+            lengthForce += (d / len) * (len - meanLen);
+        }
+    }
+    lengthForce = lengthForce / n;
+    const Vec3 combined = (centroid - p) * (1.0f - beta) + lengthForce * beta;
+    const Vec3 normal = vertexNormal(mesh, v);
+    Vec3 delta = combined * lambda;
+    delta = delta - normal * dot(delta, normal);
     return p + delta;
 }
 
@@ -82,7 +124,7 @@ Vec3 tangentialTarget(const Mesh& mesh, VertexId v, float lambda) {
 // and open borders keep their subdivided positions — sliding them along the
 // faceted crease instead reprojects erratically and creates new slivers.
 void relaxQuadMesh(Mesh& mesh, const ReferenceSurface& reference, float sharpEdgeDegrees,
-                   int iterations, float lambda) {
+                   int iterations, float lambda, float beta = 0.0f) {
     mesh.tagFeatureEdges(sharpEdgeDegrees);
     std::vector<bool> constrained(mesh.vertexCapacity(), false);
     for (Index ei = 0; ei < mesh.edgeCapacity(); ++ei) {
@@ -104,7 +146,8 @@ void relaxQuadMesh(Mesh& mesh, const ReferenceSurface& reference, float sharpEdg
             if (!mesh.isAlive(v) || constrained[i] || mesh.vertexEdges(v).empty()) {
                 continue;
             }
-            newPos[i] = tangentialTarget(mesh, v, lambda);
+            newPos[i] = beta > 0.0f ? blendedRelaxTarget(mesh, v, lambda, beta)
+                                    : tangentialTarget(mesh, v, lambda);
             move[i] = true;
         }
         for (Index i = 0; i < mesh.vertexCapacity(); ++i) {
@@ -226,6 +269,7 @@ PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSi
     }
 
     float progressBase = 0.0f;
+    bool fieldExtractor = false;  // did the position-field extractor run? (drives CV relax)
     for (std::size_t i = 0; i < islandFaces.size(); ++i) {
         IslandOutcome& outcome = outcomes[i];
         outcome.inputFaces = islandFaces[i].size();
@@ -269,6 +313,7 @@ PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSi
         // injected quadrangulator (field-aligned) when provided, else greedy.
         std::unique_ptr<IQuadrangulator> quad =
             quadrangulator ? quadrangulator() : makeGreedyPairingQuadrangulator();
+        fieldExtractor = quad->name() == "instant-meshes";
         ProgressSink quadSink =
             progress ? progress->subrange(progressBase + weight * 0.3f,
                                           progressBase + weight * 0.9f, "quadrangulate")
@@ -331,6 +376,13 @@ PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSi
             result.mesh.fillHoles(static_cast<std::size_t>(params.holeFillMaxBoundary));
     }
     if (params.pureQuads && result.mesh.faceCount() > 0) {
+        // The position-field extractor produces an already-uniform base, so we
+        // can blend in edge-length equalization (beta) to tighten edge-length CV
+        // toward the field-based reference without shearing angles. The default
+        // matcher's base is less uniform, where that same force would trade too
+        // much angle quality, so it keeps the pure centroid relax (beta 0).
+        const float relaxBeta = fieldExtractor ? 0.5f : 0.0f;
+
         // Relax the coarse base onto the source first: a skewed base subdivides
         // into skewed quads, so smoothing it before the split reduces the sliver
         // tail the subdivision would otherwise inherit.
@@ -338,7 +390,7 @@ PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSi
             const ReferenceSurface baseSurface(work, params.smoothNormalDegrees);
             if (!baseSurface.empty()) {
                 relaxQuadMesh(result.mesh, baseSurface, params.sharpEdgeDegrees,
-                              /*iterations=*/10, /*lambda=*/0.5f);
+                              /*iterations=*/10, /*lambda=*/0.5f, relaxBeta);
             }
         }
         result.mesh = result.mesh.linearSubdivide();
@@ -357,7 +409,7 @@ PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSi
                 }
             }
             relaxQuadMesh(result.mesh, sourceSurface, params.sharpEdgeDegrees,
-                          /*iterations=*/20, /*lambda=*/0.5f);
+                          /*iterations=*/20, /*lambda=*/0.5f, relaxBeta);
         }
     }
     countFaces(result.mesh, result.stats);

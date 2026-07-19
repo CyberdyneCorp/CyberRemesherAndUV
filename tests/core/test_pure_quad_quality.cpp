@@ -10,6 +10,7 @@
 #include "cyber/core/mesh.hpp"
 #include "cyber/core/pipeline.hpp"
 #include "cyber/core/remesh_params.hpp"
+#include "cyber/quadrangulate/position_field.hpp"
 
 using cyber::Index;
 using cyber::Mesh;
@@ -76,6 +77,8 @@ struct QuadQuality {
     float worstMinAngleDeg = 180.0f;  // smallest interior angle across all quads
     float shortestEdgeRatio = 1.0f;   // min edge / mean edge (0 => a collapsed quad)
     float maxRadiusError = 0.0f;      // |‖v‖ - 1| over all vertices (unit sphere)
+    float edgeCV = 0.0f;              // stddev/mean of quad edge length (uniformity)
+    float sliverFraction = 0.0f;      // fraction of quads with a corner < 20 deg
 };
 
 QuadQuality measure(const Mesh& mesh) {
@@ -108,6 +111,7 @@ QuadQuality measure(const Mesh& mesh) {
             continue;
         }
         ++q.quads;
+        float quadWorst = 180.0f;
         for (std::size_t k = 0; k < 4; ++k) {
             const Vec3 a = P[f[k]];
             const Vec3 e1 = P[f[(k + 1) % 4]] - a;
@@ -118,10 +122,31 @@ QuadQuality measure(const Mesh& mesh) {
             const float c = dot(e1, e2) / (l1 * l2 + 1e-12f);
             const float ang =
                 std::acos(std::clamp(c, -1.0f, 1.0f)) * 180.0f / 3.14159265358979323846f;
-            q.worstMinAngleDeg = std::fmin(q.worstMinAngleDeg, ang);
+            quadWorst = std::fmin(quadWorst, ang);
+        }
+        q.worstMinAngleDeg = std::fmin(q.worstMinAngleDeg, quadWorst);
+        if (quadWorst < 20.0f) {
+            q.sliverFraction += 1.0f;
         }
     }
+    if (q.quads > 0) {
+        q.sliverFraction /= static_cast<float>(q.quads);
+    }
     q.shortestEdgeRatio = meanEdge > 0.0f ? shortestEdge / meanEdge : 0.0f;
+
+    double var = 0.0;
+    for (const auto& f : F) {
+        if (f.size() != 4) {
+            continue;
+        }
+        for (std::size_t k = 0; k < 4; ++k) {
+            const double d = static_cast<double>(cyber::length(P[f[k]] - P[f[(k + 1) % 4]])) - meanEdge;
+            var += d * d;
+        }
+    }
+    if (edgeN > 0 && meanEdge > 0.0f) {
+        q.edgeCV = static_cast<float>(std::sqrt(var / static_cast<double>(edgeN)) / meanEdge);
+    }
     return q;
 }
 
@@ -155,6 +180,32 @@ TEST_CASE("pure-quad remeshing produces well-shaped quads on a clean sphere") {
         CHECK(q.maxRadiusError < 0.01f);        // shape preserved on the unit sphere
         CHECK(res.mesh.validate().empty());     // still a valid manifold
     }
+}
+
+// The position-field extractor's pure-quad path blends edge-length equalization
+// into its relaxation (pipeline.cpp relaxBeta), tightening edge-length CV toward
+// the field-based reference WITHOUT shredding angles. Guards that the blended
+// relax stays wired for the extractor: with the plain centroid relax the CV on
+// this sphere sits ~0.19; the length blend pulls it clearly below.
+TEST_CASE("position-field pure-quad path equalizes edge length") {
+    const Mesh sphere = makeIcosphere(3);
+    remesh::Parameters params;
+    params.targetQuadCount = 2500;
+    params.pureQuads = true;
+    params.adaptivity = 0.0f;
+    const remesh::PipelineResult res =
+        remesh::remesh(sphere, params, nullptr, nullptr,
+                       [] { return remesh::makeInstantMeshesQuadrangulator(); });
+    REQUIRE(res.status == remesh::RunStatus::Success);
+
+    const QuadQuality q = measure(res.mesh);
+    CAPTURE(q.edgeCV);
+    CAPTURE(q.sliverFraction);
+    CHECK(q.quads > 0);
+    CHECK(q.nonQuads == 0);            // still pure quads
+    CHECK(q.edgeCV < 0.21f);           // length blend tightens uniformity (~0.20; >0.23 without)
+    CHECK(q.sliverFraction < 0.05f);   // the blend does not shear quads into slivers
+    CHECK(res.mesh.validate().empty());
 }
 
 // Determinism: identical input and parameters yield a byte-identical indexed
