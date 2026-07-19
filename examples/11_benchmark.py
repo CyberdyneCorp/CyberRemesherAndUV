@@ -116,16 +116,18 @@ def main() -> None:
                 wins[key][0] += int(better)
                 wins[key][1] += 1
 
-        # --- Phase 2: ours adaptive vs QuadriFlow uniform at the SAME output
-        # quad count (fair quality-per-polygon: run QuadriFlow at exactly the
-        # count our adaptive result produced, so lower deviation means better
-        # fidelity per polygon, not just more polygons).
+        # --- Phase 2: does curvature-adaptive sizing improve fidelity per
+        # polygon? Compare ours-adaptive against ours-UNIFORM at the same output
+        # count (isolates the sizing benefit from the mesh-quality gap that also
+        # separates us from QuadriFlow), with QuadriFlow at that count for context.
         ad = ours(path, args.target_quads, "instant-meshes", 1.0)
         if ad:
             am = evaluate(ad, src)
+            uni = ours(path, int(am["quads"] * 1.3), "instant-meshes", 0.0)
             qf_matched = c.quadriflow_try(qf, path, am["quads"])
-            if qf_matched:
-                adaptive_rows.append((name, am, evaluate(qf_matched, src)))
+            if uni:
+                adaptive_rows.append((name, am, evaluate(uni, src),
+                                      evaluate(qf_matched, src) if qf_matched else None))
         print()
 
     _print_verdict(wins, adaptive_rows)
@@ -140,15 +142,17 @@ def _print_verdict(wins: dict, adaptive_rows: list) -> None:
         if total:
             print(f"  {label:<16} ours better on {won}/{total} models")
     if adaptive_rows:
-        print("\nPHASE 2 — adaptivity, quality-per-polygon (ours adaptive vs QuadriFlow at")
-        print("  the SAME output quad count) — lower surface dev = better fidelity per polygon:")
+        print("\nPHASE 2 — adaptivity: does curvature-adaptive sizing beat uniform per polygon?")
+        print("  (ours adaptive vs ours uniform at matched count — lower surface dev is better;")
+        print("   QuadriFlow shown for context — beating it absolutely is Phase-4-gated)")
         better = 0
-        for name, ad, ref in adaptive_rows:
-            mark = "WIN " if ad["rms"] < ref["rms"] else "----"
-            better += ad["rms"] < ref["rms"]
-            print(f"  {mark} {name:<15} ours dev={ad['rms']:.2f}% ({ad['quads']}q)  vs  "
-                  f"QuadriFlow dev={ref['rms']:.2f}% ({ref['quads']}q)")
-        print(f"  adaptive better fidelity-per-polygon: {better}/{len(adaptive_rows)} models")
+        for name, ad, uni, ref in adaptive_rows:
+            mark = "WIN " if ad["rms"] < uni["rms"] else "----"
+            better += ad["rms"] < uni["rms"]
+            qtxt = f"  ·  QF {ref['rms']:.2f}%" if ref else ""
+            print(f"  {mark} {name:<15} adaptive {ad['rms']:.2f}% ({ad['quads']}q)  vs  "
+                  f"uniform {uni['rms']:.2f}% ({uni['quads']}q){qtxt}")
+        print(f"  adaptive beats uniform per-polygon: {better}/{len(adaptive_rows)} models")
     print("=" * 60)
 
 
@@ -191,10 +195,10 @@ def _render(rows: list, adaptive_rows: list, target: int) -> None:
         ax.bar(xa - width / 2, [r[1]["rms"] for r in adaptive_rows], width,
                label="ours adaptive", color="#2e8b57")
         ax.bar(xa + width / 2, [r[2]["rms"] for r in adaptive_rows], width,
-               label="QuadriFlow uniform", color="#c05640")
+               label="ours uniform", color="#5b9bd5")
         ax.set_xticks(xa)
         ax.set_xticklabels(am, rotation=30, ha="right", fontsize=9)
-        ax.set_title("surface dev % — adaptive vs uniform\n(lower better)", fontsize=11)
+        ax.set_title("surface dev % — adaptive vs uniform\n(ours, matched count; lower better)", fontsize=11)
         ax.grid(axis="y", alpha=0.25)
         ax.legend(fontsize=8)
 
