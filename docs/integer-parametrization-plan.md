@@ -220,7 +220,7 @@ malformed-orbit holes, no post-hoc rotation.
      **no flip-repair layer at all**; QuadriFlow closes exactly this with
      `FixFlipHierarchy` over a coarsened `DownsampleEdgeGraph`. → **Phase 5.**
 
-5. ◻ **Field/grid foundation — the multi-resolution flip-repair layer (Phase 5).**
+5. 🟡 **Field/grid foundation — the multi-resolution flip-repair layer (Phase 5).**
    The one remaining lever to beat QuadriFlow on singularities / median angle. It
    slots **between** the (done, validated) integer solve and the (done, validated)
    extraction — build a coarsened edge-graph hierarchy, repair flipped cells
@@ -240,12 +240,27 @@ malformed-orbit holes, no post-hoc rotation.
    index-heavy code in the project; genuinely multi-session.
 
    **Sub-milestones:**
-   - **5a** — port `DownsampleEdgeGraph`; validate one coarsened level round-trips.
-   - **5b** — port `FixFlip` + `UpdateGraphValue`; wire `solve → downsample →
-     FixFlip → update-back → subdivide → extract`.
-   - **5c** — measure on the corpus; the dipole staircases should collapse toward
-     the ~44 true singularities (spot 388 → double digits = go/no-go).
-   - **5d** — *optional* `FixFlipSat` for residual hard cases.
+   - ✅ **5a — DONE** (commit fd6e4e8). `EdgeHierarchy` (DownsampleEdgeGraph +
+     PropagateEdge + UpdateGraphValue) + `faceArea`/`countFlipped`. Validated the
+     highest-risk part first: coarsen+propagate with no repair is an **exact
+     identity** on edge_diff (`roundTripMismatch == 0`) on cylinder (6 levels) and
+     icosphere (4 levels). Confirmed the flipped-cell count ≈ interior-irregular
+     count (spot 371 flips vs ~388 irregular) — the flips ARE the dipoles.
+   - ✅ **5b — DONE** (commit a4ca742). Greedy `FixFlip` + `CheckShrink`, wired into
+     `extractIntegerQuadMesh`. **Real win, all 5 models:** interior irregular spot
+     25.2→**20.2%**, fandisk 21.9→19.8%, cheburashka 24.2→**18.9%**, rocker
+     25.9→22.4%, bunny 24.7→20.8%; still manifold / all-quad / watertight, residual
+     invariant. Flips: spot 371→198, cheburashka 609→363.
+   - 🟡 **5c — measured; greedy at its limit.** ~19–22% irregular (target <15%,
+     QuadriFlow ~3%). The greedy is provably converged (identical at maxLen 2/4 and
+     under repeated passes): the residual ~half of the flips are multi-cell clusters
+     no single-ring shrink can fix. **Not across the line yet.**
+   - ◻ **5d — `FixFlipSat` (the remaining lever).** QuadriFlow clears the residual
+     flips with a SAT-based repair (threshold up to 4). QuadriFlow shells out to the
+     `minisat` binary (an external dep we can't take); the self-contained path is
+     porting the bundled `localsat.cpp` (~295 lines, a mini DPLL solver) + the
+     `FixFlipSat` orchestration — a large, high-risk port whose marginal gain toward
+     the 3% floor is uncertain. **Decision point.**
 
    **Exit:** interior irregular approaches the field's true singularity count —
    **irregular % < 15% and median angle ≥ QuadriFlow** on the corpus (gated on
