@@ -75,10 +75,28 @@ malformed-orbit holes, no post-hoc rotation.
    fixes were needed and are locked by the cylinder test: rotation index =
    `bb − ba` (aligned-rep index difference), and per-FACE (contractible) holonomy
    rather than spanning-tree loops (a cylinder's circumference legitimately wraps).
-2. ◻ **Integer solve** — Stage 2 min-cost-flow over the face dual; push flow to
-   cancel the ±1 translation defects; verify residual singularities drop to a
-   sparse set. **This is the next focused session.** Reuse the field connection
-   already built in Milestone 1.
+2. 🟡 **Integer solve — IN PROGRESS.** Studied QuadriFlow's actual algorithm
+   (`optimize_integer_constraints` in `examples/reference/QuadriFlow`) and
+   reimplemented the reusable engine: **`MinCostFlow`** (SPFA successive shortest
+   paths, unit-tested, commit a2de102). The exact formulation to build on it:
+   - Each **face** has **2 constraint equations** (one per coordinate component):
+     `equationID = face*2 + k`.
+   - Each **edge** carries an integer diff `edge_diff[e]` (Vector2i). For face `i`,
+     edge `j` with rotation `FQ[i][j]`, map the edge's two components to the face's
+     equations via `index = rshift90((e*2+1, e*2+2), FQ[i][j])`; `index[k] = ±(comp)`
+     gives which edge-component feeds equation `k` and its **sign** `s`.
+   - `initial[equationID] = Σ s · edge_diff[e][comp]` — the residual divergence.
+   - **Arcs:** for each edge-component bordering two equations with **opposite**
+     signs, add an arc between them (adjusting that diff moves flow). Source→
+     positive-`initial` equations (supply), negative→sink (demand).
+   - Solve min-cost flow; the flow is the integer correction to `edge_diff`; apply
+     and iterate until no residual (edge_capacity ~2 per pass).
+   The intricate remaining piece is this SETUP — the edge-component→equation
+   mapping with the connection antisymmetry (`u→v` vs `v→u`) and `rshift90` signs.
+   Build it on the Milestone-1 connection; **validate cylinder-first** (its
+   per-face residuals must drop to ~0 after the solve, since it has no
+   singularities). QuadriFlow does it multi-resolution for scale; single-level is
+   fine for our corpus (~5k faces).
 3. ◻ **Extraction** — Stage 3; measure irregular % (target < 15%) and validity
    (watertight, manifold) vs the current extractor.
 4. ◻ **Quality + promote** — median/CV/feature/robustness vs QuadriFlow; if it
