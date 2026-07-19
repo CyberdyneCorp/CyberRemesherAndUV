@@ -151,9 +151,9 @@
         <div class="s">Beats our own uniform sizing; extractor now tracks adaptive density (count 8× better)</div>
       </div>
       <div class="chip">
-        <div class="k">Sharp features (CAD)</div>
-        <div class="v win">Clear win</div>
-        <div class="s">Keeps creases crisp; QuadriFlow rounds edges &amp; tears holes</div>
+        <div class="k">Features · robustness</div>
+        <div class="v partial">Mixed</div>
+        <div class="s">Win on hard-edged/box geometry (QF tears 598 edges on a cube); QF leads on smooth CAD</div>
       </div>
     </div>
   </header>
@@ -184,15 +184,19 @@
       </div>
       <div class="pill partial">Fix landed · QF-gated</div>
     </div>
-    <div class="phase">
+    <div class="phase partial">
       <div class="idx">3</div>
       <div class="body">
         <div class="t">Win on features &amp; robustness</div>
-        <div class="d">Hard-constrain the field to sharp creases (clean CAD quad loops);
-          broaden noisy-scan / degenerate-input handling across the corpus.</div>
-        <div class="exit">Exit: <b>lower feature-follow error than QuadriFlow; ≥ its manifold-success rate.</b></div>
+        <div class="d">Metrics built (feature-follow, mesh-validity). <b>Mixed:</b> we win
+          decisively on hard-edged/box geometry — a subdivided cube tears QuadriFlow (598 boundary
+          edges, 2.87% feature err) while ours is clean (0 defects, 0.3%). But on smooth CAD/organic
+          QuadriFlow leads on crease alignment and our extractor leaves validity defects (cheburashka
+          74 boundary edges) — real bugs to fix.</div>
+        <div class="exit">Exit: hard-surface robustness <b>✓</b> · smooth-corpus feature+validity
+          <b>✗ (extractor bugs)</b></div>
       </div>
-      <div class="pill planned">Planned</div>
+      <div class="pill partial">Mixed</div>
     </div>
     <div class="phase" style="border-left-color:var(--gap)">
       <div class="idx">4</div>
@@ -249,9 +253,10 @@
   <h2><span class="n">§4</span> What the benchmark taught us</h2>
   <div class="notes">
     <div class="note">
-      <div class="h"><span class="dot" style="background:var(--win)"></span>Feature preservation</div>
-      <p>On a cube, QuadriFlow rounds the sharp edges and tears holes (20% slivers); our feature-aware
-        remesh keeps them crisp. A real win even where QuadriFlow leads on raw angle.</p>
+      <div class="h"><span class="dot" style="background:var(--win)"></span>Robust on hard geometry</div>
+      <p>On a subdivided cube QuadriFlow tears the mesh apart (598 boundary edges) and rounds the
+        corners; ours stays clean and crisp. A genuine strength on box/CAD geometry — though on
+        smooth organic models QuadriFlow is the more robust one.</p>
     </div>
     <div class="note">
       <div class="h"><span class="dot" style="background:var(--gap)"></span>The median gap needs a rewrite</div>

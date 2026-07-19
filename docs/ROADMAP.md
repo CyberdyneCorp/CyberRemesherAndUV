@@ -89,14 +89,22 @@ quads where curvature is high → better fidelity per polygon.
 **Exit:** ours ≥ QuadriFlow on quality-per-polygon on ≥ 4/5 corpus models *(blocked
 on Phase 4)*; adaptivity beats our own uniform sizing on ≥ 4/5 *(met)*.
 
-## Phase 3 — Win on features & robustness
+## Phase 3 — Win on features & robustness — 🟡 measured; MIXED (win on hard geometry)
 
-- **Sharp-feature field constraints**: hard-align the orientation field to
-  creases so CAD edges become clean quad loops (QuadriFlow blurs them).
-- **Robustness pass**: broaden noisy-scan / degenerate-input handling across the
-  whole corpus.
-**Exit:** lower feature-following error than QuadriFlow on fandisk-class models;
-≥ QuadriFlow manifold-success rate across the corpus.
+Metrics built (`feature_error`, `mesh_validity`) and wired into the benchmark.
+Honest finding — **not a clean win**:
+- ✅ **Robustness on hard-edged / box geometry** — the genuine strength. On a
+  subdivided cube QuadriFlow catastrophically tears (598 boundary edges, 2.87%
+  feature error) while ours is clean (0 defects, 0.3%). QuadriFlow degenerates on
+  sharp box corners; we don't.
+- ❌ **Complex smooth CAD/organic** — QuadriFlow leads. Better crease alignment
+  (fandisk 0.43% vs 0.83%, cheburashka 0.57% vs 1.27%) and our extractor still
+  leaves validity **defects** it doesn't (cheburashka 74 boundary edges, fandisk
+  2 non-manifold). Hole-fill doesn't close them — a real extractor bug.
+**Follow-ups:** (a) fix the extractor's scattered validity defects on complex
+models; (b) hard-align the field to sharp creases for better CAD feature loops.
+**Exit (partial):** robustness win on hard-surface geometry *(met)*; ≥ QuadriFlow
+feature alignment + validity on the smooth corpus *(not met — extractor bugs)*.
 
 ## Phase 4 — Close the median-angle gap (the hard core) — 🔴 local approaches exhausted
 
