@@ -531,6 +531,7 @@ Mesh extractFaces(const Graph& g) {
 
     constexpr std::size_t kBoundaryLoop = 12;  // orbits >= this are open boundaries
     std::vector<char> used(dartCount, 0);
+    std::vector<Vec3> outP = g.pos;  // fan-split centroids are appended
     std::vector<std::vector<Index>> faces;
     for (int start = 0; start < static_cast<int>(dartCount); ++start) {
         if (used[static_cast<std::size_t>(start)]) {
@@ -551,7 +552,8 @@ Mesh extractFaces(const Graph& g) {
                 break;  // orbit closed
             }
         }
-        if (!ok || loop.size() < 3 || loop.size() >= kBoundaryLoop) {
+        const std::size_t n = loop.size();
+        if (!ok || n < 3 || n >= kBoundaryLoop) {
             continue;
         }
         std::vector<Index> sorted = loop;
@@ -559,9 +561,30 @@ Mesh extractFaces(const Graph& g) {
         if (std::adjacent_find(sorted.begin(), sorted.end()) != sorted.end()) {
             continue;  // repeated node -> degenerate orbit
         }
-        faces.push_back(std::move(loop));
+        if (n == 3 || n == 4) {
+            faces.push_back(std::move(loop));
+            continue;
+        }
+        // Fan-split a hole orbit (5..11): add a centroid and pair consecutive
+        // edges into quads (an odd orbit leaves one boundary triangle). This
+        // fills singularity/hole regions with quads instead of an n-gon, keeping
+        // the orbit's boundary edges so the mesh stays manifold.
+        Vec3 c{};
+        for (const Index v : loop) {
+            c += g.pos[v];
+        }
+        const Index cIdx = static_cast<Index>(outP.size());
+        outP.push_back(c / static_cast<float>(n));
+        std::size_t covered = 0;
+        for (std::size_t k = 0; 2 * k + 1 < n; ++k) {
+            faces.push_back({loop[2 * k], loop[2 * k + 1], loop[(2 * k + 2) % n], cIdx});
+            covered = 2 * k + 2;
+        }
+        if (covered < n) {  // odd orbit: last edge closes with a triangle
+            faces.push_back({loop[n - 1], loop[0], cIdx});
+        }
     }
-    return Mesh::fromIndexed(g.pos, faces);
+    return Mesh::fromIndexed(outP, faces);
 }
 
 }  // namespace
