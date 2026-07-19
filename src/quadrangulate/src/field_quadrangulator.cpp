@@ -430,6 +430,31 @@ bool applyRotation(Mesh& mesh, const QuadPair& qp, Rot rot) {
     return g0.valid() && g1.valid();
 }
 
+// Greedy mop-up for the adjacent triangle pairs the blossom-free augmenting
+// matching can leave unmerged (it is near-maximum, not exactly maximum): merge
+// any remaining interior, non-feature tri-tri edge into a quad. Cheap and can
+// only raise the quad count — the matching already formed the field-aligned
+// quads, so this only cleans up residual pairs.
+void mopUpTriangles(Mesh& mesh) {
+    for (Index i = 0; i < mesh.edgeCapacity(); ++i) {
+        const EdgeId e{i};
+        if (!mesh.isAlive(e) || mesh.isFeatureEdge(e) || mesh.edgeFaceCount(e) != 2) {
+            continue;
+        }
+        const auto faces = mesh.edgeFaces(e);
+        if (mesh.faceSize(faces[0]) != 3 || mesh.faceSize(faces[1]) != 3) {
+            continue;
+        }
+        const auto [a, b] = mesh.edgeVertices(e);
+        const VertexId c = opposite(mesh, faces[0], a, b);
+        const VertexId d = opposite(mesh, faces[1], a, b);
+        if (!c.valid() || !d.valid() || c == d) {
+            continue;
+        }
+        mergePair(mesh, e, faces[0], faces[1]);
+    }
+}
+
 class FieldAlignedQuadrangulator final : public IQuadrangulator {
 public:
     explicit FieldAlignedQuadrangulator(int iterations) : m_iterations(iterations) {}
@@ -469,6 +494,7 @@ public:
             }
         }
 
+        mopUpTriangles(mesh);              // catch pairs the heuristic matching missed
         removeDoublets(mesh);              // graph simplification (5.5)
         quadValenceCleanup(mesh, &field);  // valence cleanup (5.4/5.5)
         if (progress) {
