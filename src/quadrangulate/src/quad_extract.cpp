@@ -1297,6 +1297,354 @@ std::size_t countResidualSingularities(const IntegerGrid& g) {
     return singular;
 }
 
+// --- Phase 5: multi-resolution flip-repair layer (QuadriFlow FixFlipHierarchy) --
+// The single-level zero-diff collapse quantizes a clean integer grid, splitting /
+// over-merging grid vertices into spurious val3/val5 dipoles (~9× the true field
+// singularities). QuadriFlow removes these by coarsening the edge graph to a
+// fixpoint — a neighbour-independent set of zero-diff edges contracts per pass,
+// with singular faces as barriers — then repairing "flipped" (negative parametric
+// area) cells on the coarsest level, mutating only edge_diff. Clean-room port from
+// QuadriFlow (MIT): DownsampleEdgeGraph (hierarchy.cpp:417), PropagateEdge (:1076),
+// UpdateGraphValue (:410). fixFlip / checkShrink land in Milestone 5b.
+
+using Int2Pair = std::array<int, 2>;  // an undirected edge's <= 2 incident faces
+
+// Signed parametric area of a face's grid cell (QuadriFlow Area, hierarchy.cpp:950):
+// the z of the cross product of its first two rotated edge diffs. < 0 is a flipped cell.
+long faceArea(const std::vector<std::array<int, 3>>& f2e, const std::vector<std::array<int, 3>>& fq,
+              const std::vector<Int2>& diff, int f) {
+    const auto uz = [](int x) { return static_cast<std::size_t>(x); };
+    const Int2 d0 = rshift90i(diff[uz(f2e[uz(f)][0])], fq[uz(f)][0]);
+    const Int2 d1 = rshift90i(diff[uz(f2e[uz(f)][1])], fq[uz(f)][1]);
+    return static_cast<long>(d0.x) * d1.y - static_cast<long>(d0.y) * d1.x;
+}
+
+std::size_t countFlipped(const IntegerGrid& g) {
+    std::size_t n = 0;
+    for (int f = 0; f < static_cast<int>(g.tris.size()); ++f) {
+        if (faceArea(g.faceEdgeIds, g.orients, g.edgeDiff, f) < 0) {
+            ++n;
+        }
+    }
+    return n;
+}
+
+// A coarsened edge-graph hierarchy over (FQ, F2E, E2F, EdgeDiff): each level
+// contracts an independent set of zero-diff edges, chaining orientations across
+// merged strips. `back()` is the coarsest grid where each face is ~one integer cell.
+struct EdgeHierarchy {
+    std::vector<std::vector<std::array<int, 3>>> FQ, F2E;
+    std::vector<std::vector<Int2Pair>> E2F;
+    std::vector<std::vector<Int2>> edgeDiff;
+    std::vector<std::vector<int>> allow, sing;
+    std::vector<std::vector<int>> toUpperEdges, toUpperOrients, toUpperFaces;
+    int levels = 0;
+    bool consistent = true;
+
+    void downsample(std::vector<std::array<int, 3>> fq, std::vector<std::array<int, 3>> f2e,
+                    std::vector<Int2> ediff, std::vector<int> allowChanges, int level);
+    void propagateEdge();
+    void updateGraphValue(std::vector<std::array<int, 3>>& fq, std::vector<std::array<int, 3>>& f2e,
+                          std::vector<Int2>& ediff);
+};
+
+void EdgeHierarchy::downsample(std::vector<std::array<int, 3>> fq,
+                               std::vector<std::array<int, 3>> f2e, std::vector<Int2> ediff,
+                               std::vector<int> allowChanges, int level) {
+    const auto uz = [](int x) { return static_cast<std::size_t>(x); };
+    const auto isZero = [](Int2 d) { return d.x == 0 && d.y == 0; };
+
+    std::vector<Int2Pair> e2f(ediff.size(), Int2Pair{-1, -1});
+    for (int i = 0; i < static_cast<int>(f2e.size()); ++i) {
+        for (int j = 0; j < 3; ++j) {
+            const int e = f2e[uz(i)][uz(j)];
+            if (e2f[uz(e)][0] == -1) {
+                e2f[uz(e)][0] = i;
+            } else {
+                e2f[uz(e)][1] = i;
+            }
+        }
+    }
+    const int lv = (level == -1) ? 100 : level;
+    FQ.resize(uz(lv));
+    F2E.resize(uz(lv));
+    E2F.resize(uz(lv));
+    edgeDiff.resize(uz(lv));
+    allow.resize(uz(lv));
+    sing.resize(uz(lv));
+    toUpperEdges.resize(uz(lv - 1));
+    toUpperOrients.resize(uz(lv - 1));
+
+    for (int i = 0; i < static_cast<int>(fq.size()); ++i) {
+        Int2 d{0, 0};
+        for (int j = 0; j < 3; ++j) {
+            const Int2 c = rshift90i(ediff[uz(f2e[uz(i)][uz(j)])], fq[uz(i)][uz(j)]);
+            d.x += c.x;
+            d.y += c.y;
+        }
+        if (!isZero(d)) {
+            sing[0].push_back(i);
+        }
+    }
+    allow[0] = std::move(allowChanges);
+    FQ[0] = std::move(fq);
+    F2E[0] = std::move(f2e);
+    E2F[0] = std::move(e2f);
+    edgeDiff[0] = std::move(ediff);
+
+    levels = lv;
+    for (int l = 0; l < lv - 1; ++l) {
+        auto& cFQ = FQ[uz(l)];
+        auto& cE2F = E2F[uz(l)];
+        auto& cF2E = F2E[uz(l)];
+        auto& cAllow = allow[uz(l)];
+        auto& cDiff = edgeDiff[uz(l)];
+        auto& cSing = sing[uz(l)];
+        std::vector<int> fixedFaces(cF2E.size(), 0);
+        for (const int s : cSing) {
+            fixedFaces[uz(s)] = 1;
+        }
+        auto& toUp = toUpperEdges[uz(l)];
+        auto& toUpO = toUpperOrients[uz(l)];
+        toUp.assign(cE2F.size(), -1);
+        toUpO.assign(cE2F.size(), 0);
+        auto& nFQ = FQ[uz(l + 1)];
+        auto& nE2F = E2F[uz(l + 1)];
+        auto& nF2E = F2E[uz(l + 1)];
+        auto& nAllow = allow[uz(l + 1)];
+        auto& nDiff = edgeDiff[uz(l + 1)];
+        auto& nSing = sing[uz(l + 1)];
+
+        // Select an independent set of zero-diff edges to contract (freeze the
+        // 1-ring of each committed edge so neighbours never contract together).
+        for (int i = 0; i < static_cast<int>(cE2F.size()); ++i) {
+            if (!isZero(cDiff[uz(i)])) {
+                continue;
+            }
+            if ((cE2F[uz(i)][0] >= 0 && fixedFaces[uz(cE2F[uz(i)][0])]) ||
+                (cE2F[uz(i)][1] >= 0 && fixedFaces[uz(cE2F[uz(i)][1])])) {
+                continue;
+            }
+            for (int j = 0; j < 2; ++j) {
+                const int f = cE2F[uz(i)][uz(j)];
+                if (f < 0) {
+                    continue;
+                }
+                for (int k = 0; k < 3; ++k) {
+                    const int ne = cF2E[uz(f)][uz(k)];
+                    for (int m = 0; m < 2; ++m) {
+                        const int nf = cE2F[uz(ne)][uz(m)];
+                        if (nf >= 0 && fixedFaces[uz(nf)] == 0) {
+                            fixedFaces[uz(nf)] = 1;
+                        }
+                    }
+                }
+            }
+            if (cE2F[uz(i)][0] >= 0) {
+                fixedFaces[uz(cE2F[uz(i)][0])] = 2;
+            }
+            if (cE2F[uz(i)][1] >= 0) {
+                fixedFaces[uz(cE2F[uz(i)][1])] = 2;
+            }
+            toUp[uz(i)] = -2;
+        }
+        for (int i = 0; i < static_cast<int>(cE2F.size()); ++i) {
+            if (toUp[uz(i)] == -2) {
+                continue;
+            }
+            const bool a = cE2F[uz(i)][0] < 0 || fixedFaces[uz(cE2F[uz(i)][0])] == 2;
+            const bool b = cE2F[uz(i)][1] < 0 || fixedFaces[uz(cE2F[uz(i)][1])] == 2;
+            if (a && b) {
+                toUp[uz(i)] = -3;
+            }
+        }
+
+        // Emit coarse edges: survivors keep their diff; edges bordering a consumed
+        // face walk a merge path across consumed faces, accumulating orientation.
+        int numE = 0;
+        for (int i = 0; i < static_cast<int>(toUp.size()); ++i) {
+            if (toUp[uz(i)] != -1) {
+                continue;
+            }
+            const bool sa = cE2F[uz(i)][0] < 0 || fixedFaces[uz(cE2F[uz(i)][0])] < 2;
+            const bool sb = cE2F[uz(i)][1] < 0 || fixedFaces[uz(cE2F[uz(i)][1])] < 2;
+            if (sa && sb) {
+                nE2F.push_back(cE2F[uz(i)]);
+                toUpO[uz(i)] = 0;
+                toUp[uz(i)] = numE++;
+                continue;
+            }
+            const bool useSlot0 = cE2F[uz(i)][1] < 0 || fixedFaces[uz(cE2F[uz(i)][0])] < 2;
+            const int f0 = useSlot0 ? cE2F[uz(i)][0] : cE2F[uz(i)][1];
+            int e = i, f = f0;
+            std::vector<std::pair<int, int>> paths;
+            paths.emplace_back(i, 0);
+            while (true) {
+                if (cE2F[uz(e)][0] == f) {
+                    f = cE2F[uz(e)][1];
+                } else if (cE2F[uz(e)][1] == f) {
+                    f = cE2F[uz(e)][0];
+                }
+                if (f < 0 || fixedFaces[uz(f)] < 2) {
+                    for (int j = 0; j < static_cast<int>(paths.size()); ++j) {
+                        toUp[uz(paths[uz(j)].first)] = numE;
+                        int orient = paths[uz(j)].second;
+                        if (j > 0) {
+                            orient = (orient + toUpO[uz(paths[uz(j - 1)].first)]) % 4;
+                        }
+                        toUpO[uz(paths[uz(j)].first)] = orient;
+                    }
+                    nE2F.push_back(Int2Pair{f0, f});
+                    ++numE;
+                    break;
+                }
+                int ind0 = -1, ind1 = -1;
+                for (int j = 0; j < 3; ++j) {
+                    if (cF2E[uz(f)][uz(j)] == e) {
+                        ind0 = j;
+                        break;
+                    }
+                }
+                for (int j = 0; j < 3; ++j) {
+                    const int e1 = cF2E[uz(f)][uz(j)];
+                    if (e1 != e && toUp[uz(e1)] != -2) {
+                        e = e1;
+                        ind1 = j;
+                        break;
+                    }
+                }
+                if (ind1 != -1) {
+                    paths.emplace_back(e, (cFQ[uz(f)][uz(ind1)] - cFQ[uz(f)][uz(ind0)] + 6) % 4);
+                } else {
+                    if (!isZero(cDiff[uz(e)])) {
+                        consistent = false;  // "Unsatisfied": grid violates zero-sum
+                    }
+                    for (const auto& p : paths) {
+                        toUp[uz(p.first)] = numE;
+                        toUpO[uz(p.first)] = 0;
+                    }
+                    ++numE;
+                    nE2F.push_back(Int2Pair{f0, f0});
+                    break;
+                }
+            }
+        }
+
+        nDiff.assign(uz(numE), Int2{0, 0});
+        nAllow.assign(uz(numE * 2), 1);
+        for (int i = 0; i < static_cast<int>(toUp.size()); ++i) {
+            if (toUp[uz(i)] < 0) {
+                continue;
+            }
+            if (toUpO[uz(i)] == 0) {
+                nDiff[uz(toUp[uz(i)])] = cDiff[uz(i)];
+            }
+            const int dim = toUpO[uz(i)] % 2;
+            if (cAllow[uz(i * 2 + dim)] == 0) {
+                nAllow[uz(toUp[uz(i)] * 2)] = 0;
+            } else if (cAllow[uz(i * 2 + dim)] == 2) {
+                nAllow[uz(toUp[uz(i)] * 2)] = 2;
+            }
+            if (cAllow[uz(i * 2 + 1 - dim)] == 0) {
+                nAllow[uz(toUp[uz(i)] * 2 + 1)] = 0;
+            } else if (cAllow[uz(i * 2 + 1 - dim)] == 2) {
+                nAllow[uz(toUp[uz(i)] * 2 + 1)] = 2;
+            }
+        }
+
+        std::vector<int> upperFace(cF2E.size(), -1);
+        for (int i = 0; i < static_cast<int>(cF2E.size()); ++i) {
+            const std::array<int, 3> eid{toUp[uz(cF2E[uz(i)][0])], toUp[uz(cF2E[uz(i)][1])],
+                                         toUp[uz(cF2E[uz(i)][2])]};
+            if (eid[0] >= 0 && eid[1] >= 0 && eid[2] >= 0) {
+                std::array<int, 3> eido{};
+                for (int j = 0; j < 3; ++j) {
+                    eido[uz(j)] = (cFQ[uz(i)][uz(j)] + 4 - toUpO[uz(cF2E[uz(i)][uz(j)])]) % 4;
+                }
+                upperFace[uz(i)] = static_cast<int>(nF2E.size());
+                nF2E.push_back(eid);
+                nFQ.push_back(eido);
+            }
+        }
+        for (auto& p : nE2F) {
+            for (int j = 0; j < 2; ++j) {
+                if (p[uz(j)] >= 0) {
+                    p[uz(j)] = upperFace[uz(p[uz(j)])];
+                }
+            }
+        }
+        for (const int s : cSing) {
+            if (upperFace[uz(s)] >= 0) {
+                nSing.push_back(upperFace[uz(s)]);
+            }
+        }
+        toUpperFaces.push_back(std::move(upperFace));
+
+        if (nDiff.size() == cDiff.size()) {  // fixpoint: no edge contracted
+            levels = l + 1;
+            break;
+        }
+    }
+    FQ.resize(uz(levels));
+    F2E.resize(uz(levels));
+    E2F.resize(uz(levels));
+    edgeDiff.resize(uz(levels));
+    allow.resize(uz(levels));
+    sing.resize(uz(levels));
+    toUpperEdges.resize(uz(levels - 1));
+    toUpperOrients.resize(uz(levels - 1));
+}
+
+void EdgeHierarchy::propagateEdge() {
+    const auto uz = [](int x) { return static_cast<std::size_t>(x); };
+    for (int level = static_cast<int>(toUpperEdges.size()); level > 0; --level) {
+        const auto& cDiff = edgeDiff[uz(level)];
+        auto& nDiff = edgeDiff[uz(level - 1)];
+        const auto& cFQ = FQ[uz(level)];
+        auto& nFQ = FQ[uz(level - 1)];
+        const auto& nF2E = F2E[uz(level - 1)];
+        const auto& toUp = toUpperEdges[uz(level - 1)];
+        const auto& toUpFace = toUpperFaces[uz(level - 1)];
+        const auto& toUpO = toUpperOrients[uz(level - 1)];
+        for (int i = 0; i < static_cast<int>(toUp.size()); ++i) {
+            nDiff[uz(i)] = toUp[uz(i)] >= 0
+                               ? rshift90i(cDiff[uz(toUp[uz(i)])], (4 - toUpO[uz(i)]) % 4)
+                               : Int2{0, 0};
+        }
+        for (int i = 0; i < static_cast<int>(toUpFace.size()); ++i) {
+            if (toUpFace[uz(i)] == -1) {
+                continue;
+            }
+            const auto& eido = cFQ[uz(toUpFace[uz(i)])];
+            for (int j = 0; j < 3; ++j) {
+                nFQ[uz(i)][uz(j)] = (eido[uz(j)] + toUpO[uz(nF2E[uz(i)][uz(j)])]) % 4;
+            }
+        }
+    }
+}
+
+void EdgeHierarchy::updateGraphValue(std::vector<std::array<int, 3>>& fq,
+                                     std::vector<std::array<int, 3>>& f2e,
+                                     std::vector<Int2>& ediff) {
+    fq = std::move(FQ[0]);
+    f2e = std::move(F2E[0]);
+    ediff = std::move(edgeDiff[0]);
+}
+
+// Repairs the integer grid's flipped/quantized cells in place (Milestone 5a wires
+// the coarsen + propagate round-trip; 5b adds the fixFlip repair). Only edgeDiff
+// changes; faceEdgeIds / orients round-trip identically.
+void fixFlipHierarchy(IntegerGrid& g) {
+    std::vector<int> allowChanges(g.edgeDiff.size() * 2, 1);
+    EdgeHierarchy h;
+    h.downsample(g.orients, g.faceEdgeIds, g.edgeDiff, allowChanges, -1);
+    // h.fixFlip();  // Milestone 5b
+    h.propagateEdge();
+    if (h.consistent) {
+        h.updateGraphValue(g.orients, g.faceEdgeIds, g.edgeDiff);
+    }
+}
+
 }  // namespace
 
 IntegerSolveStats debugIntegerSolve(const Mesh& mesh, const PositionField& field) {
@@ -2233,6 +2581,37 @@ SubdivideStats debugSubdivide(const Mesh& mesh, const PositionField& field) {
             ++st.residualAfter;
         }
     }
+    return st;
+}
+
+FlipRepairStats debugFlipRepair(const Mesh& mesh, const PositionField& field) {
+    IntegerGrid g = computeIntegerGrid(mesh, field);
+    FlipRepairStats st;
+    st.faces = g.tris.size();
+    st.flippedBefore = countFlipped(g);
+    st.residualBefore = countResidualSingularities(g);
+
+    // Round-trip WITHOUT repair: coarsen + propagate must be an identity on edge_diff.
+    const std::vector<Int2> before = g.edgeDiff;
+    {
+        EdgeHierarchy h;
+        std::vector<int> allow(g.edgeDiff.size() * 2, 1);
+        h.downsample(g.orients, g.faceEdgeIds, g.edgeDiff, allow, -1);
+        h.propagateEdge();
+        st.levels = h.levels;
+        std::vector<std::array<int, 3>> fq, f2e;
+        std::vector<Int2> ediff;
+        h.updateGraphValue(fq, f2e, ediff);
+        for (std::size_t i = 0; i < before.size() && i < ediff.size(); ++i) {
+            if (before[i].x != ediff[i].x || before[i].y != ediff[i].y) {
+                ++st.roundTripMismatch;
+            }
+        }
+    }
+
+    fixFlipHierarchy(g);  // 5a: identity; 5b: real repair
+    st.flippedAfter = countFlipped(g);
+    st.residualAfter = countResidualSingularities(g);
     return st;
 }
 

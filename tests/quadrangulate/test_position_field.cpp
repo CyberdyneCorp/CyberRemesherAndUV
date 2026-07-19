@@ -377,6 +377,41 @@ TEST_CASE("integer solve: subdivision makes every edge span at most one cell") {
     CHECK(s.trisAfter < s.trisBefore * 4);        // no runaway (few edges span >1 cell)
 }
 
+// Milestone 5a — the flip-repair layer's coarsen+propagate round trip. On a clean
+// developable cylinder grid, DownsampleEdgeGraph coarsens to a fixpoint and
+// PropagateEdge lifts it back; with NO flip repair this MUST be an exact identity
+// on edge_diff. This is the single highest-risk part of the port (the merge-path
+// orientation transport), so it is locked cylinder-first before FixFlip is wired.
+TEST_CASE("flip repair: coarsen+propagate is an identity on a clean cylinder grid") {
+    const Mesh cyl = cylinder(1.0f, 3.0f, 40, 40);
+    const remesh::PositionField field = remesh::computePositionField(cyl, 0.16f, 40);
+    const remesh::FlipRepairStats s = remesh::debugFlipRepair(cyl, field);
+    CAPTURE(s.faces);
+    CAPTURE(s.levels);
+    CAPTURE(s.roundTripMismatch);
+    CAPTURE(s.flippedBefore);
+    CAPTURE(s.flippedAfter);
+    REQUIRE(s.faces > 0);
+    CHECK(s.levels > 1);                            // coarsening actually happened
+    CHECK(s.roundTripMismatch == 0);                // exact round trip (transport correct)
+    CHECK(s.residualAfter == s.residualBefore);     // integrability preserved
+    CHECK(s.flippedAfter <= s.flippedBefore);       // never introduces folds
+}
+
+// Milestone 5a — the round trip is an identity on the closed icosphere too (a
+// curved grid with genuine singularities, unlike the developable cylinder).
+TEST_CASE("flip repair: coarsen+propagate is an identity on an icosphere grid") {
+    const Mesh sphere = icosphere(3);
+    const remesh::PositionField field = remesh::computePositionField(sphere, meanEdgeLength(sphere), 40);
+    const remesh::FlipRepairStats s = remesh::debugFlipRepair(sphere, field);
+    CAPTURE(s.levels);
+    CAPTURE(s.roundTripMismatch);
+    REQUIRE(s.faces > 0);
+    CHECK(s.levels > 1);
+    CHECK(s.roundTripMismatch == 0);
+    CHECK(s.residualAfter == s.residualBefore);
+}
+
 // Milestones 3–4 — extraction via QuadriFlow's BuildTriangleManifold + FixValence
 // (single-level): reconstruct a clean compact triangle manifold (zero-diff
 // collapse + orbit-walk vertex split), pair the two triangles across each

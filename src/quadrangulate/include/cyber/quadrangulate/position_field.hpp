@@ -134,6 +134,24 @@ struct SubdivideStats {
 };
 [[nodiscard]] SubdivideStats debugSubdivide(const Mesh& mesh, const PositionField& field);
 
+// Milestone 5 (Phase 5): the multi-resolution flip-repair layer. Coarsens the
+// integer edge-graph to a fixpoint and (5b) repairs flipped cells, then propagates
+// back — the fix for the single-level collapse's val3/val5 quantization. 5a
+// validates the round-trip: `roundTripMismatch` MUST be 0 (coarsen+propagate with
+// no repair is an identity on edge_diff), `levels` > 1 (coarsening happened), and
+// `residualAfter` == `residualBefore` (integrability preserved). `flippedBefore/
+// After` count negative-parametric-area cells — the metric 5b drives to zero.
+struct FlipRepairStats {
+    std::size_t faces = 0;
+    int levels = 0;
+    std::size_t roundTripMismatch = 0;
+    std::size_t flippedBefore = 0;
+    std::size_t flippedAfter = 0;
+    std::size_t residualBefore = 0;
+    std::size_t residualAfter = 0;
+};
+[[nodiscard]] FlipRepairStats debugFlipRepair(const Mesh& mesh, const PositionField& field);
+
 // Milestone 3: the integer-parametrization quad extractor. Runs the Stage-2 solve,
 // subdivides to unit cells, then collapses zero-diff edges into grid vertices and
 // pairs the two triangles across each grid-cell diagonal into a quad (QuadriFlow
