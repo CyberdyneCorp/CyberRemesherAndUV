@@ -18,6 +18,7 @@
 #include <cstdint>
 #include <map>
 #include <numeric>
+#include <queue>
 #include <set>
 #include <utility>
 #include <vector>
@@ -1305,6 +1306,208 @@ IntegerSolveStats debugIntegerSolve(const Mesh& mesh, const PositionField& field
     st.flow = g.flow;
     st.supply = g.supply;
     st.postSingular = countResidualSingularities(g);
+    return st;
+}
+
+namespace {
+
+// Small integer-2D vector arithmetic (component-wise; i2half truncates toward
+// zero, matching Eigen Vector2i / 2).
+Int2 i2add(Int2 a, Int2 b) { return {a.x + b.x, a.y + b.y}; }
+Int2 i2sub(Int2 a, Int2 b) { return {a.x - b.x, a.y - b.y}; }
+Int2 i2neg(Int2 a) { return {-a.x, -a.y}; }
+Int2 i2half(Int2 a) { return {a.x / 2, a.y / 2}; }
+bool i2eq(Int2 a, Int2 b) { return a.x == b.x && a.y == b.y; }
+int i2maxComp(Int2 a) { return std::max(std::abs(a.x), std::abs(a.y)); }
+
+// The subdivided triangle mesh: per-half-edge local-frame integer diffs, the
+// half-edge opposite map, and per-vertex field (O) + mesh (P) positions. After
+// subdivideToUnitCells every diff has |component| <= maxLen.
+struct SubMesh {
+    std::vector<std::array<int, 3>> tris;
+    std::vector<Int2> diffs;  // 3 * |tris|, half-edge (t*3+j) = edge tris[t][j]->tris[t][j+1]
+    std::vector<int> e2e;     // 3 * |tris|, opposite half-edge (-1 on boundary)
+    std::vector<Vec3> o;      // field lattice position, per vertex (output location)
+    std::vector<Vec3> p;      // mesh position, per vertex (split-priority ordering)
+};
+
+// Splits every edge whose integer jump spans more than `maxLen` grid cells so each
+// surviving edge spans <= maxLen. Faithful port of QuadriFlow subdivide_edgeDiff
+// (subdivide.cpp) operating purely on per-half-edge local-frame diffs — the
+// canonical edge_diff/face_edgeOrients mirror it keeps in lockstep is unneeded
+// because the extractor's collapse (diff==0) and diagonal (|diff|==(1,1)) tests are
+// rotation-invariant, and AnalyzeOrient/FixOrient never mutate diffs themselves.
+SubMesh subdivideToUnitCells(const IntegerGrid& g, const Mesh& mesh, const PositionField& field,
+                             int maxLen) {
+    SubMesh m;
+    const std::size_t vcap = mesh.vertexCapacity();
+    m.o.resize(vcap);
+    m.p.resize(vcap);
+    for (std::size_t v = 0; v < vcap; ++v) {
+        if (field.valid[v]) {
+            m.o[v] = field.o[v];
+            m.p[v] = mesh.position(VertexId{static_cast<Index>(v)});
+        }
+    }
+    m.tris.reserve(g.tris.size());
+    for (const auto& t : g.tris) {
+        m.tris.push_back({static_cast<int>(t[0]), static_cast<int>(t[1]), static_cast<int>(t[2])});
+    }
+    m.e2e = g.e2e;
+    m.diffs.resize(g.tris.size() * 3);
+    for (std::size_t t = 0; t < g.tris.size(); ++t) {
+        for (std::size_t j = 0; j < 3; ++j) {
+            m.diffs[t * 3 + j] = rshift90i(g.edgeDiff[static_cast<std::size_t>(g.faceEdgeIds[t][j])],
+                                           g.orients[t][j]);
+        }
+    }
+
+    const auto dedgeNext = [](int e) { return e / 3 * 3 + (e + 1) % 3; };
+    const auto dedgePrev = [](int e) { return e / 3 * 3 + (e + 2) % 3; };
+    const auto sqLen = [&](int a, int b) {
+        return lengthSquared(m.p[static_cast<std::size_t>(a)] - m.p[static_cast<std::size_t>(b)]);
+    };
+    const auto vtx = [&](int he) { return m.tris[static_cast<std::size_t>(he / 3)][static_cast<std::size_t>(he % 3)]; };
+
+    struct EdgeLink {
+        int id;
+        float length;
+        int maxlen;
+    };
+    const auto cmp = [](const EdgeLink& a, const EdgeLink& b) { return a.maxlen < b.maxlen; };
+    std::priority_queue<EdgeLink, std::vector<EdgeLink>, decltype(cmp)> queue(cmp);
+    for (std::size_t i = 0; i < m.diffs.size(); ++i) {
+        if (i2maxComp(m.diffs[i]) > maxLen) {
+            const int e = static_cast<int>(i);
+            const int other = m.e2e[i];
+            if (other == -1 || other > e) {
+                queue.push({e, sqLen(vtx(e), vtx(dedgeNext(e))), i2maxComp(m.diffs[i])});
+            }
+        }
+    }
+
+    const auto addFace = [&]() {
+        const int f = static_cast<int>(m.tris.size());
+        m.tris.push_back({0, 0, 0});
+        m.diffs.insert(m.diffs.end(), {Int2{}, Int2{}, Int2{}});
+        m.e2e.insert(m.e2e.end(), {-1, -1, -1});
+        return f;
+    };
+    const auto sE2E = [&](int a, int b) {
+        m.e2e[static_cast<std::size_t>(a)] = b;
+        if (b != -1) {
+            m.e2e[static_cast<std::size_t>(b)] = a;
+        }
+    };
+    const auto schedule = [&](int f) {
+        for (int i = 0; i < 3; ++i) {
+            const Int2 d = m.diffs[static_cast<std::size_t>(f * 3 + i)];
+            if (i2maxComp(d) > maxLen) {
+                queue.push({f * 3 + i, sqLen(m.tris[static_cast<std::size_t>(f)][static_cast<std::size_t>(i)],
+                                             m.tris[static_cast<std::size_t>(f)][static_cast<std::size_t>((i + 1) % 3)]),
+                            i2maxComp(d)});
+            }
+        }
+    };
+
+    while (!queue.empty()) {
+        const EdgeLink edge = queue.top();
+        queue.pop();
+        const int e0 = edge.id, e1 = m.e2e[static_cast<std::size_t>(e0)];
+        const bool isBoundary = (e1 == -1);
+        const int f0 = e0 / 3, f1 = isBoundary ? -1 : e1 / 3;
+        const int v0 = vtx(e0), v0p = vtx(dedgePrev(e0)), v1 = vtx(dedgeNext(e0));
+        if (sqLen(v0, v1) != edge.length) {
+            continue;  // stale queue entry: this edge already changed
+        }
+        if (i2maxComp(m.diffs[static_cast<std::size_t>(e0)]) <= maxLen) {
+            continue;
+        }
+        const int v1p = isBoundary ? -1 : vtx(dedgePrev(e1));
+
+        // New split vertex at the edge midpoint (field + mesh position).
+        const int vn = static_cast<int>(m.o.size());
+        m.o.push_back((m.o[static_cast<std::size_t>(v0)] + m.o[static_cast<std::size_t>(v1)]) * 0.5f);
+        m.p.push_back((m.p[static_cast<std::size_t>(v0)] + m.p[static_cast<std::size_t>(v1)]) * 0.5f);
+
+        // Parent local diffs (read before overwriting).
+        const Int2 D01 = m.diffs[static_cast<std::size_t>(e0)];
+        const Int2 D1p = m.diffs[static_cast<std::size_t>(dedgeNext(e0))];
+        const Int2 Dp0 = m.diffs[static_cast<std::size_t>(dedgePrev(e0))];
+        const Int2 D0n = i2half(D01);
+        Int2 Ds10{}, Ds0p{}, Dsp1{}, Dsn0{};
+        if (!isBoundary) {
+            Ds10 = m.diffs[static_cast<std::size_t>(e1)];
+            Ds0p = m.diffs[static_cast<std::size_t>(dedgeNext(e1))];
+            Dsp1 = m.diffs[static_cast<std::size_t>(dedgePrev(e1))];
+            int orient = 0;
+            while (orient < 4 && !i2eq(rshift90i(D01, orient), Ds10)) {
+                ++orient;
+            }
+            Dsn0 = rshift90i(D0n, orient);
+        }
+        // External neighbor half-edges (read before relinking clobbers them).
+        const int e0p = m.e2e[static_cast<std::size_t>(dedgePrev(e0))];
+        const int e0n = m.e2e[static_cast<std::size_t>(dedgeNext(e0))];
+        int e1p = -1, e1n = -1;
+        if (!isBoundary) {
+            e1p = m.e2e[static_cast<std::size_t>(dedgePrev(e1))];
+            e1n = m.e2e[static_cast<std::size_t>(dedgeNext(e1))];
+        }
+
+        const int f2 = isBoundary ? -1 : addFace();
+        const int f3 = addFace();
+        const auto setFace = [&](int f, int a, int b, int c, Int2 d0, Int2 d1, Int2 d2) {
+            m.tris[static_cast<std::size_t>(f)] = {a, b, c};
+            m.diffs[static_cast<std::size_t>(f * 3 + 0)] = d0;
+            m.diffs[static_cast<std::size_t>(f * 3 + 1)] = d1;
+            m.diffs[static_cast<std::size_t>(f * 3 + 2)] = d2;
+        };
+        setFace(f0, vn, v0p, v0, i2sub(i2add(D01, D1p), D0n), Dp0, D0n);
+        if (!isBoundary) {
+            const Int2 tail = i2sub(Ds10, Dsn0);
+            setFace(f1, vn, v0, v1p, Dsn0, Ds0p, i2add(Dsp1, tail));
+            setFace(f2, vn, v1p, v1, i2neg(i2add(Dsp1, tail)), Dsp1, tail);
+        }
+        setFace(f3, vn, v1, v0p, i2sub(D01, D0n), D1p, i2sub(D0n, i2add(D01, D1p)));
+
+        sE2E(3 * f0 + 0, 3 * f3 + 2);
+        sE2E(3 * f0 + 1, e0p);
+        sE2E(3 * f3 + 1, e0n);
+        if (isBoundary) {
+            sE2E(3 * f0 + 2, -1);
+            sE2E(3 * f3 + 0, -1);
+        } else {
+            sE2E(3 * f0 + 2, 3 * f1 + 0);
+            sE2E(3 * f1 + 1, e1n);
+            sE2E(3 * f1 + 2, 3 * f2 + 0);
+            sE2E(3 * f2 + 1, e1p);
+            sE2E(3 * f2 + 2, 3 * f3 + 0);
+        }
+
+        schedule(f0);
+        if (!isBoundary) {
+            schedule(f2);
+            schedule(f1);
+        }
+        schedule(f3);
+    }
+    return m;
+}
+
+}  // namespace
+
+SubdivideStats debugSubdivide(const Mesh& mesh, const PositionField& field) {
+    const IntegerGrid g = computeIntegerGrid(mesh, field);
+    const SubMesh m = subdivideToUnitCells(g, mesh, field, 1);
+    SubdivideStats st;
+    st.trisBefore = g.tris.size();
+    st.trisAfter = m.tris.size();
+    st.vertsAfter = m.o.size();
+    st.maxDiff = 0;
+    for (const Int2 d : m.diffs) {
+        st.maxDiff = std::max(st.maxDiff, i2maxComp(d));
+    }
     return st;
 }
 

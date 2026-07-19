@@ -358,6 +358,25 @@ TEST_CASE("integer solve: min-cost flow cancels spurious singularities") {
     CHECK(s.postSingular < s.preSingular * 2 / 5);      // flow removed most spurious singularities
 }
 
+// Milestone 3, stage (a): after subdivision every triangle edge spans at most one
+// grid cell (|edge_diff component| <= 1) — the invariant the collapse + quad
+// extraction relies on. The subdivided mesh must be a strict refinement (no fewer
+// triangles) and stay finite (no runaway split).
+TEST_CASE("integer solve: subdivision makes every edge span at most one cell") {
+    const Mesh sphere = icosphere(3);
+    const float spacing = meanEdgeLength(sphere);
+    const remesh::PositionField field = remesh::computePositionField(sphere, spacing, 40);
+    const remesh::SubdivideStats s = remesh::debugSubdivide(sphere, field);
+    CAPTURE(s.trisBefore);
+    CAPTURE(s.trisAfter);
+    CAPTURE(s.vertsAfter);
+    CAPTURE(s.maxDiff);
+    REQUIRE(s.trisBefore > 0);
+    CHECK(s.maxDiff <= 1);                        // the extraction invariant
+    CHECK(s.trisAfter >= s.trisBefore);           // refinement only
+    CHECK(s.trisAfter < s.trisBefore * 4);        // no runaway (few edges span >1 cell)
+}
+
 // Milestone 2 foundation: QuadriFlow's per-face joint-alignment residual. On a
 // developable cylinder the position field is a near-clean grid, so almost no
 // face is a position singularity — the input the Stage-2 flow must drive to

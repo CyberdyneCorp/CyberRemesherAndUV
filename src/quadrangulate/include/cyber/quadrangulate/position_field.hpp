@@ -119,4 +119,17 @@ struct IntegerSolveStats {
 };
 [[nodiscard]] IntegerSolveStats debugIntegerSolve(const Mesh& mesh, const PositionField& field);
 
+// Milestone 3, stage (a): edge subdivision. Runs the integer solve then splits
+// every triangle edge whose integer jump spans more than one grid cell, so each
+// surviving edge spans <= 1 cell (QuadriFlow's subdivide_edgeDiff). `maxDiff` MUST
+// be <= 1 after — the invariant the collapse + quad extraction relies on.
+// Diagnostic while extraction is wired in.
+struct SubdivideStats {
+    std::size_t trisBefore = 0;
+    std::size_t trisAfter = 0;
+    std::size_t vertsAfter = 0;
+    int maxDiff = 0;
+};
+[[nodiscard]] SubdivideStats debugSubdivide(const Mesh& mesh, const PositionField& field);
+
 }  // namespace cyber::remesh
