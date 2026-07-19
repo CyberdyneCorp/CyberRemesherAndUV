@@ -157,7 +157,7 @@
       <div class="chip">
         <div class="k">Median quad angle · singularities</div>
         <div class="v gap">~4–7° behind</div>
-        <div class="s">~84% valence-4 vs QuadriFlow's ~97%. The global integer <b>solve now works</b> (cancels ~10–14× of the spurious singularities); wiring it into extraction is the open piece.</div>
+        <div class="s">The global integer <b>solve now works</b> (cancels ~10–14× of the spurious singularities) and its <b>watertight-manifold extraction is ported</b>. Closing the last ~5–13% irregular (valence cleanup) and promoting it is the open piece.</div>
       </div>
       <div class="chip">
         <div class="k">Adaptivity (quality-per-polygon)</div>
@@ -223,14 +223,14 @@
           <div class="ms">
             <span class="msrow"><span class="msdot done"></span><b>M1 · connection + defect measurement</b> — orientation field clean (cylinder holonomy 0); defects small/local. <span class="mstag done">done</span></span>
             <span class="msrow"><span class="msdot done"></span><b>M2 · integer solve</b> — min-cost flow cancels spurious divergences: <span class="mono">icosphere 133→10 · spot 658→47 · bunny 667→68</span>. <span class="mstag done">done</span></span>
-            <span class="msrow"><span class="msdot partial"></span><b>M3 · quad extraction</b> — port QuadriFlow <span class="mono">ExtractMesh</span> (subdivide + flip-repair + compact build); shortcut rejected. <span class="mstag partial">in progress</span></span>
-            <span class="msrow"><span class="msdot"></span><b>M4 · promote</b> — benchmark vs current extractor + QuadriFlow; make default if it wins. <span class="mstag">planned</span></span>
+            <span class="msrow"><span class="msdot done"></span><b>M3 · quad extraction</b> — QuadriFlow <span class="mono">BuildTriangleManifold</span> ported (compact-manifold rebuild + orbit-walk vertex split + FixHoles). <b>Watertight manifold, all-quad</b> across the corpus. <span class="mstag done">done</span></span>
+            <span class="msrow"><span class="msdot partial"></span><b>M4 · valence + promote</b> — close the residual 22–28% irregular (FixValence + triangular-hole closing), then benchmark vs QuadriFlow &amp; make default if it wins. <span class="mstag partial">next</span></span>
           </div>
         </div>
-        <div class="exit">Exit: <b>irregular % &lt; 15% and median ≥ QuadriFlow.</b> Hardest research
-          risk (the solve) is now behind us; M3 is a scoped engineering port.</div>
+        <div class="exit">Exit: <b>irregular % &lt; 15% and median ≥ QuadriFlow.</b> Research risk (solve)
+          and the extraction port (M3) are behind us; M4 is valence cleanup + the promote gate.</div>
       </div>
-      <div class="pill partial">Solve ✓ · extraction next</div>
+      <div class="pill partial">Solve ✓ · extraction ✓</div>
     </div>
     <div class="phase">
       <div class="idx">5</div>
@@ -279,11 +279,13 @@
         smooth organic models QuadriFlow is the more robust one.</p>
     </div>
     <div class="note">
-      <div class="h"><span class="dot" style="background:var(--partial)"></span>The integer solve now works</div>
+      <div class="h"><span class="dot" style="background:var(--win)"></span>Solve + watertight extraction</div>
       <p>Bulk valence-4 quads already match QuadriFlow (80.6°); ~700 spurious singularities drag the
-        rest. Local edge-rotation cleanup nets negative — but the global integer solve (min-cost flow)
-        now cancels them: <b>spot 658→47, bunny 667→68</b>. What remains is porting QuadriFlow's mesh
-        extraction to turn that clean grid into quads.</p>
+        rest. The global integer solve (min-cost flow) cancels them (<b>spot 658→47, bunny 667→68</b>),
+        and QuadriFlow's <span class="mono">BuildTriangleManifold</span> is now ported: the extractor
+        turns that grid into a <b>watertight, manifold, all-quad</b> mesh across the whole corpus
+        (icosphere <b>312→26</b> boundary edges, <b>45→20%</b> irregular). Left: valence cleanup to
+        reach &lt;15% irregular, then promote.</p>
     </div>
     <div class="note">
       <div class="h"><span class="dot" style="background:var(--win)"></span>Adaptivity now works</div>
