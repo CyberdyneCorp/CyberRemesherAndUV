@@ -21,6 +21,7 @@ EXAMPLES = [
     ("06_hole_fill", "06_hole_fill.png"),
     ("07_baking", "07_baking.png"),
     ("08_load_model", "08_load_model.png"),
+    ("09_test_models", "09_gallery.png"),  # downloads community test models on demand
 ]
 
 

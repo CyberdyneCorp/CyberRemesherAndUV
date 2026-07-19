@@ -21,6 +21,7 @@ so quad-dominance reads at a glance.
 | `06_hole_fill.py` | `hole_fill_max_boundary` cleanup pass | `output/06_hole_fill.png` |
 | `07_baking.py` | surface baking: normal / AO / displacement maps | `output/07_baking.png` (+ `07_bake_*.png`) |
 | `08_load_model.py` | load a model → quad-dominant + 100% pure-quads | `output/08_load_model.png` |
+| `09_test_models.py` | remesh real community test models (spot, fandisk, bunny…) | `output/09_gallery.png` (+ `09_<model>.png`) |
 | `run_all.py` | runs all of the above + a stitched `output/gallery.png` | `output/gallery.png` |
 
 `08_load_model.py` loads a mesh and converts it to quads. It defaults to a
@@ -34,6 +35,17 @@ examples/run.sh examples/08_load_model.py --input model.obj --target-quads 8000 
 extension). **FBX is not supported** — convert it to one of the above first
 (e.g. in Blender). Two results are produced: *quad-dominant* (a few residual
 triangles at irregular vertices) and *pure quads* (100% quads via subdivision).
+
+`09_test_models.py` runs the pipeline on real geometry from Alec Jacobson's
+[`common-3d-test-models`](https://github.com/alecjacobson/common-3d-test-models)
+— a curated subset (smooth `spot`, CAD `fandisk` with sharp creases, higher-genus
+`rocker-arm`, organic `cheburashka`, and the scanned `stanford-bunny`). Models
+are downloaded on demand into `examples/models/` (git-ignored; each model's
+license is set upstream). Pick your own with `--models spot fandisk …`:
+
+```sh
+examples/run.sh examples/09_test_models.py --models spot rocker-arm --target-quads 6000
+```
 
 `07_baking.py` bakes a bumpy high-poly sphere onto a smooth low-poly's UV
 layout (tangent-space normal + displacement) and the detailed surface's own

@@ -15,6 +15,7 @@ import math
 import os
 import sys
 import tempfile
+import urllib.request
 from typing import Dict, List, Tuple
 
 import matplotlib
@@ -32,9 +33,40 @@ import cyberremesh  # noqa: E402
 from cyberremesh import Mesh, RemeshParams, remesh  # noqa: E402
 
 OUTPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output")
+MODELS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")
 
 Vec3 = Tuple[float, float, float]
 MeshData = Dict[str, object]  # {"positions": np.ndarray (N,3), "faces": List[List[int]]}
+
+# A curated subset of Alec Jacobson's community "common-3d-test-models"
+# (https://github.com/alecjacobson/common-3d-test-models, individual model
+# licenses vary — see that repo). Chosen for varied topology and features while
+# staying modest in size for quick demos. Downloaded on demand into MODELS_DIR.
+COMMON_3D_MODELS_BASE = (
+    "https://raw.githubusercontent.com/alecjacobson/common-3d-test-models/master/data/"
+)
+COMMON_3D_MODELS: Dict[str, str] = {
+    "spot": "spot.obj",                # smooth organic, genus-0 (the classic cow)
+    "cow": "cow.obj",                  # organic, coarse
+    "fandisk": "fandisk.obj",          # CAD part with sharp creases (feature test)
+    "rocker-arm": "rocker-arm.obj",    # mechanical, higher genus (handles/holes)
+    "cheburashka": "cheburashka.obj",  # organic character
+    "stanford-bunny": "stanford-bunny.obj",  # the iconic scanned bunny
+}
+
+
+def download_model(name: str, models_dir: str = MODELS_DIR) -> str:
+    """Return a local path to a common-3d-test-model, downloading it (once) on
+    demand. Raises KeyError for an unknown name."""
+    if name not in COMMON_3D_MODELS:
+        raise KeyError(f"unknown model {name!r}; known: {sorted(COMMON_3D_MODELS)}")
+    os.makedirs(models_dir, exist_ok=True)
+    path = os.path.join(models_dir, COMMON_3D_MODELS[name])
+    if not os.path.exists(path):
+        url = COMMON_3D_MODELS_BASE + COMMON_3D_MODELS[name]
+        print(f"  downloading {name} -> {os.path.relpath(path, _REPO)}")
+        urllib.request.urlretrieve(url, path)  # noqa: S310 - fixed, trusted host
+    return path
 
 
 # ---------------------------------------------------------------------------
@@ -389,6 +421,24 @@ def render_panels(meshes: List[MeshData], titles: List[str], path: str, suptitle
         ax = fig.add_subplot(1, n, k + 1, projection="3d")
         _draw(ax, mesh, title)
     fig.tight_layout(rect=(0, 0, 1, 0.95))
+    fig.savefig(path, bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+    print(f"  wrote {os.path.relpath(path, _REPO)}")
+
+
+def render_grid(meshes: List[MeshData], titles: List[str], path: str, cols: int = 3,
+                suptitle: str = "") -> None:
+    """Render N meshes in a rows x cols grid into one PNG (for galleries)."""
+    n = len(meshes)
+    cols = max(1, min(cols, n))
+    rows = (n + cols - 1) // cols
+    fig = plt.figure(figsize=(4.6 * cols, 4.7 * rows), dpi=120)
+    if suptitle:
+        fig.suptitle(suptitle, fontsize=14, fontweight="bold", color="#12233a", y=0.99)
+    for k, (mesh, title) in enumerate(zip(meshes, titles)):
+        ax = fig.add_subplot(rows, cols, k + 1, projection="3d")
+        _draw(ax, mesh, title)
+    fig.tight_layout(rect=(0, 0, 1, 0.96))
     fig.savefig(path, bbox_inches="tight", facecolor="white")
     plt.close(fig)
     print(f"  wrote {os.path.relpath(path, _REPO)}")
