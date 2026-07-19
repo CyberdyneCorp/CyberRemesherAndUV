@@ -129,6 +129,8 @@ struct SubdivideStats {
     std::size_t trisAfter = 0;
     std::size_t vertsAfter = 0;
     int maxDiff = 0;
+    std::size_t residualBefore = 0;  // solve singularities (pre-subdivide grid)
+    std::size_t residualAfter = 0;   // subdivided triangles whose 3 diffs don't sum to 0
 };
 [[nodiscard]] SubdivideStats debugSubdivide(const Mesh& mesh, const PositionField& field);
 

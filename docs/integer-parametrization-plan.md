@@ -182,13 +182,20 @@ malformed-orbit holes, no post-hoc rotation.
    - ❌ **Promote gate NOT met.** Two blockers: (a) at the coarse ~3000-quad
      *benchmark* density the integer path degrades to ~37–49% irregular (opposite of
      the default, which is bad at native but ~15% at benchmark density); (b) neither
-     reaches QuadriFlow's ~3% irregular. **Root cause = extraction fidelity, not
-     valence surgery:** the single-level pairing multiplies the solve's clean-grid
-     singularities **5–10×** (spot solve 82 → ~550 irregular quad-verts), dominated
-     by *interior* val3/val5 — the mesh triangulation doesn't align with the field's
-     grid cells, so cells don't tile cleanly. Closing that needs QuadriFlow's full
-     multi-resolution `DownsampleEdgeGraph` extraction (or a cleaner single-level
-     tiling) — **Phase 5 territory.** Keep the current default extractor for now.
+     reaches QuadriFlow's ~3% irregular. **Root cause LOCALISED (measured): the
+     collapse→pair→manifold extraction corrupts a clean grid.** Residual
+     singularities are *preserved exactly through subdivision* (spot solve 82 →
+     after-subdivide 82, fandisk 180→180, cheburashka 234→234 — `SubdivideStats.
+     residualAfter`), so the solve and `subdivide_edgeDiff` are clean; yet the
+     extracted quad mesh has **5–10× more** irregular vertices (spot 82 → ~550),
+     dominated by *interior* val3/val5. The multiplication happens entirely in
+     `buildManifoldTris` / `buildQuadMesh` (zero-diff collapse + orbit-walk vertex
+     split + diagonal pairing) — so this is very likely a **fixable single-level
+     defect** (prime suspect: the orbit-walk over-splitting grid vertices, or the
+     diagonal-selection), **NOT** a fundamental need for QuadriFlow's multi-res
+     `DownsampleEdgeGraph`. **This is the recommended next task** and the direct
+     lever to &lt;15% / QuadriFlow parity. Keep the current default extractor until
+     it lands.
 
 ## Open risk (revised after Milestone 1)
 

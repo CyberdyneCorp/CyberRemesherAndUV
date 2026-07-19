@@ -2224,6 +2224,15 @@ SubdivideStats debugSubdivide(const Mesh& mesh, const PositionField& field) {
     for (const Int2 d : m.diffs) {
         st.maxDiff = std::max(st.maxDiff, i2maxComp(d));
     }
+    st.residualBefore = countResidualSingularities(g);
+    // A subdivided triangle is integrable iff its three local-frame diffs sum to
+    // zero; a nonzero sum is a spurious singularity injected by subdivision.
+    for (std::size_t t = 0; t < m.tris.size(); ++t) {
+        const Int2 s = i2add(i2add(m.diffs[t * 3 + 0], m.diffs[t * 3 + 1]), m.diffs[t * 3 + 2]);
+        if (s.x != 0 || s.y != 0) {
+            ++st.residualAfter;
+        }
+    }
     return st;
 }
 
