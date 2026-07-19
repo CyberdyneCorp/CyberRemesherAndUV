@@ -118,25 +118,40 @@ malformed-orbit holes, no post-hoc rotation.
    Port faithfully from `parametrizer-int.cpp` (BuildEdgeInfo, BuildIntegerConstraints,
    ComputeMaxFlow) and `optimizer.cpp` (optimize_integer_constraints); validate
    cylinder-first at every step (Milestone 1 had 2 sign bugs caught only that way).
-3. 🟡 **Extraction — STARTED; needs the full `ExtractMesh` port.** A shortcut was
-   tried and rejected: collapsing on `edge_diff==0` and taking the unit-edge
-   lattice adjacency does NOT yield a clean quad mesh — it reproduces the same
-   lattice under-connectivity the collapse-and-walk extractor had (spot ~39%
-   valence-4 by that measure), because it skips the real machinery. Diagnosis of
-   the corrected `edge_diff` (env `CYBER_ISOLVE_DIAG`): on a properly-sized mesh
-   (spot at target edge length) it is in the right regime — 4248 unit + 2986
-   diagonal edges — confirming the solve produces a usable grid; on a mesh
-   coarser than the grid (a low-subdiv icosphere) edges span many cells (large
-   diffs), so the mesh MUST be at ~target edge length first.
-   **The real extraction is QuadriFlow's `ExtractMesh` / `ComputeIndexMap` tail:**
-   (a) `subdivide_edgeDiff` — split any edge whose |diff|>1 so every edge spans ≤1
-   grid cell; (b) `FixFlipHierarchy`/`FixFlipSat` — repair flipped/degenerate
-   cells; (c) assign integer coordinates and build the compact quad mesh
-   (`O_compact`/`F_compact`) — grid vertex = output vertex, grid cell = quad. Port
-   from `parametrizer.cpp` `ComputeIndexMap` (line ~78 onward) + `parametrizer-flip.cpp`.
-   Measure irregular % (target < 15%, from the solve's ~47 spot singularities) and
-   validity vs the current extractor. Open-mesh/boundary + sharp handling remain
-   robustness follow-ups. **Substantial — its own focused session.**
+3. 🟡 **Extraction — IN PROGRESS. Stages (a) + first (c) landed; needs
+   `BuildTriangleManifold`.** Refactored the solve into a reusable
+   `computeIntegerGrid` (commit a94fab7) that returns the post-flow grid state
+   (tris, e2e, corrected edge_diff, face_edgeIds, orients) — QuadriFlow's
+   post-`ComputeMaxFlow` state.
+   - **(a) `subdivide_edgeDiff` — DONE (commit af02889).** Faithful port, but
+     operating **purely on per-half-edge local-frame diffs** — a key simplification:
+     the canonical `edge_diff`/`face_edgeOrients` mirror QuadriFlow keeps in
+     lockstep (`AnalyzeOrient`/`FixOrient`/`face_spaces`) is **unneeded**, because
+     the extractor's collapse (`diff==0`) and diagonal (`|diff|==(1,1)`) tests are
+     rotation-invariant and those routines never mutate `diffs` themselves.
+     Validated on icosphere: `maxDiff` → 1 at every spacing (1.0× mean 1280→1900
+     tris, 0.5× 1280→6384, 0.33× 1280→16794), bounded, terminates. Regression test
+     locks the invariant.
+   - **(c-first) collapse + diagonal-pairing — DONE but hole-prone (commit
+     37efffb).** Collapse zero-diff edges → grid vertices (mean field position),
+     pair the two triangles across each `(1,1)` diagonal into a quad
+     (`extractIntegerQuadMesh`). Output is **all-quad** (nonQuad==0). **BUT NOT
+     WATERTIGHT:** ~30% true holes (icosphere: 312 boundary edges / 500 quads,
+     39–52% irregular). Confirmed *true holes* (a cell diagonal with only one clean
+     triangle), not winding artifacts — the mesh edge model is undirected, so
+     boundary edges = genuinely single-quad cells.
+   - **REMAINING — the fix is QuadriFlow's `BuildTriangleManifold`
+     (parametrizer-flip.cpp ~267–580).** Direct pairing on the *collapsed fine*
+     triangulation is fundamentally hole-prone; QuadriFlow first reconstructs a
+     **clean compact triangle manifold** over the grid vertices (orbit walks +
+     manifold-repair loop over the fully-downsampled edge graph `F2E/E2F/EdgeDiff/FQ`),
+     *then* pairs diagonals, then `FixHoles`/`FixValence`. Single-level: build the
+     compact-triangle edge structure directly (skip `DownsampleEdgeGraph`'s
+     multi-resolution). Also port `FixFlipHierarchy`/`FixFlipSat` (parametrizer-flip.cpp)
+     to repair flipped cells, and `FixValence`/`FixHoles` (parametrizer-mesh.cpp).
+     Target: watertight, irregular % < 15% (from the solve's ~47 spot
+     singularities). Open-mesh/boundary + sharp handling remain robustness
+     follow-ups. **The next focused session.**
 4. ◻ **Quality + promote** — median/CV/feature/robustness vs QuadriFlow; if it
    wins, make it the extractor default and retire the collapse-and-walk path.
 
