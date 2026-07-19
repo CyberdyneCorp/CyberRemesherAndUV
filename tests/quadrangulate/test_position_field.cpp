@@ -377,24 +377,31 @@ TEST_CASE("integer solve: subdivision makes every edge span at most one cell") {
     CHECK(s.trisAfter < s.trisBefore * 4);        // no runaway (few edges span >1 cell)
 }
 
-// Milestone 3, stage (c) — first extraction. Collapse-and-pair on the unit-cell
-// mesh yields an all-quad output (every face has four sides, no triangles/n-gons).
-// NOTE: it is not yet watertight — direct diagonal-pairing on the collapsed fine
-// triangulation leaves true holes (~30% of cells) where a grid-cell diagonal has
-// only one clean triangle. Closing them needs QuadriFlow's BuildTriangleManifold
-// reconstruction (a clean compact triangle manifold before pairing). This test
-// locks the invariants that already hold; watertightness/irregular are pending.
-TEST_CASE("integer solve: extraction produces an all-quad mesh") {
+// Milestone 3, stage (c) — extraction via QuadriFlow's BuildTriangleManifold
+// (single-level): reconstruct a clean compact triangle manifold (zero-diff
+// collapse + orbit-walk vertex split), pair the two triangles across each
+// grid-cell diagonal into a quad, then FixHoles the residual boundary loops.
+// The output is all-quad, a valid manifold, and near-watertight: the earlier
+// naive collapse-and-pair left ~312 boundary edges / ~45% irregular on this
+// mesh; the manifold reconstruction cuts that to a few dozen boundary edges
+// (only unfillable triangular holes at singularities remain) and ~20% irregular.
+TEST_CASE("integer solve: extraction is manifold, all-quad and near-watertight") {
     const Mesh sphere = icosphere(3);
     const float spacing = meanEdgeLength(sphere);
     const remesh::PositionField field = remesh::computePositionField(sphere, spacing, 40);
+
+    const Mesh quads = remesh::extractIntegerQuadMesh(sphere, field);
+    CHECK(quads.validate().empty());  // a valid manifold (was non-manifold before)
+
     const remesh::IntegerExtractStats s = remesh::debugIntegerExtract(sphere, field);
     CAPTURE(s.quads);
     CAPTURE(s.verts);
     CAPTURE(s.irregular);
     CAPTURE(s.boundaryEdges);
     REQUIRE(s.quads > 0);
-    CHECK(s.nonQuad == 0);  // every emitted face is a quad
+    CHECK(s.nonQuad == 0);                  // every emitted face is a quad
+    CHECK(s.boundaryEdges < s.quads / 10);  // near-watertight (was > 60%)
+    CHECK(s.irregular < s.verts / 4);       // mostly valence-4 (was ~45%)
 }
 
 // Milestone 2 foundation: QuadriFlow's per-face joint-alignment residual. On a

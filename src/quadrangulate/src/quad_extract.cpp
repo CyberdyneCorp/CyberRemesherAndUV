@@ -16,10 +16,12 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <deque>
 #include <map>
 #include <numeric>
 #include <queue>
 #include <set>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -1329,6 +1331,7 @@ struct SubMesh {
     std::vector<int> e2e;     // 3 * |tris|, opposite half-edge (-1 on boundary)
     std::vector<Vec3> o;      // field lattice position, per vertex (output location)
     std::vector<Vec3> p;      // mesh position, per vertex (split-priority ordering)
+    std::vector<Vec3> n;      // field normal, per vertex (for manifold hole filling)
 };
 
 // Splits every edge whose integer jump spans more than `maxLen` grid cells so each
@@ -1343,10 +1346,12 @@ SubMesh subdivideToUnitCells(const IntegerGrid& g, const Mesh& mesh, const Posit
     const std::size_t vcap = mesh.vertexCapacity();
     m.o.resize(vcap);
     m.p.resize(vcap);
+    m.n.resize(vcap);
     for (std::size_t v = 0; v < vcap; ++v) {
         if (field.valid[v]) {
             m.o[v] = field.o[v];
             m.p[v] = mesh.position(VertexId{static_cast<Index>(v)});
+            m.n[v] = field.normal[v];
         }
     }
     m.tris.reserve(g.tris.size());
@@ -1429,6 +1434,7 @@ SubMesh subdivideToUnitCells(const IntegerGrid& g, const Mesh& mesh, const Posit
         const int vn = static_cast<int>(m.o.size());
         m.o.push_back((m.o[static_cast<std::size_t>(v0)] + m.o[static_cast<std::size_t>(v1)]) * 0.5f);
         m.p.push_back((m.p[static_cast<std::size_t>(v0)] + m.p[static_cast<std::size_t>(v1)]) * 0.5f);
+        m.n.push_back(normalized(m.n[static_cast<std::size_t>(v0)] + m.n[static_cast<std::size_t>(v1)]));
 
         // Parent local diffs (read before overwriting).
         const Int2 D01 = m.diffs[static_cast<std::size_t>(e0)];
@@ -1495,67 +1501,566 @@ SubMesh subdivideToUnitCells(const IntegerGrid& g, const Mesh& mesh, const Posit
     return m;
 }
 
-// Collapses the unit-cell mesh into a quad mesh (QuadriFlow AdvancedExtractQuad +
-// BuildTriangleManifold, single-level). Every zero-diff edge merges its endpoints
-// (a grid vertex); every |diff|==(1,1) edge is a grid-cell diagonal shared by two
-// triangles, and those two triangles pair into a quad. Output vertex position is
-// the mean field position (O) of its collapsed cluster.
-Mesh buildQuadMesh(const SubMesh& m) {
+// A clean compact triangle manifold over the grid vertices — QuadriFlow's
+// BuildTriangleManifold state (single-level). `tv` are per-face manifold vertex
+// ids; `diff` mirrors the SubMesh's per-half-edge rotated diffs; `e2e` is the
+// half-edge opposite; O/N are per-manifold-vertex field position and normal.
+struct ManifoldTris {
+    std::vector<std::array<int, 3>> tv;
+    std::vector<std::array<Int2, 3>> diff;
+    std::vector<int> e2e;
+    std::vector<Vec3> O;
+    std::vector<Vec3> N;
+};
+
+// Half-edge opposite over compact triangles: only genuinely-manifold edges (one
+// directed occurrence each way) get paired; boundary / non-manifold edges stay -1
+// so the orbit walk splits them cleanly.
+std::vector<int> computeTriE2E(const std::vector<std::array<int, 3>>& tris) {
+    std::map<std::pair<int, int>, int> count;
+    std::map<std::pair<int, int>, int> lastHe;
+    for (std::size_t t = 0; t < tris.size(); ++t) {
+        for (int j = 0; j < 3; ++j) {
+            const std::pair<int, int> d{tris[t][static_cast<std::size_t>(j)],
+                                        tris[t][static_cast<std::size_t>((j + 1) % 3)]};
+            ++count[d];
+            lastHe[d] = static_cast<int>(t) * 3 + j;
+        }
+    }
+    std::vector<int> e2e(tris.size() * 3, -1);
+    for (std::size_t t = 0; t < tris.size(); ++t) {
+        for (int j = 0; j < 3; ++j) {
+            const int a = tris[t][static_cast<std::size_t>(j)];
+            const int b = tris[t][static_cast<std::size_t>((j + 1) % 3)];
+            const auto fwd = count.find({a, b});
+            const auto rev = count.find({b, a});
+            if (fwd != count.end() && fwd->second == 1 && rev != count.end() && rev->second == 1) {
+                e2e[t * 3 + static_cast<std::size_t>(j)] = lastHe[{b, a}];
+            }
+        }
+    }
+    return e2e;
+}
+
+int triPrevHe(int de) { return de / 3 * 3 + (de + 2) % 3; }
+int triNextHe(int de) { return de / 3 * 3 + (de + 1) % 3; }
+
+// The fan of directed edges around the vertex at half-edge `seed`, walked through
+// the triangle opposite map `e2e`: back to the start on a closed fan, or across
+// both directions from the seed on an open (boundary) fan.
+std::deque<int> gatherVertexFan(const std::vector<int>& e2e, int seed) {
+    std::deque<int> orbit;
+    int d = seed;
+    do {
+        orbit.push_back(d);
+        d = e2e[static_cast<std::size_t>(triPrevHe(d))];
+    } while (d != -1 && d != seed);
+    if (d == -1) {  // open fan: also walk the other direction from the seed
+        d = seed;
+        while (true) {
+            d = e2e[static_cast<std::size_t>(d)];
+            if (d == -1 || triNextHe(d) == seed) {
+                break;
+            }
+            d = triNextHe(d);
+            orbit.push_front(d);
+        }
+    }
+    return orbit;
+}
+
+// Splits non-manifold manifold-vertices — a vertex whose incident-triangle fan
+// revisits a directed edge, i.e. wraps into several sub-loops (a bowtie / pinch)
+// — into one distinct vertex per sub-loop, until stable (QuadriFlow
+// BuildTriangleManifold repair loop). Keeps tv / e2e / O / N consistent so the
+// downstream boundary trace and quad pairing see a clean manifold.
+void splitNonManifoldVertices(ManifoldTris& mt) {
+    const auto tvAt = [&](int de) -> int& {
+        return mt.tv[static_cast<std::size_t>(de / 3)][static_cast<std::size_t>(de % 3)];
+    };
+    const auto nextHe = [](int de) { return triNextHe(de); };
+
+    int numV = static_cast<int>(mt.O.size());
+    int prev = -1;
+    while (numV != prev) {
+        prev = numV;
+
+        // Build vertex -> incident dedges, and disconnect degenerate triangles.
+        std::vector<std::vector<int>> vertToDedge(static_cast<std::size_t>(numV));
+        for (std::size_t i = 0; i < mt.tv.size(); ++i) {
+            const auto& pt = mt.tv[i];
+            if (pt[0] == pt[1] || pt[1] == pt[2] || pt[2] == pt[0]) {
+                for (int j = 0; j < 3; ++j) {
+                    const int t = mt.e2e[i * 3 + static_cast<std::size_t>(j)];
+                    if (t != -1) {
+                        mt.e2e[static_cast<std::size_t>(t)] = -1;
+                    }
+                }
+                for (int j = 0; j < 3; ++j) {
+                    mt.e2e[i * 3 + static_cast<std::size_t>(j)] = -1;
+                }
+            } else {
+                for (int j = 0; j < 3; ++j) {
+                    const int vtx = pt[static_cast<std::size_t>(j)];
+                    const int he0 = static_cast<int>(i) * 3 + j;
+                    vertToDedge[static_cast<std::size_t>(vtx)].push_back(he0);
+                }
+            }
+        }
+
+        std::vector<int> colors(mt.tv.size() * 3, -1);
+        for (int i = 0; i < numV; ++i) {
+            int numColor = 0;
+            for (const int seed : vertToDedge[static_cast<std::size_t>(i)]) {
+                if (colors[static_cast<std::size_t>(seed)] != -1) {
+                    continue;
+                }
+                const std::deque<int> orbit = gatherVertexFan(mt.e2e, seed);
+                // Split the fan wherever a directed edge (v1,v2) repeats: the run
+                // between the two occurrences is a closed sub-loop -> its own color.
+                std::map<std::pair<int, int>, int> loc;
+                std::vector<int> dedgeColor(orbit.size(), numColor);
+                ++numColor;
+                for (std::size_t jj = 0; jj < orbit.size(); ++jj) {
+                    const int de = orbit[jj];
+                    colors[static_cast<std::size_t>(de)] = 0;
+                    const std::pair<int, int> key{tvAt(de), tvAt(nextHe(de))};
+                    const auto it = loc.find(key);
+                    if (it != loc.end()) {
+                        for (int k = it->second; k < static_cast<int>(jj); ++k) {
+                            const int de1 = orbit[static_cast<std::size_t>(k)];
+                            loc.erase({tvAt(de1), tvAt(nextHe(de1))});
+                            dedgeColor[static_cast<std::size_t>(k)] = numColor;
+                        }
+                        ++numColor;
+                    }
+                    loc[key] = static_cast<int>(jj);
+                }
+                for (std::size_t j = 0; j < orbit.size(); ++j) {
+                    if (dedgeColor[j] > 0) {
+                        tvAt(orbit[j]) = numV + dedgeColor[j] - 1;
+                    }
+                }
+            }
+            if (numColor > 1) {
+                for (int j = 0; j < numColor - 1; ++j) {
+                    mt.O.push_back(mt.O[static_cast<std::size_t>(i)]);
+                    mt.N.push_back(mt.N[static_cast<std::size_t>(i)]);
+                }
+                numV += numColor - 1;
+            }
+        }
+    }
+
+    // Drop triangles that stayed degenerate; compact tv + diff (e2e is unused
+    // downstream — the quad pairing and FixHoles rebuild their own adjacency).
+    std::size_t offset = 0;
+    for (std::size_t i = 0; i < mt.tv.size(); ++i) {
+        const auto& pt = mt.tv[i];
+        if (pt[0] == pt[1] || pt[1] == pt[2] || pt[2] == pt[0]) {
+            continue;
+        }
+        mt.tv[offset] = mt.tv[i];
+        mt.diff[offset] = mt.diff[i];
+        ++offset;
+    }
+    mt.tv.resize(offset);
+    mt.diff.resize(offset);
+}
+
+// Reconstructs the compact triangle manifold from the subdivided unit-cell mesh
+// (QuadriFlow AdvancedExtractQuad + BuildTriangleManifold, single-level):
+//  1. collapse zero-diff edges into compact grid vertices (averaged O / N);
+//  2. build compact triangles, dropping any that straddle a collapsed edge;
+//  3. orbit-walk each vertex fan to assign a per-fan manifold vertex id — this
+//     splits non-manifold vertices (multiple disconnected fans) into distinct
+//     vertices so the downstream boundary tracing and quad pairing are clean.
+ManifoldTris buildManifoldTris(const SubMesh& m) {
     const std::size_t nV = m.o.size();
+
+    // 1. Zero-diff collapse -> compact grid vertices with averaged geometry.
     DisjointSets ds(nV);
     for (std::size_t he = 0; he < m.diffs.size(); ++he) {
         if (m.diffs[he].x == 0 && m.diffs[he].y == 0) {
             const std::size_t t = he / 3, j = he % 3;
-            ds.unite(static_cast<Index>(m.tris[t][j]),
-                     static_cast<Index>(m.tris[t][(j + 1) % 3]));
+            ds.unite(static_cast<Index>(m.tris[t][j]), static_cast<Index>(m.tris[t][(j + 1) % 3]));
         }
     }
-    // Averaged field position per collapsed cluster (indexed by union-find root).
-    std::vector<Vec3> sumO(nV, Vec3{});
-    std::vector<int> cnt(nV, 0);
+    std::vector<int> compactId(nV, -1);
+    int nCompact = 0;
     for (std::size_t v = 0; v < nV; ++v) {
         const Index r = ds.find(static_cast<Index>(v));
-        sumO[r] = sumO[r] + m.o[v];
-        cnt[r] += 1;
+        if (compactId[r] == -1) {
+            compactId[r] = nCompact++;
+        }
     }
-    const auto root = [&](int v) { return static_cast<int>(ds.find(static_cast<Index>(v))); };
+    const auto cvOf = [&](int g) { return compactId[ds.find(static_cast<Index>(g))]; };
+    std::vector<Vec3> oCompact(static_cast<std::size_t>(nCompact), Vec3{});
+    std::vector<Vec3> nCompactVec(static_cast<std::size_t>(nCompact), Vec3{});
+    std::vector<int> cnt(static_cast<std::size_t>(nCompact), 0);
+    for (std::size_t v = 0; v < nV; ++v) {
+        const int c = cvOf(static_cast<int>(v));
+        oCompact[static_cast<std::size_t>(c)] += m.o[v];
+        nCompactVec[static_cast<std::size_t>(c)] += m.n[v];
+        ++cnt[static_cast<std::size_t>(c)];
+    }
+    for (int c = 0; c < nCompact; ++c) {
+        if (cnt[static_cast<std::size_t>(c)] > 0) {
+            oCompact[static_cast<std::size_t>(c)] =
+                oCompact[static_cast<std::size_t>(c)] *
+                (1.0f / static_cast<float>(cnt[static_cast<std::size_t>(c)]));
+        }
+        nCompactVec[static_cast<std::size_t>(c)] =
+            normalized(nCompactVec[static_cast<std::size_t>(c)]);
+    }
 
-    // Pair the two triangles across each grid-cell diagonal (QuadriFlow keys the
-    // diagonal by its endpoint pair; .first / .second are the two triangles).
-    std::map<std::pair<int, int>, std::pair<std::array<int, 3>, std::array<int, 3>>> quads;
-    for (std::size_t he = 0; he < m.diffs.size(); ++he) {
-        const Int2 d = m.diffs[he];
-        if (std::abs(d.x) == 1 && std::abs(d.y) == 1) {
-            const std::size_t t = he / 3, j = he % 3;
-            const int cv1 = root(m.tris[t][j]);
-            const int cv2 = root(m.tris[t][(j + 1) % 3]);
-            const int cv3 = root(m.tris[t][(j + 2) % 3]);
-            if (cv1 == cv2) {
-                continue;  // diagonal collapsed to a point
+    // 2. Compact triangles (distinct corners) + their rotated diffs.
+    std::vector<std::array<int, 3>> ctris;
+    std::vector<std::array<Int2, 3>> cdiff;
+    for (std::size_t t = 0; t < m.tris.size(); ++t) {
+        const int a = cvOf(m.tris[t][0]), b = cvOf(m.tris[t][1]), c = cvOf(m.tris[t][2]);
+        if (a == b || b == c || a == c) {
+            continue;  // straddles a collapsed edge -> degenerate
+        }
+        ctris.push_back({a, b, c});
+        cdiff.push_back({m.diffs[t * 3 + 0], m.diffs[t * 3 + 1], m.diffs[t * 3 + 2]});
+    }
+    const std::vector<int> e2e = computeTriE2E(ctris);
+
+    // 3. Orbit-walk each vertex fan into a fresh per-fan manifold vertex id.
+    ManifoldTris mt;
+    mt.diff = std::move(cdiff);
+    mt.e2e = e2e;
+    mt.tv.assign(ctris.size(), {-1, -1, -1});
+    int numV = 0;
+    for (std::size_t t = 0; t < ctris.size(); ++t) {
+        for (int j = 0; j < 3; ++j) {
+            if (mt.tv[t][static_cast<std::size_t>(j)] != -1) {
+                continue;
             }
-            const std::pair<int, int> key = cv1 < cv2 ? std::make_pair(cv1, cv2)
-                                                      : std::make_pair(cv2, cv1);
-            const auto it = quads.find(key);
-            if (it == quads.end()) {
-                quads[key] = {{cv1, cv2, cv3}, {-1, -1, -1}};
-            } else {
-                it->second.second = {cv1, cv2, cv3};
+            const int cid = ctris[t][static_cast<std::size_t>(j)];
+            mt.O.push_back(oCompact[static_cast<std::size_t>(cid)]);
+            mt.N.push_back(nCompactVec[static_cast<std::size_t>(cid)]);
+            const int d0 = static_cast<int>(t) * 3 + j;
+            int d = d0;
+            do {
+                mt.tv[static_cast<std::size_t>(d / 3)][static_cast<std::size_t>(d % 3)] = numV;
+                d = e2e[static_cast<std::size_t>(d / 3 * 3 + (d + 2) % 3)];
+            } while (d != d0 && d != -1);
+            if (d == -1) {  // open fan: walk the other direction from the seed
+                d = d0;
+                while (true) {
+                    d = e2e[static_cast<std::size_t>(d)];
+                    if (d == -1) {
+                        break;
+                    }
+                    d = d / 3 * 3 + (d + 1) % 3;
+                    mt.tv[static_cast<std::size_t>(d / 3)][static_cast<std::size_t>(d % 3)] = numV;
+                }
             }
+            ++numV;
         }
     }
 
-    // Emit a quad per diagonal that has both triangles and distinct apexes; the
-    // 4-cycle is (v2, apexA, v1, apexB) around the shared diagonal (v1,v2).
+    // 4. Split non-manifold vertices so the output is a clean manifold.
+    splitNonManifoldVertices(mt);
+    return mt;
+}
+
+// --- FixHoles: fill residual boundary loops with quads (QuadriFlow) -----------
+
+// Quad half-edge opposite map (compute_direct_graph_quad): E2E[4*f+i] is the
+// opposite of the directed edge F[f][i]->F[f][i+1], or -1 on boundary / non-
+// manifold. V2E unused downstream, so only E2E is returned.
+std::vector<int> quadE2E(const std::vector<std::array<int, 4>>& faces, int nVerts) {
+    std::vector<int> v2e(static_cast<std::size_t>(nVerts), -1);
+    const int nHe = static_cast<int>(faces.size()) * 4;
+    std::vector<int> target(static_cast<std::size_t>(nHe), -1);
+    std::vector<int> nextChain(static_cast<std::size_t>(nHe), -1);
+    for (std::size_t f = 0; f < faces.size(); ++f) {
+        for (int i = 0; i < 4; ++i) {
+            const int a = faces[f][static_cast<std::size_t>(i)];
+            const int b = faces[f][static_cast<std::size_t>((i + 1) % 4)];
+            const int eid = static_cast<int>(f) * 4 + i;
+            if (a == b) {
+                continue;
+            }
+            target[static_cast<std::size_t>(eid)] = b;
+            if (v2e[static_cast<std::size_t>(a)] == -1) {
+                v2e[static_cast<std::size_t>(a)] = eid;
+            } else {
+                int idx = v2e[static_cast<std::size_t>(a)];
+                while (nextChain[static_cast<std::size_t>(idx)] != -1) {
+                    idx = nextChain[static_cast<std::size_t>(idx)];
+                }
+                nextChain[static_cast<std::size_t>(idx)] = eid;
+            }
+        }
+    }
+    std::vector<int> e2e(static_cast<std::size_t>(nHe), -1);
+    for (std::size_t f = 0; f < faces.size(); ++f) {
+        for (int i = 0; i < 4; ++i) {
+            const int a = faces[f][static_cast<std::size_t>(i)];
+            const int b = faces[f][static_cast<std::size_t>((i + 1) % 4)];
+            const int eid = static_cast<int>(f) * 4 + i;
+            if (a == b) {
+                continue;
+            }
+            int it = v2e[static_cast<std::size_t>(b)], opp = -1;
+            while (it != -1) {
+                if (target[static_cast<std::size_t>(it)] == a) {
+                    if (opp == -1) {
+                        opp = it;
+                    } else {
+                        opp = -1;  // non-manifold: leave both as boundary
+                        break;
+                    }
+                }
+                it = nextChain[static_cast<std::size_t>(it)];
+            }
+            if (opp != -1 && eid < opp) {
+                e2e[static_cast<std::size_t>(eid)] = opp;
+                e2e[static_cast<std::size_t>(opp)] = eid;
+            }
+        }
+    }
+    return e2e;
+}
+
+// Min-angle-energy quadrangulation of a boundary loop (QuadriFlow QuadEnergy):
+// a length-4 loop emits one quad and returns its squared-angle-deviation energy;
+// longer even loops are split at every (seg1, seg2) parity-respecting pair and
+// the minimum-energy partition is kept. `budget` bounds the exponential search.
+double quadEnergy(const std::vector<int>& loop, const std::vector<Vec3>& O,
+                  const std::vector<Vec3>& N, std::vector<std::array<int, 4>>& res, int& budget) {
+    const int n = static_cast<int>(loop.size());
+    if (n < 4) {
+        return 0.0;
+    }
+    if (--budget < 0) {
+        return 1e30;  // recursion budget exhausted: leave this (large) loop unfilled
+    }
+    if (n == 4) {
+        double energy = 0.0;
+        for (int j = 0; j < 4; ++j) {
+            const int v0 = loop[static_cast<std::size_t>(j)];
+            const int v2 = loop[static_cast<std::size_t>((j + 1) % 4)];
+            const int v1 = loop[static_cast<std::size_t>((j + 3) % 4)];
+            const Vec3 pt1 =
+                normalized(O[static_cast<std::size_t>(v1)] - O[static_cast<std::size_t>(v0)]);
+            const Vec3 pt2 =
+                normalized(O[static_cast<std::size_t>(v2)] - O[static_cast<std::size_t>(v0)]);
+            const Vec3 nn = cross(pt1, pt2);
+            double sina = length(nn);
+            if (dot(nn, N[static_cast<std::size_t>(v0)]) < 0.0f) {
+                sina = -sina;
+            }
+            const double cosa = dot(pt1, pt2);
+            double angle = std::atan2(sina, cosa) / static_cast<double>(kPi) * 180.0;
+            if (angle < 0.0) {
+                angle = 360.0 + angle;
+            }
+            energy += angle * angle;
+        }
+        res.push_back({loop[0], loop[3], loop[2], loop[1]});
+        return energy;
+    }
+    double best = 1e30;
+    for (int seg1 = 2; seg1 < n; seg1 += 2) {
+        for (int seg2 = seg1 + 1; seg2 < n; seg2 += 2) {
+            std::array<std::vector<std::array<int, 4>>, 4> quads;
+            std::vector<int> corner{loop[0], loop[1], loop[static_cast<std::size_t>(seg1)],
+                                    loop[static_cast<std::size_t>(seg2)]};
+            double energy = quadEnergy(corner, O, N, quads[0], budget);
+            if (seg1 > 2) {
+                std::vector<int> v(loop.begin() + 1, loop.begin() + seg1);
+                v.push_back(loop[static_cast<std::size_t>(seg1)]);
+                energy += quadEnergy(v, O, N, quads[1], budget);
+            }
+            if (seg2 != seg1 + 1) {
+                std::vector<int> v(loop.begin() + seg1, loop.begin() + seg2);
+                v.push_back(loop[static_cast<std::size_t>(seg2)]);
+                energy += quadEnergy(v, O, N, quads[2], budget);
+            }
+            if (seg2 + 1 != n) {
+                std::vector<int> v(loop.begin() + seg2, loop.end());
+                v.push_back(loop[0]);
+                energy += quadEnergy(v, O, N, quads[3], budget);
+            }
+            if (best > energy) {
+                best = energy;
+                res.clear();
+                for (const auto& part : quads) {
+                    for (const auto& q : part) {
+                        res.push_back(q);
+                    }
+                }
+            }
+        }
+    }
+    return best;
+}
+
+// Fill a single traced boundary loop: split it at repeated vertices into simple
+// sub-loops, quadrangulate each with quadEnergy, and add the quads whose edges do
+// not already exist (QuadriFlow FixHoles(loop_vertices)).
+void fixHolesLoop(const std::vector<int>& loopIn, std::vector<std::array<int, 4>>& faces,
+                  std::set<std::pair<int, int>>& quadEdges, const std::vector<Vec3>& O,
+                  const std::vector<Vec3>& N) {
+    std::vector<std::vector<int>> subLoops;
+    std::unordered_map<int, int> seen;
+    for (int i = 0; i < static_cast<int>(loopIn.size()); ++i) {
+        const auto it = seen.find(loopIn[static_cast<std::size_t>(i)]);
+        if (it != seen.end()) {
+            const int j = it->second;
+            subLoops.emplace_back();
+            if (i - j > 3 && (i - j) % 2 == 0) {
+                for (int k = j; k < i; ++k) {
+                    const auto it2 = seen.find(loopIn[static_cast<std::size_t>(k)]);
+                    if (it2 != seen.end()) {
+                        subLoops.back().push_back(loopIn[static_cast<std::size_t>(k)]);
+                        seen.erase(it2);
+                    }
+                }
+            }
+        }
+        seen[loopIn[static_cast<std::size_t>(i)]] = i;
+    }
+    if (seen.size() >= 3) {
+        subLoops.emplace_back();
+        for (int k = 0; k < static_cast<int>(loopIn.size()); ++k) {
+            const auto it2 = seen.find(loopIn[static_cast<std::size_t>(k)]);
+            if (it2 != seen.end()) {
+                subLoops.back().push_back(loopIn[static_cast<std::size_t>(k)]);
+                seen.erase(it2);
+            }
+        }
+    }
+    for (auto& loop : subLoops) {
+        if (loop.empty()) {
+            return;  // faithful to QuadriFlow: abandons the rest
+        }
+        std::vector<std::array<int, 4>> quads;
+        int budget = 200000;  // bounds the exponential search on pathological loops
+        quadEnergy(loop, O, N, quads, budget);
+        const auto quadEdge = [](const std::array<int, 4>& q, int j) {
+            return std::pair<int, int>{q[static_cast<std::size_t>(j)],
+                                       q[static_cast<std::size_t>((j + 1) % 4)]};
+        };
+        for (const auto& q : quads) {
+            bool exists = false;
+            for (int j = 0; j < 4; ++j) {
+                if (quadEdges.count(quadEdge(q, j))) {
+                    exists = true;
+                    break;
+                }
+            }
+            if (!exists) {
+                for (int j = 0; j < 4; ++j) {
+                    quadEdges.insert(quadEdge(q, j));
+                }
+                faces.push_back(q);
+            }
+        }
+    }
+}
+
+// Trace every boundary loop of the quad mesh and fill loops under 25 vertices
+// (QuadriFlow FixHoles()). Mutates `faces`; new quads reference existing vertices.
+void fixHoles(std::vector<std::array<int, 4>>& faces, const std::vector<Vec3>& O,
+              const std::vector<Vec3>& N, int nVerts) {
+    std::set<std::pair<int, int>> quadEdges;
+    for (const auto& f : faces) {
+        for (int j = 0; j < 4; ++j) {
+            quadEdges.insert(
+                {f[static_cast<std::size_t>(j)], f[static_cast<std::size_t>((j + 1) % 4)]});
+        }
+    }
+    const std::vector<int> e2e = quadE2E(faces, nVerts);
+    std::vector<char> detected(e2e.size(), 0);
+    for (int i = 0; i < static_cast<int>(e2e.size()); ++i) {
+        if (detected[static_cast<std::size_t>(i)] != 0 || e2e[static_cast<std::size_t>(i)] != -1) {
+            continue;
+        }
+        std::vector<int> loopEdges;
+        int cur = i;
+        bool degenerate = false;
+        while (detected[static_cast<std::size_t>(cur)] == 0) {
+            detected[static_cast<std::size_t>(cur)] = 1;
+            loopEdges.push_back(cur);
+            cur = cur / 4 * 4 + (cur + 1) % 4;
+            std::size_t guard = 0;
+            while (e2e[static_cast<std::size_t>(cur)] != -1) {
+                cur = e2e[static_cast<std::size_t>(cur)];
+                cur = cur / 4 * 4 + (cur + 1) % 4;
+                if (++guard > e2e.size()) {
+                    degenerate = true;  // non-manifold fan: abandon this loop
+                    break;
+                }
+            }
+            if (degenerate) {
+                break;
+            }
+        }
+        if (degenerate) {
+            continue;
+        }
+        std::vector<int> loopV(loopEdges.size());
+        for (std::size_t j = 0; j < loopEdges.size(); ++j) {
+            loopV[j] = faces[static_cast<std::size_t>(loopEdges[j] / 4)]
+                            [static_cast<std::size_t>(loopEdges[j] % 4)];
+        }
+        if (loopV.size() < 25) {
+            fixHolesLoop(loopV, faces, quadEdges, O, N);
+        }
+    }
+}
+
+// Collapses the unit-cell mesh into a watertight quad mesh (QuadriFlow
+// AdvancedExtractQuad + BuildTriangleManifold, single-level): reconstruct a clean
+// compact triangle manifold, pair the two triangles across each |diff|==(1,1)
+// grid-cell diagonal into a quad, drop degenerate quads, then FixHoles the
+// residual boundary loops. Output vertex position is the mean field position (O).
+Mesh buildQuadMesh(const SubMesh& m) {
+    const ManifoldTris mt = buildManifoldTris(m);
+
+    // Pair the two triangles across each grid-cell diagonal (QuadriFlow keys the
+    // diagonal by its manifold-vertex endpoint pair).
+    std::map<std::pair<int, int>, std::pair<std::array<int, 3>, std::array<int, 3>>> quads;
+    for (std::size_t t = 0; t < mt.tv.size(); ++t) {
+        for (int j = 0; j < 3; ++j) {
+            const Int2 d = mt.diff[t][static_cast<std::size_t>(j)];
+            if (std::abs(d.x) != 1 || std::abs(d.y) != 1) {
+                continue;
+            }
+            const int v1 = mt.tv[t][static_cast<std::size_t>(j)];
+            const int v2 = mt.tv[t][static_cast<std::size_t>((j + 1) % 3)];
+            const int v3 = mt.tv[t][static_cast<std::size_t>((j + 2) % 3)];
+            const std::pair<int, int> key =
+                v1 < v2 ? std::make_pair(v1, v2) : std::make_pair(v2, v1);
+            const auto it = quads.find(key);
+            if (it == quads.end()) {
+                quads[key] = {{v1, v2, v3}, {-1, -1, -1}};
+            } else {
+                it->second.second = {v1, v2, v3};
+            }
+        }
+    }
     std::vector<std::array<int, 4>> faces;
     for (const auto& kv : quads) {
         const auto& f = kv.second.first;
         const auto& s = kv.second.second;
-        if (s[0] == -1 || f[2] == s[2]) {
-            continue;
+        if (s[0] != -1 && f[2] != s[2]) {
+            faces.push_back({f[1], f[2], f[0], s[2]});
         }
-        const std::array<int, 4> q{f[1], f[2], f[0], s[2]};
+    }
+
+    // Drop degenerate quads (repeated vertex) — removing one cannot create another.
+    std::vector<std::array<int, 4>> cleaned;
+    cleaned.reserve(faces.size());
+    for (const auto& q : faces) {
         bool distinct = true;
-        for (int a = 0; a < 4 && distinct; ++a) {
+        for (int a = 0; a < 3 && distinct; ++a) {
             for (int b = a + 1; b < 4; ++b) {
                 if (q[static_cast<std::size_t>(a)] == q[static_cast<std::size_t>(b)]) {
                     distinct = false;
@@ -1564,21 +2069,23 @@ Mesh buildQuadMesh(const SubMesh& m) {
             }
         }
         if (distinct) {
-            faces.push_back(q);
+            cleaned.push_back(q);
         }
     }
+    faces.swap(cleaned);
 
-    // Materialise the mesh: only clusters referenced by a quad become vertices.
+    fixHoles(faces, mt.O, mt.N, static_cast<int>(mt.O.size()));
+
+    // Materialise: only manifold vertices referenced by a face become mesh verts.
     Mesh out;
     std::map<int, VertexId> remap;
-    const auto getV = [&](int r) {
-        const auto it = remap.find(r);
+    const auto getV = [&](int v) {
+        const auto it = remap.find(v);
         if (it != remap.end()) {
             return it->second;
         }
-        const VertexId id =
-            out.addVertex(sumO[static_cast<std::size_t>(r)] * (1.0f / static_cast<float>(cnt[static_cast<std::size_t>(r)])));
-        remap.emplace(r, id);
+        const VertexId id = out.addVertex(mt.O[static_cast<std::size_t>(v)]);
+        remap.emplace(v, id);
         return id;
     };
     for (const auto& q : faces) {

@@ -118,8 +118,10 @@ malformed-orbit holes, no post-hoc rotation.
    Port faithfully from `parametrizer-int.cpp` (BuildEdgeInfo, BuildIntegerConstraints,
    ComputeMaxFlow) and `optimizer.cpp` (optimize_integer_constraints); validate
    cylinder-first at every step (Milestone 1 had 2 sign bugs caught only that way).
-3. 🟡 **Extraction — IN PROGRESS. Stages (a) + first (c) landed; needs
-   `BuildTriangleManifold`.** Refactored the solve into a reusable
+3. 🟢 **Extraction — WATERTIGHT MANIFOLD DONE; irregular %/holes → Milestone 4.**
+   `BuildTriangleManifold` ported (single-level): the extractor is now a valid
+   manifold, all-quad and near-watertight across the whole corpus. Refactored the
+   solve into a reusable
    `computeIntegerGrid` (commit a94fab7) that returns the post-flow grid state
    (tris, e2e, corrected edge_diff, face_edgeIds, orients) — QuadriFlow's
    post-`ComputeMaxFlow` state.
@@ -135,23 +137,33 @@ malformed-orbit holes, no post-hoc rotation.
    - **(c-first) collapse + diagonal-pairing — DONE but hole-prone (commit
      37efffb).** Collapse zero-diff edges → grid vertices (mean field position),
      pair the two triangles across each `(1,1)` diagonal into a quad
-     (`extractIntegerQuadMesh`). Output is **all-quad** (nonQuad==0). **BUT NOT
+     (`extractIntegerQuadMesh`). Output was **all-quad** (nonQuad==0) but **NOT
      WATERTIGHT:** ~30% true holes (icosphere: 312 boundary edges / 500 quads,
-     39–52% irregular). Confirmed *true holes* (a cell diagonal with only one clean
-     triangle), not winding artifacts — the mesh edge model is undirected, so
-     boundary edges = genuinely single-quad cells.
-   - **REMAINING — the fix is QuadriFlow's `BuildTriangleManifold`
-     (parametrizer-flip.cpp ~267–580).** Direct pairing on the *collapsed fine*
-     triangulation is fundamentally hole-prone; QuadriFlow first reconstructs a
-     **clean compact triangle manifold** over the grid vertices (orbit walks +
-     manifold-repair loop over the fully-downsampled edge graph `F2E/E2F/EdgeDiff/FQ`),
-     *then* pairs diagonals, then `FixHoles`/`FixValence`. Single-level: build the
-     compact-triangle edge structure directly (skip `DownsampleEdgeGraph`'s
-     multi-resolution). Also port `FixFlipHierarchy`/`FixFlipSat` (parametrizer-flip.cpp)
-     to repair flipped cells, and `FixValence`/`FixHoles` (parametrizer-mesh.cpp).
-     Target: watertight, irregular % < 15% (from the solve's ~47 spot
-     singularities). Open-mesh/boundary + sharp handling remain robustness
-     follow-ups. **The next focused session.**
+     39–52% irregular), and non-manifold at pinch points.
+   - **(c-manifold) `BuildTriangleManifold` — DONE (this session).** Ported
+     QuadriFlow's `BuildTriangleManifold` (parametrizer-flip.cpp ~267–580),
+     single-level: (1) collapse zero-diff edges into a **compact triangle mesh**
+     (the single-level stand-in for `DownsampleEdgeGraph` — drop triangles that
+     straddle a collapsed edge); (2) **orbit-walk** each vertex fan into a per-fan
+     manifold id, then the **manifold-repair loop** splits any non-manifold
+     (bowtie/pinch) vertex into one vertex per directed-edge sub-loop; (3) pair
+     `(1,1)` diagonals into quads; (4) drop degenerate quads; (5) **`FixHoles`**
+     traces residual boundary loops (quad `E2E`) and fills each `<25`-vertex loop
+     with `QuadEnergy` min-angle-DP quads (guarded by a recursion budget so a
+     pathological loop can't blow up the exponential search). **Result across the
+     whole corpus: a valid manifold, all-quad, near-watertight** — icosphere
+     312→**26 boundary edges**, 45%→**20% irregular**; spot/bunny/fandisk/
+     cheburashka/rocker-arm all `validate()`-clean, boundary edges ~1.5–4% of
+     total, irregular 22–28%. Regression test asserts manifold + `nonQuad==0` +
+     `boundary < quads/10` + `irregular < verts/4`.
+   - **REMAINING — irregular % 22–28% (target < 15%) + a few residual triangular
+     holes.** Boundary vertices from the small unfillable triangular holes (a cell
+     diagonal with one clean triangle → a size-3 loop `QuadEnergy` cannot quad-fill)
+     count as irregular and inflate the %. The remaining levers, deferred to
+     Milestone 4 (quality/promote): port **`FixValence`** (parametrizer-mesh.cpp —
+     doublet/valence-3 cleanup), close triangular holes (edge collapse / merge into
+     a neighbour), and optionally `FixFlipHierarchy`/`FixFlipSat` for flipped cells.
+     Open-mesh/boundary + sharp handling remain robustness follow-ups.
 4. ◻ **Quality + promote** — median/CV/feature/robustness vs QuadriFlow; if it
    wins, make it the extractor default and retire the collapse-and-walk path.
 
