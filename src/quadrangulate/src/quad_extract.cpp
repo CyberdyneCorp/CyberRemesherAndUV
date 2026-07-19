@@ -16,6 +16,7 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <map>
 #include <numeric>
 #include <set>
 #include <vector>
@@ -485,103 +486,80 @@ Graph buildCollapsedGraph(const Mesh& mesh, const PositionField& field) {
     return g;
 }
 
-// --- Stage B: trace faces by walking the angularly-ordered graph. ---------
-// From a start half-edge, repeatedly step to the neighbour and take the next
-// edge in that neighbour's angular fan after the back-edge ("turn left"),
-// until returning to the start. A closed loop of exactly `targetSize` with no
-// already-used half-edge is a face; its half-edges are then marked used so the
-// result is a manifold cover. Quads (size 4) are extracted first.
+// --- Stage B: trace faces as orbits of the rotation system. ----------------
+// The angularly-ordered adjacency is a rotation system; each face is an orbit
+// of phi = sigma . alpha over the directed edges ("darts"): from a dart u->v,
+// reverse to v->u and take the CCW-successor neighbour of u around v. Every dart
+// belongs to exactly ONE orbit, so this covers the WHOLE graph — unlike a
+// target-size turn-left walk, which abandons darts that do not close a 4-cycle
+// and so leaves large holes on curved / singular surfaces. Orbits of size 3-11
+// become faces (quads / tris / small n-gons filling holes around singularities);
+// larger orbits are open-boundary loops and are dropped.
 Mesh extractFaces(const Graph& g) {
     const std::size_t nN = g.pos.size();
-    std::vector<std::vector<std::uint8_t>> used(nN);
-    for (std::size_t i = 0; i < nN; ++i) {
-        used[i].assign(g.adj[i].size(), 0);
+
+    // Darts (directed edges), indexed for O(log n) reverse/lookup; ringPos[d] is
+    // the index of dst within src's CCW neighbour ring.
+    std::map<std::pair<Index, Index>, int> dartId;
+    std::vector<Index> src, dst;
+    std::vector<int> ringPos;
+    for (Index u = 0; u < static_cast<Index>(nN); ++u) {
+        const auto& ring = g.adj[u];
+        for (int k = 0; k < static_cast<int>(ring.size()); ++k) {
+            dartId[{u, ring[static_cast<std::size_t>(k)].id}] = static_cast<int>(src.size());
+            src.push_back(u);
+            dst.push_back(ring[static_cast<std::size_t>(k)].id);
+            ringPos.push_back(k);
+        }
     }
-    const auto valence = [&](Index n) { return static_cast<int>(g.adj[static_cast<std::size_t>(n)].size()); };
-    const auto backEdge = [&](Index from, Index to) {
-        const auto& a = g.adj[static_cast<std::size_t>(to)];
-        for (int k = 0; k < static_cast<int>(a.size()); ++k) {
-            if (a[static_cast<std::size_t>(k)].id == from) {
-                return k;
-            }
+    const std::size_t dartCount = src.size();
+
+    const auto nextDart = [&](int dart) -> int {
+        const Index u = src[static_cast<std::size_t>(dart)];
+        const Index v = dst[static_cast<std::size_t>(dart)];
+        const auto rev = dartId.find({v, u});
+        if (rev == dartId.end()) {
+            return -1;
         }
-        return -1;
+        const auto& ring = g.adj[v];
+        const int deg = static_cast<int>(ring.size());
+        const int i = ringPos[static_cast<std::size_t>(rev->second)];
+        const Index w = ring[static_cast<std::size_t>((i + 1) % deg)].id;
+        const auto jt = dartId.find({v, w});
+        return jt == dartId.end() ? -1 : jt->second;
     };
 
-    constexpr int kMaxSize = 8;
-    // Walk from (start, startIdx). targetSize > 0 requires exactly that many
-    // corners; targetSize == 0 accepts any closed loop in [3, kMaxSize] (used to
-    // fill leftover regions around singularities). Returns the node cycle, or
-    // empty on failure. Does not mutate `used`.
-    const auto walk = [&](Index start, int startIdx, int targetSize) {
-        std::vector<std::pair<Index, int>> path;
-        Index cur = start;
-        int ci = startIdx;
-        bool ok = false;
-        while (true) {
-            if (used[static_cast<std::size_t>(cur)][static_cast<std::size_t>(ci)]) {
-                break;
-            }
-            const int cap = targetSize > 0 ? targetSize : kMaxSize;
-            if (static_cast<int>(path.size()) + 1 > cap) {
-                break;
-            }
-            path.emplace_back(cur, ci);
-            const Index next = g.adj[static_cast<std::size_t>(cur)][static_cast<std::size_t>(ci)].id;
-            const int bi = backEdge(next, cur);
-            if (bi < 0 || valence(next) <= 1) {
-                break;
-            }
-            ci = (bi + 1) % valence(next);
-            cur = next;
-            if (cur == start) {
-                const int sz = static_cast<int>(path.size());
-                ok = targetSize > 0 ? sz == targetSize : sz >= 3;
-                break;
-            }
-        }
-        if (!ok) {
-            path.clear();
-        }
-        return path;
-    };
-
+    constexpr std::size_t kBoundaryLoop = 12;  // orbits >= this are open boundaries
+    std::vector<char> used(dartCount, 0);
     std::vector<std::vector<Index>> faces;
-    const auto tryEmit = [&](Index start, int startIdx, int targetSize) {
-        if (used[static_cast<std::size_t>(start)][static_cast<std::size_t>(startIdx)]) {
-            return;
+    for (int start = 0; start < static_cast<int>(dartCount); ++start) {
+        if (used[static_cast<std::size_t>(start)]) {
+            continue;
         }
-        const auto path = walk(start, startIdx, targetSize);
-        if (path.empty()) {
-            return;
+        std::vector<Index> loop;
+        int dart = start;
+        bool ok = true;
+        for (std::size_t guard = 0; guard <= dartCount; ++guard) {
+            if (dart < 0 || used[static_cast<std::size_t>(dart)]) {
+                ok = dart == start;
+                break;
+            }
+            used[static_cast<std::size_t>(dart)] = 1;
+            loop.push_back(src[static_cast<std::size_t>(dart)]);
+            dart = nextDart(dart);
+            if (dart == start) {
+                break;  // orbit closed
+            }
         }
-        std::vector<Index> face;
-        face.reserve(path.size());
-        for (const auto& [n, idx] : path) {
-            face.push_back(n);
+        if (!ok || loop.size() < 3 || loop.size() >= kBoundaryLoop) {
+            continue;
         }
-        std::vector<Index> sorted = face;
+        std::vector<Index> sorted = loop;
         std::sort(sorted.begin(), sorted.end());
         if (std::adjacent_find(sorted.begin(), sorted.end()) != sorted.end()) {
-            return;  // repeated vertex -> degenerate
+            continue;  // repeated node -> degenerate orbit
         }
-        for (const auto& [n, idx] : path) {
-            used[static_cast<std::size_t>(n)][static_cast<std::size_t>(idx)] = 1;
-        }
-        faces.push_back(std::move(face));
-    };
-
-    // Quads first (grab every clean 4-cycle), then fill leftover regions with
-    // whatever closes (tris / pentagons / n-gons around singularities).
-    for (Index start = 0; start < static_cast<Index>(nN); ++start) {
-        for (int idx = 0; idx < valence(start); ++idx) {
-            tryEmit(start, idx, 4);
-        }
-    }
-    for (Index start = 0; start < static_cast<Index>(nN); ++start) {
-        for (int idx = 0; idx < valence(start); ++idx) {
-            tryEmit(start, idx, 0);
-        }
+        faces.push_back(std::move(loop));
     }
     return Mesh::fromIndexed(g.pos, faces);
 }
