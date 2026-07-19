@@ -29,9 +29,31 @@ and characterised; closing the last gap is a genuine topology build.
 Every phase exits on a number from a single automated benchmark (Phase 1). We
 do not claim "better" without a harness number that shows it.
 
+## Status (2026-07)
+
+- **Phase 1 — DONE.** `examples/11_benchmark.py` scores the corpus vs QuadriFlow
+  on surface deviation, normal error, median angle, edge CV, and irregular-vertex
+  %. Uniform, matched target (~3000 quads), best-of-ours vs QuadriFlow: ours ties
+  on surface dev / normal error (2/5 models each), trails on median angle and
+  singularity count (0/5) — the known extraction-singularity gap. It immediately
+  earned its keep by falsifying the naive Phase-2 hypothesis (below).
+- **Phase 2 — PARTIAL.** Quality-per-polygon (ours adaptive vs QuadriFlow at the
+  same output count): ours wins on **3/5** models (spot, fandisk, bunny) and
+  loses on rocker-arm and cheburashka. Not yet robust. The benchmark exposed the
+  blockers: (a) the position-field extractor uses a single global spacing, so it
+  **over-merges adaptive-density input and collapses the quad count** (target
+  2500 → ~200–650); (b) the curvature sizing puts large quads across gently
+  curved fillets, hurting fidelity on some models. Both are the tracked Phase-2
+  work; the win is real where it lands but needs a variable-spacing extractor and
+  a better sizing field to generalize.
+- **Bonus finding:** the QuadriFlow-in-every-example panels show a clear
+  feature-preservation win — on a cube QuadriFlow rounds the edges and tears
+  holes (20% slivers) while our feature-aware remesh keeps them crisp. Feeds
+  Phase 3.
+
 ---
 
-## Phase 1 — Define & measure "better" (foundation)
+## Phase 1 — Define & measure "better" (foundation) — ✅ DONE
 
 Today's harness measures QuadriFlow's home turf (uniform, matched-count, median
 angle). Build metrics that capture *real* retopology quality:
@@ -47,13 +69,18 @@ angle). Build metrics that capture *real* retopology quality:
 runnable in CI, producing a per-model table and an aggregate score vs QuadriFlow.
 **Exit:** the benchmark runs green and reproduces the numbers above.
 
-## Phase 2 — Win on adaptivity (quality-per-polygon)
+## Phase 2 — Win on adaptivity (quality-per-polygon) — 🟡 PARTIAL (3/5)
 
 QuadriFlow is uniform. We have curvature-adaptive sizing (`adaptivity`). Concentrate
-quads where curvature is high → same fidelity at fewer polygons. Validate + tune
-against the Phase-1 quality-per-polygon metric.
-**Exit:** at matched Hausdorff/normal error, we use fewer quads than QuadriFlow on
-mixed curved/flat models (spot, cheburashka, rocker-arm).
+quads where curvature is high → same fidelity at fewer polygons. The quality-per-
+polygon win lands on 3/5 models today. To make it robust:
+- **Variable-spacing extractor**: the position-field extractor must accept a
+  per-vertex target spacing (e.g. local edge length) instead of one global
+  spacing, so it stops over-merging adaptive input and honors the quad budget.
+- **Better sizing field**: refine on gently-curved fillets (currently spans them
+  with large quads), and stabilize the target-count contract across models.
+**Exit:** ours ≥ QuadriFlow on quality-per-polygon (surface dev at matched output
+count) on ≥ 4/5 corpus models, and adaptivity honors the target count within ±25%.
 
 ## Phase 3 — Win on features & robustness
 
