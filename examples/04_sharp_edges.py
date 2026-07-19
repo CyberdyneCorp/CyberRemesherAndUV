@@ -23,11 +23,17 @@ def main() -> None:
         )
         print(c.stat_line("cube remesh", stats, out))
 
+        panels = [src, out]
+        titles = [f"input · {len(src['faces'])} triangles",
+                  c.quad_label("CyberRemesher · edges kept", out, vs_source=src)]
+        ref = c.reference_panel(src_path, c.face_counts(out)[0], source=src)
+        if ref:
+            panels.append(ref[0])
+            titles.append(ref[1])
         c.render_panels(
-            [src, out],
-            [f"input · {len(src['faces'])} triangles", "remeshed · sharp edges kept"],
+            panels, titles,
             os.path.join(c.OUTPUT_DIR, "04_sharp_edges.png"),
-            suptitle="Sharp-edge preservation (feature-aware remesh)",
+            suptitle="Sharp-edge preservation — CyberRemesher (feature-aware) vs QuadriFlow",
         )
 
 

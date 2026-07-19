@@ -55,13 +55,19 @@ def main() -> None:
         print(c.stat_line(f"{name} pure", s_pure, pure))
         print()
 
-        # Per-model before/after triptych.
+        # Per-model panels: input, ours (quad-dominant + pure), and QuadriFlow
+        # at the matched pure-quad count for a side-by-side quality read.
+        panels = [src, dominant, pure]
+        titles = [f"{name} · {len(src['faces'])} tris", f"quad-dominant · {qd} quads",
+                  c.quad_label("pure quads", pure, vs_source=src)]
+        ref = c.reference_panel(path, qp, source=src)
+        if ref:
+            panels.append(ref[0])
+            titles.append(ref[1])
         c.render_panels(
-            [src, dominant, pure],
-            [f"{name} · {len(src['faces'])} tris", f"quad-dominant · {qd} quads",
-             f"pure quads · {qp} quads"],
+            panels, titles,
             os.path.join(c.OUTPUT_DIR, f"09_{name}.png"),
-            suptitle=f"{name}: real model → quads",
+            suptitle=f"{name}: real model → quads — CyberRemesher vs QuadriFlow",
         )
 
         gallery.append(dominant)

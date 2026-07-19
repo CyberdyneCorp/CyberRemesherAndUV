@@ -37,11 +37,18 @@ def main() -> None:
         print(f"hole left open : {open_edges(no_fill)} boundary edges (hole + outer border)")
         print(f"hole filled    : {open_edges(filled)} boundary edges (only the outer border left)")
 
+        panels = [src, no_fill, filled]
+        titles = ["input · square hole", "remeshed · hole left open",
+                  "remeshed · hole filled (grey patch)"]
+        # QuadriFlow has no targeted hole-fill pass — the contrast panel.
+        ref = c.reference_panel(src_path, c.face_counts(filled)[0])
+        if ref:
+            panels.append(ref[0])
+            titles.append(ref[1])
         c.render_panels(
-            [src, no_fill, filled],
-            ["input · square hole", "remeshed · hole left open", "remeshed · hole filled (grey patch)"],
+            panels, titles,
             os.path.join(c.OUTPUT_DIR, "06_hole_fill.png"),
-            suptitle="Hole filling as a cleanup pass (holeFillMaxBoundary)",
+            suptitle="Hole filling as a cleanup pass (holeFillMaxBoundary) — vs QuadriFlow",
         )
 
 

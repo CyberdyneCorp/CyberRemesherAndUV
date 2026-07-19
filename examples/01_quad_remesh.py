@@ -24,11 +24,17 @@ def main() -> None:
         print(c.stat_line("input (triangles)", _fake_stats(src), src))
         print(c.stat_line("remeshed (quads)", stats, out))
 
+        panels = [src, out]
+        titles = [f"input · {len(src['faces'])} triangles",
+                  c.quad_label("CyberRemesher", out, vs_source=src)]
+        ref = c.reference_panel(src_path, c.face_counts(out)[0], source=src)
+        if ref:
+            panels.append(ref[0])
+            titles.append(ref[1])
         c.render_panels(
-            [src, out],
-            [f"input · {len(src['faces'])} triangles", f"remeshed · quad-dominant"],
+            panels, titles,
             os.path.join(c.OUTPUT_DIR, "01_quad_remesh.png"),
-            suptitle="CyberRemesher — triangle mesh → quad-dominant remesh",
+            suptitle="triangle mesh → quad-dominant remesh — CyberRemesher vs QuadriFlow",
         )
 
 

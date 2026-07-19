@@ -97,6 +97,24 @@ def quadriflow_try(binary: "str | None", model_path: str, faces: int) -> "MeshDa
         return None
 
 
+_QF_BINARY_CACHE: "list" = []  # memoize the (possibly slow) QuadriFlow build once per run
+
+
+def reference_panel(input_obj: str, quads: int, source: "MeshData | None" = None
+                    ) -> "Tuple[MeshData, str] | None":
+    """A (mesh, title) QuadriFlow reference panel for an example: remeshes
+    `input_obj` to ~`quads` quads with QuadriFlow so every example can show a
+    side-by-side. Returns None when QuadriFlow is unavailable (offline / no Eigen)
+    or fails on this input, so examples degrade gracefully. The QuadriFlow build
+    is done once per process and memoized."""
+    if not _QF_BINARY_CACHE:
+        _QF_BINARY_CACHE.append(quadriflow_binary())
+    mesh = quadriflow_try(_QF_BINARY_CACHE[0], input_obj, quads)
+    if mesh is None:
+        return None
+    return mesh, quad_label("QuadriFlow", mesh, vs_source=source)
+
+
 def quad_label(engine: str, mesh: MeshData, *, vs_source: "MeshData | None" = None) -> str:
     """A two/three-line panel title with quad count, angle/uniformity quality,
     and (when a source is given) surface-fidelity. Shared by every example so the

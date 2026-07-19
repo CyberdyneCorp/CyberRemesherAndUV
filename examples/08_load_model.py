@@ -57,12 +57,17 @@ def main() -> None:
 
     qd, _, _ = c.face_counts(dominant)
     qp, _, _ = c.face_counts(pure)
+    panels = [src, dominant, pure]
+    titles = [f"input · {len(src['faces'])} triangles", f"quad-dominant · {qd} quads",
+              c.quad_label("pure quads", pure, vs_source=src)]
+    ref = c.reference_panel(input_path, qp, source=src)
+    if ref:
+        panels.append(ref[0])
+        titles.append(ref[1])
     c.render_panels(
-        [src, dominant, pure],
-        [f"input · {len(src['faces'])} triangles", f"quad-dominant · {qd} quads",
-         f"pure quads · {qp} quads (100%)"],
+        panels, titles,
         os.path.join(c.OUTPUT_DIR, "08_load_model.png"),
-        suptitle="Load a model → convert to good-quality quads",
+        suptitle="Load a model → good-quality quads — CyberRemesher vs QuadriFlow",
     )
 
 

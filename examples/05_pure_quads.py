@@ -20,11 +20,18 @@ def main() -> None:
 
         q1, t1, _ = c.face_counts(dominant)
         q2, t2, _ = c.face_counts(pure)
+        src = c.load_obj(src_path)
+        panels = [dominant, pure]
+        titles = [f"quad-dominant · {t1} triangles left",
+                  c.quad_label("pure quads", pure, vs_source=src)]
+        ref = c.reference_panel(src_path, q2, source=src)
+        if ref:
+            panels.append(ref[0])
+            titles.append(ref[1])
         c.render_panels(
-            [dominant, pure],
-            [f"quad-dominant · {t1} triangles left", f"pure quads · {t2} triangles"],
+            panels, titles,
             os.path.join(c.OUTPUT_DIR, "05_pure_quads.png"),
-            suptitle="Pure-quad mode eliminates residual triangles",
+            suptitle="Pure-quad mode eliminates residual triangles (vs QuadriFlow, matched)",
         )
 
 

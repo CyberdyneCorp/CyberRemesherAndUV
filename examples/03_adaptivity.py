@@ -24,11 +24,17 @@ def main() -> None:
             )
             print(c.stat_line(f"adaptivity={adapt}", stats, out))
             meshes.append(out)
-            titles.append(f"adaptivity {adapt:g}")
+            titles.append(f"adaptivity {adapt:g} · {c.face_counts(out)[0]} quads")
 
+        # QuadriFlow only sizes uniformly — the contrast to our adaptive panel.
+        src = c.load_obj(src_path)
+        ref = c.reference_panel(src_path, c.face_counts(meshes[-1])[0], source=src)
+        if ref:
+            meshes.append(ref[0])
+            titles.append(ref[1])
         c.render_panels(
             meshes, titles, os.path.join(c.OUTPUT_DIR, "03_adaptivity.png"),
-            suptitle="Curvature adaptivity (uniform vs curvature-adaptive)",
+            suptitle="Curvature adaptivity (uniform vs adaptive) vs QuadriFlow (uniform-only)",
         )
 
 
