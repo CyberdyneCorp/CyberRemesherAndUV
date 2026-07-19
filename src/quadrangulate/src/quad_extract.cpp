@@ -338,56 +338,79 @@ Mesh extractFaces(const Graph& g) {
         return -1;
     };
 
-    std::vector<std::vector<Index>> faces;
-    for (const int targetSize : {4, 3, 5, 6}) {
-        for (Index start = 0; start < static_cast<Index>(nN); ++start) {
-            for (int startIdx = 0; startIdx < valence(start); ++startIdx) {
-                if (used[start][static_cast<std::size_t>(startIdx)]) {
-                    continue;
-                }
-                std::vector<std::pair<Index, int>> path;
-                Index cur = start;
-                int ci = startIdx;
-                bool ok = false;
-                while (true) {
-                    if (used[static_cast<std::size_t>(cur)][static_cast<std::size_t>(ci)]) {
-                        break;
-                    }
-                    if (static_cast<int>(path.size()) + 1 > targetSize) {
-                        break;
-                    }
-                    path.emplace_back(cur, ci);
-                    const Index next = g.adj[static_cast<std::size_t>(cur)][static_cast<std::size_t>(ci)].id;
-                    const int bi = backEdge(next, cur);
-                    if (bi < 0 || valence(next) <= 1) {
-                        break;
-                    }
-                    ci = (bi + 1) % valence(next);
-                    cur = next;
-                    if (cur == start) {
-                        ok = static_cast<int>(path.size()) == targetSize;
-                        break;
-                    }
-                }
-                if (!ok) {
-                    continue;
-                }
-                std::vector<Index> face;
-                face.reserve(path.size());
-                for (const auto& [n, idx] : path) {
-                    face.push_back(n);
-                }
-                // Reject degenerate faces (a repeated vertex).
-                std::vector<Index> sorted = face;
-                std::sort(sorted.begin(), sorted.end());
-                if (std::adjacent_find(sorted.begin(), sorted.end()) != sorted.end()) {
-                    continue;
-                }
-                for (const auto& [n, idx] : path) {
-                    used[static_cast<std::size_t>(n)][static_cast<std::size_t>(idx)] = 1;
-                }
-                faces.push_back(std::move(face));
+    constexpr int kMaxSize = 8;
+    // Walk from (start, startIdx). targetSize > 0 requires exactly that many
+    // corners; targetSize == 0 accepts any closed loop in [3, kMaxSize] (used to
+    // fill leftover regions around singularities). Returns the node cycle, or
+    // empty on failure. Does not mutate `used`.
+    const auto walk = [&](Index start, int startIdx, int targetSize) {
+        std::vector<std::pair<Index, int>> path;
+        Index cur = start;
+        int ci = startIdx;
+        bool ok = false;
+        while (true) {
+            if (used[static_cast<std::size_t>(cur)][static_cast<std::size_t>(ci)]) {
+                break;
             }
+            const int cap = targetSize > 0 ? targetSize : kMaxSize;
+            if (static_cast<int>(path.size()) + 1 > cap) {
+                break;
+            }
+            path.emplace_back(cur, ci);
+            const Index next = g.adj[static_cast<std::size_t>(cur)][static_cast<std::size_t>(ci)].id;
+            const int bi = backEdge(next, cur);
+            if (bi < 0 || valence(next) <= 1) {
+                break;
+            }
+            ci = (bi + 1) % valence(next);
+            cur = next;
+            if (cur == start) {
+                const int sz = static_cast<int>(path.size());
+                ok = targetSize > 0 ? sz == targetSize : sz >= 3;
+                break;
+            }
+        }
+        if (!ok) {
+            path.clear();
+        }
+        return path;
+    };
+
+    std::vector<std::vector<Index>> faces;
+    const auto tryEmit = [&](Index start, int startIdx, int targetSize) {
+        if (used[static_cast<std::size_t>(start)][static_cast<std::size_t>(startIdx)]) {
+            return;
+        }
+        const auto path = walk(start, startIdx, targetSize);
+        if (path.empty()) {
+            return;
+        }
+        std::vector<Index> face;
+        face.reserve(path.size());
+        for (const auto& [n, idx] : path) {
+            face.push_back(n);
+        }
+        std::vector<Index> sorted = face;
+        std::sort(sorted.begin(), sorted.end());
+        if (std::adjacent_find(sorted.begin(), sorted.end()) != sorted.end()) {
+            return;  // repeated vertex -> degenerate
+        }
+        for (const auto& [n, idx] : path) {
+            used[static_cast<std::size_t>(n)][static_cast<std::size_t>(idx)] = 1;
+        }
+        faces.push_back(std::move(face));
+    };
+
+    // Quads first (grab every clean 4-cycle), then fill leftover regions with
+    // whatever closes (tris / pentagons / n-gons around singularities).
+    for (Index start = 0; start < static_cast<Index>(nN); ++start) {
+        for (int idx = 0; idx < valence(start); ++idx) {
+            tryEmit(start, idx, 4);
+        }
+    }
+    for (Index start = 0; start < static_cast<Index>(nN); ++start) {
+        for (int idx = 0; idx < valence(start); ++idx) {
+            tryEmit(start, idx, 0);
         }
     }
     return Mesh::fromIndexed(g.pos, faces);
