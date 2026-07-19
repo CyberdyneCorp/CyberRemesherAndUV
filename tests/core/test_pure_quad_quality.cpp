@@ -182,11 +182,12 @@ TEST_CASE("pure-quad remeshing produces well-shaped quads on a clean sphere") {
     }
 }
 
-// The position-field extractor's pure-quad path blends edge-length equalization
-// into its relaxation (pipeline.cpp relaxBeta), tightening edge-length CV toward
-// the field-based reference WITHOUT shredding angles. Guards that the blended
-// relax stays wired for the extractor: with the plain centroid relax the CV on
-// this sphere sits ~0.19; the length blend pulls it clearly below.
+// The position-field extractor's pure-quad path fits every quad to a common-
+// sized square (shape matching, pipeline.cpp shapeMatch), regularising both
+// 90-degree corners and equal edge lengths toward the field-based reference.
+// Guards that shape matching stays wired for the extractor: with the plain
+// centroid relax the CV on this sphere sits ~0.25; shape matching pulls it well
+// below without shearing quads into slivers.
 TEST_CASE("position-field pure-quad path equalizes edge length") {
     const Mesh sphere = makeIcosphere(3);
     remesh::Parameters params;

@@ -1,6 +1,7 @@
 #include "cyber/core/pipeline.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 
 #include "cyber/core/bvh.hpp"
@@ -60,6 +61,94 @@ Vec3 vertexNormal(const Mesh& mesh, VertexId v) {
     return normalized(normal);
 }
 
+// An orthonormal tangent basis (u, w) of the plane normal to n.
+void tangentBasis(Vec3 n, Vec3& u, Vec3& w) {
+    if (std::fabs(n.x) > std::fabs(n.y)) {
+        const float il = 1.0f / std::sqrt(n.x * n.x + n.z * n.z);
+        u = Vec3{-n.z * il, 0.0f, n.x * il};
+    } else {
+        const float il = 1.0f / std::sqrt(n.y * n.y + n.z * n.z);
+        u = Vec3{0.0f, n.z * il, -n.y * il};
+    }
+    w = cross(n, u);
+}
+
+// Best-fit-square ("shape-matching") target for a vertex: each incident quad is
+// fitted to the square (same centroid, same average radius, best rotation in the
+// face's tangent plane) that its four corners are closest to, and the vertex
+// moves toward the average of its corner position across those ideal squares.
+// A square has 90-degree corners AND equal edges, so this pushes both angle and
+// edge-length regularity at once — the geometric equivalent of a globally
+// consistent integer grid, without a global solve. Interior only; the result is
+// projected back onto the surface by the caller.
+Vec3 shapeMatchTarget(const Mesh& mesh, VertexId v, float lambda, float targetRadius) {
+    const Vec3 p = mesh.position(v);
+    Vec3 accum{};
+    int count = 0;
+    for (const FaceId f : mesh.vertexFaces(v)) {
+        const auto verts = mesh.faceVertices(f);
+        if (verts.size() != 4) {
+            continue;  // shape-matching is defined for quads
+        }
+        Vec3 m{};
+        for (const VertexId vv : verts) {
+            m += mesh.position(vv);
+        }
+        m = m / 4.0f;
+        Vec3 u, w;
+        tangentBasis(mesh.faceNormal(f), u, w);
+
+        // Project corners to the face's 2D tangent frame. The square's radius is
+        // the shared global target (uniform sizing => every quad the same square,
+        // giving both 90-degree corners AND equal edge lengths across the mesh),
+        // falling back to the quad's own average radius when no target is given.
+        std::array<float, 4> ax{}, ay{};
+        float radius = 0.0f;
+        for (std::size_t i = 0; i < 4; ++i) {
+            const Vec3 d = mesh.position(verts[i]) - m;
+            ax[i] = dot(d, u);
+            ay[i] = dot(d, w);
+            radius += std::sqrt(ax[i] * ax[i] + ay[i] * ay[i]);
+        }
+        radius = targetRadius > 0.0f ? targetRadius : radius * 0.25f;
+
+        // Canonical square corners (45,135,225,315 deg) in the same winding as
+        // the face; solve the 2D Procrustes rotation aligning them to the actual
+        // corners: theta = atan2(sum canon x actual, sum canon . actual).
+        constexpr float kQuarterPi = 0.78539816339744830961f;
+        std::array<float, 4> cx{}, cy{};
+        float sumCross = 0.0f, sumDot = 0.0f;
+        for (std::size_t i = 0; i < 4; ++i) {
+            const float phi = kQuarterPi + static_cast<float>(i) * (2.0f * kQuarterPi);
+            cx[i] = radius * std::cos(phi);
+            cy[i] = radius * std::sin(phi);
+            sumCross += cx[i] * ay[i] - cy[i] * ax[i];
+            sumDot += cx[i] * ax[i] + cy[i] * ay[i];
+        }
+        const float theta = std::atan2(sumCross, sumDot);
+        const float ct = std::cos(theta), st = std::sin(theta);
+
+        // This vertex's index within the quad -> its ideal (rotated) corner.
+        for (std::size_t i = 0; i < 4; ++i) {
+            if (verts[i] == v) {
+                const float tx = ct * cx[i] - st * cy[i];
+                const float ty = st * cx[i] + ct * cy[i];
+                accum += m + u * tx + w * ty;
+                ++count;
+                break;
+            }
+        }
+    }
+    if (count == 0) {
+        return p;
+    }
+    const Vec3 target = accum / static_cast<float>(count);
+    const Vec3 normal = vertexNormal(mesh, v);
+    Vec3 delta = (target - p) * lambda;
+    delta = delta - normal * dot(delta, normal);  // stay tangential; caller reprojects
+    return p + delta;
+}
+
 Vec3 tangentialTarget(const Mesh& mesh, VertexId v, float lambda) {
     const auto edges = mesh.vertexEdges(v);
     Vec3 centroid{};
@@ -75,44 +164,6 @@ Vec3 tangentialTarget(const Mesh& mesh, VertexId v, float lambda) {
     return p + delta;
 }
 
-// Blended relaxation target: mixes a 1-ring centroid pull (which regularises
-// quad SHAPE / angles) with an edge-length-equalizing spring (each neighbour
-// pulls v along the edge in proportion to how far that edge deviates from the
-// incident mean, which regularises edge LENGTH). `beta` in [0,1] trades the two:
-// 0 is pure centroid (best angles, poor uniformity), 1 is pure length-equalize
-// (uniform edges but sheared angles). A middle value gets both — the balance
-// QuadriFlow's smoothing achieves. The result stays tangential to the surface.
-Vec3 blendedRelaxTarget(const Mesh& mesh, VertexId v, float lambda, float beta) {
-    const auto edges = mesh.vertexEdges(v);
-    const Vec3 p = mesh.position(v);
-    Vec3 centroid{};
-    float meanLen = 0.0f;
-    for (const EdgeId e : edges) {
-        const auto [a, b] = mesh.edgeVertices(e);
-        const Vec3 np = mesh.position(a == v ? b : a);
-        centroid += np;
-        meanLen += length(np - p);
-    }
-    const float n = static_cast<float>(edges.size());
-    centroid = centroid / n;
-    meanLen /= n;
-    Vec3 lengthForce{};
-    for (const EdgeId e : edges) {
-        const auto [a, b] = mesh.edgeVertices(e);
-        const Vec3 d = mesh.position(a == v ? b : a) - p;
-        const float len = length(d);
-        if (len > 1e-8f) {
-            lengthForce += (d / len) * (len - meanLen);
-        }
-    }
-    lengthForce = lengthForce / n;
-    const Vec3 combined = (centroid - p) * (1.0f - beta) + lengthForce * beta;
-    const Vec3 normal = vertexNormal(mesh, v);
-    Vec3 delta = combined * lambda;
-    delta = delta - normal * dot(delta, normal);
-    return p + delta;
-}
-
 // Relaxes a quad mesh, re-projecting onto the source surface every iteration.
 // Linear subdivision followed by closest-point snapping leaves many degenerate
 // quads — adjacent vertices land nearly on top of one another (near-zero edges,
@@ -124,7 +175,7 @@ Vec3 blendedRelaxTarget(const Mesh& mesh, VertexId v, float lambda, float beta) 
 // and open borders keep their subdivided positions — sliding them along the
 // faceted crease instead reprojects erratically and creates new slivers.
 void relaxQuadMesh(Mesh& mesh, const ReferenceSurface& reference, float sharpEdgeDegrees,
-                   int iterations, float lambda, float beta = 0.0f) {
+                   int iterations, float lambda, bool shapeMatch = false) {
     mesh.tagFeatureEdges(sharpEdgeDegrees);
     std::vector<bool> constrained(mesh.vertexCapacity(), false);
     for (Index ei = 0; ei < mesh.edgeCapacity(); ++ei) {
@@ -137,17 +188,39 @@ void relaxQuadMesh(Mesh& mesh, const ReferenceSurface& reference, float sharpEdg
         constrained[b.value] = true;
     }
 
+    // Uniform target square half-diagonal for shape matching: the current mean
+    // quad edge / sqrt(2). Recomputed each sweep so it tracks the mesh as it
+    // uniformizes and converges to a consistent global cell size.
+    const auto meanQuadEdge = [&]() {
+        double sum = 0.0;
+        std::size_t n = 0;
+        for (Index fi = 0; fi < mesh.faceCapacity(); ++fi) {
+            const FaceId f{fi};
+            if (!mesh.isAlive(f) || mesh.faceSize(f) != 4) {
+                continue;
+            }
+            const auto verts = mesh.faceVertices(f);
+            for (std::size_t k = 0; k < 4; ++k) {
+                sum += static_cast<double>(length(mesh.position(verts[k]) -
+                                                  mesh.position(verts[(k + 1) % 4])));
+                ++n;
+            }
+        }
+        return n ? static_cast<float>(sum / static_cast<double>(n)) : 0.0f;
+    };
+
     std::vector<Vec3> newPos(mesh.vertexCapacity());
     std::vector<bool> move(mesh.vertexCapacity(), false);
     for (int it = 0; it < iterations; ++it) {
+        const float targetRadius = shapeMatch ? meanQuadEdge() * 0.70710678f : 0.0f;
         std::fill(move.begin(), move.end(), false);
         for (Index i = 0; i < mesh.vertexCapacity(); ++i) {
             const VertexId v{i};
             if (!mesh.isAlive(v) || constrained[i] || mesh.vertexEdges(v).empty()) {
                 continue;
             }
-            newPos[i] = beta > 0.0f ? blendedRelaxTarget(mesh, v, lambda, beta)
-                                    : tangentialTarget(mesh, v, lambda);
+            newPos[i] = shapeMatch ? shapeMatchTarget(mesh, v, lambda, targetRadius)
+                                   : tangentialTarget(mesh, v, lambda);
             move[i] = true;
         }
         for (Index i = 0; i < mesh.vertexCapacity(); ++i) {
@@ -377,11 +450,12 @@ PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSi
     }
     if (params.pureQuads && result.mesh.faceCount() > 0) {
         // The position-field extractor produces an already-uniform base, so we
-        // can blend in edge-length equalization (beta) to tighten edge-length CV
-        // toward the field-based reference without shearing angles. The default
-        // matcher's base is less uniform, where that same force would trade too
-        // much angle quality, so it keeps the pure centroid relax (beta 0).
-        const float relaxBeta = fieldExtractor ? 0.5f : 0.0f;
+        // fit every quad to a common-sized square (shape matching) — regularising
+        // 90-degree corners AND equal edge lengths at once, tightening angle and
+        // edge-length CV toward the field-based reference. The default matcher's
+        // base is less uniform, where forcing uniform squares would trade too
+        // much angle quality, so it keeps the plain centroid relax.
+        const bool shapeMatch = fieldExtractor;
 
         // Relax the coarse base onto the source first: a skewed base subdivides
         // into skewed quads, so smoothing it before the split reduces the sliver
@@ -390,7 +464,7 @@ PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSi
             const ReferenceSurface baseSurface(work, params.smoothNormalDegrees);
             if (!baseSurface.empty()) {
                 relaxQuadMesh(result.mesh, baseSurface, params.sharpEdgeDegrees,
-                              /*iterations=*/10, /*lambda=*/0.5f, relaxBeta);
+                              /*iterations=*/10, /*lambda=*/0.5f, shapeMatch);
             }
         }
         result.mesh = result.mesh.linearSubdivide();
@@ -409,7 +483,7 @@ PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSi
                 }
             }
             relaxQuadMesh(result.mesh, sourceSurface, params.sharpEdgeDegrees,
-                          /*iterations=*/20, /*lambda=*/0.5f, relaxBeta);
+                          /*iterations=*/20, /*lambda=*/0.5f, shapeMatch);
         }
     }
     countFaces(result.mesh, result.stats);
