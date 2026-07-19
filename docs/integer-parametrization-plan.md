@@ -91,12 +91,25 @@ malformed-orbit holes, no post-hoc rotation.
      positive-`initial` equations (supply), negative→sink (demand).
    - Solve min-cost flow; the flow is the integer correction to `edge_diff`; apply
      and iterate until no residual (edge_capacity ~2 per pass).
-   The intricate remaining piece is this SETUP — the edge-component→equation
-   mapping with the connection antisymmetry (`u→v` vs `v→u`) and `rshift90` signs.
-   Build it on the Milestone-1 connection; **validate cylinder-first** (its
-   per-face residuals must drop to ~0 after the solve, since it has no
-   singularities). QuadriFlow does it multi-resolution for scale; single-level is
-   fine for our corpus (~5k faces).
+   **Landed so far:** the `MinCostFlow` engine (tested) and the flow's INPUT —
+   `debugPositionSingularities` (QuadriFlow's `ComputePositionSingularities`:
+   per-face joint alignment of the 3 crosses, summed integer edge diffs; a nonzero
+   sum is a singularity). Validated: cylinder 0.8% singular, corpus ~11% (spot
+   658 ≈ the ~700 diagnosed spurious singularities). This is cleaner than the
+   pairwise holonomy (the ±1 noise cancels within a face).
+
+   **Remaining (the intricate heart):** build `edge_diff` + per-face `face_edgeOrients`
+   (FQ) via the **`DisajointOrientTree`** — a union-find with relative orientation
+   that spans the face graph (merging non-singular, non-sharp edges) to rotate
+   every face into one global orientation frame; then label connected components
+   so supply==demand per component; then build the flow network (per-face 2
+   equations, edge-component→equation via `rshift90` signs, residual supply/demand,
+   opposite-sign arcs), solve with `MinCostFlow`, apply the flow to `edge_diff`,
+   iterate. QuadriFlow does it multi-resolution for scale; single-level is fine for
+   our ~5k-face corpus. **Acceptance: cylinder residual → ~0 after the solve.**
+   Port faithfully from `parametrizer-int.cpp` (BuildEdgeInfo, BuildIntegerConstraints,
+   ComputeMaxFlow) and `optimizer.cpp` (optimize_integer_constraints); validate
+   cylinder-first at every step (Milestone 1 had 2 sign bugs caught only that way).
 3. ◻ **Extraction** — Stage 3; measure irregular % (target < 15%) and validity
    (watertight, manifold) vs the current extractor.
 4. ◻ **Quality + promote** — median/CV/feature/robustness vs QuadriFlow; if it
