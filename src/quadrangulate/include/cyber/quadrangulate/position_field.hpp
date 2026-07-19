@@ -52,6 +52,14 @@ struct PositionField {
 // and THIRD_PARTY_NOTICES.md). Returns a fresh mesh; the input is not modified.
 [[nodiscard]] Mesh extractQuadMesh(const Mesh& mesh, const PositionField& field);
 
+// Position-field quadrangulator (IQuadrangulator seam): computes the orientation
+// + position fields and extracts a quad mesh (Instant-Meshes-style), replacing
+// the triangle mesh wholesale. Its advantage over the triangle-pairing
+// quadrangulators is field-aligned, uniform-grid edge flow. Experimental —
+// exercise via the pipeline's quadrangulator injection. `iterations` is the
+// field-smoothing sweep count per multiresolution level.
+std::unique_ptr<IQuadrangulator> makeInstantMeshesQuadrangulator(int iterations = 25);
+
 // Diagnostic for the collapse stage (Stage A): number of lattice-cell nodes and
 // undirected lattice edges the collapse produces. Used by tests to confirm the
 // collapse yields ~area/spacing^2 cells rather than over-merging.

@@ -594,6 +594,44 @@ Mesh extractQuadMesh(const Mesh& mesh, const PositionField& field) {
     return extractFaces(g);
 }
 
+namespace {
+
+// IQuadrangulator wrapper: build the position field on the (isotropic, at ~edge
+// length) triangle mesh, extract a quad mesh, and replace the input in place.
+class InstantMeshesQuadrangulator final : public IQuadrangulator {
+public:
+    explicit InstantMeshesQuadrangulator(int iterations) : m_iterations(iterations) {}
+
+    Outcome quadrangulate(Mesh& mesh, float targetEdgeLength, ProgressSink* progress,
+                          const CancelToken* cancel) override {
+        if (cancel != nullptr && cancel->isCancelled()) {
+            return {.success = false, .cancelled = true, .failureReason = "cancelled"};
+        }
+        const PositionField field = computePositionField(mesh, targetEdgeLength, m_iterations);
+        Mesh quads = extractQuadMesh(mesh, field);
+        if (quads.faceCount() == 0) {
+            return {.success = false, .cancelled = false,
+                    .failureReason = "position-field extraction produced no faces"};
+        }
+        mesh = std::move(quads);
+        if (progress != nullptr) {
+            progress->report(1.0f, "quadrangulate");
+        }
+        return {.success = true, .cancelled = false, .failureReason = {}};
+    }
+
+    [[nodiscard]] std::string name() const override { return "instant-meshes"; }
+
+private:
+    int m_iterations;
+};
+
+}  // namespace
+
+std::unique_ptr<IQuadrangulator> makeInstantMeshesQuadrangulator(int iterations) {
+    return std::make_unique<InstantMeshesQuadrangulator>(iterations);
+}
+
 CollapsedGraphStats debugCollapse(const Mesh& mesh, const PositionField& field) {
     const Graph g = buildCollapsedGraph(mesh, field);
     std::size_t edges = 0;

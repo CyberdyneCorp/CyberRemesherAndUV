@@ -101,6 +101,34 @@ TEST_CASE("position field: orientation is smooth and principal-direction aligned
     CHECK(alignment > 0.9);    // one field axis runs along the cylinder axis
 }
 
+// The wired position-field quadrangulator must turn a closed triangle mesh at
+// ~target edge length into a valid, strongly quad-dominant mesh — the
+// rotation-system walk + fan-split cover the whole surface (only singularity
+// triangles remain), unlike the old ~30%-coverage walk.
+TEST_CASE("instant-meshes quadrangulator gives a valid quad-dominant mesh") {
+    Mesh cyl = cylinder(1.0f, 3.0f, 12, 25);  // ~unit edge length grid
+    cyl.tagFeatureEdges(90.0f);
+    auto quad = remesh::makeInstantMeshesQuadrangulator(25);
+    const auto outcome = quad->quadrangulate(cyl, 0.25f, nullptr, nullptr);
+    REQUIRE(outcome.success);
+    REQUIRE(quad->name() == "instant-meshes");
+    REQUIRE(cyl.validate().empty());
+
+    std::vector<Vec3> P;
+    std::vector<std::vector<Index>> F;
+    cyl.toIndexed(P, F);
+    std::size_t quads = 0;
+    for (const auto& f : F) {
+        if (f.size() == 4) {
+            ++quads;
+        }
+    }
+    CAPTURE(F.size());
+    CAPTURE(quads);
+    REQUIRE(F.size() > 0);
+    CHECK(static_cast<double>(quads) / static_cast<double>(F.size()) > 0.9);
+}
+
 // The position field must stay on the surface near each vertex (it is a
 // representative of that vertex's lattice cell, not a free point): every o_i is
 // within a small multiple of the spacing of its vertex.
