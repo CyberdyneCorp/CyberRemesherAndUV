@@ -75,7 +75,15 @@ malformed-orbit holes, no post-hoc rotation.
    fixes were needed and are locked by the cylinder test: rotation index =
    `bb − ba` (aligned-rep index difference), and per-FACE (contractible) holonomy
    rather than spanning-tree loops (a cylinder's circumference legitimately wraps).
-2. 🟡 **Integer solve — IN PROGRESS.** Studied QuadriFlow's actual algorithm
+2. ✅ **Integer solve — DONE** (commit 27839cb). The min-cost flow cancels the
+   position-field's spurious divergences: **icosphere 133→10 singularities**
+   (near the ~8 genus-0 minimum), **spot 658→47** (~14×), **bunny 667→68** (~10×).
+   Both checkpoints green — the residual recomputed from edge_diff/orient matches
+   the position singularities (setup correct), and the flow removes the spurious
+   defects. Single-level, closed genus-0; the `DisajointOrientTree` global
+   alignment + `MinCostFlow` engine are the machinery. Regression test locks
+   icosphere post < 2/5 pre. **Details below kept for reference.** Studied
+   QuadriFlow's actual algorithm
    (`optimize_integer_constraints` in `examples/reference/QuadriFlow`) and
    reimplemented the reusable engine: **`MinCostFlow`** (SPFA successive shortest
    paths, unit-tested, commit a2de102). The exact formulation to build on it:
@@ -110,8 +118,15 @@ malformed-orbit holes, no post-hoc rotation.
    Port faithfully from `parametrizer-int.cpp` (BuildEdgeInfo, BuildIntegerConstraints,
    ComputeMaxFlow) and `optimizer.cpp` (optimize_integer_constraints); validate
    cylinder-first at every step (Milestone 1 had 2 sign bugs caught only that way).
-3. ◻ **Extraction** — Stage 3; measure irregular % (target < 15%) and validity
-   (watertight, manifold) vs the current extractor.
+3. ◻ **Extraction — NEXT.** Extract the quad mesh from the *corrected* integer
+   edge-diffs (integer-grid iso-line tracing / QuadriFlow's `ExtractMesh`): the
+   grid is now globally consistent, so the output is watertight and mostly
+   valence-4 by construction. Measure irregular % (target < 15%, from the
+   solve's ~sparse singularities) and validity (watertight, manifold) vs the
+   current collapse-and-walk extractor. The solve already runs on the isotropic
+   triangle mesh + field; wire it before extraction. Open-mesh / boundary and
+   sharp-edge handling (currently assumed closed genus-0, no sharp) are the
+   robustness follow-ups.
 4. ◻ **Quality + promote** — median/CV/feature/robustness vs QuadriFlow; if it
    wins, make it the extractor default and retire the collapse-and-walk path.
 
