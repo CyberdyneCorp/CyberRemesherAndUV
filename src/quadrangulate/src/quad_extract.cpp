@@ -1343,6 +1343,7 @@ struct EdgeHierarchy {
 
     void downsample(std::vector<std::array<int, 3>> fq, std::vector<std::array<int, 3>> f2e,
                     std::vector<Int2> ediff, std::vector<int> allowChanges, int level);
+    void fixFlip(int depth = 0);
     void propagateEdge();
     void updateGraphValue(std::vector<std::array<int, 3>>& fq, std::vector<std::array<int, 3>>& f2e,
                           std::vector<Int2>& ediff);
@@ -1595,6 +1596,160 @@ void EdgeHierarchy::downsample(std::vector<std::array<int, 3>> fq,
     toUpperOrients.resize(uz(levels - 1));
 }
 
+// Repairs flipped (negative-area) cells on the coarsest level, then propagates the
+// repair down to level 0 (QuadriFlow FixFlip + CheckShrink, hierarchy.cpp:923). A
+// checkShrink shifts a vertex-ring's edge diffs and commits only when it strictly
+// reduces the flip count — the monotone-decrease that guarantees termination.
+void EdgeHierarchy::fixFlip(int depth) {
+    const auto uz = [](int x) { return static_cast<std::size_t>(x); };
+    const int l = levels - 1;
+    auto& cF2E = F2E[uz(l)];
+    auto& cE2F = E2F[uz(l)];
+    auto& cFQ = FQ[uz(l)];
+    auto& cDiff = edgeDiff[uz(l)];
+    auto& cAllow = allow[uz(l)];
+
+    // Directed half-edge opposite for this level (QuadriFlow FixFlip E2E, :932):
+    // t1 scans forward in the first incident face, t2 backward in the second. This
+    // is NOT the mesh half-edge opposite; the ring walks below depend on it.
+    std::vector<int> e2e(cF2E.size() * 3, -1);
+    for (int i = 0; i < static_cast<int>(cE2F.size()); ++i) {
+        const int v1 = cE2F[uz(i)][0], v2 = cE2F[uz(i)][1];
+        int t1 = 0, t2 = 2;
+        if (v1 != -1) {
+            while (cF2E[uz(v1)][uz(t1)] != i) {
+                ++t1;
+            }
+        }
+        if (v2 != -1) {
+            while (cF2E[uz(v2)][uz(t2)] != i) {
+                --t2;
+            }
+        }
+        if (v1 != -1) {
+            e2e[uz(v1 * 3 + t1)] = (v2 == -1) ? -1 : v2 * 3 + t2;
+        }
+        if (v2 != -1) {
+            e2e[uz(v2 * 3 + t2)] = (v1 == -1) ? -1 : v1 * 3 + t1;
+        }
+    }
+
+    const auto area = [&](int f) { return faceArea(cF2E, cFQ, cDiff, f); };
+
+    // Try to shrink the vertex ring reached from directed edge `deid` so every cell
+    // there fits `allowedLen`; commit iff it lowers the ring's flip count.
+    const auto checkShrink = [&](int deid, int allowedLen) -> bool {
+        if (deid == -1) {
+            return false;
+        }
+        std::vector<int> corrFaces, corrEdges;
+        std::vector<Int2> corrDiff;
+        const int deid0 = deid;
+        while (deid != -1) {
+            deid = deid / 3 * 3 + (deid + 2) % 3;
+            if (e2e[uz(deid)] == -1) {
+                break;
+            }
+            deid = e2e[uz(deid)];
+            if (deid == deid0) {
+                break;
+            }
+        }
+        Int2 diff = cDiff[uz(cF2E[uz(deid / 3)][uz(deid % 3)])];
+        do {
+            corrDiff.push_back(diff);
+            corrEdges.push_back(deid);
+            corrFaces.push_back(deid / 3);
+            deid = e2e[uz(deid)];
+            if (deid == -1) {
+                return false;
+            }
+            const Int2 r = rshift90i(diff, cFQ[uz(deid / 3)][uz(deid % 3)]);
+            diff = Int2{-r.x, -r.y};
+            deid = deid / 3 * 3 + (deid + 1) % 3;
+            diff = rshift90i(diff, (4 - cFQ[uz(deid / 3)][uz(deid % 3)]) % 4);
+        } while (deid != corrEdges.front());
+        if (diff.x != corrDiff.front().x || diff.y != corrDiff.front().y) {
+            return false;
+        }
+        std::unordered_map<int, Int2> newValues;
+        for (const int de : corrEdges) {
+            const int eid = cF2E[uz(de / 3)][uz(de % 3)];
+            newValues[eid] = cDiff[uz(eid)];
+        }
+        for (std::size_t i = 0; i < corrEdges.size(); ++i) {
+            const int eid = cF2E[uz(corrEdges[i] / 3)][uz(corrEdges[i] % 3)];
+            if ((corrDiff[i].x != 0 && cAllow[uz(eid * 2)] == 0) ||
+                (corrDiff[i].y != 0 && cAllow[uz(eid * 2 + 1)] == 0)) {
+                return false;
+            }
+            Int2& res = newValues[eid];
+            res.x -= corrDiff[i].x;
+            res.y -= corrDiff[i].y;
+            if (std::abs(res.x) > allowedLen || std::abs(res.y) > allowedLen) {
+                return false;
+            }
+            if ((std::abs(res.x) > 1 && res.y != 0) || (std::abs(res.y) > 1 && res.x != 0)) {
+                return false;
+            }
+        }
+        int prevFlips = 0, curFlips = 0;
+        for (const int f : corrFaces) {
+            if (area(f) < 0) {
+                ++prevFlips;
+            }
+        }
+        for (auto& p : newValues) {
+            std::swap(cDiff[uz(p.first)], p.second);
+        }
+        for (const int f : corrFaces) {
+            if (area(f) < 0) {
+                ++curFlips;
+            }
+        }
+        if (curFlips < prevFlips) {
+            return true;
+        }
+        for (auto& p : newValues) {  // no improvement — revert
+            std::swap(cDiff[uz(p.first)], p.second);
+        }
+        return false;
+    };
+
+    std::queue<int> flipped;
+    for (int i = 0; i < static_cast<int>(cF2E.size()); ++i) {
+        if (area(i) < 0) {
+            flipped.push(i);
+        }
+    }
+    bool update = false;
+    for (int maxLen = 1; !update && maxLen <= 2; ++maxLen) {
+        while (!flipped.empty()) {
+            const int f = flipped.front();
+            if (area(f) >= 0) {
+                flipped.pop();
+                continue;
+            }
+            for (int i = 0; i < 3; ++i) {
+                if (checkShrink(f * 3 + i, maxLen) || checkShrink(e2e[uz(f * 3 + i)], maxLen)) {
+                    update = true;
+                    break;
+                }
+            }
+            flipped.pop();
+        }
+    }
+    // Re-coarsen the repaired level and repair again (QuadriFlow recurses): each
+    // pass strictly lowers the flip count, so this terminates; depth-capped anyway.
+    if (update && depth < 64) {
+        EdgeHierarchy fh;
+        fh.downsample(FQ[uz(l)], F2E[uz(l)], edgeDiff[uz(l)], allow[uz(l)], -1);
+        fh.fixFlip(depth + 1);
+        fh.updateGraphValue(FQ[uz(l)], F2E[uz(l)], edgeDiff[uz(l)]);
+    }
+    propagateEdge();
+}
+
 void EdgeHierarchy::propagateEdge() {
     const auto uz = [](int x) { return static_cast<std::size_t>(x); };
     for (int level = static_cast<int>(toUpperEdges.size()); level > 0; --level) {
@@ -1638,11 +1793,11 @@ void fixFlipHierarchy(IntegerGrid& g) {
     std::vector<int> allowChanges(g.edgeDiff.size() * 2, 1);
     EdgeHierarchy h;
     h.downsample(g.orients, g.faceEdgeIds, g.edgeDiff, allowChanges, -1);
-    // h.fixFlip();  // Milestone 5b
-    h.propagateEdge();
-    if (h.consistent) {
-        h.updateGraphValue(g.orients, g.faceEdgeIds, g.edgeDiff);
+    if (!h.consistent) {
+        return;  // invalid grid (non-integrable) — leave edge_diff untouched
     }
+    h.fixFlip();  // repairs flipped cells on the coarsest level + propagates down
+    h.updateGraphValue(g.orients, g.faceEdgeIds, g.edgeDiff);
 }
 
 }  // namespace
@@ -2527,7 +2682,8 @@ Mesh buildQuadMesh(const SubMesh& m) {
 }  // namespace
 
 Mesh extractIntegerQuadMesh(const Mesh& mesh, const PositionField& field) {
-    const IntegerGrid g = computeIntegerGrid(mesh, field);
+    IntegerGrid g = computeIntegerGrid(mesh, field);
+    fixFlipHierarchy(g);  // Phase 5: repair the collapse's val3/val5 quantization
     const SubMesh m = subdivideToUnitCells(g, mesh, field, 1);
     return buildQuadMesh(m);
 }

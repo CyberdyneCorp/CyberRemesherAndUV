@@ -412,6 +412,21 @@ TEST_CASE("flip repair: coarsen+propagate is an identity on an icosphere grid") 
     CHECK(s.residualAfter == s.residualBefore);
 }
 
+// Milestone 5b — FixFlip repairs flipped (negative-parametric-area) cells: the
+// val3/val5 dipoles the single-level collapse quantizes into a clean grid. On a
+// curved uv-sphere the raw grid has folds; the greedy repair strictly reduces them
+// while preserving integrability (residual unchanged).
+TEST_CASE("flip repair: FixFlip reduces folded cells on a curved grid") {
+    const Mesh sphere = uvSphere(1.0f, 24, 30);
+    const remesh::PositionField field = remesh::computePositionField(sphere, 0.14f, 40);
+    const remesh::FlipRepairStats s = remesh::debugFlipRepair(sphere, field);
+    CAPTURE(s.flippedBefore);
+    CAPTURE(s.flippedAfter);
+    REQUIRE(s.flippedBefore > 0);                 // the curved grid has folds to fix
+    CHECK(s.flippedAfter < s.flippedBefore);      // greedy FixFlip removes some
+    CHECK(s.residualAfter == s.residualBefore);   // integrability preserved
+}
+
 // Milestones 3–4 — extraction via QuadriFlow's BuildTriangleManifold + FixValence
 // (single-level): reconstruct a clean compact triangle manifold (zero-diff
 // collapse + orbit-walk vertex split), pair the two triangles across each
