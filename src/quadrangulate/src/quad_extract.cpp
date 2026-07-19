@@ -153,6 +153,84 @@ void coordinateSystem(Vec3 n, Vec3& s, Vec3& t) {
     t = cross(n, s);
 }
 
+// --- Integer-parametrization Stage-2 helpers (clean-room from QuadriFlow) -----
+
+// Rotate an integer 2-D vector by amount*90 degrees (QuadriFlow rshift90).
+Int2 rshift90i(Int2 v, int amount) {
+    if (amount & 1) {
+        v = Int2{-v.y, v.x};
+    }
+    if (amount >= 2) {
+        v = Int2{-v.x, -v.y};
+    }
+    return v;
+}
+
+// 4-RoSy orientation transition index (QuadriFlow compat_orientation_extrinsic_
+// index_4): returns (a, b) with a in {0,1}, b in {0,1,2,3}; the rotation from q1's
+// frame to q0's is (a - b + 4) % 4.
+std::pair<int, int> orientIndex(Vec3 q0, Vec3 n0, Vec3 q1, Vec3 n1) {
+    const std::array<Vec3, 2> a{q0, cross(n0, q0)};
+    const std::array<Vec3, 2> b{q1, cross(n1, q1)};
+    float best = -1e30f;
+    int ba = 0, bb = 0;
+    for (int i = 0; i < 2; ++i) {
+        for (int j = 0; j < 2; ++j) {
+            const float s = std::fabs(dot(a[static_cast<std::size_t>(i)], b[static_cast<std::size_t>(j)]));
+            if (s > best) {
+                best = s;
+                ba = i;
+                bb = j;
+            }
+        }
+    }
+    if (dot(a[static_cast<std::size_t>(ba)], b[static_cast<std::size_t>(bb)]) < 0.0f) {
+        bb += 2;
+    }
+    return {ba, bb};
+}
+
+// Union-find with a relative 90-degree orientation per node (QuadriFlow
+// DisajointOrientTree): globally aligns the per-face edge orientations so a
+// shared edge maps consistently between its two faces.
+struct OrientTree {
+    std::vector<std::pair<int, int>> parent;  // (parent, orientation to parent, mod 4)
+    std::vector<int> rank;
+    explicit OrientTree(int nn) : parent(static_cast<std::size_t>(nn)), rank(static_cast<std::size_t>(nn), 1) {
+        for (int i = 0; i < nn; ++i) {
+            parent[static_cast<std::size_t>(i)] = {i, 0};
+        }
+    }
+    int root(int j) {
+        auto& pj = parent[static_cast<std::size_t>(j)];
+        if (j == pj.first) {
+            return j;
+        }
+        const int k = root(pj.first);
+        pj.second = (pj.second + parent[static_cast<std::size_t>(pj.first)].second) % 4;
+        pj.first = k;
+        return k;
+    }
+    int orient(int j) {
+        const auto& pj = parent[static_cast<std::size_t>(j)];
+        return j == pj.first ? pj.second : (pj.second + orient(pj.first)) % 4;
+    }
+    void merge(int v0, int v1, int o0, int o1) {
+        const int p0 = root(v0), p1 = root(v1);
+        if (p0 == p1) {
+            return;
+        }
+        const int op0 = orient(v0), op1 = orient(v1);
+        if (rank[static_cast<std::size_t>(p1)] < rank[static_cast<std::size_t>(p0)]) {
+            rank[static_cast<std::size_t>(p0)] += rank[static_cast<std::size_t>(p1)];
+            parent[static_cast<std::size_t>(p1)] = {p0, (o1 - o0 + op0 - op1 + 8) % 4};
+        } else {
+            rank[static_cast<std::size_t>(p1)] += rank[static_cast<std::size_t>(p0)];
+            parent[static_cast<std::size_t>(p0)] = {p1, (o0 - o1 + op1 - op0 + 8) % 4};
+        }
+    }
+};
+
 // Min-cost max-flow (SPFA successive shortest paths). The reusable engine for
 // the integer-parametrization Stage-2 solve (docs/integer-parametrization-plan.md):
 // the integer optimization is a min-cost flow that balances per-face coordinate
@@ -887,6 +965,298 @@ std::size_t debugPositionSingularities(const Mesh& mesh, const PositionField& fi
         }
     }
     return singular;
+}
+
+IntegerSolveStats debugIntegerSolve(const Mesh& mesh, const PositionField& field) {
+    IntegerSolveStats st;
+
+    // 1. Triangles + half-edge opposite map (E2E), undirected edge implied later.
+    std::vector<std::array<Index, 3>> tris;
+    for (Index fi = 0; fi < mesh.faceCapacity(); ++fi) {
+        const FaceId f{fi};
+        if (!mesh.isAlive(f) || mesh.faceSize(f) != 3) {
+            continue;
+        }
+        const auto v = mesh.faceVertices(f);
+        if (field.valid[v[0].value] && field.valid[v[1].value] && field.valid[v[2].value]) {
+            tris.push_back({v[0].value, v[1].value, v[2].value});
+        }
+    }
+    const int nTri = static_cast<int>(tris.size());
+    st.faces = tris.size();
+    std::map<std::pair<Index, Index>, int> heMap;
+    for (int t = 0; t < nTri; ++t) {
+        for (int j = 0; j < 3; ++j) {
+            heMap[{tris[static_cast<std::size_t>(t)][static_cast<std::size_t>(j)],
+                   tris[static_cast<std::size_t>(t)][static_cast<std::size_t>((j + 1) % 3)]}] = t * 3 + j;
+        }
+    }
+    std::vector<int> e2e(static_cast<std::size_t>(nTri) * 3, -1);
+    for (int t = 0; t < nTri; ++t) {
+        for (int j = 0; j < 3; ++j) {
+            const auto it = heMap.find({tris[static_cast<std::size_t>(t)][static_cast<std::size_t>((j + 1) % 3)],
+                                        tris[static_cast<std::size_t>(t)][static_cast<std::size_t>(j)]});
+            if (it != heMap.end()) {
+                e2e[static_cast<std::size_t>(t * 3 + j)] = it->second;
+            }
+        }
+    }
+
+    // 2. Per-face joint alignment -> pos_rank, pos_index (per edge), singularities.
+    std::vector<std::array<int, 3>> posRank(static_cast<std::size_t>(nTri));
+    std::vector<std::array<Int2, 3>> posIndex(static_cast<std::size_t>(nTri));
+    std::set<int> singular;
+    const auto rot = [](Vec3 d, Vec3 nn, int r) {
+        for (int i = 0; i < (r & 3); ++i) {
+            d = cross(nn, d);
+        }
+        return d;
+    };
+    for (int t = 0; t < nTri; ++t) {
+        std::array<Vec3, 3> q{}, n{}, o{}, p{};
+        std::array<float, 3> sc{};
+        for (std::size_t k = 0; k < 3; ++k) {
+            const Index vk = tris[static_cast<std::size_t>(t)][k];
+            q[k] = field.q[vk];
+            n[k] = field.normal[vk];
+            o[k] = field.o[vk];
+            p[k] = mesh.position(VertexId{vk});
+            sc[k] = field.scale.empty() ? field.spacing : field.spacing * field.scale[vk];
+        }
+        int best[3] = {0, 0, 0};
+        float bestDp = -2.0f;
+        for (int i = 0; i < 4; ++i) {
+            const Vec3 v0 = rot(q[0], n[0], i);
+            for (int j = 0; j < 4; ++j) {
+                const Vec3 v1 = rot(q[1], n[1], j);
+                for (int k = 0; k < 4; ++k) {
+                    const Vec3 v2 = rot(q[2], n[2], k);
+                    const float dp = std::fmin(std::fmin(dot(v0, v1), dot(v1, v2)), dot(v2, v0));
+                    if (dp > bestDp) {
+                        bestDp = dp;
+                        best[0] = i;
+                        best[1] = j;
+                        best[2] = k;
+                    }
+                }
+            }
+        }
+        std::array<Vec3, 3> qr{};
+        for (std::size_t k = 0; k < 3; ++k) {
+            qr[k] = rot(q[k], n[k], best[k]);
+            posRank[static_cast<std::size_t>(t)][k] = best[k];
+        }
+        Int2 index{0, 0};
+        for (std::size_t k = 0; k < 3; ++k) {
+            const std::size_t kn = (k + 1) % 3;
+            const float s = 0.5f * (sc[k] + sc[kn]);
+            const PosCompat pc =
+                compatPosition(p[k], n[k], qr[k], o[k], p[kn], n[kn], qr[kn], o[kn], s, 1.0f / s);
+            posIndex[static_cast<std::size_t>(t)][k] = Int2{pc.i0.x - pc.i1.x, pc.i0.y - pc.i1.y};
+            index.x += posIndex[static_cast<std::size_t>(t)][k].x;
+            index.y += posIndex[static_cast<std::size_t>(t)][k].y;
+        }
+        if (index.x != 0 || index.y != 0) {
+            singular.insert(t);
+        }
+    }
+    st.preSingular = singular.size();
+
+    // 3. BuildEdgeInfo: undirected edge ids + edge_diff.
+    std::vector<Int2> edgeDiff;
+    std::vector<std::array<int, 3>> faceEdgeIds(static_cast<std::size_t>(nTri), {-1, -1, -1});
+    for (int t = 0; t < nTri; ++t) {
+        for (int j = 0; j < 3; ++j) {
+            const int k1 = j, k2 = (j + 1) % 3;
+            const Index v1 = tris[static_cast<std::size_t>(t)][static_cast<std::size_t>(k1)];
+            const Index v2 = tris[static_cast<std::size_t>(t)][static_cast<std::size_t>(k2)];
+            Int2 diff2;
+            if (v1 > v2) {
+                const Int2 neg{-posIndex[static_cast<std::size_t>(t)][static_cast<std::size_t>(k1)].x,
+                               -posIndex[static_cast<std::size_t>(t)][static_cast<std::size_t>(k1)].y};
+                diff2 = rshift90i(neg, posRank[static_cast<std::size_t>(t)][static_cast<std::size_t>(k2)]);
+            } else {
+                diff2 = rshift90i(posIndex[static_cast<std::size_t>(t)][static_cast<std::size_t>(k1)],
+                                  posRank[static_cast<std::size_t>(t)][static_cast<std::size_t>(k1)]);
+            }
+            const int he = t * 3 + k1;
+            const int opp = e2e[static_cast<std::size_t>(he)];
+            if (faceEdgeIds[static_cast<std::size_t>(t)][static_cast<std::size_t>(k1)] == -1) {
+                const int eid = static_cast<int>(edgeDiff.size());
+                edgeDiff.push_back(diff2);
+                faceEdgeIds[static_cast<std::size_t>(t)][static_cast<std::size_t>(k1)] = eid;
+                if (opp != -1) {
+                    faceEdgeIds[static_cast<std::size_t>(opp / 3)][static_cast<std::size_t>(opp % 3)] = eid;
+                }
+            } else if (!singular.count(t) && opp != -1) {
+                const int eid = faceEdgeIds[static_cast<std::size_t>(opp / 3)][static_cast<std::size_t>(opp % 3)];
+                edgeDiff[static_cast<std::size_t>(eid)] = diff2;
+            }
+        }
+    }
+
+    // 4. BuildIntegerConstraints: per-face edge orientations + global alignment.
+    std::vector<std::array<int, 3>> orients(static_cast<std::size_t>(nTri));
+    for (int t = 0; t < nTri; ++t) {
+        const Index v0 = tris[static_cast<std::size_t>(t)][0], v1 = tris[static_cast<std::size_t>(t)][1],
+                    v2 = tris[static_cast<std::size_t>(t)][2];
+        const auto i1 = orientIndex(field.q[v0], field.normal[v0], field.q[v1], field.normal[v1]);
+        const auto i2 = orientIndex(field.q[v0], field.normal[v0], field.q[v2], field.normal[v2]);
+        const int rank1 = (i1.first - i1.second + 4) % 4;
+        const int rank2 = (i2.first - i2.second + 4) % 4;
+        std::array<int, 3> od{0, 0, 0};
+        od[0] = (v1 < v0) ? (rank1 + 2) % 4 : 0;
+        od[1] = (v2 < v1) ? (rank2 + 2) % 4 : rank1;
+        od[2] = (v2 < v0) ? rank2 : 2;
+        orients[static_cast<std::size_t>(t)] = od;
+    }
+    // E2D: undirected edge -> its (up to two) directed face-edges.
+    std::vector<std::pair<int, int>> e2d(edgeDiff.size(), {-1, -1});
+    for (int t = 0; t < nTri; ++t) {
+        for (int j = 0; j < 3; ++j) {
+            const int eid = faceEdgeIds[static_cast<std::size_t>(t)][static_cast<std::size_t>(j)];
+            if (e2d[static_cast<std::size_t>(eid)].first == -1) {
+                e2d[static_cast<std::size_t>(eid)].first = t * 3 + j;
+            } else {
+                e2d[static_cast<std::size_t>(eid)].second = t * 3 + j;
+            }
+        }
+    }
+    OrientTree tree(nTri);
+    for (std::size_t e = 0; e < e2d.size(); ++e) {
+        const auto& c = e2d[e];
+        if (c.first == -1 || c.second == -1) {
+            continue;
+        }
+        const int f0 = c.first / 3, f1 = c.second / 3;
+        if (singular.count(f0) || singular.count(f1)) {
+            continue;
+        }
+        const int o1 = orients[static_cast<std::size_t>(f0)][static_cast<std::size_t>(c.first % 3)];
+        const int o0 = (orients[static_cast<std::size_t>(f1)][static_cast<std::size_t>(c.second % 3)] + 2) % 4;
+        tree.merge(f0, f1, o0, o1);
+    }
+    for (const int fs : singular) {
+        for (int j = 0; j < 3; ++j) {
+            const auto& c = e2d[static_cast<std::size_t>(faceEdgeIds[static_cast<std::size_t>(fs)][static_cast<std::size_t>(j)])];
+            if (c.first == -1 || c.second == -1) {
+                continue;
+            }
+            const int f0 = c.first / 3, f1 = c.second / 3;
+            const int o1 = orients[static_cast<std::size_t>(f0)][static_cast<std::size_t>(c.first % 3)];
+            const int o0 = (orients[static_cast<std::size_t>(f1)][static_cast<std::size_t>(c.second % 3)] + 2) % 4;
+            tree.merge(f0, f1, o0, o1);
+        }
+    }
+    for (int t = 0; t < nTri; ++t) {
+        const int add = tree.orient(t);
+        for (int j = 0; j < 3; ++j) {
+            orients[static_cast<std::size_t>(t)][static_cast<std::size_t>(j)] =
+                (orients[static_cast<std::size_t>(t)][static_cast<std::size_t>(j)] + add) % 4;
+        }
+    }
+
+    // Checkpoint A: the residual recomputed from edge_diff/orient must match the
+    // position singularities. Also build edge_to_constraints (equation, sign) per
+    // edge-component and the per-equation initial residual.
+    std::vector<std::array<int, 4>> e2c(edgeDiff.size() * 2, {-1, 0, -1, 0});
+    std::vector<int> initial(static_cast<std::size_t>(nTri) * 2, 0);
+    for (int t = 0; t < nTri; ++t) {
+        Int2 res{0, 0};
+        for (int j = 0; j < 3; ++j) {
+            const int eid = faceEdgeIds[static_cast<std::size_t>(t)][static_cast<std::size_t>(j)];
+            const int fq = orients[static_cast<std::size_t>(t)][static_cast<std::size_t>(j)];
+            const Int2 contrib = rshift90i(edgeDiff[static_cast<std::size_t>(eid)], fq);
+            res.x += contrib.x;
+            res.y += contrib.y;
+            // Signed component refs: rshift90((eid*2+1, eid*2+2), fq).
+            const Int2 idx = rshift90i(Int2{eid * 2 + 1, eid * 2 + 2}, fq);
+            const int comp[2] = {idx.x, idx.y};
+            for (int k = 0; k < 2; ++k) {
+                const int l = std::abs(comp[k]);
+                const int s = comp[k] / l;
+                const int ind = l - 1;
+                const int eq = t * 2 + k;
+                if (e2c[static_cast<std::size_t>(ind)][0] == -1) {
+                    e2c[static_cast<std::size_t>(ind)][0] = eq;
+                    e2c[static_cast<std::size_t>(ind)][1] = s;
+                } else {
+                    e2c[static_cast<std::size_t>(ind)][2] = eq;
+                    e2c[static_cast<std::size_t>(ind)][3] = s;
+                }
+                const int diffVal = (ind % 2 == 0) ? edgeDiff[static_cast<std::size_t>(ind / 2)].x
+                                                   : edgeDiff[static_cast<std::size_t>(ind / 2)].y;
+                initial[static_cast<std::size_t>(eq)] += s * diffVal;
+            }
+        }
+        const bool isSing = (res.x != 0 || res.y != 0);
+        if (isSing != (singular.count(t) != 0)) {
+            ++st.residualMismatch;
+        }
+    }
+
+    // 5. Flow: nodes = equations + source + sink. Route positive residuals to
+    // negative via edge-component arcs (opposite-sign pairs). Cost-1 variable
+    // arcs minimize total edge_diff change.
+    const int nEq = nTri * 2;
+    const int source = nEq, sink = nEq + 1;
+    MinCostFlow flow;
+    flow.init(nEq + 2);
+    int supply = 0;
+    for (int e = 0; e < nEq; ++e) {
+        if (initial[static_cast<std::size_t>(e)] > 0) {
+            flow.addEdge(source, e, initial[static_cast<std::size_t>(e)], 0);
+            supply += initial[static_cast<std::size_t>(e)];
+        } else if (initial[static_cast<std::size_t>(e)] < 0) {
+            flow.addEdge(e, sink, -initial[static_cast<std::size_t>(e)], 0);
+        }
+    }
+    st.supply = supply;
+    struct VarArc {
+        int edgeId, comp, arcFwd;  // flow eq(+)->eq(-) decreases edge_diff[edgeId][comp]
+    };
+    std::vector<VarArc> varArcs;
+    for (std::size_t ind = 0; ind < e2c.size(); ++ind) {
+        const auto& c = e2c[ind];
+        if (c[0] == -1 || c[2] == -1 || c[1] != -c[3]) {
+            continue;  // need two equations with opposite signs
+        }
+        int vplus = c[0], vminus = c[2];  // the +sign equation and the -sign one
+        if (c[1] < 0) {
+            std::swap(vplus, vminus);
+        }
+        const int fwd = flow.addEdge(vplus, vminus, 1 << 20, 1);
+        varArcs.push_back(VarArc{static_cast<int>(ind) / 2, static_cast<int>(ind) % 2, fwd});
+    }
+    const auto res = flow.solve(source, sink);
+    st.flow = res.first;
+
+    // Apply: flow eq(+)->eq(-) on a variable arc decreases that edge_diff component.
+    for (const VarArc& va : varArcs) {
+        const int f = flow.flow(va.arcFwd);
+        if (f != 0) {
+            if (va.comp == 0) {
+                edgeDiff[static_cast<std::size_t>(va.edgeId)].x -= f;
+            } else {
+                edgeDiff[static_cast<std::size_t>(va.edgeId)].y -= f;
+            }
+        }
+    }
+
+    // Post-solve residual per face.
+    for (int t = 0; t < nTri; ++t) {
+        Int2 r{0, 0};
+        for (int j = 0; j < 3; ++j) {
+            const Int2 contrib = rshift90i(edgeDiff[static_cast<std::size_t>(faceEdgeIds[static_cast<std::size_t>(t)][static_cast<std::size_t>(j)])],
+                                           orients[static_cast<std::size_t>(t)][static_cast<std::size_t>(j)]);
+            r.x += contrib.x;
+            r.y += contrib.y;
+        }
+        if (r.x != 0 || r.y != 0) {
+            ++st.postSingular;
+        }
+    }
+    return st;
 }
 
 bool debugMinCostFlow() {

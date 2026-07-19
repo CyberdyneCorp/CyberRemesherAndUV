@@ -338,6 +338,26 @@ TEST_CASE("integer solve: min-cost max-flow engine is correct") {
     CHECK(remesh::debugMinCostFlow());
 }
 
+// Milestone 2 — the integer solve. On a closed genus-0 icosphere the min-cost
+// flow must cancel most of the position-field's spurious divergences: the residual
+// recomputed from the edge diffs / orientations matches the position singularities
+// (checkpoint A: residualMismatch ~0), and the post-solve singularity count is a
+// small fraction of the pre-solve one (the flow removed the spurious defects,
+// leaving only the topologically required singularities).
+TEST_CASE("integer solve: min-cost flow cancels spurious singularities") {
+    const Mesh sphere = icosphere(3);
+    const float spacing = meanEdgeLength(sphere);
+    const remesh::PositionField field = remesh::computePositionField(sphere, spacing, 40);
+    const remesh::IntegerSolveStats s = remesh::debugIntegerSolve(sphere, field);
+    CAPTURE(s.faces);
+    CAPTURE(s.preSingular);
+    CAPTURE(s.residualMismatch);
+    CAPTURE(s.postSingular);
+    REQUIRE(s.preSingular > 0);
+    CHECK(s.residualMismatch < s.faces / 50);          // setup consistent (checkpoint A)
+    CHECK(s.postSingular < s.preSingular * 2 / 5);      // flow removed most spurious singularities
+}
+
 // Milestone 2 foundation: QuadriFlow's per-face joint-alignment residual. On a
 // developable cylinder the position field is a near-clean grid, so almost no
 // face is a position singularity — the input the Stage-2 flow must drive to

@@ -102,4 +102,21 @@ struct IntegerConsistency {
 // A developable surface has ~none. Diagnostic while the solve is built.
 [[nodiscard]] std::size_t debugPositionSingularities(const Mesh& mesh, const PositionField& field);
 
+// Stage-2 integer solve (single-level, closed genus-0 mesh). Builds the edge-diff
+// / face-orientation constraint graph, runs the min-cost flow to cancel the
+// position-field divergences, and reports before/after. `residualMismatch` must
+// be 0 (checkpoint A: the residual recomputed from edge_diff/orient matches the
+// position singularities — proves the constraint setup). `postSingular` should be
+// far below `preSingular` (the flow removed the spurious defects, leaving only
+// the true singularities). Diagnostic while the solve is wired into extraction.
+struct IntegerSolveStats {
+    std::size_t faces = 0;
+    std::size_t preSingular = 0;
+    std::size_t residualMismatch = 0;
+    std::size_t postSingular = 0;
+    int flow = 0;
+    int supply = 0;
+};
+[[nodiscard]] IntegerSolveStats debugIntegerSolve(const Mesh& mesh, const PositionField& field);
+
 }  // namespace cyber::remesh
