@@ -118,15 +118,25 @@ malformed-orbit holes, no post-hoc rotation.
    Port faithfully from `parametrizer-int.cpp` (BuildEdgeInfo, BuildIntegerConstraints,
    ComputeMaxFlow) and `optimizer.cpp` (optimize_integer_constraints); validate
    cylinder-first at every step (Milestone 1 had 2 sign bugs caught only that way).
-3. ◻ **Extraction — NEXT.** Extract the quad mesh from the *corrected* integer
-   edge-diffs (integer-grid iso-line tracing / QuadriFlow's `ExtractMesh`): the
-   grid is now globally consistent, so the output is watertight and mostly
-   valence-4 by construction. Measure irregular % (target < 15%, from the
-   solve's ~sparse singularities) and validity (watertight, manifold) vs the
-   current collapse-and-walk extractor. The solve already runs on the isotropic
-   triangle mesh + field; wire it before extraction. Open-mesh / boundary and
-   sharp-edge handling (currently assumed closed genus-0, no sharp) are the
-   robustness follow-ups.
+3. 🟡 **Extraction — STARTED; needs the full `ExtractMesh` port.** A shortcut was
+   tried and rejected: collapsing on `edge_diff==0` and taking the unit-edge
+   lattice adjacency does NOT yield a clean quad mesh — it reproduces the same
+   lattice under-connectivity the collapse-and-walk extractor had (spot ~39%
+   valence-4 by that measure), because it skips the real machinery. Diagnosis of
+   the corrected `edge_diff` (env `CYBER_ISOLVE_DIAG`): on a properly-sized mesh
+   (spot at target edge length) it is in the right regime — 4248 unit + 2986
+   diagonal edges — confirming the solve produces a usable grid; on a mesh
+   coarser than the grid (a low-subdiv icosphere) edges span many cells (large
+   diffs), so the mesh MUST be at ~target edge length first.
+   **The real extraction is QuadriFlow's `ExtractMesh` / `ComputeIndexMap` tail:**
+   (a) `subdivide_edgeDiff` — split any edge whose |diff|>1 so every edge spans ≤1
+   grid cell; (b) `FixFlipHierarchy`/`FixFlipSat` — repair flipped/degenerate
+   cells; (c) assign integer coordinates and build the compact quad mesh
+   (`O_compact`/`F_compact`) — grid vertex = output vertex, grid cell = quad. Port
+   from `parametrizer.cpp` `ComputeIndexMap` (line ~78 onward) + `parametrizer-flip.cpp`.
+   Measure irregular % (target < 15%, from the solve's ~47 spot singularities) and
+   validity vs the current extractor. Open-mesh/boundary + sharp handling remain
+   robustness follow-ups. **Substantial — its own focused session.**
 4. ◻ **Quality + promote** — median/CV/feature/robustness vs QuadriFlow; if it
    wins, make it the extractor default and retire the collapse-and-walk path.
 
