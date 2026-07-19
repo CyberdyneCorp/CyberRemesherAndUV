@@ -54,6 +54,22 @@ clamps out-of-range values and reports the clamps. Any non-OK C ABI status is
 raised as `CyberError`, carrying the numeric status and the engine's
 `cyber_last_error()` message.
 
+### Quadrangulator choice
+
+`quad_method` selects how triangles become quads:
+
+- `"field-aligned"` (default) — maximum-matching over a smoothed cross field.
+  Highest quad-dominance (~95%+ on clean input) with curvature-following flow.
+- `"instant-meshes"` — the Instant-Meshes-style **position-field extractor**
+  (per-vertex 4-RoSy orientation + lattice position field, collapse, extract).
+  More uniform, field-aligned edge flow with fewer, better-placed singularities;
+  it matches QuadriFlow on edge-length uniformity. Best for organic/scanned
+  surfaces where flow matters more than raw dominance.
+
+```python
+RemeshParams(target_quad_count=5000, pure_quads=True, quad_method="instant-meshes")
+```
+
 ## Tests
 
 `tests/test_api.py` runs as a plain script. It skips (exit 0) when the native

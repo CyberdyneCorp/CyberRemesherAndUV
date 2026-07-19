@@ -9,6 +9,24 @@ Re-implements and improves on [AutoRemesher](https://github.com/huxingyi/autorem
 see `openspec/changes/bootstrap-v1-platform/` for the founding change (proposal, design,
 capability specs, task plan).
 
+### Auto-retopology
+
+Two triangle→quad strategies (`RemeshParams.quad_method`), both clean-room and
+permissively licensed:
+
+- **`field-aligned`** (default) — maximum-matching over a smoothed cross field;
+  highest quad-dominance (~95%+) with curvature-following flow.
+- **`instant-meshes`** — an Instant-Meshes-style position-field extractor
+  (4-RoSy orientation + lattice position field → collapse → extract). More
+  uniform, field-aligned flow; **matches [QuadriFlow](https://github.com/hjwdzh/QuadriFlow)
+  on edge-length uniformity** (CV ≈ 0.17–0.21 vs 0.12–0.17) and trails it a few
+  degrees on median quad angle.
+
+Both feed a pure-quad path (subdivision + surface-projected relaxation) for a
+100%-quad result. `examples/10_vs_reference.py` renders the side-by-side against
+QuadriFlow. GPL sources (AutoRemesher, its QuadCover/CoMISo path) were used only
+as idea references, never copied — see [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
+
 ## Layout
 
 ```

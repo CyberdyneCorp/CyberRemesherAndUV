@@ -52,13 +52,17 @@ Extraction SHALL trace integer isolines into a connection graph, simplify it (di
 - **WHEN** the field-aligned quadrangulator pairs triangles into quads
 - **THEN** it SHALL compute a maximum matching on the triangle-adjacency graph (a weighted-greedy seed that prefers field-diagonal, high-quality merges, followed by augmenting-path improvement that rescues triangles a greedy pass would strand), so quad-dominance is maximized (~95%+ on clean input) rather than left at the ~76–84% a greedy maximal matching produces, while surviving quad edges still follow the cross field. The field-aligned quadrangulator is the default for the CLI and C ABI / bindings.
 
+#### Scenario: Position-field quadrangulator option
+- **WHEN** quadMethod selects the position-field (Instant-Meshes-style) extractor
+- **THEN** the pipeline SHALL build a per-vertex 4-RoSy orientation field and a lattice position field, collapse mesh vertices into lattice cells (with post-collapse edge recovery so the collapsed graph reaches near-grid valence), and extract faces by a rotation-system walk with greedy-cut hole filling, yielding more uniform, field-aligned edge flow (edge-length CV competitive with field-based references such as QuadriFlow) with fewer, better-placed singularities; residual singularity triangles SHALL be resolved by the pure-quad path. It is offered as an opt-in alternative to the default field-aligned matcher, never copying GPL sources.
+
 #### Scenario: Pure-quad post-pass
 - **WHEN** the pure-quad option is enabled
 - **THEN** the output SHALL contain only quads, or the report SHALL explicitly list the residual non-quads that could not be resolved
 
 #### Scenario: Pure-quad element quality
 - **WHEN** the pure-quad option is enabled
-- **THEN** the construction (quad-dominant remesh at a fraction of the target density, then one linear subdivision) SHALL be followed by a tangential-relaxation de-slivering pass — interior vertices slide toward their 1-ring centroid within the tangent plane, re-projecting onto the source surface each iteration, with feature (sharp-crease) and boundary vertices held fixed — so the quads are well shaped (no slivers or collapsed edges) rather than merely all four-sided, while the silhouette follows the source curvature
+- **THEN** the construction (quad-dominant remesh at a fraction of the target density, then one linear subdivision) SHALL be followed by a tangential-relaxation de-slivering pass — interior vertices slide toward their 1-ring centroid within the tangent plane, re-projecting onto the source surface each iteration, with feature (sharp-crease) and boundary vertices held fixed — so the quads are well shaped (no slivers or collapsed edges) rather than merely all four-sided, while the silhouette follows the source curvature. For the position-field quadrangulator the relaxation SHALL instead fit each quad to a common-sized square (shape matching), regularising 90-degree corners and equal edge lengths together for uniformity competitive with field-based references
 
 ### Requirement: Explicit cleanup policies
 Hole filling, small-patch removal, and non-manifold face removal SHALL be governed by named, documented policies with user-visible parameters (maximum hole-boundary length; minimum patch size or keep-all), not hard-coded constants. Defaults SHALL be recorded in remeshing-parameters.

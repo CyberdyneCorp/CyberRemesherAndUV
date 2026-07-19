@@ -15,6 +15,7 @@ The remesher SHALL expose exactly these user-facing parameters, defined once in 
 | pureQuads | bool | false | — |
 | holeFillMaxBoundary | int | 64 | 0 (never fill) – 10 000 |
 | smallPatchPolicy | enum | keep-largest | keep-largest \| keep-all \| min-faces(N) |
+| quadMethod | enum | field-aligned | field-aligned \| instant-meshes |
 
 #### Scenario: Defaults applied
 - **WHEN** a remesh is invoked with no explicit parameters

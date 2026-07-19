@@ -22,6 +22,7 @@ so quad-dominance reads at a glance.
 | `07_baking.py` | surface baking: normal / AO / displacement maps | `output/07_baking.png` (+ `07_bake_*.png`) |
 | `08_load_model.py` | load a model → quad-dominant + 100% pure-quads | `output/08_load_model.png` |
 | `09_test_models.py` | remesh real community test models (spot, fandisk, bunny…) | `output/09_gallery.png` (+ `09_<model>.png`) |
+| `10_vs_reference.py` | side-by-side vs the QuadriFlow reference (both quadrangulators) | `output/10_vs_<model>.png` |
 | `run_all.py` | runs all of the above + a stitched `output/gallery.png` | `output/gallery.png` |
 
 `08_load_model.py` loads a mesh and converts it to quads. It defaults to a
@@ -46,6 +47,28 @@ license is set upstream). Pick your own with `--models spot fandisk …`:
 ```sh
 examples/run.sh examples/09_test_models.py --models spot rocker-arm --target-quads 6000
 ```
+
+`10_vs_reference.py` compares CyberRemesher against
+[QuadriFlow](https://github.com/hjwdzh/QuadriFlow) — a field-based/integer-grid
+quad remesher (Instant Meshes lineage) — at matched density and uniform sizing.
+It renders four panels per model: the input, both of CyberRemesher's
+quadrangulators (`field-aligned` and the `instant-meshes` position-field
+extractor), and QuadriFlow, each labelled with median smallest-quad-angle,
+sliver rate, and edge-length CV. QuadriFlow is built on demand (headless,
+boost-free) by `reference/build_quadriflow.sh`; if it can't build (offline / no
+Eigen) the script still renders ours. The position-field extractor matches
+QuadriFlow on edge-length uniformity and trails it slightly on median angle.
+
+```sh
+examples/run.sh examples/10_vs_reference.py --models spot fandisk
+```
+
+## Quadrangulators
+
+Two triangle→quad strategies, selected via `RemeshParams(quad_method=…)`:
+**`field-aligned`** (default, max-matching cross field — highest dominance) and
+**`instant-meshes`** (position-field extractor — more uniform, field-aligned
+flow). See the Python binding README for details.
 
 `07_baking.py` bakes a bumpy high-poly sphere onto a smooth low-poly's UV
 layout (tangent-space normal + displacement) and the detailed surface's own
