@@ -157,7 +157,7 @@
       <div class="chip">
         <div class="k">Median quad angle · singularities</div>
         <div class="v gap">~4–7° behind</div>
-        <div class="s">The global integer <b>solve now works</b> (cancels ~10–14× of the spurious singularities) and its <b>watertight-manifold extraction is ported</b>. Closing the last ~5–13% irregular (valence cleanup) and promoting it is the open piece.</div>
+        <div class="s">The global integer <b>solve works</b> and its <b>watertight-manifold extraction is ported</b> (beats the default extractor, not yet QuadriFlow). The last gap is diagnosed: the zero-diff collapse quantizes the clean grid into val3/val5 dipoles — needs the multi-res flip-repair layer (Phase 5), not valence cleanup.</div>
       </div>
       <div class="chip">
         <div class="k">Adaptivity (quality-per-polygon)</div>
@@ -224,7 +224,8 @@
             <span class="msrow"><span class="msdot done"></span><b>M1 · connection + defect measurement</b> — orientation field clean (cylinder holonomy 0); defects small/local. <span class="mstag done">done</span></span>
             <span class="msrow"><span class="msdot done"></span><b>M2 · integer solve</b> — min-cost flow cancels spurious divergences: <span class="mono">icosphere 133→10 · spot 658→47 · bunny 667→68</span>. <span class="mstag done">done</span></span>
             <span class="msrow"><span class="msdot done"></span><b>M3 · quad extraction</b> — QuadriFlow <span class="mono">BuildTriangleManifold</span> ported (compact-manifold rebuild + orbit-walk vertex split + FixHoles). <b>Watertight manifold, all-quad</b> across the corpus. <span class="mstag done">done</span></span>
-            <span class="msrow"><span class="msdot partial"></span><b>M4 · valence + promote</b> — interior valence-2 doublet cleanup landed (irr −1–3&#8202;pts). But it <b>beats the current default extractor</b> yet <b>not</b> QuadriFlow: the promote gate is <b>extraction fidelity</b>, not valence surgery (single-level pairing multiplies clean-grid singularities 5–10×) → Phase 5. <span class="mstag partial">gate not met</span></span>
+            <span class="msrow"><span class="msdot partial"></span><b>M4 · valence + promote</b> — interior valence-2 doublet cleanup landed (irr −1–3&#8202;pts). <b>Beats the current default extractor</b> yet <b>not</b> QuadriFlow; the promote gate is <b>extraction fidelity</b>, not valence surgery. <span class="mstag partial">gate not met</span></span>
+            <span class="msrow"><span class="msdot"></span><b>M5 · flip-repair layer</b> — 2 workflow bug-hunt rounds, <b>VERDICT: fundamental single-level limit, not a bug</b>. The zero-diff <b>collapse</b> (not the pairing, which is clean) quantizes a clean grid: local transitivity ≠ lattice equivalence → val3/val5 <b>dipoles</b>, ~9× the 44 true field singularities. Fix = port QuadriFlow's multi-res <span class="mono">DownsampleEdgeGraph</span> + <span class="mono">FixFlip</span> (~400 lines). <span class="mstag">scoped</span></span>
           </div>
         </div>
         <div class="exit">Exit: <b>irregular % &lt; 15% and median ≥ QuadriFlow.</b> Solve + extraction port +
@@ -232,15 +233,21 @@
       </div>
       <div class="pill partial">Extraction ✓ · fidelity-gated</div>
     </div>
-    <div class="phase">
+    <div class="phase partial">
       <div class="idx">5</div>
       <div class="body">
-        <div class="t">Field foundation</div>
-        <div class="d">Stronger orientation-field optimization (fewer, better-placed singularities
-          at the source) + position-field integer optimization. Feeds 2–4.</div>
-        <div class="exit">Exit: <b>raw-extraction corner-skew floor &lt; 8° (now ~13°).</b></div>
+        <div class="t">Multi-resolution flip-repair layer (scoped)</div>
+        <div class="d"><b>The one remaining lever to beat QuadriFlow on singularities / median angle</b>,
+          pinned by the round-2 bug hunt. Slots between the done+validated solve and extraction:
+          build a coarsened edge-graph hierarchy and repair flipped cells coarse-to-fine so the
+          finest collapse is flip-free = one clean node per cell. Port QuadriFlow (MIT, clean-room)
+          <span class="mono">DownsampleEdgeGraph</span> + greedy <span class="mono">FixFlip</span> +
+          <span class="mono">UpdateGraphValue</span> (~400 lines). Recommended entry: a time-boxed
+          <b>5a+5b spike</b> — smallest slice that shows spot's dipoles collapsing — as go/no-go.</div>
+        <div class="exit">Exit: <b>irregular % &lt; 15% and median ≥ QuadriFlow</b> (spot 388 → double
+          digits), promoting the integer extractor to default. Highest-complexity port; multi-session.</div>
       </div>
-      <div class="pill planned">Planned</div>
+      <div class="pill partial">Scoped · spike-gated</div>
     </div>
   </div>
 
@@ -284,9 +291,9 @@
         <span class="mono">BuildTriangleManifold</span> + <span class="mono">FixValence</span> turn that
         grid into a <b>watertight, manifold, all-quad</b> mesh — <b>beating the current default
         extractor</b> on irregular % across the corpus (spot 25% vs 44%, rocker-arm 24% vs 68%). It
-        does <i>not</i> yet beat QuadriFlow: the extraction still multiplies the clean grid's
-        singularities <b>5–10×</b> (interior val-3/5), so &lt;15% needs a higher-fidelity tiling
-        (multi-res) — Phase 5, not valence surgery.</p>
+        does <i>not</i> yet beat QuadriFlow: the zero-diff <b>collapse</b> quantizes the clean grid,
+        multiplying its 44 true singularities <b>~9×</b> into val3/val5 dipoles (the pairing and field
+        are both clean — round 2). Closing it needs the multi-res flip-repair layer — Phase 5.</p>
     </div>
     <div class="note">
       <div class="h"><span class="dot" style="background:var(--win)"></span>Adaptivity now works</div>
