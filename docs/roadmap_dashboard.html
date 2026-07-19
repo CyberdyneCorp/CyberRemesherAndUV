@@ -80,6 +80,20 @@
   .pill.partial { color: var(--partial); background: var(--partial-bg); }
   .pill.planned { color: var(--planned); background: var(--panel-2); }
 
+  /* milestone sub-list inside a phase */
+  .ms { display: grid; gap: 7px; margin-top: 10px; }
+  .msrow { display: grid; grid-template-columns: 14px 1fr auto; gap: 9px; align-items: baseline;
+    font-size: 13px; color: var(--ink-soft); }
+  .msrow b { color: var(--ink); font-weight: 650; }
+  .msdot { width: 8px; height: 8px; border-radius: 50%; background: var(--planned);
+    align-self: center; }
+  .msdot.done { background: var(--win); } .msdot.partial { background: var(--partial); }
+  .mstag { font-size: 10.5px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase;
+    padding: 2px 8px; border-radius: 999px; white-space: nowrap; color: var(--planned);
+    background: var(--panel-2); }
+  .mstag.done { color: var(--win); background: var(--win-bg); }
+  .mstag.partial { color: var(--partial); background: var(--partial-bg); }
+
   /* benchmark table */
   .scroll { overflow-x: auto; border: 1px solid var(--line); border-radius: 12px;
     box-shadow: var(--shadow); background: var(--panel); }
@@ -142,13 +156,13 @@
       </div>
       <div class="chip">
         <div class="k">Median quad angle · singularities</div>
-        <div class="v gap">~4–6° behind</div>
-        <div class="s">62–65% valence-4 vs QuadriFlow's ~97% — the extraction-singularity gap</div>
+        <div class="v gap">~4–7° behind</div>
+        <div class="s">~84% valence-4 vs QuadriFlow's ~97%. The global integer <b>solve now works</b> (cancels ~10–14× of the spurious singularities); wiring it into extraction is the open piece.</div>
       </div>
       <div class="chip">
         <div class="k">Adaptivity (quality-per-polygon)</div>
         <div class="v win">Validated 4&#8202;/&#8202;5</div>
-        <div class="s">Beats our own uniform sizing; extractor now tracks adaptive density (count 8× better)</div>
+        <div class="s">Adaptive sizing beats our own uniform per-polygon on 4&#8202;/&#8202;5; the extractor now tracks local density instead of collapsing it</div>
       </div>
       <div class="chip">
         <div class="k">Features · robustness</div>
@@ -192,25 +206,31 @@
           decisively on hard-edged/box geometry — a subdivided cube tears QuadriFlow (598 boundary
           edges, 2.87% feature err) while ours is clean (0 defects, 0.3%). But on smooth CAD/organic
           QuadriFlow leads on crease alignment and our extractor leaves validity defects (cheburashka
-          74 boundary edges) — real bugs to fix.</div>
+          34, stanford-bunny 132) — real bugs to fix.</div>
         <div class="exit">Exit: hard-surface robustness <b>✓</b> · smooth-corpus feature+validity
           <b>✗ (extractor bugs)</b></div>
       </div>
       <div class="pill partial">Mixed</div>
     </div>
-    <div class="phase" style="border-left-color:var(--gap)">
+    <div class="phase partial">
       <div class="idx">4</div>
       <div class="body">
-        <div class="t">Close the median-angle gap</div>
-        <div class="d"><b>Local approaches exhausted.</b> Greedy valence optimization (rotate
-          edges to cancel val-3/5 pairs) was tried and reverted — it trades topology for
-          geometry: ungated it cut irregulars 38→31% but wrecked edge CV (bunny 0.21→0.46);
-          gated it becomes a no-op. The remaining lever is a <i>global integer parametrization</i>
-          (clean topology AND geometry from the start) — a large, high-risk extractor rewrite.</div>
-        <div class="exit">Exit: <b>irregular % &lt; 15% and median ≥ QuadriFlow</b> — only the
-          rewrite (4b) can reach it; local shortcuts are proven dead ends.</div>
+        <div class="t">Close the median-angle gap — integer parametrization (4b)</div>
+        <div class="d"><b>Local approaches exhausted; the global rewrite is underway.</b> Greedy
+          valence optimization was tried and reverted (trades topology for geometry, nets negative).
+          The lever is a QuadriFlow-style <i>global integer parametrization</i> — clean topology AND
+          geometry from the start — built as milestones:
+          <div class="ms">
+            <span class="msrow"><span class="msdot done"></span><b>M1 · connection + defect measurement</b> — orientation field clean (cylinder holonomy 0); defects small/local. <span class="mstag done">done</span></span>
+            <span class="msrow"><span class="msdot done"></span><b>M2 · integer solve</b> — min-cost flow cancels spurious divergences: <span class="mono">icosphere 133→10 · spot 658→47 · bunny 667→68</span>. <span class="mstag done">done</span></span>
+            <span class="msrow"><span class="msdot partial"></span><b>M3 · quad extraction</b> — port QuadriFlow <span class="mono">ExtractMesh</span> (subdivide + flip-repair + compact build); shortcut rejected. <span class="mstag partial">in progress</span></span>
+            <span class="msrow"><span class="msdot"></span><b>M4 · promote</b> — benchmark vs current extractor + QuadriFlow; make default if it wins. <span class="mstag">planned</span></span>
+          </div>
+        </div>
+        <div class="exit">Exit: <b>irregular % &lt; 15% and median ≥ QuadriFlow.</b> Hardest research
+          risk (the solve) is now behind us; M3 is a scoped engineering port.</div>
       </div>
-      <div class="pill" style="color:var(--gap);background:var(--gap-bg)">Local ✗ · needs rewrite</div>
+      <div class="pill partial">Solve ✓ · extraction next</div>
     </div>
     <div class="phase">
       <div class="idx">5</div>
@@ -259,10 +279,11 @@
         smooth organic models QuadriFlow is the more robust one.</p>
     </div>
     <div class="note">
-      <div class="h"><span class="dot" style="background:var(--gap)"></span>The median gap needs a rewrite</div>
-      <p>Bulk valence-4 quads already match QuadriFlow (80.6°) but are only ~21% of the mesh; ~700
-        spurious singularities drag the rest. Local edge-rotation cleanup was tried — it trades
-        topology for geometry and nets out negative. Only a global integer parametrization closes it.</p>
+      <div class="h"><span class="dot" style="background:var(--partial)"></span>The integer solve now works</div>
+      <p>Bulk valence-4 quads already match QuadriFlow (80.6°); ~700 spurious singularities drag the
+        rest. Local edge-rotation cleanup nets negative — but the global integer solve (min-cost flow)
+        now cancels them: <b>spot 658→47, bunny 667→68</b>. What remains is porting QuadriFlow's mesh
+        extraction to turn that clean grid into quads.</p>
     </div>
     <div class="note">
       <div class="h"><span class="dot" style="background:var(--win)"></span>Adaptivity now works</div>
@@ -273,7 +294,7 @@
   </div>
 
   <footer>
-    Snapshot: 2026-07 · corpus = spot · fandisk · rocker-arm · cheburashka · stanford-bunny ·
+    Snapshot: 2026-07-19 · corpus = spot · fandisk · rocker-arm · cheburashka · stanford-bunny ·
     target ~3000 quads · reference = QuadriFlow (headless, boost-free) · numbers from
     <code>examples/11_benchmark.py</code>. Roadmap detail in <code>docs/ROADMAP.md</code>.
   </footer>
@@ -284,11 +305,11 @@
   // dir: +1 = higher is better (median), -1 = lower is better (rest).
   const DIR = [+1, -1, -1, -1, -1];
   const ROWS = [
-    ["spot",           [78,0.26,7.7,15,0.19],  [82,0.25,7.4,3,0.13]],
-    ["fandisk",        [78,0.30,7.8,15,0.18],  [83,0.27,5.0,2,0.13]],
-    ["rocker-arm",     [78,0.35,11.7,14,0.23], [82,0.28,8.9,2,0.13]],
-    ["cheburashka",    [76,0.32,9.9,16,0.27],  [82,0.25,8.6,4,0.15]],
-    ["stanford-bunny", [76,0.34,12.7,20,0.22], [81,0.33,11.9,5,0.17]],
+    ["spot",           [78,0.26,7.7,15,0.19],  [82,0.24,6.7,3,0.14]],
+    ["fandisk",        [78,0.30,7.8,15,0.18],  [85,0.28,5.3,1,0.19]],
+    ["rocker-arm",     [78,0.35,11.7,14,0.23], [82,0.26,8.0,3,0.15]],
+    ["cheburashka",    [76,0.32,9.9,16,0.27],  [82,0.23,7.3,2,0.15]],
+    ["stanford-bunny", [76,0.34,12.7,20,0.22], [82,0.32,10.7,4,0.17]],
   ];
   const fmt = (v, i) => (i===0 || i===3) ? String(Math.round(v)) : v.toFixed(2);
   const tb = document.getElementById("bench");
@@ -307,11 +328,11 @@
   // Adaptivity, quality-per-polygon: [model, adaptiveDev, adaptiveQ, uniformDev, uniformQ]
   // ours adaptive vs OURS uniform at matched count — isolates the sizing benefit.
   const QPP = [
-    ["spot", 0.58, 625, 0.56, 556],
-    ["fandisk", 0.46, 885, 0.82, 666],
-    ["rocker-arm", 0.69, 815, 0.74, 622],
-    ["cheburashka", 0.47, 694, 0.56, 468],
-    ["stanford-bunny", 1.05, 331, 1.12, 186],
+    ["spot", 0.71, 212, 1.02, 156],
+    ["fandisk", 0.84, 963, 0.54, 738],
+    ["rocker-arm", 0.55, 584, 0.78, 352],
+    ["cheburashka", 0.32, 423, 0.93, 216],
+    ["stanford-bunny", 0.63, 264, 1.56, 138],
   ];
   const maxDev = Math.max(...QPP.flatMap(r => [r[1], r[3]]));
   const qp = document.getElementById("qpp");
