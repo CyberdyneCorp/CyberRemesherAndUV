@@ -95,4 +95,11 @@ struct IntegerConsistency {
 // integer solve is built; not on the production path.
 [[nodiscard]] bool debugMinCostFlow();
 
+// QuadriFlow's per-face joint-alignment position-singularity count: the number
+// of triangles whose summed integer edge-diffs (in the face's jointly-aligned
+// cross frame) are nonzero. These are the true position singularities the
+// Stage-2 integer solve must place; everything else the flow drives to zero.
+// A developable surface has ~none. Diagnostic while the solve is built.
+[[nodiscard]] std::size_t debugPositionSingularities(const Mesh& mesh, const PositionField& field);
+
 }  // namespace cyber::remesh

@@ -338,6 +338,26 @@ TEST_CASE("integer solve: min-cost max-flow engine is correct") {
     CHECK(remesh::debugMinCostFlow());
 }
 
+// Milestone 2 foundation: QuadriFlow's per-face joint-alignment residual. On a
+// developable cylinder the position field is a near-clean grid, so almost no
+// face is a position singularity — the input the Stage-2 flow must drive to
+// zero. (Curved corpus meshes have ~11% pre-solve; the flow reduces that.)
+TEST_CASE("integer solve: cylinder has few position singularities") {
+    const Mesh cyl = cylinder(1.0f, 3.0f, 40, 40);
+    const remesh::PositionField field = remesh::computePositionField(cyl, 0.16f, 40);
+    std::size_t faces = 0;
+    for (cyber::Index fi = 0; fi < cyl.faceCapacity(); ++fi) {
+        if (cyl.isAlive(cyber::FaceId{fi}) && cyl.faceSize(cyber::FaceId{fi}) == 3) {
+            ++faces;
+        }
+    }
+    const std::size_t sing = remesh::debugPositionSingularities(cyl, field);
+    CAPTURE(faces);
+    CAPTURE(sing);
+    REQUIRE(faces > 0);
+    CHECK(static_cast<double>(sing) / static_cast<double>(faces) < 0.03);  // near-clean grid
+}
+
 // Integer-parametrization rewrite, Milestone 1: the per-face holonomy of the
 // field connection must find NO orientation singularities on a developable
 // cylinder (its 4-RoSy field is clean). This locks in the connection rotation

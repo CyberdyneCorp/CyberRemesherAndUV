@@ -817,6 +817,78 @@ CollapsedGraphStats debugCollapse(const Mesh& mesh, const PositionField& field) 
     return {g.pos.size(), edges / 2};
 }
 
+std::size_t debugPositionSingularities(const Mesh& mesh, const PositionField& field) {
+    // QuadriFlow's ComputePositionSingularities: for each triangle, jointly align
+    // the three crosses (best of 4^3 rotations, maximizing the minimum pairwise
+    // dot), then sum the three edges' integer position diffs in that common frame.
+    // A nonzero sum is a genuine position singularity — the residual the Stage-2
+    // integer solve cancels. Cleaner than pairwise holonomy (the ±1 cell-boundary
+    // noise cancels within a face's joint alignment).
+    std::size_t singular = 0;
+    for (Index fi = 0; fi < mesh.faceCapacity(); ++fi) {
+        const FaceId f{fi};
+        if (!mesh.isAlive(f) || mesh.faceSize(f) != 3) {
+            continue;
+        }
+        const auto verts = mesh.faceVertices(f);
+        if (!field.valid[verts[0].value] || !field.valid[verts[1].value] ||
+            !field.valid[verts[2].value]) {
+            continue;
+        }
+        std::array<Vec3, 3> q{}, n{}, o{}, p{};
+        std::array<float, 3> sc{};
+        for (std::size_t k = 0; k < 3; ++k) {
+            const Index vk = verts[k].value;
+            q[k] = field.q[vk];
+            n[k] = field.normal[vk];
+            o[k] = field.o[vk];
+            p[k] = mesh.position(verts[k]);
+            sc[k] = field.scale.empty() ? field.spacing : field.spacing * field.scale[vk];
+        }
+        // rotate90_by(q, n, r) = apply cross(n, .) r times.
+        const auto rot = [](Vec3 d, Vec3 nn, int r) {
+            for (int i = 0; i < (r & 3); ++i) {
+                d = cross(nn, d);
+            }
+            return d;
+        };
+        int best[3] = {0, 0, 0};
+        float bestDp = -2.0f;
+        for (int i = 0; i < 4; ++i) {
+            const Vec3 v0 = rot(q[0], n[0], i);
+            for (int j = 0; j < 4; ++j) {
+                const Vec3 v1 = rot(q[1], n[1], j);
+                for (int k = 0; k < 4; ++k) {
+                    const Vec3 v2 = rot(q[2], n[2], k);
+                    const float dp = std::fmin(std::fmin(dot(v0, v1), dot(v1, v2)), dot(v2, v0));
+                    if (dp > bestDp) {
+                        bestDp = dp;
+                        best[0] = i;
+                        best[1] = j;
+                        best[2] = k;
+                    }
+                }
+            }
+        }
+        for (std::size_t k = 0; k < 3; ++k) {
+            q[k] = rot(q[k], n[k], best[k]);
+        }
+        Int2 index{0, 0};
+        for (std::size_t k = 0; k < 3; ++k) {
+            const std::size_t kn = (k + 1) % 3;
+            const float s = 0.5f * (sc[k] + sc[kn]);
+            const PosCompat pc =
+                compatPosition(p[k], n[k], q[k], o[k], p[kn], n[kn], q[kn], o[kn], s, 1.0f / s);
+            index.x += pc.i0.x - pc.i1.x;
+            index.y += pc.i0.y - pc.i1.y;
+        }
+        if (index.x != 0 || index.y != 0) {
+            ++singular;
+        }
+    }
+    return singular;
+}
+
 bool debugMinCostFlow() {
     // Case 1: two disjoint s->t paths, cheap (cost 2) and expensive (cost 6);
     // max flow 2 must use both, min cost = 8.
