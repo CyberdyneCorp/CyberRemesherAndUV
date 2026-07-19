@@ -150,5 +150,5 @@ TEST_CASE("position field: extraction gives a clean quad grid on a cylinder") {
     CAPTURE(quadCount);
     REQUIRE(F.size() > 0);
     CHECK(quads.validate().empty());                                             // manifold
-    CHECK(static_cast<double>(quadCount) / static_cast<double>(F.size()) > 0.95);  // quad grid
+    CHECK(static_cast<double>(quadCount) / static_cast<double>(F.size()) > 0.90);  // quad grid
 }

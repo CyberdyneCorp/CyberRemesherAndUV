@@ -38,151 +38,275 @@ Vec3 projectUnit(Vec3 v, Vec3 n) {
     return len > 1e-12f ? p / len : v;
 }
 
-struct Frames {
-    std::vector<Vec3> normal, tangent;
-    std::vector<bool> constrained;     // on a feature/boundary edge
-    std::vector<Vec3> constraintDir;   // feature/boundary direction (tangent plane)
-    std::vector<std::vector<Index>> neighbours;  // 1-ring vertex neighbours
-    std::vector<bool> valid;
+// An arbitrary unit tangent of the plane normal to `n`.
+Vec3 anyTangent(Vec3 n) {
+    const Vec3 seed = std::fabs(n.x) < 0.9f ? Vec3{1, 0, 0} : Vec3{0, 1, 0};
+    return projectUnit(seed, n);
+}
+
+// A generic field graph: positions, normals, adjacency and per-node fields.
+// Used both for the mesh (finest level) and every coarsened level of the
+// multiresolution hierarchy, so the same smoothing code runs at all levels.
+struct FieldGraph {
+    std::vector<Vec3> pos;
+    std::vector<Vec3> normal;
+    std::vector<std::vector<int>> nbr;
+    std::vector<bool> constrained;   // feature/boundary
+    std::vector<Vec3> constraintDir;
+    std::vector<Vec3> q;  // orientation field
+    std::vector<Vec3> o;  // position field
+    [[nodiscard]] std::size_t size() const { return pos.size(); }
 };
 
-Frames buildFrames(const Mesh& mesh) {
-    const std::size_t n = mesh.vertexCapacity();
-    Frames fr;
-    fr.normal.assign(n, Vec3{0, 0, 1});
-    fr.tangent.assign(n, Vec3{1, 0, 0});
-    fr.constrained.assign(n, false);
-    fr.constraintDir.assign(n, Vec3{0, 0, 0});
-    fr.neighbours.assign(n, {});
-    fr.valid.assign(n, false);
-
-    for (Index i = 0; i < n; ++i) {
+// Builds the finest-level graph from the mesh; `baseToVertex` maps each graph
+// node back to its mesh vertex index.
+FieldGraph buildBaseGraph(const Mesh& mesh, std::vector<Index>& baseToVertex) {
+    const std::size_t cap = mesh.vertexCapacity();
+    std::vector<int> toBase(cap, -1);
+    FieldGraph g;
+    for (Index i = 0; i < cap; ++i) {
         const VertexId v{i};
-        if (!mesh.isAlive(v)) {
+        if (!mesh.isAlive(v) || mesh.vertexFaces(v).empty()) {
             continue;
         }
-        const auto faces = mesh.vertexFaces(v);
-        if (faces.empty()) {
+        toBase[i] = static_cast<int>(g.pos.size());
+        baseToVertex.push_back(i);
+        g.pos.push_back(mesh.position(v));
+        Vec3 n{};
+        for (const FaceId f : mesh.vertexFaces(v)) {
+            n += mesh.faceNormal(f);
+        }
+        g.normal.push_back(normalized(n));
+        g.constrained.push_back(false);
+        g.constraintDir.push_back(Vec3{0, 0, 0});
+    }
+    g.nbr.assign(g.pos.size(), {});
+    for (Index i = 0; i < cap; ++i) {
+        if (toBase[i] < 0) {
             continue;
         }
-        Vec3 nrm{};
-        for (const FaceId f : faces) {
-            nrm += mesh.faceNormal(f);
-        }
-        nrm = normalized(nrm);
-        fr.normal[i] = nrm;
-        fr.valid[i] = true;
-
-        // Neighbours + a stable initial tangent (first incident edge).
-        Vec3 firstEdge{};
+        const VertexId v{i};
+        const auto base = static_cast<std::size_t>(toBase[i]);
         for (const EdgeId e : mesh.vertexEdges(v)) {
             const auto [a, b] = mesh.edgeVertices(e);
             const VertexId other = (a == v ? b : a);
-            fr.neighbours[i].push_back(other.value);
-            if (length(firstEdge) < 1e-12f) {
-                firstEdge = mesh.position(other) - mesh.position(v);
+            if (toBase[other.value] >= 0) {
+                g.nbr[base].push_back(toBase[other.value]);
             }
-            // A feature/boundary edge constrains the vertex to align with it.
             if (mesh.isFeatureEdge(e) || mesh.isBoundaryEdge(e)) {
-                fr.constrained[i] = true;
-                fr.constraintDir[i] = projectUnit(mesh.position(other) - mesh.position(v), nrm);
+                g.constrained[base] = true;
+                g.constraintDir[base] = projectUnit(mesh.position(other) - mesh.position(v),
+                                                    g.normal[base]);
             }
         }
-        fr.tangent[i] = projectUnit(length(firstEdge) > 1e-12f ? firstEdge : Vec3{1, 0, 0}, nrm);
     }
-    return fr;
+    g.q.assign(g.size(), Vec3{1, 0, 0});
+    g.o = g.pos;
+    return g;
 }
 
-// One Jacobi sweep of the 4-RoSy orientation field: each free vertex moves
-// toward the RoSy-matched average of its neighbours' directions, reprojected
-// into its tangent plane. Constrained vertices hold the feature direction.
-void smoothOrientation(const Frames& fr, std::vector<Vec3>& q) {
-    std::vector<Vec3> next(q.size());
-    for (std::size_t i = 0; i < q.size(); ++i) {
-        if (!fr.valid[i]) {
-            next[i] = q[i];
+// Coarsens a graph by greedy edge matching: adjacent nodes are paired, each
+// pair (or lone node) becomes one coarse node. `parent[fine] = coarse index`.
+FieldGraph coarsen(const FieldGraph& fine, std::vector<int>& parent) {
+    const int n = static_cast<int>(fine.size());
+    std::vector<int> match(fine.size(), -1);
+    for (int i = 0; i < n; ++i) {
+        if (match[static_cast<std::size_t>(i)] >= 0) {
             continue;
         }
-        if (fr.constrained[i]) {
-            next[i] = fr.constraintDir[i];
-            continue;
+        for (const int j : fine.nbr[static_cast<std::size_t>(i)]) {
+            if (match[static_cast<std::size_t>(j)] < 0 && j != i) {
+                match[static_cast<std::size_t>(i)] = j;
+                match[static_cast<std::size_t>(j)] = i;
+                break;
+            }
         }
-        Vec3 acc = q[i];
-        for (const Index j : fr.neighbours[i]) {
-            const Vec3 dj = projectUnit(q[static_cast<std::size_t>(j)], fr.normal[i]);
-            acc += matchRoSy(q[i], dj, fr.normal[i]);
-        }
-        next[i] = projectUnit(acc, fr.normal[i]);
     }
-    q.swap(next);
+    parent.assign(fine.size(), -1);
+    int nc = 0;
+    for (int i = 0; i < n; ++i) {
+        if (parent[static_cast<std::size_t>(i)] >= 0) {
+            continue;
+        }
+        parent[static_cast<std::size_t>(i)] = nc;
+        if (match[static_cast<std::size_t>(i)] >= 0) {
+            parent[static_cast<std::size_t>(match[static_cast<std::size_t>(i)])] = nc;
+        }
+        ++nc;
+    }
+
+    FieldGraph c;
+    const auto ncs = static_cast<std::size_t>(nc);
+    c.pos.assign(ncs, Vec3{0, 0, 0});
+    c.normal.assign(ncs, Vec3{0, 0, 0});
+    c.constrained.assign(ncs, false);
+    c.constraintDir.assign(ncs, Vec3{0, 0, 0});
+    c.nbr.assign(ncs, {});
+    std::vector<float> count(ncs, 0.0f);
+    for (int i = 0; i < n; ++i) {
+        const auto ci = static_cast<std::size_t>(parent[static_cast<std::size_t>(i)]);
+        c.pos[ci] += fine.pos[static_cast<std::size_t>(i)];
+        c.normal[ci] += fine.normal[static_cast<std::size_t>(i)];
+        count[ci] += 1.0f;
+        if (fine.constrained[static_cast<std::size_t>(i)]) {
+            c.constrained[ci] = true;
+            c.constraintDir[ci] = fine.constraintDir[static_cast<std::size_t>(i)];
+        }
+    }
+    for (std::size_t ci = 0; ci < ncs; ++ci) {
+        if (count[ci] > 0.0f) {
+            c.pos[ci] = c.pos[ci] / count[ci];
+        }
+        c.normal[ci] = normalized(c.normal[ci]);
+        if (c.constrained[ci]) {
+            c.constraintDir[ci] = projectUnit(c.constraintDir[ci], c.normal[ci]);
+        }
+    }
+    // Coarse adjacency = resolved fine edges between distinct coarse nodes.
+    for (int i = 0; i < n; ++i) {
+        const int ci = parent[static_cast<std::size_t>(i)];
+        for (const int j : fine.nbr[static_cast<std::size_t>(i)]) {
+            const int cj = parent[static_cast<std::size_t>(j)];
+            if (ci != cj) {
+                c.nbr[static_cast<std::size_t>(ci)].push_back(cj);
+            }
+        }
+    }
+    for (auto& list : c.nbr) {
+        std::sort(list.begin(), list.end());
+        list.erase(std::unique(list.begin(), list.end()), list.end());
+    }
+    c.q.assign(ncs, Vec3{1, 0, 0});
+    c.o = c.pos;
+    return c;
 }
 
-// One Jacobi sweep of the position field. For each neighbour, snap its lattice
-// point into this vertex's cell (integer offset in the local q / q_perp frame)
-// and average; then re-anchor the average to the lattice point nearest the
-// vertex (position_round_4). Same-cell vertices thus converge to one shared
-// lattice point (crisp cells for the collapse), while cross-cell neighbours,
-// snapped back by a full step, reinforce the target spacing instead of merging.
-void smoothPosition(const Frames& fr, const Mesh& mesh, const std::vector<Vec3>& q, float s,
-                    std::vector<Vec3>& o) {
+// One Jacobi sweep of the 4-RoSy orientation field on a graph.
+void smoothOrientation(FieldGraph& g, int iterations) {
+    std::vector<Vec3> next(g.size());
+    for (int it = 0; it < iterations; ++it) {
+        for (std::size_t i = 0; i < g.size(); ++i) {
+            if (g.constrained[i]) {
+                next[i] = g.constraintDir[i];
+                continue;
+            }
+            Vec3 acc = g.q[i];
+            for (const int j : g.nbr[i]) {
+                const Vec3 dj = projectUnit(g.q[static_cast<std::size_t>(j)], g.normal[i]);
+                acc += matchRoSy(g.q[i], dj, g.normal[i]);
+            }
+            next[i] = projectUnit(acc, g.normal[i]);
+        }
+        g.q.swap(next);
+    }
+}
+
+// One Jacobi sweep of the position field on a graph (position_round_4 anchoring
+// plus normal-drift removal, so representatives form crisp on-surface cells).
+void smoothPosition(FieldGraph& g, float s, int iterations) {
     const float invS = 1.0f / s;
-    std::vector<Vec3> next(o.size());
-    for (std::size_t i = 0; i < o.size(); ++i) {
-        const VertexId vi{static_cast<Index>(i)};
-        if (!fr.valid[i]) {
-            next[i] = o[i];
-            continue;
+    std::vector<Vec3> next(g.size());
+    for (int it = 0; it < iterations; ++it) {
+        for (std::size_t i = 0; i < g.size(); ++i) {
+            const Vec3 qi = g.q[i];
+            const Vec3 ti = cross(g.normal[i], qi);
+            Vec3 sum = g.o[i];
+            float w = 1.0f;
+            for (const int jn : g.nbr[i]) {
+                const auto j = static_cast<std::size_t>(jn);
+                const Vec3 diff = g.o[j] - g.o[i];
+                const float a = std::round(dot(diff, qi) * invS);
+                const float b = std::round(dot(diff, ti) * invS);
+                sum += g.o[j] - (qi * (a * s) + ti * (b * s));
+                w += 1.0f;
+            }
+            sum = sum / w;
+            const Vec3 d = g.pos[i] - sum;
+            const Vec3 anchored =
+                sum + qi * (std::round(dot(qi, d) * invS) * s) + ti * (std::round(dot(ti, d) * invS) * s);
+            Vec3 rel = anchored - g.pos[i];
+            rel = rel - g.normal[i] * dot(g.normal[i], rel);
+            next[i] = g.pos[i] + rel;
         }
-        const Vec3 qi = q[i];
-        const Vec3 ti = cross(fr.normal[i], qi);
-        Vec3 sum = o[i];
-        float w = 1.0f;
-        for (const Index jn : fr.neighbours[i]) {
-            const Vec3 diff = o[static_cast<std::size_t>(jn)] - o[i];
-            const float a = std::round(dot(diff, qi) * invS);
-            const float b = std::round(dot(diff, ti) * invS);
-            const Vec3 aligned = o[static_cast<std::size_t>(jn)] - (qi * (a * s) + ti * (b * s));
-            sum += aligned;
-            w += 1.0f;
-        }
-        sum = sum / w;
-        // position_round_4: shift `sum` by whole lattice steps to the cell of p,
-        // then remove the normal drift so the representative stays on the surface
-        // (pure averaging sinks o toward the centroid on curved regions).
-        const Vec3 p = mesh.position(vi);
-        const Vec3 d = p - sum;
-        const Vec3 anchored = sum + qi * (std::round(dot(qi, d) * invS) * s) +
-                              ti * (std::round(dot(ti, d) * invS) * s);
-        Vec3 rel = anchored - p;
-        rel = rel - fr.normal[i] * dot(fr.normal[i], rel);
-        next[i] = p + rel;
+        g.o.swap(next);
     }
-    o.swap(next);
 }
 
 }  // namespace
 
 PositionField computePositionField(const Mesh& mesh, float spacing, int iterations) {
-    const Frames fr = buildFrames(mesh);
-    const std::size_t n = mesh.vertexCapacity();
+    std::vector<Index> baseToVertex;
+    FieldGraph base = buildBaseGraph(mesh, baseToVertex);
 
+    // Build the multiresolution hierarchy (finest first) by greedy coarsening.
+    std::vector<FieldGraph> levels;
+    std::vector<std::vector<int>> parents;
+    levels.push_back(std::move(base));
+    while (levels.back().size() > 16) {
+        std::vector<int> parent;
+        FieldGraph c = coarsen(levels.back(), parent);
+        if (c.size() >= levels.back().size()) {
+            break;  // no progress (e.g. disconnected singletons)
+        }
+        parents.push_back(std::move(parent));
+        levels.push_back(std::move(c));
+    }
+
+    const auto initQ = [](FieldGraph& g, std::size_t i) {
+        g.q[i] = g.constrained[i] ? g.constraintDir[i] : anyTangent(g.normal[i]);
+    };
+
+    // Orientation: seed + smooth the coarsest level, then prolong + smooth each
+    // finer level. The coarse solve fixes the global cross-field topology
+    // (singularity placement) that single-resolution smoothing gets stuck on.
+    for (std::size_t i = 0; i < levels.back().size(); ++i) {
+        initQ(levels.back(), i);
+    }
+    smoothOrientation(levels.back(), iterations);
+    for (int lvl = static_cast<int>(levels.size()) - 2; lvl >= 0; --lvl) {
+        FieldGraph& fine = levels[static_cast<std::size_t>(lvl)];
+        const FieldGraph& coarse = levels[static_cast<std::size_t>(lvl) + 1];
+        const std::vector<int>& parent = parents[static_cast<std::size_t>(lvl)];
+        for (std::size_t i = 0; i < fine.size(); ++i) {
+            fine.q[i] = fine.constrained[i]
+                            ? fine.constraintDir[i]
+                            : projectUnit(coarse.q[static_cast<std::size_t>(parent[i])], fine.normal[i]);
+        }
+        smoothOrientation(fine, iterations);
+    }
+
+    // Position: same coarse-to-fine schedule, carrying the coarse lattice
+    // through the prolongation (parent's o shifted by this node's offset).
+    for (std::size_t i = 0; i < levels.back().size(); ++i) {
+        levels.back().o[i] = levels.back().pos[i];
+    }
+    smoothPosition(levels.back(), spacing, iterations);
+    for (int lvl = static_cast<int>(levels.size()) - 2; lvl >= 0; --lvl) {
+        FieldGraph& fine = levels[static_cast<std::size_t>(lvl)];
+        const FieldGraph& coarse = levels[static_cast<std::size_t>(lvl) + 1];
+        const std::vector<int>& parent = parents[static_cast<std::size_t>(lvl)];
+        for (std::size_t i = 0; i < fine.size(); ++i) {
+            const auto p = static_cast<std::size_t>(parent[i]);
+            fine.o[i] = coarse.o[p] + (fine.pos[i] - coarse.pos[p]);
+        }
+        smoothPosition(fine, spacing, iterations);
+    }
+
+    // Scatter the finest level back onto the mesh's vertex indexing.
+    const FieldGraph& fine = levels.front();
+    const std::size_t cap = mesh.vertexCapacity();
     PositionField field;
     field.spacing = spacing;
-    field.normal = fr.normal;
-    field.valid.assign(n, false);
-    field.q.assign(n, Vec3{1, 0, 0});
-    field.o.assign(n, Vec3{0, 0, 0});
-    for (std::size_t i = 0; i < n; ++i) {
-        field.valid[i] = fr.valid[i];
-        field.q[i] = fr.constrained[i] ? fr.constraintDir[i] : fr.tangent[i];
-        field.o[i] = mesh.position(VertexId{static_cast<Index>(i)});
-    }
-
-    for (int it = 0; it < iterations; ++it) {
-        smoothOrientation(fr, field.q);
-    }
-    for (int it = 0; it < iterations; ++it) {
-        smoothPosition(fr, mesh, field.q, spacing, field.o);
+    field.normal.assign(cap, Vec3{0, 0, 1});
+    field.q.assign(cap, Vec3{1, 0, 0});
+    field.o.assign(cap, Vec3{0, 0, 0});
+    field.valid.assign(cap, false);
+    for (std::size_t b = 0; b < baseToVertex.size(); ++b) {
+        const std::size_t v = baseToVertex[b];
+        field.valid[v] = true;
+        field.normal[v] = fine.normal[b];
+        field.q[v] = fine.q[b];
+        field.o[v] = fine.o[b];
     }
     return field;
 }
