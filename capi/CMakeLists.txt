@@ -9,7 +9,7 @@ add_library(cyber_capi STATIC
 add_library(cyber::capi ALIAS cyber_capi)
 
 target_include_directories(cyber_capi PUBLIC include)
-target_link_libraries(cyber_capi PUBLIC cyber_core cyber_bake cyber_imageio)
+target_link_libraries(cyber_capi PUBLIC cyber_core cyber_bake cyber_imageio cyber_quadrangulate)
 
 # The C-facing version mirrors the CMake project() version.
 target_compile_definitions(cyber_capi PRIVATE
@@ -28,7 +28,7 @@ if(CYBER_BUILD_CAPI_SHARED)
         src/capi.cpp
     )
     target_include_directories(cyber_capi_shared PUBLIC include)
-    target_link_libraries(cyber_capi_shared PRIVATE cyber_core cyber_bake cyber_imageio)
+    target_link_libraries(cyber_capi_shared PRIVATE cyber_core cyber_bake cyber_imageio cyber_quadrangulate)
     set_target_properties(cyber_capi_shared PROPERTIES
         OUTPUT_NAME cyber_capi
         POSITION_INDEPENDENT_CODE ON

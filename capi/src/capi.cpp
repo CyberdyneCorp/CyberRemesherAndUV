@@ -22,6 +22,7 @@
 #include "cyber/core/io.hpp"
 #include "cyber/core/mesh.hpp"
 #include "cyber/core/pipeline.hpp"
+#include "cyber/quadrangulate/field_quadrangulator.hpp"
 #include "cyber/imageio/image.hpp"
 #include "cyber/core/progress.hpp"
 #include "cyber/core/remesh_params.hpp"
@@ -213,12 +214,14 @@ CyberStatus cyber_remesh(const CyberMesh* in, const CyberRemeshParams* params,
         const cyber::CancelToken token;
         cyber::ProgressSink sink = makeSink(progress, cancel, user, token);
 
-        // Greedy pairing keeps the strongest quad-dominance for a general
-        // "convert to quads" load; the field-aligned quadrangulator trades some
-        // quad-dominance for edge flow (used by the CLI). Pure-quad mode
-        // (params.pureQuads) yields a 100%-quad result on top of either.
-        cyber::remesh::PipelineResult result =
-            cyber::remesh::remesh(in->mesh, cppParams, &sink, &token);
+        // The field-aligned quadrangulator (maximum triangle matching over a
+        // smoothed cross field) gives both the highest quad-dominance (~95%+ on
+        // clean input) AND edge flow that follows curvature, so it is the
+        // default for the C ABI / bindings. Pure-quad mode (params.pureQuads)
+        // yields a 100%-quad result on top of it.
+        cyber::remesh::PipelineResult result = cyber::remesh::remesh(
+            in->mesh, cppParams, &sink, &token,
+            [] { return cyber::remesh::makeFieldAlignedQuadrangulator(); });
 
         switch (result.status) {
             case cyber::remesh::RunStatus::Success:
