@@ -164,8 +164,31 @@ malformed-orbit holes, no post-hoc rotation.
      doublet/valence-3 cleanup), close triangular holes (edge collapse / merge into
      a neighbour), and optionally `FixFlipHierarchy`/`FixFlipSat` for flipped cells.
      Open-mesh/boundary + sharp handling remain robustness follow-ups.
-4. ◻ **Quality + promote** — median/CV/feature/robustness vs QuadriFlow; if it
-   wins, make it the extractor default and retire the collapse-and-walk path.
+4. 🟡 **Quality + promote — doublet cleanup landed; promote gate NOT met (extraction
+   fidelity is the real lever).** Measured the extractor's valence distribution and
+   ran a head-to-head vs the current default extractor.
+   - ✅ **Interior valence-2 doublet dissolution** (QuadriFlow `FixValence`, "Remove
+     Valence 2") ported and shipped — restricted to *interior* doublets (merging a
+     boundary valence-2 vertex opens seams: measured net-negative, irregular AND
+     boundary both up). Modest safe win: irregular spot 28→25%, fandisk 22→21%,
+     cheburashka 24→22%, rocker 26→24%, bunny 25→23%; boundary unchanged, still
+     manifold. The high-valence split / decrease-valence passes are **net-negative
+     on this extractor** (they open seams / trade topology for geometry, echoing the
+     Phase-4a local-surgery finding) and are deliberately omitted.
+   - ✅ **Head-to-head (native density):** the integer extractor **beats the current
+     default extractor** on irregular % on all 5 corpus models (spot 25% vs 44%,
+     rocker 24% vs 68%, cheburashka 22% vs 46%, bunny 23% vs 37%) and is watertight
+     + manifold where the default tears.
+   - ❌ **Promote gate NOT met.** Two blockers: (a) at the coarse ~3000-quad
+     *benchmark* density the integer path degrades to ~37–49% irregular (opposite of
+     the default, which is bad at native but ~15% at benchmark density); (b) neither
+     reaches QuadriFlow's ~3% irregular. **Root cause = extraction fidelity, not
+     valence surgery:** the single-level pairing multiplies the solve's clean-grid
+     singularities **5–10×** (spot solve 82 → ~550 irregular quad-verts), dominated
+     by *interior* val3/val5 — the mesh triangulation doesn't align with the field's
+     grid cells, so cells don't tile cleanly. Closing that needs QuadriFlow's full
+     multi-resolution `DownsampleEdgeGraph` extraction (or a cleaner single-level
+     tiling) — **Phase 5 territory.** Keep the current default extractor for now.
 
 ## Open risk (revised after Milestone 1)
 

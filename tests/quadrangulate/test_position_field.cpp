@@ -377,14 +377,15 @@ TEST_CASE("integer solve: subdivision makes every edge span at most one cell") {
     CHECK(s.trisAfter < s.trisBefore * 4);        // no runaway (few edges span >1 cell)
 }
 
-// Milestone 3, stage (c) — extraction via QuadriFlow's BuildTriangleManifold
+// Milestones 3–4 — extraction via QuadriFlow's BuildTriangleManifold + FixValence
 // (single-level): reconstruct a clean compact triangle manifold (zero-diff
 // collapse + orbit-walk vertex split), pair the two triangles across each
-// grid-cell diagonal into a quad, then FixHoles the residual boundary loops.
-// The output is all-quad, a valid manifold, and near-watertight: the earlier
-// naive collapse-and-pair left ~312 boundary edges / ~45% irregular on this
-// mesh; the manifold reconstruction cuts that to a few dozen boundary edges
-// (only unfillable triangular holes at singularities remain) and ~20% irregular.
+// grid-cell diagonal into a quad, FixHoles the residual boundary loops, then
+// dissolve interior valence-2 doublets (FixValence). The output is all-quad, a
+// valid manifold, and near-watertight: the naive collapse-and-pair left ~312
+// boundary edges / ~45% irregular; the manifold reconstruction cuts that to a few
+// dozen boundary edges (only unfillable triangular holes at singularities remain),
+// and the doublet pass trims the irregular count further.
 TEST_CASE("integer solve: extraction is manifold, all-quad and near-watertight") {
     const Mesh sphere = icosphere(3);
     const float spacing = meanEdgeLength(sphere);

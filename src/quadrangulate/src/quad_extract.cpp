@@ -1769,10 +1769,14 @@ ManifoldTris buildManifoldTris(const SubMesh& m) {
 
 // --- FixHoles: fill residual boundary loops with quads (QuadriFlow) -----------
 
-// Quad half-edge opposite map (compute_direct_graph_quad): E2E[4*f+i] is the
-// opposite of the directed edge F[f][i]->F[f][i+1], or -1 on boundary / non-
-// manifold. V2E unused downstream, so only E2E is returned.
-std::vector<int> quadE2E(const std::vector<std::array<int, 4>>& faces, int nVerts) {
+// Quad half-edge adjacency (compute_direct_graph_quad): E2E[4*f+i] is the opposite
+// of the directed edge F[f][i]->F[f][i+1], or -1 on boundary / non-manifold; V2E[v]
+// is one outgoing half-edge of vertex v (-1 if unused).
+struct QuadDedge {
+    std::vector<int> v2e;
+    std::vector<int> e2e;
+};
+QuadDedge quadDedge(const std::vector<std::array<int, 4>>& faces, int nVerts) {
     std::vector<int> v2e(static_cast<std::size_t>(nVerts), -1);
     const int nHe = static_cast<int>(faces.size()) * 4;
     std::vector<int> target(static_cast<std::size_t>(nHe), -1);
@@ -1824,7 +1828,7 @@ std::vector<int> quadE2E(const std::vector<std::array<int, 4>>& faces, int nVert
             }
         }
     }
-    return e2e;
+    return {std::move(v2e), std::move(e2e)};
 }
 
 // Min-angle-energy quadrangulation of a boundary loop (QuadriFlow QuadEnergy):
@@ -1976,7 +1980,7 @@ void fixHoles(std::vector<std::array<int, 4>>& faces, const std::vector<Vec3>& O
                 {f[static_cast<std::size_t>(j)], f[static_cast<std::size_t>((j + 1) % 4)]});
         }
     }
-    const std::vector<int> e2e = quadE2E(faces, nVerts);
+    const std::vector<int> e2e = quadDedge(faces, nVerts).e2e;
     std::vector<char> detected(e2e.size(), 0);
     for (int i = 0; i < static_cast<int>(e2e.size()); ++i) {
         if (detected[static_cast<std::size_t>(i)] != 0 || e2e[static_cast<std::size_t>(i)] != -1) {
@@ -2016,11 +2020,87 @@ void fixHoles(std::vector<std::array<int, 4>>& faces, const std::vector<Vec3>& O
     }
 }
 
+// --- FixValence: topology cleanup on the quad mesh (QuadriFlow) ----------------
+
+int qPrevHe(int de) { return de / 4 * 4 + (de + 3) % 4; }
+
+// One pass of doublet dissolution (QuadriFlow FixValence "Remove Valence 2"):
+// each valence-2 vertex is shared by exactly two quads along two edges; merge
+// those two quads into a single quad and drop the doublet vertex. Returns whether
+// anything changed (the caller loops to a fixpoint).
+bool removeDoubletsPass(std::vector<std::array<int, 4>>& faces, int nV) {
+    const QuadDedge d = quadDedge(faces, nV);
+    std::vector<char> marks(static_cast<std::size_t>(nV), 0);
+    std::vector<char> erasedF(faces.size(), 0);
+    const auto corner = [&](int de, int off) {
+        return faces[static_cast<std::size_t>(de / 4)][static_cast<std::size_t>((de + off) % 4)];
+    };
+    bool update = false;
+    for (int i = 0; i < nV; ++i) {
+        const int deid0 = d.v2e[static_cast<std::size_t>(i)];
+        if (marks[static_cast<std::size_t>(i)] || deid0 == -1) {
+            continue;
+        }
+        int deid = deid0;
+        std::vector<int> dedges;
+        const std::size_t fanCap = d.e2e.size() + 1;
+        do {
+            dedges.push_back(deid);
+            deid = d.e2e[static_cast<std::size_t>(qPrevHe(deid))];
+        } while (deid != deid0 && deid != -1 && dedges.size() <= fanCap);
+        // A true doublet is an *interior* valence-2 vertex: its fan closes back to
+        // the seed. A boundary valence-2 vertex (fan hits -1) is not a doublet —
+        // merging it opens seams — so skip it.
+        if (deid != deid0 || dedges.size() != 2) {
+            continue;
+        }
+        const int v1 = corner(dedges[0], 1), v2 = corner(dedges[0], 2);
+        const int v3 = corner(dedges[1], 1), v4 = corner(dedges[1], 2);
+        if (marks[static_cast<std::size_t>(v1)] || marks[static_cast<std::size_t>(v2)] ||
+            marks[static_cast<std::size_t>(v3)] || marks[static_cast<std::size_t>(v4)]) {
+            continue;
+        }
+        marks[static_cast<std::size_t>(v1)] = 1;
+        marks[static_cast<std::size_t>(v2)] = 1;
+        marks[static_cast<std::size_t>(v3)] = 1;
+        marks[static_cast<std::size_t>(v4)] = 1;
+        if (v1 == v2 || v1 == v3 || v1 == v4 || v2 == v3 || v2 == v4 || v3 == v4) {
+            erasedF[static_cast<std::size_t>(dedges[0] / 4)] = 1;
+        } else {
+            faces[static_cast<std::size_t>(dedges[0] / 4)] = {v1, v2, v3, v4};
+        }
+        erasedF[static_cast<std::size_t>(dedges[1] / 4)] = 1;
+        update = true;
+    }
+    if (update) {
+        std::size_t top = 0;
+        for (std::size_t f = 0; f < faces.size(); ++f) {
+            if (!erasedF[f]) {
+                faces[top++] = faces[f];
+            }
+        }
+        faces.resize(top);
+    }
+    return update;
+}
+
+// Topology cleanup on the extracted quad mesh (QuadriFlow FixValence, "Remove
+// Valence 2"): dissolve interior valence-2 doublets to a fixpoint. Restricted to
+// interior doublets — merging a boundary valence-2 vertex opens seams and was
+// measured net-negative (irregular + boundary both up); the high-valence split /
+// decrease passes are likewise net-negative on this extractor and omitted.
+// Geometry is untouched; freed vertices drop out at materialisation.
+void fixValence(std::vector<std::array<int, 4>>& faces, int nV) {
+    while (removeDoubletsPass(faces, nV)) {
+    }
+}
+
 // Collapses the unit-cell mesh into a watertight quad mesh (QuadriFlow
-// AdvancedExtractQuad + BuildTriangleManifold, single-level): reconstruct a clean
-// compact triangle manifold, pair the two triangles across each |diff|==(1,1)
-// grid-cell diagonal into a quad, drop degenerate quads, then FixHoles the
-// residual boundary loops. Output vertex position is the mean field position (O).
+// AdvancedExtractQuad + BuildTriangleManifold + FixValence, single-level):
+// reconstruct a clean compact triangle manifold, pair the two triangles across
+// each |diff|==(1,1) grid-cell diagonal into a quad, drop degenerate quads,
+// FixHoles the residual boundary loops, then FixValence (dissolve doublets).
+// Output vertex position is the mean field position (O).
 Mesh buildQuadMesh(const SubMesh& m) {
     const ManifoldTris mt = buildManifoldTris(m);
 
@@ -2075,6 +2155,7 @@ Mesh buildQuadMesh(const SubMesh& m) {
     faces.swap(cleaned);
 
     fixHoles(faces, mt.O, mt.N, static_cast<int>(mt.O.size()));
+    fixValence(faces, static_cast<int>(mt.O.size()));
 
     // Materialise: only manifold vertices referenced by a face become mesh verts.
     Mesh out;
