@@ -123,6 +123,32 @@ float meanEdgeLength(const Mesh& m) {
     return n ? static_cast<float>(sum / static_cast<double>(n)) : 1.0f;
 }
 
+// A flat quad grid whose columns get progressively wider, so local edge length
+// grades from fine (x=0 side) to coarse (far side). Exercises the position
+// field's per-vertex density scale (adaptive/variable-spacing support).
+Mesh gradedGrid(int nx, int ny) {
+    std::vector<float> xs(static_cast<std::size_t>(nx) + 1);
+    float x = 0.0f;
+    for (int j = 0; j <= nx; ++j) {
+        xs[static_cast<std::size_t>(j)] = x;
+        x += 0.05f + 0.20f * static_cast<float>(j) / static_cast<float>(nx);  // widening columns
+    }
+    std::vector<Vec3> p;
+    for (int i = 0; i <= ny; ++i) {
+        for (int j = 0; j <= nx; ++j) {
+            p.push_back({xs[static_cast<std::size_t>(j)], 0.25f * static_cast<float>(i), 0.0f});
+        }
+    }
+    const auto id = [&](int i, int j) { return static_cast<Index>(i * (nx + 1) + j); };
+    std::vector<std::vector<Index>> f;
+    for (int i = 0; i < ny; ++i) {
+        for (int j = 0; j < nx; ++j) {
+            f.push_back({id(i, j), id(i, j + 1), id(i + 1, j + 1), id(i + 1, j)});
+        }
+    }
+    return Mesh::fromIndexed(p, f);
+}
+
 // Best 4-RoSy agreement between two tangent-plane directions about normal n.
 float rosyAgreement(Vec3 a, Vec3 b, Vec3 n) {
     float best = -1.0f;
@@ -265,6 +291,44 @@ TEST_CASE("position field: extraction gives a clean quad grid on a cylinder") {
     REQUIRE(F.size() > 0);
     CHECK(quads.validate().empty());                                             // manifold
     CHECK(static_cast<double>(quadCount) / static_cast<double>(F.size()) > 0.90);  // quad grid
+}
+
+// The position field's per-vertex lattice-spacing scale must track LOCAL mesh
+// density: on a graded grid (fine columns → coarse columns) the fine side gets a
+// sub-1 multiplier and the coarse side a super-1 one. This is what lets the
+// extractor follow adaptive sizing instead of over-merging the coarse regions; a
+// uniform mesh keeps scale ~1 everywhere (so the fixed-spacing path is unchanged).
+TEST_CASE("position field: per-vertex scale tracks local density") {
+    const Mesh grid = gradedGrid(22, 8);
+    const float spacing = meanEdgeLength(grid);
+    const remesh::PositionField field = remesh::computePositionField(grid, spacing, 20);
+
+    float minScale = 1e9f, maxScale = 0.0f;
+    for (std::size_t i = 0; i < field.size(); ++i) {
+        if (field.valid[i]) {
+            minScale = std::fmin(minScale, field.scale[i]);
+            maxScale = std::fmax(maxScale, field.scale[i]);
+        }
+    }
+    CAPTURE(minScale);
+    CAPTURE(maxScale);
+    CHECK(minScale < 0.8f);   // fine columns: sub-mean spacing
+    CHECK(maxScale > 1.25f);  // coarse columns: super-mean spacing
+
+    // A uniform mesh must stay ~1 everywhere (fixed-spacing path unchanged).
+    const Mesh cyl = cylinder(1.0f, 3.0f, 30, 30);
+    const remesh::PositionField uni = remesh::computePositionField(cyl, 0.2f, 20);
+    float uMin = 1e9f, uMax = 0.0f;
+    for (std::size_t i = 0; i < uni.size(); ++i) {
+        if (uni.valid[i]) {
+            uMin = std::fmin(uMin, uni.scale[i]);
+            uMax = std::fmax(uMax, uni.scale[i]);
+        }
+    }
+    CAPTURE(uMin);
+    CAPTURE(uMax);
+    CHECK(uMin > 0.8f);   // uniform: scale stays near 1
+    CHECK(uMax < 1.25f);
 }
 
 // Regression for the post-collapse lattice-edge recovery (A4b). Per-vertex

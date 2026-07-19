@@ -334,8 +334,18 @@ void removeUnnecessaryEdges(std::vector<Vec3>& pos, std::vector<Vec3>& normal,
 
 Graph buildCollapsedGraph(const Mesh& mesh, const PositionField& field) {
     const float s = field.spacing;
-    const float invS = 1.0f / s;
     const std::size_t nV = field.size();
+
+    // Local lattice spacing: the base spacing scaled by the per-vertex density
+    // multiplier (1 on a uniform mesh, so these reduce to the global s; on an
+    // adaptive mesh the cell size follows local density so coarse regions are not
+    // over-merged). Per-edge uses the two endpoints' average.
+    const auto nodeS = [&](std::size_t i) {
+        return field.scale.empty() ? s : s * field.scale[i];
+    };
+    const auto edgeS = [&](std::size_t i, std::size_t j) {
+        return field.scale.empty() ? s : s * 0.5f * (field.scale[i] + field.scale[j]);
+    };
 
     // --- A1: classify every mesh edge as collapse candidate / lattice edge. ---
     struct CollapseEdge {
@@ -358,9 +368,10 @@ Graph buildCollapsedGraph(const Mesh& mesh, const PositionField& field) {
         }
         const auto [q0, q1] =
             compatOrientation(field.q[i], field.normal[i], field.q[j], field.normal[j]);
+        const float es = edgeS(i, j);
         const PosCompat pc =
             compatPosition(mesh.position(va), field.normal[i], q0, field.o[i], mesh.position(vb),
-                           field.normal[j], q1, field.o[j], s, invS);
+                           field.normal[j], q1, field.o[j], es, 1.0f / es);
         const int dx = std::abs(pc.i0.x - pc.i1.x);
         const int dy = std::abs(pc.i0.y - pc.i1.y);
         if (std::max(dx, dy) > 1 || (dx == 1 && dy == 1)) {
@@ -437,7 +448,8 @@ Graph buildCollapsedGraph(const Mesh& mesh, const PositionField& field) {
         }
         const Index node = nodeOf[dset.find(static_cast<Index>(v))];
         const Vec3 p = mesh.position(VertexId{static_cast<Index>(v)});
-        const float w = std::exp(-9.0f * lengthSquared(field.o[v] - p) / (s * s));
+        const float sv = nodeS(v);
+        const float w = std::exp(-9.0f * lengthSquared(field.o[v] - p) / (sv * sv));
         g.pos[node] += field.o[v] * w;
         g.normal[node] += field.normal[v] * w;
         weight[node] += w;
@@ -472,13 +484,6 @@ Graph buildCollapsedGraph(const Mesh& mesh, const PositionField& field) {
     // restores the ~6% of unit edges that per-vertex field noise misclassified
     // as diagonal/far, raising graph valence toward the grid ideal of 4. ---
     {
-        const float lo = 0.55f * s;   // below: same cell (already collapsed)
-        // Accept up to 1.30s: catches curvature-compressed lattice edges while
-        // staying clear of a true quad diagonal (s*sqrt2 = 1.414s). Higher cuts
-        // (1.35s+) start admitting diagonals and fuse quads on noisy scans.
-        const float hi = 1.30f * s;
-        const float hi2 = hi * hi;
-        const float lo2 = lo * lo;
         for (Index ei = 0; ei < mesh.edgeCapacity(); ++ei) {
             const EdgeId e{ei};
             if (!mesh.isAlive(e)) {
@@ -493,6 +498,12 @@ Graph buildCollapsedGraph(const Mesh& mesh, const PositionField& field) {
             if (a == b || nodeAdj[static_cast<std::size_t>(a)].count(b)) {
                 continue;
             }
+            // Local thresholds: same cell below 0.55s, quad diagonal above 1.30s
+            // (a true diagonal is s*sqrt2 = 1.414s), scaled by the edge's local
+            // spacing so recovery works on adaptive as well as uniform meshes.
+            const float es = edgeS(va.value, vb.value);
+            const float lo2 = (0.55f * es) * (0.55f * es);
+            const float hi2 = (1.30f * es) * (1.30f * es);
             const float d2 = lengthSquared(g.pos[static_cast<std::size_t>(a)] -
                                            g.pos[static_cast<std::size_t>(b)]);
             if (d2 >= lo2 && d2 <= hi2) {

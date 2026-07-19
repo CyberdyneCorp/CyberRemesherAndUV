@@ -26,7 +26,8 @@ struct PositionField {
     std::vector<Vec3> q;         // per-vertex orientation direction (tangent plane)
     std::vector<Vec3> o;         // per-vertex lattice position (near the vertex)
     std::vector<bool> valid;     // false for dead/isolated vertices
-    float spacing = 1.0f;        // target lattice spacing (edge length)
+    std::vector<float> scale;    // per-vertex lattice-spacing multiplier (1 = uniform)
+    float spacing = 1.0f;        // base lattice spacing; local spacing = spacing * scale[i]
 
     [[nodiscard]] std::size_t size() const { return q.size(); }
     // The orthogonal field direction q_perp = normal x q.

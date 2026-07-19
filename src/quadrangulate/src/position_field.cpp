@@ -55,6 +55,7 @@ struct FieldGraph {
     std::vector<Vec3> constraintDir;
     std::vector<Vec3> q;  // orientation field
     std::vector<Vec3> o;  // position field
+    std::vector<float> scale;  // per-node lattice-spacing multiplier (1 = uniform)
     [[nodiscard]] std::size_t size() const { return pos.size(); }
 };
 
@@ -102,6 +103,48 @@ FieldGraph buildBaseGraph(const Mesh& mesh, std::vector<Index>& baseToVertex) {
     }
     g.q.assign(g.size(), Vec3{1, 0, 0});
     g.o = g.pos;
+
+    // Per-node lattice-spacing multiplier from LOCAL mesh density: the mean
+    // incident edge length, normalized by the global mean so a uniform mesh maps
+    // to ~1 everywhere (extractor behaviour then matches the fixed-spacing path),
+    // while an adaptive mesh — fine near curvature, coarse on flats — carries
+    // that density into the lattice, so cells track the local edge length instead
+    // of over-merging the coarse regions. Smoothed so remesh noise doesn't
+    // fragment the field.
+    std::vector<float> localLen(g.size(), 0.0f);
+    for (std::size_t i = 0; i < g.size(); ++i) {
+        const auto& nb = g.nbr[i];
+        if (nb.empty()) {
+            localLen[i] = 1.0f;
+            continue;
+        }
+        float sum = 0.0f;
+        for (const int j : nb) {
+            sum += length(g.pos[i] - g.pos[static_cast<std::size_t>(j)]);
+        }
+        localLen[i] = sum / static_cast<float>(nb.size());
+    }
+    double meanLen = 0.0;
+    for (const float l : localLen) {
+        meanLen += l;
+    }
+    meanLen = g.size() ? meanLen / static_cast<double>(g.size()) : 1.0;
+    const float invMean = meanLen > 1e-12 ? static_cast<float>(1.0 / meanLen) : 1.0f;
+    g.scale.assign(g.size(), 1.0f);
+    for (std::size_t i = 0; i < g.size(); ++i) {
+        g.scale[i] = localLen[i] * invMean;
+    }
+    for (int pass = 0; pass < 3; ++pass) {  // Laplacian smoothing of the density field
+        std::vector<float> next = g.scale;
+        for (std::size_t i = 0; i < g.size(); ++i) {
+            float sum = g.scale[i];
+            for (const int j : g.nbr[i]) {
+                sum += g.scale[static_cast<std::size_t>(j)];
+            }
+            next[i] = sum / static_cast<float>(g.nbr[i].size() + 1);
+        }
+        g.scale.swap(next);
+    }
     return g;
 }
 
@@ -142,11 +185,13 @@ FieldGraph coarsen(const FieldGraph& fine, std::vector<int>& parent) {
     c.constrained.assign(ncs, false);
     c.constraintDir.assign(ncs, Vec3{0, 0, 0});
     c.nbr.assign(ncs, {});
+    c.scale.assign(ncs, 0.0f);
     std::vector<float> count(ncs, 0.0f);
     for (int i = 0; i < n; ++i) {
         const auto ci = static_cast<std::size_t>(parent[static_cast<std::size_t>(i)]);
         c.pos[ci] += fine.pos[static_cast<std::size_t>(i)];
         c.normal[ci] += fine.normal[static_cast<std::size_t>(i)];
+        c.scale[ci] += fine.scale[static_cast<std::size_t>(i)];
         count[ci] += 1.0f;
         if (fine.constrained[static_cast<std::size_t>(i)]) {
             c.constrained[ci] = true;
@@ -156,6 +201,7 @@ FieldGraph coarsen(const FieldGraph& fine, std::vector<int>& parent) {
     for (std::size_t ci = 0; ci < ncs; ++ci) {
         if (count[ci] > 0.0f) {
             c.pos[ci] = c.pos[ci] / count[ci];
+            c.scale[ci] = c.scale[ci] / count[ci];
         }
         c.normal[ci] = normalized(c.normal[ci]);
         if (c.constrained[ci]) {
@@ -204,10 +250,13 @@ void smoothOrientation(FieldGraph& g, int iterations) {
 // One Jacobi sweep of the position field on a graph (position_round_4 anchoring
 // plus normal-drift removal, so representatives form crisp on-surface cells).
 void smoothPosition(FieldGraph& g, float s, int iterations) {
-    const float invS = 1.0f / s;
     std::vector<Vec3> next(g.size());
     for (int it = 0; it < iterations; ++it) {
         for (std::size_t i = 0; i < g.size(); ++i) {
+            // Local lattice spacing at this node (s for a uniform mesh; scaled by
+            // the density multiplier on an adaptive one).
+            const float si = s * (g.scale.empty() ? 1.0f : g.scale[i]);
+            const float invS = 1.0f / si;
             const Vec3 qi = g.q[i];
             const Vec3 ti = cross(g.normal[i], qi);
             Vec3 sum = g.o[i];
@@ -217,13 +266,13 @@ void smoothPosition(FieldGraph& g, float s, int iterations) {
                 const Vec3 diff = g.o[j] - g.o[i];
                 const float a = std::round(dot(diff, qi) * invS);
                 const float b = std::round(dot(diff, ti) * invS);
-                sum += g.o[j] - (qi * (a * s) + ti * (b * s));
+                sum += g.o[j] - (qi * (a * si) + ti * (b * si));
                 w += 1.0f;
             }
             sum = sum / w;
             const Vec3 d = g.pos[i] - sum;
             const Vec3 anchored =
-                sum + qi * (std::round(dot(qi, d) * invS) * s) + ti * (std::round(dot(ti, d) * invS) * s);
+                sum + qi * (std::round(dot(qi, d) * invS) * si) + ti * (std::round(dot(ti, d) * invS) * si);
             Vec3 rel = anchored - g.pos[i];
             rel = rel - g.normal[i] * dot(g.normal[i], rel);
             next[i] = g.pos[i] + rel;
@@ -300,6 +349,7 @@ PositionField computePositionField(const Mesh& mesh, float spacing, int iteratio
     field.normal.assign(cap, Vec3{0, 0, 1});
     field.q.assign(cap, Vec3{1, 0, 0});
     field.o.assign(cap, Vec3{0, 0, 0});
+    field.scale.assign(cap, 1.0f);
     field.valid.assign(cap, false);
     for (std::size_t b = 0; b < baseToVertex.size(); ++b) {
         const std::size_t v = baseToVertex[b];
@@ -307,6 +357,7 @@ PositionField computePositionField(const Mesh& mesh, float spacing, int iteratio
         field.normal[v] = fine.normal[b];
         field.q[v] = fine.q[b];
         field.o[v] = fine.o[b];
+        field.scale[v] = fine.scale.empty() ? 1.0f : fine.scale[b];
     }
     return field;
 }
