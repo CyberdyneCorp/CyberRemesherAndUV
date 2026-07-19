@@ -7,8 +7,11 @@ quad remesher in the same state-of-the-art lineage (Instant Meshes family).
 QuadriFlow is built on demand (headless, boost-free) by reference/build_quadriflow.sh.
 
 Both engines produce 100% quads, so this compares EDGE FLOW and QUAD SHAPE at a
-matched density, with numbers: worst quad interior angle (closer to 90 is better)
-and edge-length coefficient of variation (lower = more uniform).
+matched density and matched (uniform) sizing — QuadriFlow sizes uniformly, so we
+run with adaptivity=0 for an apples-to-apples fight (CyberRemesher can also size
+adaptively by curvature, which QuadriFlow's default does not). Reported per mesh:
+median smallest-quad-angle (higher = better), sliver rate (% of quads under 20
+deg, lower = better), and edge-length CV (lower = more uniform).
 
     examples/run.sh examples/10_vs_reference.py
     examples/run.sh examples/10_vs_reference.py --models spot bunny
@@ -41,25 +44,32 @@ def main() -> None:
         path = c.download_model(name)
         src = c.load_any(path)
 
+        # Uniform sizing (adaptivity=0) so the sizing matches QuadriFlow's.
         ours, _ = c.remesh_obj(
-            path, c.RemeshParams(target_quad_count=args.target_quads, pure_quads=True))
+            path, c.RemeshParams(target_quad_count=args.target_quads, pure_quads=True,
+                                 adaptivity=0.0))
         oq, _, _ = c.face_counts(ours)
-        o_ang, o_cv = c.quad_quality(ours)
+        oqual = c.quad_quality(ours)
+
+        def label(engine: str, n: int, q: "dict") -> str:
+            return (f"{engine} · {n} quads\nmedian {q['median']:.0f}° · "
+                    f"slivers {q['slivers']:.1f}% · CV {q['cv']:.2f}")
 
         panels = [src, ours]
-        titles = [f"{name} · {len(src['faces'])} tris",
-                  f"CyberRemesher · {oq} quads\nworst angle {o_ang:.0f}° · edge CV {o_cv:.2f}"]
+        titles = [f"{name} · {len(src['faces'])} tris", label("CyberRemesher", oq, oqual)]
 
         if qf:
             ref = c.quadriflow_remesh(qf, path, oq)  # match our quad count
             rq, _, _ = c.face_counts(ref)
-            r_ang, r_cv = c.quad_quality(ref)
+            rqual = c.quad_quality(ref)
             panels.append(ref)
-            titles.append(f"QuadriFlow · {rq} quads\nworst angle {r_ang:.0f}° · edge CV {r_cv:.2f}")
-            print(f"{name}: ours worst-angle={o_ang:.0f}° cv={o_cv:.2f} | "
-                  f"QuadriFlow worst-angle={r_ang:.0f}° cv={r_cv:.2f}")
+            titles.append(label("QuadriFlow", rq, rqual))
+            print(f"{name}: ours median={oqual['median']:.0f}° slivers={oqual['slivers']:.1f}% "
+                  f"cv={oqual['cv']:.2f} | QF median={rqual['median']:.0f}° "
+                  f"slivers={rqual['slivers']:.1f}% cv={rqual['cv']:.2f}")
         else:
-            print(f"{name}: ours worst-angle={o_ang:.0f}° cv={o_cv:.2f} (reference unavailable)")
+            print(f"{name}: ours median={oqual['median']:.0f}° slivers={oqual['slivers']:.1f}% "
+                  f"cv={oqual['cv']:.2f} (reference unavailable)")
 
         c.render_panels(panels, titles, os.path.join(c.OUTPUT_DIR, f"10_vs_{name}.png"),
                         suptitle=f"{name}: CyberRemesher vs QuadriFlow (both pure-quad)")

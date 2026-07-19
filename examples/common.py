@@ -84,27 +84,35 @@ def quadriflow_remesh(binary: str, model_path: str, faces: int) -> MeshData:
     return data
 
 
-def quad_quality(mesh: MeshData) -> "Tuple[float, float]":
-    """(worst quad interior angle in degrees — 90 is ideal, higher=better;
-    edge-length coefficient of variation — lower=more uniform) over the quads."""
+def quad_quality(mesh: MeshData) -> "Dict[str, float]":
+    """Quad-mesh quality summary. Keys: 'median' (median of each quad's smallest
+    interior angle, deg — higher/closer to 90 is better), 'slivers' (% of quads
+    whose smallest angle is under 20 deg — lower is better), 'cv' (edge-length
+    coefficient of variation — lower = more uniform). The median + sliver rate
+    are far more robust than a single worst angle (one bad quad drags it to 0)."""
     P = mesh["positions"]
-    worst = 90.0
+    min_angles: List[float] = []
     lengths: List[float] = []
     for f in mesh["faces"]:
         if len(f) != 4:
             continue
+        worst = 180.0
         for k in range(4):
             a, b, prev = P[f[k]], P[f[(k + 1) % 4]], P[f[(k + 3) % 4]]
             e1, e2 = b - a, prev - a
             lengths.append(float(np.linalg.norm(e1)))
             c = float(np.dot(e1, e2) / (np.linalg.norm(e1) * np.linalg.norm(e2) + 1e-12))
-            ang = math.degrees(math.acos(max(-1.0, min(1.0, c))))
-            worst = min(worst, ang)
-    if not lengths:
-        return (0.0, 0.0)
-    arr = np.array(lengths)
-    cv = float(arr.std() / (arr.mean() + 1e-12))
-    return (worst, cv)
+            worst = min(worst, math.degrees(math.acos(max(-1.0, min(1.0, c)))))
+        min_angles.append(worst)
+    if not min_angles:
+        return {"median": 0.0, "slivers": 0.0, "cv": 0.0}
+    ang = np.array(min_angles)
+    len_arr = np.array(lengths)
+    return {
+        "median": float(np.median(ang)),
+        "slivers": float(100.0 * np.mean(ang < 20.0)),
+        "cv": float(len_arr.std() / (len_arr.mean() + 1e-12)),
+    }
 
 
 def download_model(name: str, models_dir: str = MODELS_DIR) -> str:
