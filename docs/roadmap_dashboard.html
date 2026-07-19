@@ -194,15 +194,19 @@
       </div>
       <div class="pill planned">Planned</div>
     </div>
-    <div class="phase">
+    <div class="phase" style="border-left-color:var(--gap)">
       <div class="idx">4</div>
       <div class="body">
         <div class="t">Close the median-angle gap</div>
-        <div class="d">Reduce ~700 spurious singularities (36% → &lt;10%): quad singularity
-          cancellation, or a global integer parametrization. The hard core.</div>
-        <div class="exit">Exit: <b>irregular-vertex % &lt; 15% and median angle ≥ QuadriFlow.</b></div>
+        <div class="d"><b>Local approaches exhausted.</b> Greedy valence optimization (rotate
+          edges to cancel val-3/5 pairs) was tried and reverted — it trades topology for
+          geometry: ungated it cut irregulars 38→31% but wrecked edge CV (bunny 0.21→0.46);
+          gated it becomes a no-op. The remaining lever is a <i>global integer parametrization</i>
+          (clean topology AND geometry from the start) — a large, high-risk extractor rewrite.</div>
+        <div class="exit">Exit: <b>irregular % &lt; 15% and median ≥ QuadriFlow</b> — only the
+          rewrite (4b) can reach it; local shortcuts are proven dead ends.</div>
       </div>
-      <div class="pill planned">Planned</div>
+      <div class="pill" style="color:var(--gap);background:var(--gap-bg)">Local ✗ · needs rewrite</div>
     </div>
     <div class="phase">
       <div class="idx">5</div>
@@ -250,9 +254,10 @@
         remesh keeps them crisp. A real win even where QuadriFlow leads on raw angle.</p>
     </div>
     <div class="note">
-      <div class="h"><span class="dot" style="background:var(--gap)"></span>The median gap is topological</div>
-      <p>Our bulk valence-4 quads already match QuadriFlow (median 80.6°) — but they're only ~21% of
-        the mesh. ~700 spurious singularities drag the rest down. That's the Phase-4 target.</p>
+      <div class="h"><span class="dot" style="background:var(--gap)"></span>The median gap needs a rewrite</div>
+      <p>Bulk valence-4 quads already match QuadriFlow (80.6°) but are only ~21% of the mesh; ~700
+        spurious singularities drag the rest. Local edge-rotation cleanup was tried — it trades
+        topology for geometry and nets out negative. Only a global integer parametrization closes it.</p>
     </div>
     <div class="note">
       <div class="h"><span class="dot" style="background:var(--win)"></span>Adaptivity now works</div>
@@ -274,11 +279,11 @@
   // dir: +1 = higher is better (median), -1 = lower is better (rest).
   const DIR = [+1, -1, -1, -1, -1];
   const ROWS = [
-    ["spot",           [77,0.29,8.2,15,0.21],  [81,0.25,7.2,3,0.15]],
-    ["fandisk",        [77,0.33,8.3,16,0.23],  [84,0.42,7.6,3,0.25]],
-    ["rocker-arm",     [79,0.35,11.2,13,0.20], [83,0.27,9.1,3,0.16]],
-    ["cheburashka",    [77,0.29,9.5,16,0.22],  [81,0.24,8.1,4,0.18]],
-    ["stanford-bunny", [75,0.39,13.4,19,0.29], [80,0.31,11.5,4,0.19]],
+    ["spot",           [78,0.26,7.7,15,0.19],  [82,0.25,7.4,3,0.13]],
+    ["fandisk",        [78,0.30,7.8,15,0.18],  [83,0.27,5.0,2,0.13]],
+    ["rocker-arm",     [78,0.35,11.7,14,0.23], [82,0.28,8.9,2,0.13]],
+    ["cheburashka",    [76,0.32,9.9,16,0.27],  [82,0.25,8.6,4,0.15]],
+    ["stanford-bunny", [76,0.34,12.7,20,0.22], [81,0.33,11.9,5,0.17]],
   ];
   const fmt = (v, i) => (i===0 || i===3) ? String(Math.round(v)) : v.toFixed(2);
   const tb = document.getElementById("bench");

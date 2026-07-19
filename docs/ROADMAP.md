@@ -98,17 +98,20 @@ on Phase 4)*; adaptivity beats our own uniform sizing on ≥ 4/5 *(met)*.
 **Exit:** lower feature-following error than QuadriFlow on fandisk-class models;
 ≥ QuadriFlow manifold-success rate across the corpus.
 
-## Phase 4 — Close the median-angle gap (the hard core)
+## Phase 4 — Close the median-angle gap (the hard core) — 🔴 local approaches exhausted
 
-Reduce spurious singularities (36% irregular → target < 10%) for angle parity:
-
-- **4a. Quad singularity cancellation** (Tarini/Bunin): post-extraction surgery
-  moving +¼/−¼ defects along quad chains to annihilate. Incremental; attacks the
-  measured problem without a rewrite. Try first.
-- **4b. Global integer parametrization** (QuadriFlow's actual method): spanning-tree
-  integer integration + min-cost-flow holonomy resolution, replacing the
-  collapse extractor. Big rewrite; only if 4a plateaus.
-**Exit:** irregular-vertex % < 15% and median angle ≥ QuadriFlow on the harness.
+Reduce spurious singularities (36% irregular → target < 10%) for angle parity.
+- ❌ **4a. Local valence optimization** (edge rotation to cancel val-3/5 pairs) —
+  TRIED, net-negative. Trades topology for geometry: ungated it cut irregular
+  vertices 38→31% but wrecked edge-length CV (bunny 0.21→0.46) by shearing quads;
+  gated to preserve geometry it becomes a no-op. Triangle-pair merge was also
+  neutral. Local post-hoc surgery can't fix this without wrecking shape.
+- ◻ **4b. Global integer parametrization** (QuadriFlow's method): spanning-tree
+  integer integration + min-cost-flow holonomy resolution, producing clean
+  topology *and* geometry from the start. The remaining real lever — a large,
+  high-risk extractor rewrite, genuinely multi-session.
+**Exit:** irregular-vertex % < 15% and median angle ≥ QuadriFlow. **Only 4b can
+get there; the local shortcuts are proven dead ends.**
 
 ## Phase 5 — Field foundation (enables 2–4)
 
