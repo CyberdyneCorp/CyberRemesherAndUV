@@ -224,13 +224,13 @@
             <span class="msrow"><span class="msdot done"></span><b>M1 · connection + defect measurement</b> — orientation field clean (cylinder holonomy 0); defects small/local. <span class="mstag done">done</span></span>
             <span class="msrow"><span class="msdot done"></span><b>M2 · integer solve</b> — min-cost flow cancels spurious divergences: <span class="mono">icosphere 133→10 · spot 658→47 · bunny 667→68</span>. <span class="mstag done">done</span></span>
             <span class="msrow"><span class="msdot done"></span><b>M3 · quad extraction</b> — QuadriFlow <span class="mono">BuildTriangleManifold</span> ported (compact-manifold rebuild + orbit-walk vertex split + FixHoles). <b>Watertight manifold, all-quad</b> across the corpus. <span class="mstag done">done</span></span>
-            <span class="msrow"><span class="msdot partial"></span><b>M4 · valence + promote</b> — close the residual 22–28% irregular (FixValence + triangular-hole closing), then benchmark vs QuadriFlow &amp; make default if it wins. <span class="mstag partial">next</span></span>
+            <span class="msrow"><span class="msdot partial"></span><b>M4 · valence + promote</b> — interior valence-2 doublet cleanup landed (irr −1–3&#8202;pts). But it <b>beats the current default extractor</b> yet <b>not</b> QuadriFlow: the promote gate is <b>extraction fidelity</b>, not valence surgery (single-level pairing multiplies clean-grid singularities 5–10×) → Phase 5. <span class="mstag partial">gate not met</span></span>
           </div>
         </div>
-        <div class="exit">Exit: <b>irregular % &lt; 15% and median ≥ QuadriFlow.</b> Research risk (solve)
-          and the extraction port (M3) are behind us; M4 is valence cleanup + the promote gate.</div>
+        <div class="exit">Exit: <b>irregular % &lt; 15% and median ≥ QuadriFlow.</b> Solve + extraction port +
+          doublet cleanup are in; the last gap is extraction fidelity (multi-res tiling) — Phase 5.</div>
       </div>
-      <div class="pill partial">Solve ✓ · extraction ✓</div>
+      <div class="pill partial">Extraction ✓ · fidelity-gated</div>
     </div>
     <div class="phase">
       <div class="idx">5</div>
@@ -280,12 +280,13 @@
     </div>
     <div class="note">
       <div class="h"><span class="dot" style="background:var(--win)"></span>Solve + watertight extraction</div>
-      <p>Bulk valence-4 quads already match QuadriFlow (80.6°); ~700 spurious singularities drag the
-        rest. The global integer solve (min-cost flow) cancels them (<b>spot 658→47, bunny 667→68</b>),
-        and QuadriFlow's <span class="mono">BuildTriangleManifold</span> is now ported: the extractor
-        turns that grid into a <b>watertight, manifold, all-quad</b> mesh across the whole corpus
-        (icosphere <b>312→26</b> boundary edges, <b>45→20%</b> irregular). Left: valence cleanup to
-        reach &lt;15% irregular, then promote.</p>
+      <p>The global integer solve (min-cost flow) cancels the spurious singularities, and QuadriFlow's
+        <span class="mono">BuildTriangleManifold</span> + <span class="mono">FixValence</span> turn that
+        grid into a <b>watertight, manifold, all-quad</b> mesh — <b>beating the current default
+        extractor</b> on irregular % across the corpus (spot 25% vs 44%, rocker-arm 24% vs 68%). It
+        does <i>not</i> yet beat QuadriFlow: the extraction still multiplies the clean grid's
+        singularities <b>5–10×</b> (interior val-3/5), so &lt;15% needs a higher-fidelity tiling
+        (multi-res) — Phase 5, not valence surgery.</p>
     </div>
     <div class="note">
       <div class="h"><span class="dot" style="background:var(--win)"></span>Adaptivity now works</div>
