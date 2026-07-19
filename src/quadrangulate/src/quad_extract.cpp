@@ -587,7 +587,7 @@ void fillFace(std::vector<Index> loop, const std::vector<Vec3>& pos,
     }
 }
 
-Mesh extractFaces(const Graph& g) {
+Mesh extractFaces(const Graph& g, bool closedInput) {
     const std::size_t nN = g.pos.size();
 
     // Darts (directed edges), indexed for O(log n) reverse/lookup; ringPos[d] is
@@ -621,7 +621,12 @@ Mesh extractFaces(const Graph& g) {
         return jt == dartId.end() ? -1 : jt->second;
     };
 
-    constexpr std::size_t kBoundaryLoop = 12;  // orbits >= this are open boundaries
+    // On a closed input every orbit is a real face, so fill large hole orbits
+    // (up to a pathological cap) instead of dropping them as boundaries; on an
+    // open input, orbits at/above the small threshold are the genuine mesh
+    // boundary and stay open. This keeps closed models watertight (fewer holes
+    // for the downstream fill to botch) without inventing faces across real holes.
+    const std::size_t kBoundaryLoop = closedInput ? 64 : 12;
     std::vector<char> used(dartCount, 0);
     std::vector<std::vector<Index>> faces;
     for (int start = 0; start < static_cast<int>(dartCount); ++start) {
@@ -667,7 +672,15 @@ Mesh extractFaces(const Graph& g) {
 
 Mesh extractQuadMesh(const Mesh& mesh, const PositionField& field) {
     const Graph g = buildCollapsedGraph(mesh, field);
-    return extractFaces(g);
+    bool closed = true;
+    for (Index ei = 0; ei < mesh.edgeCapacity(); ++ei) {
+        const EdgeId e{ei};
+        if (mesh.isAlive(e) && mesh.isBoundaryEdge(e)) {
+            closed = false;
+            break;
+        }
+    }
+    return extractFaces(g, closed);
 }
 
 namespace {
