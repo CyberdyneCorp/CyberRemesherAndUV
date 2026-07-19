@@ -189,13 +189,22 @@ malformed-orbit holes, no post-hoc rotation.
      residualAfter`), so the solve and `subdivide_edgeDiff` are clean; yet the
      extracted quad mesh has **5–10× more** irregular vertices (spot 82 → ~550),
      dominated by *interior* val3/val5. The multiplication happens entirely in
-     `buildManifoldTris` / `buildQuadMesh` (zero-diff collapse + orbit-walk vertex
-     split + diagonal pairing) — so this is very likely a **fixable single-level
-     defect** (prime suspect: the orbit-walk over-splitting grid vertices, or the
-     diagonal-selection), **NOT** a fundamental need for QuadriFlow's multi-res
-     `DownsampleEdgeGraph`. **This is the recommended next task** and the direct
-     lever to &lt;15% / QuadriFlow parity. Keep the current default extractor until
-     it lands.
+     `buildManifoldTris` / `buildQuadMesh`. Keep the current default extractor.
+   - 🔬 **Bug-hunt round 1 (multi-agent workflow) — narrowed further, three suspects
+     ruled out with numbers.** (a) The **pairing is clean**: spot forms 2391 quads
+     from ~2439 cells, only 44 singletons + 26 rejects, **0 key collisions**. (b)
+     **Vertex identity is clean**: manifold verts exceed distinct grid cells by only
+     +0.4–2.6% (no orbit-walk fragmentation). (c) The **field is clean**: only **44
+     orientation (rotation) singularities** on spot (fandisk 36, cheburashka 77) —
+     and orientation holonomy is what SETS quad valence (val3/5), *not* the position
+     residual (82) that the earlier note compared against. Yet extraction yields
+     **388 interior irregular** on spot — ~9× the 44 field singularities. So ~344
+     spurious val3/val5 are baked into the **grid connectivity by the subdivide +
+     collapse stage**: coarser spacing (more subdivision) is strictly worse, native
+     (≈1 cell/edge, least subdivision) is best — confirming subdivision as the noise
+     source. **Next: localize subdivide vs collapse; determine whether a clean
+     single-level grid construction is achievable, else port the multi-res
+     `DownsampleEdgeGraph`.** The direct lever to &lt;15% / QuadriFlow parity.
 
 ## Open risk (revised after Milestone 1)
 
