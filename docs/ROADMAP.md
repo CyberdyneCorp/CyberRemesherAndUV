@@ -117,7 +117,10 @@ Reduce spurious singularities (36% irregular → target < 10%) for angle parity.
 - ◻ **4b. Global integer parametrization** (QuadriFlow's method): spanning-tree
   integer integration + min-cost-flow holonomy resolution, producing clean
   topology *and* geometry from the start. The remaining real lever — a large,
-  high-risk extractor rewrite, genuinely multi-session.
+  high-risk extractor rewrite, genuinely multi-session. **Planned in detail:**
+  [`docs/integer-parametrization-plan.md`](integer-parametrization-plan.md)
+  (Stage 1 coords → Stage 2 integer solve → Stage 3 extraction, behind a new
+  `quad_method="integer"` until it beats the current path).
 **Exit:** irregular-vertex % < 15% and median angle ≥ QuadriFlow. **Only 4b can
 get there; the local shortcuts are proven dead ends.**
 
