@@ -134,7 +134,12 @@ FieldGraph buildBaseGraph(const Mesh& mesh, std::vector<Index>& baseToVertex) {
     for (std::size_t i = 0; i < g.size(); ++i) {
         g.scale[i] = localLen[i] * invMean;
     }
-    for (int pass = 0; pass < 3; ++pass) {  // Laplacian smoothing of the density field
+    // Heavy Laplacian smoothing: isotropic-remesh edge noise (~±20% even on a
+    // "uniform" mesh) would otherwise fragment the lattice; many passes flatten
+    // that noise toward 1 while the large-scale adaptive density gradient (smooth
+    // over many vertices) survives. Uniform input -> scale ~1, so the extractor
+    // matches the fixed-spacing path; adaptive input keeps its gradient.
+    for (int pass = 0; pass < 16; ++pass) {
         std::vector<float> next = g.scale;
         for (std::size_t i = 0; i < g.size(); ++i) {
             float sum = g.scale[i];

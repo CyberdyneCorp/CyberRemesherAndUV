@@ -312,8 +312,8 @@ TEST_CASE("position field: per-vertex scale tracks local density") {
     }
     CAPTURE(minScale);
     CAPTURE(maxScale);
-    CHECK(minScale < 0.8f);   // fine columns: sub-mean spacing
-    CHECK(maxScale > 1.25f);  // coarse columns: super-mean spacing
+    CHECK(minScale < 0.85f);  // fine columns: sub-mean spacing (heavy smoothing caps the range)
+    CHECK(maxScale > 1.15f);  // coarse columns: super-mean spacing
 
     // A uniform mesh must stay ~1 everywhere (fixed-spacing path unchanged).
     const Mesh cyl = cylinder(1.0f, 3.0f, 30, 30);
