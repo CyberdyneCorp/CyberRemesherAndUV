@@ -1495,7 +1495,135 @@ SubMesh subdivideToUnitCells(const IntegerGrid& g, const Mesh& mesh, const Posit
     return m;
 }
 
+// Collapses the unit-cell mesh into a quad mesh (QuadriFlow AdvancedExtractQuad +
+// BuildTriangleManifold, single-level). Every zero-diff edge merges its endpoints
+// (a grid vertex); every |diff|==(1,1) edge is a grid-cell diagonal shared by two
+// triangles, and those two triangles pair into a quad. Output vertex position is
+// the mean field position (O) of its collapsed cluster.
+Mesh buildQuadMesh(const SubMesh& m) {
+    const std::size_t nV = m.o.size();
+    DisjointSets ds(nV);
+    for (std::size_t he = 0; he < m.diffs.size(); ++he) {
+        if (m.diffs[he].x == 0 && m.diffs[he].y == 0) {
+            const std::size_t t = he / 3, j = he % 3;
+            ds.unite(static_cast<Index>(m.tris[t][j]),
+                     static_cast<Index>(m.tris[t][(j + 1) % 3]));
+        }
+    }
+    // Averaged field position per collapsed cluster (indexed by union-find root).
+    std::vector<Vec3> sumO(nV, Vec3{});
+    std::vector<int> cnt(nV, 0);
+    for (std::size_t v = 0; v < nV; ++v) {
+        const Index r = ds.find(static_cast<Index>(v));
+        sumO[r] = sumO[r] + m.o[v];
+        cnt[r] += 1;
+    }
+    const auto root = [&](int v) { return static_cast<int>(ds.find(static_cast<Index>(v))); };
+
+    // Pair the two triangles across each grid-cell diagonal (QuadriFlow keys the
+    // diagonal by its endpoint pair; .first / .second are the two triangles).
+    std::map<std::pair<int, int>, std::pair<std::array<int, 3>, std::array<int, 3>>> quads;
+    for (std::size_t he = 0; he < m.diffs.size(); ++he) {
+        const Int2 d = m.diffs[he];
+        if (std::abs(d.x) == 1 && std::abs(d.y) == 1) {
+            const std::size_t t = he / 3, j = he % 3;
+            const int cv1 = root(m.tris[t][j]);
+            const int cv2 = root(m.tris[t][(j + 1) % 3]);
+            const int cv3 = root(m.tris[t][(j + 2) % 3]);
+            if (cv1 == cv2) {
+                continue;  // diagonal collapsed to a point
+            }
+            const std::pair<int, int> key = cv1 < cv2 ? std::make_pair(cv1, cv2)
+                                                      : std::make_pair(cv2, cv1);
+            const auto it = quads.find(key);
+            if (it == quads.end()) {
+                quads[key] = {{cv1, cv2, cv3}, {-1, -1, -1}};
+            } else {
+                it->second.second = {cv1, cv2, cv3};
+            }
+        }
+    }
+
+    // Emit a quad per diagonal that has both triangles and distinct apexes; the
+    // 4-cycle is (v2, apexA, v1, apexB) around the shared diagonal (v1,v2).
+    std::vector<std::array<int, 4>> faces;
+    for (const auto& kv : quads) {
+        const auto& f = kv.second.first;
+        const auto& s = kv.second.second;
+        if (s[0] == -1 || f[2] == s[2]) {
+            continue;
+        }
+        const std::array<int, 4> q{f[1], f[2], f[0], s[2]};
+        bool distinct = true;
+        for (int a = 0; a < 4 && distinct; ++a) {
+            for (int b = a + 1; b < 4; ++b) {
+                if (q[static_cast<std::size_t>(a)] == q[static_cast<std::size_t>(b)]) {
+                    distinct = false;
+                    break;
+                }
+            }
+        }
+        if (distinct) {
+            faces.push_back(q);
+        }
+    }
+
+    // Materialise the mesh: only clusters referenced by a quad become vertices.
+    Mesh out;
+    std::map<int, VertexId> remap;
+    const auto getV = [&](int r) {
+        const auto it = remap.find(r);
+        if (it != remap.end()) {
+            return it->second;
+        }
+        const VertexId id =
+            out.addVertex(sumO[static_cast<std::size_t>(r)] * (1.0f / static_cast<float>(cnt[static_cast<std::size_t>(r)])));
+        remap.emplace(r, id);
+        return id;
+    };
+    for (const auto& q : faces) {
+        const std::array<VertexId, 4> vv{getV(q[0]), getV(q[1]), getV(q[2]), getV(q[3])};
+        out.addFace(vv);
+    }
+    return out;
+}
+
 }  // namespace
+
+Mesh extractIntegerQuadMesh(const Mesh& mesh, const PositionField& field) {
+    const IntegerGrid g = computeIntegerGrid(mesh, field);
+    const SubMesh m = subdivideToUnitCells(g, mesh, field, 1);
+    return buildQuadMesh(m);
+}
+
+IntegerExtractStats debugIntegerExtract(const Mesh& mesh, const PositionField& field) {
+    const Mesh q = extractIntegerQuadMesh(mesh, field);
+    IntegerExtractStats st;
+    st.quads = q.faceCount();
+    st.verts = q.vertexCount();
+    for (Index fi = 0; fi < q.faceCapacity(); ++fi) {
+        const FaceId f{fi};
+        if (q.isAlive(f) && q.faceSize(f) != 4) {
+            ++st.nonQuad;
+        }
+    }
+    for (Index vi = 0; vi < q.vertexCapacity(); ++vi) {
+        const VertexId v{vi};
+        if (!q.isAlive(v)) {
+            continue;
+        }
+        if (q.vertexFaces(v).size() != 4) {
+            ++st.irregular;
+        }
+    }
+    for (Index ei = 0; ei < q.edgeCapacity(); ++ei) {
+        const EdgeId e{ei};
+        if (q.isAlive(e) && q.isBoundaryEdge(e)) {
+            ++st.boundaryEdges;
+        }
+    }
+    return st;
+}
 
 SubdivideStats debugSubdivide(const Mesh& mesh, const PositionField& field) {
     const IntegerGrid g = computeIntegerGrid(mesh, field);

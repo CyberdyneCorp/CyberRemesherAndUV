@@ -377,6 +377,26 @@ TEST_CASE("integer solve: subdivision makes every edge span at most one cell") {
     CHECK(s.trisAfter < s.trisBefore * 4);        // no runaway (few edges span >1 cell)
 }
 
+// Milestone 3, stage (c) — first extraction. Collapse-and-pair on the unit-cell
+// mesh yields an all-quad output (every face has four sides, no triangles/n-gons).
+// NOTE: it is not yet watertight — direct diagonal-pairing on the collapsed fine
+// triangulation leaves true holes (~30% of cells) where a grid-cell diagonal has
+// only one clean triangle. Closing them needs QuadriFlow's BuildTriangleManifold
+// reconstruction (a clean compact triangle manifold before pairing). This test
+// locks the invariants that already hold; watertightness/irregular are pending.
+TEST_CASE("integer solve: extraction produces an all-quad mesh") {
+    const Mesh sphere = icosphere(3);
+    const float spacing = meanEdgeLength(sphere);
+    const remesh::PositionField field = remesh::computePositionField(sphere, spacing, 40);
+    const remesh::IntegerExtractStats s = remesh::debugIntegerExtract(sphere, field);
+    CAPTURE(s.quads);
+    CAPTURE(s.verts);
+    CAPTURE(s.irregular);
+    CAPTURE(s.boundaryEdges);
+    REQUIRE(s.quads > 0);
+    CHECK(s.nonQuad == 0);  // every emitted face is a quad
+}
+
 // Milestone 2 foundation: QuadriFlow's per-face joint-alignment residual. On a
 // developable cylinder the position field is a near-clean grid, so almost no
 // face is a position singularity — the input the Stage-2 flow must drive to

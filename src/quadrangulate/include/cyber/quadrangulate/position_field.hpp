@@ -132,4 +132,25 @@ struct SubdivideStats {
 };
 [[nodiscard]] SubdivideStats debugSubdivide(const Mesh& mesh, const PositionField& field);
 
+// Milestone 3: the integer-parametrization quad extractor. Runs the Stage-2 solve,
+// subdivides to unit cells, then collapses zero-diff edges into grid vertices and
+// pairs the two triangles across each grid-cell diagonal into a quad (QuadriFlow
+// AdvancedExtractQuad / BuildTriangleManifold, single-level). Unlike the local
+// collapse-and-walk extractor, singularities appear only where the corrected
+// integer grid genuinely demands them, so the output is mostly valence-4. Returns
+// a fresh mesh; the input is not modified.
+[[nodiscard]] Mesh extractIntegerQuadMesh(const Mesh& mesh, const PositionField& field);
+
+// Diagnostic for the integer extractor: output quad / vertex counts, irregular
+// (valence != 4) vertices, non-quad faces, and boundary (hole) edges. Used by
+// tests to confirm the extraction is watertight and mostly valence-4.
+struct IntegerExtractStats {
+    std::size_t quads = 0;
+    std::size_t verts = 0;
+    std::size_t irregular = 0;
+    std::size_t nonQuad = 0;
+    std::size_t boundaryEdges = 0;
+};
+[[nodiscard]] IntegerExtractStats debugIntegerExtract(const Mesh& mesh, const PositionField& field);
+
 }  // namespace cyber::remesh
