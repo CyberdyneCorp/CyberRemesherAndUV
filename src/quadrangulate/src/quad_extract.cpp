@@ -17,6 +17,7 @@
 #include <cmath>
 #include <cstdint>
 #include <numeric>
+#include <set>
 #include <vector>
 
 namespace cyber::remesh {
@@ -164,6 +165,172 @@ struct Graph {
     std::vector<std::vector<Link>> adj;
 };
 
+// --- Graph cleanup (Instant Meshes extract_graph "Step 5"). ----------------
+
+// Snap/merge/project sweep: for every 2-path i-j-k whose triangle altitude from
+// i onto edge (j,k) is below `thresh`, either merge i with a near-coincident
+// endpoint or slide i onto edge (j,k) — repairing the sliver triangles an
+// imperfect position field leaves. Returns whether anything changed.
+bool snapMergeProject(std::vector<Vec3>& pos, std::vector<Vec3>& normal,
+                      std::vector<std::set<int>>& adj, float thresh) {
+    const auto len = [&](int a, int b) {
+        return length(pos[static_cast<std::size_t>(a)] - pos[static_cast<std::size_t>(b)]);
+    };
+    const auto height = [&](int i, int j, int k) {  // altitude from i onto (j,k), or -1
+        const float a = len(j, k), b = len(i, j), c = len(i, k);
+        if (a <= std::fmax(b, c)) {
+            return -1.0f;  // (j,k) not the longest side -> i is not the sliver tip
+        }
+        const float sp = (a + b + c) * 0.5f;
+        const float area2 = sp * (sp - a) * (sp - b) * (sp - c);
+        return area2 > 0.0f ? 2.0f * std::sqrt(area2) / a : -1.0f;
+    };
+
+    struct Cand {
+        float h;
+        int i, j, k;
+    };
+    std::vector<Cand> cands;
+    for (int i = 0; i < static_cast<int>(adj.size()); ++i) {
+        for (const int j : adj[static_cast<std::size_t>(i)]) {
+            for (const int k : adj[static_cast<std::size_t>(j)]) {
+                if (k == i) {
+                    continue;
+                }
+                const float h = height(i, j, k);
+                if (h >= 0.0f && h < thresh) {
+                    cands.push_back({h, i, j, k});
+                }
+            }
+        }
+    }
+    std::sort(cands.begin(), cands.end(), [](const Cand& x, const Cand& y) { return x.h < y.h; });
+
+    bool changed = false;
+    for (const Cand& cd : cands) {
+        const int i = cd.i, j = cd.j, k = cd.k;
+        if (!adj[static_cast<std::size_t>(i)].count(j) || !adj[static_cast<std::size_t>(j)].count(k)) {
+            continue;
+        }
+        if (height(i, j, k) != cd.h) {
+            continue;  // graph changed around this triple -> stale
+        }
+        const bool hasKI = adj[static_cast<std::size_t>(k)].count(i) > 0;
+        const float b = len(i, j), c = len(i, k);
+        if (b < thresh || c < thresh) {  // MERGE: dissolve the near endpoint into i
+            const int mid = b < thresh ? j : k;
+            pos[static_cast<std::size_t>(i)] =
+                (pos[static_cast<std::size_t>(i)] + pos[static_cast<std::size_t>(mid)]) * 0.5f;
+            normal[static_cast<std::size_t>(i)] =
+                (normal[static_cast<std::size_t>(i)] + normal[static_cast<std::size_t>(mid)]) * 0.5f;
+            for (const int n : adj[static_cast<std::size_t>(mid)]) {
+                if (n == i) {
+                    continue;
+                }
+                adj[static_cast<std::size_t>(n)].erase(mid);
+                adj[static_cast<std::size_t>(n)].insert(i);
+                adj[static_cast<std::size_t>(i)].insert(n);
+            }
+            adj[static_cast<std::size_t>(i)].erase(i);
+            adj[static_cast<std::size_t>(i)].erase(mid);
+            adj[static_cast<std::size_t>(mid)].clear();
+        } else {  // PROJECT: slide i onto edge (j,k), splitting it
+            pos[static_cast<std::size_t>(i)] =
+                (pos[static_cast<std::size_t>(j)] + pos[static_cast<std::size_t>(k)]) * 0.5f;
+            normal[static_cast<std::size_t>(i)] =
+                normalized(normal[static_cast<std::size_t>(j)] + normal[static_cast<std::size_t>(k)]);
+            adj[static_cast<std::size_t>(j)].erase(k);
+            adj[static_cast<std::size_t>(k)].erase(j);
+            if (!hasKI) {
+                adj[static_cast<std::size_t>(i)].insert(k);
+                adj[static_cast<std::size_t>(k)].insert(i);
+            }
+        }
+        changed = true;
+    }
+    return changed;
+}
+
+// Diagonal removal: delete each edge (i,j) that is the shared diagonal of two
+// triangles (exactly two common neighbours) whose four outer edges make it look
+// like a near-square, fusing the two triangles into one quad. Returns whether
+// anything changed.
+bool removeDiagonals(const std::vector<Vec3>& pos, std::vector<std::set<int>>& adj) {
+    const auto len = [&](int a, int b) {
+        return length(pos[static_cast<std::size_t>(a)] - pos[static_cast<std::size_t>(b)]);
+    };
+    struct DCand {
+        float score;
+        int i, j;
+    };
+    std::vector<DCand> cands;
+    for (int i = 0; i < static_cast<int>(adj.size()); ++i) {
+        for (const int j : adj[static_cast<std::size_t>(i)]) {
+            if (j <= i) {
+                continue;  // each undirected edge once
+            }
+            int nTris = 0;
+            float outer = 0.0f;
+            for (const int k : adj[static_cast<std::size_t>(i)]) {
+                if (adj[static_cast<std::size_t>(j)].count(k)) {
+                    ++nTris;
+                    outer += len(k, i) + len(k, j);
+                }
+            }
+            if (nTris != 2) {
+                continue;
+            }
+            const float diag = len(i, j);
+            const float expDiag = outer / 4.0f * std::sqrt(2.0f);
+            const float score = std::fabs(diag - expDiag) / std::fmax(1e-9f, std::fmin(diag, expDiag));
+            cands.push_back({score, i, j});
+        }
+    }
+    std::sort(cands.begin(), cands.end(), [](const DCand& x, const DCand& y) { return x.score < y.score; });
+
+    bool changed = false;
+    for (const DCand& dc : cands) {
+        const int i = dc.i, j = dc.j;
+        if (!adj[static_cast<std::size_t>(i)].count(j)) {
+            continue;
+        }
+        int nTris = 0;
+        for (const int k : adj[static_cast<std::size_t>(i)]) {
+            if (adj[static_cast<std::size_t>(j)].count(k)) {
+                ++nTris;
+            }
+        }
+        if (nTris != 2) {
+            continue;  // a neighbouring removal already changed the diamond
+        }
+        adj[static_cast<std::size_t>(i)].erase(j);
+        adj[static_cast<std::size_t>(j)].erase(i);
+        changed = true;
+    }
+    return changed;
+}
+
+// Repairs the collapsed lattice graph before the face walk: snap/merge/project
+// to a fixpoint, then one diagonal-removal pass, repeated until stable. This
+// lets the extraction tolerate an imperfect position field, pushing node valence
+// back toward 4 and fusing stray triangles into quads.
+void removeUnnecessaryEdges(std::vector<Vec3>& pos, std::vector<Vec3>& normal,
+                            std::vector<std::set<int>>& adj, float s) {
+    const float thresh = 0.3f * s;
+    for (int guard = 0; guard < 64; ++guard) {
+        bool changed = false;
+        while (snapMergeProject(pos, normal, adj, thresh)) {
+            changed = true;
+        }
+        if (removeDiagonals(pos, adj)) {
+            changed = true;
+        }
+        if (!changed) {
+            break;
+        }
+    }
+}
+
 Graph buildCollapsedGraph(const Mesh& mesh, const PositionField& field) {
     const float s = field.spacing;
     const float invS = 1.0f / s;
@@ -281,34 +448,37 @@ Graph buildCollapsedGraph(const Mesh& mesh, const PositionField& field) {
         g.normal[k] = normalized(g.normal[k]);
     }
 
-    // --- Node adjacency from the (resolved, deduplicated) lattice edges. ---
-    g.adj.assign(g.pos.size(), {});
-    std::vector<std::vector<Index>> nodeAdj(g.pos.size());
+    // --- Node adjacency (as sets) from the resolved lattice edges. ---
+    std::vector<std::set<int>> nodeAdj(g.pos.size());
     for (std::size_t v = 0; v < nV; ++v) {
         if (!field.valid[v]) {
             continue;
         }
-        const Index a = nodeOf[dset.find(static_cast<Index>(v))];
+        const int a = static_cast<int>(nodeOf[dset.find(static_cast<Index>(v))]);
         for (const Index nb : latticeAdj[v]) {
-            const Index b = nodeOf[dset.find(nb)];
+            const int b = static_cast<int>(nodeOf[dset.find(nb)]);
             if (a != b) {
-                nodeAdj[a].push_back(b);
+                nodeAdj[static_cast<std::size_t>(a)].insert(b);
+                nodeAdj[static_cast<std::size_t>(b)].insert(a);
             }
         }
     }
 
-    // --- A6: dedupe + angular ordering of each node's neighbours. ---
+    // --- A5: graph cleanup (snap/merge/project + diagonal removal). ---
+    removeUnnecessaryEdges(g.pos, g.normal, nodeAdj, s);
+
+    // --- A6: angular ordering of each node's neighbours into the walk graph. ---
+    g.adj.assign(g.pos.size(), {});
     for (std::size_t a = 0; a < nodeAdj.size(); ++a) {
-        std::sort(nodeAdj[a].begin(), nodeAdj[a].end());
-        nodeAdj[a].erase(std::unique(nodeAdj[a].begin(), nodeAdj[a].end()), nodeAdj[a].end());
+        std::vector<Index> nbrs(nodeAdj[a].begin(), nodeAdj[a].end());
         Vec3 su, tv;
         coordinateSystem(g.normal[a], su, tv);
-        std::sort(nodeAdj[a].begin(), nodeAdj[a].end(), [&](Index x, Index y) {
+        std::sort(nbrs.begin(), nbrs.end(), [&](Index x, Index y) {
             const Vec3 vx = g.pos[x] - g.pos[a];
             const Vec3 vy = g.pos[y] - g.pos[a];
             return std::atan2(dot(tv, vx), dot(su, vx)) > std::atan2(dot(tv, vy), dot(su, vy));
         });
-        for (const Index b : nodeAdj[a]) {
+        for (const Index b : nbrs) {
             g.adj[a].push_back(Link{b, 0});
         }
     }
