@@ -121,8 +121,20 @@ class RemeshParams:
     adaptivity: float = 1.0  # 0.0 .. 1.0
     pure_quads: bool = False
     hole_fill_max_boundary: int = 64  # 0 (never) .. 10_000
+    # Quadrangulator: "field-aligned" (default, max-matching, highest
+    # dominance) or "instant-meshes" (position-field extractor, more uniform
+    # field-aligned flow with fewer/better singularities).
+    quad_method: str = "field-aligned"
+
+    _QUAD_METHODS = {"field-aligned": 0, "instant-meshes": 1}
 
     def _to_c(self) -> "_ffi.CyberRemeshParams":
+        try:
+            method = self._QUAD_METHODS[self.quad_method]
+        except KeyError:
+            raise ValueError(
+                f"quad_method must be one of {sorted(self._QUAD_METHODS)}, got {self.quad_method!r}"
+            ) from None
         return _ffi.CyberRemeshParams(
             target_quad_count=int(self.target_quad_count),
             edge_scale=float(self.edge_scale),
@@ -131,6 +143,7 @@ class RemeshParams:
             adaptivity=float(self.adaptivity),
             pure_quads=1 if self.pure_quads else 0,
             hole_fill_max_boundary=int(self.hole_fill_max_boundary),
+            quad_method=method,
         )
 
 

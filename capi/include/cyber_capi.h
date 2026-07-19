@@ -68,7 +68,13 @@ typedef struct CyberRemeshParams {
     float adaptivity;          /* 0 uniform .. 1 fully curvature-adaptive */
     int pureQuads;             /* non-zero: forbid residual triangles */
     int holeFillMaxBoundary;   /* max boundary edges of holes to fill; 0 off */
+    int quadMethod;            /* 0 = field-aligned matching (default),
+                                * 1 = Instant-Meshes position-field extractor */
 } CyberRemeshParams;
+
+/* Quadrangulator selection values for CyberRemeshParams.quadMethod. */
+#define CYBER_QUAD_FIELD_ALIGNED 0
+#define CYBER_QUAD_INSTANT_MESHES 1
 
 /* Fills params with the engine defaults. No-op on NULL. */
 void cyber_default_params(CyberRemeshParams* params);

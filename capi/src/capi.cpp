@@ -23,6 +23,7 @@
 #include "cyber/core/mesh.hpp"
 #include "cyber/core/pipeline.hpp"
 #include "cyber/quadrangulate/field_quadrangulator.hpp"
+#include "cyber/quadrangulate/position_field.hpp"
 #include "cyber/imageio/image.hpp"
 #include "cyber/core/progress.hpp"
 #include "cyber/core/remesh_params.hpp"
@@ -199,6 +200,7 @@ void cyber_default_params(CyberRemeshParams* params) {
     params->adaptivity = defaults.adaptivity;
     params->pureQuads = defaults.pureQuads ? 1 : 0;
     params->holeFillMaxBoundary = defaults.holeFillMaxBoundary;
+    params->quadMethod = CYBER_QUAD_FIELD_ALIGNED;
 }
 
 CyberStatus cyber_remesh(const CyberMesh* in, const CyberRemeshParams* params,
@@ -218,10 +220,15 @@ CyberStatus cyber_remesh(const CyberMesh* in, const CyberRemeshParams* params,
         // smoothed cross field) gives both the highest quad-dominance (~95%+ on
         // clean input) AND edge flow that follows curvature, so it is the
         // default for the C ABI / bindings. Pure-quad mode (params.pureQuads)
-        // yields a 100%-quad result on top of it.
+        // yields a 100%-quad result on top of it. quadMethod selects the
+        // Instant-Meshes position-field extractor instead — more uniform,
+        // field-aligned edge flow with fewer/better-placed singularities.
+        const bool useInstantMeshes = params->quadMethod == CYBER_QUAD_INSTANT_MESHES;
         cyber::remesh::PipelineResult result = cyber::remesh::remesh(
-            in->mesh, cppParams, &sink, &token,
-            [] { return cyber::remesh::makeFieldAlignedQuadrangulator(); });
+            in->mesh, cppParams, &sink, &token, [useInstantMeshes] {
+                return useInstantMeshes ? cyber::remesh::makeInstantMeshesQuadrangulator()
+                                        : cyber::remesh::makeFieldAlignedQuadrangulator();
+            });
 
         switch (result.status) {
             case cyber::remesh::RunStatus::Success:

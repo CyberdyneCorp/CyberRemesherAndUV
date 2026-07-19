@@ -86,6 +86,29 @@ def _run_remesh():
     ))
 
 
+def _run_quad_method():
+    # Both quadrangulators must be selectable and produce quads; an unknown
+    # method name must raise before touching the engine.
+    tmpdir = tempfile.mkdtemp(prefix="cyberremesh_qm_")
+    obj_path = os.path.join(tmpdir, "cube.obj")
+    with open(obj_path, "w") as fh:
+        fh.write(_CUBE_OBJ)
+
+    for method in ("field-aligned", "instant-meshes"):
+        with Mesh.load_obj(obj_path) as mesh:
+            result = remesh(mesh, RemeshParams(target_quad_count=200, quad_method=method))
+            with result:
+                assert result.stats.quads > 0, (method, result.stats)
+        print("PASS: quad_method={0} produced {1} quads".format(method, result.stats.quads))
+
+    try:
+        RemeshParams(quad_method="nope")._to_c()
+    except ValueError:
+        print("PASS: unknown quad_method rejected")
+    else:
+        raise AssertionError("expected ValueError for unknown quad_method")
+
+
 def _quads_in(path):
     quads = 0
     with open(path) as fh:
@@ -105,6 +128,7 @@ def main():
 
     print("cyberremesh engine version: {0}".format(cyberremesh.version()))
     _run_remesh()
+    _run_quad_method()
     return 0
 
 

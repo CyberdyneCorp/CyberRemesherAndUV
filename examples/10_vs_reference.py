@@ -44,35 +44,47 @@ def main() -> None:
         path = c.download_model(name)
         src = c.load_any(path)
 
-        # Uniform sizing (adaptivity=0) so the sizing matches QuadriFlow's.
-        ours, _ = c.remesh_obj(
-            path, c.RemeshParams(target_quad_count=args.target_quads, pure_quads=True,
-                                 adaptivity=0.0))
-        oq, _, _ = c.face_counts(ours)
-        oqual = c.quad_quality(ours)
+        # Uniform sizing (adaptivity=0) so the sizing matches QuadriFlow's. We
+        # show BOTH quadrangulators: the default field-aligned matcher and the
+        # Instant-Meshes position-field extractor (quad_method="instant-meshes"),
+        # since the extractor is where the field-based edge flow lives — the
+        # apples-to-apples fight with QuadriFlow's own field-based approach.
+        def our_result(method: str) -> "tuple":
+            mesh, _ = c.remesh_obj(
+                path, c.RemeshParams(target_quad_count=args.target_quads, pure_quads=True,
+                                     adaptivity=0.0, quad_method=method))
+            q, _, _ = c.face_counts(mesh)
+            return mesh, q, c.quad_quality(mesh)
+
+        matched, mq, mqual = our_result("field-aligned")
+        extracted, eq, equal = our_result("instant-meshes")
 
         def label(engine: str, n: int, q: "dict") -> str:
             return (f"{engine} · {n} quads\nmedian {q['median']:.0f}° · "
                     f"slivers {q['slivers']:.1f}% · CV {q['cv']:.2f}")
 
-        panels = [src, ours]
-        titles = [f"{name} · {len(src['faces'])} tris", label("CyberRemesher", oq, oqual)]
+        panels = [src, matched, extracted]
+        titles = [f"{name} · {len(src['faces'])} tris",
+                  label("CyberRemesher (field-aligned)", mq, mqual),
+                  label("CyberRemesher (position-field)", eq, equal)]
 
         if qf:
-            ref = c.quadriflow_remesh(qf, path, oq)  # match our quad count
+            ref = c.quadriflow_remesh(qf, path, eq)  # match the extractor's quad count
             rq, _, _ = c.face_counts(ref)
             rqual = c.quad_quality(ref)
             panels.append(ref)
             titles.append(label("QuadriFlow", rq, rqual))
-            print(f"{name}: ours median={oqual['median']:.0f}° slivers={oqual['slivers']:.1f}% "
-                  f"cv={oqual['cv']:.2f} | QF median={rqual['median']:.0f}° "
+            print(f"{name}: field-aligned median={mqual['median']:.0f}° cv={mqual['cv']:.2f} | "
+                  f"position-field median={equal['median']:.0f}° slivers={equal['slivers']:.1f}% "
+                  f"cv={equal['cv']:.2f} | QF median={rqual['median']:.0f}° "
                   f"slivers={rqual['slivers']:.1f}% cv={rqual['cv']:.2f}")
         else:
-            print(f"{name}: ours median={oqual['median']:.0f}° slivers={oqual['slivers']:.1f}% "
-                  f"cv={oqual['cv']:.2f} (reference unavailable)")
+            print(f"{name}: field-aligned median={mqual['median']:.0f}° cv={mqual['cv']:.2f} | "
+                  f"position-field median={equal['median']:.0f}° slivers={equal['slivers']:.1f}% "
+                  f"cv={equal['cv']:.2f} (reference unavailable)")
 
         c.render_panels(panels, titles, os.path.join(c.OUTPUT_DIR, f"10_vs_{name}.png"),
-                        suptitle=f"{name}: CyberRemesher vs QuadriFlow (both pure-quad)")
+                        suptitle=f"{name}: CyberRemesher (both quadrangulators) vs QuadriFlow")
 
 
 if __name__ == "__main__":
