@@ -12,7 +12,7 @@ Runnable as a plain script (no pytest / unittest required):
 Behaviour (matches ``test_api.py``'s capability gate):
   * ``import cyberremesh`` must always succeed even without a built engine.
   * If the C ABI shared library cannot be located/loaded, prints ``SKIP`` and
-    exits 0 — safe to run unconditionally in CI and locally.
+    exits 77 (CTest SKIP) — safe to run unconditionally in CI and locally.
   * Otherwise asserts the following invariants:
       - load -> save -> reload preserves vertex and face counts (round-trip);
       - the progress callback fires with monotonically non-decreasing fractions
@@ -152,9 +152,9 @@ def _numpy_positions(tmpdir):
 
 def main():
     if not cyberremesh.is_available():
-        print("SKIP: cyber_capi shared library not found "
+        print("SKIP: cyber_capi shared library not loadable "
               "(set CYBER_CAPI_LIB or build the `capi` module)")
-        return 0
+        return 77  # CTest SKIP_RETURN_CODE — reported as Skipped, never a vacuous pass
 
     print("cyberremesh engine version: {0}".format(cyberremesh.version()))
     tmpdir = tempfile.mkdtemp(prefix="cyberremesh_invariants_")

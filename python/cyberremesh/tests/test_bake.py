@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Surface-baking binding test. Self-skips (exit 0) when the shared library is
+"""Surface-baking binding test. Self-skips (exit 77, CTest SKIP) when the shared library is
 not loadable, so it is safe to run unconditionally in CI."""
 
 import os
@@ -20,7 +20,7 @@ _UV_PLANE = (
 def main() -> int:
     if not cyberremesh.is_available():
         print("SKIP: cyber_capi shared library not loadable")
-        return 0
+        return 77  # CTest SKIP_RETURN_CODE — reported as Skipped, never a vacuous pass
 
     from cyberremesh import BakeMap, BakeParams, Mesh, bake
 

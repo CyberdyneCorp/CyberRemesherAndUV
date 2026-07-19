@@ -83,15 +83,28 @@ if(TARGET cyberbridge-server AND Python3_FOUND)
                 $<TARGET_FILE:cyberbridge-server>)
 endif()
 
-# Python ctypes bindings over the C ABI shared library. The test self-skips
-# (exit 0) if it cannot load the lib, so it runs for real in a clean CI and
-# degrades gracefully in environments with a conflicting libstdc++.
+# Python ctypes bindings over the C ABI shared library. A skip (lib not loadable)
+# returns CTest's SKIP code (77) so it shows as "Skipped", never a vacuous "Passed".
+# To make the tests actually run — even when Python3_EXECUTABLE ships an older
+# libstdc++ than the toolchain that built the lib (e.g. a conda Python) — we
+# LD_PRELOAD the compiler's own libstdc++, which is a superset of what the
+# interpreter needs and lets ctypes resolve the lib's newer GLIBCXX symbols.
 if(TARGET cyber_capi_shared AND Python3_FOUND)
     set(_pydir ${CMAKE_CURRENT_SOURCE_DIR}/../python/cyberremesh/tests)
+    execute_process(
+        COMMAND ${CMAKE_CXX_COMPILER} -print-file-name=libstdc++.so.6
+        OUTPUT_VARIABLE _toolchain_libstdcxx OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET)
+    get_filename_component(_toolchain_libstdcxx "${_toolchain_libstdcxx}" REALPATH)
+    set(_py_test_env "CYBER_CAPI_LIB=$<TARGET_FILE:cyber_capi_shared>")
+    if(EXISTS "${_toolchain_libstdcxx}")
+        list(APPEND _py_test_env "LD_PRELOAD=${_toolchain_libstdcxx}")
+    endif()
     foreach(_pyt test_api test_golden test_document_invariants test_bake)
         add_test(NAME python_${_pyt}
             COMMAND ${Python3_EXECUTABLE} ${_pydir}/${_pyt}.py)
         set_tests_properties(python_${_pyt} PROPERTIES
-            ENVIRONMENT "CYBER_CAPI_LIB=$<TARGET_FILE:cyber_capi_shared>")
+            ENVIRONMENT "${_py_test_env}"
+            SKIP_RETURN_CODE 77)
     endforeach()
 endif()

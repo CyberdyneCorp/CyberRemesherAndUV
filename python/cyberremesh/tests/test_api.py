@@ -8,7 +8,7 @@ Runnable as a plain script (no pytest/unittest required):
 Behaviour:
   * Imports the package WITHOUT dlopening anything — this must always succeed,
     even on a machine that never built the engine.
-  * If the C ABI shared library cannot be found, prints ``SKIP`` and exits 0
+  * If the C ABI shared library cannot be found, prints ``SKIP`` and exits 77 (CTest SKIP)
     (this is an integration test, gated on the built `capi` module).
   * Otherwise loads a temporary cube OBJ, remeshes it and asserts that the
     result contains quads.
@@ -122,9 +122,9 @@ def main():
     _check_import_contract()
 
     if not cyberremesh.is_available():
-        print("SKIP: cyber_capi shared library not found "
+        print("SKIP: cyber_capi shared library not loadable "
               "(set CYBER_CAPI_LIB or build the `capi` module)")
-        return 0
+        return 77  # CTest SKIP_RETURN_CODE — reported as Skipped, never a vacuous pass
 
     print("cyberremesh engine version: {0}".format(cyberremesh.version()))
     _run_remesh()

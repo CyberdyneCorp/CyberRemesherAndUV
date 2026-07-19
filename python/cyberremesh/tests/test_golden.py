@@ -13,7 +13,7 @@ Behaviour (matches ``test_api.py``'s capability gate):
   * ``import cyberremesh`` must always succeed, even when the engine was never
     built — it never dlopens anything at import time.
   * If the C ABI shared library cannot be located/loaded, prints ``SKIP`` and
-    exits 0. This keeps the file safe to run unconditionally in CI and locally.
+    exits 77 (CTest SKIP). Safe to run unconditionally in CI and locally.
   * Otherwise builds small procedural OBJ meshes (a cube and a UV-sphere
     approximation), remeshes them through the bindings and asserts invariant
     baselines: the result is quad-dominant (``stats.quads > 0``), the run is
@@ -186,9 +186,9 @@ def _determinism(tmpdir):
 
 def main():
     if not cyberremesh.is_available():
-        print("SKIP: cyber_capi shared library not found "
+        print("SKIP: cyber_capi shared library not loadable "
               "(set CYBER_CAPI_LIB or build the `capi` module)")
-        return 0
+        return 77  # CTest SKIP_RETURN_CODE — reported as Skipped, never a vacuous pass
 
     print("cyberremesh engine version: {0}".format(cyberremesh.version()))
     tmpdir = tempfile.mkdtemp(prefix="cyberremesh_golden_")
