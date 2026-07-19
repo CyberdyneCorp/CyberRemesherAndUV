@@ -227,6 +227,92 @@ def surface_metrics(out_mesh: MeshData, src_mesh: MeshData, n: int = 50_000,
     }
 
 
+def _face_normals(mesh: MeshData) -> "np.ndarray":
+    """Robust per-face unit normals (Newell's method, works for non-planar quads)."""
+    P = mesh["positions"]  # type: ignore[index]
+    out = []
+    for f in mesh["faces"]:  # type: ignore[index]
+        n = np.zeros(3)
+        m = len(f)
+        for k in range(m):
+            a, b = P[f[k]], P[f[(k + 1) % m]]
+            n += np.cross(a, b)
+        norm = np.linalg.norm(n)
+        out.append(n / norm if norm > 1e-12 else n)
+    return np.array(out)
+
+
+def _edge_samples(mesh: MeshData, edges: "list", per_edge: int) -> "np.ndarray":
+    P = mesh["positions"]  # type: ignore[index]
+    ts = np.linspace(0.0, 1.0, per_edge)
+    pts = [P[a] * (1.0 - t) + P[b] * t for (a, b) in edges for t in ts]
+    return np.array(pts) if pts else np.zeros((0, 3))
+
+
+def feature_error(out_mesh: MeshData, src_mesh: MeshData, angle_deg: float = 40.0,
+                  per_edge: int = 5) -> "float | None":
+    """How well the output's edges follow the source's SHARP creases. Finds source
+    edges whose dihedral angle exceeds `angle_deg` (plus open boundaries), samples
+    points along them, and returns the mean distance from those crease points to
+    the nearest OUTPUT edge, as a percentage of the bounding-box diagonal. Low =
+    the retopology laid clean quad loops on the creases; high = it rounded or
+    straddled them (QuadriFlow's smooth field tends to). None if the source has no
+    detectable features."""
+    from scipy.spatial import cKDTree
+    P = src_mesh["positions"]  # type: ignore[index]
+    fn = _face_normals(src_mesh)
+    edge_faces: Dict[Tuple[int, int], List[int]] = {}
+    for fi, f in enumerate(src_mesh["faces"]):  # type: ignore[index]
+        m = len(f)
+        for k in range(m):
+            a, b = f[k], f[(k + 1) % m]
+            edge_faces.setdefault((min(a, b), max(a, b)), []).append(fi)
+    cos_t = math.cos(math.radians(angle_deg))
+    sharp = []
+    for (a, b), fs in edge_faces.items():
+        if len(fs) == 1:
+            sharp.append((a, b))  # open boundary is a feature
+        elif len(fs) == 2 and float(np.dot(fn[fs[0]], fn[fs[1]])) < cos_t:
+            sharp.append((a, b))
+    if not sharp:
+        return None
+
+    crease_pts = _edge_samples(src_mesh, sharp, per_edge)
+    out_edges = set()
+    for f in out_mesh["faces"]:  # type: ignore[index]
+        m = len(f)
+        for k in range(m):
+            a, b = f[k], f[(k + 1) % m]
+            out_edges.add((min(a, b), max(a, b)))
+    out_pts = _edge_samples(out_mesh, list(out_edges), per_edge)
+    if len(out_pts) == 0:
+        return None
+    diag = float(np.linalg.norm(P.max(axis=0) - P.min(axis=0))) + 1e-12
+    dist, _ = cKDTree(out_pts).query(crease_pts)
+    return float(np.mean(dist) / diag * 100.0)
+
+
+def mesh_validity(mesh: MeshData, closed_input: bool = True) -> "Dict[str, int]":
+    """Topological validity of a remesh output: 'nonmanifold' = edges shared by
+    more than two faces, 'boundary' = edges on exactly one face (holes/tears — on
+    a closed input these are defects), 'degenerate' = faces with a repeated
+    vertex. A robust remesher returns 0/0/0 on a clean closed model; QuadriFlow
+    can tear or fold on hard inputs. Lower is better."""
+    edge_count: Dict[Tuple[int, int], int] = {}
+    degenerate = 0
+    for f in mesh["faces"]:  # type: ignore[index]
+        if len(set(f)) != len(f):
+            degenerate += 1
+        m = len(f)
+        for k in range(m):
+            a, b = f[k], f[(k + 1) % m]
+            edge_count[(min(a, b), max(a, b))] = edge_count.get((min(a, b), max(a, b)), 0) + 1
+    nonmanifold = sum(1 for c in edge_count.values() if c > 2)
+    boundary = sum(1 for c in edge_count.values() if c == 1)
+    return {"nonmanifold": nonmanifold, "boundary": boundary if closed_input else 0,
+            "degenerate": degenerate}
+
+
 def irregular_pct(mesh: MeshData) -> float:
     """Percentage of quad-incident vertices whose valence != 4. Irregular vertices
     (singularities) are where a quad mesh loses its clean grid; fewer, sparser

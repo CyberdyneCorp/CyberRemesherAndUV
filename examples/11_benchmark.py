@@ -41,6 +41,8 @@ def evaluate(mesh: "c.MeshData", source: "c.MeshData") -> dict:
     q, _, _ = c.face_counts(mesh)
     qq = c.quad_quality(mesh)
     sm = c.surface_metrics(mesh, source)
+    fe = c.feature_error(mesh, source)
+    val = c.mesh_validity(mesh)
     return {
         "quads": q,
         "median": qq["median"],
@@ -49,6 +51,8 @@ def evaluate(mesh: "c.MeshData", source: "c.MeshData") -> dict:
         "rms": sm["rms"],
         "normal_err": sm["normal_err"],
         "irregular": c.irregular_pct(mesh),
+        "feature": fe if fe is not None else float("nan"),
+        "defects": val["nonmanifold"] + val["boundary"] + val["degenerate"],
     }
 
 
@@ -131,7 +135,26 @@ def main() -> None:
         print()
 
     _print_verdict(wins, adaptive_rows)
+    _phase3(rows)
     _render(rows, adaptive_rows, args.target_quads)
+
+
+def _phase3(rows: list) -> None:
+    """Phase 3 — features & robustness: our position-field extractor vs QuadriFlow
+    on feature-following error (edges on sharp creases) and topological defects
+    (non-manifold edges + holes/tears + degenerate faces)."""
+    import math as _m
+    models = sorted({r[0] for r in rows})
+    print("\nPHASE 3 — features & robustness (position-field extractor vs QuadriFlow):")
+    print("  feature-follow % (edges on source creases, lower better) · topo defects (count, lower better)")
+    for name in models:
+        o = next((r[2] for r in rows if r[0] == name and r[1] == "ours position-field"), None)
+        q = next((r[2] for r in rows if r[0] == name and r[1] == "QuadriFlow"), None)
+        if not o or not q:
+            continue
+        of = "n/a" if _m.isnan(o["feature"]) else f"{o['feature']:.2f}%"
+        qfv = "n/a" if _m.isnan(q["feature"]) else f"{q['feature']:.2f}%"
+        print(f"  {name:<15} feature ours={of:<7} QF={qfv:<7} | defects ours={o['defects']:<4} QF={q['defects']}")
 
 
 def _print_verdict(wins: dict, adaptive_rows: list) -> None:
