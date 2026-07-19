@@ -331,6 +331,16 @@ PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSi
             result.mesh.fillHoles(static_cast<std::size_t>(params.holeFillMaxBoundary));
     }
     if (params.pureQuads && result.mesh.faceCount() > 0) {
+        // Relax the coarse base onto the source first: a skewed base subdivides
+        // into skewed quads, so smoothing it before the split reduces the sliver
+        // tail the subdivision would otherwise inherit.
+        {
+            const ReferenceSurface baseSurface(work, params.smoothNormalDegrees);
+            if (!baseSurface.empty()) {
+                relaxQuadMesh(result.mesh, baseSurface, params.sharpEdgeDegrees,
+                              /*iterations=*/10, /*lambda=*/0.5f);
+            }
+        }
         result.mesh = result.mesh.linearSubdivide();
         // Linear subdivision only splits faces — the new vertices sit on the
         // coarse (quarter-density) base's flat facets, so the silhouette stays
