@@ -465,6 +465,43 @@ Graph buildCollapsedGraph(const Mesh& mesh, const PositionField& field) {
         }
     }
 
+    // --- A4b: recover lattice edges the per-vertex offsets missed. Node
+    // centroids are far cleaner than the noisy per-vertex field, so re-test
+    // every cross-node mesh edge by centroid distance: cells one spacing apart
+    // are lattice neighbours, cells ~s*sqrt(2) apart are quad diagonals. This
+    // restores the ~6% of unit edges that per-vertex field noise misclassified
+    // as diagonal/far, raising graph valence toward the grid ideal of 4. ---
+    {
+        const float lo = 0.55f * s;   // below: same cell (already collapsed)
+        // Accept up to 1.30s: catches curvature-compressed lattice edges while
+        // staying clear of a true quad diagonal (s*sqrt2 = 1.414s). Higher cuts
+        // (1.35s+) start admitting diagonals and fuse quads on noisy scans.
+        const float hi = 1.30f * s;
+        const float hi2 = hi * hi;
+        const float lo2 = lo * lo;
+        for (Index ei = 0; ei < mesh.edgeCapacity(); ++ei) {
+            const EdgeId e{ei};
+            if (!mesh.isAlive(e)) {
+                continue;
+            }
+            const auto [va, vb] = mesh.edgeVertices(e);
+            if (!field.valid[va.value] || !field.valid[vb.value]) {
+                continue;
+            }
+            const int a = static_cast<int>(nodeOf[dset.find(va.value)]);
+            const int b = static_cast<int>(nodeOf[dset.find(vb.value)]);
+            if (a == b || nodeAdj[static_cast<std::size_t>(a)].count(b)) {
+                continue;
+            }
+            const float d2 = lengthSquared(g.pos[static_cast<std::size_t>(a)] -
+                                           g.pos[static_cast<std::size_t>(b)]);
+            if (d2 >= lo2 && d2 <= hi2) {
+                nodeAdj[static_cast<std::size_t>(a)].insert(b);
+                nodeAdj[static_cast<std::size_t>(b)].insert(a);
+            }
+        }
+    }
+
     // --- A5: graph cleanup (snap/merge/project + diagonal removal). ---
     removeUnnecessaryEdges(g.pos, g.normal, nodeAdj, s);
 

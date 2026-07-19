@@ -62,6 +62,67 @@ Mesh uvSphere(float radius, int rings, int segments) {
     return Mesh::fromIndexed(p, f);
 }
 
+// Subdivided icosahedron: a near-uniform triangulation of the sphere (unlike a
+// UV sphere it has no pole clustering), so its collapsed lattice graph reaches a
+// clean, high valence — the right probe for the edge-recovery pass.
+Mesh icosphere(int subdivisions) {
+    const float t = (1.0f + std::sqrt(5.0f)) * 0.5f;
+    std::vector<Vec3> p = {{-1, t, 0}, {1, t, 0}, {-1, -t, 0}, {1, -t, 0}, {0, -1, t}, {0, 1, t},
+                           {0, -1, -t}, {0, 1, -t}, {t, 0, -1}, {t, 0, 1}, {-t, 0, -1}, {-t, 0, 1}};
+    std::vector<std::array<int, 3>> tri = {
+        {0, 11, 5}, {0, 5, 1}, {0, 1, 7}, {0, 7, 10}, {0, 10, 11}, {1, 5, 9}, {5, 11, 4},
+        {11, 10, 2}, {10, 7, 6}, {7, 1, 8}, {3, 9, 4}, {3, 4, 2}, {3, 2, 6}, {3, 6, 8},
+        {3, 8, 9}, {4, 9, 5}, {2, 4, 11}, {6, 2, 10}, {8, 6, 7}, {9, 8, 1}};
+    for (int s = 0; s < subdivisions; ++s) {
+        std::vector<std::array<int, 3>> nt;
+        std::map<std::pair<int, int>, int> mid;
+        const auto mp = [&](int a, int b) {
+            const auto k = std::minmax(a, b);
+            const auto it = mid.find({k.first, k.second});
+            if (it != mid.end()) {
+                return it->second;
+            }
+            const int idx = static_cast<int>(p.size());
+            p.push_back((p[static_cast<std::size_t>(a)] + p[static_cast<std::size_t>(b)]) * 0.5f);
+            mid[{k.first, k.second}] = idx;
+            return idx;
+        };
+        for (const auto& f : tri) {
+            const int a = mp(f[0], f[1]), b = mp(f[1], f[2]), c = mp(f[2], f[0]);
+            nt.push_back({f[0], a, c});
+            nt.push_back({f[1], b, a});
+            nt.push_back({f[2], c, b});
+            nt.push_back({a, b, c});
+        }
+        tri = std::move(nt);
+    }
+    std::vector<Vec3> pn;
+    std::vector<std::vector<Index>> fn;
+    for (const auto& v : p) {
+        pn.push_back(normalized(v));
+    }
+    for (const auto& f : tri) {
+        fn.push_back({static_cast<Index>(f[0]), static_cast<Index>(f[1]), static_cast<Index>(f[2])});
+    }
+    return Mesh::fromIndexed(pn, fn);
+}
+
+// Mean edge length of a mesh (used to size the field to the input).
+float meanEdgeLength(const Mesh& m) {
+    std::vector<Vec3> P;
+    std::vector<std::vector<Index>> F;
+    m.toIndexed(P, F);
+    double sum = 0.0;
+    std::size_t n = 0;
+    for (const auto& f : F) {
+        for (std::size_t k = 0; k < f.size(); ++k) {
+            sum += static_cast<double>(length(P[f[k]] - P[f[(k + 1) % f.size()]]));
+            ++n;
+        }
+    }
+    return n ? static_cast<float>(sum / static_cast<double>(n)) : 1.0f;
+}
+
 // Best 4-RoSy agreement between two tangent-plane directions about normal n.
 float rosyAgreement(Vec3 a, Vec3 b, Vec3 n) {
     float best = -1.0f;
@@ -204,6 +265,24 @@ TEST_CASE("position field: extraction gives a clean quad grid on a cylinder") {
     REQUIRE(F.size() > 0);
     CHECK(quads.validate().empty());                                             // manifold
     CHECK(static_cast<double>(quadCount) / static_cast<double>(F.size()) > 0.90);  // quad grid
+}
+
+// Regression for the post-collapse lattice-edge recovery (A4b). Per-vertex
+// field noise misclassifies some real lattice edges as diagonals, dropping the
+// collapsed graph's average valence below the grid ideal of 4. Recovery re-tests
+// cross-node mesh edges by the cleaner node-centroid distance and restores them.
+// Without recovery a UV sphere sits near valence 3.75; with it, near the ideal.
+TEST_CASE("position field: collapse graph reaches near-grid valence") {
+    const Mesh sphere = icosphere(3);
+    const float spacing = meanEdgeLength(sphere);
+    const remesh::PositionField field = remesh::computePositionField(sphere, spacing, 60);
+    const remesh::CollapsedGraphStats st = remesh::debugCollapse(sphere, field);
+    REQUIRE(st.nodes > 0);
+    const double valence = 2.0 * static_cast<double>(st.latticeEdges) / static_cast<double>(st.nodes);
+    CAPTURE(st.nodes);
+    CAPTURE(st.latticeEdges);
+    CAPTURE(valence);
+    CHECK(valence > 3.85);  // recovery lifts it from ~3.74 toward the grid ideal 4
 }
 
 // Regression for the greedy-cut hole fill (fillFace). A UV sphere's poles are
