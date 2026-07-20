@@ -163,6 +163,12 @@ struct FlipRepairStats {
 // flip-repair-on-unit-diffs claim.
 [[nodiscard]] std::size_t debugSubMeshDiffRoundTrip(const Mesh& mesh, const PositionField& field);
 
+// Phase 5d: the SAT flip-repair preserves grid integrability (residual invariant)
+// even as it rewrites edge diffs. Not on the default extraction path — it optimises
+// coarse-level flips, which does not reliably lower the final irregulars and costs
+// 3-21 s/mesh — but kept validated.
+[[nodiscard]] bool debugSatPreservesIntegrability(const Mesh& mesh, const PositionField& field);
+
 // Milestone 3: the integer-parametrization quad extractor. Runs the Stage-2 solve,
 // subdivides to unit cells, then collapses zero-diff edges into grid vertices and
 // pairs the two triangles across each grid-cell diagonal into a quad (QuadriFlow

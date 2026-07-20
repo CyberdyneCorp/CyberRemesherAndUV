@@ -447,6 +447,17 @@ TEST_CASE("flip repair: SubMesh<->IntegerGrid round trip is an identity") {
     CHECK(remesh::debugSubMeshDiffRoundTrip(sphere, sfield) == 0);
 }
 
+// Phase 5d — the SAT flip-repair's equalities are hard, so it preserves grid
+// integrability (residual singularity count invariant) even as it rewrites edge
+// diffs on a folded uv-sphere. Kept validated even though it is NOT on the default
+// extraction path (it optimises coarse-level flips, which does not reliably lower
+// the final mesh's irregulars, and costs 3-21 s/mesh).
+TEST_CASE("flip repair: SAT preserves grid integrability") {
+    const Mesh sphere = uvSphere(1.0f, 12, 16);  // small — the SAT is slow
+    const remesh::PositionField field = remesh::computePositionField(sphere, 0.22f, 40);
+    CHECK(remesh::debugSatPreservesIntegrability(sphere, field));
+}
+
 // Milestones 3–4 — extraction via QuadriFlow's BuildTriangleManifold + FixValence
 // (single-level): reconstruct a clean compact triangle manifold (zero-diff
 // collapse + orbit-walk vertex split), pair the two triangles across each
