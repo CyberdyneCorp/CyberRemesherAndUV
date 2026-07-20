@@ -586,3 +586,29 @@ TEST_CASE("position field: greedy-cut hole fill avoids pie-slice slivers") {
     CHECK(quadFrac > 0.75);       // strongly quad-dominant despite the two poles
     CHECK(sliverFrac < 0.10);     // greedy-cut keeps pie-slice slivers rare
 }
+
+// Regression: a field far finer than the mesh (period << edge length) yields an
+// inconsistent grid whose edges never close, so the unit-cell subdivision would
+// split forever and exhaust memory (the coarse-density OOM). The extractor caps
+// the subdivision at trisBefore*8 + 100000 so it always terminates with bounded
+// memory; the resulting mesh is sparse but valid, never a crash.
+TEST_CASE("integer solve: pathological fine field does not blow up subdivision") {
+    const Mesh sphere = icosphere(2);
+    const float spacing = meanEdgeLength(sphere) * 0.25f;  // ~320x runaway uncapped
+    const remesh::PositionField field = remesh::computePositionField(sphere, spacing, 40);
+    const remesh::SubdivideStats s = remesh::debugSubdivide(sphere, field);
+    CAPTURE(s.trisBefore);
+    CAPTURE(s.trisAfter);
+    REQUIRE(s.trisBefore > 0);
+    // The cap held: bounded well below the millions of triangles an uncapped
+    // split would allocate (a small slack for the last split before the check).
+    CHECK(s.trisAfter <= s.trisBefore * 8 + 100000 + 8);
+
+    // The full extractor (flip repair + subdivision) must likewise terminate and
+    // return a usable, structurally valid quad mesh on the same pathological input.
+    const Mesh quads = remesh::extractIntegerQuadMesh(sphere, field);
+    CHECK(quads.validate().empty());
+    const remesh::IntegerExtractStats es = remesh::debugIntegerExtract(sphere, field);
+    CHECK(es.quads > 0);
+    CHECK(es.nonQuad == 0);
+}

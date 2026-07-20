@@ -1746,6 +1746,18 @@ void EdgeHierarchy::downsample(std::vector<std::array<int, 3>> fq,
                 }
                 if (ind1 != -1) {
                     paths.emplace_back(e, (cFQ[uz(f)][uz(ind1)] - cFQ[uz(f)][uz(ind0)] + 6) % 4);
+                    if (paths.size() > cE2F.size()) {
+                        // The merge path is cycling — the graph is inconsistent (a
+                        // recursive CheckShrink can leave it so). Bail, don't OOM.
+                        consistent = false;
+                        for (const auto& p : paths) {
+                            toUp[uz(p.first)] = numE;
+                            toUpO[uz(p.first)] = 0;
+                        }
+                        ++numE;
+                        nE2F.push_back(Int2Pair{f0, f0});
+                        break;
+                    }
                 } else {
                     if (!isZero(cDiff[uz(e)])) {
                         consistent = false;  // "Unsatisfied": grid violates zero-sum
@@ -1974,8 +1986,10 @@ void EdgeHierarchy::fixFlip(int depth) {
     if (update && depth < 64) {
         EdgeHierarchy fh;
         fh.downsample(FQ[uz(l)], F2E[uz(l)], edgeDiff[uz(l)], allow[uz(l)], -1);
-        fh.fixFlip(depth + 1);
-        fh.updateGraphValue(FQ[uz(l)], F2E[uz(l)], edgeDiff[uz(l)]);
+        if (fh.consistent) {  // skip a coarsening that bailed (cyclic merge path)
+            fh.fixFlip(depth + 1);
+            fh.updateGraphValue(FQ[uz(l)], F2E[uz(l)], edgeDiff[uz(l)]);
+        }
     }
     propagateEdge();
 }
@@ -2223,6 +2237,17 @@ void EdgeHierarchy::updateGraphValue(std::vector<std::array<int, 3>>& fq,
 // the coarsen + propagate round-trip; 5b adds the fixFlip repair). Only edgeDiff
 // changes; faceEdgeIds / orients round-trip identically.
 void fixFlipHierarchy(IntegerGrid& g) {
+    const auto maxDiff = [](const std::vector<Int2>& d) {
+        int m = 0;
+        for (const Int2& v : d) {
+            m = std::max(m, std::max(std::abs(v.x), std::abs(v.y)));
+        }
+        return m;
+    };
+    const std::vector<Int2> origDiff = g.edgeDiff;
+    const std::size_t residBefore = countResidualSingularities(g);
+    const int diffBefore = maxDiff(g.edgeDiff);
+
     std::vector<int> allowChanges(g.edgeDiff.size() * 2, 1);
     EdgeHierarchy h;
     h.downsample(g.orients, g.faceEdgeIds, g.edgeDiff, allowChanges, -1);
@@ -2231,6 +2256,15 @@ void fixFlipHierarchy(IntegerGrid& g) {
     }
     h.fixFlip();  // repairs flipped cells on the coarsest level + propagates down
     h.updateGraphValue(g.orients, g.faceEdgeIds, g.edgeDiff);
+
+    // A recursive coarsening can bail on a cyclic merge path and leave the graph
+    // inconsistent; propagating that down inflates edge diffs and breaks
+    // integrability, which makes the downstream subdivision blow up. The repair
+    // must never make the grid worse — if it did by either measure, discard it.
+    if (maxDiff(g.edgeDiff) > diffBefore ||
+        countResidualSingularities(g) > residBefore) {
+        g.edgeDiff = origDiff;
+    }
 }
 
 // SAT-based flip repair over the coarsened grid, escalating the patch threshold
@@ -2372,7 +2406,14 @@ SubMesh subdivideToUnitCells(const IntegerGrid& g, const Mesh& mesh, const Posit
         }
     };
 
+    // Runaway guard: a valid grid subdivides <4x; a corrupt one (e.g. from a
+    // flip-repair that left an inconsistent diff) can split forever. Cap well above
+    // any legitimate case — buildQuadMesh tolerates the few residual non-unit edges.
+    const std::size_t triCap = m.tris.size() * 8 + 100000;
     while (!queue.empty()) {
+        if (m.tris.size() > triCap) {
+            break;
+        }
         const EdgeLink edge = queue.top();
         queue.pop();
         const int e0 = edge.id, e1 = m.e2e[static_cast<std::size_t>(e0)];
