@@ -1534,6 +1534,7 @@ struct EdgeHierarchy {
     void downsample(std::vector<std::array<int, 3>> fq, std::vector<std::array<int, 3>> f2e,
                     std::vector<Int2> ediff, std::vector<int> allowChanges, int level);
     void fixFlip(int depth = 0);
+    int fixFlipSat(int level, int threshold);
     void propagateEdge();
     void updateGraphValue(std::vector<std::array<int, 3>>& fq, std::vector<std::array<int, 3>>& f2e,
                           std::vector<Int2>& ediff);
@@ -1940,6 +1941,207 @@ void EdgeHierarchy::fixFlip(int depth) {
     propagateEdge();
 }
 
+// SAT-based flip repair (QuadriFlow FixFlipSat, hierarchy.cpp:640): extract a local
+// patch of flexible edges around the flipped cells (BFS bounded by `threshold`),
+// split it into connected groups, and for each group build + solve the ternary CSP
+// (per-face loop-closure equalities + no-flip area inequalities) with our
+// self-contained solver — clearing the multi-cell clusters greedy CheckShrink
+// cannot. Mutates only edgeDiff on `level`; returns the post-repair flip count.
+int EdgeHierarchy::fixFlipSat(int level, int threshold) {
+    const auto uz = [](int x) { return static_cast<std::size_t>(x); };
+    auto& cF2E = F2E[uz(level)];
+    auto& cE2F = E2F[uz(level)];
+    auto& cFQ = FQ[uz(level)];
+    auto& cDiff = edgeDiff[uz(level)];
+    auto& cAllow = allow[uz(level)];
+
+    std::vector<int> e2e(cF2E.size() * 3, -1);
+    for (int i = 0; i < static_cast<int>(cE2F.size()); ++i) {
+        const int v1 = cE2F[uz(i)][0], v2 = cE2F[uz(i)][1];
+        int t1 = 0, t2 = 2;
+        if (v1 != -1) {
+            while (cF2E[uz(v1)][uz(t1)] != i) ++t1;
+        }
+        if (v2 != -1) {
+            while (cF2E[uz(v2)][uz(t2)] != i) --t2;
+        }
+        if (v1 != -1) {
+            e2e[uz(v1 * 3 + t1)] = (v2 == -1) ? -1 : v2 * 3 + t2;
+        }
+        if (v2 != -1) {
+            e2e[uz(v2 * 3 + t2)] = (v1 == -1) ? -1 : v1 * 3 + t1;
+        }
+    }
+    const auto area = [&](int f) { return faceArea(cF2E, cFQ, cDiff, f); };
+    const auto elen = [&](int he) {
+        const Int2 d = cDiff[uz(cF2E[uz(he / 3)][uz(he % 3)])];
+        return std::abs(d.x) + std::abs(d.y);
+    };
+
+    // Patch BFS: mark dedges reachable from flipped faces (free flood across
+    // zero-length edges; length-weighted expansion up to `threshold`).
+    std::deque<std::pair<int, int>> queue;
+    std::vector<char> mark(cF2E.size() * 3, 0);
+    for (int f = 0; f < static_cast<int>(cF2E.size()); ++f) {
+        if (area(f) < 0) {
+            for (int j = 0; j < 3; ++j) {
+                if (!mark[uz(f * 3 + j)]) {
+                    queue.emplace_back(f * 3 + j, 0);
+                    mark[uz(f * 3 + j)] = 1;
+                }
+            }
+        }
+    }
+    const auto sweep = [&](int e0, int d, bool zeroLen, int step) {
+        int e = e0, e1 = -1;
+        do {
+            e1 = e2e[uz(e)];
+            if (e1 == -1) break;
+            const int len = elen(e1);
+            const bool take = zeroLen ? (len == 0) : (len > 0 && d + len <= threshold);
+            if (take && !mark[uz(e1)]) {
+                mark[uz(e1)] = 1;
+                if (zeroLen) {
+                    queue.emplace_front(e1, d);
+                } else {
+                    queue.emplace_back(e1, d + len);
+                }
+            }
+            e = e1 / 3 * 3 + (e1 + step) % 3;
+            mark[uz(e)] = 1;
+        } while (e != e0);
+        return e1;
+    };
+    while (!queue.empty()) {
+        const int e0 = queue.front().first, d = queue.front().second;
+        queue.pop_front();
+        if (sweep(e0, d, true, 1) == -1) sweep(e0, d, true, 2);
+        if (sweep(e0, d, false, 1) == -1) sweep(e0, d, false, 2);
+    }
+
+    std::vector<char> flexible(cDiff.size(), 0);
+    for (int i = 0; i < static_cast<int>(cF2E.size()); ++i) {
+        for (int j = 0; j < 3; ++j) {
+            if (mark[uz(i * 3 + j)]) {
+                flexible[uz(cF2E[uz(i)][uz(j)])] = 1;
+            }
+        }
+    }
+    for (int i = 0; i < static_cast<int>(cDiff.size()); ++i) {
+        if (cE2F[uz(i)][0] == cE2F[uz(i)][1] || cAllow[uz(i * 2)] == 0 || cAllow[uz(i * 2 + 1)] == 0) {
+            flexible[uz(i)] = 0;
+        }
+    }
+
+    // Group flexible edges into connected components (via shared faces).
+    int numGroup = 0;
+    std::vector<int> group(cDiff.size(), -1), index(cDiff.size(), -1);
+    for (int i = 0; i < static_cast<int>(cDiff.size()); ++i) {
+        if (group[uz(i)] != -1 || !flexible[uz(i)]) {
+            continue;
+        }
+        std::queue<int> bfs;
+        bfs.push(i);
+        group[uz(i)] = numGroup;
+        while (!bfs.empty()) {
+            const int e = bfs.front();
+            bfs.pop();
+            for (int s = 0; s < 2; ++s) {
+                const int f = cE2F[uz(e)][uz(s)];
+                if (f == -1) {
+                    continue;
+                }
+                for (int k = 0; k < 3; ++k) {
+                    const int e1 = cF2E[uz(f)][uz(k)];
+                    if (flexible[uz(e1)] && group[uz(e1)] == -1) {
+                        group[uz(e1)] = numGroup;
+                        bfs.push(e1);
+                    }
+                }
+            }
+        }
+        ++numGroup;
+    }
+
+    // Per-group: flat ternary variables (edge diff components) + face constraints.
+    std::vector<int> numEdges(static_cast<std::size_t>(numGroup), 0);
+    std::vector<std::vector<int>> values(static_cast<std::size_t>(numGroup));
+    for (int i = 0; i < static_cast<int>(cDiff.size()); ++i) {
+        if (group[uz(i)] != -1) {
+            const std::size_t grp = uz(group[uz(i)]);
+            index[uz(i)] = numEdges[grp]++;
+            values[grp].push_back(cDiff[uz(i)].x);
+            values[grp].push_back(cDiff[uz(i)].y);
+        }
+    }
+    const std::vector<int> numFlex = numEdges;  // flexible count, before fixed appends
+    std::vector<std::vector<EqRow>> eqs(static_cast<std::size_t>(numGroup));
+    std::vector<std::vector<GeRow>> ges(static_cast<std::size_t>(numGroup));
+    std::map<std::pair<int, int>, int> fixedVars;
+    const auto sgn = [](int v) { return (v > 0) - (v < 0); };
+    for (int i = 0; i < static_cast<int>(cF2E.size()); ++i) {
+        int gind = 0;
+        while (gind < 3 && group[uz(cF2E[uz(i)][uz(gind)])] == -1) {
+            ++gind;
+        }
+        if (gind == 3) {
+            continue;
+        }
+        const int grp = group[uz(cF2E[uz(i)][uz(gind)])];
+        int ind[3] = {-1, -1, -1};
+        for (int j = 0; j < 3; ++j) {
+            const int eid = cF2E[uz(i)][uz(j)];
+            if (group[uz(eid)] == grp) {
+                ind[j] = index[uz(eid)];
+            } else {  // fixed neighbour edge: append (or reuse) a pinned variable
+                const std::pair<int, int> key{eid, grp};
+                const auto it = fixedVars.find(key);
+                if (it == fixedVars.end()) {
+                    ind[j] = numEdges[uz(grp)];
+                    values[uz(grp)].push_back(cDiff[uz(eid)].x);
+                    values[uz(grp)].push_back(cDiff[uz(eid)].y);
+                    fixedVars[key] = numEdges[uz(grp)]++;
+                } else {
+                    ind[j] = it->second;
+                }
+            }
+        }
+        Int2 var[3], cst[3];
+        for (int j = 0; j < 3; ++j) {
+            const Int2 v = rshift90i(Int2{ind[j] * 2 + 1, ind[j] * 2 + 2}, cFQ[uz(i)][uz(j)]);
+            cst[j] = Int2{sgn(v.x), sgn(v.y)};
+            var[j] = Int2{std::abs(v.x) - 1, std::abs(v.y) - 1};
+        }
+        eqs[uz(grp)].push_back(EqRow{var[0].x, var[1].x, var[2].x, cst[0].x, cst[1].x, cst[2].x});
+        eqs[uz(grp)].push_back(EqRow{var[0].y, var[1].y, var[2].y, cst[0].y, cst[1].y, cst[2].y});
+        ges[uz(grp)].push_back(GeRow{var[0].x, var[1].y, var[0].y, var[1].x,
+                                     cst[0].x * cst[1].y, cst[0].y * cst[1].x});
+    }
+
+    for (int gi = 0; gi < numGroup; ++gi) {
+        std::vector<char> flex(values[uz(gi)].size(), 1);
+        for (std::size_t j = uz(numFlex[uz(gi)] * 2); j < flex.size(); ++j) {
+            flex[j] = 0;
+        }
+        solveTernaryCsp(values[uz(gi)], flex, eqs[uz(gi)], ges[uz(gi)], 50000);
+    }
+    for (int i = 0; i < static_cast<int>(cDiff.size()); ++i) {
+        const int grp = group[uz(i)];
+        if (grp == -1) {
+            continue;
+        }
+        cDiff[uz(i)].x = values[uz(grp)][uz(2 * index[uz(i)])];
+        cDiff[uz(i)].y = values[uz(grp)][uz(2 * index[uz(i)] + 1)];
+    }
+    int flips = 0;
+    for (int f = 0; f < static_cast<int>(cF2E.size()); ++f) {
+        if (area(f) < 0) {
+            ++flips;
+        }
+    }
+    return flips;
+}
+
 void EdgeHierarchy::propagateEdge() {
     const auto uz = [](int x) { return static_cast<std::size_t>(x); };
     for (int level = static_cast<int>(toUpperEdges.size()); level > 0; --level) {
@@ -1988,6 +2190,27 @@ void fixFlipHierarchy(IntegerGrid& g) {
     }
     h.fixFlip();  // repairs flipped cells on the coarsest level + propagates down
     h.updateGraphValue(g.orients, g.faceEdgeIds, g.edgeDiff);
+}
+
+// SAT-based flip repair over the coarsened grid, escalating the patch threshold
+// 1..4 (QuadriFlow FixFlipSat driver, parametrizer-flip.cpp:175). Requires UNIT
+// edge diffs (ternary domain), so it runs on the post-subdivide grid. Coarsest-
+// only: propagateEdge floods the repair to level 0, then updateGraphValue reads it.
+void fixFlipSatHierarchy(IntegerGrid& g) {
+    for (int threshold = 1; threshold <= 4; ++threshold) {
+        std::vector<int> allowChanges(g.edgeDiff.size() * 2, 1);
+        EdgeHierarchy h;
+        h.downsample(g.orients, g.faceEdgeIds, g.edgeDiff, allowChanges, -1);
+        if (!h.consistent) {
+            return;
+        }
+        const int nflip = h.fixFlipSat(h.levels - 1, threshold);
+        h.propagateEdge();
+        h.updateGraphValue(g.orients, g.faceEdgeIds, g.edgeDiff);
+        if (nflip == 0) {
+            break;
+        }
+    }
 }
 
 }  // namespace
@@ -2931,8 +3154,13 @@ void writeDiffsBackToSubMesh(const IntegerGrid& g, SubMesh& m) {
 
 Mesh extractIntegerQuadMesh(const Mesh& mesh, const PositionField& field) {
     IntegerGrid g = computeIntegerGrid(mesh, field);
-    fixFlipHierarchy(g);  // Phase 5: repair the collapse's val3/val5 quantization
-    const SubMesh m = subdivideToUnitCells(g, mesh, field, 1);
+    fixFlipHierarchy(g);  // Phase 5b: greedy flip repair (non-unit grid OK)
+    SubMesh m = subdivideToUnitCells(g, mesh, field, 1);
+    // Phase 5d: SAT flip repair needs the UNIT-diff grid — reconstruct it from the
+    // subdivided mesh, clear the residual multi-cell flip clusters, write back.
+    IntegerGrid gs = integerGridFromSubMesh(m);
+    fixFlipSatHierarchy(gs);
+    writeDiffsBackToSubMesh(gs, m);
     return buildQuadMesh(m);
 }
 
