@@ -354,9 +354,10 @@
   <div class="ms">
     <span class="msrow"><span class="msdot partial"></span><b>A · Multi-resolution extraction — <span style="color:var(--gap)">DEAD END (proven)</span></b> — the plan was to read faces off QuadriFlow's coarsened edge graph. <b>Built it and measured: byte-identical to the single-level path</b> (3398 == 3398 compact triangles). Reason: <code>DownsampleEdgeGraph</code> only contracts <i>zero-diff</i> edges, but subdivision split-vertices are joined by <i>|diff|=1</i> edges, so the coarse faces are exactly the fine non-degenerate faces. QuadriFlow's low count comes from its <i>upstream</i> 2nd-subdivide + FixFlipSat + position-solve, not the coarse read. Reverted. <span class="mstag partial">no-op, reverted</span></span>
     <span class="msrow"><span class="msdot done"></span><b>B · Valence-3/5 dipole canceller — <span style="color:var(--win)">DONE</span></b> — measured the irregulars: ~60% val3, ~30% val5 (dipoles). Added a valence-improving <b>edge-rotation</b> pass to <span class="mono">FixValence</span>: re-draw an interior edge along a hexagon diagonal, moving valence off the 3/5 pair onto a neighbour, accepted only when it <b>strictly</b> lowers local irregulars and stays manifold (monotone). <b>Irregular −27% at native density</b> (spot 20.2→16.8%); at 3000-quad: spot 9→7, fandisk 10→9, rocker 10→8, cheb 11→9, bunny 14→13. Regression-tested, ASan-clean. <span class="mstag done">shipped · a83ac1f</span></span>
-    <span class="msrow"><span class="msdot"></span><b>C · Reduce split T-junctions upstream</b> — the ~60% val3 excess is subdivision T-junctions where the grid is locally imperfect (A0 probe: split-vertices are 62–91% of interior irregulars). The lever QuadriFlow actually uses: a 2nd subdivide + <span class="mono">FixFlipSat</span> (we have <code>fixFlipSatHierarchy</code>, currently off) and a position solve that leave fewer |diff|&gt;1 edges. This is now the primary remaining singularity lever. <span class="mstag">investigate</span></span>
+    <span class="msrow"><span class="msdot partial"></span><b>C · Reduce split T-junctions — <span style="color:var(--gap)">CEILING REACHED</span></b> — the ~60% val3 excess is subdivision T-junctions. Tried two levers, both <b>no-ops</b>: (1) QuadriFlow's unit-grid <span class="mono">FixFlipSat</span> reduced spot only 16.8→16.2% at 2.3 s/mesh; (2) a val-3 T-junction edge-collapse (AutoRemesher <span class="mono">removeSingleEndpoints</span> dual) found <b>zero</b> legal monotone collapses. These Ts sit at genuine field-singularity mismatches that no local, manifold, monotone operator can remove. <b>Paradigm-inherent</b> — the real fix is F. <span class="mstag partial">exhausted</span></span>
     <span class="msrow"><span class="msdot"></span><b>D · Surface-projected position relaxation</b> — fold the Laplacian pass onto the source surface via the existing BVH (<code>src/accel</code>) instead of a per-vertex tangent plane. Marginal CV, protects fidelity. <span class="mstag">extend · <code>relaxPositions</code></span></span>
     <span class="msrow"><span class="msdot"></span><b>E · Sharp-crease + open-boundary handling</b> — detect source creases (<code>sharpEdgeDegrees</code>) and pin/align extracted vertices before relaxation, so CAD input (fandisk) keeps its edges. <span class="mstag">feature</span></span>
+    <span class="msrow"><span class="msdot"></span><b>F · Seamless-UV isoline extractor (the real unlock)</b> — the reason QuadCover (AutoRemesher) hits 1–4%: it doesn't collapse a subdivided grid, it <b>traces integer isolines</b> over a <i>seamless integer-grid UV</i>, so every crossing is a transversal = valence-4 <b>by construction</b>; irregulars appear only at true field singularities. Its extractor (<code>quadextractor.cpp</code>, MIT, Geogram-free) is portable in ~1–2 weeks — but it needs a seamless per-corner UV we don't produce. The cost is <b>adding a QuadCover/MIQ parametrization solver</b> (or vendoring Geogram's), not the extractor. This is the path to parity, and a real project. <span class="mstag">big · port + solver</span></span>
   </div>
   <div class="notes" style="margin-top:14px">
     <div class="note">
@@ -366,12 +367,15 @@
         integer solve and <span class="mono">BuildTriangleManifold</span> already landed.</p>
     </div>
     <div class="note">
-      <div class="h"><span class="dot" style="background:var(--win)"></span>Reference: autoremesher <span style="margin-left:auto;font-weight:600;color:var(--ink-soft)">MIT · port</span></div>
+      <div class="h"><span class="dot" style="background:var(--win)"></span>Reference: autoremesher / QuadCover <span style="margin-left:auto;font-weight:600;color:var(--ink-soft)">MIT · port</span></div>
       <p><a href="https://github.com/huxingyi/autoremesher" style="color:var(--accent)">huxingyi/autoremesher</a>
-        (Dust3D) is <b>MIT</b> — the CGAL/GPL dependency was dropped, so its source is a <b>portable
-        clean-room reference</b> for the same tasks (extraction, valence cleanup). It's GUI-oriented (Qt,
-        no headless CLI), so <b>QuadriFlow stays the runnable oracle</b> for on-corpus metric comparison.
-        Check bundled <code>thirdparty/</code> sub-licences before lifting any vendored code.</p>
+        (Dust3D) is <b>MIT</b>. Its core algorithm is <b>QuadCover</b> (<code>quadextractor.cpp</code>) —
+        isoline tracing over a seamless UV, studied in full (§6·F). The extractor is Qt-free and
+        <b>Geogram-free</b> (the <code>exploragram</code> include is vestigial/dead); the seamless UV it
+        needs comes from Geogram's <code>quad_cover</code> in <code>parameterizer.cpp</code>. It <b>does</b>
+        run headless (<code>--input/--target-quads</code>), and the parameterize+extract core is
+        Qt-free, so a small headless harness (over bundled Geogram/TBB/Eigen) can be built for the
+        benchmark — planned as a second reference alongside QuadriFlow.</p>
     </div>
   </div>
 
