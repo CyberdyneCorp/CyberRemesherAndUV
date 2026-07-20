@@ -338,6 +338,14 @@ TEST_CASE("integer solve: min-cost max-flow engine is correct") {
     CHECK(remesh::debugMinCostFlow());
 }
 
+// Phase 5d: the self-contained ternary-CSP solver that replaces QuadriFlow's
+// minisat shell-out for FixFlipSat. Repairs a flipped-but-loop-closed face,
+// reports UNSAT on an over-pinned inconsistent system, preserves an already-valid
+// assignment, and times out (leaving the value untouched) under a zero budget.
+TEST_CASE("flip repair: ternary-CSP solver is correct") {
+    CHECK(remesh::debugTernaryCsp());
+}
+
 // Milestone 2 — the integer solve. On a closed genus-0 icosphere the min-cost
 // flow must cancel most of the position-field's spurious divergences: the residual
 // recomputed from the edge diffs / orientations matches the position singularities

@@ -1329,6 +1329,196 @@ std::size_t countFlipped(const IntegerGrid& g) {
     return n;
 }
 
+// --- Phase 5d: self-contained bounded ternary-CSP solver -----------------------
+// The flip-repair SAT patch (QuadriFlow FixFlipSat) is a small constraint problem
+// over ternary variables v[i] in {-1,0,+1} (the unit edge-diff components): hard
+// linear equalities (per-face loop closure) and hard inequalities (per-face
+// no-flip, signed area >= 0). QuadriFlow solves it by shelling out to the external
+// `minisat` binary (localsat.cpp:39); we forbid that dependency, so this is a
+// self-contained backtracking search — arc-consistency on the equalities, most-
+// constrained-variable branching preferring each variable's current value (minimal
+// change, like minisat's polarity bias), bounded by a node budget so it stays
+// local and never hangs. On Sat it writes the assignment back; on Unsat/Timeout it
+// leaves `value` untouched (identical no-op semantics to minisat UNSAT / timeout).
+
+enum class SatStatus { Sat, Unsat, Timeout };
+
+struct EqRow {  // sa*v[a] + sb*v[b] + sc*v[c] == 0
+    int a, b, c, sa, sb, sc;
+};
+struct GeRow {  // k0*v[a]*v[b] - k1*v[c]*v[d] >= 0  (a face's signed area)
+    int a, b, c, d, k0, k1;
+};
+
+class TernaryCsp {
+public:
+    TernaryCsp(std::vector<int>& value, const std::vector<char>& flexible, std::vector<EqRow> eqs,
+               std::vector<GeRow> ges, long nodeCap)
+        : m_value(value), m_eqs(std::move(eqs)), m_ges(std::move(ges)), m_cap(nodeCap) {
+        m_dom.resize(value.size());
+        for (std::size_t i = 0; i < value.size(); ++i) {
+            m_dom[i] = flexible[i] ? std::uint8_t{0b111} : maskOf(value[i]);
+        }
+    }
+
+    SatStatus solve() {
+        if (!propagate()) {
+            return SatStatus::Unsat;
+        }
+        const SatStatus s = search();
+        if (s == SatStatus::Sat) {
+            for (std::size_t i = 0; i < m_dom.size(); ++i) {
+                m_value[i] = lowValue(m_dom[i]);
+            }
+        }
+        return s;
+    }
+
+private:
+    static std::uint8_t maskOf(int v) { return static_cast<std::uint8_t>(1 << (v + 1)); }
+    static bool has(std::uint8_t d, int v) { return (d & maskOf(v)) != 0; }
+    static int popcnt(std::uint8_t d) { return (d & 1) + ((d >> 1) & 1) + ((d >> 2) & 1); }
+    static int lowValue(std::uint8_t d) { return (d & 1) ? -1 : ((d & 2) ? 0 : 1); }
+
+    // Generalised arc-consistency over one equality's three ternary variables:
+    // keep only values that appear in some in-domain zero-sum tuple.
+    bool narrowEq(const EqRow& e, bool& changed) {
+        std::uint8_t okA = 0, okB = 0, okC = 0;
+        for (int va = -1; va <= 1; ++va) {
+            if (!has(m_dom[static_cast<std::size_t>(e.a)], va)) continue;
+            for (int vb = -1; vb <= 1; ++vb) {
+                if (!has(m_dom[static_cast<std::size_t>(e.b)], vb)) continue;
+                for (int vc = -1; vc <= 1; ++vc) {
+                    if (!has(m_dom[static_cast<std::size_t>(e.c)], vc)) continue;
+                    if (e.sa * va + e.sb * vb + e.sc * vc == 0) {
+                        okA |= maskOf(va);
+                        okB |= maskOf(vb);
+                        okC |= maskOf(vc);
+                    }
+                }
+            }
+        }
+        return narrow(e.a, okA, changed) && narrow(e.b, okB, changed) &&
+               narrow(e.c, okC, changed);
+    }
+
+    // A no-flip inequality: enforce only once <= 1 of its 4 vars is still free.
+    bool checkGe(const GeRow& g, bool& changed) {
+        const int idx[4] = {g.a, g.b, g.c, g.d};
+        int freeVar = -1, nFree = 0;
+        for (const int v : idx) {
+            if (popcnt(m_dom[static_cast<std::size_t>(v)]) > 1) {
+                freeVar = v;
+                ++nFree;
+            }
+        }
+        const auto cur = [&](int i) { return lowValue(m_dom[static_cast<std::size_t>(i)]); };
+        const auto pick = [&](int i, int trial) { return i == freeVar ? trial : cur(i); };
+        const auto area = [&](int t) {
+            return g.k0 * pick(g.a, t) * pick(g.b, t) - g.k1 * pick(g.c, t) * pick(g.d, t);
+        };
+        if (nFree == 0) {
+            return g.k0 * cur(g.a) * cur(g.b) - g.k1 * cur(g.c) * cur(g.d) >= 0;
+        }
+        if (nFree == 1) {
+            std::uint8_t ok = 0;
+            for (int val = -1; val <= 1; ++val) {
+                if (has(m_dom[static_cast<std::size_t>(freeVar)], val) && area(val) >= 0) {
+                    ok |= maskOf(val);
+                }
+            }
+            return narrow(freeVar, ok, changed);
+        }
+        return true;
+    }
+
+    bool narrow(int var, std::uint8_t ok, bool& changed) {
+        const std::size_t uv = static_cast<std::size_t>(var);
+        const std::uint8_t nd = static_cast<std::uint8_t>(m_dom[uv] & ok);
+        if (nd != m_dom[uv]) {
+            m_dom[uv] = nd;
+            changed = true;
+        }
+        return nd != 0;
+    }
+
+    bool propagate() {
+        bool changed = true;
+        while (changed) {
+            changed = false;
+            for (const EqRow& e : m_eqs) {
+                if (!narrowEq(e, changed)) return false;
+            }
+            for (const GeRow& g : m_ges) {
+                if (!checkGe(g, changed)) return false;
+            }
+        }
+        return true;
+    }
+
+    int pickVar() const {
+        int best = -1, bestPc = 4;
+        for (std::size_t i = 0; i < m_dom.size(); ++i) {
+            const int pc = popcnt(m_dom[i]);
+            if (pc > 1 && pc < bestPc) {
+                bestPc = pc;
+                best = static_cast<int>(i);
+            }
+        }
+        return best;
+    }
+
+    SatStatus search() {
+        if (++m_nodes > m_cap) {
+            return SatStatus::Timeout;
+        }
+        const int v = pickVar();
+        if (v == -1) {
+            return SatStatus::Sat;  // every domain singleton and consistent
+        }
+        const std::size_t uv = static_cast<std::size_t>(v);
+        // Value order: the variable's current value first (minimal-change bias),
+        // then the remaining two — always covers all of {-1,0,+1}.
+        const int cur = m_value[uv];
+        int order[3];
+        int k = 0;
+        if (cur >= -1 && cur <= 1) {
+            order[k++] = cur;
+        }
+        for (int val = -1; val <= 1; ++val) {
+            if (val != cur) {
+                order[k++] = val;
+            }
+        }
+        for (const int val : order) {
+            if (!has(m_dom[uv], val)) continue;
+            const std::vector<std::uint8_t> saved = m_dom;
+            m_dom[uv] = maskOf(val);
+            if (propagate()) {
+                const SatStatus s = search();
+                if (s != SatStatus::Unsat) {
+                    return s;  // Sat (keep domains) or Timeout (abort)
+                }
+            }
+            m_dom = saved;
+        }
+        return SatStatus::Unsat;
+    }
+
+    std::vector<int>& m_value;
+    std::vector<std::uint8_t> m_dom;
+    std::vector<EqRow> m_eqs;
+    std::vector<GeRow> m_ges;
+    long m_nodes = 0;
+    long m_cap;
+};
+
+SatStatus solveTernaryCsp(std::vector<int>& value, const std::vector<char>& flexible,
+                          std::vector<EqRow> eqs, std::vector<GeRow> ges, long nodeCap) {
+    TernaryCsp csp(value, flexible, std::move(eqs), std::move(ges), nodeCap);
+    return csp.solve();
+}
+
 // A coarsened edge-graph hierarchy over (FQ, F2E, E2F, EdgeDiff): each level
 // contracts an independent set of zero-diff edges, chaining orientations across
 // merged strips. `back()` is the coarsest grid where each face is ~one integer cell.
@@ -2769,6 +2959,66 @@ FlipRepairStats debugFlipRepair(const Mesh& mesh, const PositionField& field) {
     st.flippedAfter = countFlipped(g);
     st.residualAfter = countResidualSingularities(g);
     return st;
+}
+
+bool debugTernaryCsp() {
+    // Case A — a face that is loop-closed (v0+v1+v2==0) but flipped (area < 0);
+    // the solver must find a satisfying, non-flipped ternary assignment.
+    {
+        std::vector<int> value{1, 0, -1, -1};
+        const std::vector<char> flex{1, 1, 1, 1};
+        std::vector<EqRow> eqs{{0, 1, 2, 1, 1, 1}};
+        std::vector<GeRow> ges{{0, 1, 2, 3, 1, 1}};
+        if (solveTernaryCsp(value, flex, eqs, ges, 50000) != SatStatus::Sat) {
+            return false;
+        }
+        if (value[0] + value[1] + value[2] != 0) {
+            return false;
+        }
+        if (value[0] * value[1] - value[2] * value[3] < 0) {
+            return false;
+        }
+    }
+    // Case B — all variables pinned to a loop-open assignment: UNSAT, unchanged.
+    {
+        std::vector<int> value{1, 1, 1, 0};
+        const std::vector<int> before = value;
+        const std::vector<char> flex{0, 0, 0, 0};
+        std::vector<EqRow> eqs{{0, 1, 2, 1, 1, 1}};  // 1+1+1 != 0
+        if (solveTernaryCsp(value, flex, eqs, {}, 50000) != SatStatus::Unsat) {
+            return false;
+        }
+        if (value != before) {
+            return false;
+        }
+    }
+    // Case C — already satisfied: SAT with the current assignment preserved.
+    {
+        std::vector<int> value{0, 0, 0, 0};
+        const std::vector<int> before = value;
+        const std::vector<char> flex{1, 1, 1, 1};
+        std::vector<EqRow> eqs{{0, 1, 2, 1, 1, 1}};
+        std::vector<GeRow> ges{{0, 1, 2, 3, 1, 1}};
+        if (solveTernaryCsp(value, flex, eqs, ges, 50000) != SatStatus::Sat) {
+            return false;
+        }
+        if (value != before) {
+            return false;  // minimal-change bias keeps a valid assignment as-is
+        }
+    }
+    // Case D — a real search with a zero node budget times out (value untouched).
+    {
+        std::vector<int> value{0, 0, 0};
+        const std::vector<int> before = value;
+        const std::vector<char> flex{1, 1, 1};
+        if (solveTernaryCsp(value, flex, {}, {}, 0) != SatStatus::Timeout) {
+            return false;
+        }
+        if (value != before) {
+            return false;
+        }
+    }
+    return true;
 }
 
 bool debugMinCostFlow() {

@@ -95,6 +95,11 @@ struct IntegerConsistency {
 // integer solve is built; not on the production path.
 [[nodiscard]] bool debugMinCostFlow();
 
+// Phase 5d: self-test of the bounded ternary-CSP solver that replaces QuadriFlow's
+// minisat shell-out (Sat repairs a flip, Unsat/Timeout leave the assignment
+// untouched). Returns true iff all internal cases pass.
+[[nodiscard]] bool debugTernaryCsp();
+
 // QuadriFlow's per-face joint-alignment position-singularity count: the number
 // of triangles whose summed integer edge-diffs (in the face's jointly-aligned
 // cross frame) are nonzero. These are the true position singularities the
