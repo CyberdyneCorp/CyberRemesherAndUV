@@ -55,14 +55,15 @@ struct SeamlessSetup {
 // continuous integer-grid UV. Two phases:
 //   (M2a) a cotangent Poisson solve per coordinate (grad(u,v) matches the combed frame field
 //         scaled to `spacing`) via Conjugate Gradient on accel::spmv — the RELAXED seam;
-//   (M2c) a constrained re-solve: the seam transitions are added as HARD linear equality
-//         constraints (rigidity: the shared edge vector transforms by R^rho) via a range-space
-//         (dual Schur) solve over the well-conditioned pinned Laplacian, and the integer
-//         translations are rounded greedily (round one, re-solve, repeat). This turns the
-//         non-rigid relaxed seam into a rigid integer grid so seamlessUvResidual drops to ~0.
+//   (M2c) a constrained re-solve: the seam transitions and gauge become HARD homogeneous
+//         constraints once the integer translations are promoted to variables; exact ±1
+//         Gauss-Jordan reduces them to independent DOF (reconciling branch-point holonomy),
+//         the reduced Dirichlet energy is CG-solved via accel::spmv, and the integer
+//         translations are rounded greedily. This turns the non-rigid relaxed seam into a
+//         rigid integer grid so seamlessUvResidual drops to ~0.
 // Output is PER-CORNER UV (cornerUv[faceId] = the 3 corner UVs). The integer phase uses a
-// dense dual whose cost grows with the seam-edge count, so it runs only for low-singularity
-// surfaces (a seam-count cap); larger meshes keep the relaxed UV (residual > 0).
+// sparse constraint elimination (no dense dual, no seam cap), so it scales to meshes with
+// hundreds of singularities (e.g. spot: 92 cones).
 struct Parameterization {
     std::vector<std::array<Vec2, 3>> cornerUv;  // per FaceId; empty array for dead faces
     int cutVertexCount = 0;   // vertices of the cut-open (disk) mesh the solve ran on

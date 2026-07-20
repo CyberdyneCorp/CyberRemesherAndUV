@@ -337,26 +337,6 @@ int conjugateGradient(accel::IBackend& backend, const accel::SparseMatrix& A,
     return it;
 }
 
-// A single linear equality constraint:  sum_k terms[k].coeff * z[terms[k].col] == rhs.
-struct ConstraintRow {
-    std::vector<std::pair<std::size_t, double>> terms;
-    double rhs = 0.0;
-};
-
-// Add coeff * z[col] to a constraint row, accumulating if col already present.
-void addTerm(ConstraintRow& row, std::size_t col, double coeff) {
-    if (coeff == 0.0) {
-        return;
-    }
-    for (auto& [c, w] : row.terms) {
-        if (c == col) {
-            w += coeff;
-            return;
-        }
-    }
-    row.terms.emplace_back(col, coeff);
-}
-
 // Coefficients of R^rho applied to a (u,v) pair, R = CCW (u,v) -> (-v,u):
 //   (R^rho (u,v))_x = cxu*u + cxv*v ;  (R^rho (u,v))_y = cyu*u + cyv*v.
 void rotCoeffs(int rho, double& cxu, double& cxv, double& cyu, double& cyv) {
@@ -428,316 +408,372 @@ struct SeamRef {
     int rho = 0;
 };
 
-// Build the translation functional t = uv_B(p) - R^rho uv_A(p) at one endpoint p of a seam
-// edge (p given by its side-A/side-B cut ids pA,pB), as two scalar constraint rows (x,y)
-// with rhs 0 (the caller sets rhs when rounding). ux(c)=c, vx(c)=nCut+c.
-void seamTranslationRows(std::size_t nCut, std::size_t pA, std::size_t pB, int rho,
-                         ConstraintRow& rowX, ConstraintRow& rowY) {
-    double cxu, cxv, cyu, cyv;
-    rotCoeffs(rho, cxu, cxv, cyu, cyv);
-    addTerm(rowX, pB, 1.0);
-    addTerm(rowX, pA, -cxu);
-    addTerm(rowX, nCut + pA, -cxv);
-    addTerm(rowY, nCut + pB, 1.0);
-    addTerm(rowY, pA, -cyu);
-    addTerm(rowY, nCut + pA, -cyv);
-}
+// Sparse constraint-elimination MIQ (docs/native-miq-plan.md, "M2c-sparse"). The seam
+// rigidity uv_B = R^rho uv_A + t (t an integer 2-vector shared by both endpoints of a seam
+// edge) plus the gauge pin are HOMOGENEOUS linear constraints ONCE the integer translations
+// are promoted to extra variables z = [u | v | t]. Every rotation/translation coefficient is
+// +-1, so exact Gauss-Jordan elimination reduces z to independent DOF w with a sparse
+// reduction map z = T w. This automatically reconciles branch-point holonomy: a regular
+// cut-junction closes to a pure-integer row that eliminates one redundant translation, and a
+// cone closes to a pin of its representative. The surviving independent integers are therefore
+// UNCONSTRAINED -- rounding them to ANY integers keeps the map seamless (the dependent integers
+// stay integer as +-1 combinations, cones land on the half-integer lattice). We minimise the
+// reduced Dirichlet energy (CG on T^T blkdiag(L,L) T via accel::spmv), greedily round the
+// integers (round the most-confident, fix it, re-solve), and reconstruct z = T w. Scales to
+// hundreds of singularities: no dense dual, no seam cap. Returns total CG iterations.
+int solveSeamlessReduced(accel::IBackend& backend, std::size_t nCut,
+                         const std::vector<std::unordered_map<std::size_t, float>>& rows,
+                         const std::vector<float>& bu, const std::vector<float>& bv,
+                         const std::vector<SeamRef>& seams, std::size_t gauge,
+                         std::vector<float>& u, std::vector<float>& v) {
+    const std::size_t nSeam = seams.size();
+    const std::size_t nUv = 2 * nCut;
+    const std::size_t N = nUv + 2 * nSeam;
+    const auto uIx = [](std::size_t c) { return c; };
+    const auto vIx = [nCut](std::size_t c) { return nCut + c; };
+    const auto txIx = [nCut](std::size_t e) { return 2 * nCut + 2 * e; };
+    const auto tyIx = [nCut](std::size_t e) { return 2 * nCut + 2 * e + 1; };
 
-// Re-solve the Dirichlet energy (H, g from the cotan rows + divergence RHS) with the seam
-// transitions as HARD equality constraints, greedily rounding the integer translations so
-// the result is integer-seamless. `u`,`v` come in as the relaxed solution (warm start) and
-// go out as the constrained solution. poleCut is the gauge vertex pinned to the origin.
-// Returns total CG iterations.
-int solveSeamlessConstrained(accel::IBackend& backend, std::size_t nCut,
-                             const std::vector<std::unordered_map<std::size_t, float>>& rows,
-                             const std::vector<float>& bu, const std::vector<float>& bv,
-                             const std::vector<SeamRef>& seams, std::size_t poleCut,
-                             std::vector<float>& u, std::vector<float>& v) {
-    const auto ux = [](std::size_t c) { return c; };
-    const auto vx = [nCut](std::size_t c) { return nCut + c; };
-
-    // The energy Hessian is blkdiag(Lp, Lp) with Lp the cotan Laplacian pinned at poleCut
-    // (identity row) so it is SPD; both u and v are solved against the SAME Lp. We solve the
-    // constrained problem in the RANGE space of Lp^{-1}: every constraint costs only a
-    // well-conditioned Lp-solve (Conjugate Gradient), so it stays fast even with many
-    // constraints. Build Lp as CSR, and the pinned divergence RHS gu, gv.
-    accel::SparseMatrix Lp;
-    Lp.rows = nCut;
-    Lp.rowStart.reserve(nCut + 1);
-    Lp.rowStart.push_back(0);
-    std::vector<float> gu(nCut, 0.0f), gv(nCut, 0.0f);
-    for (std::size_t i = 0; i < nCut; ++i) {
-        if (i == poleCut || rows[i].empty()) {
-            Lp.colIndex.push_back(i);
-            Lp.value.push_back(1.0f);
-            gu[i] = (i == poleCut) ? 0.0f : ((rows[i].empty()) ? 0.0f : bu[i]);
-            gv[i] = (i == poleCut) ? 0.0f : ((rows[i].empty()) ? 0.0f : bv[i]);
-            Lp.rowStart.push_back(Lp.colIndex.size());
-            continue;
+    using Row = std::unordered_map<std::size_t, double>;
+    const auto addC = [](Row& r, std::size_t c, double w) {
+        if (w != 0.0) {
+            r[c] += w;
         }
-        for (const auto& [j, w] : rows[i]) {
-            if (j == poleCut) {
-                continue;  // pinned to 0 -> no coupling
+    };
+    const double eps = 1e-7;
+    const auto prune = [&](Row& r) {
+        for (auto it = r.begin(); it != r.end();) {
+            if (std::abs(it->second) < eps) {
+                it = r.erase(it);
+            } else {
+                ++it;
             }
-            Lp.colIndex.push_back(j);
-            Lp.value.push_back(w);
         }
-        Lp.rowStart.push_back(Lp.colIndex.size());
-        gu[i] = bu[i];
-        gv[i] = bv[i];
-    }
+    };
 
-    // Fixed constraints: rigidity of every seam edge (the gauge pole is already pinned in Lp).
-    std::vector<ConstraintRow> fixed;
-    for (const SeamRef& s : seams) {
+    // Homogeneous constraint rows (== 0): 4 per seam edge (x,y at each endpoint) + gauge.
+    std::vector<Row> cons;
+    cons.reserve(4 * nSeam + 2);
+    for (std::size_t e = 0; e < nSeam; ++e) {
+        const SeamRef& s = seams[e];
         double cxu, cxv, cyu, cyv;
         rotCoeffs(s.rho, cxu, cxv, cyu, cyv);
-        // [uv_B(b) - uv_B(a)] - R^rho [uv_A(b) - uv_A(a)] = 0, as x and y rows.
-        ConstraintRow rx, ry;
-        addTerm(rx, ux(s.bB), 1.0);
-        addTerm(rx, ux(s.aB), -1.0);
-        addTerm(rx, ux(s.bA), -cxu);
-        addTerm(rx, ux(s.aA), cxu);
-        addTerm(rx, vx(s.bA), -cxv);
-        addTerm(rx, vx(s.aA), cxv);
-        addTerm(ry, vx(s.bB), 1.0);
-        addTerm(ry, vx(s.aB), -1.0);
-        addTerm(ry, ux(s.bA), -cyu);
-        addTerm(ry, ux(s.aA), cyu);
-        addTerm(ry, vx(s.bA), -cyv);
-        addTerm(ry, vx(s.aA), cyv);
-        fixed.push_back(std::move(rx));
-        fixed.push_back(std::move(ry));
-    }
-
-    // Integer functionals to round: one translation per seam SEGMENT (a maximal run of
-    // adjacent same-rho seam edges). Segments via union-find over seam edges sharing a cut id
-    // with equal rho.
-    std::vector<std::size_t> parent(seams.size());
-    std::iota(parent.begin(), parent.end(), std::size_t{0});
-    std::function<std::size_t(std::size_t)> find = [&](std::size_t x) {
-        while (parent[x] != x) {
-            parent[x] = parent[parent[x]];
-            x = parent[x];
-        }
-        return x;
-    };
-    std::unordered_map<std::size_t, std::vector<std::size_t>> byCut;
-    for (std::size_t i = 0; i < seams.size(); ++i) {
-        for (std::size_t c : {seams[i].aA, seams[i].bA, seams[i].aB, seams[i].bB}) {
-            byCut[c].push_back(i);
-        }
-    }
-    for (const auto& [c, list] : byCut) {
-        for (std::size_t k = 1; k < list.size(); ++k) {
-            if (seams[list[k]].rho == seams[list[0]].rho) {
-                parent[find(list[k])] = find(list[0]);
+        const std::array<std::pair<std::size_t, std::size_t>, 2> ends{
+            std::make_pair(s.aA, s.aB), std::make_pair(s.bA, s.bB)};
+        for (const auto& [pA, pB] : ends) {
+            Row rx, ry;
+            addC(rx, uIx(pB), 1.0);
+            addC(rx, uIx(pA), -cxu);
+            addC(rx, vIx(pA), -cxv);
+            addC(rx, txIx(e), -1.0);
+            addC(ry, vIx(pB), 1.0);
+            addC(ry, uIx(pA), -cyu);
+            addC(ry, vIx(pA), -cyv);
+            addC(ry, tyIx(e), -1.0);
+            prune(rx);
+            prune(ry);
+            if (!rx.empty()) {
+                cons.push_back(std::move(rx));
+            }
+            if (!ry.empty()) {
+                cons.push_back(std::move(ry));
             }
         }
     }
-    std::vector<ConstraintRow> funcs;
-    std::unordered_map<std::size_t, bool> segSeen;
-    for (std::size_t i = 0; i < seams.size(); ++i) {
-        const std::size_t root = find(i);
-        if (segSeen[root]) {
-            continue;
-        }
-        segSeen[root] = true;
-        // Reference endpoint where the two side copies differ (well-defined translation).
-        const SeamRef& s = seams[i];
-        ConstraintRow rx, ry;
-        if (s.aA != s.aB) {
-            seamTranslationRows(nCut, s.aA, s.aB, s.rho, rx, ry);
-        } else {
-            seamTranslationRows(nCut, s.bA, s.bB, s.rho, rx, ry);
-        }
-        funcs.push_back(std::move(rx));
-        funcs.push_back(std::move(ry));
+    {
+        Row rg;
+        addC(rg, uIx(gauge), 1.0);
+        cons.push_back(std::move(rg));
+        Row rh;
+        addC(rh, vIx(gauge), 1.0);
+        cons.push_back(std::move(rh));
     }
-    // NOTE: singularity vertices are deliberately NOT pinned to the lattice. Their positions
-    // are fixed points of the cone rotation and are determined by the segment translations via
-    // closure; pinning them independently over-constrains the system (breaks rigidity / blows
-    // up the scale). Rigidity + integer segment translations already land the cone leaf edges
-    // on the grid.
 
-    const bool dbg = std::getenv("CYBER_QC_DEBUG") != nullptr;
-    if (dbg) {
-        std::fprintf(stderr, "[qc] pre-greedy: nCut=%zu seams=%zu rigidity=%zu funcs(segments*2)=%zu\n",
-                     nCut, seams.size(), fixed.size(), funcs.size());
-    }
-    int totalCg = 0;
-    std::vector<double> z(2 * nCut, 0.0);
-
-    // Range-space (dual Schur) solve of  min (1/2)z^T H z - g^T z  s.t.  C z = d, with
-    // H = blkdiag(Lp,Lp):  z = H^{-1}g + H^{-1}C^T mu,  (C H^{-1} C^T) mu = d - C H^{-1}g.
-    // Each column H^{-1}c_k^T is one Lp-solve per coordinate block (poleCut terms dropped —
-    // that variable is fixed at 0). A tiny ridge absorbs redundant (but consistent) rigidity
-    // rows. Returns z into the captured vector.
-    const auto lpSolve = [&](const std::vector<float>& rhs) {
-        std::vector<float> x(nCut, 0.0f);
-        totalCg += conjugateGradient(backend, Lp, rhs, x, static_cast<int>(nCut) + 500, 1e-10f);
-        return x;
-    };
-    const auto colFull = [&](const std::vector<float>& xu, const std::vector<float>& xv,
-                             std::size_t col) {
-        return (col < nCut) ? static_cast<double>(xu[col])
-                            : static_cast<double>(xv[col - nCut]);
-    };
-    // The particular solution H^{-1}g and the constraint columns H^{-1}c_k^T are constant
-    // across greedy steps, so compute them once and only append the newly-pinned column each
-    // step (the expensive Lp-solves are never repeated). Xu/Xv are the cached columns.
-    const std::vector<float> y0u = lpSolve(gu), y0v = lpSolve(gv);
-    std::vector<std::vector<float>> Xu, Xv;
-    const auto addColumn = [&](const ConstraintRow& c) {
-        std::vector<float> cu(nCut, 0.0f), cv(nCut, 0.0f);
-        for (const auto& [col, coeff] : c.terms) {
-            if (col == poleCut || col == nCut + poleCut) {
-                continue;  // fixed variable
-            }
-            if (col < nCut) {
-                cu[col] += static_cast<float>(coeff);
+    // Gauss-Jordan elimination. pivotExpr[j] (valid where isPivot[j]) gives dependent variable
+    // j as an affine-free combination of the surviving independent variables. Pivots prefer a
+    // CONTINUOUS variable (so integer translations stay free to be rounded); a unit coefficient
+    // is preferred to keep the elimination integer-exact.
+    std::vector<char> isPivot(N, 0);
+    std::vector<Row> pivotExpr(N);
+    for (Row& raw : cons) {
+        Row cur;
+        for (const auto& [c, w] : raw) {
+            if (isPivot[c]) {
+                for (const auto& [c2, w2] : pivotExpr[c]) {
+                    cur[c2] += w * w2;
+                }
             } else {
-                cv[col - nCut] += static_cast<float>(coeff);
+                cur[c] += w;
             }
         }
-        Xu.push_back(lpSolve(cu));
-        Xv.push_back(lpSolve(cv));
-    };
-    for (const ConstraintRow& c : fixed) {
-        addColumn(c);
+        prune(cur);
+        if (cur.empty()) {
+            continue;  // redundant (holonomy already reconciled)
+        }
+        std::size_t pv = N;
+        int bestScore = -1;
+        double bestMag = 0.0;
+        for (const auto& [c, w] : cur) {
+            const bool cont = c < nUv;
+            const bool unit = std::abs(std::abs(w) - 1.0) < 1e-6;
+            const int score = (cont ? 2 : 0) + (unit ? 1 : 0);
+            if (score > bestScore || (score == bestScore && std::abs(w) > bestMag)) {
+                bestScore = score;
+                bestMag = std::abs(w);
+                pv = c;
+            }
+        }
+        const double cpv = cur[pv];
+        Row expr;
+        for (const auto& [c, w] : cur) {
+            if (c != pv) {
+                expr[c] = -w / cpv;
+            }
+        }
+        // Back-substitute the new pivot into every existing pivot expression (Gauss-Jordan), so
+        // all pivot expressions stay in independent variables only.
+        for (std::size_t k = 0; k < N; ++k) {
+            if (!isPivot[k]) {
+                continue;
+            }
+            auto it = pivotExpr[k].find(pv);
+            if (it == pivotExpr[k].end()) {
+                continue;
+            }
+            const double coeff = it->second;
+            pivotExpr[k].erase(it);
+            for (const auto& [c, w] : expr) {
+                pivotExpr[k][c] += coeff * w;
+            }
+            prune(pivotExpr[k]);
+        }
+        isPivot[pv] = 1;
+        pivotExpr[pv] = std::move(expr);
     }
-    // Solve the dual (C H^{-1} C^T + ridge) mu = d - C H^{-1} g from the cached columns, then
-    // z = y0 + sum_j mu_j X_j.
-    const auto solveDual = [&]() {
-        const std::size_t m = fixed.size();
-        std::vector<std::vector<double>> S(m, std::vector<double>(m + 1, 0.0));
-        for (std::size_t i = 0; i < m; ++i) {
-            for (std::size_t j = 0; j < m; ++j) {
-                double s = 0.0;
-                for (const auto& [col, coeff] : fixed[i].terms) {
-                    if (col == poleCut || col == nCut + poleCut) {
+
+    // Independent variables -> reduced index; classify integer (translation) frees for rounding.
+    std::vector<std::size_t> freeIx(N, kInvalidIndex);
+    std::vector<std::size_t> intFree;  // reduced indices of independent integer translations
+    std::size_t W = 0;
+    for (std::size_t j = 0; j < N; ++j) {
+        if (!isPivot[j]) {
+            freeIx[j] = W++;
+            if (j >= nUv) {
+                intFree.push_back(freeIx[j]);
+            }
+        }
+    }
+
+    // Reduction map on the UV block only: Tuv (nUv x W) and its transpose Tt (W x nUv).
+    const auto buildCsr = [](std::size_t nr, const std::vector<std::vector<std::pair<std::size_t, double>>>& r) {
+        accel::SparseMatrix m;
+        m.rows = nr;
+        m.rowStart.reserve(nr + 1);
+        m.rowStart.push_back(0);
+        for (std::size_t i = 0; i < nr; ++i) {
+            for (const auto& [c, w] : r[i]) {
+                m.colIndex.push_back(c);
+                m.value.push_back(static_cast<float>(w));
+            }
+            m.rowStart.push_back(m.colIndex.size());
+        }
+        return m;
+    };
+    std::vector<std::vector<std::pair<std::size_t, double>>> tuvRows(nUv), ttRows(W);
+    for (std::size_t j = 0; j < nUv; ++j) {
+        if (!isPivot[j]) {
+            tuvRows[j].emplace_back(freeIx[j], 1.0);
+            ttRows[freeIx[j]].emplace_back(j, 1.0);
+        } else {
+            for (const auto& [c, w] : pivotExpr[j]) {
+                tuvRows[j].emplace_back(freeIx[c], w);
+                ttRows[freeIx[c]].emplace_back(j, w);
+            }
+        }
+    }
+    const accel::SparseMatrix Tuv = buildCsr(nUv, tuvRows);
+    const accel::SparseMatrix Tt = buildCsr(W, ttRows);
+
+    // L2 = blkdiag(L, L) over the UV block, from the unpinned cotan rows.
+    accel::SparseMatrix L2;
+    L2.rows = nUv;
+    L2.rowStart.reserve(nUv + 1);
+    L2.rowStart.push_back(0);
+    for (std::size_t half = 0; half < 2; ++half) {
+        for (std::size_t i = 0; i < nCut; ++i) {
+            for (const auto& [j, w] : rows[i]) {
+                L2.colIndex.push_back(half * nCut + j);
+                L2.value.push_back(w);
+            }
+            L2.rowStart.push_back(L2.colIndex.size());
+        }
+    }
+
+    // Reduced gradient gRed = Tt * g, g = [bu | bv].
+    std::vector<float> g(nUv, 0.0f);
+    for (std::size_t i = 0; i < nCut; ++i) {
+        g[i] = bu[i];
+        g[nCut + i] = bv[i];
+    }
+    accel::Buffer<float> gBuf(g), gRed;
+    accel::spmv(backend, Tt, gBuf, gRed);
+    const std::vector<float> gReduced(gRed.data(), gRed.data() + gRed.size());
+
+    // Reduced operator A(p) = Tt * L2 * Tuv * p, applied via three spmv.
+    accel::Buffer<float> tmpUv, tmpUv2, outBuf, pBuf;
+    const auto applyA = [&](const std::vector<float>& p, std::vector<float>& out) {
+        pBuf.upload(p);
+        accel::spmv(backend, Tuv, pBuf, tmpUv);
+        accel::spmv(backend, L2, tmpUv, tmpUv2);
+        accel::spmv(backend, Tt, tmpUv2, outBuf);
+        out.assign(outBuf.data(), outBuf.data() + outBuf.size());
+    };
+
+    // Masked Conjugate Gradient: solve A w = rhs over coordinates with mask==1 (others held at
+    // their current w, folded into the effective RHS). Small ridge keeps A well-conditioned.
+    std::vector<float> w(W, 0.0f);
+    int totalCg = 0;
+    const double ridge = 1e-8;
+    const auto maskedSolve = [&](const std::vector<char>& mask) {
+        // rhsEff = gReduced - A(wFixed), wFixed = w on !mask, 0 on mask.
+        std::vector<float> wFixed(W, 0.0f);
+        for (std::size_t i = 0; i < W; ++i) {
+            if (!mask[i]) {
+                wFixed[i] = w[i];
+            }
+        }
+        std::vector<float> Aw;
+        applyA(wFixed, Aw);
+        std::vector<float> rhs(W);
+        for (std::size_t i = 0; i < W; ++i) {
+            rhs[i] = mask[i] ? (gReduced[i] - Aw[i]) : 0.0f;
+        }
+        // CG on the masked subspace, warm-started from the current w on mask coords (so each
+        // greedy re-solve, which only perturbs one fixed integer, converges in a few iters).
+        std::vector<float> x(W, 0.0f);
+        for (std::size_t i = 0; i < W; ++i) {
+            if (mask[i]) {
+                x[i] = w[i];
+            }
+        }
+        std::vector<float> Ax;
+        applyA(x, Ax);  // x already lives on mask coords only
+        std::vector<float> r(W), pv(W), Ap;
+        double rs = 0.0;
+        for (std::size_t i = 0; i < W; ++i) {
+            if (mask[i]) {
+                r[i] = rhs[i] - (Ax[i] + static_cast<float>(ridge) * x[i]);
+                pv[i] = r[i];
+                rs += static_cast<double>(r[i]) * r[i];
+            } else {
+                r[i] = 0.0f;
+                pv[i] = 0.0f;
+            }
+        }
+        const double rs0 = rs;
+        if (rs0 > 0.0) {
+            const int maxIt = static_cast<int>(W) + 1000;
+            for (int it = 0; it < maxIt; ++it) {
+                applyA(pv, Ap);
+                double pAp = 0.0;
+                for (std::size_t i = 0; i < W; ++i) {
+                    if (mask[i]) {
+                        Ap[i] += static_cast<float>(ridge) * pv[i];
+                        pAp += static_cast<double>(pv[i]) * Ap[i];
+                    } else {
+                        Ap[i] = 0.0f;
+                    }
+                }
+                ++totalCg;
+                if (pAp <= 0.0) {
+                    break;
+                }
+                const double alpha = rs / pAp;
+                double rsNew = 0.0;
+                for (std::size_t i = 0; i < W; ++i) {
+                    if (!mask[i]) {
                         continue;
                     }
-                    s += coeff * colFull(Xu[j], Xv[j], col);
+                    x[i] += static_cast<float>(alpha) * pv[i];
+                    r[i] -= static_cast<float>(alpha * static_cast<double>(Ap[i]));
+                    rsNew += static_cast<double>(r[i]) * r[i];
                 }
-                S[i][j] = s + ((i == j) ? 1e-9 : 0.0);  // ridge for redundant rows
-            }
-            double cy = 0.0;
-            for (const auto& [col, coeff] : fixed[i].terms) {
-                if (col == poleCut || col == nCut + poleCut) {
-                    continue;
+                if (rsNew <= 1e-12 * rs0) {
+                    break;
                 }
-                cy += coeff * colFull(y0u, y0v, col);
-            }
-            S[i][m] = fixed[i].rhs - cy;
-        }
-        std::vector<double> mu(m, 0.0);
-        for (std::size_t c = 0; c < m; ++c) {  // Gaussian elimination, partial pivoting
-            std::size_t piv = c;
-            for (std::size_t r = c + 1; r < m; ++r) {
-                if (std::abs(S[r][c]) > std::abs(S[piv][c])) {
-                    piv = r;
+                const double beta = rsNew / rs;
+                for (std::size_t i = 0; i < W; ++i) {
+                    if (mask[i]) {
+                        pv[i] = r[i] + static_cast<float>(beta) * pv[i];
+                    }
                 }
-            }
-            std::swap(S[c], S[piv]);
-            const double diag = S[c][c];
-            if (std::abs(diag) < 1e-14) {
-                continue;
-            }
-            for (std::size_t r = 0; r < m; ++r) {
-                if (r == c) {
-                    continue;
-                }
-                const double f = S[r][c] / diag;
-                if (f == 0.0) {
-                    continue;
-                }
-                for (std::size_t cc = c; cc <= m; ++cc) {
-                    S[r][cc] -= f * S[c][cc];
-                }
+                rs = rsNew;
             }
         }
-        for (std::size_t c = 0; c < m; ++c) {
-            mu[c] = (std::abs(S[c][c]) < 1e-14) ? 0.0 : S[c][m] / S[c][c];
-        }
-        for (std::size_t i = 0; i < nCut; ++i) {
-            z[ux(i)] = static_cast<double>(y0u[i]);
-            z[vx(i)] = static_cast<double>(y0v[i]);
-        }
-        for (std::size_t j = 0; j < m; ++j) {
-            if (mu[j] == 0.0) {
-                continue;
-            }
-            for (std::size_t i = 0; i < nCut; ++i) {
-                z[ux(i)] += mu[j] * static_cast<double>(Xu[j][i]);
-                z[vx(i)] += mu[j] * static_cast<double>(Xv[j][i]);
+        for (std::size_t i = 0; i < W; ++i) {
+            if (mask[i]) {
+                w[i] = x[i];
             }
         }
     };
 
-    // Greedy integer rounding: solve, pin the most-confident (closest-to-integer) functional,
-    // re-solve, repeat — so the continuous variables absorb each rounding and the remaining
-    // transitions stay near-integer (MIQ-style rounding, holonomy handled by the re-solve).
-    std::vector<char> pinned(funcs.size(), 0);
-    solveDual();
-    for (std::size_t step = 0; step < funcs.size(); ++step) {
-        std::size_t best = funcs.size();
-        double bestFrac = 1e30, bestVal = 0.0;
-        for (std::size_t k = 0; k < funcs.size(); ++k) {
-            if (pinned[k]) {
+    // Relaxed solve (all frees active), then BATCHED greedy integer rounding: each round pins
+    // every still-free integer that is already confidently near an integer (|frac| <= kConfident)
+    // and re-solves, so the continuous DOF absorb the rounding MIQ-style while the solve count
+    // stays small (a few rounds, not one per integer). If a round pins nothing, fall back to the
+    // single most-confident so it always terminates. Seamlessness holds for any integer values
+    // (the reduction makes the free integers unconstrained); rounding only shapes distortion.
+    std::vector<char> mask(W, 1);
+    maskedSolve(mask);
+    std::vector<char> intPinned(intFree.size(), 0);
+    constexpr double kConfident = 0.2;
+    std::size_t remaining = intFree.size();
+    while (remaining > 0) {
+        std::size_t closest = intFree.size();
+        double bestFrac = 2.0;
+        std::size_t pinnedThisRound = 0;
+        for (std::size_t k = 0; k < intFree.size(); ++k) {
+            if (intPinned[k]) {
                 continue;
             }
-            double val = 0.0;
-            for (const auto& [col, coeff] : funcs[k].terms) {
-                val += coeff * z[col];
-            }
+            const std::size_t ri = intFree[k];
+            const double val = static_cast<double>(w[ri]);
             const double frac = std::abs(val - std::round(val));
             if (frac < bestFrac) {
                 bestFrac = frac;
-                best = k;
-                bestVal = val;
+                closest = k;
+            }
+            if (frac <= kConfident) {
+                w[ri] = static_cast<float>(std::round(val));
+                mask[ri] = 0;
+                intPinned[k] = 1;
+                --remaining;
+                ++pinnedThisRound;
             }
         }
-        if (best == funcs.size()) {
-            break;
+        if (pinnedThisRound == 0) {  // nothing confident: pin the single closest
+            const std::size_t ri = intFree[closest];
+            w[ri] = static_cast<float>(std::round(static_cast<double>(w[ri])));
+            mask[ri] = 0;
+            intPinned[closest] = 1;
+            --remaining;
         }
-        pinned[best] = 1;
-        ConstraintRow row = funcs[best];
-        row.rhs = std::round(bestVal);
-        fixed.push_back(row);
-        addColumn(row);
-        solveDual();
-    }
-    if (dbg) {
-        double umin = 1e30, umax = -1e30, rigMax = 0.0, resMax = 0.0;
-        int bad = 0;
-        for (const SeamRef& s : seams) {
-            umin = std::min({umin, z[ux(s.aA)], z[ux(s.bA)]});
-            umax = std::max({umax, z[ux(s.aA)], z[ux(s.bA)]});
-            double cxu, cxv, cyu, cyv;
-            rotCoeffs(s.rho, cxu, cxv, cyu, cyv);
-            const double dAu = z[ux(s.bA)] - z[ux(s.aA)], dAv = z[vx(s.bA)] - z[vx(s.aA)];
-            const double dBu = z[ux(s.bB)] - z[ux(s.aB)], dBv = z[vx(s.bB)] - z[vx(s.aB)];
-            rigMax = std::max({rigMax, std::abs(dBu - (cxu * dAu + cxv * dAv)),
-                               std::abs(dBv - (cyu * dAu + cyv * dAv))});
-            const double tx = z[ux(s.aB)] - (cxu * z[ux(s.aA)] + cxv * z[vx(s.aA)]);
-            const double ty = z[vx(s.aB)] - (cyu * z[ux(s.aA)] + cyv * z[vx(s.aA)]);
-            const double f = std::max(std::abs(tx - std::round(tx)), std::abs(ty - std::round(ty)));
-            resMax = std::max(resMax, f);
-            if (f > 1e-3) {
-                ++bad;
-            }
-        }
-        std::fprintf(stderr,
-                     "[qc] nCut=%zu seams=%zu funcs=%zu totalCg=%d uRange=[%.2f,%.2f] "
-                     "rigMax=%.3g resMax=%.3g bad=%d/%zu\n",
-                     nCut, seams.size(), funcs.size(), totalCg, umin, umax, rigMax, resMax, bad,
-                     seams.size());
+        maskedSolve(mask);
     }
 
+    // Reconstruct z = T w on the UV block.
+    accel::Buffer<float> wBuf(w), zUv;
+    accel::spmv(backend, Tuv, wBuf, zUv);
     for (std::size_t i = 0; i < nCut; ++i) {
-        u[i] = static_cast<float>(z[ux(i)]);
-        v[i] = static_cast<float>(z[vx(i)]);
+        u[i] = zUv[i];
+        v[i] = zUv[nCut + i];
+    }
+
+    const bool dbg = std::getenv("CYBER_QC_DEBUG") != nullptr;
+    if (dbg) {
+        std::fprintf(stderr,
+                     "[qc] reduced: nCut=%zu seams=%zu vars=%zu free=%zu intFree=%zu totalCg=%d\n",
+                     nCut, nSeam, N, W, intFree.size(), totalCg);
     }
     return totalCg;
 }
@@ -892,17 +928,13 @@ Parameterization solveParameterization(const Mesh& mesh, const SeamlessSetup& se
     out.cgIterationsU = conjugateGradient(backend, A, bu, u, maxIters, 1e-8f);
     out.cgIterationsV = conjugateGradient(backend, A, bv, v, maxIters, 1e-8f);
 
-    // Integer-seamless phase: collect the seam edges (with the rotation rho estimated from
-    // the relaxed UV, matching the residual metric's bestK), then re-solve the Dirichlet
-    // energy with the seam transitions as hard constraints and greedily round the integer
-    // translations (solveSeamlessConstrained). This turns the non-rigid relaxed seam into a
-    // rigid integer-grid seam so seamlessUvResidual drops to ~0.
-    const auto rot90v = [](Vec2 d, int k) {
-        for (int i = 0; i < ((k % 4) + 4) % 4; ++i) {
-            d = Vec2{-d.y, d.x};
-        }
-        return d;
-    };
+    // Integer-seamless phase: collect the seam edges with the rotation rho taken from the
+    // COMBED field (rho = comb[B] - comb[A] - periodJump, mod 4) — the exact grid symmetry the
+    // Dirichlet energy aligns to, so the holonomy around every cone/junction is consistent (a
+    // relaxed-UV estimate would drift at branch points). Then re-solve with the seam transitions
+    // as hard constraints, reducing them to independent DOF and rounding the integer
+    // translations (solveSeamlessReduced) — turning the non-rigid relaxed seam into a rigid
+    // integer grid so seamlessUvResidual drops to ~0. Scales to hundreds of singularities.
     std::vector<SeamRef> seams;
     for (Index ei = 0; ei < mesh.edgeCapacity(); ++ei) {
         const EdgeId e{ei};
@@ -919,19 +951,9 @@ Parameterization solveParameterization(const Mesh& mesh, const SeamlessSetup& se
         s.bA = cutOf(ef[0].value, b.value);
         s.aB = cutOf(ef[1].value, a.value);
         s.bB = cutOf(ef[1].value, b.value);
-        const Vec2 da{u[s.bA] - u[s.aA], v[s.bA] - v[s.aA]};
-        const Vec2 db{u[s.bB] - u[s.aB], v[s.bB] - v[s.aB]};
-        int bestK = 0;
-        float bestD = 1e30f;
-        for (int k = 0; k < 4; ++k) {
-            const Vec2 r = rot90v(da, k);
-            const float d = (r.x - db.x) * (r.x - db.x) + (r.y - db.y) * (r.y - db.y);
-            if (d < bestD) {
-                bestD = d;
-                bestK = k;
-            }
-        }
-        s.rho = bestK;
+        // Combed grid symmetry from side A (ef[0]) to side B (ef[1]).
+        const int p = setup.periodJump[ei];
+        s.rho = (((comb[ef[1].value] - comb[ef[0].value] - p) % 4) + 4) % 4;
         seams.push_back(s);
     }
     std::vector<std::size_t> singCuts;
@@ -945,14 +967,12 @@ Parameterization solveParameterization(const Mesh& mesh, const SeamlessSetup& se
             singCuts.push_back(cutOf(vf[0].value, vi));
         }
     }
-    // The integer-seamless phase uses a DENSE dual (Schur) solve whose cost grows as
-    // O(constraints^3); it is fast for low-singularity genus-0 surfaces but not for meshes
-    // with hundreds of seam edges. Cap it so the solve always terminates: above the cap we
-    // keep the relaxed (non-integer) UV rather than hang. Larger meshes need a sparse-direct
-    // MIQ reduction (future work; the vendored quad_cover path already handles them).
-    constexpr std::size_t kMaxConstrainedSeams = 64;
-    if (!seams.empty() && !singCuts.empty() && seams.size() <= kMaxConstrainedSeams) {
-        solveSeamlessConstrained(backend, nCut, rows, bu0, bv0, seams, singCuts[0], u, v);
+    // Sparse constraint-elimination MIQ: eliminates the seam rigidity + gauge to independent
+    // DOF and greedily rounds the integer translations. No dense dual, no seam cap — it scales
+    // to hundreds of cones (spot: ~350 seam edges), reconciling branch-point holonomy exactly.
+    const std::size_t gauge = singCuts.empty() ? std::size_t{0} : singCuts[0];
+    if (!seams.empty()) {
+        solveSeamlessReduced(backend, nCut, rows, bu0, bv0, seams, gauge, u, v);
     }
 
     // Per-corner UV.

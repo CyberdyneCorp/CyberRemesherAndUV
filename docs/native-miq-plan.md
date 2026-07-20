@@ -139,16 +139,37 @@ translations:
   pinning them independently over-constrains the system (breaks rigidity, blows up the scale).
 
 **Result:** on the UV sphere `seamlessUvResidual` drops from ~0.5 to **2.4e-7** (< 1e-3 gate)
-and `extractIsolineQuads` yields a clean 252-quad mesh (regression test
-`seamless M2c ...` in `test_seamless_solver.cpp`).
+and `extractIsolineQuads` yields a clean quad mesh (regression test `seamless M2c ...` in
+`test_seamless_solver.cpp`).
 
-**Known limitation.** The dual is a *dense* `m×m` solve (`m` = #seam-edge constraints), cost
-`O(segments · m³)`, fine for low-singularity genus-0 surfaces but not for meshes with hundreds
-of seam edges (e.g. spot: 92 singularities → 350 seam edges). A seam-count cap keeps those on
-the relaxed UV rather than hanging. Making it scale needs a sparse-direct MIQ reduction
-(eliminate the rigidity to independent DOF + factorize once); the vendored `quad_cover` path
-already covers those meshes. Also still open: improve field feature-alignment (a
-diagonally-triangulated flat grid pulls the cross field ~27° off-axis).
+**M2c-sparse — Scalable constraint-elimination MIQ — ✅ DONE (many singularities).**
+`solveSeamlessReduced` replaces the dense dual with a sparse variable reduction, so it scales to
+hundreds of cones and reconciles branch-point holonomy exactly (the dense path dropped one weld
+per cut cycle and left residual ~0.5 on branching cuts):
+- **Integer translations as variables.** Promoting the per-seam-edge integer translation `t` to
+  extra variables `z = [u | v | t]` makes the seam rigidity `uv_B = R^rho uv_A + t` and the gauge
+  pin HOMOGENEOUS linear constraints. `rho` is taken from the **combed field**
+  (`rho = comb[B] - comb[A] - periodJump`, mod 4), the exact grid symmetry the Dirichlet energy
+  aligns to — so the holonomy summed around any cone/junction is consistent.
+- **Exact Gauss-Jordan reduction.** Every rotation/translation coefficient is ±1, so exact
+  elimination reduces `z` to independent DOF `w` with a sparse map `z = T w`. Branch-point
+  holonomy falls out automatically: a regular junction closes to a pure-integer row that
+  eliminates one redundant translation; a cone closes to a pin of its representative. The
+  surviving independent integers are therefore **unconstrained** — rounding them to *any* integers
+  keeps the map seamless (dependent integers stay integer, cones land on the half-integer lattice).
+- **Reduced CG + batched rounding.** The reduced Dirichlet energy `T^T blkdiag(L,L) T` is
+  minimised by Conjugate Gradient applied implicitly through three `accel::spmv` (no dense reduced
+  Hessian). Integers are rounded in batches (pin every confidently-near-integer value, re-solve,
+  repeat) with the continuous solve warm-started across rounds, so a 350-seam mesh takes a few
+  hundred CG sweeps, not one solve per integer.
+
+**Result:** `spot` (92 cones, ~350 seam edges) reaches `seamlessUvResidual` **~1e-6** (< 1e-3
+gate) with `extractIsolineQuads` yielding a ~600-cell quad-dominant mesh (~86 % valence-4). A
+branching-cut regression (`seamless M2c: branching-cut ...`, a cube-sphere with 8 cones) guards
+the holonomy reconciliation. No seam cap, no dense dual, no external solver.
+
+**Still open:** improve field feature-alignment (a diagonally-triangulated flat grid pulls the
+cross field ~27° off-axis).
 
 **M3 — Isotropic pre-remesh.** QuadCover wants a reasonably uniform triangle mesh (the
 harness isotropically remeshes first). Reuse our own `isotropicRemesh` at the target edge

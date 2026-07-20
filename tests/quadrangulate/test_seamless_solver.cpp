@@ -2,6 +2,8 @@
 
 #include <cmath>
 #include <cstddef>
+#include <map>
+#include <tuple>
 #include <vector>
 
 #include "cyber/accel/backend.hpp"
@@ -47,6 +49,51 @@ Mesh makeSphere(int rings = 20, int segments = 30) {
     }
     for (int s = 0; s < segments; ++s) {
         f.push_back({south, ring(rings - 1, s + 1), ring(rings - 1, s)});
+    }
+    return Mesh::fromIndexed(p, f);
+}
+
+// A subdivided cube projected to the unit sphere. Its 8 corners concentrate curvature into
+// EIGHT index-1 cross-field cones (sum 8 == 4*chi), so the cut graph is a branching tree over
+// the cones — the many-singularity case whose branch-point holonomy must be reconciled for the
+// seam to close (a single-path cut like the plain sphere never exercises it).
+Mesh makeCubeSphere(int n = 8) {
+    std::vector<Vec3> p;
+    std::vector<std::vector<Index>> f;
+    std::map<std::tuple<int, int, int>, Index> idx;
+    const auto add = [&](const Vec3& raw) -> Index {
+        const Vec3 u = normalized(raw);
+        const std::tuple<int, int, int> k{static_cast<int>(std::lround(u.x * 1000.0f)),
+                                          static_cast<int>(std::lround(u.y * 1000.0f)),
+                                          static_cast<int>(std::lround(u.z * 1000.0f))};
+        const auto it = idx.find(k);
+        if (it != idx.end()) {
+            return it->second;
+        }
+        const Index id = static_cast<Index>(p.size());
+        p.push_back(u);
+        idx.emplace(k, id);
+        return id;
+    };
+    const int dirs[6][3] = {{0, 0, 1}, {0, 0, -1}, {0, 1, 0}, {0, -1, 0}, {1, 0, 0}, {-1, 0, 0}};
+    for (const auto& d : dirs) {
+        const Vec3 nrm{static_cast<float>(d[0]), static_cast<float>(d[1]), static_cast<float>(d[2])};
+        const Vec3 a = std::abs(nrm.z) < 0.5f ? Vec3{0, 0, 1} : Vec3{1, 0, 0};
+        const Vec3 t1 = normalized(cross(nrm, a));
+        const Vec3 t2 = cross(nrm, t1);
+        const auto pt = [&](int i, int j) {
+            const float u = -1.0f + 2.0f * static_cast<float>(i) / static_cast<float>(n);
+            const float v = -1.0f + 2.0f * static_cast<float>(j) / static_cast<float>(n);
+            return nrm + t1 * u + t2 * v;
+        };
+        for (int i = 0; i < n; ++i) {
+            for (int j = 0; j < n; ++j) {
+                const Index a0 = add(pt(i, j)), a1 = add(pt(i + 1, j));
+                const Index a2 = add(pt(i + 1, j + 1)), a3 = add(pt(i, j + 1));
+                f.push_back({a0, a1, a2});
+                f.push_back({a0, a2, a3});
+            }
+        }
     }
     return Mesh::fromIndexed(p, f);
 }
@@ -232,4 +279,38 @@ TEST_CASE("seamless M2c: constrained solve is integer-seamless on a sphere (resi
     const remesh::IsolineQuadMesh quads = remesh::extractIsolineQuads(sphere, uv);
     CHECK(quads.quads.size() > 100);
     CHECK(quads.quads.size() < 2000);
+}
+
+// Milestone 2c (many-singularity / branch-point holonomy): the sparse constraint-elimination
+// solve must stay seamless when the cut graph BRANCHES. The cube-sphere has eight cross-field
+// cones, so the cut is a branching tree and the integer transitions must be reconciled around
+// every junction (the earlier dense-dual path dropped one weld per cycle and left residual
+// ~0.5). The gate is the same: seamlessUvResidual ~0 AND a real quad-dominant extraction.
+TEST_CASE("seamless M2c: branching-cut many-cone surface stays seamless (residual < 1e-3)") {
+    auto backend = cyber::accel::defaultBackend();
+    const Mesh cube = makeCubeSphere(8);
+    const remesh::SeamlessSetup setup = remesh::buildSeamlessSetup(cube, 50, *backend);
+    REQUIRE(setup.valid);
+    // Eight cones (Poincare-Hopf sum 8) -> a branching cut tree, not a single path.
+    CHECK(setup.totalIndex() == 8);
+    CHECK(setup.singularityCount() >= 4);
+
+    const remesh::Parameterization param =
+        remesh::solveParameterization(cube, setup, 0.12f, *backend);
+    REQUIRE(param.valid);
+
+    const remesh::SeamlessUv uv = assembleUv(cube, param);
+    REQUIRE(uv.valid);
+    CHECK(remesh::seamlessUvResidual(uv) < 1e-3);
+
+    // A quad-DOMINANT extraction: hundreds of cells, the clear majority valence-4.
+    const remesh::IsolineQuadMesh quads = remesh::extractIsolineQuads(cube, uv);
+    CHECK(quads.quads.size() > 100);
+    std::size_t nQuad = 0;
+    for (const auto& q : quads.quads) {
+        if (q.size() == 4) {
+            ++nQuad;
+        }
+    }
+    CHECK(nQuad * 2 > quads.quads.size());  // > 50% are quads
 }
