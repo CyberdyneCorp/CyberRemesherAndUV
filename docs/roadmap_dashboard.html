@@ -168,8 +168,8 @@
       </div>
       <div class="chip">
         <div class="k">Standalone · robustness</div>
-        <div class="v partial">Harness-gated</div>
-        <div class="s">quad-cover still needs the out-of-process seamless-UV solve (Geogram <span class="mono">quad_cover</span>); in-process solver is M4c. field-aligned stays the always-manifold default for CAD/box geometry.</div>
+        <div class="v win">In-process</div>
+        <div class="s">M4c done: the seamless-UV solve links in-process behind <span class="mono">-DCYBER_WITH_QUADCOVER=ON</span> — no subprocess, no harness binary. field-aligned stays the always-manifold default for CAD/box geometry.</div>
       </div>
     </div>
   </header>
@@ -263,8 +263,8 @@
           (<span class="mono">quadextractor.cpp</span> port), wired as <span class="mono">quad_method="quad-cover"</span>.
           At matched density it reaches <b>irregular 1–4%</b> — beating QuadriFlow on spot &amp; rocker-arm,
           tying on bunny — with near-parity CV and best-or-tied median angle (full detail §6·I).</div>
-        <div class="exit">Exit: <b>irregular &lt; 15% and median ≥ QuadriFlow ✓ met.</b> Remaining: in-process
-          solver (M4c) to drop the harness-binary dependency.</div>
+        <div class="exit">Exit: <b>irregular &lt; 15% and median ≥ QuadriFlow ✓ met.</b> Solver now links
+          <b>in-process</b> (M4c) — no harness binary. Remaining: adaptive-sizing quad-cover.</div>
       </div>
       <div class="pill done">Parity</div>
     </div>
@@ -381,7 +381,7 @@
     <span class="msrow"><span class="msdot done"></span><b>F · Benchmarked AutoRemesher (QuadCover) — <span style="color:var(--win)">DONE, and it reframes everything</span></b> — built a Qt-free headless harness over its QuadCover core (Geogram <span class="mono">quad_cover</span> seamless-UV solver + isoline <span class="mono">quadextractor.cpp</span>) and added it as a 2nd benchmark reference. <b>The theory did NOT hold in practice:</b> QuadCover's isoline tracing is T-junction-free <i>in principle</i>, but AutoRemesher's actual pipeline (isotropic remesh → frame field → quad_cover) lands at <b>irregular 6–15%</b> (spot 6, fandisk 14, cheb 15, bunny 12) — <b>comparable to our integer extractor (7–13%)</b> — with the <b>worst edge CV of all (0.41–0.56)</b>. So the seamless-UV paradigm is <b>not</b> a guaranteed path to parity, and we are already competitive with AutoRemesher. <span class="mstag done">shipped · 7aba362</span></span>
     <span class="msrow"><span class="msdot partial"></span><b>① G · Reproduce QuadriFlow's flip-repair order — <span style="color:var(--gap)">MARGINAL (tested)</span></b> — measured the grid at benchmark density: <b>~30–53 true singularities but 38–63 surviving folds + ~300 big-diff edges</b> → the ~176 final irregulars. Subdivision <b>re-introduces folds</b> the coarse repair never saw (spot's unit grid: 172 folds). Ported QuadriFlow's order — repair folds on the <i>unit</i> grid + re-subdivide (<code>subdivideUnitCellsInPlace</code>). It cuts folds sharply (172→7) and lowers raw irregular (spot 7.2→5.9%, 4/5), <b>but that's mostly coarsening</b>: at MATCHED count only ~0.7pt, CV neutral-to-worse, and it collapses ~25% of cells. <span class="mono">FixFlipSat</span> is <b>harmful</b> (folds up). Kept off the default path. <span class="mstag partial">not the lever</span></span>
     <span class="msrow"><span class="msdot done"></span><b>H · The gap was the collapse paradigm — <span style="color:var(--win)">CONFIRMED</span></b> — A (multi-res read), C (T-junction cleanup) and G (flip-repair order) all gave only marginal matched-count gains; the organic 7–13% vs QuadriFlow 1–4% was dominated by the <b>zero-diff collapse quantising the grid</b>. The predicted structural fix — a <b>QuadCover seamless-UV isoline extractor</b> — was built (I) and <b>reached parity</b>, proving the diagnosis. <span class="mstag done">verdict held</span></span>
-    <span class="msrow"><span class="msdot done"></span><b>I · QuadCover seamless-UV extractor — <span style="color:var(--win)">DONE, QuadriFlow parity</span></b> — the structural path H called for (plan: <code>docs/quadcover-plan.md</code>). <b>M0</b> scaffold · <b>M1</b> seamless UV (residual 0.000000 across 6273 edges) · <b>M2</b> ported the isoline tracer (<code>quadextractor.cpp</code>) with a <b>boundary-fraction gate</b> (closed→graph-cleanup, open→core) · <b>M3</b> wired into the pipeline as <span class="mono">quad_method="quad-cover"</span> (skips our isotropic remesh — the harness does its own) · <b>M4a</b> closed-loop count calibration (4758→2776 on spot) · <b>M4b</b> the win: the harness ran the default adaptive frame field (1.0) whose scaling gradients inject singularities — forcing a <b>uniform field (−a 0.0)</b> dropped irregular <b>and</b> CV together. Result: <b>irr spot 2 / fandisk 3 / rocker 1 / cheb 4 / bunny 4</b> vs QuadriFlow 3/1/3/2/4 — parity, honestly measured at matched density. <b>M4c next</b>: link the seamless solve in-process to drop the harness-binary dependency. <span class="mstag done">shipped · M0–M4b</span></span>
+    <span class="msrow"><span class="msdot done"></span><b>I · QuadCover seamless-UV extractor — <span style="color:var(--win)">DONE, QuadriFlow parity</span></b> — the structural path H called for (plan: <code>docs/quadcover-plan.md</code>). <b>M0</b> scaffold · <b>M1</b> seamless UV (residual 0.000000 across 6273 edges) · <b>M2</b> ported the isoline tracer (<code>quadextractor.cpp</code>) with a <b>boundary-fraction gate</b> (closed→graph-cleanup, open→core) · <b>M3</b> wired into the pipeline as <span class="mono">quad_method="quad-cover"</span> (skips our isotropic remesh — the harness does its own) · <b>M4a</b> closed-loop count calibration (4758→2776 on spot) · <b>M4b</b> the win: the harness ran the default adaptive frame field (1.0) whose scaling gradients inject singularities — forcing a <b>uniform field (−a 0.0)</b> dropped irregular <b>and</b> CV together. Result: <b>irr spot 2 / fandisk 3 / rocker 1 / cheb 4 / bunny 4</b> vs QuadriFlow 3/1/3/2/4 — parity, honestly measured at matched density. <b>M4c</b>: the seamless solve now links <b>in-process</b> (isolated <span class="mono">cyber_quadcover_solver</span> lib behind <span class="mono">-DCYBER_WITH_QUADCOVER=ON</span>) — no subprocess, no harness binary; sphere tests pass with the env unset, suite 241/241. <span class="mstag done">shipped · M0–M4c</span></span>
   </div>
   <div class="notes" style="margin-top:14px">
     <div class="note">
@@ -409,9 +409,9 @@
     numbers from <code>examples/11_benchmark.py</code>. Roadmap detail in <code>docs/ROADMAP.md</code>,
     QuadCover milestones in <code>docs/quadcover-plan.md</code>.
     <br>
-    <span style="opacity:.75">Dashboard content as of commit <code>89ec61c</code> (2026-07-20),
-    QuadCover M0–M4b (quad-cover at QuadriFlow parity) — a manual artifact; it does not auto-track
-    the repo, so a later commit may have moved past this.</span>
+    <span style="opacity:.75">Dashboard content as of commit <code>95e540f</code> (2026-07-20),
+    QuadCover M0–M4c (quad-cover at QuadriFlow parity, in-process solver) — a manual artifact; it does
+    not auto-track the repo, so a later commit may have moved past this.</span>
   </footer>
 </div>
 
