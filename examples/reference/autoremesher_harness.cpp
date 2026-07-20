@@ -121,5 +121,8 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "autoremesher_cli: failed to write %s\n", out);
         return 5;
     }
-    return 0;
+    // The output is written and flushed; skip global/static teardown, which double-frees
+    // in Geogram/TBB cleanup on some (CAD) inputs and would abort an otherwise-good run.
+    std::fflush(nullptr);
+    std::_Exit(0);
 }
