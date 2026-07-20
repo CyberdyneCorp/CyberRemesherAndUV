@@ -29,8 +29,20 @@ option(CYBER_BUILD_BAKECAGE "Build the editable projection cage + component link
 option(CYBER_ENABLE_METAL "Enable the Metal compute backend" OFF)
 option(CYBER_ENABLE_CUDA "Enable the CUDA compute backend" OFF)
 option(CYBER_ENABLE_OPENCL "Enable the OpenCL compute backend" OFF)
+# In-process QuadCover seamless-UV solver (Geogram + AutoRemesher). OFF by default:
+# ON vendors and compiles a large Geogram subset (see cmake/QuadCoverSolver.cmake)
+# and links it into cyber_quadrangulate so the quad-cover method needs no external
+# CYBER_QUADCOVER_CLI harness. Kept off for normal builds to avoid the dependency.
+option(CYBER_WITH_QUADCOVER "Build the in-process QuadCover seamless-UV solver" OFF)
 
 include(cmake/CompilerWarnings.cmake)
+
+if(CYBER_WITH_QUADCOVER)
+    # The vendored Geogram subset includes ~11 C translation units; the base
+    # project only enables CXX, so enable C for the isolated solver library.
+    enable_language(C)
+    include(cmake/QuadCoverSolver.cmake)
+endif()
 
 add_subdirectory(src/core)
 add_subdirectory(src/accel)

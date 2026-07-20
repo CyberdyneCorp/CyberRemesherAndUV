@@ -21,12 +21,21 @@
 #include <utility>
 #include <vector>
 
+#ifdef CYBER_HAVE_QUADCOVER
+#include "autoremesher_solve.hpp"
+#endif
+
 // TASK F. The isoline extractor and the IQuadrangulator seam are still stubs
 // (Milestones 2-3); Milestone 1 fills computeSeamlessUv by obtaining a seamless
 // integer-grid UV out-of-process from AutoRemesher's Geogram quad_cover harness.
 namespace cyber::remesh {
 
 namespace {
+
+#ifndef CYBER_HAVE_QUADCOVER
+// The OBJ writer and UV-dump parser serve only the out-of-process subprocess path.
+// With the in-process solver linked in they are unused, so compile them out to keep
+// -Werror=unused-function happy.
 
 // Parse the harness UV dump (autoremesher_harness.cpp writeUvDump): the isotropic
 // mesh (V) plus per-triangle vertex indices and 3 corner UVs (T).
@@ -103,13 +112,93 @@ bool writeObjFor(const std::string& path, const Mesh& mesh, double& areaOut) {
     areaOut = area;
     return true;
 }
+#endif  // CYBER_HAVE_QUADCOVER
 
 }  // namespace
 
 SeamlessUv computeSeamlessUv(const Mesh& mesh, float targetEdgeLength, float harnessScaling) {
     SeamlessUv uv;
+    if (targetEdgeLength <= 0.0f) {
+        return uv;  // no target density -> caller degrades cleanly
+    }
+
+#ifdef CYBER_HAVE_QUADCOVER
+    // In-process solve (M4c): no subprocess, no temp files, no CYBER_QUADCOVER_CLI.
+    // Convert the mesh to indexed verts/tris, derive the target quad count from the
+    // requested edge length exactly as the subprocess path did, and run AutoRemesher's
+    // Geogram quad_cover directly via the isolated cyber_quadcover_solver library.
+    std::vector<Vec3> pos;
+    std::vector<std::vector<Index>> faces;
+    mesh.toIndexed(pos, faces);
+    if (pos.empty() || faces.empty()) {
+        return uv;
+    }
+    std::vector<std::array<double, 3>> verts;
+    verts.reserve(pos.size());
+    for (const Vec3& p : pos) {
+        verts.push_back({static_cast<double>(p.x), static_cast<double>(p.y),
+                         static_cast<double>(p.z)});
+    }
+    std::vector<std::array<std::size_t, 3>> tris;
+    double area = 0.0;
+    for (const auto& fc : faces) {
+        for (std::size_t k = 1; k + 1 < fc.size(); ++k) {  // fan-triangulate
+            tris.push_back({static_cast<std::size_t>(fc[0]), static_cast<std::size_t>(fc[k]),
+                            static_cast<std::size_t>(fc[k + 1])});
+            area += 0.5 * static_cast<double>(length(cross(pos[fc[k]] - pos[fc[0]],
+                                                           pos[fc[k + 1]] - pos[fc[0]])));
+        }
+    }
+    if (tris.empty()) {
+        return uv;
+    }
+    const double cell =
+        static_cast<double>(targetEdgeLength) * static_cast<double>(targetEdgeLength);
+    const long quads = cell > 0.0 ? std::max(64L, std::lround(area / cell)) : 3000L;
+    // Scaling defaults to the passed harnessScaling (the QuadCoverQuadrangulator
+    // calibration loop sweeps it); CYBER_QC_SCALING overrides for calibration sweeps.
+    // Adaptivity defaults to a uniform field (0.0) matching the subprocess `-a 0.0`;
+    // CYBER_QC_ADAPT overrides. Both env overrides honored in BOTH paths.
+    const char* scalingEnv = std::getenv("CYBER_QC_SCALING");
+    const double scaling =
+        scalingEnv != nullptr ? std::atof(scalingEnv) : static_cast<double>(harnessScaling);
+    const char* adaptEnv = std::getenv("CYBER_QC_ADAPT");
+    const double adapt = adaptEnv != nullptr ? std::atof(adaptEnv) : 0.0;
+    const bool dbg = std::getenv("CYBER_QC_DEBUG") != nullptr;
+    if (dbg) {
+        std::fprintf(stderr, "[qc] in-process edgeLen=%g area=%g quads=%ld s=%g a=%g\n",
+                     static_cast<double>(targetEdgeLength), area, quads, scaling, adapt);
+    }
+    const qcsolver::SeamlessSolveResult res =
+        qcsolver::solveSeamlessUv(verts, tris, quads, scaling, adapt);
+    if (dbg) {
+        std::fprintf(stderr, "[qc] in-process ok=%d isoTris=%zu\n", static_cast<int>(res.ok),
+                     res.triangles.size());
+    }
+    if (!res.ok) {
+        return uv;
+    }
+    uv.vertices.reserve(res.vertices.size());
+    for (const auto& v : res.vertices) {
+        uv.vertices.push_back(Vec3{static_cast<float>(v[0]), static_cast<float>(v[1]),
+                                   static_cast<float>(v[2])});
+    }
+    uv.triangles.reserve(res.triangles.size());
+    uv.triangleUv.reserve(res.triangleUvs.size());
+    for (std::size_t t = 0; t < res.triangles.size(); ++t) {
+        const auto& tri = res.triangles[t];
+        const auto& q = res.triangleUvs[t];
+        uv.triangles.push_back({static_cast<Index>(tri[0]), static_cast<Index>(tri[1]),
+                                static_cast<Index>(tri[2])});
+        uv.triangleUv.push_back({Vec2{static_cast<float>(q[0]), static_cast<float>(q[1])},
+                                 Vec2{static_cast<float>(q[2]), static_cast<float>(q[3])},
+                                 Vec2{static_cast<float>(q[4]), static_cast<float>(q[5])}});
+    }
+    uv.valid = !uv.triangles.empty();
+    return uv;
+#else
     const char* cli = std::getenv("CYBER_QUADCOVER_CLI");
-    if (cli == nullptr || targetEdgeLength <= 0.0f) {
+    if (cli == nullptr) {
         return uv;  // no solver available -> caller degrades cleanly
     }
     static std::atomic<unsigned> counter{0};
@@ -159,6 +248,7 @@ SeamlessUv computeSeamlessUv(const Mesh& mesh, float targetEdgeLength, float har
     std::filesystem::remove(objPath, ec);
     std::filesystem::remove(uvPath, ec);
     return uv;
+#endif  // CYBER_HAVE_QUADCOVER
 }
 
 // Max integer-jump residual across interior edges: for each shared edge the grid
