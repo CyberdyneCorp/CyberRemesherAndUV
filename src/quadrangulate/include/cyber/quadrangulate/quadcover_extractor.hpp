@@ -54,19 +54,32 @@ namespace cyber::remesh {
 // F return text weighs vendoring Geogram vs. an MIQ/QuadCover reimplementation
 // vs. reusing the benchmark-harness build path.
 struct SeamlessUv {
-    // triangleUv[t] holds the 3 corner UVs of triangle t, in the same corner
-    // order as the source mesh's triangle. Empty until a solver fills it.
+    // The mesh the UV lives on. The solver (AutoRemesher via the M1 harness)
+    // isotropically remeshes internally, so the UV is NOT on the input triangles —
+    // it comes with its own vertices/triangles, and the extractor (M2) traces
+    // isolines on THIS mesh, then the pipeline reprojects onto the source surface.
+    std::vector<Vec3> vertices;
+    std::vector<std::array<Index, 3>> triangles;
+    // triangleUv[t] holds the 3 corner UVs of triangles[t], same corner order.
     std::vector<std::array<Vec2, 3>> triangleUv;
-    // True once a real seamless solve has populated triangleUv. The stub leaves
-    // this false so the extractor can guard.
+    // True once a real seamless solve has populated the fields. The stub / a failed
+    // solve leaves this false so the extractor can guard.
     bool valid = false;
 };
 
-// Placeholder for the solver seam. The real signature will also take the
-// orientation/position field (see computePositionField in position_field.hpp)
-// and the target edge length / per-face adaptive scaling. Returns an invalid
-// SeamlessUv until a solver is wired in.
+// Compute a seamless integer-grid UV for `mesh`. Milestone 1 obtains it out-of-process
+// from AutoRemesher's Geogram quad_cover via the benchmark harness: the binary path is
+// read from the CYBER_QUADCOVER_CLI environment variable (built by
+// examples/reference/build_autoremesher.sh); if unset or the run fails, an INVALID
+// SeamlessUv (valid == false) is returned so callers degrade cleanly. A later milestone
+// replaces the subprocess with a vendored/native solver (see docs/quadcover-plan.md).
 [[nodiscard]] SeamlessUv computeSeamlessUv(const Mesh& mesh, float targetEdgeLength);
+
+// Max integer-jump residual of a seamless UV across its interior edges: for each edge
+// shared by two triangles, the grid symmetry mapping one triangle's shared-vertex UVs
+// to the other's must have an INTEGER translation. 0 == perfectly seamless. A
+// validation hook (M1); returns 0 for an empty/invalid UV.
+[[nodiscard]] double seamlessUvResidual(const SeamlessUv& uv);
 
 // -----------------------------------------------------------------------------
 // Collaborator 2 (NOT IMPLEMENTED): the isoline tracer / mesh extractor.
