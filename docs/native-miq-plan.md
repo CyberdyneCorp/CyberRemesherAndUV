@@ -75,12 +75,18 @@ SeamlessUv`, guarded stub returning `valid=false`. Wire it as the FIRST choice i
 `CYBER_QC_NATIVE` opt-in until it validates, so nothing regresses. *Test:* stub returns
 invalid, callers degrade.
 
-**M1 — Frame field adapter + cut graph.** Adapt `computePositionField`'s `q` into the
-per-triangle 4-RoSy representation QuadCover needs; detect singularities (field index ≠
-0); build a **cut graph** (spanning tree connecting singularities + one loop per handle)
-that opens the surface into a disk. *Test:* cut graph makes the mesh simply-connected
-(Euler characteristic of the cut mesh = 1); singularity count matches the integer
-extractor's.
+**M1 — Frame field adapter + cut graph — ✅ DONE (genus 0).** `buildSeamlessSetup` in
+`seamless_solver.{hpp,cpp}`: reuses the per-face `CrossField` (`computeCrossField`), and
+adds per-edge period jumps, per-vertex cross-field singularity indices, and a cut graph.
+The index is computed by walking each interior one-ring in a consistent CCW sense
+(following face orientation) and rounding (Σ minimal spoke residuals + angle defect) /
+(π/2); this is validated rigorously by **Poincaré–Hopf: Σ index == 4·χ** — measured 8 on
+a sphere and on spot (χ=2), 0 on a torus (χ=0). The cut graph is a spanning tree over the
+singular vertices routed along mesh edges (BFS); slitting a closed genus-0 surface along
+it opens it to a **disk (cut-open χ == 1)**, validated by `cutOpenEulerCharacteristic`
+(union-find over face-corners). *Tests:* `test_seamless_solver.cpp` (sphere Σ=8 + disk,
+torus Σ=0, empty→invalid). **TODO for genus>0:** add homology-generator (handle) loops via
+tree-cotree so a torus also opens to a disk — genus 0 (characters, most models) works now.
 
 **M2 — Seamless parameterization solve (THE research core).** Assemble the Poisson system
 (gradient of `(u,v)` ≈ frame field × spacing) with the frame-field rotation transitions

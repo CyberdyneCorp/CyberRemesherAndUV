@@ -4,6 +4,7 @@ add_library(cyber_quadrangulate STATIC
     src/quadcover_extractor.cpp
     src/position_field.cpp
     src/quad_extract.cpp
+    src/seamless_solver.cpp
 )
 add_library(cyber::quadrangulate ALIAS cyber_quadrangulate)
 
