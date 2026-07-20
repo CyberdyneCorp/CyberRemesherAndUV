@@ -223,11 +223,20 @@ CyberStatus cyber_remesh(const CyberMesh* in, const CyberRemeshParams* params,
         // yields a 100%-quad result on top of it. quadMethod selects the
         // Instant-Meshes position-field extractor instead — more uniform,
         // field-aligned edge flow with fewer/better-placed singularities.
-        const bool useInstantMeshes = params->quadMethod == CYBER_QUAD_INSTANT_MESHES;
+        // quadMethod selects the extractor: field-aligned (default), the
+        // Instant-Meshes position-field extractor, or the integer-parametrization
+        // extractor (Milestones 3-5, experimental).
+        const int quadMethod = params->quadMethod;
         cyber::remesh::PipelineResult result = cyber::remesh::remesh(
-            in->mesh, cppParams, &sink, &token, [useInstantMeshes] {
-                return useInstantMeshes ? cyber::remesh::makeInstantMeshesQuadrangulator()
-                                        : cyber::remesh::makeFieldAlignedQuadrangulator();
+            in->mesh, cppParams, &sink, &token,
+            [quadMethod]() -> std::unique_ptr<cyber::remesh::IQuadrangulator> {
+                if (quadMethod == CYBER_QUAD_INSTANT_MESHES) {
+                    return cyber::remesh::makeInstantMeshesQuadrangulator();
+                }
+                if (quadMethod == CYBER_QUAD_INTEGER) {
+                    return cyber::remesh::makeIntegerQuadrangulator();
+                }
+                return cyber::remesh::makeFieldAlignedQuadrangulator();
             });
 
         switch (result.status) {

@@ -61,6 +61,13 @@ struct PositionField {
 // field-smoothing sweep count per multiresolution level.
 std::unique_ptr<IQuadrangulator> makeInstantMeshesQuadrangulator(int iterations = 25);
 
+// Integer-parametrization quadrangulator (IQuadrangulator seam): computes the
+// fields and extracts via the integer solve + BuildTriangleManifold + FixValence +
+// greedy flip-repair path (Milestones 3-5). Experimental — watertight/manifold and
+// lower irregular % than the instant-meshes extractor at native density, but it
+// degrades at coarse target counts and does not beat QuadriFlow; not the default.
+std::unique_ptr<IQuadrangulator> makeIntegerQuadrangulator(int iterations = 40);
+
 // Diagnostic for the collapse stage (Stage A): number of lattice-cell nodes and
 // undirected lattice edges the collapse produces. Used by tests to confirm the
 // collapse yields ~area/spacing^2 cells rather than over-merging.

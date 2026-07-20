@@ -889,6 +889,45 @@ std::unique_ptr<IQuadrangulator> makeInstantMeshesQuadrangulator(int iterations)
     return std::make_unique<InstantMeshesQuadrangulator>(iterations);
 }
 
+namespace {
+
+// IQuadrangulator wrapper for the integer-parametrization extractor (Milestones
+// 3-5: solve + subdivide + BuildTriangleManifold + FixValence + greedy flip
+// repair). Same field/replace flow as the instant-meshes wrapper.
+class IntegerQuadrangulator final : public IQuadrangulator {
+public:
+    explicit IntegerQuadrangulator(int iterations) : m_iterations(iterations) {}
+
+    Outcome quadrangulate(Mesh& mesh, float targetEdgeLength, ProgressSink* progress,
+                          const CancelToken* cancel) override {
+        if (cancel != nullptr && cancel->isCancelled()) {
+            return {.success = false, .cancelled = true, .failureReason = "cancelled"};
+        }
+        const PositionField field = computePositionField(mesh, targetEdgeLength, m_iterations);
+        Mesh quads = extractIntegerQuadMesh(mesh, field);
+        if (quads.faceCount() == 0) {
+            return {.success = false, .cancelled = false,
+                    .failureReason = "integer extraction produced no faces"};
+        }
+        mesh = std::move(quads);
+        if (progress != nullptr) {
+            progress->report(1.0f, "quadrangulate");
+        }
+        return {.success = true, .cancelled = false, .failureReason = {}};
+    }
+
+    [[nodiscard]] std::string name() const override { return "integer"; }
+
+private:
+    int m_iterations;
+};
+
+}  // namespace
+
+std::unique_ptr<IQuadrangulator> makeIntegerQuadrangulator(int iterations) {
+    return std::make_unique<IntegerQuadrangulator>(iterations);
+}
+
 CollapsedGraphStats debugCollapse(const Mesh& mesh, const PositionField& field) {
     const Graph g = buildCollapsedGraph(mesh, field);
     std::size_t edges = 0;

@@ -75,6 +75,7 @@ typedef struct CyberRemeshParams {
 /* Quadrangulator selection values for CyberRemeshParams.quadMethod. */
 #define CYBER_QUAD_FIELD_ALIGNED 0
 #define CYBER_QUAD_INSTANT_MESHES 1
+#define CYBER_QUAD_INTEGER 2
 
 /* Fills params with the engine defaults. No-op on NULL. */
 void cyber_default_params(CyberRemeshParams* params);

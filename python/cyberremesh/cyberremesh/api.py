@@ -122,11 +122,13 @@ class RemeshParams:
     pure_quads: bool = False
     hole_fill_max_boundary: int = 64  # 0 (never) .. 10_000
     # Quadrangulator: "field-aligned" (default, max-matching, highest
-    # dominance) or "instant-meshes" (position-field extractor, more uniform
-    # field-aligned flow with fewer/better singularities).
+    # dominance), "instant-meshes" (position-field extractor, more uniform
+    # field-aligned flow with fewer/better singularities), or "integer" (the
+    # integer-parametrization extractor, Milestones 3-5 — watertight/manifold,
+    # experimental; degrades at coarse target counts).
     quad_method: str = "field-aligned"
 
-    _QUAD_METHODS = {"field-aligned": 0, "instant-meshes": 1}
+    _QUAD_METHODS = {"field-aligned": 0, "instant-meshes": 1, "integer": 2}
 
     def _to_c(self) -> "_ffi.CyberRemeshParams":
         try:
