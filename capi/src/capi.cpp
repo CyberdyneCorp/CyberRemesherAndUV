@@ -23,6 +23,7 @@
 #include "cyber/core/mesh.hpp"
 #include "cyber/core/pipeline.hpp"
 #include "cyber/quadrangulate/field_quadrangulator.hpp"
+#include "cyber/quadrangulate/quadcover_extractor.hpp"
 #include "cyber/quadrangulate/position_field.hpp"
 #include "cyber/imageio/image.hpp"
 #include "cyber/core/progress.hpp"
@@ -235,6 +236,9 @@ CyberStatus cyber_remesh(const CyberMesh* in, const CyberRemeshParams* params,
                 }
                 if (quadMethod == CYBER_QUAD_INTEGER) {
                     return cyber::remesh::makeIntegerQuadrangulator();
+                }
+                if (quadMethod == CYBER_QUAD_QUADCOVER) {
+                    return cyber::remesh::makeQuadCoverQuadrangulator();
                 }
                 return cyber::remesh::makeFieldAlignedQuadrangulator();
             });

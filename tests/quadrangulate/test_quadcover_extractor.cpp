@@ -124,12 +124,12 @@ VertexInfo vertexInfo(const Mesh& mesh, VertexId v) {
 
 }  // namespace
 
-// TASK F scaffold contract. Until the seamless-UV isoline extractor is
-// implemented, the maker must still yield a usable IQuadrangulator that fails
-// cleanly and never corrupts the input mesh. Locking this now keeps the pipeline
-// safe when the quad-cover method is selected before it is finished, and gives
-// the next engineer a red/green target to flip once extraction lands.
-TEST_CASE("quad-cover quadrangulator is a safe not-implemented stub") {
+// M3 contract: makeQuadCoverQuadrangulator yields a real IQuadrangulator. When the
+// seamless-UV harness (CYBER_QUADCOVER_CLI) is unavailable it must FAIL CLEANLY —
+// report failure with a reason and leave the mesh exactly as-is — so the pipeline
+// degrades safely. When it succeeds it must have rewritten the mesh with faces. The
+// invariant that matters either way: on the failure path the input is untouched.
+TEST_CASE("quad-cover quadrangulator degrades cleanly and never corrupts on failure") {
     auto q = remesh::makeQuadCoverQuadrangulator();
     REQUIRE(q != nullptr);
     CHECK(q->name() == "quad-cover");
@@ -139,13 +139,16 @@ TEST_CASE("quad-cover quadrangulator is a safe not-implemented stub") {
 
     auto outcome = q->quadrangulate(mesh, 1.0f, nullptr, nullptr);
 
-    // Not implemented yet: reports failure, not cancellation, with a reason.
-    CHECK_FALSE(outcome.success);
     CHECK_FALSE(outcome.cancelled);
-    CHECK_FALSE(outcome.failureReason.empty());
-
-    // The mesh must be left exactly as-is on the failure path.
-    CHECK(aliveFaces(mesh) == facesBefore);
+    if (outcome.success) {
+        // Harness available: the mesh was replaced with an extracted quad mesh.
+        CHECK(aliveFaces(mesh) > 0);
+    } else {
+        // Harness absent (or extraction declined): a reason is reported and the input
+        // triangle island is left exactly as it was.
+        CHECK_FALSE(outcome.failureReason.empty());
+        CHECK(aliveFaces(mesh) == facesBefore);
+    }
 }
 
 // The isoline tracer (Milestone 2) is still a stub: an invalid UV yields no quads.

@@ -123,12 +123,20 @@ class RemeshParams:
     hole_fill_max_boundary: int = 64  # 0 (never) .. 10_000
     # Quadrangulator: "field-aligned" (default, max-matching, highest
     # dominance), "instant-meshes" (position-field extractor, more uniform
-    # field-aligned flow with fewer/better singularities), or "integer" (the
+    # field-aligned flow with fewer/better singularities), "integer" (the
     # integer-parametrization extractor, Milestones 3-5 — watertight/manifold,
-    # experimental; degrades at coarse target counts).
+    # experimental; degrades at coarse target counts), or "quad-cover"
+    # (QuadCover seamless-UV isoline extractor — ~1% irregular on closed
+    # surfaces, but requires the CYBER_QUADCOVER_CLI environment variable to
+    # point at a built autoremesher_cli; without it the run fails cleanly).
     quad_method: str = "field-aligned"
 
-    _QUAD_METHODS = {"field-aligned": 0, "instant-meshes": 1, "integer": 2}
+    _QUAD_METHODS = {
+        "field-aligned": 0,
+        "instant-meshes": 1,
+        "integer": 2,
+        "quad-cover": 3,
+    }
 
     def _to_c(self) -> "_ffi.CyberRemeshParams":
         try:

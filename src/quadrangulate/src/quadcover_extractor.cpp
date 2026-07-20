@@ -126,9 +126,18 @@ SeamlessUv computeSeamlessUv(const Mesh& mesh, float targetEdgeLength) {
     const long quads = cell > 0.0 ? std::max(64L, std::lround(area / cell)) : 3000L;
     const std::string cmd = std::string(cli) + " -i " + objPath + " -u " + uvPath + " -f " +
                             std::to_string(quads) + " -s 0.5 >/dev/null 2>&1";
+    const bool dbg = std::getenv("CYBER_QC_DEBUG") != nullptr;
+    if (dbg) {
+        std::fprintf(stderr, "[qc] edgeLen=%g area=%g quads=%ld cmd=%s\n",
+                     static_cast<double>(targetEdgeLength), area, quads, cmd.c_str());
+    }
     const int rc = std::system(cmd.c_str());
     if (rc == 0) {
         uv.valid = parseUvDump(uvPath, uv);
+    }
+    if (dbg) {
+        std::fprintf(stderr, "[qc] rc=%d valid=%d isoTris=%zu\n", rc, static_cast<int>(uv.valid),
+                     uv.triangles.size());
     }
     std::error_code ec;
     std::filesystem::remove(objPath, ec);
@@ -1390,13 +1399,15 @@ void IsolineExtractor::extract() {
 
 // Milestone 2 entry point: trace the seamless UV's integer isolines into an
 // oriented quad mesh. Returns empty for an invalid/empty UV.
-// A triangle soup is closed when every undirected edge is shared by exactly two
-// triangles (no boundary edge). Used to gate the closed-surface graph cleanup.
-bool isClosedTriMesh(const std::vector<std::array<Index, 3>>& triangles) {
+// Fraction of undirected edges that are on a boundary (incident to a single
+// triangle). ~0 for a closed surface (or a closed surface with a few numerical
+// cracks); large for a genuine open disk, whose whole perimeter is boundary.
+double boundaryEdgeFraction(const std::vector<std::array<Index, 3>>& triangles) {
     if (triangles.empty()) {
-        return false;
+        return 1.0;
     }
     std::unordered_map<std::uint64_t, int> edgeCount;
+    edgeCount.reserve(triangles.size() * 3);
     const auto key = [](Index a, Index b) {
         const std::uint64_t lo = static_cast<std::uint64_t>(std::min(a, b));
         const std::uint64_t hi = static_cast<std::uint64_t>(std::max(a, b));
@@ -1407,13 +1418,14 @@ bool isClosedTriMesh(const std::vector<std::array<Index, 3>>& triangles) {
         ++edgeCount[key(t[1], t[2])];
         ++edgeCount[key(t[2], t[0])];
     }
+    std::size_t boundary = 0;
     for (const auto& [e, count] : edgeCount) {
         (void)e;
-        if (count != 2) {
-            return false;
+        if (count == 1) {
+            ++boundary;
         }
     }
-    return true;
+    return static_cast<double>(boundary) / static_cast<double>(edgeCount.size());
 }
 
 IsolineQuadMesh extractIsolineQuads(const Mesh& /*mesh*/, const SeamlessUv& uv) {
@@ -1443,15 +1455,24 @@ IsolineQuadMesh extractIsolineQuads(const Mesh& /*mesh*/, const SeamlessUv& uv) 
 
     // Boundary-aware gate: the closed-surface graph cleanup (simplifyGraph / fixHoles /
     // collapse*) merges the raw isoline oversampling into clean quad cells and is REQUIRED
-    // on a closed surface (a sphere goes from 357 non-quad n-gons to 1.1% irregular with
-    // it on) but CORRUPTS an open disk (it fills the outer boundary as a hole and deletes
-    // real perimeter corners). Decide from the isotropic mesh itself: run cleanup iff it is
-    // closed (every edge shared by exactly two triangles).
-    const bool closed = isClosedTriMesh(uv.triangles);
+    // on a closed (or nearly-closed) surface — a sphere goes from 357 non-quad n-gons to
+    // 1.1% irregular with it on — but CORRUPTS a genuine open disk (it fills the perimeter
+    // as a hole and deletes real boundary corners). A binary closed test is too brittle:
+    // the harness re-remeshes and leaves a few numerical crack edges, so a genuinely closed
+    // model (e.g. spot) reads as "open" and gets the wrong branch. Decide on the boundary
+    // FRACTION instead: ~0 for a closed/cracked surface, large (whole perimeter) for a real
+    // open disk. Below 10% we treat the surface as closed and run the cleanup.
+    const double boundaryFrac = boundaryEdgeFraction(uv.triangles);
+    const bool closed = boundaryFrac < 0.10;
 
     IsolineExtractor extractor(std::move(vertices), std::move(triangles), std::move(triangleUvs));
     extractor.setRunClosedSurfaceCleanup(closed);
     extractor.extract();
+    if (std::getenv("CYBER_QC_DEBUG") != nullptr) {
+        std::fprintf(stderr, "[qc] extract closed=%d bndFrac=%.3f uvTris=%zu -> quads=%zu verts=%zu\n",
+                     static_cast<int>(closed), boundaryFrac, uv.triangles.size(),
+                     extractor.remeshedQuads().size(), extractor.remeshedVertices().size());
+    }
 
     IsolineQuadMesh out;
     out.vertices.reserve(extractor.remeshedVertices().size());
@@ -1465,9 +1486,12 @@ IsolineQuadMesh extractIsolineQuads(const Mesh& /*mesh*/, const SeamlessUv& uv) 
 
 namespace {
 
-// IQuadrangulator implementation. The stub does not touch `mesh`: on the failure
-// path the caller keeps its input triangle island unchanged, which is exactly the
-// safe degrade behaviour the pipeline expects from a not-yet-implemented seam.
+// IQuadrangulator implementation (Milestone 3). Runs the full QuadCover pipeline:
+// seamless integer-grid UV (M1, out-of-process via CYBER_QUADCOVER_CLI) -> isoline
+// trace + boundary-aware cleanup (M2) -> replace `mesh` in place with the quad mesh.
+// Every failure path leaves `mesh` untouched, so the pipeline degrades cleanly (e.g.
+// when the harness binary is absent, computeSeamlessUv returns invalid and we report
+// a reason without corrupting the input triangle island).
 class QuadCoverQuadrangulator final : public IQuadrangulator {
 public:
     explicit QuadCoverQuadrangulator(int fieldIterations) : m_fieldIterations(fieldIterations) {}
@@ -1478,22 +1502,49 @@ public:
             return {.success = false, .cancelled = true, .failureReason = {}};
         }
         if (progress != nullptr) {
-            progress->report(0.0f, "quadrangulate (quad-cover: not implemented)");
+            progress->report(0.0f, "quadrangulate (quad-cover: seamless UV)");
         }
-
-        // --- Real pipeline goes here (Milestones 1-4) ---
-        //   SeamlessUv uv = computeSeamlessUv(mesh, targetEdgeLength);
-        //   if (!uv.valid) return { .success = false, ... };
-        //   IsolineQuadMesh out = extractIsolineQuads(mesh, uv);
-        //   rewriteMeshInPlace(mesh, out);   // replace tris with quads
-        // Until then, leave `mesh` untouched and report not-implemented.
-        (void)mesh;
-        (void)targetEdgeLength;
         (void)m_fieldIterations;
 
-        return {.success = false,
-                .cancelled = false,
-                .failureReason = "quad-cover isoline extractor not implemented (Task F scaffold)"};
+        const SeamlessUv uv = computeSeamlessUv(mesh, targetEdgeLength);
+        if (!uv.valid) {
+            return {.success = false, .cancelled = false,
+                    .failureReason = "quad-cover seamless UV unavailable "
+                                     "(set CYBER_QUADCOVER_CLI to the autoremesher_cli build)"};
+        }
+        if (cancel != nullptr && cancel->isCancelled()) {
+            return {.success = false, .cancelled = true, .failureReason = {}};
+        }
+        if (progress != nullptr) {
+            progress->report(0.5f, "quadrangulate (quad-cover: isoline extract)");
+        }
+
+        const IsolineQuadMesh out = extractIsolineQuads(mesh, uv);
+        if (out.quads.empty()) {
+            return {.success = false, .cancelled = false,
+                    .failureReason = "quad-cover isoline extraction produced no faces"};
+        }
+
+        std::vector<std::vector<Index>> faces;
+        faces.reserve(out.quads.size());
+        for (const auto& q : out.quads) {
+            std::vector<Index> f;
+            f.reserve(q.size());
+            for (const std::size_t v : q) {
+                f.push_back(static_cast<Index>(v));
+            }
+            faces.push_back(std::move(f));
+        }
+        Mesh quads = Mesh::fromIndexed(out.vertices, faces);
+        if (quads.faceCount() == 0) {
+            return {.success = false, .cancelled = false,
+                    .failureReason = "quad-cover extraction yielded a degenerate mesh"};
+        }
+        mesh = std::move(quads);
+        if (progress != nullptr) {
+            progress->report(1.0f, "quadrangulate");
+        }
+        return {.success = true, .cancelled = false, .failureReason = {}};
     }
 
     [[nodiscard]] std::string name() const override { return "quad-cover"; }

@@ -69,13 +69,20 @@ typedef struct CyberRemeshParams {
     int pureQuads;             /* non-zero: forbid residual triangles */
     int holeFillMaxBoundary;   /* max boundary edges of holes to fill; 0 off */
     int quadMethod;            /* 0 = field-aligned matching (default),
-                                * 1 = Instant-Meshes position-field extractor */
+                                * 1 = Instant-Meshes position-field extractor,
+                                * 2 = integer-parametrization extractor,
+                                * 3 = QuadCover seamless-UV isoline extractor */
 } CyberRemeshParams;
 
 /* Quadrangulator selection values for CyberRemeshParams.quadMethod. */
 #define CYBER_QUAD_FIELD_ALIGNED 0
 #define CYBER_QUAD_INSTANT_MESHES 1
 #define CYBER_QUAD_INTEGER 2
+/* QuadCover seamless-UV isoline extractor (Task F). Reaches ~1% irregular on closed
+ * surfaces but requires an out-of-process seamless-UV solve: set the CYBER_QUADCOVER_CLI
+ * environment variable to a built autoremesher_cli. Without it the run reports failure
+ * and the input is left unchanged. */
+#define CYBER_QUAD_QUADCOVER 3
 
 /* Fills params with the engine defaults. No-op on NULL. */
 void cyber_default_params(CyberRemeshParams* params);

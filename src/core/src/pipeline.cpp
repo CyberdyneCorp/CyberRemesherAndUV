@@ -407,6 +407,13 @@ PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSi
     float progressBase = 0.0f;
     bool fieldExtractor = false;   // did the position-field extractor run? (drives CV relax)
     bool integerExtractor = false;  // integer-grid extractor? (drives base-relax strength)
+    // The quad-cover method runs its own (harness) isotropic remesh + seamless-UV solve on
+    // the raw triangles; a preceding pipeline isotropic remesh would double-remesh and leave
+    // the harness a density-sensitive, crack-prone input. Peek the method name once so the
+    // per-island loop can skip our isotropic stage for it and feed the raw island through.
+    const std::string quadMethodName =
+        quadrangulator ? quadrangulator()->name() : std::string("greedy");
+    const bool quadCoverMethod = quadMethodName == "quad-cover";
     for (std::size_t i = 0; i < islandFaces.size(); ++i) {
         IslandOutcome& outcome = outcomes[i];
         outcome.inputFaces = islandFaces[i].size();
@@ -421,29 +428,32 @@ PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSi
 
         outcome.mesh = extractIsland(work, islandFaces[i]);
         outcome.mesh.tagFeatureEdges(params.sharpEdgeDegrees);
-        const ReferenceSurface reference(outcome.mesh, params.smoothNormalDegrees);
 
-        // Isotropic stage: overall 0.0-0.3 of this island's slice.
-        IsotropicOptions iso;
-        iso.targetEdgeLength = lengthResult.edgeLength;
-        iso.adaptivity = params.adaptivity;
-        iso.smoothNormalDegrees = params.smoothNormalDegrees;
-        ProgressSink isoSink =
-            progress ? progress->subrange(progressBase, progressBase + weight * 0.3f, "isotropic")
-                     : ProgressSink{};
-        const IsotropicStatus isoStatus =
-            isotropicRemesh(outcome.mesh, reference, iso, progress ? &isoSink : nullptr, cancel);
-        if (isoStatus == IsotropicStatus::Cancelled) {
-            result.status = RunStatus::Cancelled;
-            return result;
-        }
-        if (isoStatus != IsotropicStatus::Success || outcome.mesh.faceCount() == 0) {
-            outcome.stage = "isotropic";
-            outcome.reason = isoStatus == IsotropicStatus::InvalidInput
-                                 ? "invalid island input"
-                                 : "island vanished during isotropic remeshing";
-            progressBase += weight;
-            continue;
+        // Isotropic stage: overall 0.0-0.3 of this island's slice. Skipped for quad-cover,
+        // which does its own isotropic remesh downstream (see quadCoverMethod above).
+        if (!quadCoverMethod) {
+            const ReferenceSurface reference(outcome.mesh, params.smoothNormalDegrees);
+            IsotropicOptions iso;
+            iso.targetEdgeLength = lengthResult.edgeLength;
+            iso.adaptivity = params.adaptivity;
+            iso.smoothNormalDegrees = params.smoothNormalDegrees;
+            ProgressSink isoSink =
+                progress ? progress->subrange(progressBase, progressBase + weight * 0.3f, "isotropic")
+                         : ProgressSink{};
+            const IsotropicStatus isoStatus =
+                isotropicRemesh(outcome.mesh, reference, iso, progress ? &isoSink : nullptr, cancel);
+            if (isoStatus == IsotropicStatus::Cancelled) {
+                result.status = RunStatus::Cancelled;
+                return result;
+            }
+            if (isoStatus != IsotropicStatus::Success || outcome.mesh.faceCount() == 0) {
+                outcome.stage = "isotropic";
+                outcome.reason = isoStatus == IsotropicStatus::InvalidInput
+                                     ? "invalid island input"
+                                     : "island vanished during isotropic remeshing";
+                progressBase += weight;
+                continue;
+            }
         }
 
         // Quadrangulation stage: 0.3-0.9 of this island's slice. Use the
