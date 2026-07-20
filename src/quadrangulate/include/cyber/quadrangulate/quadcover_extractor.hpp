@@ -86,6 +86,16 @@ struct SeamlessUv {
                                            float harnessScaling = 0.5f,
                                            float harnessAdaptivity = 0.0f);
 
+// Native seamless integer-grid parameterizer (docs/native-miq-plan.md) — the path to
+// dropping the vendored-Geogram dependency entirely. QuadCover-style: reuse our own
+// 4-RoSy frame field (computePositionField) + a cut graph, solve the seamless Poisson
+// system with Conjugate Gradient on accel::spmv, round seam jumps with MinCostFlow.
+// M0 SCAFFOLD: returns an INVALID SeamlessUv (valid == false) until the solve (M2)
+// lands, so computeSeamlessUv falls through to the vendored/harness path. Opt-in via
+// CYBER_QC_NATIVE so it never affects the shipped path before it validates.
+[[nodiscard]] SeamlessUv computeSeamlessUvNative(const Mesh& mesh, float targetEdgeLength,
+                                                 float adaptivity = 0.0f);
+
 // Max integer-jump residual of a seamless UV across its interior edges: for each edge
 // shared by two triangles, the grid symmetry mapping one triangle's shared-vertex UVs
 // to the other's must have an INTEGER translation. 0 == perfectly seamless. A

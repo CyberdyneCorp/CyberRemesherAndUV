@@ -116,11 +116,33 @@ bool writeObjFor(const std::string& path, const Mesh& mesh, double& areaOut) {
 
 }  // namespace
 
+SeamlessUv computeSeamlessUvNative(const Mesh& mesh, float targetEdgeLength, float adaptivity) {
+    // M0 scaffold (docs/native-miq-plan.md). The QuadCover-style native solve — frame
+    // field (computePositionField) -> cut graph (M1) -> seamless Poisson solve via
+    // CG-on-spmv + MinCostFlow seam rounding (M2) -> isotropic pre-remesh (M3) — is not
+    // implemented yet, so return an invalid UV and let the caller fall through to the
+    // vendored / harness path. Wired but inert.
+    (void)mesh;
+    (void)targetEdgeLength;
+    (void)adaptivity;
+    return SeamlessUv{};
+}
+
 SeamlessUv computeSeamlessUv(const Mesh& mesh, float targetEdgeLength, float harnessScaling,
                              float harnessAdaptivity) {
     SeamlessUv uv;
     if (targetEdgeLength <= 0.0f) {
         return uv;  // no target density -> caller degrades cleanly
+    }
+
+    // Native seamless-UV solver (docs/native-miq-plan.md), opt-in via CYBER_QC_NATIVE
+    // until it validates. When it returns a valid UV, use it and skip the vendored path
+    // entirely; otherwise fall through so nothing regresses.
+    if (std::getenv("CYBER_QC_NATIVE") != nullptr) {
+        SeamlessUv native = computeSeamlessUvNative(mesh, targetEdgeLength, harnessAdaptivity);
+        if (native.valid) {
+            return native;
+        }
     }
 
 #ifdef CYBER_HAVE_QUADCOVER
