@@ -3082,14 +3082,148 @@ bool removeDoubletsPass(std::vector<std::array<int, 4>>& faces, int nV) {
     return update;
 }
 
+// Per-vertex quad valence (incident-face count) + boundary flag, from a QuadDedge.
+struct QuadValence {
+    std::vector<int> val;
+    std::vector<char> bnd;
+};
+QuadValence quadValence(const QuadDedge& d, const std::vector<std::array<int, 4>>& faces, int nV) {
+    QuadValence q;
+    q.val.assign(static_cast<std::size_t>(nV), 0);
+    q.bnd.assign(static_cast<std::size_t>(nV), 0);
+    for (std::size_t f = 0; f < faces.size(); ++f) {
+        for (int i = 0; i < 4; ++i) {
+            const int a = faces[f][static_cast<std::size_t>(i)];
+            const int b = faces[f][static_cast<std::size_t>((i + 1) % 4)];
+            if (a == b) {
+                continue;
+            }
+            ++q.val[static_cast<std::size_t>(a)];
+            if (d.e2e[f * 4 + static_cast<std::size_t>(i)] == -1) {
+                q.bnd[static_cast<std::size_t>(a)] = 1;
+                q.bnd[static_cast<std::size_t>(b)] = 1;
+            }
+        }
+    }
+    return q;
+}
+
+// True iff all six hexagon vertices are distinct (a well-formed rotation patch).
+bool allDistinct6(const std::array<int, 6>& a) {
+    for (int p = 0; p < 6; ++p) {
+        for (int q = p + 1; q < 6; ++q) {
+            if (a[static_cast<std::size_t>(p)] == a[static_cast<std::size_t>(q)]) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+// One pass of valence-improving quad edge rotation — the val3/val5 dipole canceller.
+// Each interior edge is shared by two quads that together form a hexagon; the edge
+// can be re-drawn along either of the two other hexagon diagonals. A rotation moves
+// one valence unit off each of the edge's endpoints onto the two diagonal endpoints.
+// Accept one only when it STRICTLY reduces the interior irregular (valence != 4)
+// count in that hexagon and stays manifold (no duplicated/existing edge, endpoints
+// keep valence >= 3, boundary vertices untouched). No QuadriFlow analogue — QuadriFlow
+// relies on a cleaner grid upstream — but the monotone guard makes it purely additive:
+// it cancels a 3/5 dipole exactly when a neighbour absorbs the moved valence.
+bool rotateValencePass(std::vector<std::array<int, 4>>& faces, int nV) {
+    const QuadDedge d = quadDedge(faces, nV);
+    const QuadValence qv = quadValence(d, faces, nV);
+    std::set<std::pair<int, int>> edges;
+    for (const auto& f : faces) {
+        for (int i = 0; i < 4; ++i) {
+            const int a = f[static_cast<std::size_t>(i)], b = f[static_cast<std::size_t>((i + 1) % 4)];
+            if (a != b) {
+                edges.insert(std::minmax(a, b));
+            }
+        }
+    }
+    std::vector<char> marks(static_cast<std::size_t>(nV), 0);
+    const auto irr = [&](int v, int valence) {  // 1 if this interior vertex is irregular
+        return qv.bnd[static_cast<std::size_t>(v)] != 0 ? 0 : (valence != 4 ? 1 : 0);
+    };
+    // Delta in interior-irregular count if (u,v) lose a valence and (p,q) gain one,
+    // introducing edge p-q. Returns +1 (reject) if the rotation is invalid.
+    const auto evalRot = [&](int u, int v, int p, int q) {
+        if (marks[static_cast<std::size_t>(p)] != 0 || marks[static_cast<std::size_t>(q)] != 0) {
+            return 1;
+        }
+        if (edges.count(std::minmax(p, q)) != 0) {
+            return 1;  // p-q already an edge: rotation would double it (non-manifold)
+        }
+        const std::size_t up = static_cast<std::size_t>(p), uq = static_cast<std::size_t>(q);
+        return (irr(u, qv.val[static_cast<std::size_t>(u)] - 1) -
+                irr(u, qv.val[static_cast<std::size_t>(u)])) +
+               (irr(v, qv.val[static_cast<std::size_t>(v)] - 1) -
+                irr(v, qv.val[static_cast<std::size_t>(v)])) +
+               (irr(p, qv.val[up] + 1) - irr(p, qv.val[up])) +
+               (irr(q, qv.val[uq] + 1) - irr(q, qv.val[uq]));
+    };
+    bool update = false;
+    for (std::size_t f = 0; f < faces.size(); ++f) {
+        for (int i = 0; i < 4; ++i) {
+            const int he = static_cast<int>(f) * 4 + i;
+            const int he2 = d.e2e[static_cast<std::size_t>(he)];
+            if (he2 == -1 || he2 < he) {
+                continue;  // boundary, or handle each undirected edge once
+            }
+            const int u = faces[f][static_cast<std::size_t>(i)];
+            const int v = faces[f][static_cast<std::size_t>((i + 1) % 4)];
+            const int w = faces[f][static_cast<std::size_t>((i + 2) % 4)];
+            const int x = faces[f][static_cast<std::size_t>((i + 3) % 4)];
+            const std::size_t f2 = static_cast<std::size_t>(he2 / 4);
+            const int j = he2 % 4;
+            const int yv = faces[f2][static_cast<std::size_t>((j + 2) % 4)];
+            const int zv = faces[f2][static_cast<std::size_t>((j + 3) % 4)];
+            // Both rotations decrement u and v; keep them interior and >= valence 4.
+            if (qv.val[static_cast<std::size_t>(u)] < 4 || qv.val[static_cast<std::size_t>(v)] < 4 ||
+                qv.bnd[static_cast<std::size_t>(u)] != 0 || qv.bnd[static_cast<std::size_t>(v)] != 0) {
+                continue;
+            }
+            const std::array<int, 6> hex{u, v, w, x, yv, zv};
+            if (!allDistinct6(hex) || marks[static_cast<std::size_t>(u)] != 0 ||
+                marks[static_cast<std::size_t>(v)] != 0) {
+                continue;
+            }
+            const int dA = evalRot(u, v, w, yv);  // re-split along diagonal w-y
+            const int dB = evalRot(u, v, x, zv);  // re-split along diagonal x-z
+            if (dA < 0 && dA <= dB) {
+                faces[f] = {w, x, u, yv};
+                faces[f2] = {yv, zv, v, w};
+            } else if (dB < 0) {
+                faces[f] = {x, u, yv, zv};
+                faces[f2] = {zv, v, w, x};
+            } else {
+                continue;
+            }
+            for (const int hv : hex) {
+                marks[static_cast<std::size_t>(hv)] = 1;
+            }
+            update = true;
+        }
+    }
+    return update;
+}
+
 // Topology cleanup on the extracted quad mesh (QuadriFlow FixValence, "Remove
-// Valence 2"): dissolve interior valence-2 doublets to a fixpoint. Restricted to
-// interior doublets — merging a boundary valence-2 vertex opens seams and was
-// measured net-negative (irregular + boundary both up); the high-valence split /
-// decrease passes are likewise net-negative on this extractor and omitted.
-// Geometry is untouched; freed vertices drop out at materialisation.
-void fixValence(std::vector<std::array<int, 4>>& faces, int nV) {
-    while (removeDoubletsPass(faces, nV)) {
+// Valence 2", plus our valence-improving edge rotation): dissolve interior valence-2
+// doublets, then cancel valence-3/valence-5 dipoles by edge rotation, to a joint
+// fixpoint. Both operators are strictly monotone (only remove irregulars / never open
+// a boundary), so this can only improve the mesh. Geometry is untouched; freed
+// vertices drop out at materialisation.
+void fixValence(std::vector<std::array<int, 4>>& faces, int nV, bool rotate) {
+    bool changed = true;
+    for (int guard = 0; changed && guard < 100; ++guard) {
+        changed = false;
+        while (removeDoubletsPass(faces, nV)) {
+            changed = true;
+        }
+        if (rotate && rotateValencePass(faces, nV)) {
+            changed = true;
+        }
     }
 }
 
@@ -3145,7 +3279,7 @@ void relaxPositions(const std::vector<std::array<int, 4>>& faces, std::vector<Ve
 // each |diff|==(1,1) grid-cell diagonal into a quad, drop degenerate quads,
 // FixHoles the residual boundary loops, then FixValence (dissolve doublets).
 // Output vertex position is the mean field position (O).
-Mesh buildQuadMesh(const SubMesh& m) {
+Mesh buildQuadMesh(const SubMesh& m, bool rotateCleanup = true) {
     const ManifoldTris mt = buildManifoldTris(m);
 
     // Pair the two triangles across each grid-cell diagonal (QuadriFlow keys the
@@ -3199,7 +3333,7 @@ Mesh buildQuadMesh(const SubMesh& m) {
     faces.swap(cleaned);
 
     fixHoles(faces, mt.O, mt.N, static_cast<int>(mt.O.size()));
-    fixValence(faces, static_cast<int>(mt.O.size()));
+    fixValence(faces, static_cast<int>(mt.O.size()), rotateCleanup);
 
     // Even out the extracted quad spacing before materialising (see relaxPositions).
     std::vector<Vec3> pos = mt.O;
@@ -3337,6 +3471,38 @@ IntegerExtractStats debugIntegerExtract(const Mesh& mesh, const PositionField& f
         }
     }
     return st;
+}
+
+ValenceCleanupStats debugValenceCleanup(const Mesh& mesh, const PositionField& field) {
+    IntegerGrid g = computeIntegerGrid(mesh, field);
+    fixFlipHierarchy(g);
+    const SubMesh m = subdivideToUnitCells(g, mesh, field, 1);
+    const auto interiorIrr = [](const Mesh& q) {
+        std::size_t n = 0;
+        for (Index vi = 0; vi < q.vertexCapacity(); ++vi) {
+            const VertexId v{vi};
+            if (!q.isAlive(v)) {
+                continue;
+            }
+            bool boundary = false;
+            for (const EdgeId e : q.vertexEdges(v)) {
+                if (q.isBoundaryEdge(e)) {
+                    boundary = true;
+                    break;
+                }
+            }
+            if (!boundary && q.vertexFaces(v).size() != 4) {
+                ++n;
+            }
+        }
+        return n;
+    };
+    ValenceCleanupStats s;
+    s.irregularWithout = interiorIrr(buildQuadMesh(m, false));
+    const Mesh with = buildQuadMesh(m, true);
+    s.irregularWith = interiorIrr(with);
+    s.manifoldWith = with.validate().empty();
+    return s;
 }
 
 SubdivideStats debugSubdivide(const Mesh& mesh, const PositionField& field) {

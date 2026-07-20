@@ -467,6 +467,21 @@ TEST_CASE("flip repair: SAT preserves grid integrability") {
 // boundary edges / ~45% irregular; the manifold reconstruction cuts that to a few
 // dozen boundary edges (only unfillable triangular holes at singularities remain),
 // and the doublet pass trims the irregular count further.
+// Regression: the valence-cleanup edge-rotation pass (val3/val5 dipole canceller) must
+// be strictly monotone — never raise the interior irregular count — and always leave a
+// manifold mesh. On a curved icosphere it also actively lowers the count (the win).
+TEST_CASE("valence cleanup: dipole canceller lowers irregular count and stays manifold") {
+    const Mesh sphere = icosphere(3);
+    const float spacing = meanEdgeLength(sphere);
+    const remesh::PositionField field = remesh::computePositionField(sphere, spacing, 40);
+    const remesh::ValenceCleanupStats s = remesh::debugValenceCleanup(sphere, field);
+    CAPTURE(s.irregularWithout);
+    CAPTURE(s.irregularWith);
+    CHECK(s.manifoldWith);                        // never breaks the manifold
+    CHECK(s.irregularWith <= s.irregularWithout);  // monotone: never worse
+    CHECK(s.irregularWith < s.irregularWithout);   // and it helps on a curved mesh
+}
+
 TEST_CASE("integer solve: extraction is manifold, all-quad and near-watertight") {
     const Mesh sphere = icosphere(3);
     const float spacing = meanEdgeLength(sphere);

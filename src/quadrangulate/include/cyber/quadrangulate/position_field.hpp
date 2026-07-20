@@ -197,4 +197,14 @@ struct IntegerExtractStats {
 };
 [[nodiscard]] IntegerExtractStats debugIntegerExtract(const Mesh& mesh, const PositionField& field);
 
+// Validation hook for the valence cleanup (dipole canceller): the interior-irregular
+// count of the extraction with the edge-rotation pass disabled vs enabled. The pass
+// must be monotone (never raise the count) and keep the mesh manifold.
+struct ValenceCleanupStats {
+    std::size_t irregularWithout = 0;
+    std::size_t irregularWith = 0;
+    bool manifoldWith = false;
+};
+[[nodiscard]] ValenceCleanupStats debugValenceCleanup(const Mesh& mesh, const PositionField& field);
+
 }  // namespace cyber::remesh
