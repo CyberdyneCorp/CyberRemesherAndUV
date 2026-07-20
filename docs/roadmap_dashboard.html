@@ -305,12 +305,44 @@
     </div>
   </div>
 
+  <h2><span class="n">§5</span> What's missing to match QuadriFlow</h2>
+  <p class="lede" style="font-size:14px;margin-bottom:14px">The integer extractor is now
+    benchmarkable (<code>quad_method="integer"</code>) and is <b>best-of-ours on singularity
+    count</b> — but four concrete gaps remain, each measured at the ~3000-quad target.</p>
+  <div class="notes">
+    <div class="note">
+      <div class="h"><span class="dot" style="background:var(--gap)"></span>1 · Fewer singularities</div>
+      <p><b>irregular 9–10% vs QuadriFlow 1–3%</b> (3–9× more). The single-level collapse
+        <i>quantizes</i> the grid; the flip-repair layer we built only partly undoes it. The real fix
+        is genuinely <b>end-to-end multi-resolution extraction</b> — QuadriFlow's whole coarse-to-fine
+        pipeline produces a globally consistent grid, not just the one flip pass we bolted on.</p>
+    </div>
+    <div class="note">
+      <div class="h"><span class="dot" style="background:var(--gap)"></span>2 · Uniform quads</div>
+      <p><b>edge CV 0.29–0.34 vs QuadriFlow 0.14–0.19</b> — our quads vary more in size. We run no
+        <b>position optimisation</b>: QuadriFlow relaxes the extracted vertices onto the field lattice
+        after the solve (a Laplacian/position pass), evening out quad size. That pass is missing.</p>
+    </div>
+    <div class="note">
+      <div class="h"><span class="dot" style="background:var(--partial)"></span>3 · Straighter angles</div>
+      <p><b>median 75–78° vs QuadriFlow 82–85°.</b> Mostly <i>downstream</i> of gaps 1 &amp; 2 —
+        irregular vertices skew their neighbours and non-uniform quads shear. Closing the singularity
+        count and adding position optimisation recovers most of the angle gap for free.</p>
+    </div>
+    <div class="note">
+      <div class="h"><span class="dot" style="background:var(--gap)"></span>4 · Robustness</div>
+      <p>The integer path <b>OOM-kills on cheburashka / rocker-arm</b> at coarse target counts (a
+        subdivide runaway), where QuadriFlow is stable across the whole corpus. Needs the coarse-density
+        blow-up fixed, plus open-boundary and sharp-crease handling for CAD input.</p>
+    </div>
+  </div>
+
   <footer>
     Snapshot: 2026-07-19 · corpus = spot · fandisk · rocker-arm · cheburashka · stanford-bunny ·
     target ~3000 quads · reference = QuadriFlow (headless, boost-free) · numbers from
     <code>examples/11_benchmark.py</code>. Roadmap detail in <code>docs/ROADMAP.md</code>.
     <br>
-    <span style="opacity:.75">Dashboard content as of commit <code>123b2d7</code> (2026-07-19) —
+    <span style="opacity:.75">Dashboard content as of commit <code>8018ed3</code> (2026-07-19) —
     a manual artifact; it does not auto-track the repo, so a later commit may have moved past this.</span>
   </footer>
 </div>
