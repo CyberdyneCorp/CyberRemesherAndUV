@@ -135,6 +135,25 @@ TEST_CASE("multi-island input remeshes every island (spec: multi-island)") {
     REQUIRE(result.mesh.islands().size() == 2);  // both shells in the output
 }
 
+// Regression: an unwelded "polygon soup" (patches meeting at coincident-but-distinct
+// vertices) must be fused into one connected surface before islands(), otherwise each
+// patch is quadrangulated independently and their shared boundaries leave open seams at
+// high density (the flat-cube -> >=1500-quad stitching bug: hundreds of boundary edges).
+// A unit square as two triangles sharing a diagonal in POSITION only (no shared vertex
+// index) is two islands until welded. Genuinely-separate geometry (the two spheres
+// above, 5 units apart) is untouched — the weld merges only coincident vertices.
+TEST_CASE("pipeline welds coincident vertices so unwelded patches fuse into one surface") {
+    const std::vector<Vec3> p = {{0, 0, 0}, {1, 0, 0}, {1, 1, 0},   // triangle A
+                                 {0, 0, 0}, {1, 1, 0}, {0, 1, 0}};  // triangle B: dups A's diag
+    const std::vector<std::vector<Index>> f = {{0, 1, 2}, {3, 4, 5}};
+    const Mesh soup = Mesh::fromIndexed(p, f);
+    REQUIRE(soup.islands().size() == 2);  // unwelded: two disconnected patches
+
+    const auto result = remesh::remesh(soup, smallRun(64));
+    REQUIRE(result.status == remesh::RunStatus::Success);
+    CHECK(result.mesh.islands().size() == 1);  // welded -> one connected surface, no seam
+}
+
 TEST_CASE("pure quads option yields zero non-quads (spec: pure-quad post-pass)") {
     const Mesh sphere = makeSphere(12, 18);
     remesh::Parameters params = smallRun(400);

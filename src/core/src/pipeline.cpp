@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <map>
 
 #include "cyber/core/bvh.hpp"
 #include "cyber/core/isotropic.hpp"
@@ -48,6 +49,67 @@ Mesh extractIsland(const Mesh& source, const std::vector<FaceId>& faces) {
         faceLists.push_back(std::move(face));
     }
     return Mesh::fromIndexed(positions, faceLists);
+}
+
+// Weld coincident vertices so a polygon soup becomes a connected surface. Some inputs
+// (e.g. an exported cube whose six faces don't share vertices) arrive as disconnected
+// patches meeting at coincident-but-distinct vertices; islands() then sees N patches,
+// quadrangulates each independently, and their shared-edge boundaries disagree at high
+// density — leaving open seams (hundreds of boundary edges). Merging duplicate positions
+// makes the surface one component before quadrangulation, so there is nothing to stitch.
+// Returns the input unchanged when nothing is coincident (already-welded meshes stay
+// bit-identical, preserving determinism on the corpus).
+Mesh weldCoincidentVertices(const Mesh& mesh) {
+    std::vector<Vec3> pos;
+    std::vector<std::vector<Index>> faces;
+    mesh.toIndexed(pos, faces);
+    if (pos.empty()) {
+        return mesh;
+    }
+    Vec3 lo = pos[0];
+    Vec3 hi = pos[0];
+    for (const Vec3& p : pos) {
+        lo = min(lo, p);
+        hi = max(hi, p);
+    }
+    const float eps = std::max(length(hi - lo) * 1e-6f, 1e-9f);
+    const float inv = 1.0f / eps;
+    const auto key = [&](const Vec3& p) {
+        return std::array<long long, 3>{std::llround(static_cast<double>(p.x * inv)),
+                                        std::llround(static_cast<double>(p.y * inv)),
+                                        std::llround(static_cast<double>(p.z * inv))};
+    };
+    std::map<std::array<long long, 3>, Index> lookup;
+    std::vector<Vec3> welded;
+    std::vector<Index> remap(pos.size());
+    for (std::size_t i = 0; i < pos.size(); ++i) {
+        const auto [it, inserted] = lookup.try_emplace(key(pos[i]), static_cast<Index>(welded.size()));
+        if (inserted) {
+            welded.push_back(pos[i]);
+        }
+        remap[i] = it->second;
+    }
+    if (welded.size() == pos.size()) {
+        return mesh;  // nothing coincident
+    }
+    std::vector<std::vector<Index>> weldedFaces;
+    weldedFaces.reserve(faces.size());
+    for (const auto& f : faces) {
+        std::vector<Index> nf;
+        for (const Index v : f) {
+            const Index w = remap[v];
+            if (nf.empty() || nf.back() != w) {
+                nf.push_back(w);  // drop consecutive duplicates a weld can create
+            }
+        }
+        while (nf.size() > 1 && nf.front() == nf.back()) {
+            nf.pop_back();
+        }
+        if (nf.size() >= 3) {  // skip faces that collapsed to a degenerate
+            weldedFaces.push_back(std::move(nf));
+        }
+    }
+    return Mesh::fromIndexed(welded, weldedFaces);
 }
 
 // Tangential Laplacian step for an interior vertex: move toward the 1-ring
@@ -313,6 +375,7 @@ PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSi
     // Stage 1: guarded target edge length.
     Mesh work = input;
     work.triangulate();
+    work = weldCoincidentVertices(work);  // fuse unwelded coincident patches (seam fix)
     const double area = totalSurfaceArea(work);
     const EdgeLengthResult lengthResult = targetEdgeLength(area, effectiveQuads, params.edgeScale);
     if (!lengthResult.ok()) {
