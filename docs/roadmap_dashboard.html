@@ -279,29 +279,25 @@
   <div class="qpp" id="qpp"></div>
   <div class="qpp-key">Surface deviation (% of bbox diagonal) at the <b>same output quad count</b>, <b>ours adaptive vs ours uniform</b> — isolates the sizing benefit from the mesh-quality gap. Lower bar = better fidelity per polygon. <span style="color:var(--accent-soft);font-weight:700">■ adaptive</span> &nbsp; <span style="color:var(--ref);font-weight:700">■ uniform</span>. Beating QuadriFlow's <i>absolute</i> fidelity is Phase-4-gated.
 
-  <h2><span class="n">§4</span> What the benchmark taught us</h2>
+  <h2><span class="n">§4</span> Three-way, by scenario — where each engine wins</h2>
+  <p class="lede" style="font-size:14px;margin-bottom:14px">The visual examples split into four
+    scenarios, and the ranking flips between them. No engine wins everywhere.</p>
   <div class="notes">
     <div class="note">
-      <div class="h"><span class="dot" style="background:var(--win)"></span>Robust on hard geometry</div>
-      <p>On a subdivided cube QuadriFlow tears the mesh apart (598 boundary edges) and rounds the
-        corners; ours stays clean and crisp. A genuine strength on box/CAD geometry — though on
-        smooth organic models QuadriFlow is the more robust one.</p>
+      <div class="h"><span class="dot" style="background:var(--ref)"></span>Organic (spot · bunny · rocker) — <b style="color:var(--ref)">QuadriFlow wins</b></div>
+      <p>irregular <b>ours 7–13% · QF 1–4% · AR 6–15%</b>; CV <b>ours 0.29–0.42 · QF 0.14–0.19 · AR 0.41–0.56</b>; median <b>ours 74–79° · QF 82° · AR 75–80°</b>. QuadriFlow is cleanest on the common case; <b>we are on par with AutoRemesher</b> (match irregular, beat CV).</p>
     </div>
     <div class="note">
-      <div class="h"><span class="dot" style="background:var(--win)"></span>Solve + watertight extraction</div>
-      <p>The global integer solve (min-cost flow) cancels the spurious singularities, and QuadriFlow's
-        <span class="mono">BuildTriangleManifold</span> + <span class="mono">FixValence</span> turn that
-        grid into a <b>watertight, manifold, all-quad</b> mesh — <b>beating the current default
-        extractor</b> on irregular % across the corpus (spot 25% vs 44%, rocker-arm 24% vs 68%). It
-        does <i>not</i> yet beat QuadriFlow: the zero-diff <b>collapse</b> quantizes the clean grid,
-        multiplying its 44 true singularities <b>~9×</b> into val3/val5 dipoles (the pairing and field
-        are both clean — round 2). Closing it needs the multi-res flip-repair layer — Phase 5.</p>
+      <div class="h"><span class="dot" style="background:var(--gap)"></span>CAD / sharp (cube) — <b style="color:var(--gap)">everyone struggles differently</b></div>
+      <p>On a flat-faced cube (900-quad target): QF nails 89° angles but <b>tears the mesh — 376 defects</b>; AutoRemesher is <b>cleanest (0 defects, 90°)</b> but CV 1.39; <b>our integer path breaks</b> (non-manifold, 312 defects, 61% irregular); our field-aligned is <b>robust (0 defects)</b> but CV 1.58. Flat CAD is the weakest spot for our integer extractor.</p>
     </div>
     <div class="note">
-      <div class="h"><span class="dot" style="background:var(--win)"></span>Adaptivity now works</div>
-      <p>A per-vertex spacing (local density) stops the extractor over-merging adaptive input —
-        the count no longer collapses (8× more quads) and adaptive sizing beats our own uniform
-        on 4&#8202;/&#8202;5 models. Beating QuadriFlow absolutely waits on Phase 4.</p>
+      <div class="h"><span class="dot" style="background:var(--win)"></span>Adaptivity — <b style="color:var(--win)">only ours</b></div>
+      <p>Curvature-adaptive sizing spends polygons where the surface bends; it beats our own uniform on 4&#8202;/&#8202;5 models (§3). <b>QuadriFlow and AutoRemesher are uniform-only</b> — this axis is ours alone.</p>
+    </div>
+    <div class="note">
+      <div class="h"><span class="dot" style="background:var(--win)"></span>Robustness — <b style="color:var(--win)">ours (field-aligned)</b></div>
+      <p>Our field-aligned path returns <b>0 topological defects</b> on the cube where QuadriFlow tears it (376). AutoRemesher is clean too but <b>double-frees in teardown on CAD</b> (we patched our harness to survive it). The always-manifold guarantee is a real edge for production use.</p>
     </div>
   </div>
 
@@ -346,19 +342,20 @@
     </div>
   </div>
 
-  <h2><span class="n">§6</span> The plan to close the gap</h2>
+  <h2><span class="n">§6</span> The plan — prioritized by the three-way data</h2>
   <p class="lede" style="font-size:14px;margin-bottom:14px">Four tasks resolved (A dead-end, B shipped,
-    C ceiling, F benchmarked); the findings reshaped the rest. The big surprise: benchmarking
-    AutoRemesher (F) showed <b>QuadCover-in-practice is no better than us</b> — <b>QuadriFlow is the one
-    real target</b> (G). Both references are <b>MIT</b>.</p>
+    C ceiling, F benchmarked). The scenario data (§4) sets the order for what's left:
+    <b style="color:var(--gap)">①&nbsp;G</b> close the organic-quality gap to QuadriFlow (the common case);
+    <b style="color:var(--partial)">②&nbsp;E</b> fix the integer extractor on CAD (it goes non-manifold on a flat cube);
+    <b>③&nbsp;D</b> position relaxation for angle. Both references are <b>MIT</b>.</p>
   <div class="ms">
     <span class="msrow"><span class="msdot partial"></span><b>A · Multi-resolution extraction — <span style="color:var(--gap)">DEAD END (proven)</span></b> — the plan was to read faces off QuadriFlow's coarsened edge graph. <b>Built it and measured: byte-identical to the single-level path</b> (3398 == 3398 compact triangles). Reason: <code>DownsampleEdgeGraph</code> only contracts <i>zero-diff</i> edges, but subdivision split-vertices are joined by <i>|diff|=1</i> edges, so the coarse faces are exactly the fine non-degenerate faces. QuadriFlow's low count comes from its <i>upstream</i> 2nd-subdivide + FixFlipSat + position-solve, not the coarse read. Reverted. <span class="mstag partial">no-op, reverted</span></span>
     <span class="msrow"><span class="msdot done"></span><b>B · Valence-3/5 dipole canceller — <span style="color:var(--win)">DONE</span></b> — measured the irregulars: ~60% val3, ~30% val5 (dipoles). Added a valence-improving <b>edge-rotation</b> pass to <span class="mono">FixValence</span>: re-draw an interior edge along a hexagon diagonal, moving valence off the 3/5 pair onto a neighbour, accepted only when it <b>strictly</b> lowers local irregulars and stays manifold (monotone). <b>Irregular −27% at native density</b> (spot 20.2→16.8%); at 3000-quad: spot 9→7, fandisk 10→9, rocker 10→8, cheb 11→9, bunny 14→13. Regression-tested, ASan-clean. <span class="mstag done">shipped · a83ac1f</span></span>
     <span class="msrow"><span class="msdot partial"></span><b>C · Reduce split T-junctions — <span style="color:var(--gap)">CEILING REACHED</span></b> — the ~60% val3 excess is subdivision T-junctions. Tried two levers, both <b>no-ops</b>: (1) QuadriFlow's unit-grid <span class="mono">FixFlipSat</span> reduced spot only 16.8→16.2% at 2.3 s/mesh; (2) a val-3 T-junction edge-collapse (AutoRemesher <span class="mono">removeSingleEndpoints</span> dual) found <b>zero</b> legal monotone collapses. These Ts sit at genuine field-singularity mismatches that no local, manifold, monotone operator can remove. <b>Paradigm-inherent</b> — the real fix is F. <span class="mstag partial">exhausted</span></span>
-    <span class="msrow"><span class="msdot"></span><b>D · Surface-projected position relaxation</b> — fold the Laplacian pass onto the source surface via the existing BVH (<code>src/accel</code>) instead of a per-vertex tangent plane. Marginal CV, protects fidelity. <span class="mstag">extend · <code>relaxPositions</code></span></span>
-    <span class="msrow"><span class="msdot"></span><b>E · Sharp-crease + open-boundary handling</b> — detect source creases (<code>sharpEdgeDegrees</code>) and pin/align extracted vertices before relaxation, so CAD input (fandisk) keeps its edges. <span class="mstag">feature</span></span>
+    <span class="msrow"><span class="msdot"></span><b>③ D · Surface-projected position relaxation</b> — fold the Laplacian pass onto the source surface via the existing BVH (<code>src/accel</code>) instead of a per-vertex tangent plane, for a few degrees of median angle. Marginal CV, protects fidelity. <span class="mstag">extend · <code>relaxPositions</code></span></span>
+    <span class="msrow"><span class="msdot partial"></span><b>② E · Fix the integer extractor on CAD</b> — §4 exposed it: on a flat cube the integer path returns <b>non-manifold output (312 defects), 61% irregular, and undershoots the count</b>, while our field-aligned path stays clean (0 defects). Near-term: <b>route flat/sharp CAD to the robust field-aligned quadrangulator</b> (detect via <code>sharpEdgeDegrees</code> / low curvature); longer-term make the integer solve feature-aware (pin creases, align to sharp edges). <span class="mstag partial">robustness</span></span>
     <span class="msrow"><span class="msdot done"></span><b>F · Benchmarked AutoRemesher (QuadCover) — <span style="color:var(--win)">DONE, and it reframes everything</span></b> — built a Qt-free headless harness over its QuadCover core (Geogram <span class="mono">quad_cover</span> seamless-UV solver + isoline <span class="mono">quadextractor.cpp</span>) and added it as a 2nd benchmark reference. <b>The theory did NOT hold in practice:</b> QuadCover's isoline tracing is T-junction-free <i>in principle</i>, but AutoRemesher's actual pipeline (isotropic remesh → frame field → quad_cover) lands at <b>irregular 6–15%</b> (spot 6, fandisk 14, cheb 15, bunny 12) — <b>comparable to our integer extractor (7–13%)</b> — with the <b>worst edge CV of all (0.41–0.56)</b>. So the seamless-UV paradigm is <b>not</b> a guaranteed path to parity, and we are already competitive with AutoRemesher. <span class="mstag done">shipped · 7aba362</span></span>
-    <span class="msrow"><span class="msdot"></span><b>G · Close on QuadriFlow, the real gold standard</b> — the benchmark's verdict: <b>QuadriFlow alone</b> hits 1–4% irregular + CV 0.14–0.19; both ours and AutoRemesher trail it. QuadriFlow's edge over both is its <i>upstream</i> integrity (2nd subdivide + FixFlipSat + position solve → fewer |diff|&gt;1 edges → fewer splits), not a magic extractor. That upstream-integrity work — deferred as marginal in C at native density — is worth revisiting at the coarse benchmark density where splits dominate. <span class="mstag">the real target</span></span>
+    <span class="msrow"><span class="msdot partial"></span><b>① G · Close the organic gap to QuadriFlow — the real target</b> — QuadriFlow alone hits 1–4% irregular + CV 0.14–0.19; ours and AutoRemesher both trail it on organic. Its edge is <i>upstream</i> grid integrity — the full <span class="mono">ComputeIndexMap</span> order (2nd subdivide + FixFlipSat + <span class="mono">optimize_positions</span> → fewer |diff|&gt;1 edges → fewer split T-junctions). The concrete step: reproduce that order at the <b>coarse benchmark density</b> where splits dominate (C tested it only at native density and found it marginal — the coarse regime is untested and is where the gap actually lives). <span class="mstag partial">biggest lever</span></span>
   </div>
   <div class="notes" style="margin-top:14px">
     <div class="note">
@@ -385,7 +382,7 @@
     target ~3000 quads · reference = QuadriFlow (headless, boost-free) · numbers from
     <code>examples/11_benchmark.py</code>. Roadmap detail in <code>docs/ROADMAP.md</code>.
     <br>
-    <span style="opacity:.75">Dashboard content as of commit <code>7aba362</code> (2026-07-20) —
+    <span style="opacity:.75">Dashboard content as of commit <code>ecfda9d</code> (2026-07-20) —
     a manual artifact; it does not auto-track the repo, so a later commit may have moved past this.</span>
   </footer>
 </div>
