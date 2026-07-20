@@ -92,9 +92,11 @@ The full source of all files is in the `git diff` at the end.
 
 ## 4. PHASED PLAN (each milestone = demoable checkpoint + test)
 
-**M0 — Scaffold (DONE, this task).** Green stub + contract test. *Checkpoint:* `makeQuadCoverQuadrangulator()` builds, fails safely. *Test:* `test_quadcover_extractor.cpp` (passing).
+**M0 — Scaffold — ✅ DONE (committed 30f0df4).** Green stub + contract test. *Checkpoint:* `makeQuadCoverQuadrangulator()` builds, fails safely. *Test:* `test_quadcover_extractor.cpp` (passing).
 
-**M1 — Seamless UV via harness (option c).** Fill `computeSeamlessUv` by driving the existing `autoremesher_cli`/harness object set out-of-process (OBJ in → seamless-UV quad OBJ / per-corner UV dump out). *Checkpoint:* dump per-corner UVs for a sphere and assert seamlessness (across each interior edge the two shared-vertex UVs differ only by a grid symmetry). *Test:* `computeSeamlessUv(sphere).valid == true` and a seam-consistency assertion (integer-jump residual == 0 on a closed loop).
+**M1 — Seamless UV via harness (option c) — ✅ DONE (committed a5f2089).** `autoremesher_cli -u` dumps the isotropic mesh + per-corner UVs; `computeSeamlessUv` runs it out-of-process (via `CYBER_QUADCOVER_CLI`) and parses it; `seamlessUvResidual` validated **max residual 0.000000 across 6273 interior edges** on a UV sphere — the UV is genuinely seamless and ready for M2. Original plan for M1 below:
+
+> Fill `computeSeamlessUv` by driving the existing `autoremesher_cli`/harness object set out-of-process (OBJ in → seamless-UV quad OBJ / per-corner UV dump out). *Checkpoint:* dump per-corner UVs for a sphere and assert seamlessness (across each interior edge the two shared-vertex UVs differ only by a grid symmetry). *Test:* `computeSeamlessUv(sphere).valid == true` and a seam-consistency assertion (integer-jump residual == 0 on a closed loop).
 
 **M2 — Port the isoline extractor.** Port `PositionKey`/`Double`/`extractConnections`/`extractEdges`/`extractMesh` to `Vec3`/`Mesh`; wire `extractIsolineQuads`. *Checkpoint:* feed M1's UV → watertight quad mesh; open it next to the harness's own output and diff. *Tests:* on a flat UV'd grid the extractor reproduces the exact NxN quad grid (0 irregular); on a sphere the output is manifold and **quad count ≈ area/spacing²**.
 
