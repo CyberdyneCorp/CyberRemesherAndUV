@@ -116,7 +116,8 @@ bool writeObjFor(const std::string& path, const Mesh& mesh, double& areaOut) {
 
 }  // namespace
 
-SeamlessUv computeSeamlessUv(const Mesh& mesh, float targetEdgeLength, float harnessScaling) {
+SeamlessUv computeSeamlessUv(const Mesh& mesh, float targetEdgeLength, float harnessScaling,
+                             float harnessAdaptivity) {
     SeamlessUv uv;
     if (targetEdgeLength <= 0.0f) {
         return uv;  // no target density -> caller degrades cleanly
@@ -163,7 +164,8 @@ SeamlessUv computeSeamlessUv(const Mesh& mesh, float targetEdgeLength, float har
     const double scaling =
         scalingEnv != nullptr ? std::atof(scalingEnv) : static_cast<double>(harnessScaling);
     const char* adaptEnv = std::getenv("CYBER_QC_ADAPT");
-    const double adapt = adaptEnv != nullptr ? std::atof(adaptEnv) : 0.0;
+    const double adapt =
+        adaptEnv != nullptr ? std::atof(adaptEnv) : static_cast<double>(harnessAdaptivity);
     const bool dbg = std::getenv("CYBER_QC_DEBUG") != nullptr;
     if (dbg) {
         std::fprintf(stderr, "[qc] in-process edgeLen=%g area=%g quads=%ld s=%g a=%g\n",
@@ -228,7 +230,8 @@ SeamlessUv computeSeamlessUv(const Mesh& mesh, float targetEdgeLength, float har
     // lifts quad-dominance to ~99.6% (M4b). CYBER_QC_ADAPT overrides for sweeps.
     const char* adaptEnv = std::getenv("CYBER_QC_ADAPT");
     const std::string adaptArg =
-        std::string(" -a ") + (adaptEnv != nullptr ? std::string(adaptEnv) : std::string("0.0"));
+        std::string(" -a ") +
+        (adaptEnv != nullptr ? std::string(adaptEnv) : std::to_string(harnessAdaptivity));
     const std::string cmd = std::string(cli) + " -i " + objPath + " -u " + uvPath + " -f " +
                             std::to_string(quads) + " -s " + scaling + adaptArg + " >/dev/null 2>&1";
     const bool dbg = std::getenv("CYBER_QC_DEBUG") != nullptr;
@@ -1620,7 +1623,8 @@ double meshTargetQuads(const Mesh& mesh, float targetEdgeLength) {
 // a reason without corrupting the input triangle island).
 class QuadCoverQuadrangulator final : public IQuadrangulator {
 public:
-    explicit QuadCoverQuadrangulator(int fieldIterations) : m_fieldIterations(fieldIterations) {}
+    QuadCoverQuadrangulator(int fieldIterations, float adaptivity)
+        : m_fieldIterations(fieldIterations), m_adaptivity(adaptivity) {}
 
     Outcome quadrangulate(Mesh& mesh, float targetEdgeLength, ProgressSink* progress,
                           const CancelToken* cancel) override {
@@ -1640,7 +1644,7 @@ public:
         IsolineQuadMesh out;
         float scaling = 0.5f;
         for (int attempt = 0; attempt < 2; ++attempt) {
-            const SeamlessUv uv = computeSeamlessUv(mesh, targetEdgeLength, scaling);
+            const SeamlessUv uv = computeSeamlessUv(mesh, targetEdgeLength, scaling, m_adaptivity);
             if (!uv.valid) {
                 return {.success = false, .cancelled = false,
                         .failureReason = "quad-cover seamless UV unavailable "
@@ -1694,12 +1698,13 @@ public:
 
 private:
     int m_fieldIterations;
+    float m_adaptivity;
 };
 
 }  // namespace
 
-std::unique_ptr<IQuadrangulator> makeQuadCoverQuadrangulator(int fieldIterations) {
-    return std::make_unique<QuadCoverQuadrangulator>(fieldIterations);
+std::unique_ptr<IQuadrangulator> makeQuadCoverQuadrangulator(int fieldIterations, float adaptivity) {
+    return std::make_unique<QuadCoverQuadrangulator>(fieldIterations, adaptivity);
 }
 
 bool quadCoverAvailable() {

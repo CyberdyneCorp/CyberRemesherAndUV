@@ -246,7 +246,13 @@ CyberStatus cyber_remesh(const CyberMesh* in, const CyberRemeshParams* params,
                 return cyber::remesh::makeIntegerQuadrangulator();
             }
             if (method == CYBER_QUAD_QUADCOVER) {
-                return cyber::remesh::makeQuadCoverQuadrangulator();
+                // Uniform (adaptivity 0): quad-cover is a seamless global-grid method whose
+                // strength is uniform clean topology. Measured, curvature-adaptive sizing on
+                // it gives no surface-fidelity gain but injects singularities and edge-length
+                // variance (spot irr 2->6%, fandisk 3->15%), so — unlike the field/integer
+                // paths — it stays uniform-only here. The adaptivity knob remains available
+                // for experiments via makeQuadCoverQuadrangulator(iters, a) / CYBER_QC_ADAPT.
+                return cyber::remesh::makeQuadCoverQuadrangulator(40, 0.0f);
             }
             return cyber::remesh::makeFieldAlignedQuadrangulator();
         };

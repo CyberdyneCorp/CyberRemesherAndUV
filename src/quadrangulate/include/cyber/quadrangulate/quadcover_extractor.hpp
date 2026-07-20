@@ -77,8 +77,14 @@ struct SeamlessUv {
 // density that drives the seamless-UV grid resolution and thus the extracted quad
 // count (lower -> denser -> more quads, ~1/s^2). The quad-cover quadrangulator sweeps
 // it in a short closed loop to hit the requested count. CYBER_QC_SCALING overrides it.
+//
+// `harnessAdaptivity` is passed to the harness (-a): the frame-field gradient
+// adaptivity. 0.0 is a uniform field (fewest singularities, cleanest topology — the
+// default); higher packs quads into high-curvature regions (better surface fidelity
+// per polygon, but more singularities). CYBER_QC_ADAPT overrides it.
 [[nodiscard]] SeamlessUv computeSeamlessUv(const Mesh& mesh, float targetEdgeLength,
-                                           float harnessScaling = 0.5f);
+                                           float harnessScaling = 0.5f,
+                                           float harnessAdaptivity = 0.0f);
 
 // Max integer-jump residual of a seamless UV across its interior edges: for each edge
 // shared by two triangles, the grid symmetry mapping one triangle's shared-vertex UVs
@@ -112,7 +118,11 @@ struct IsolineQuadMesh {
 // grid constraints by the solve. SCAFFOLD STATUS: quadrangulate() currently
 // leaves the mesh untouched and returns a failure Outcome with a "not
 // implemented" reason, so the pipeline degrades cleanly rather than crashing.
-std::unique_ptr<IQuadrangulator> makeQuadCoverQuadrangulator(int fieldIterations = 40);
+// `adaptivity` (0.0 = uniform, the cleanest topology; up to 1.0 = fully
+// curvature-adaptive sizing) is forwarded to the seamless-UV solve as the frame-field
+// gradient adaptivity. The pipeline passes the run's adaptivity through here.
+std::unique_ptr<IQuadrangulator> makeQuadCoverQuadrangulator(int fieldIterations = 40,
+                                                            float adaptivity = 0.0f);
 
 // Whether a seamless-UV solver is available for the quad-cover method: true when the
 // in-process solver is linked (built with -DCYBER_WITH_QUADCOVER=ON) or the
