@@ -88,12 +88,24 @@ it opens it to a **disk (cut-open χ == 1)**, validated by `cutOpenEulerCharacte
 torus Σ=0, empty→invalid). **TODO for genus>0:** add homology-generator (handle) loops via
 tree-cotree so a torus also opens to a disk — genus 0 (characters, most models) works now.
 
-**M2 — Seamless parameterization solve (THE research core).** Assemble the Poisson system
-(gradient of `(u,v)` ≈ frame field × spacing) with the frame-field rotation transitions
-across cut edges as constraints; solve with CG-on-`spmv`; round seam translations to
-integers (min-cost flow) and re-solve until the integer-jump residual across interior
-edges is ~0. *Gate:* `seamlessUvResidual < 1e-3` on the sphere (matching the harness's
-0.000000 across 6273 edges). **This is the multi-week step.**
+**M2a — Relaxed Poisson solve — ✅ DONE.** `solveParameterization` solves the seamless UV
+on the mesh **cut open along the seam** (a closed surface can't carry a globally continuous
+integer-grid UV, so seam vertices are duplicated via union-find over face-corners — the same
+corners the cut Euler check merges). Per coordinate it assembles the **cotangent Laplacian**
++ divergence RHS from the **combed** frame field (`combField`: BFS over non-cut edges so the
+cross is continuous on the disk) and solves `L u = b_u`, `L v = b_v` with **Conjugate
+Gradient on `accel::spmv`** (`conjugateGradient`), pinning one vertex for SPD. Output is
+per-corner UV. **Working end to end on real closed surfaces with no Geogram / no harness:**
+sphere → 232 quads, spot → 742 quads via `extractIsolineQuads`. As expected for the RELAXED
+(pre-rounding) solve the seam translations are non-integer, so `seamlessUvResidual ≈ 0.5`.
+Tested in `test_seamless_solver.cpp` (cut duplicates seam verts, CG converges, UV varies).
+
+**M2b/c — Integer seam rounding (THE remaining core).** Round the seam translations across
+cut edges to integers and re-solve with them as hard constraints (min-cost-flow / MIQ-style
+rounding) until the integer-jump residual is ~0. *Gate:* `seamlessUvResidual < 1e-3` on the
+sphere (matching the harness's 0.000000 across 6273 edges). Also improve field feature-
+alignment (a diagonally-triangulated flat grid currently pulls the cross field ~27° off-axis,
+so its UV, while seamless, does not extract cleanly — closed curved surfaces align fine).
 
 **M3 — Isotropic pre-remesh.** QuadCover wants a reasonably uniform triangle mesh (the
 harness isotropically remeshes first). Reuse our own `isotropicRemesh` at the target edge

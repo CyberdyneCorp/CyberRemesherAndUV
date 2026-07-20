@@ -49,4 +49,22 @@ struct SeamlessSetup {
 // surface to a disk yields 1. Validation hook for M1 (and a guard for M2's flattening).
 [[nodiscard]] int cutOpenEulerCharacteristic(const Mesh& mesh, const SeamlessSetup& setup);
 
+// The relaxed seamless parameterization (Milestone 2). Solved on the mesh CUT OPEN along
+// the cut graph (seam vertices duplicated), so the UV can jump by a grid symmetry across
+// the seam — a closed surface cannot carry a globally continuous integer-grid UV. Per
+// coordinate it is a cotangent Poisson solve (grad(u,v) matches the combed frame field
+// scaled to `spacing`) via Conjugate Gradient on accel::spmv. Output is PER-CORNER UV
+// (cornerUv[faceId] = the 3 corner UVs). This is the RELAXED solve — real-valued, so the
+// seam translations are not yet integers (seamlessUvResidual > 0); integer rounding of
+// the seams (M2c) drives the residual to 0.
+struct Parameterization {
+    std::vector<std::array<Vec2, 3>> cornerUv;  // per FaceId; empty array for dead faces
+    int cutVertexCount = 0;   // vertices of the cut-open (disk) mesh the solve ran on
+    int cgIterationsU = 0;
+    int cgIterationsV = 0;
+    bool valid = false;
+};
+[[nodiscard]] Parameterization solveParameterization(const Mesh& mesh, const SeamlessSetup& setup,
+                                                     float spacing, accel::IBackend& backend);
+
 }  // namespace cyber::remesh

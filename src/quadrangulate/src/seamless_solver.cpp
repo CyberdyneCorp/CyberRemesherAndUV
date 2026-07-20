@@ -1,6 +1,7 @@
 #include "cyber/quadrangulate/seamless_solver.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -11,6 +12,8 @@
 #include <utility>
 #include <vector>
 
+#include "cyber/accel/buffer.hpp"
+#include "cyber/accel/primitives.hpp"
 #include "cyber/core/math.hpp"
 
 // Native QuadCover seamless-UV — Milestone 1 (docs/native-miq-plan.md): the frame-field
@@ -257,6 +260,294 @@ SeamlessSetup buildSeamlessSetup(const Mesh& mesh, int iterations, accel::IBacke
 
     setup.valid = true;
     return setup;
+}
+
+namespace {
+
+// The (up to 3) edges of a triangle face, found from its consecutive vertex pairs.
+std::vector<EdgeId> faceEdges(const Mesh& mesh, FaceId f) {
+    const std::vector<VertexId> vs = mesh.faceVertices(f);
+    std::vector<EdgeId> out;
+    for (std::size_t k = 0; k < vs.size(); ++k) {
+        const VertexId a = vs[k];
+        const VertexId b = vs[(k + 1) % vs.size()];
+        for (const EdgeId e : mesh.vertexEdges(a)) {
+            const auto [ea, eb] = mesh.edgeVertices(e);
+            if ((ea == a && eb == b) || (ea == b && eb == a)) {
+                out.push_back(e);
+                break;
+            }
+        }
+    }
+    return out;
+}
+
+// Conjugate Gradient for a symmetric-positive-definite CSR system A x = b, using the
+// accel spmv for the matrix-vector product (so a GPU backend accelerates it). Returns
+// the iteration count; x is seeded with its incoming value.
+int conjugateGradient(accel::IBackend& backend, const accel::SparseMatrix& A,
+                      const std::vector<float>& b, std::vector<float>& x, int maxIters,
+                      float tol) {
+    const std::size_t n = A.rows;
+    accel::Buffer<float> xb(std::vector<float>(x.begin(), x.end()));
+    accel::Buffer<float> ax;
+    accel::spmv(backend, A, xb, ax);  // Ax
+    std::vector<float> r(n), p(n);
+    double rs = 0.0;
+    for (std::size_t i = 0; i < n; ++i) {
+        r[i] = b[i] - ax[i];
+        p[i] = r[i];
+        rs += static_cast<double>(r[i]) * r[i];
+    }
+    const double rs0 = rs;
+    if (rs0 <= 0.0) {
+        return 0;
+    }
+    int it = 0;
+    accel::Buffer<float> pb, apb;
+    for (; it < maxIters; ++it) {
+        pb.upload(p);
+        accel::spmv(backend, A, pb, apb);  // Ap
+        double pAp = 0.0;
+        for (std::size_t i = 0; i < n; ++i) {
+            pAp += static_cast<double>(p[i]) * apb[i];
+        }
+        if (pAp <= 0.0) {
+            break;
+        }
+        const double alpha = rs / pAp;
+        double rsNew = 0.0;
+        for (std::size_t i = 0; i < n; ++i) {
+            x[i] += static_cast<float>(alpha) * p[i];
+            r[i] -= static_cast<float>(alpha * apb[i]);
+            rsNew += static_cast<double>(r[i]) * r[i];
+        }
+        if (rsNew <= static_cast<double>(tol) * static_cast<double>(tol) * rs0) {
+            ++it;
+            break;
+        }
+        const double beta = rsNew / rs;
+        for (std::size_t i = 0; i < n; ++i) {
+            p[i] = r[i] + static_cast<float>(beta) * p[i];
+        }
+        rs = rsNew;
+    }
+    return it;
+}
+
+// Rotate direction d by r quarter-turns about axis n (r mod 4).
+Vec3 rotQuarter(Vec3 d, const Vec3& n, int r) {
+    const int k = ((r % 4) + 4) % 4;
+    for (int i = 0; i < k; ++i) {
+        d = cross(n, d);
+    }
+    return d;
+}
+
+// Comb the frame field: BFS over faces across non-cut interior edges, assigning each
+// face an integer rotation so the combed cross is continuous across every non-cut edge.
+// The cut graph absorbs the field's holonomy, so on the cut disk this is consistent.
+std::vector<int> combField(const Mesh& mesh, const SeamlessSetup& setup, int& touched) {
+    std::vector<int> comb(mesh.faceCapacity(), 0);
+    std::vector<char> visited(mesh.faceCapacity(), 0);
+    touched = 0;
+    for (Index seed = 0; seed < mesh.faceCapacity(); ++seed) {
+        if (!mesh.isAlive(FaceId{seed}) || visited[seed]) {
+            continue;
+        }
+        visited[seed] = 1;
+        std::queue<FaceId> q;
+        q.push(FaceId{seed});
+        while (!q.empty()) {
+            const FaceId f = q.front();
+            q.pop();
+            for (const EdgeId e : faceEdges(mesh, f)) {
+                if (setup.isCutEdge[e.value] || mesh.edgeFaceCount(e) != 2) {
+                    continue;
+                }
+                const auto ef = mesh.edgeFaces(e);
+                const FaceId g = (ef[0] == f) ? ef[1] : ef[0];
+                if (visited[g.value]) {
+                    continue;
+                }
+                // periodJump[e] aligns ef[1]'s cross to ef[0]'s (rotate ef[1] by +p).
+                // Propagate comb so combed(g) matches combed(f).
+                const int p = setup.periodJump[e.value];
+                comb[g.value] = (ef[0] == f) ? (comb[f.value] - p) : (comb[f.value] + p);
+                comb[g.value] = ((comb[g.value] % 4) + 4) % 4;
+                if (comb[g.value] != 0) {
+                    ++touched;
+                }
+                visited[g.value] = 1;
+                q.push(g);
+            }
+        }
+    }
+    return comb;
+}
+
+}  // namespace
+
+Parameterization solveParameterization(const Mesh& mesh, const SeamlessSetup& setup,
+                                       float spacing, accel::IBackend& backend) {
+    Parameterization out;
+    if (!setup.valid || spacing <= 0.0f || mesh.faceCapacity() == 0) {
+        return out;
+    }
+    const float invS = 1.0f / spacing;
+
+    // Comb the frame so it is continuous across non-cut edges.
+    int touched = 0;
+    const std::vector<int> comb = combField(mesh, setup, touched);
+
+    // Corner indexing: one node per (triangle, corner). Union-find merges the two corners
+    // of a shared vertex across every NON-cut interior edge, so a cut edge (and boundary)
+    // leaves the seam split. Each surviving component is one vertex of the cut-open mesh.
+    std::unordered_map<std::uint64_t, std::size_t> cornerId;
+    std::vector<std::size_t> parent;
+    const auto ckey = [](Index f, Index v) {
+        return (static_cast<std::uint64_t>(f) << 32) | static_cast<std::uint64_t>(v);
+    };
+    for (Index fi = 0; fi < mesh.faceCapacity(); ++fi) {
+        const FaceId f{fi};
+        if (!mesh.isAlive(f) || mesh.faceSize(f) != 3) {
+            continue;
+        }
+        for (const VertexId v : mesh.faceVertices(f)) {
+            cornerId.emplace(ckey(fi, v.value), parent.size());
+            parent.push_back(parent.size());
+        }
+    }
+    std::function<std::size_t(std::size_t)> find = [&](std::size_t x) {
+        while (parent[x] != x) {
+            parent[x] = parent[parent[x]];
+            x = parent[x];
+        }
+        return x;
+    };
+    const auto unite = [&](std::size_t a, std::size_t b) { parent[find(a)] = find(b); };
+    for (Index ei = 0; ei < mesh.edgeCapacity(); ++ei) {
+        const EdgeId e{ei};
+        if (!mesh.isAlive(e) || mesh.edgeFaceCount(e) != 2 || setup.isCutEdge[ei]) {
+            continue;
+        }
+        const auto ef = mesh.edgeFaces(e);
+        if (mesh.faceSize(ef[0]) != 3 || mesh.faceSize(ef[1]) != 3) {
+            continue;
+        }
+        const auto [a, b] = mesh.edgeVertices(e);
+        unite(cornerId.at(ckey(ef[0].value, a.value)), cornerId.at(ckey(ef[1].value, a.value)));
+        unite(cornerId.at(ckey(ef[0].value, b.value)), cornerId.at(ckey(ef[1].value, b.value)));
+    }
+    // Compact roots to cut-vertex ids 0..M-1.
+    std::unordered_map<std::size_t, std::size_t> rootToCut;
+    for (std::size_t i = 0; i < parent.size(); ++i) {
+        rootToCut.emplace(find(i), rootToCut.size());
+    }
+    const std::size_t nCut = rootToCut.size();
+    const auto cutOf = [&](Index f, Index v) {
+        return rootToCut.at(find(cornerId.at(ckey(f, v))));
+    };
+    out.cutVertexCount = static_cast<int>(nCut);
+
+    // Assemble the cotangent Laplacian L and divergence RHS b_u, b_v over the cut vertices
+    // from the combed target gradients Gu = e0/spacing, Gv = e1/spacing per face.
+    std::vector<std::unordered_map<std::size_t, float>> rows(nCut);
+    std::vector<float> bu(nCut, 0.0f), bv(nCut, 0.0f);
+    for (Index fi = 0; fi < mesh.faceCapacity(); ++fi) {
+        const FaceId f{fi};
+        if (!mesh.isAlive(f) || mesh.faceSize(f) != 3) {
+            continue;
+        }
+        const std::vector<VertexId> vs = mesh.faceVertices(f);
+        const std::array<Vec3, 3> p{mesh.position(vs[0]), mesh.position(vs[1]), mesh.position(vs[2])};
+        const Vec3 nrm = cross(p[1] - p[0], p[2] - p[0]);
+        const float area2 = length(nrm);
+        if (area2 < 1e-20f) {
+            continue;
+        }
+        const Vec3 n = nrm / area2;
+        const float area = 0.5f * area2;
+        const Vec3 e0 = normalized(rotQuarter(setup.field.direction(f), n, comb[fi]));
+        const Vec3 e1 = cross(n, e0);
+        const Vec3 gu = e0 * invS;
+        const Vec3 gv = e1 * invS;
+        std::array<std::size_t, 3> cut{};
+        for (int k = 0; k < 3; ++k) {
+            cut[static_cast<std::size_t>(k)] = cutOf(fi, vs[static_cast<std::size_t>(k)].value);
+        }
+        for (int k = 0; k < 3; ++k) {
+            const Vec3 pk = p[static_cast<std::size_t>(k)];
+            const Vec3 pa = p[static_cast<std::size_t>((k + 1) % 3)];
+            const Vec3 pb = p[static_cast<std::size_t>((k + 2) % 3)];
+            const Vec3 gradPhi = cross(n, pb - pa) / area2;
+            bu[cut[static_cast<std::size_t>(k)]] += area * dot(gradPhi, gu);
+            bv[cut[static_cast<std::size_t>(k)]] += area * dot(gradPhi, gv);
+            const float cotK = dot(pa - pk, pb - pk) / area2;
+            const std::size_t ia = cut[static_cast<std::size_t>((k + 1) % 3)];
+            const std::size_t ib = cut[static_cast<std::size_t>((k + 2) % 3)];
+            const float w = 0.5f * cotK;
+            rows[ia][ib] -= w;
+            rows[ib][ia] -= w;
+            rows[ia][ia] += w;
+            rows[ib][ib] += w;
+        }
+    }
+    if (nCut == 0) {
+        return out;
+    }
+
+    // Pin cut vertex 0 to make the Laplacian SPD for CG.
+    const std::size_t pin = 0;
+    accel::SparseMatrix A;
+    A.rows = nCut;
+    A.rowStart.reserve(nCut + 1);
+    A.rowStart.push_back(0);
+    for (std::size_t i = 0; i < nCut; ++i) {
+        if (i == pin || rows[i].empty()) {
+            A.colIndex.push_back(i);
+            A.value.push_back(1.0f);
+            bu[i] = (i == pin) ? 0.0f : bu[i];
+            bv[i] = (i == pin) ? 0.0f : bv[i];
+            if (rows[i].empty() && i != pin) {
+                bu[i] = 0.0f;
+                bv[i] = 0.0f;
+            }
+            A.rowStart.push_back(A.colIndex.size());
+            continue;
+        }
+        for (const auto& [j, w] : rows[i]) {
+            if (j == pin) {
+                continue;  // pinned to 0 -> no RHS contribution
+            }
+            A.colIndex.push_back(j);
+            A.value.push_back(w);
+        }
+        A.rowStart.push_back(A.colIndex.size());
+    }
+    bu[pin] = 0.0f;
+    bv[pin] = 0.0f;
+
+    std::vector<float> u(nCut, 0.0f), v(nCut, 0.0f);
+    const int maxIters = static_cast<int>(nCut) + 500;
+    out.cgIterationsU = conjugateGradient(backend, A, bu, u, maxIters, 1e-8f);
+    out.cgIterationsV = conjugateGradient(backend, A, bv, v, maxIters, 1e-8f);
+
+    // Per-corner UV.
+    out.cornerUv.assign(mesh.faceCapacity(), std::array<Vec2, 3>{});
+    for (Index fi = 0; fi < mesh.faceCapacity(); ++fi) {
+        const FaceId f{fi};
+        if (!mesh.isAlive(f) || mesh.faceSize(f) != 3) {
+            continue;
+        }
+        const std::vector<VertexId> vs = mesh.faceVertices(f);
+        for (int k = 0; k < 3; ++k) {
+            const std::size_t cv = cutOf(fi, vs[static_cast<std::size_t>(k)].value);
+            out.cornerUv[fi][static_cast<std::size_t>(k)] = Vec2{u[cv], v[cv]};
+        }
+    }
+    out.valid = true;
+    return out;
 }
 
 int cutOpenEulerCharacteristic(const Mesh& mesh, const SeamlessSetup& setup) {

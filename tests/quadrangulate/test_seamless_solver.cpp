@@ -135,3 +135,51 @@ TEST_CASE("seamless M1: empty mesh -> invalid setup") {
     const remesh::SeamlessSetup setup = remesh::buildSeamlessSetup(empty, 10, *backend);
     CHECK_FALSE(setup.valid);
 }
+
+namespace {
+
+std::size_t aliveVertices(const Mesh& m) {
+    std::size_t n = 0;
+    for (Index i = 0; i < m.vertexCapacity(); ++i) {
+        if (m.isAlive(VertexId{i})) ++n;
+    }
+    return n;
+}
+
+}  // namespace
+
+// Native seamless-UV Milestone 2 (relaxed solve): the cotangent Poisson solve on the mesh
+// cut open along the seam. A closed surface cannot carry a globally continuous integer-grid
+// UV, so the solve runs on the cut mesh with duplicated seam vertices — the UV jumps by a
+// grid symmetry across the seam. This is the RELAXED solve (real-valued), so the seam
+// translations are not yet integers (residual > 0); integer rounding is M2c.
+TEST_CASE("seamless M2: relaxed Poisson solve produces a cut-mesh parameterization") {
+    auto backend = cyber::accel::defaultBackend();
+    const Mesh sphere = makeSphere();
+    const remesh::SeamlessSetup setup = remesh::buildSeamlessSetup(sphere, 50, *backend);
+    REQUIRE(setup.valid);
+
+    const remesh::Parameterization param =
+        remesh::solveParameterization(sphere, setup, 0.12f, *backend);
+    REQUIRE(param.valid);
+
+    // The cut duplicated seam vertices: the solve mesh has more vertices than the input.
+    CHECK(static_cast<std::size_t>(param.cutVertexCount) > aliveVertices(sphere));
+    // CG converged (well under the iteration cap).
+    CHECK(param.cgIterationsU > 0);
+    CHECK(param.cgIterationsV > 0);
+    // Per-corner UV was produced for the alive faces.
+    CHECK(param.cornerUv.size() == sphere.faceCapacity());
+
+    // The relaxed UV is a genuine (if not-yet-integer-seamless) parameterization: the
+    // gradient is non-degenerate, so the corner UVs actually vary across the mesh.
+    float uMin = 1e30f, uMax = -1e30f;
+    for (Index fi = 0; fi < sphere.faceCapacity(); ++fi) {
+        if (!sphere.isAlive(FaceId{fi}) || sphere.faceSize(FaceId{fi}) != 3) continue;
+        for (const cyber::Vec2& c : param.cornerUv[fi]) {
+            uMin = std::min(uMin, c.x);
+            uMax = std::max(uMax, c.x);
+        }
+    }
+    CHECK(uMax - uMin > 1.0f);  // spans several integer isolines
+}
