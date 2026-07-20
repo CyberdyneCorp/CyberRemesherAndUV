@@ -2331,33 +2331,10 @@ struct SubMesh {
 // canonical edge_diff/face_edgeOrients mirror it keeps in lockstep is unneeded
 // because the extractor's collapse (diff==0) and diagonal (|diff|==(1,1)) tests are
 // rotation-invariant, and AnalyzeOrient/FixOrient never mutate diffs themselves.
-SubMesh subdivideToUnitCells(const IntegerGrid& g, const Mesh& mesh, const PositionField& field,
-                             int maxLen) {
-    SubMesh m;
-    const std::size_t vcap = mesh.vertexCapacity();
-    m.o.resize(vcap);
-    m.p.resize(vcap);
-    m.n.resize(vcap);
-    for (std::size_t v = 0; v < vcap; ++v) {
-        if (field.valid[v]) {
-            m.o[v] = field.o[v];
-            m.p[v] = mesh.position(VertexId{static_cast<Index>(v)});
-            m.n[v] = field.normal[v];
-        }
-    }
-    m.tris.reserve(g.tris.size());
-    for (const auto& t : g.tris) {
-        m.tris.push_back({static_cast<int>(t[0]), static_cast<int>(t[1]), static_cast<int>(t[2])});
-    }
-    m.e2e = g.e2e;
-    m.diffs.resize(g.tris.size() * 3);
-    for (std::size_t t = 0; t < g.tris.size(); ++t) {
-        for (std::size_t j = 0; j < 3; ++j) {
-            m.diffs[t * 3 + j] = rshift90i(g.edgeDiff[static_cast<std::size_t>(g.faceEdgeIds[t][j])],
-                                           g.orients[t][j]);
-        }
-    }
-
+// Split every SubMesh edge whose integer jump spans > maxLen grid cells, in place —
+// the core of subdivideToUnitCells, reusable after a unit-grid flip repair that
+// re-inflates some diffs. Midpoints interpolate the SubMesh's own o/p/n.
+void subdivideUnitCellsInPlace(SubMesh& m, int maxLen) {
     const auto dedgeNext = [](int e) { return e / 3 * 3 + (e + 1) % 3; };
     const auto dedgePrev = [](int e) { return e / 3 * 3 + (e + 2) % 3; };
     const auto sqLen = [&](int a, int b) {
@@ -2496,6 +2473,36 @@ SubMesh subdivideToUnitCells(const IntegerGrid& g, const Mesh& mesh, const Posit
         }
         schedule(f3);
     }
+}
+
+SubMesh subdivideToUnitCells(const IntegerGrid& g, const Mesh& mesh, const PositionField& field,
+                             int maxLen) {
+    SubMesh m;
+    const std::size_t vcap = mesh.vertexCapacity();
+    m.o.resize(vcap);
+    m.p.resize(vcap);
+    m.n.resize(vcap);
+    for (std::size_t v = 0; v < vcap; ++v) {
+        if (field.valid[v]) {
+            m.o[v] = field.o[v];
+            m.p[v] = mesh.position(VertexId{static_cast<Index>(v)});
+            m.n[v] = field.normal[v];
+        }
+    }
+    m.tris.reserve(g.tris.size());
+    for (const auto& t : g.tris) {
+        m.tris.push_back({static_cast<int>(t[0]), static_cast<int>(t[1]), static_cast<int>(t[2])});
+    }
+    m.e2e = g.e2e;
+    m.diffs.resize(g.tris.size() * 3);
+    for (std::size_t t = 0; t < g.tris.size(); ++t) {
+        for (std::size_t j = 0; j < 3; ++j) {
+            m.diffs[t * 3 + j] = rshift90i(g.edgeDiff[static_cast<std::size_t>(g.faceEdgeIds[t][j])],
+                                           g.orients[t][j]);
+        }
+    }
+
+    subdivideUnitCellsInPlace(m, maxLen);
     return m;
 }
 
@@ -3422,9 +3429,11 @@ Mesh extractIntegerQuadMesh(const Mesh& mesh, const PositionField& field) {
     IntegerGrid g = computeIntegerGrid(mesh, field);
     fixFlipHierarchy(g);  // Phase 5b: greedy flip repair (fast, the bulk of the win)
     const SubMesh m = subdivideToUnitCells(g, mesh, field, 1);
-    // Phase 5d SAT (fixFlipSatHierarchy on the reconstructed unit grid, exercised by
-    // debugSatReducesFlips) is deliberately NOT run here: measured a ~1pt irregular
-    // gain at 3-21 s/mesh, net-negative for the default path. It stays available.
+    // QuadriFlow's ComputeIndexMap additionally repairs folds on the *unit* grid (a 2nd
+    // fixFlip/FixFlipSat + re-subdivide, ported as subdivideUnitCellsInPlace). Measured
+    // (Task G): it drops the fold count sharply (spot 172->7) but at matched quad count
+    // the net gain is marginal (~0.7pt irregular, CV neutral-to-worse) and it collapses
+    // ~25% of cells; FixFlipSat is actively harmful (folds up). Not on the default path.
     return buildQuadMesh(m);
 }
 
