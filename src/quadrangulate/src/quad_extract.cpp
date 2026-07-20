@@ -12,6 +12,8 @@
 
 #include "cyber/quadrangulate/position_field.hpp"
 
+#include "cyber/quadrangulate/field_quadrangulator.hpp"
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -21,6 +23,7 @@
 #include <numeric>
 #include <queue>
 #include <set>
+#include <span>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -891,9 +894,98 @@ std::unique_ptr<IQuadrangulator> makeInstantMeshesQuadrangulator(int iterations)
 
 namespace {
 
+// Total surface area of a mesh (triangulating each face as a fan). Used to size
+// the expected quad count for the extraction health check.
+[[nodiscard]] double meshSurfaceArea(const Mesh& m) {
+    double area = 0.0;
+    for (Index fi = 0; fi < m.faceCapacity(); ++fi) {
+        const FaceId f{fi};
+        if (!m.isAlive(f)) {
+            continue;
+        }
+        const std::vector<VertexId> vs = m.faceVertices(f);
+        for (std::size_t k = 1; k + 1 < vs.size(); ++k) {
+            const Vec3 a = m.position(vs[0]);
+            const Vec3 b = m.position(vs[k]);
+            const Vec3 c = m.position(vs[k + 1]);
+            area += 0.5 * static_cast<double>(length(cross(b - a, c - a)));
+        }
+    }
+    return area;
+}
+
+// Health check for an integer-extractor result: returns false (i.e. "fall back")
+// when the quad mesh is empty, structurally invalid, torn into more connected
+// components than the input surface had, collapsed well below the target quad
+// count, or dominated by irregular vertices. These are general robustness
+// signals (no CAD-specific heuristics): the integer extractor is tuned for
+// organic surfaces and can tear flat/sharp geometry into fragments, which the
+// pipeline's KeepLargest policy then reduces to a broken, under-count mesh.
+[[nodiscard]] bool integerExtractionUsable(const Mesh& quads, std::size_t inputComponents,
+                                           double inputArea, float targetEdgeLength) {
+    if (quads.faceCount() == 0) {
+        return false;
+    }
+    if (!quads.validate().empty()) {
+        return false;  // non-manifold / structurally broken
+    }
+    // Fragmentation: a valid quadrangulation of an N-component surface stays N
+    // components. More means the extractor tore the surface apart — the flat/CAD
+    // failure mode (a single fragment survives KeepLargest; the rest is debris).
+    if (quads.islands().size() > std::max<std::size_t>(inputComponents, 1)) {
+        return false;
+    }
+    // Count collapse: far fewer quads than the target density implies.
+    if (targetEdgeLength > 0.0f && inputArea > 0.0) {
+        const double cell = static_cast<double>(targetEdgeLength) *
+                            static_cast<double>(targetEdgeLength);
+        const double expected = inputArea / cell;
+        if (expected >= 8.0 && static_cast<double>(quads.faceCount()) < 0.30 * expected) {
+            return false;
+        }
+    }
+    // Irregularity: an interior vertex of a quad mesh is regular at valence 4. A
+    // result where most interior vertices are irregular is degenerate.
+    std::size_t interior = 0;
+    std::size_t irregular = 0;
+    for (Index vi = 0; vi < quads.vertexCapacity(); ++vi) {
+        const VertexId v{vi};
+        if (!quads.isAlive(v)) {
+            continue;
+        }
+        const std::span<const EdgeId> edges = quads.vertexEdges(v);
+        if (edges.empty()) {
+            continue;  // isolated vertex — ignore
+        }
+        bool boundary = false;
+        for (const EdgeId e : edges) {
+            if (quads.isAlive(e) && quads.isBoundaryEdge(e)) {
+                boundary = true;
+                break;
+            }
+        }
+        if (boundary) {
+            continue;
+        }
+        ++interior;
+        if (quads.vertexFaces(v).size() != 4) {
+            ++irregular;
+        }
+    }
+    if (interior >= 8 && static_cast<double>(irregular) > 0.5 * static_cast<double>(interior)) {
+        return false;
+    }
+    return true;
+}
+
 // IQuadrangulator wrapper for the integer-parametrization extractor (Milestones
 // 3-5: solve + subdivide + BuildTriangleManifold + FixValence + greedy flip
-// repair). Same field/replace flow as the instant-meshes wrapper.
+// repair). Same field/replace flow as the instant-meshes wrapper, with a
+// defect-triggered fallback: the integer extractor is tuned for organic
+// surfaces and can tear flat/CAD geometry, so if its output fails the health
+// check we re-run the robust field-aligned quadrangulator on the untouched
+// triangle island and return that instead. Organic input passes the check and
+// keeps the integer result unchanged.
 class IntegerQuadrangulator final : public IQuadrangulator {
 public:
     explicit IntegerQuadrangulator(int iterations) : m_iterations(iterations) {}
@@ -903,17 +995,22 @@ public:
         if (cancel != nullptr && cancel->isCancelled()) {
             return {.success = false, .cancelled = true, .failureReason = "cancelled"};
         }
+        const std::size_t inputComponents = mesh.islands().size();
+        const double inputArea = meshSurfaceArea(mesh);
         const PositionField field = computePositionField(mesh, targetEdgeLength, m_iterations);
         Mesh quads = extractIntegerQuadMesh(mesh, field);
-        if (quads.faceCount() == 0) {
-            return {.success = false, .cancelled = false,
-                    .failureReason = "integer extraction produced no faces"};
+        if (integerExtractionUsable(quads, inputComponents, inputArea, targetEdgeLength)) {
+            mesh = std::move(quads);
+            if (progress != nullptr) {
+                progress->report(1.0f, "quadrangulate");
+            }
+            return {.success = true, .cancelled = false, .failureReason = {}};
         }
-        mesh = std::move(quads);
-        if (progress != nullptr) {
-            progress->report(1.0f, "quadrangulate");
-        }
-        return {.success = true, .cancelled = false, .failureReason = {}};
+        // Defect-triggered fallback: `mesh` is still the untouched triangle island
+        // (extractIntegerQuadMesh does not modify its input), so the field-aligned
+        // quadrangulator can rewrite it in place from scratch.
+        return makeFieldAlignedQuadrangulator()->quadrangulate(mesh, targetEdgeLength, progress,
+                                                               cancel);
     }
 
     [[nodiscard]] std::string name() const override { return "integer"; }

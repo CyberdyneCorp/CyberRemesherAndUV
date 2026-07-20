@@ -1,10 +1,13 @@
 #include <doctest.h>
 
 #include <cmath>
+#include <tuple>
 #include <vector>
 
 #include "cyber/core/math.hpp"
 #include "cyber/core/mesh.hpp"
+#include "cyber/core/pipeline.hpp"
+#include "cyber/quadrangulate/field_quadrangulator.hpp"
 #include "cyber/quadrangulate/position_field.hpp"
 
 using cyber::Index;
@@ -147,6 +150,53 @@ Mesh gradedGrid(int nx, int ny) {
         }
     }
     return Mesh::fromIndexed(p, f);
+}
+
+// A flat, welded, triangulated cube [-1,1]^3 — each of the 6 faces split into an
+// n x n grid of quads, each quad into 2 triangles. Shared edges/corners are
+// welded via a rounded-position vertex map so the mesh is closed and manifold.
+// This is the flat/CAD regime the organic integer extractor breaks on.
+Mesh flatCube(int n) {
+    std::vector<Vec3> pts;
+    std::map<std::tuple<int, int, int>, Index> vmap;
+    const auto key = [](const Vec3& p) {
+        const auto q = [](float v) { return static_cast<int>(std::lround(v * 1024.0f)); };
+        return std::make_tuple(q(p.x), q(p.y), q(p.z));
+    };
+    const auto vid = [&](const Vec3& p) {
+        const auto k = key(p);
+        const auto it = vmap.find(k);
+        if (it != vmap.end()) {
+            return it->second;
+        }
+        const auto idx = static_cast<Index>(pts.size());
+        pts.push_back(p);
+        vmap.emplace(k, idx);
+        return idx;
+    };
+    std::vector<std::vector<Index>> faces;
+    // Six axis-aligned faces; (u,v) grid mapped into 3-D per face orientation.
+    const auto emitFace = [&](auto place) {
+        for (int i = 0; i < n; ++i) {
+            for (int j = 0; j < n; ++j) {
+                const float u0 = -1.0f + 2.0f * static_cast<float>(i) / static_cast<float>(n);
+                const float u1 = -1.0f + 2.0f * static_cast<float>(i + 1) / static_cast<float>(n);
+                const float v0 = -1.0f + 2.0f * static_cast<float>(j) / static_cast<float>(n);
+                const float v1 = -1.0f + 2.0f * static_cast<float>(j + 1) / static_cast<float>(n);
+                const Index a = vid(place(u0, v0)), b = vid(place(u1, v0));
+                const Index c = vid(place(u1, v1)), d = vid(place(u0, v1));
+                faces.push_back({a, b, c});
+                faces.push_back({a, c, d});
+            }
+        }
+    };
+    emitFace([](float u, float v) { return Vec3{u, v, 1.0f}; });
+    emitFace([](float u, float v) { return Vec3{u, v, -1.0f}; });
+    emitFace([](float u, float v) { return Vec3{u, 1.0f, v}; });
+    emitFace([](float u, float v) { return Vec3{u, -1.0f, v}; });
+    emitFace([](float u, float v) { return Vec3{1.0f, u, v}; });
+    emitFace([](float u, float v) { return Vec3{-1.0f, u, v}; });
+    return Mesh::fromIndexed(pts, faces);
 }
 
 // Best 4-RoSy agreement between two tangent-plane directions about normal n.
@@ -626,4 +676,109 @@ TEST_CASE("integer solve: pathological fine field does not blow up subdivision")
     const remesh::IntegerExtractStats es = remesh::debugIntegerExtract(sphere, field);
     CHECK(es.quads > 0);
     CHECK(es.nonQuad == 0);
+}
+
+namespace {
+
+// Per-vertex quality counters of a (merged) quad-dominant mesh: interior
+// (non-boundary, non-isolated) vertices, how many of those are irregular
+// (valence != 4), and how many alive vertices are debris (no incident face).
+struct QuadHealth {
+    std::size_t quads = 0;
+    std::size_t interior = 0;
+    std::size_t irregularInterior = 0;
+    std::size_t debrisVertices = 0;
+    [[nodiscard]] double irregularFraction() const {
+        return interior ? static_cast<double>(irregularInterior) /
+                          static_cast<double>(interior)
+                        : 0.0;
+    }
+};
+
+QuadHealth quadHealth(const Mesh& m) {
+    QuadHealth h;
+    for (cyber::Index fi = 0; fi < m.faceCapacity(); ++fi) {
+        if (m.isAlive(cyber::FaceId{fi}) && m.faceSize(cyber::FaceId{fi}) == 4) {
+            ++h.quads;
+        }
+    }
+    for (cyber::Index vi = 0; vi < m.vertexCapacity(); ++vi) {
+        const cyber::VertexId v{vi};
+        if (!m.isAlive(v)) {
+            continue;
+        }
+        if (m.vertexFaces(v).empty()) {
+            ++h.debrisVertices;  // alive but part of no face — extraction/cleanup debris
+            continue;
+        }
+        bool boundary = false;
+        for (const cyber::EdgeId e : m.vertexEdges(v)) {
+            if (m.isAlive(e) && m.isBoundaryEdge(e)) {
+                boundary = true;
+                break;
+            }
+        }
+        if (boundary) {
+            continue;
+        }
+        ++h.interior;
+        if (m.vertexFaces(v).size() != 4) {
+            ++h.irregularInterior;
+        }
+    }
+    return h;
+}
+
+}  // namespace
+
+// TASK E regression: the integer quadrangulator must never return a broken
+// (non-manifold / fragmented / mostly-irregular / collapsed-count) mesh on flat
+// CAD geometry. On an isotropically-remeshed flat cube the integer extractor
+// tears the surface into two components; the pipeline's KeepLargest policy then
+// keeps one fragment (~150 quads of a ~400 target) and leaves the rest as
+// isolated-vertex debris — 62% of interior vertices irregular. The
+// defect-triggered fallback in makeIntegerQuadrangulator detects this and
+// returns the robust field-aligned result instead.
+TEST_CASE("integer quadrangulator: flat cube falls back to a manifold, non-degenerate mesh") {
+    const Mesh cube = flatCube(1);  // raw welded cube: 12 tris, 8 verts
+    remesh::Parameters params;
+    params.targetQuadCount = 400;
+    params.sharpEdgeDegrees = 90.0f;
+    const remesh::PipelineResult r = remesh::remesh(
+        cube, params, nullptr, nullptr, [] { return remesh::makeIntegerQuadrangulator(40); });
+
+    REQUIRE(r.status == remesh::RunStatus::Success);
+    CHECK(r.mesh.validate().empty());  // manifold / structurally valid
+
+    const QuadHealth h = quadHealth(r.mesh);
+    CAPTURE(h.quads);
+    CAPTURE(h.interior);
+    CAPTURE(h.irregularInterior);
+    CAPTURE(h.debrisVertices);
+    CHECK(h.debrisVertices < 20);              // no isolated-vertex debris (was ~195)
+    CHECK(h.quads >= 350);                     // count not collapsed (was ~150 of 400)
+    CHECK(h.irregularFraction() < 0.5);        // not mostly-irregular (was ~0.62)
+}
+
+// TASK E regression (other half): on good ORGANIC output the fallback must NOT
+// fire — the integer result is kept. An icosphere's integer extraction is
+// mostly valence-4 (~7% irregular), far cleaner than the field-aligned fallback
+// (~35%+), so a low irregular fraction here confirms the integer path was used.
+TEST_CASE("integer quadrangulator: organic icosphere keeps the integer result") {
+    const Mesh sphere = icosphere(2);
+    remesh::Parameters params;
+    params.targetQuadCount = 400;
+    const remesh::PipelineResult r = remesh::remesh(
+        sphere, params, nullptr, nullptr, [] { return remesh::makeIntegerQuadrangulator(40); });
+
+    REQUIRE(r.status == remesh::RunStatus::Success);
+    CHECK(r.mesh.validate().empty());
+
+    const QuadHealth h = quadHealth(r.mesh);
+    CAPTURE(h.quads);
+    CAPTURE(h.interior);
+    CAPTURE(h.irregularInterior);
+    CHECK(h.debrisVertices == 0);
+    CHECK(h.quads > 200);
+    CHECK(h.irregularFraction() < 0.15);  // integer-clean; the fallback would be far higher
 }
