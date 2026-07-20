@@ -100,12 +100,26 @@ sphere → 232 quads, spot → 742 quads via `extractIsolineQuads`. As expected 
 (pre-rounding) solve the seam translations are non-integer, so `seamlessUvResidual ≈ 0.5`.
 Tested in `test_seamless_solver.cpp` (cut duplicates seam verts, CG converges, UV varies).
 
-**M2b/c — Integer seam rounding (THE remaining core).** Round the seam translations across
-cut edges to integers and re-solve with them as hard constraints (min-cost-flow / MIQ-style
-rounding) until the integer-jump residual is ~0. *Gate:* `seamlessUvResidual < 1e-3` on the
-sphere (matching the harness's 0.000000 across 6273 edges). Also improve field feature-
-alignment (a diagonally-triangulated flat grid currently pulls the cross field ~27° off-axis,
-so its UV, while seamless, does not extract cleanly — closed curved surfaces align fine).
+**M2b/c — Integer seam rounding (THE remaining core, DIAGNOSED — not yet done).** The seam
+must become a *rigid* grid symmetry `uv_B = R^r·uv_A + t` with `t` an integer 2-vector shared
+by both endpoints of each cut edge. A relaxed-solve-then-penalize approach was built and
+measured, and it **does not converge to a rigid seam** — precise diagnosis:
+- Rounding `t` per endpoint independently makes each endpoint integer (my-convention residual
+  0) but `seamlessUvResidual` stays ~0.5, because the two endpoints of a cut edge then carry
+  *different* translations, so the edge is not a single rigid map.
+- Forcing one shared `t` per cut edge (rounded from the two endpoints' average, with `r` taken
+  from the relaxed UV geometry to match the residual metric's `bestK`) leaves my-convention
+  residual ~0.5: the two endpoints genuinely *want* different integers, i.e. the relaxed seam
+  is **not rigid** even geometrically. The base Dirichlet energy relaxes the two independent
+  cut sides into a non-rigid state that a post-hoc penalty (even λ=1e4) cannot rigidify.
+
+**Conclusion:** exact seamlessness needs the seam rotation coupled as a **hard constraint
+during the solve** — the two cut sides are not independent DOF; side B is `R^r·`side A plus a
+single integer translation propagated consistently along the seam (MIQ-style: greedily round
+one integer transition, fix it, re-solve, repeat). That is the genuine multi-week core. The
+M2a relaxed solve (produces quads, residual ~0.5) is committed; this constrained/rounded solve
+is the open work. *Gate:* `seamlessUvResidual < 1e-3` on the sphere. Also: improve field
+feature-alignment (a diagonally-triangulated flat grid pulls the cross field ~27° off-axis).
 
 **M3 — Isotropic pre-remesh.** QuadCover wants a reasonably uniform triangle mesh (the
 harness isotropically remeshes first). Reuse our own `isotropicRemesh` at the target edge
