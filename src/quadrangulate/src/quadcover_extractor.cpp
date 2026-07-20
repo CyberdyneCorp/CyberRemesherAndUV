@@ -1702,4 +1702,12 @@ std::unique_ptr<IQuadrangulator> makeQuadCoverQuadrangulator(int fieldIterations
     return std::make_unique<QuadCoverQuadrangulator>(fieldIterations);
 }
 
+bool quadCoverAvailable() {
+#ifdef CYBER_HAVE_QUADCOVER
+    return true;  // in-process solver linked
+#else
+    return std::getenv("CYBER_QUADCOVER_CLI") != nullptr;  // out-of-process harness
+#endif
+}
+
 }  // namespace cyber::remesh

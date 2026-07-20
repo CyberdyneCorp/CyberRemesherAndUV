@@ -114,4 +114,11 @@ struct IsolineQuadMesh {
 // implemented" reason, so the pipeline degrades cleanly rather than crashing.
 std::unique_ptr<IQuadrangulator> makeQuadCoverQuadrangulator(int fieldIterations = 40);
 
+// Whether a seamless-UV solver is available for the quad-cover method: true when the
+// in-process solver is linked (built with -DCYBER_WITH_QUADCOVER=ON) or the
+// CYBER_QUADCOVER_CLI harness binary is configured. Callers making quad-cover the
+// default use this to fall back to the field-aligned quadrangulator when neither is
+// present, so a build without the solver still produces output.
+[[nodiscard]] bool quadCoverAvailable();
+
 }  // namespace cyber::remesh

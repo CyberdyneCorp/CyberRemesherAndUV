@@ -345,7 +345,8 @@ void applySmallPatchPolicy(Mesh& mesh, SmallPatchPolicy policy, int minFaces) {
 }
 
 PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSink* progress,
-                      const CancelToken* cancel, const QuadrangulatorFactory& quadrangulator) {
+                      const CancelToken* cancel, const QuadrangulatorFactory& quadrangulator,
+                      const QuadrangulatorFactory& fallbackQuadrangulator) {
     PipelineResult result;
 
     // Stage 0: parameters (validated at every entry point — spec).
@@ -414,6 +415,29 @@ PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSi
     const std::string quadMethodName =
         quadrangulator ? quadrangulator()->name() : std::string("greedy");
     const bool quadCoverMethod = quadMethodName == "quad-cover";
+
+    // Isotropic remesh of one island in place. Returns the status; on a non-cancel
+    // failure it records the stage/reason on `oc`. Factored out so the quad-cover
+    // fallback path can reuse it after quad-cover declines an island.
+    const auto runIsotropicStage = [&](Mesh& m, float base, float span,
+                                       IslandOutcome& oc) -> IsotropicStatus {
+        const ReferenceSurface reference(m, params.smoothNormalDegrees);
+        IsotropicOptions iso;
+        iso.targetEdgeLength = lengthResult.edgeLength;
+        iso.adaptivity = params.adaptivity;
+        iso.smoothNormalDegrees = params.smoothNormalDegrees;
+        ProgressSink isoSink =
+            progress ? progress->subrange(base, base + span, "isotropic") : ProgressSink{};
+        const IsotropicStatus st =
+            isotropicRemesh(m, reference, iso, progress ? &isoSink : nullptr, cancel);
+        if (st != IsotropicStatus::Cancelled && (st != IsotropicStatus::Success || m.faceCount() == 0)) {
+            oc.stage = "isotropic";
+            oc.reason = st == IsotropicStatus::InvalidInput ? "invalid island input"
+                                                            : "island vanished during isotropic remeshing";
+        }
+        return st;
+    };
+
     for (std::size_t i = 0; i < islandFaces.size(); ++i) {
         IslandOutcome& outcome = outcomes[i];
         outcome.inputFaces = islandFaces[i].size();
@@ -432,25 +456,13 @@ PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSi
         // Isotropic stage: overall 0.0-0.3 of this island's slice. Skipped for quad-cover,
         // which does its own isotropic remesh downstream (see quadCoverMethod above).
         if (!quadCoverMethod) {
-            const ReferenceSurface reference(outcome.mesh, params.smoothNormalDegrees);
-            IsotropicOptions iso;
-            iso.targetEdgeLength = lengthResult.edgeLength;
-            iso.adaptivity = params.adaptivity;
-            iso.smoothNormalDegrees = params.smoothNormalDegrees;
-            ProgressSink isoSink =
-                progress ? progress->subrange(progressBase, progressBase + weight * 0.3f, "isotropic")
-                         : ProgressSink{};
             const IsotropicStatus isoStatus =
-                isotropicRemesh(outcome.mesh, reference, iso, progress ? &isoSink : nullptr, cancel);
+                runIsotropicStage(outcome.mesh, progressBase, weight * 0.3f, outcome);
             if (isoStatus == IsotropicStatus::Cancelled) {
                 result.status = RunStatus::Cancelled;
                 return result;
             }
             if (isoStatus != IsotropicStatus::Success || outcome.mesh.faceCount() == 0) {
-                outcome.stage = "isotropic";
-                outcome.reason = isoStatus == IsotropicStatus::InvalidInput
-                                     ? "invalid island input"
-                                     : "island vanished during isotropic remeshing";
                 progressBase += weight;
                 continue;
             }
@@ -472,10 +484,39 @@ PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSi
             result.status = RunStatus::Cancelled;
             return result;
         }
-        if (!quadOutcome.success || outcome.mesh.faceCount() == 0) {
-            outcome.stage = "quadrangulate";
-            outcome.reason =
-                quadOutcome.failureReason.empty() ? "no faces produced" : quadOutcome.failureReason;
+        bool quadOk = quadOutcome.success && outcome.mesh.faceCount() > 0;
+
+        // Quad-cover recovery: it skipped the isotropic stage and declined this island
+        // (no seamless-UV solver, or a solve/extraction failure). The mesh is untouched,
+        // so recover the island via the normal isotropic remesh + fallback quadrangulator
+        // (field-aligned) — the default never loses field-aligned's always-produces-output
+        // guarantee.
+        if (!quadOk && quadCoverMethod && fallbackQuadrangulator) {
+            const IsotropicStatus isoStatus =
+                runIsotropicStage(outcome.mesh, progressBase, weight * 0.3f, outcome);
+            if (isoStatus == IsotropicStatus::Cancelled) {
+                result.status = RunStatus::Cancelled;
+                return result;
+            }
+            if (isoStatus == IsotropicStatus::Success && outcome.mesh.faceCount() > 0) {
+                std::unique_ptr<IQuadrangulator> fb = fallbackQuadrangulator();
+                fieldExtractor = fb->name() == "instant-meshes";
+                integerExtractor = fb->name() == "integer";
+                const auto fbOutcome = fb->quadrangulate(
+                    outcome.mesh, lengthResult.edgeLength, progress ? &quadSink : nullptr, cancel);
+                if (fbOutcome.cancelled) {
+                    result.status = RunStatus::Cancelled;
+                    return result;
+                }
+                quadOk = fbOutcome.success && outcome.mesh.faceCount() > 0;
+            }
+        }
+        if (!quadOk) {
+            if (outcome.stage.empty()) {  // not already set by a failed fallback isotropic
+                outcome.stage = "quadrangulate";
+                outcome.reason = quadOutcome.failureReason.empty() ? "no faces produced"
+                                                                   : quadOutcome.failureReason;
+            }
             progressBase += weight;
             continue;
         }

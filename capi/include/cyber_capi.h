@@ -68,20 +68,21 @@ typedef struct CyberRemeshParams {
     float adaptivity;          /* 0 uniform .. 1 fully curvature-adaptive */
     int pureQuads;             /* non-zero: forbid residual triangles */
     int holeFillMaxBoundary;   /* max boundary edges of holes to fill; 0 off */
-    int quadMethod;            /* 0 = field-aligned matching (default),
+    int quadMethod;            /* 0 = field-aligned matching,
                                 * 1 = Instant-Meshes position-field extractor,
                                 * 2 = integer-parametrization extractor,
-                                * 3 = QuadCover seamless-UV isoline extractor */
+                                * 3 = QuadCover seamless-UV isoline extractor (default;
+                                *     falls back to field-aligned where no solver is present) */
 } CyberRemeshParams;
 
 /* Quadrangulator selection values for CyberRemeshParams.quadMethod. */
 #define CYBER_QUAD_FIELD_ALIGNED 0
 #define CYBER_QUAD_INSTANT_MESHES 1
 #define CYBER_QUAD_INTEGER 2
-/* QuadCover seamless-UV isoline extractor (Task F). Reaches ~1% irregular on closed
- * surfaces but requires an out-of-process seamless-UV solve: set the CYBER_QUADCOVER_CLI
- * environment variable to a built autoremesher_cli. Without it the run reports failure
- * and the input is left unchanged. */
+/* QuadCover seamless-UV isoline extractor (Task F). QuadriFlow-class irregular/CV. The
+ * seamless-UV solve runs in-process when built with -DCYBER_WITH_QUADCOVER=ON, or
+ * out-of-process when the CYBER_QUADCOVER_CLI environment variable points at a built
+ * autoremesher_cli. When neither is present the engine falls back to field-aligned. */
 #define CYBER_QUAD_QUADCOVER 3
 
 /* Fills params with the engine defaults. No-op on NULL. */

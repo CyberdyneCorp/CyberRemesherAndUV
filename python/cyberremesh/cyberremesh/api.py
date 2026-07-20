@@ -129,7 +129,7 @@ class RemeshParams:
     # (QuadCover seamless-UV isoline extractor — ~1% irregular on closed
     # surfaces, but requires the CYBER_QUADCOVER_CLI environment variable to
     # point at a built autoremesher_cli; without it the run fails cleanly).
-    quad_method: str = "field-aligned"
+    quad_method: str = "quad-cover"
 
     _QUAD_METHODS = {
         "field-aligned": 0,

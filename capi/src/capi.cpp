@@ -201,7 +201,9 @@ void cyber_default_params(CyberRemeshParams* params) {
     params->adaptivity = defaults.adaptivity;
     params->pureQuads = defaults.pureQuads ? 1 : 0;
     params->holeFillMaxBoundary = defaults.holeFillMaxBoundary;
-    params->quadMethod = CYBER_QUAD_FIELD_ALIGNED;
+    // quad-cover is the default: it reaches QuadriFlow-class irregular/CV where a solver
+    // is available, and degrades to field-aligned (per-island) when it is not.
+    params->quadMethod = CYBER_QUAD_QUADCOVER;
 }
 
 CyberStatus cyber_remesh(const CyberMesh* in, const CyberRemeshParams* params,
@@ -227,21 +229,34 @@ CyberStatus cyber_remesh(const CyberMesh* in, const CyberRemeshParams* params,
         // quadMethod selects the extractor: field-aligned (default), the
         // Instant-Meshes position-field extractor, or the integer-parametrization
         // extractor (Milestones 3-5, experimental).
-        const int quadMethod = params->quadMethod;
+        // quad-cover is the default, but it needs a seamless-UV solver (in-process build
+        // or the CYBER_QUADCOVER_CLI harness). When neither is present, fall back to the
+        // field-aligned quadrangulator so a default build still produces output; when it
+        // IS present, pass field-aligned as the per-island fallback the pipeline uses if
+        // quad-cover declines an island.
+        int quadMethod = params->quadMethod;
+        if (quadMethod == CYBER_QUAD_QUADCOVER && !cyber::remesh::quadCoverAvailable()) {
+            quadMethod = CYBER_QUAD_FIELD_ALIGNED;
+        }
+        const auto makeQuad = [](int method) -> std::unique_ptr<cyber::remesh::IQuadrangulator> {
+            if (method == CYBER_QUAD_INSTANT_MESHES) {
+                return cyber::remesh::makeInstantMeshesQuadrangulator();
+            }
+            if (method == CYBER_QUAD_INTEGER) {
+                return cyber::remesh::makeIntegerQuadrangulator();
+            }
+            if (method == CYBER_QUAD_QUADCOVER) {
+                return cyber::remesh::makeQuadCoverQuadrangulator();
+            }
+            return cyber::remesh::makeFieldAlignedQuadrangulator();
+        };
+        cyber::remesh::QuadrangulatorFactory fallback;
+        if (quadMethod == CYBER_QUAD_QUADCOVER) {
+            fallback = []() { return cyber::remesh::makeFieldAlignedQuadrangulator(); };
+        }
         cyber::remesh::PipelineResult result = cyber::remesh::remesh(
             in->mesh, cppParams, &sink, &token,
-            [quadMethod]() -> std::unique_ptr<cyber::remesh::IQuadrangulator> {
-                if (quadMethod == CYBER_QUAD_INSTANT_MESHES) {
-                    return cyber::remesh::makeInstantMeshesQuadrangulator();
-                }
-                if (quadMethod == CYBER_QUAD_INTEGER) {
-                    return cyber::remesh::makeIntegerQuadrangulator();
-                }
-                if (quadMethod == CYBER_QUAD_QUADCOVER) {
-                    return cyber::remesh::makeQuadCoverQuadrangulator();
-                }
-                return cyber::remesh::makeFieldAlignedQuadrangulator();
-            });
+            [quadMethod, makeQuad]() { return makeQuad(quadMethod); }, fallback);
 
         switch (result.status) {
             case cyber::remesh::RunStatus::Success:
