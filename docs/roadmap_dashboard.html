@@ -157,7 +157,7 @@
       <div class="chip">
         <div class="k">Median quad angle · singularities</div>
         <div class="v gap">~3–8° behind</div>
-        <div class="s">The global integer <b>solve</b>, <b>watertight-manifold extraction</b> and the <b>flip-repair layer</b> are all in, plus a <b>position-relaxation pass</b> and a <b>bounded-memory</b> extractor (runs the whole corpus). Best-of-ours on singularities (irr 9–14%) but still <b>3–9× QuadriFlow's 1–4%</b>. The residual gap is topological — needs end-to-end multi-res extraction + a valence-cancellation pass (§6), not more geometry.</div>
+        <div class="s">The global integer <b>solve</b>, <b>watertight extraction</b>, <b>flip-repair</b>, a <b>position-relaxation pass</b>, a <b>bounded-memory</b> extractor and now a <b>val3/5 dipole canceller</b> are all in. Best-of-ours on singularities, down to <b>irr 7–13%</b> (from 9–14%) but still <b>2–9× QuadriFlow's 1–4%</b>. Multi-res coarse extraction was <b>proven a no-op</b>; the residual gap is subdivision T-junctions (§6·C).</div>
       </div>
       <div class="chip">
         <div class="k">Adaptivity (quality-per-polygon)</div>
@@ -253,7 +253,7 @@
     </div>
   </div>
 
-  <h2><span class="n">§2</span> Benchmark — position-field extractor vs QuadriFlow</h2>
+  <h2><span class="n">§2</span> Benchmark — integer extractor (+ dipole canceller) vs QuadriFlow</h2>
   <div class="scroll">
     <table>
       <thead>
@@ -314,13 +314,13 @@
     <b>irregular 9–14% vs 1–4%</b> · <b>edge CV 0.29–0.42 vs 0.14–0.19</b> · <b>median 74–79° vs 82°</b>.</p>
   <div class="notes">
     <div class="note">
-      <div class="h"><span class="dot" style="background:var(--gap)"></span>1 · Fewer singularities <span class="mstag partial" style="margin-left:auto">the real gap</span></div>
-      <p><b>irregular 9–14% vs QuadriFlow 1–4%</b> (3–9× more). The single-level collapse
-        <i>quantizes</i> the clean grid into val3/val5 dipoles; the flip-repair layer only partly undoes
-        it. The fix is <b>end-to-end multi-resolution extraction + a valence-optimisation pass</b> —
-        QuadriFlow's coarse-to-fine pipeline yields a globally consistent grid and then cancels the
-        residual singular pairs. This is the dominant lever and the one that also drags CV and angle
-        down with it.</p>
+      <div class="h"><span class="dot" style="background:var(--gap)"></span>1 · Fewer singularities <span class="mstag partial" style="margin-left:auto">closing</span></div>
+      <p><b>irregular 7–13% vs QuadriFlow 1–4%</b> — down from 9–14% now that the <b>dipole canceller</b>
+        (§6·B) ships (spot 9→7, cheb 11→9, bunny 14→13). The collapse still <i>quantizes</i> the grid
+        into val3/val5 dipoles + val3 T-junctions; the canceller removes the dipoles a neighbour can
+        absorb (~60% val3 / ~30% val5). The remaining excess is <b>subdivision T-junctions</b> — the
+        next lever is upstream (§6·C: 2nd subdivide + FixFlipSat → fewer |diff|&gt;1 edges), not the
+        coarse-face read, which was <b>proven a no-op</b> (§6·A).</p>
     </div>
     <div class="note">
       <div class="h"><span class="dot" style="background:var(--partial)"></span>2 · Uniform quads <span class="mstag done" style="margin-left:auto">pass added</span></div>
@@ -348,15 +348,15 @@
 
   <h2><span class="n">§6</span> The plan to close the gap</h2>
   <p class="lede" style="font-size:14px;margin-bottom:14px">Ordered by leverage. The headline deficit
-    (irregular %) is <b>topological</b>, so the top two tasks are about the <i>grid</i>, not the
-    geometry. Both references below are <b>MIT</b> (autoremesher too, verified), so every task is a
-    portable clean-room job — no oracle-only constraint.</p>
+    (irregular %) is <b>topological</b>. Two tasks are now resolved — one a dead end, one a real win —
+    and the finding reshaped the rest. Both references are <b>MIT</b> (autoremesher too, verified), so
+    every task is a portable clean-room job.</p>
   <div class="ms">
-    <span class="msrow"><span class="msdot"></span><b>A · End-to-end multi-resolution extraction</b> — today we collapse a single level then run one flip pass; QuadriFlow extracts on the full coarse-to-fine edge hierarchy so the integer grid is globally consistent before it ever becomes quads. This is the primary singularity lever (9–14% → target ~3%). <span class="mstag">port · QuadriFlow MIT</span></span>
-    <span class="msrow"><span class="msdot"></span><b>B · Valence-optimisation / singularity cancellation pass</b> — after extraction, cancel adjacent val3–val5 pairs by edge rotation and collapse (QuadriFlow <span class="mono">optimize_mesh</span>). We only do interior valence-2 doublet cleanup (M4); this is the missing step that turns a locally-consistent grid into a clean one. Directly attacks irregular % and, with it, CV and angle. <span class="mstag">port · QuadriFlow MIT</span></span>
-    <span class="msrow"><span class="msdot"></span><b>C · Diagnose the collapse quantisation</b> — instrument the zero-diff collapse and measure exactly where the field's ~44 orientation singularities multiply into ~200–500 interior irregulars. Use the two oracles below to confirm ours converges to theirs on the same field. <span class="mstag">diagnostic</span></span>
-    <span class="msrow"><span class="msdot"></span><b>D · Surface-projected position relaxation</b> — fold the Laplacian pass onto the source surface via the existing BVH (<code>src/accel</code>) instead of a per-vertex tangent plane, and add area-equalising weights, so more iterations stop drifting off-surface. Marginal CV, protects fidelity. <span class="mstag">extend · <code>relaxPositions</code></span></span>
-    <span class="msrow"><span class="msdot"></span><b>E · Sharp-crease + open-boundary handling</b> — detect source creases (dihedral threshold, already have <code>sharpEdgeDegrees</code>) and pin/align extracted vertices to them before relaxation, so CAD input (fandisk) keeps its edges and holes keep their silhouette. <span class="mstag">feature</span></span>
+    <span class="msrow"><span class="msdot partial"></span><b>A · Multi-resolution extraction — <span style="color:var(--gap)">DEAD END (proven)</span></b> — the plan was to read faces off QuadriFlow's coarsened edge graph. <b>Built it and measured: byte-identical to the single-level path</b> (3398 == 3398 compact triangles). Reason: <code>DownsampleEdgeGraph</code> only contracts <i>zero-diff</i> edges, but subdivision split-vertices are joined by <i>|diff|=1</i> edges, so the coarse faces are exactly the fine non-degenerate faces. QuadriFlow's low count comes from its <i>upstream</i> 2nd-subdivide + FixFlipSat + position-solve, not the coarse read. Reverted. <span class="mstag partial">no-op, reverted</span></span>
+    <span class="msrow"><span class="msdot done"></span><b>B · Valence-3/5 dipole canceller — <span style="color:var(--win)">DONE</span></b> — measured the irregulars: ~60% val3, ~30% val5 (dipoles). Added a valence-improving <b>edge-rotation</b> pass to <span class="mono">FixValence</span>: re-draw an interior edge along a hexagon diagonal, moving valence off the 3/5 pair onto a neighbour, accepted only when it <b>strictly</b> lowers local irregulars and stays manifold (monotone). <b>Irregular −27% at native density</b> (spot 20.2→16.8%); at 3000-quad: spot 9→7, fandisk 10→9, rocker 10→8, cheb 11→9, bunny 14→13. Regression-tested, ASan-clean. <span class="mstag done">shipped · a83ac1f</span></span>
+    <span class="msrow"><span class="msdot"></span><b>C · Reduce split T-junctions upstream</b> — the ~60% val3 excess is subdivision T-junctions where the grid is locally imperfect (A0 probe: split-vertices are 62–91% of interior irregulars). The lever QuadriFlow actually uses: a 2nd subdivide + <span class="mono">FixFlipSat</span> (we have <code>fixFlipSatHierarchy</code>, currently off) and a position solve that leave fewer |diff|&gt;1 edges. This is now the primary remaining singularity lever. <span class="mstag">investigate</span></span>
+    <span class="msrow"><span class="msdot"></span><b>D · Surface-projected position relaxation</b> — fold the Laplacian pass onto the source surface via the existing BVH (<code>src/accel</code>) instead of a per-vertex tangent plane. Marginal CV, protects fidelity. <span class="mstag">extend · <code>relaxPositions</code></span></span>
+    <span class="msrow"><span class="msdot"></span><b>E · Sharp-crease + open-boundary handling</b> — detect source creases (<code>sharpEdgeDegrees</code>) and pin/align extracted vertices before relaxation, so CAD input (fandisk) keeps its edges. <span class="mstag">feature</span></span>
   </div>
   <div class="notes" style="margin-top:14px">
     <div class="note">
@@ -380,7 +380,7 @@
     target ~3000 quads · reference = QuadriFlow (headless, boost-free) · numbers from
     <code>examples/11_benchmark.py</code>. Roadmap detail in <code>docs/ROADMAP.md</code>.
     <br>
-    <span style="opacity:.75">Dashboard content as of commit <code>118aeaa</code> (2026-07-20) —
+    <span style="opacity:.75">Dashboard content as of commit <code>a83ac1f</code> (2026-07-20) —
     a manual artifact; it does not auto-track the repo, so a later commit may have moved past this.</span>
   </footer>
 </div>
@@ -389,12 +389,13 @@
   // Benchmark rows: [model, median, dev, nerr, irr, cv] for position-field(ours) and QuadriFlow.
   // dir: +1 = higher is better (median), -1 = lower is better (rest).
   const DIR = [+1, -1, -1, -1, -1];
+  // ours = the INTEGER extractor (best-of-ours on singularities, with the dipole canceller).
   const ROWS = [
-    ["spot",           [78,0.26,7.7,15,0.19],  [82,0.24,6.7,3,0.14]],
-    ["fandisk",        [78,0.30,7.8,15,0.18],  [85,0.28,5.3,1,0.19]],
-    ["rocker-arm",     [78,0.35,11.7,14,0.23], [82,0.26,8.0,3,0.15]],
-    ["cheburashka",    [76,0.32,9.9,16,0.27],  [82,0.23,7.3,2,0.15]],
-    ["stanford-bunny", [76,0.34,12.7,20,0.22], [82,0.32,10.7,4,0.17]],
+    ["spot",           [77,0.29,8.3,7,0.34],   [82,0.24,6.7,3,0.14]],
+    ["fandisk",        [79,0.32,8.1,9,0.29],    [85,0.28,5.3,1,0.19]],
+    ["rocker-arm",     [74,0.31,10.3,8,0.33],   [82,0.26,8.0,3,0.15]],
+    ["cheburashka",    [76,0.31,10.1,9,0.42],   [82,0.23,7.3,2,0.15]],
+    ["stanford-bunny", [75,0.32,12.6,13,0.41],  [82,0.32,10.7,4,0.17]],
   ];
   const fmt = (v, i) => (i===0 || i===3) ? String(Math.round(v)) : v.toFixed(2);
   const tb = document.getElementById("bench");
