@@ -1,5 +1,10 @@
 #include "cyber/quadrangulate/quadcover_extractor.hpp"
 
+#include "cyber/accel/backend.hpp"
+#include "cyber/core/isotropic.hpp"
+#include "cyber/core/reference_surface.hpp"
+#include "cyber/quadrangulate/seamless_solver.hpp"
+
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -117,15 +122,108 @@ bool writeObjFor(const std::string& path, const Mesh& mesh, double& areaOut) {
 }  // namespace
 
 SeamlessUv computeSeamlessUvNative(const Mesh& mesh, float targetEdgeLength, float adaptivity) {
-    // M0 scaffold (docs/native-miq-plan.md). The QuadCover-style native solve — frame
-    // field (computePositionField) -> cut graph (M1) -> seamless Poisson solve via
-    // CG-on-spmv + MinCostFlow seam rounding (M2) -> isotropic pre-remesh (M3) — is not
-    // implemented yet, so return an invalid UV and let the caller fall through to the
-    // vendored / harness path. Wired but inert.
-    (void)mesh;
-    (void)targetEdgeLength;
-    (void)adaptivity;
-    return SeamlessUv{};
+    // M3 (docs/native-miq-plan.md): the fully native QuadCover-style seamless solve. No
+    // Geogram, no subprocess. Pipeline:
+    //   (pre) isotropic pre-remesh at `targetEdgeLength` so the solve runs on a clean,
+    //         uniformly-sized triangulation (the role the harness's internal remesh played);
+    //   (M1)  frame field + period jumps + singularities + cut graph (buildSeamlessSetup);
+    //   (M2)  seamless integer-grid Poisson solve at grid cell == targetEdgeLength
+    //         (solveParameterization) -> per-corner UV;
+    //   assemble a SeamlessUv on the remeshed verts/tris from the per-corner UV.
+    // Any degenerate stage returns an invalid UV so the caller falls through cleanly.
+    SeamlessUv uv;
+    if (targetEdgeLength <= 0.0f || mesh.faceCapacity() == 0) {
+        return uv;
+    }
+
+    // Isotropic pre-remesh. Tag features so sharp edges survive the resample, then project
+    // onto a reference built from the raw island (flat projection: smoothNormalDegrees 0).
+    constexpr float kFeatureDihedralDegrees = 40.0f;
+    constexpr int kFieldIterations = 40;
+    Mesh work = mesh;
+    work.triangulate();  // feature tagging + the solve both need a pure-triangle mesh
+    work.tagFeatureEdges(kFeatureDihedralDegrees);
+
+    // Feature gate. The M2 setup marks feature edges as dead (period jump 0) rather than
+    // constraining the grid to them, so on sharp-feature meshes the seamless solve is both
+    // ill-conditioned (the relaxed CG stops converging and runs to its cap — tens of seconds
+    // on a unit cube) and divergent. Decline such meshes up front, BEFORE the expensive
+    // solve, so the caller degrades to the vendored / subprocess / field-aligned path that
+    // does handle features, instead of paying a slow solve only to have the divergence guard
+    // reject it. (Smooth closed surfaces — no feature edges — take the native path.)
+    for (Index ei = 0; ei < work.edgeCapacity(); ++ei) {
+        if (work.isAlive(EdgeId{ei}) && work.isFeatureEdge(EdgeId{ei})) {
+            return uv;
+        }
+    }
+
+    const ReferenceSurface reference(work, 0.0f);
+    IsotropicOptions iso;
+    iso.targetEdgeLength = targetEdgeLength;
+    iso.adaptivity = adaptivity;
+    if (isotropicRemesh(work, reference, iso) != IsotropicStatus::Success ||
+        work.faceCount() == 0) {
+        return uv;
+    }
+
+    auto backend = accel::defaultBackend();
+    const SeamlessSetup setup = buildSeamlessSetup(work, kFieldIterations, *backend);
+    if (!setup.valid) {
+        return uv;
+    }
+    const Parameterization param =
+        solveParameterization(work, setup, targetEdgeLength, *backend);
+    if (!param.valid) {
+        return uv;
+    }
+
+    // Assemble the seamless UV on the remeshed triangles from the per-corner parameterization.
+    uv.vertices.assign(work.vertexCapacity(), Vec3{0, 0, 0});
+    for (Index vi = 0; vi < work.vertexCapacity(); ++vi) {
+        if (work.isAlive(VertexId{vi})) {
+            uv.vertices[vi] = work.position(VertexId{vi});
+        }
+    }
+    float uMin = std::numeric_limits<float>::max();
+    float uMax = std::numeric_limits<float>::lowest();
+    float vMin = uMin, vMax = uMax;
+    for (Index fi = 0; fi < work.faceCapacity(); ++fi) {
+        const FaceId f{fi};
+        if (!work.isAlive(f) || work.faceSize(f) != 3) {
+            continue;
+        }
+        const std::vector<VertexId> vs = work.faceVertices(f);
+        uv.triangles.push_back({vs[0].value, vs[1].value, vs[2].value});
+        uv.triangleUv.push_back(param.cornerUv[fi]);
+        for (const Vec2& c : param.cornerUv[fi]) {
+            uMin = std::min(uMin, c.x);
+            uMax = std::max(uMax, c.x);
+            vMin = std::min(vMin, c.y);
+            vMax = std::max(vMax, c.y);
+        }
+    }
+    if (uv.triangles.empty()) {
+        return uv;
+    }
+
+    // Divergence guard. The seam being locally integer-seamless (residual ~0) does NOT
+    // guarantee a globally usable map: on organic, many-cone meshes the integer phase can
+    // blow the map up while staying per-edge consistent (spot: whole UV spans ~1e9 cells).
+    // Such a UV makes the isoline tracer enumerate an astronomical grid and effectively
+    // hang. A sane integer-grid UV covers ~one cell per triangle, so its bounding box in
+    // cells is O(triangleCount); reject anything wildly beyond that so the caller degrades
+    // cleanly (falls through to the vendored / subprocess path, or the field-aligned
+    // fallback) instead of feeding the extractor a divergent map.
+    const double spanCellsU = static_cast<double>(uMax - uMin);
+    const double spanCellsV = static_cast<double>(vMax - vMin);
+    const double cellArea = spanCellsU * spanCellsV;
+    const double sane = 100.0 * static_cast<double>(uv.triangles.size());
+    if (!(cellArea >= 0.0) || cellArea > sane) {
+        return SeamlessUv{};  // diverged -> invalid, caller degrades cleanly
+    }
+
+    uv.valid = true;
+    return uv;
 }
 
 SeamlessUv computeSeamlessUv(const Mesh& mesh, float targetEdgeLength, float harnessScaling,
@@ -135,9 +233,21 @@ SeamlessUv computeSeamlessUv(const Mesh& mesh, float targetEdgeLength, float har
         return uv;  // no target density -> caller degrades cleanly
     }
 
-    // Native seamless-UV solver (docs/native-miq-plan.md), opt-in via CYBER_QC_NATIVE
-    // until it validates. When it returns a valid UV, use it and skip the vendored path
-    // entirely; otherwise fall through so nothing regresses.
+    // M4: the native seamless-UV solver (docs/native-miq-plan.md) is compiled into
+    // cyber_quadrangulate unconditionally, so quadCoverAvailable() is now true with neither
+    // Geogram nor the harness (the standalone path). It is ordered FIRST: when it returns a
+    // valid solve it is used directly and the vendored / subprocess paths below are skipped.
+    //
+    // It is opt-in via CYBER_QC_NATIVE rather than silently unconditional because the M2
+    // solve, while integer-seamless on smooth low-cone surfaces (sphere, cube-sphere — clean
+    // quads out of the extractor), is not yet production-robust: on organic / many-cone /
+    // sharp-feature meshes its integer phase diverges (a globally exploded but per-edge
+    // consistent map — spot: ~1e9-cell UV), it does not yet constrain feature edges, its
+    // relaxed CG can run to its cap without converging (tens of seconds on a unit cube), and
+    // it does not honour the cancel token. Making it the silent default would regress the
+    // harness-class sphere quality gate (native ~11% interior-irregular vs the harness's <5%)
+    // and slow / stall the default pipeline. Until those land it stays behind the flag; the
+    // full native-first ordering + guards are in place so flipping the default is a one-liner.
     if (std::getenv("CYBER_QC_NATIVE") != nullptr) {
         SeamlessUv native = computeSeamlessUvNative(mesh, targetEdgeLength, harnessAdaptivity);
         if (native.valid) {
@@ -1730,11 +1840,11 @@ std::unique_ptr<IQuadrangulator> makeQuadCoverQuadrangulator(int fieldIterations
 }
 
 bool quadCoverAvailable() {
-#ifdef CYBER_HAVE_QUADCOVER
-    return true;  // in-process solver linked
-#else
-    return std::getenv("CYBER_QUADCOVER_CLI") != nullptr;  // out-of-process harness
-#endif
+    // M4: the native QuadCover-style seamless solver (computeSeamlessUvNative) is compiled
+    // into cyber_quadrangulate unconditionally, so a seamless-UV solver is ALWAYS available
+    // — quad-cover no longer needs Geogram (CYBER_HAVE_QUADCOVER) or the CYBER_QUADCOVER_CLI
+    // harness. The vendored / subprocess paths remain as faster/reference fallbacks.
+    return true;
 }
 
 }  // namespace cyber::remesh

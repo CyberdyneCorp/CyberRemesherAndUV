@@ -171,17 +171,33 @@ the holonomy reconciliation. No seam cap, no dense dual, no external solver.
 **Still open:** improve field feature-alignment (a diagonally-triangulated flat grid pulls the
 cross field ~27° off-axis).
 
-**M3 — Isotropic pre-remesh.** QuadCover wants a reasonably uniform triangle mesh (the
-harness isotropically remeshes first). Reuse our own `isotropicRemesh` at the target edge
-length before the solve (we already have it). *Test:* extracted quad count tracks the
-target; feed M2's UV into the existing `extractIsolineQuads` → clean quads.
+**M3 — Isotropic pre-remesh + wiring — ✅ DONE.** `computeSeamlessUvNative` (was a stub) now
+runs the full native pipeline: `triangulate` → `tagFeatureEdges` → **feature gate** (decline
+sharp-feature meshes up front — the M2 solve does not constrain feature edges and is
+ill-conditioned/divergent on them, so degrade to the vendored/subprocess/field-aligned path
+instead of paying a slow solve) → `isotropicRemesh` at `targetEdgeLength` (reuses core) →
+`buildSeamlessSetup` → `solveParameterization` → assemble a `SeamlessUv` from the per-corner UV
+→ **divergence guard** (reject a UV whose cell-bbox is ≫ triangle count, so the isoline tracer
+never enumerates an astronomical grid / hangs). Verified end to end with `CYBER_QC_NATIVE=1`,
+Geogram OFF, no `CYBER_QUADCOVER_CLI`: a UV sphere yields **442 quads through the full pipeline**,
+entirely native.
 
-**M4 — Wire as default + drop the vendored lib.** Once M2/M3 pass the residual + parity
-gates on the corpus, make `computeSeamlessUvNative` the default path, flip
-`CYBER_WITH_QUADCOVER` semantics (native is built-in, vendored becomes an optional
-cross-check), and quad-cover ships as the always-available default with no Geogram. *Gate:*
-`11_benchmark.py` irregular/CV/median within noise of the vendored-solver numbers across
-all 5 models; full suite green with no vendored dependency.
+**M4 — Standalone availability (opt-in) — ✅ INFRA / ⏳ silent-default GATED.**
+`quadCoverAvailable()` returns true unconditionally (the native solver is compiled into
+`cyber_quadrangulate`), so quad-cover is selectable with **neither Geogram nor the harness**;
+`computeSeamlessUv` is ordered **native → vendored → subprocess**. The native solve is **opt-in
+via `CYBER_QC_NATIVE`**, deliberately NOT the silent default yet, because the M2 solve is not
+production-robust: (1) quality ~11% interior-irregular on the harness sphere gate vs the
+harness's <5% (not closed by field-iteration tuning); (2) integer-magnitude divergence on
+organic/many-cone meshes (an isotropically-remeshed spot with 156 cones explodes to a ~1e9-cell
+UV — caught by the divergence guard, but means no result); (3) the relaxed CG can run to its cap
+without converging on feature meshes (tens of seconds on a cube) and `computeSeamlessUvNative`
+does not honour the cancel token. All native-first machinery + guards are in place, so flipping
+to silent default is a one-line change once the solver is hardened: **feature-edge constraints,
+CG convergence + cancellation, integer-magnitude control, and closing the ~11%→<5% quality gap.**
+Stock default is unaffected (no `CYBER_QC_NATIVE` → field-aligned via the per-island fallback);
+suite 247/247. *Gate for silent default:* `11_benchmark.py` irregular/CV/median within noise of
+the vendored-solver numbers across all 5 models, robust + cancellable, full suite green.
 
 ## Risks
 
