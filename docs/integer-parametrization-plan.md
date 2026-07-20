@@ -220,7 +220,15 @@ malformed-orbit holes, no post-hoc rotation.
      **no flip-repair layer at all**; QuadriFlow closes exactly this with
      `FixFlipHierarchy` over a coarsened `DownsampleEdgeGraph`. → **Phase 5.**
 
-5. 🟡 **Field/grid foundation — the multi-resolution flip-repair layer (Phase 5).**
+5. 🟠 **Field/grid foundation — the multi-resolution flip-repair layer (Phase 5)
+   — BUILT IN FULL; real gain, but does NOT beat QuadriFlow.** Bottom line: the
+   entire documented lever was implemented and validated (5a coarsen + 5b greedy
+   flip repair + 5d SAT/MaxSAT), improving the integer extractor's interior
+   irregular from ~25% to **~20%** — a genuine advance on the hardest axis — but it
+   **plateaus far above QuadriFlow's ~3%** and the `<15%` exit is not met. The
+   remaining gap is a deeper limitation of the single-level extraction structure
+   that flip repair alone cannot close; the shipped default remains the
+   field-aligned quadrangulator. Details below.
    The one remaining lever to beat QuadriFlow on singularities / median angle. It
    slots **between** the (done, validated) integer solve and the (done, validated)
    extraction — build a coarsened edge-graph hierarchy, repair flipped cells
@@ -255,21 +263,24 @@ malformed-orbit holes, no post-hoc rotation.
      QuadriFlow ~3%). The greedy is provably converged (identical at maxLen 2/4 and
      under repeated passes): the residual ~half of the flips are multi-cell clusters
      no single-ring shrink can fix. **Not across the line yet.**
-   - ◻ **5d — `FixFlipSat` (the remaining lever) — BIGGER THAN FIRST SCOPED.**
-     Correction after reading the source: `localsat.cpp` is **not a solver** — it is
-     a CNF encoder that writes a file and shells out to the external **`minisat`
-     binary** (localsat.cpp:39), and `FixFlipSat` no-ops if `minisat` is absent
-     (hierarchy.cpp:641). QuadriFlow bundles no solver. So a self-contained 5d needs
-     either (A) an external `minisat` runtime dep — rejected (defeats the
-     self-contained build), or (B) **writing a constraint solver from scratch**. The
-     local flip patches are small ternary-variable CSPs (each edge-component ∈
-     {−1,0,+1}; hard exactly-one + face zero-sum equality + fixed non-flexible vars;
-     the area-≥0 flip-avoidance constraints), so a **bounded backtracking CSP solver
-     (~200 lines, not CNF/DPLL)** is tractable — but it is real, intricate, and its
-     payoff toward the 3% floor is uncertain (QuadriFlow's own SAT is bounded:
-     threshold ≤ 4, 8 s timeout, legitimately returns UNSAT/Timeout, so it does not
-     always reach zero flips). Scope = port `FixFlipSat` patch extraction +
-     `ExportLocalSat` CNF/constraint encoding + a from-scratch bounded CSP solver.
+   - 🟠 **5d — `FixFlipSat` DONE + measured NET-NEGATIVE; NOT on the default path**
+     (commits 2103f5f solver, b065da3 glue, dc8f647 wired, 35bf5d1 unwired).
+     Correction that reshaped it: `localsat.cpp` is **not a solver** — it is a CNF
+     encoder that shells out to the external **`minisat` binary** (localsat.cpp:39),
+     and `FixFlipSat` no-ops without it (hierarchy.cpp:641). QuadriFlow bundles no
+     solver, and an external `minisat` dep is rejected — so we wrote a **self-
+     contained bounded backtracking ternary-CSP solver** from scratch (hard exactly-
+     one + face zero-sum equalities, area-≥0 flip inequalities; `debugTernaryCsp`
+     regression), ported `FixFlipSat`'s patch extraction + constraint encoding, and
+     added the `SubMesh↔IntegerGrid` inversion so it runs on the unit grid
+     (`debugSubMeshDiffRoundTrip == 0`, validated). **Result: net-negative.** It
+     optimises the *coarse*-level flip count, which does not reliably lower the
+     *final* mesh's irregulars (spot 263→249, ~1pt; cheburashka slightly worse) and
+     costs **3–21 s/mesh**. A **MaxSAT** branch-and-bound variant (minimise flips —
+     which QuadriFlow's decision-only minisat cannot) gave **no downstream gain**
+     (coarse-flip optimisation ≠ final quality). So the SAT is kept as validated
+     infrastructure (`debugSatPreservesIntegrability`) but is **off the default
+     extractor**; the shipped integer path is fast greedy-only flip repair (~20%).
 
    **Exit:** interior irregular approaches the field's true singularity count —
    **irregular % < 15% and median angle ≥ QuadriFlow** on the corpus (gated on
