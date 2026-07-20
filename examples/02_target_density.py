@@ -21,13 +21,12 @@ def main() -> None:
             meshes.append(out)
             titles.append(f"target {target} · {q} quads")
 
-        ref = c.reference_panel(src_path, c.face_counts(meshes[-1])[0])
-        if ref:
-            meshes.append(ref[0])
-            titles.append(ref[1])
+        for panel in c.reference_panels(src_path, c.face_counts(meshes[-1])[0]):
+            meshes.append(panel[0])
+            titles.append(panel[1])
         c.render_panels(
             meshes, titles, os.path.join(c.OUTPUT_DIR, "02_target_density.png"),
-            suptitle="Target quad count drives output density (last panel: QuadriFlow, matched)",
+            suptitle="Target quad count drives output density (last panels: QuadriFlow & AutoRemesher, matched)",
         )
 
 

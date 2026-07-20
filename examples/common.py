@@ -172,6 +172,35 @@ def reference_panel(input_obj: str, quads: int, source: "MeshData | None" = None
     return mesh, quad_label("QuadriFlow", mesh, vs_source=source)
 
 
+_AR_BINARY_CACHE: "list" = []  # memoize the (slow) AutoRemesher build once per run
+
+
+def autoremesher_panel(input_obj: str, quads: int, source: "MeshData | None" = None
+                       ) -> "Tuple[MeshData, str] | None":
+    """A (mesh, title) AutoRemesher (QuadCover) reference panel, mirroring
+    reference_panel. Returns None when AutoRemesher is unavailable / fails, so
+    examples degrade gracefully. The build is done once per process and memoized."""
+    if not _AR_BINARY_CACHE:
+        _AR_BINARY_CACHE.append(autoremesher_binary())
+    mesh = autoremesher_try(_AR_BINARY_CACHE[0], input_obj, quads)
+    if mesh is None:
+        return None
+    return mesh, quad_label("AutoRemesher", mesh, vs_source=source)
+
+
+def reference_panels(input_obj: str, quads: int, source: "MeshData | None" = None
+                     ) -> "List[Tuple[MeshData, str]]":
+    """Both reference panels — QuadriFlow and AutoRemesher — at ~`quads` quads, for a
+    side-by-side against ours. Silently drops any reference that is unavailable, so an
+    example still renders with whichever references built."""
+    out = []
+    for panel in (reference_panel(input_obj, quads, source),
+                  autoremesher_panel(input_obj, quads, source)):
+        if panel is not None:
+            out.append(panel)
+    return out
+
+
 def quad_label(engine: str, mesh: MeshData, *, vs_source: "MeshData | None" = None) -> str:
     """A two/three-line panel title with quad count, angle/uniformity quality,
     and (when a source is given) surface-fidelity. Shared by every example so the

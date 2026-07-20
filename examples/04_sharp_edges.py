@@ -26,14 +26,13 @@ def main() -> None:
         panels = [src, out]
         titles = [f"input · {len(src['faces'])} triangles",
                   c.quad_label("CyberRemesher · edges kept", out, vs_source=src)]
-        ref = c.reference_panel(src_path, c.face_counts(out)[0], source=src)
-        if ref:
-            panels.append(ref[0])
-            titles.append(ref[1])
+        for panel in c.reference_panels(src_path, c.face_counts(out)[0], source=src):
+            panels.append(panel[0])
+            titles.append(panel[1])
         c.render_panels(
             panels, titles,
             os.path.join(c.OUTPUT_DIR, "04_sharp_edges.png"),
-            suptitle="Sharp-edge preservation — CyberRemesher (feature-aware) vs QuadriFlow",
+            suptitle="Sharp-edge preservation — CyberRemesher (feature-aware) vs QuadriFlow & AutoRemesher",
         )
 
 

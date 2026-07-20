@@ -41,14 +41,13 @@ def main() -> None:
         titles = ["input · square hole", "remeshed · hole left open",
                   "remeshed · hole filled (grey patch)"]
         # QuadriFlow has no targeted hole-fill pass — the contrast panel.
-        ref = c.reference_panel(src_path, c.face_counts(filled)[0])
-        if ref:
-            panels.append(ref[0])
-            titles.append(ref[1])
+        for panel in c.reference_panels(src_path, c.face_counts(filled)[0]):
+            panels.append(panel[0])
+            titles.append(panel[1])
         c.render_panels(
             panels, titles,
             os.path.join(c.OUTPUT_DIR, "06_hole_fill.png"),
-            suptitle="Hole filling as a cleanup pass (holeFillMaxBoundary) — vs QuadriFlow",
+            suptitle="Hole filling as a cleanup pass (holeFillMaxBoundary) — vs QuadriFlow & AutoRemesher",
         )
 
 

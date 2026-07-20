@@ -28,13 +28,12 @@ def main() -> None:
 
         # QuadriFlow only sizes uniformly — the contrast to our adaptive panel.
         src = c.load_obj(src_path)
-        ref = c.reference_panel(src_path, c.face_counts(meshes[-1])[0], source=src)
-        if ref:
-            meshes.append(ref[0])
-            titles.append(ref[1])
+        for panel in c.reference_panels(src_path, c.face_counts(meshes[-1])[0], source=src):
+            meshes.append(panel[0])
+            titles.append(panel[1])
         c.render_panels(
             meshes, titles, os.path.join(c.OUTPUT_DIR, "03_adaptivity.png"),
-            suptitle="Curvature adaptivity (uniform vs adaptive) vs QuadriFlow (uniform-only)",
+            suptitle="Curvature adaptivity (uniform vs adaptive) vs QuadriFlow & AutoRemesher (uniform-only)",
         )
 
 

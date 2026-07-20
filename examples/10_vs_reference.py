@@ -38,7 +38,10 @@ def main() -> None:
     c.require_engine()
     print("building QuadriFlow reference (first run compiles it)...")
     qf = c.quadriflow_binary()
-    print(f"  reference: {'ready' if qf else 'UNAVAILABLE (offline / no Eigen) — showing ours only'}\n")
+    print(f"  QuadriFlow: {'ready' if qf else 'UNAVAILABLE (offline / no Eigen)'}")
+    print("building AutoRemesher reference (first run compiles QuadCover + Geogram)...")
+    ar = c.autoremesher_binary()
+    print(f"  AutoRemesher: {'ready' if ar else 'UNAVAILABLE'}\n")
 
     for name in args.models:
         path = c.download_model(name)
@@ -81,10 +84,16 @@ def main() -> None:
         else:
             print(f"{name}: field-aligned median={mqual['median']:.0f}° cv={mqual['cv']:.2f} | "
                   f"position-field median={equal['median']:.0f}° slivers={equal['slivers']:.1f}% "
-                  f"cv={equal['cv']:.2f} (reference unavailable)")
+                  f"cv={equal['cv']:.2f} (QuadriFlow unavailable)")
+
+        aref = c.autoremesher_try(ar, path, eq)  # QuadCover, matched quad count
+        if aref is not None:
+            arq, _, _ = c.face_counts(aref)
+            panels.append(aref)
+            titles.append(label("AutoRemesher", arq, c.quad_quality(aref)))
 
         c.render_panels(panels, titles, os.path.join(c.OUTPUT_DIR, f"10_vs_{name}.png"),
-                        suptitle=f"{name}: CyberRemesher (both quadrangulators) vs QuadriFlow")
+                        suptitle=f"{name}: CyberRemesher (both) vs QuadriFlow vs AutoRemesher")
 
 
 if __name__ == "__main__":
