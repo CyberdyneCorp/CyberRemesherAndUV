@@ -342,7 +342,8 @@ PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSi
     }
 
     float progressBase = 0.0f;
-    bool fieldExtractor = false;  // did the position-field extractor run? (drives CV relax)
+    bool fieldExtractor = false;   // did the position-field extractor run? (drives CV relax)
+    bool integerExtractor = false;  // integer-grid extractor? (drives base-relax strength)
     for (std::size_t i = 0; i < islandFaces.size(); ++i) {
         IslandOutcome& outcome = outcomes[i];
         outcome.inputFaces = islandFaces[i].size();
@@ -387,6 +388,7 @@ PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSi
         std::unique_ptr<IQuadrangulator> quad =
             quadrangulator ? quadrangulator() : makeGreedyPairingQuadrangulator();
         fieldExtractor = quad->name() == "instant-meshes";
+        integerExtractor = quad->name() == "integer";
         ProgressSink quadSink =
             progress ? progress->subrange(progressBase + weight * 0.3f,
                                           progressBase + weight * 0.9f, "quadrangulate")
@@ -459,12 +461,18 @@ PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSi
 
         // Relax the coarse base onto the source first: a skewed base subdivides
         // into skewed quads, so smoothing it before the split reduces the sliver
-        // tail the subdivision would otherwise inherit.
+        // tail the subdivision would otherwise inherit. The integer extractor emits
+        // a highly uniform integer-grid base whose only defect is per-cell skew, so
+        // it tolerates a longer projected relax here — straightening those cells
+        // before the 4x split lifts the median quad angle a couple of degrees at no
+        // CV / surface-deviation cost. Less-uniform bases (field-aligned) would trade
+        // edge-length CV for that, so they keep the lighter default pass.
         {
             const ReferenceSurface baseSurface(work, params.smoothNormalDegrees);
             if (!baseSurface.empty()) {
+                const int baseRelaxIters = integerExtractor ? 40 : 10;
                 relaxQuadMesh(result.mesh, baseSurface, params.sharpEdgeDegrees,
-                              /*iterations=*/10, /*lambda=*/0.5f, shapeMatch);
+                              baseRelaxIters, /*lambda=*/0.5f, shapeMatch);
             }
         }
         result.mesh = result.mesh.linearSubdivide();

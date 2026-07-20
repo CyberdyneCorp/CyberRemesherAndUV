@@ -1,5 +1,6 @@
 #include <doctest.h>
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <map>
@@ -79,6 +80,7 @@ struct QuadQuality {
     float maxRadiusError = 0.0f;      // |‖v‖ - 1| over all vertices (unit sphere)
     float edgeCV = 0.0f;              // stddev/mean of quad edge length (uniformity)
     float sliverFraction = 0.0f;      // fraction of quads with a corner < 20 deg
+    float medianMinAngleDeg = 0.0f;   // median over quads of each quad's smallest angle
 };
 
 QuadQuality measure(const Mesh& mesh) {
@@ -101,6 +103,7 @@ QuadQuality measure(const Mesh& mesh) {
     const float meanEdge = edgeN ? static_cast<float>(edgeSum / static_cast<double>(edgeN)) : 1.0f;
 
     QuadQuality q;
+    std::vector<float> minAngles;  // per-quad smallest interior angle, for the median
     float shortestEdge = meanEdge;
     for (const Vec3& p : P) {
         q.maxRadiusError = std::fmax(q.maxRadiusError, std::fabs(cyber::length(p) - 1.0f));
@@ -125,12 +128,15 @@ QuadQuality measure(const Mesh& mesh) {
             quadWorst = std::fmin(quadWorst, ang);
         }
         q.worstMinAngleDeg = std::fmin(q.worstMinAngleDeg, quadWorst);
+        minAngles.push_back(quadWorst);
         if (quadWorst < 20.0f) {
             q.sliverFraction += 1.0f;
         }
     }
     if (q.quads > 0) {
         q.sliverFraction /= static_cast<float>(q.quads);
+        std::sort(minAngles.begin(), minAngles.end());
+        q.medianMinAngleDeg = minAngles[minAngles.size() / 2];
     }
     q.shortestEdgeRatio = meanEdge > 0.0f ? shortestEdge / meanEdge : 0.0f;
 
@@ -206,6 +212,47 @@ TEST_CASE("position-field pure-quad path equalizes edge length") {
     CHECK(q.nonQuads == 0);            // still pure quads
     CHECK(q.edgeCV < 0.21f);           // length blend tightens uniformity (~0.20; >0.23 without)
     CHECK(q.sliverFraction < 0.05f);   // the blend does not shear quads into slivers
+    CHECK(res.mesh.validate().empty());
+}
+
+// The integer extractor emits a very uniform integer-grid base whose main defect
+// is per-cell skew (rhombus cells: uniform edges yet acute corners). The pipeline
+// gives it a longer projected base relaxation before the pure-quad subdivision
+// (pipeline.cpp, integerExtractor ? 40 : 10 base-relax iterations) to straighten
+// those cells, so the 4x subdivision inherits squarer quads. This lifts the median
+// quad angle a couple of degrees at no CV/deviation cost. Guards that the stronger
+// integer base relax stays wired: with the plain 10-iteration pass the median min
+// angle on this ellipsoid sits ~79 deg; the longer relax pushes it past 80.
+TEST_CASE("integer extractor pure-quad path lifts the median quad angle") {
+    // A stretched ellipsoid: anisotropic curvature makes the integer grid lay down
+    // skewed (rhombus) cells, so the base-relax skew-straightening has real work to
+    // do — unlike a perfectly uniform sphere where every method is already ~90 deg.
+    Mesh sphere = makeIcosphere(3);
+    for (Index vi = 0; vi < sphere.vertexCapacity(); ++vi) {
+        const cyber::VertexId v{vi};
+        if (sphere.isAlive(v)) {
+            const Vec3 p = sphere.position(v);
+            sphere.setPosition(v, Vec3{p.x * 2.2f, p.y, p.z * 0.6f});
+        }
+    }
+    remesh::Parameters params;
+    params.targetQuadCount = 2500;
+    params.pureQuads = true;
+    params.adaptivity = 0.0f;
+    const remesh::PipelineResult res =
+        remesh::remesh(sphere, params, nullptr, nullptr,
+                       [] { return remesh::makeIntegerQuadrangulator(); });
+    REQUIRE(res.status == remesh::RunStatus::Success);
+
+    const QuadQuality q = measure(res.mesh);
+    CAPTURE(q.medianMinAngleDeg);
+    CAPTURE(q.edgeCV);
+    CAPTURE(q.sliverFraction);
+    CHECK(q.quads > 0);
+    CHECK(q.nonQuads == 0);                 // still pure quads
+    CHECK(q.medianMinAngleDeg > 80.0f);     // stronger base relax (~80.7; ~79.1 without)
+    CHECK(q.edgeCV < 0.24f);                // median gain must not cost uniformity (~0.23)
+    CHECK(q.sliverFraction < 0.05f);        // and must not shear quads into slivers
     CHECK(res.mesh.validate().empty());
 }
 
