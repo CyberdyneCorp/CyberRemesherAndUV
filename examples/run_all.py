@@ -27,7 +27,13 @@ EXAMPLES = [
 
 def main() -> None:
     c.require_engine()
-    print(f"CyberRemesher engine {cyberremesh.version()} — via the Python (ctypes) binding\n")
+    # Point the default quad-cover method at the seamless-UV solver so the gallery
+    # showcases the actual default; without it the examples degrade to field-aligned.
+    ar = c.autoremesher_binary()
+    if ar:
+        os.environ["CYBER_QUADCOVER_CLI"] = ar
+    print(f"CyberRemesher engine {cyberremesh.version()} — via the Python (ctypes) binding")
+    print(f"quad-cover solver: {'ready · ' + ar if ar else 'unavailable (examples use field-aligned)'}\n")
 
     produced = []
     for module_name, png in EXAMPLES:

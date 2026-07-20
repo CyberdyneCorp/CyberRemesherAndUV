@@ -17,10 +17,14 @@ def main() -> None:
         src_path = os.path.join(tmp, "bumpy.obj")
         c.bumpy_sphere_obj(src_path, rings=36, segments=54)
 
+        # The position-field extractor is the adaptivity-capable path (curvature drives
+        # the isotropic density). The default quad-cover method is uniform-only, so this
+        # example pins the method that actually varies with adaptivity.
         meshes, titles = [], []
         for adapt in (0.0, 1.0):
             out, stats = c.remesh_obj(
-                src_path, c.RemeshParams(target_quad_count=1600, adaptivity=adapt)
+                src_path, c.RemeshParams(target_quad_count=1600, adaptivity=adapt,
+                                         quad_method="instant-meshes")
             )
             print(c.stat_line(f"adaptivity={adapt}", stats, out))
             meshes.append(out)
