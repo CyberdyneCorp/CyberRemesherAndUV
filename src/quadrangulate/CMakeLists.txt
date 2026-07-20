@@ -1,6 +1,7 @@
 add_library(cyber_quadrangulate STATIC
     src/crossfield.cpp
     src/field_quadrangulator.cpp
+    src/quadcover_extractor.cpp
     src/position_field.cpp
     src/quad_extract.cpp
 )

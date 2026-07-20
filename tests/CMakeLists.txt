@@ -9,6 +9,7 @@ add_executable(cyber_tests
     quadrangulate/test_crossfield.cpp
     quadrangulate/test_field_quadrangulator.cpp
     quadrangulate/test_position_field.cpp
+    quadrangulate/test_quadcover_extractor.cpp
     quadrangulate/test_quad_cleanup.cpp
     core/test_bvh.cpp
     core/test_golden.cpp
