@@ -97,6 +97,63 @@ def quadriflow_try(binary: "str | None", model_path: str, faces: int) -> "MeshDa
         return None
 
 
+def autoremesher_binary() -> "str | None":
+    """Build (once, cached) and return the path to the AutoRemesher headless CLI
+    (a Qt-free harness over its QuadCover core), or None if it cannot be built.
+    AutoRemesher (github.com/huxingyi/autoremesher, MIT) is the isoline-tracing
+    QuadCover remesher; see reference/build_autoremesher.sh."""
+    import subprocess
+    script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "reference",
+                          "build_autoremesher.sh")
+    try:
+        out = subprocess.run(["bash", script], capture_output=True, text=True, timeout=1800)
+        lines = [ln for ln in out.stdout.strip().splitlines() if ln.strip()]
+        path = lines[-1] if lines else ""
+        return path if path and os.path.exists(path) else None
+    except Exception:  # noqa: BLE001 - any build/network failure -> unavailable
+        return None
+
+
+def autoremesher_remesh(binary: str, model_path: str, faces: int) -> "MeshData | None":
+    """Remesh `model_path` to ~`faces` quads with AutoRemesher (QuadCover). The quad
+    period is mesh-scale dependent, so auto-tune the UV scaling to hit the target
+    count (quads scale as ~1/scaling**2). Returns the closest run with quads > 0."""
+    import math
+    import subprocess
+    scaling = 1.0
+    best: "MeshData | None" = None
+    best_err = 1e18
+    for _ in range(5):
+        with tempfile.NamedTemporaryFile(suffix=".obj", delete=False) as tmp:
+            out = tmp.name
+        try:
+            subprocess.run([binary, "-i", model_path, "-o", out, "-f", str(faces),
+                            "-s", f"{scaling:.4f}"], check=True, capture_output=True, timeout=600)
+            mesh = load_obj(out)
+        finally:
+            if os.path.exists(out):
+                os.unlink(out)
+        q, _, _ = face_counts(mesh)
+        if q == 0:
+            break
+        if abs(q - faces) < best_err:
+            best_err, best = abs(q - faces), mesh
+        if 0.75 * faces <= q <= 1.3 * faces:
+            break
+        scaling = min(max(scaling * math.sqrt(q / faces), 0.03), 30.0)
+    return best
+
+
+def autoremesher_try(binary: "str | None", model_path: str, faces: int) -> "MeshData | None":
+    """Run AutoRemesher but never raise: returns the remeshed MeshData or None."""
+    if not binary:
+        return None
+    try:
+        return autoremesher_remesh(binary, model_path, faces)
+    except Exception:  # noqa: BLE001 - AutoRemesher failure -> no reference panel
+        return None
+
+
 _QF_BINARY_CACHE: "list" = []  # memoize the (possibly slow) QuadriFlow build once per run
 
 

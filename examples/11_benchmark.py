@@ -76,7 +76,10 @@ def main() -> None:
     c.require_engine()
     print("building QuadriFlow reference (first run compiles it)...")
     qf = c.quadriflow_binary()
-    print(f"  reference: {'ready' if qf else 'UNAVAILABLE — scoring ours only'}\n")
+    print(f"  QuadriFlow: {'ready' if qf else 'UNAVAILABLE'}")
+    print("building AutoRemesher reference (first run compiles QuadCover + Geogram)...")
+    ar = c.autoremesher_binary()
+    print(f"  AutoRemesher: {'ready' if ar else 'UNAVAILABLE'}\n")
 
     header = f"{'model':<15} {'engine':<20} {'quads':>6} {'med°':>5} {'dev%':>6} {'Nerr°':>6} {'irr%':>6} {'CV':>5}"
     print(header)
@@ -108,6 +111,9 @@ def main() -> None:
         ref = c.quadriflow_try(qf, path, args.target_quads)
         if ref:
             engines["QuadriFlow"] = evaluate(ref, src)
+        aref = c.autoremesher_try(ar, path, args.target_quads)
+        if aref:
+            engines["AutoRemesher"] = evaluate(aref, src)
 
         for engine, mtr in engines.items():
             print(f"{name:<15} {engine:<20} {mtr['quads']:>6} {mtr['median']:>5.0f} "
@@ -187,9 +193,9 @@ def _render(rows: list, adaptive_rows: list, target: int) -> None:
         print("no results to render")
         return
     models = sorted({r[0] for r in rows}, key=lambda m: m)
-    engines = ["ours field-aligned", "ours position-field", "QuadriFlow"]
+    engines = ["ours position-field", "ours integer", "QuadriFlow", "AutoRemesher"]
     colors = {"ours field-aligned": "#5b9bd5", "ours position-field": "#2e8b57",
-              "QuadriFlow": "#c05640"}
+              "ours integer": "#7b4fa0", "QuadriFlow": "#c05640", "AutoRemesher": "#d98e2b"}
     panel_metrics = [("median", "median angle° (higher better)", False),
                      ("rms", "surface dev % (lower better)", True),
                      ("irregular", "irregular vertices % (lower better)", True)]
@@ -200,14 +206,15 @@ def _render(rows: list, adaptive_rows: list, target: int) -> None:
     fig.suptitle(f"CyberRemesher vs QuadriFlow — retopology benchmark "
                  f"(~{target} quads, uniform)", fontsize=14, fontweight="bold", color="#12233a")
     x = np.arange(len(models))
-    width = 0.26
+    width = 0.2
     for ax, (key, label, _lower) in zip(axes, panel_metrics):
         for e_i, engine in enumerate(engines):
             vals = []
             for m in models:
                 hit = [r[2][key] for r in rows if r[0] == m and r[1] == engine]
                 vals.append(hit[0] if hit else 0.0)
-            ax.bar(x + (e_i - 1) * width, vals, width, label=engine, color=colors[engine])
+            ax.bar(x + (e_i - (len(engines) - 1) / 2) * width, vals, width, label=engine,
+                   color=colors[engine])
         ax.set_xticks(x)
         ax.set_xticklabels(models, rotation=30, ha="right", fontsize=9)
         ax.set_title(label, fontsize=11)

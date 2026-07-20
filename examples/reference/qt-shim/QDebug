@@ -1,0 +1,7 @@
+// Qt-free shim: swallows AutoRemesher's qDebug() << ... logging. Not part of Qt.
+#pragma once
+struct QDebugShim {
+    template <class T>
+    QDebugShim& operator<<(const T&) { return *this; }
+};
+inline QDebugShim qDebug() { return QDebugShim(); }
