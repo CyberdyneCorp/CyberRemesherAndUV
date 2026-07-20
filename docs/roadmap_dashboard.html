@@ -225,7 +225,7 @@
             <span class="msrow"><span class="msdot done"></span><b>M2 · integer solve</b> — min-cost flow cancels spurious divergences: <span class="mono">icosphere 133→10 · spot 658→47 · bunny 667→68</span>. <span class="mstag done">done</span></span>
             <span class="msrow"><span class="msdot done"></span><b>M3 · quad extraction</b> — QuadriFlow <span class="mono">BuildTriangleManifold</span> ported (compact-manifold rebuild + orbit-walk vertex split + FixHoles). <b>Watertight manifold, all-quad</b> across the corpus. <span class="mstag done">done</span></span>
             <span class="msrow"><span class="msdot partial"></span><b>M4 · valence + promote</b> — interior valence-2 doublet cleanup landed (irr −1–3&#8202;pts). <b>Beats the current default extractor</b> yet <b>not</b> QuadriFlow; the promote gate is <b>extraction fidelity</b>, not valence surgery. <span class="mstag partial">gate not met</span></span>
-            <span class="msrow"><span class="msdot"></span><b>M5 · flip-repair layer</b> — 2 workflow bug-hunt rounds, <b>VERDICT: fundamental single-level limit, not a bug</b>. The zero-diff <b>collapse</b> (not the pairing, which is clean) quantizes a clean grid: local transitivity ≠ lattice equivalence → val3/val5 <b>dipoles</b>, ~9× the 44 true field singularities. Fix = port QuadriFlow's multi-res <span class="mono">DownsampleEdgeGraph</span> + <span class="mono">FixFlip</span> (~400 lines). <span class="mstag">scoped</span></span>
+            <span class="msrow"><span class="msdot partial"></span><b>M5 · flip-repair layer — BUILT</b>. Ported the full multi-res machinery: <span class="mono">DownsampleEdgeGraph</span>+propagate (5a, exact-identity validated), greedy <span class="mono">FixFlip</span> (5b, the win), and a self-contained <span class="mono">FixFlipSat</span> CSP/MaxSAT solver (5d — QuadriFlow only shells out to external minisat). Interior irregular <b>~25%→~20%</b>. But it <b>plateaus far above QuadriFlow's ~3%</b>; 5d is net-negative (coarse-flip optimisation ≠ final quality, 3–21 s/mesh) and off the default path. <span class="mstag partial">real gain, not parity</span></span>
           </div>
         </div>
         <div class="exit">Exit: <b>irregular % &lt; 15% and median ≥ QuadriFlow.</b> Solve + extraction port +
@@ -236,18 +236,20 @@
     <div class="phase partial">
       <div class="idx">5</div>
       <div class="body">
-        <div class="t">Multi-resolution flip-repair layer (scoped)</div>
-        <div class="d"><b>The one remaining lever to beat QuadriFlow on singularities / median angle</b>,
-          pinned by the round-2 bug hunt. Slots between the done+validated solve and extraction:
-          build a coarsened edge-graph hierarchy and repair flipped cells coarse-to-fine so the
-          finest collapse is flip-free = one clean node per cell. Port QuadriFlow (MIT, clean-room)
-          <span class="mono">DownsampleEdgeGraph</span> + greedy <span class="mono">FixFlip</span> +
-          <span class="mono">UpdateGraphValue</span> (~400 lines). Recommended entry: a time-boxed
-          <b>5a+5b spike</b> — smallest slice that shows spot's dipoles collapsing — as go/no-go.</div>
-        <div class="exit">Exit: <b>irregular % &lt; 15% and median ≥ QuadriFlow</b> (spot 388 → double
-          digits), promoting the integer extractor to default. Highest-complexity port; multi-session.</div>
+        <div class="t">Multi-resolution flip-repair layer — built; real gain, not parity</div>
+        <div class="d"><b>The full documented lever is implemented and validated.</b> Between the
+          done solve and the extraction it coarsens the edge graph (<span class="mono">DownsampleEdgeGraph</span>,
+          exact-identity round-trip), repairs flipped cells greedily (<span class="mono">FixFlip</span> — the
+          win), and with a <b>from-scratch bounded CSP/MaxSAT solver</b> (<span class="mono">FixFlipSat</span>;
+          QuadriFlow only shells out to external minisat). Interior irregular dropped <b>~25%→~20%</b> — a
+          genuine advance on the hardest axis. But it <b>plateaus far above QuadriFlow's ~3%</b>: the SAT
+          optimises coarse-level flips, which does not reliably lower final irregulars (net-negative,
+          3–21 s/mesh) and is off the default path.</div>
+        <div class="exit">Exit <b>NOT met</b>: irregular ~20% (target &lt;15%, QuadriFlow ~3%). The residual
+          gap is a deeper single-level-extraction limit flip repair can't close; the field-aligned
+          quadrangulator stays the shipped default.</div>
       </div>
-      <div class="pill partial">Scoped · spike-gated</div>
+      <div class="pill partial">Built · real gain, not parity</div>
     </div>
   </div>
 
@@ -308,7 +310,7 @@
     target ~3000 quads · reference = QuadriFlow (headless, boost-free) · numbers from
     <code>examples/11_benchmark.py</code>. Roadmap detail in <code>docs/ROADMAP.md</code>.
     <br>
-    <span style="opacity:.75">Dashboard content as of commit <code>7d6464e</code> (2026-07-19) —
+    <span style="opacity:.75">Dashboard content as of commit <code>123b2d7</code> (2026-07-19) —
     a manual artifact; it does not auto-track the repo, so a later commit may have moved past this.</span>
   </footer>
 </div>
