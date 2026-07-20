@@ -3093,6 +3093,52 @@ void fixValence(std::vector<std::array<int, 4>>& faces, int nV) {
     }
 }
 
+// Tangential Laplacian relaxation of the extracted quad vertices: nudge each
+// interior vertex toward the centroid of its quad neighbours, but keep only the
+// component within its tangent plane, so edge lengths even out (lower CV, better
+// angles) without pulling the mesh off the source surface. Boundary vertices are
+// pinned so open edges keep their silhouette. A few gentle passes — QuadriFlow
+// smooths the extracted mesh the same way.
+void relaxPositions(const std::vector<std::array<int, 4>>& faces, std::vector<Vec3>& O,
+                    const std::vector<Vec3>& N, int iters, float lambda) {
+    const std::size_t nV = O.size();
+    std::vector<std::vector<int>> adj(nV);
+    std::map<std::pair<int, int>, int> edgeCount;
+    for (const auto& q : faces) {
+        for (int k = 0; k < 4; ++k) {
+            const int a = q[static_cast<std::size_t>(k)], b = q[static_cast<std::size_t>((k + 1) % 4)];
+            adj[static_cast<std::size_t>(a)].push_back(b);
+            adj[static_cast<std::size_t>(b)].push_back(a);
+            ++edgeCount[a < b ? std::make_pair(a, b) : std::make_pair(b, a)];
+        }
+    }
+    std::vector<char> pinned(nV, 0);
+    for (const auto& ec : edgeCount) {
+        if (ec.second == 1) {  // an edge on only one quad is a boundary edge
+            pinned[static_cast<std::size_t>(ec.first.first)] = 1;
+            pinned[static_cast<std::size_t>(ec.first.second)] = 1;
+        }
+    }
+    std::vector<Vec3> next(nV);
+    for (int it = 0; it < iters; ++it) {
+        for (std::size_t v = 0; v < nV; ++v) {
+            next[v] = O[v];
+            if (pinned[v] != 0 || adj[v].size() < 2) {
+                continue;
+            }
+            Vec3 c{};
+            for (const int nb : adj[v]) {
+                c += O[static_cast<std::size_t>(nb)];
+            }
+            c = c * (1.0f / static_cast<float>(adj[v].size()));
+            Vec3 delta = c - O[v];
+            delta = delta - N[v] * dot(delta, N[v]);  // project onto the tangent plane
+            next[v] = O[v] + delta * lambda;
+        }
+        O.swap(next);
+    }
+}
+
 // Collapses the unit-cell mesh into a watertight quad mesh (QuadriFlow
 // AdvancedExtractQuad + BuildTriangleManifold + FixValence, single-level):
 // reconstruct a clean compact triangle manifold, pair the two triangles across
@@ -3155,6 +3201,10 @@ Mesh buildQuadMesh(const SubMesh& m) {
     fixHoles(faces, mt.O, mt.N, static_cast<int>(mt.O.size()));
     fixValence(faces, static_cast<int>(mt.O.size()));
 
+    // Even out the extracted quad spacing before materialising (see relaxPositions).
+    std::vector<Vec3> pos = mt.O;
+    relaxPositions(faces, pos, mt.N, 10, 0.5f);
+
     // Materialise: only manifold vertices referenced by a face become mesh verts.
     Mesh out;
     std::map<int, VertexId> remap;
@@ -3163,7 +3213,7 @@ Mesh buildQuadMesh(const SubMesh& m) {
         if (it != remap.end()) {
             return it->second;
         }
-        const VertexId id = out.addVertex(mt.O[static_cast<std::size_t>(v)]);
+        const VertexId id = out.addVertex(pos[static_cast<std::size_t>(v)]);
         remap.emplace(v, id);
         return id;
     };
