@@ -49,14 +49,20 @@ struct SeamlessSetup {
 // surface to a disk yields 1. Validation hook for M1 (and a guard for M2's flattening).
 [[nodiscard]] int cutOpenEulerCharacteristic(const Mesh& mesh, const SeamlessSetup& setup);
 
-// The relaxed seamless parameterization (Milestone 2). Solved on the mesh CUT OPEN along
-// the cut graph (seam vertices duplicated), so the UV can jump by a grid symmetry across
-// the seam — a closed surface cannot carry a globally continuous integer-grid UV. Per
-// coordinate it is a cotangent Poisson solve (grad(u,v) matches the combed frame field
-// scaled to `spacing`) via Conjugate Gradient on accel::spmv. Output is PER-CORNER UV
-// (cornerUv[faceId] = the 3 corner UVs). This is the RELAXED solve — real-valued, so the
-// seam translations are not yet integers (seamlessUvResidual > 0); integer rounding of
-// the seams (M2c) drives the residual to 0.
+// The seamless integer-grid parameterization (Milestone 2). Solved on the mesh CUT OPEN
+// along the cut graph (seam vertices duplicated), so the UV jumps by a grid symmetry
+// (uv_B = R^rho uv_A + integer t) across the seam — a closed surface cannot carry a globally
+// continuous integer-grid UV. Two phases:
+//   (M2a) a cotangent Poisson solve per coordinate (grad(u,v) matches the combed frame field
+//         scaled to `spacing`) via Conjugate Gradient on accel::spmv — the RELAXED seam;
+//   (M2c) a constrained re-solve: the seam transitions are added as HARD linear equality
+//         constraints (rigidity: the shared edge vector transforms by R^rho) via a range-space
+//         (dual Schur) solve over the well-conditioned pinned Laplacian, and the integer
+//         translations are rounded greedily (round one, re-solve, repeat). This turns the
+//         non-rigid relaxed seam into a rigid integer grid so seamlessUvResidual drops to ~0.
+// Output is PER-CORNER UV (cornerUv[faceId] = the 3 corner UVs). The integer phase uses a
+// dense dual whose cost grows with the seam-edge count, so it runs only for low-singularity
+// surfaces (a seam-count cap); larger meshes keep the relaxed UV (residual > 0).
 struct Parameterization {
     std::vector<std::array<Vec2, 3>> cornerUv;  // per FaceId; empty array for dead faces
     int cutVertexCount = 0;   // vertices of the cut-open (disk) mesh the solve ran on

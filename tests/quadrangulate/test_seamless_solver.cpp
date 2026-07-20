@@ -6,12 +6,14 @@
 
 #include "cyber/accel/backend.hpp"
 #include "cyber/core/mesh.hpp"
+#include "cyber/quadrangulate/quadcover_extractor.hpp"
 #include "cyber/quadrangulate/seamless_solver.hpp"
 
 using cyber::EdgeId;
 using cyber::FaceId;
 using cyber::Index;
 using cyber::Mesh;
+using cyber::Vec2;
 using cyber::Vec3;
 using cyber::VertexId;
 namespace remesh = cyber::remesh;
@@ -182,4 +184,52 @@ TEST_CASE("seamless M2: relaxed Poisson solve produces a cut-mesh parameterizati
         }
     }
     CHECK(uMax - uMin > 1.0f);  // spans several integer isolines
+}
+
+namespace {
+
+// Assemble a SeamlessUv on the input triangles from a per-corner parameterization, so the
+// integer-jump residual metric can score it.
+remesh::SeamlessUv assembleUv(const Mesh& mesh, const remesh::Parameterization& param) {
+    remesh::SeamlessUv uv;
+    uv.vertices.assign(mesh.vertexCapacity(), Vec3{0, 0, 0});
+    for (Index vi = 0; vi < mesh.vertexCapacity(); ++vi) {
+        if (mesh.isAlive(VertexId{vi})) uv.vertices[vi] = mesh.position(VertexId{vi});
+    }
+    for (Index fi = 0; fi < mesh.faceCapacity(); ++fi) {
+        const FaceId f{fi};
+        if (!mesh.isAlive(f) || mesh.faceSize(f) != 3) continue;
+        const std::vector<VertexId> vs = mesh.faceVertices(f);
+        uv.triangles.push_back({vs[0].value, vs[1].value, vs[2].value});
+        uv.triangleUv.push_back(param.cornerUv[fi]);
+    }
+    uv.valid = !uv.triangles.empty();
+    return uv;
+}
+
+}  // namespace
+
+// Milestone 2b/c (integer-seamless): the constrained solve makes the seam a rigid integer
+// grid symmetry. The acceptance gate is the same metric that validated the vendored solver —
+// seamlessUvResidual (max integer-jump residual over interior edges) must be ~0. A relaxed
+// solve leaves it ~0.5; the KKT/rigidity + integer-rounding phase must drive it below 1e-3.
+TEST_CASE("seamless M2c: constrained solve is integer-seamless on a sphere (residual < 1e-3)") {
+    auto backend = cyber::accel::defaultBackend();
+    const Mesh sphere = makeSphere();
+    const remesh::SeamlessSetup setup = remesh::buildSeamlessSetup(sphere, 50, *backend);
+    REQUIRE(setup.valid);
+
+    const remesh::Parameterization param =
+        remesh::solveParameterization(sphere, setup, 0.12f, *backend);
+    REQUIRE(param.valid);
+
+    const remesh::SeamlessUv uv = assembleUv(sphere, param);
+    REQUIRE(uv.valid);
+    CHECK(remesh::seamlessUvResidual(uv) < 1e-3);
+
+    // The seam being rigid, the extractor traces a bounded, clean quad mesh (a non-rigid seam
+    // blows the UV up into hundreds of thousands of spurious cells).
+    const remesh::IsolineQuadMesh quads = remesh::extractIsolineQuads(sphere, uv);
+    CHECK(quads.quads.size() > 100);
+    CHECK(quads.quads.size() < 2000);
 }

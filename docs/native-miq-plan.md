@@ -116,10 +116,39 @@ measured, and it **does not converge to a rigid seam** — precise diagnosis:
 **Conclusion:** exact seamlessness needs the seam rotation coupled as a **hard constraint
 during the solve** — the two cut sides are not independent DOF; side B is `R^r·`side A plus a
 single integer translation propagated consistently along the seam (MIQ-style: greedily round
-one integer transition, fix it, re-solve, repeat). That is the genuine multi-week core. The
-M2a relaxed solve (produces quads, residual ~0.5) is committed; this constrained/rounded solve
-is the open work. *Gate:* `seamlessUvResidual < 1e-3` on the sphere. Also: improve field
-feature-alignment (a diagonally-triangulated flat grid pulls the cross field ~27° off-axis).
+one integer transition, fix it, re-solve, repeat).
+
+**M2c — Constrained integer-seamless solve — ✅ DONE (genus-0, low-singularity).**
+`solveSeamlessConstrained` (in `seamless_solver.cpp`) re-solves the Dirichlet energy with the
+seam transitions as HARD linear equality constraints and greedily rounds the integer
+translations:
+- **Rigidity as equality constraints.** For every seam edge the shared edge vector must
+  transform rigidly by `R^rho` (`uv_B(b)-uv_B(a) = R^rho[uv_A(b)-uv_A(a)]`), with `rho`
+  estimated from the relaxed UV so it matches the residual metric's `bestK`. This makes the
+  seam transition a single well-defined `t` per edge (equal at both endpoints), constant
+  along a constant-`rho` seam segment.
+- **KKT via a range-space (dual Schur) solve.** The energy Hessian is `blkdiag(Lp,Lp)` with
+  `Lp` the cotan Laplacian pinned at one singularity (SPD); the constrained system is solved
+  in the range of `Lp^{-1}`, so each constraint costs only a well-conditioned CG solve
+  (`accel::spmv`) — no indefinite KKT, no external solver. Columns are cached across rounding
+  steps. A tiny ridge absorbs the redundant-but-consistent rigidity rows (cone holonomy).
+- **Greedy integer rounding.** One integer translation per seam *segment*; round the
+  most-confident (closest-to-integer), pin it, re-solve, repeat, so the continuous DOF absorb
+  each rounding and closure stays consistent. Singularities are deliberately *not* pinned to
+  the lattice — their cone fixed points are determined by the segment translations, and
+  pinning them independently over-constrains the system (breaks rigidity, blows up the scale).
+
+**Result:** on the UV sphere `seamlessUvResidual` drops from ~0.5 to **2.4e-7** (< 1e-3 gate)
+and `extractIsolineQuads` yields a clean 252-quad mesh (regression test
+`seamless M2c ...` in `test_seamless_solver.cpp`).
+
+**Known limitation.** The dual is a *dense* `m×m` solve (`m` = #seam-edge constraints), cost
+`O(segments · m³)`, fine for low-singularity genus-0 surfaces but not for meshes with hundreds
+of seam edges (e.g. spot: 92 singularities → 350 seam edges). A seam-count cap keeps those on
+the relaxed UV rather than hanging. Making it scale needs a sparse-direct MIQ reduction
+(eliminate the rigidity to independent DOF + factorize once); the vendored `quad_cover` path
+already covers those meshes. Also still open: improve field feature-alignment (a
+diagonally-triangulated flat grid pulls the cross field ~27° off-axis).
 
 **M3 — Isotropic pre-remesh.** QuadCover wants a reasonably uniform triangle mesh (the
 harness isotropically remeshes first). Reuse our own `isotropicRemesh` at the target edge
