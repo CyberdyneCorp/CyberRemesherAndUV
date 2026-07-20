@@ -914,6 +914,29 @@ namespace {
     return area;
 }
 
+// Flatness of a triangle island: |sum of area-weighted face normals| / total area.
+// 1.0 for a perfectly planar patch (every normal aligned), and -> 0 for curved or
+// closed surfaces (by the divergence theorem the normals of a closed surface cancel).
+// Used to detect flat CAD patches the integer extractor cannot orient (see caller).
+[[nodiscard]] double meshFlatness(const Mesh& m) {
+    Vec3 nsum{0.0f, 0.0f, 0.0f};
+    double area2 = 0.0;
+    for (Index fi = 0; fi < m.faceCapacity(); ++fi) {
+        const FaceId f{fi};
+        if (!m.isAlive(f)) {
+            continue;
+        }
+        const std::vector<VertexId> vs = m.faceVertices(f);
+        for (std::size_t k = 1; k + 1 < vs.size(); ++k) {
+            const Vec3 cr = cross(m.position(vs[k]) - m.position(vs[0]),
+                                  m.position(vs[k + 1]) - m.position(vs[0]));  // 2*area*normal
+            nsum = nsum + cr;
+            area2 += static_cast<double>(length(cr));
+        }
+    }
+    return area2 > 0.0 ? static_cast<double>(length(nsum)) / area2 : 0.0;
+}
+
 // Health check for an integer-extractor result: returns false (i.e. "fall back")
 // when the quad mesh is empty, structurally invalid, torn into more connected
 // components than the input surface had, collapsed well below the target quad
@@ -997,6 +1020,17 @@ public:
         }
         const std::size_t inputComponents = mesh.islands().size();
         const double inputArea = meshSurfaceArea(mesh);
+        // Near-planar CAD islands (a cube face, a flat panel): the integer extractor's
+        // orientation field is degenerate on a flat patch — nothing to align to — so it
+        // quantises the patch into incoherent tiny islands that stitch to non-manifold
+        // seams (the per-island health check can't catch this: each fragment is locally
+        // valid). Route flat patches to the robust field-aligned quadrangulator, which
+        // gives a clean, well-sized grid at normal densities. (At extreme density even
+        // field-aligned's cross-island stitching can tear — a separate pipeline limit.)
+        if (meshFlatness(mesh) > 0.97) {
+            return makeFieldAlignedQuadrangulator()->quadrangulate(mesh, targetEdgeLength, progress,
+                                                                   cancel);
+        }
         const PositionField field = computePositionField(mesh, targetEdgeLength, m_iterations);
         Mesh quads = extractIntegerQuadMesh(mesh, field);
         if (integerExtractionUsable(quads, inputComponents, inputArea, targetEdgeLength)) {

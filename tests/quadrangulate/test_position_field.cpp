@@ -760,6 +760,30 @@ TEST_CASE("integer quadrangulator: flat cube falls back to a manifold, non-degen
     CHECK(h.irregularFraction() < 0.5);        // not mostly-irregular (was ~0.62)
 }
 
+// TASK E gap: at higher target density the extractor emits many small LOCALLY-VALID
+// islands that stitch to non-manifold seams — each passes the per-island output
+// health check, so the output-based fallback cannot catch it (the flat cube showed
+// ~312 defects at ~900 quads). The input-based flatness routing sends flat patches to
+// the field-aligned quadrangulator BEFORE extraction, keeping the result manifold.
+TEST_CASE("integer quadrangulator: flat cube stays manifold at higher target density") {
+    const Mesh cube = flatCube(1);
+    remesh::Parameters params;
+    params.targetQuadCount = 900;
+    params.sharpEdgeDegrees = 90.0f;
+    const remesh::PipelineResult r = remesh::remesh(
+        cube, params, nullptr, nullptr, [] { return remesh::makeIntegerQuadrangulator(40); });
+
+    REQUIRE(r.status == remesh::RunStatus::Success);
+    CHECK(r.mesh.validate().empty());  // manifold (was ~312 topological defects)
+
+    const QuadHealth h = quadHealth(r.mesh);
+    CAPTURE(h.quads);
+    CAPTURE(h.irregularInterior);
+    CAPTURE(h.debrisVertices);
+    CHECK(h.debrisVertices < 20);        // no isolated-vertex debris
+    CHECK(h.irregularFraction() < 0.5);  // not mostly-irregular (was ~0.61)
+}
+
 // TASK E regression (other half): on good ORGANIC output the fallback must NOT
 // fire — the integer result is kept. An icosphere's integer extraction is
 // mostly valence-4 (~7% irregular), far cleaner than the field-aligned fallback
