@@ -9,3 +9,4 @@ __pycache__/
 examples/models/
 examples/reference/QuadriFlow/
 examples/reference/autoremesher-src/
+.claude/worktrees/

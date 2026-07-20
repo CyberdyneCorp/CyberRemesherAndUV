@@ -236,15 +236,16 @@ TEST_CASE("quad-cover M2: flat integer-grid UV extracts a clean quad grid") {
     CHECK(interior == static_cast<std::size_t>((n - 1) * (n - 1)));
 }
 
-// Milestone 2 SECONDARY (needs the M1 harness): a real seamless UV on a sphere runs
-// through the isoline tracer end to end. No-op when the harness is unavailable.
+// Milestone 3 (needs the M1 harness): a real seamless UV on a CLOSED sphere must
+// extract a clean, near-all-quad mesh with QuadriFlow-class irregular fraction.
+// No-op when the harness is unavailable.
 //
-// NOTE: on a dense/curved surface the raw isoline graph carries many valence-2
-// mid-isoline sample points; merging them into clean quad cells is the closed-surface
-// graph-cleanup stage, which is ported but disabled by default (see extract() /
-// TODO(M3)). So this test only asserts the tracer runs and produces a constructible
-// mesh — it does NOT yet assert a fully clean closed quad mesh (that is M3).
-TEST_CASE("quad-cover M2: harness sphere UV runs the isoline tracer") {
+// This is the boundary-aware gate at work: extractIsolineQuads detects the isotropic
+// mesh is closed and runs the closed-surface graph cleanup (simplifyGraph / fixHoles /
+// collapse*), which merges the raw isoline oversampling into clean quad cells. With the
+// gate a UV sphere goes from ~350 non-quad n-gons (core only) to <1% non-quad and ~1%
+// interior irregular — matching QuadriFlow's 1-4%.
+TEST_CASE("quad-cover M3: harness sphere UV extracts a clean closed quad mesh") {
     const Mesh sphere = makeSphere();
     const remesh::SeamlessUv uv = remesh::computeSeamlessUv(sphere, 0.15f);
     if (!uv.valid) {
@@ -254,12 +255,20 @@ TEST_CASE("quad-cover M2: harness sphere UV runs the isoline tracer") {
     const remesh::IsolineQuadMesh out = remesh::extractIsolineQuads(sphere, uv);
     REQUIRE_FALSE(out.quads.empty());
     CHECK(out.vertices.size() > 0);
+
+    std::size_t nonQuad = 0;
     for (const auto& face : out.quads) {
         CHECK(face.size() >= 3);  // every polygon is at least a triangle
+        if (face.size() != 4) {
+            ++nonQuad;
+        }
     }
+    // A closed sphere has no true boundary, so the cleanup should leave essentially
+    // only quads (allow a tiny handful of unavoidable cap polygons).
+    CHECK(nonQuad <= out.quads.size() / 20);
 
-    // The result must at least be constructible as a mesh (fromIndexed is
-    // non-manifold safe; this catches faces referencing out-of-range vertices).
+    // Rebuild as a mesh (fromIndexed is non-manifold safe) and check it is sound and
+    // low-defect on the interior.
     std::vector<std::vector<Index>> faces;
     faces.reserve(out.quads.size());
     for (const auto& q : out.quads) {
@@ -271,4 +280,27 @@ TEST_CASE("quad-cover M2: harness sphere UV runs the isoline tracer") {
     }
     const Mesh mesh = Mesh::fromIndexed(out.vertices, faces);
     CHECK(mesh.faceCount() > 0);
+    CHECK(mesh.validate().empty());
+
+    std::size_t interior = 0;
+    std::size_t interiorIrregular = 0;
+    for (Index i = 0; i < mesh.vertexCapacity(); ++i) {
+        const VertexId v{i};
+        if (!mesh.isAlive(v)) {
+            continue;
+        }
+        const VertexInfo info = vertexInfo(mesh, v);
+        if (info.boundary) {
+            continue;
+        }
+        ++interior;
+        if (info.faces != 4) {
+            ++interiorIrregular;
+        }
+    }
+    REQUIRE(interior > 0);
+    // QuadriFlow-class: well under 5% of interior vertices are irregular.
+    const double irregularFraction =
+        static_cast<double>(interiorIrregular) / static_cast<double>(interior);
+    CHECK(irregularFraction < 0.05);
 }

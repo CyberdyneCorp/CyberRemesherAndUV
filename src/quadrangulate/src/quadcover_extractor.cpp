@@ -384,6 +384,11 @@ public:
 
     void extract();
 
+    // Enable the closed-surface graph cleanup + hole fill. Correct (and required)
+    // for closed inputs, corrupting for open ones — the caller gates on whether the
+    // isotropic mesh has a boundary. See extract() and extractIsolineQuads().
+    void setRunClosedSurfaceCleanup(bool on) { m_runClosedSurfaceCleanup = on; }
+
     const std::vector<DVec3>& remeshedVertices() const { return m_remeshedVertices; }
     const std::vector<std::vector<std::size_t>>& remeshedQuads() const { return m_remeshedPolygons; }
 
@@ -1385,6 +1390,32 @@ void IsolineExtractor::extract() {
 
 // Milestone 2 entry point: trace the seamless UV's integer isolines into an
 // oriented quad mesh. Returns empty for an invalid/empty UV.
+// A triangle soup is closed when every undirected edge is shared by exactly two
+// triangles (no boundary edge). Used to gate the closed-surface graph cleanup.
+bool isClosedTriMesh(const std::vector<std::array<Index, 3>>& triangles) {
+    if (triangles.empty()) {
+        return false;
+    }
+    std::unordered_map<std::uint64_t, int> edgeCount;
+    const auto key = [](Index a, Index b) {
+        const std::uint64_t lo = static_cast<std::uint64_t>(std::min(a, b));
+        const std::uint64_t hi = static_cast<std::uint64_t>(std::max(a, b));
+        return (hi << 32) | lo;
+    };
+    for (const auto& t : triangles) {
+        ++edgeCount[key(t[0], t[1])];
+        ++edgeCount[key(t[1], t[2])];
+        ++edgeCount[key(t[2], t[0])];
+    }
+    for (const auto& [e, count] : edgeCount) {
+        (void)e;
+        if (count != 2) {
+            return false;
+        }
+    }
+    return true;
+}
+
 IsolineQuadMesh extractIsolineQuads(const Mesh& /*mesh*/, const SeamlessUv& uv) {
     if (!uv.valid || uv.triangles.empty()) {
         return IsolineQuadMesh{};
@@ -1410,7 +1441,16 @@ IsolineQuadMesh extractIsolineQuads(const Mesh& /*mesh*/, const SeamlessUv& uv) 
                                DVec2{static_cast<double>(t[2].x), static_cast<double>(t[2].y)}});
     }
 
+    // Boundary-aware gate: the closed-surface graph cleanup (simplifyGraph / fixHoles /
+    // collapse*) merges the raw isoline oversampling into clean quad cells and is REQUIRED
+    // on a closed surface (a sphere goes from 357 non-quad n-gons to 1.1% irregular with
+    // it on) but CORRUPTS an open disk (it fills the outer boundary as a hole and deletes
+    // real perimeter corners). Decide from the isotropic mesh itself: run cleanup iff it is
+    // closed (every edge shared by exactly two triangles).
+    const bool closed = isClosedTriMesh(uv.triangles);
+
     IsolineExtractor extractor(std::move(vertices), std::move(triangles), std::move(triangleUvs));
+    extractor.setRunClosedSurfaceCleanup(closed);
     extractor.extract();
 
     IsolineQuadMesh out;
