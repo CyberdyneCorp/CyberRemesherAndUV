@@ -157,6 +157,12 @@ struct FlipRepairStats {
 };
 [[nodiscard]] FlipRepairStats debugFlipRepair(const Mesh& mesh, const PositionField& field);
 
+// Phase 5d glue check: reconstructing an IntegerGrid from the subdivided unit-cell
+// mesh and writing its diffs back must be an exact identity (0 mismatches) when no
+// SAT repair runs — the gate on the SubMesh<->IntegerGrid inversion before any
+// flip-repair-on-unit-diffs claim.
+[[nodiscard]] std::size_t debugSubMeshDiffRoundTrip(const Mesh& mesh, const PositionField& field);
+
 // Milestone 3: the integer-parametrization quad extractor. Runs the Stage-2 solve,
 // subdivides to unit cells, then collapses zero-diff edges into grid vertices and
 // pairs the two triangles across each grid-cell diagonal into a quad (QuadriFlow

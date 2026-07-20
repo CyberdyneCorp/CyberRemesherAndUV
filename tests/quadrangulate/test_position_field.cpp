@@ -435,6 +435,18 @@ TEST_CASE("flip repair: FixFlip reduces folded cells on a curved grid") {
     CHECK(s.residualAfter == s.residualBefore);   // integrability preserved
 }
 
+// Phase 5d — the SubMesh<->IntegerGrid inversion the SAT repair runs on must be an
+// exact identity with no repair (the highest-risk glue). Cylinder + icosphere.
+TEST_CASE("flip repair: SubMesh<->IntegerGrid round trip is an identity") {
+    const Mesh cyl = cylinder(1.0f, 3.0f, 40, 40);
+    const remesh::PositionField cfield = remesh::computePositionField(cyl, 0.16f, 40);
+    CHECK(remesh::debugSubMeshDiffRoundTrip(cyl, cfield) == 0);
+
+    const Mesh sphere = icosphere(3);
+    const remesh::PositionField sfield = remesh::computePositionField(sphere, meanEdgeLength(sphere), 40);
+    CHECK(remesh::debugSubMeshDiffRoundTrip(sphere, sfield) == 0);
+}
+
 // Milestones 3–4 — extraction via QuadriFlow's BuildTriangleManifold + FixValence
 // (single-level): reconstruct a clean compact triangle manifold (zero-diff
 // collapse + orbit-walk vertex split), pair the two triangles across each

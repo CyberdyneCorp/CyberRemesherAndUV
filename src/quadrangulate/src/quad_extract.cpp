@@ -2869,6 +2869,64 @@ Mesh buildQuadMesh(const SubMesh& m) {
     return out;
 }
 
+// --- Phase 5d glue: reconstruct an IntegerGrid from the subdivided unit-cell mesh
+// so the flip-repair SAT can run on the *unit* diffs (its ternary domain requires
+// |component| <= 1, which only holds post-subdivide). The SubMesh's per-half-edge
+// `diffs` are already the rotated local-frame diffs, so pair opposite half-edges
+// via `e2e` into undirected edges: the representative's diff is canonical
+// (orient 0), and the opposite's orient is the rotation k with
+// rshift90i(canonical, k) == its diff (a k always exists — negation is rotation
+// by 2). faceArea / loop-closure of the reconstructed grid match the SubMesh.
+IntegerGrid integerGridFromSubMesh(const SubMesh& m) {
+    IntegerGrid g;
+    const int nTri = static_cast<int>(m.tris.size());
+    g.tris.resize(static_cast<std::size_t>(nTri));
+    for (int t = 0; t < nTri; ++t) {
+        g.tris[static_cast<std::size_t>(t)] = {static_cast<Index>(m.tris[static_cast<std::size_t>(t)][0]),
+                                               static_cast<Index>(m.tris[static_cast<std::size_t>(t)][1]),
+                                               static_cast<Index>(m.tris[static_cast<std::size_t>(t)][2])};
+    }
+    g.e2e = m.e2e;
+    g.faceEdgeIds.assign(static_cast<std::size_t>(nTri), {-1, -1, -1});
+    g.orients.assign(static_cast<std::size_t>(nTri), {0, 0, 0});
+    for (int he = 0; he < nTri * 3; ++he) {
+        const std::size_t t = static_cast<std::size_t>(he / 3), j = static_cast<std::size_t>(he % 3);
+        if (g.faceEdgeIds[t][j] != -1) {
+            continue;
+        }
+        const int eid = static_cast<int>(g.edgeDiff.size());
+        g.edgeDiff.push_back(m.diffs[static_cast<std::size_t>(he)]);
+        g.faceEdgeIds[t][j] = eid;
+        g.orients[t][j] = 0;
+        const int opp = m.e2e[static_cast<std::size_t>(he)];
+        if (opp != -1) {
+            const std::size_t ot = static_cast<std::size_t>(opp / 3), oj = static_cast<std::size_t>(opp % 3);
+            g.faceEdgeIds[ot][oj] = eid;
+            int k = 0;
+            for (; k < 4; ++k) {
+                const Int2 r = rshift90i(g.edgeDiff[static_cast<std::size_t>(eid)], k);
+                if (r.x == m.diffs[static_cast<std::size_t>(opp)].x &&
+                    r.y == m.diffs[static_cast<std::size_t>(opp)].y) {
+                    break;
+                }
+            }
+            g.orients[ot][oj] = (k < 4) ? k : 0;
+        }
+    }
+    return g;
+}
+
+// Recompute the SubMesh's per-half-edge diffs from a (possibly SAT-repaired)
+// IntegerGrid — the inverse of the pairing above. With no repair this is an
+// identity on `m.diffs`.
+void writeDiffsBackToSubMesh(const IntegerGrid& g, SubMesh& m) {
+    for (int he = 0; he < static_cast<int>(m.diffs.size()); ++he) {
+        const std::size_t t = static_cast<std::size_t>(he / 3), j = static_cast<std::size_t>(he % 3);
+        m.diffs[static_cast<std::size_t>(he)] =
+            rshift90i(g.edgeDiff[static_cast<std::size_t>(g.faceEdgeIds[t][j])], g.orients[t][j]);
+    }
+}
+
 }  // namespace
 
 Mesh extractIntegerQuadMesh(const Mesh& mesh, const PositionField& field) {
@@ -2959,6 +3017,22 @@ FlipRepairStats debugFlipRepair(const Mesh& mesh, const PositionField& field) {
     st.flippedAfter = countFlipped(g);
     st.residualAfter = countResidualSingularities(g);
     return st;
+}
+
+std::size_t debugSubMeshDiffRoundTrip(const Mesh& mesh, const PositionField& field) {
+    IntegerGrid g = computeIntegerGrid(mesh, field);
+    fixFlipHierarchy(g);
+    SubMesh m = subdivideToUnitCells(g, mesh, field, 1);
+    const std::vector<Int2> before = m.diffs;
+    const IntegerGrid gs = integerGridFromSubMesh(m);
+    writeDiffsBackToSubMesh(gs, m);  // no repair -> must be an exact identity
+    std::size_t mismatch = 0;
+    for (std::size_t i = 0; i < before.size(); ++i) {
+        if (before[i].x != m.diffs[i].x || before[i].y != m.diffs[i].y) {
+            ++mismatch;
+        }
+    }
+    return mismatch;
 }
 
 bool debugTernaryCsp() {
