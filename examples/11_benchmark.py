@@ -98,10 +98,13 @@ def main() -> None:
         engines = {}
         fa = ours(path, args.target_quads, "field-aligned", 0.0)
         im = ours(path, args.target_quads, "instant-meshes", 0.0)
+        intg = ours(path, args.target_quads, "integer", 0.0)
         if fa:
             engines["ours field-aligned"] = evaluate(fa, src)
         if im:
             engines["ours position-field"] = evaluate(im, src)
+        if intg:
+            engines["ours integer"] = evaluate(intg, src)
         ref = c.quadriflow_try(qf, path, args.target_quads)
         if ref:
             engines["QuadriFlow"] = evaluate(ref, src)
