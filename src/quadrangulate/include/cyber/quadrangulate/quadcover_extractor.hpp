@@ -73,7 +73,12 @@ struct SeamlessUv {
 // examples/reference/build_autoremesher.sh); if unset or the run fails, an INVALID
 // SeamlessUv (valid == false) is returned so callers degrade cleanly. A later milestone
 // replaces the subprocess with a vendored/native solver (see docs/quadcover-plan.md).
-[[nodiscard]] SeamlessUv computeSeamlessUv(const Mesh& mesh, float targetEdgeLength);
+// `harnessScaling` is passed to the harness (-s): it controls the isotropic-remesh
+// density that drives the seamless-UV grid resolution and thus the extracted quad
+// count (lower -> denser -> more quads, ~1/s^2). The quad-cover quadrangulator sweeps
+// it in a short closed loop to hit the requested count. CYBER_QC_SCALING overrides it.
+[[nodiscard]] SeamlessUv computeSeamlessUv(const Mesh& mesh, float targetEdgeLength,
+                                           float harnessScaling = 0.5f);
 
 // Max integer-jump residual of a seamless UV across its interior edges: for each edge
 // shared by two triangles, the grid symmetry mapping one triangle's shared-vertex UVs

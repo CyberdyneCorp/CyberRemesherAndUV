@@ -106,7 +106,7 @@ bool writeObjFor(const std::string& path, const Mesh& mesh, double& areaOut) {
 
 }  // namespace
 
-SeamlessUv computeSeamlessUv(const Mesh& mesh, float targetEdgeLength) {
+SeamlessUv computeSeamlessUv(const Mesh& mesh, float targetEdgeLength, float harnessScaling) {
     SeamlessUv uv;
     const char* cli = std::getenv("CYBER_QUADCOVER_CLI");
     if (cli == nullptr || targetEdgeLength <= 0.0f) {
@@ -124,8 +124,15 @@ SeamlessUv computeSeamlessUv(const Mesh& mesh, float targetEdgeLength) {
     }
     const double cell = static_cast<double>(targetEdgeLength) * static_cast<double>(targetEdgeLength);
     const long quads = cell > 0.0 ? std::max(64L, std::lround(area / cell)) : 3000L;
+    // The harness scaling controls the isotropic-remesh density that in turn sets the
+    // seamless-UV grid resolution (and thus our extracted quad count). Overridable via
+    // CYBER_QC_SCALING for calibration sweeps; the default is tuned so the extracted quad
+    // count tracks the requested target (see M4 calibration in docs/quadcover-plan.md).
+    const char* scalingEnv = std::getenv("CYBER_QC_SCALING");
+    const std::string scaling =
+        scalingEnv != nullptr ? std::string(scalingEnv) : std::to_string(harnessScaling);
     const std::string cmd = std::string(cli) + " -i " + objPath + " -u " + uvPath + " -f " +
-                            std::to_string(quads) + " -s 0.5 >/dev/null 2>&1";
+                            std::to_string(quads) + " -s " + scaling + " >/dev/null 2>&1";
     const bool dbg = std::getenv("CYBER_QC_DEBUG") != nullptr;
     if (dbg) {
         std::fprintf(stderr, "[qc] edgeLen=%g area=%g quads=%ld cmd=%s\n",
@@ -1486,6 +1493,26 @@ IsolineQuadMesh extractIsolineQuads(const Mesh& /*mesh*/, const SeamlessUv& uv) 
 
 namespace {
 
+// Quad count implied by a target edge length: surface area / edge^2. Used to
+// calibrate the harness scaling so the extracted count tracks the request.
+double meshTargetQuads(const Mesh& mesh, float targetEdgeLength) {
+    if (targetEdgeLength <= 0.0f) {
+        return 0.0;
+    }
+    std::vector<Vec3> pos;
+    std::vector<std::vector<Index>> faces;
+    mesh.toIndexed(pos, faces);
+    double area = 0.0;
+    for (const auto& fc : faces) {
+        for (std::size_t k = 1; k + 1 < fc.size(); ++k) {
+            area += 0.5 * static_cast<double>(length(cross(pos[fc[k]] - pos[fc[0]],
+                                                           pos[fc[k + 1]] - pos[fc[0]])));
+        }
+    }
+    const double cell = static_cast<double>(targetEdgeLength) * static_cast<double>(targetEdgeLength);
+    return area / cell;
+}
+
 // IQuadrangulator implementation (Milestone 3). Runs the full QuadCover pipeline:
 // seamless integer-grid UV (M1, out-of-process via CYBER_QUADCOVER_CLI) -> isoline
 // trace + boundary-aware cleanup (M2) -> replace `mesh` in place with the quad mesh.
@@ -1506,20 +1533,37 @@ public:
         }
         (void)m_fieldIterations;
 
-        const SeamlessUv uv = computeSeamlessUv(mesh, targetEdgeLength);
-        if (!uv.valid) {
-            return {.success = false, .cancelled = false,
-                    .failureReason = "quad-cover seamless UV unavailable "
-                                     "(set CYBER_QUADCOVER_CLI to the autoremesher_cli build)"};
-        }
-        if (cancel != nullptr && cancel->isCancelled()) {
-            return {.success = false, .cancelled = true, .failureReason = {}};
+        // Target quad count implied by the requested edge length. The harness scaling only
+        // loosely maps to the extracted count, so hit the target with a short closed loop:
+        // extract, measure, correct the scaling by sqrt(actual/target) (quads ~ 1/scaling^2),
+        // and re-solve once if we are off by more than 25%.
+        const double targetQuads = meshTargetQuads(mesh, targetEdgeLength);
+        IsolineQuadMesh out;
+        float scaling = 0.5f;
+        for (int attempt = 0; attempt < 2; ++attempt) {
+            const SeamlessUv uv = computeSeamlessUv(mesh, targetEdgeLength, scaling);
+            if (!uv.valid) {
+                return {.success = false, .cancelled = false,
+                        .failureReason = "quad-cover seamless UV unavailable "
+                                         "(set CYBER_QUADCOVER_CLI to the autoremesher_cli build)"};
+            }
+            if (cancel != nullptr && cancel->isCancelled()) {
+                return {.success = false, .cancelled = true, .failureReason = {}};
+            }
+            out = extractIsolineQuads(mesh, uv);
+            const double got = static_cast<double>(out.quads.size());
+            if (std::getenv("CYBER_QC_SCALING") != nullptr || targetQuads <= 0.0 || got <= 0.0) {
+                break;  // fixed scaling (experiment) or nothing to calibrate against
+            }
+            const double ratio = got / targetQuads;
+            if (ratio > 0.75 && ratio < 1.33) {
+                break;  // within 25% -> accept
+            }
+            scaling = std::clamp(scaling * static_cast<float>(std::sqrt(ratio)), 0.2f, 1.5f);
         }
         if (progress != nullptr) {
             progress->report(0.5f, "quadrangulate (quad-cover: isoline extract)");
         }
-
-        const IsolineQuadMesh out = extractIsolineQuads(mesh, uv);
         if (out.quads.empty()) {
             return {.success = false, .cancelled = false,
                     .failureReason = "quad-cover isoline extraction produced no faces"};
