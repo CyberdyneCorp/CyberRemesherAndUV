@@ -255,12 +255,21 @@ malformed-orbit holes, no post-hoc rotation.
      QuadriFlow ~3%). The greedy is provably converged (identical at maxLen 2/4 and
      under repeated passes): the residual ~half of the flips are multi-cell clusters
      no single-ring shrink can fix. **Not across the line yet.**
-   - ◻ **5d — `FixFlipSat` (the remaining lever).** QuadriFlow clears the residual
-     flips with a SAT-based repair (threshold up to 4). QuadriFlow shells out to the
-     `minisat` binary (an external dep we can't take); the self-contained path is
-     porting the bundled `localsat.cpp` (~295 lines, a mini DPLL solver) + the
-     `FixFlipSat` orchestration — a large, high-risk port whose marginal gain toward
-     the 3% floor is uncertain. **Decision point.**
+   - ◻ **5d — `FixFlipSat` (the remaining lever) — BIGGER THAN FIRST SCOPED.**
+     Correction after reading the source: `localsat.cpp` is **not a solver** — it is
+     a CNF encoder that writes a file and shells out to the external **`minisat`
+     binary** (localsat.cpp:39), and `FixFlipSat` no-ops if `minisat` is absent
+     (hierarchy.cpp:641). QuadriFlow bundles no solver. So a self-contained 5d needs
+     either (A) an external `minisat` runtime dep — rejected (defeats the
+     self-contained build), or (B) **writing a constraint solver from scratch**. The
+     local flip patches are small ternary-variable CSPs (each edge-component ∈
+     {−1,0,+1}; hard exactly-one + face zero-sum equality + fixed non-flexible vars;
+     the area-≥0 flip-avoidance constraints), so a **bounded backtracking CSP solver
+     (~200 lines, not CNF/DPLL)** is tractable — but it is real, intricate, and its
+     payoff toward the 3% floor is uncertain (QuadriFlow's own SAT is bounded:
+     threshold ≤ 4, 8 s timeout, legitimately returns UNSAT/Timeout, so it does not
+     always reach zero flips). Scope = port `FixFlipSat` patch extraction +
+     `ExportLocalSat` CNF/constraint encoding + a from-scratch bounded CSP solver.
 
    **Exit:** interior irregular approaches the field's true singularity count —
    **irregular % < 15% and median angle ≥ QuadriFlow** on the corpus (gated on
