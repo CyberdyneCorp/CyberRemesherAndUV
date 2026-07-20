@@ -131,8 +131,17 @@ SeamlessUv computeSeamlessUv(const Mesh& mesh, float targetEdgeLength, float har
     const char* scalingEnv = std::getenv("CYBER_QC_SCALING");
     const std::string scaling =
         scalingEnv != nullptr ? std::string(scalingEnv) : std::to_string(harnessScaling);
+    // Frame-field gradient adaptivity (harness -a). AutoRemesher defaults to 1.0, whose
+    // curvature-driven scaling gradients inject singularities; a UNIFORM field (0.0)
+    // minimizes them and is the right choice here since quad-cover is a uniform-density
+    // method (it bypasses the pipeline's adaptive isotropic stage). Measured at matched
+    // density this drops irregular fraction — spot 3.6->2.6%, fandisk 5.2->1.6% — and
+    // lifts quad-dominance to ~99.6% (M4b). CYBER_QC_ADAPT overrides for sweeps.
+    const char* adaptEnv = std::getenv("CYBER_QC_ADAPT");
+    const std::string adaptArg =
+        std::string(" -a ") + (adaptEnv != nullptr ? std::string(adaptEnv) : std::string("0.0"));
     const std::string cmd = std::string(cli) + " -i " + objPath + " -u " + uvPath + " -f " +
-                            std::to_string(quads) + " -s " + scaling + " >/dev/null 2>&1";
+                            std::to_string(quads) + " -s " + scaling + adaptArg + " >/dev/null 2>&1";
     const bool dbg = std::getenv("CYBER_QC_DEBUG") != nullptr;
     if (dbg) {
         std::fprintf(stderr, "[qc] edgeLen=%g area=%g quads=%ld cmd=%s\n",

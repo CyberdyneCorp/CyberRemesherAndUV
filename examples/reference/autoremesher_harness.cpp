@@ -123,6 +123,9 @@ int main(int argc, char** argv) {
     const char* uvOut = nullptr;
     long targetQuads = 3000;
     double scaling = 1.0;
+    double adaptivity = 1.0;  // AutoRemesher default; -a lowers the curvature-driven
+                              // scaling-field variance (fewer forced singularities).
+    bool adaptivitySet = false;
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "-i") == 0 && i + 1 < argc) {
             in = argv[++i];
@@ -134,6 +137,9 @@ int main(int argc, char** argv) {
             targetQuads = std::atol(argv[++i]);
         } else if (std::strcmp(argv[i], "-s") == 0 && i + 1 < argc) {
             scaling = std::atof(argv[++i]);
+        } else if (std::strcmp(argv[i], "-a") == 0 && i + 1 < argc) {
+            adaptivity = std::atof(argv[++i]);
+            adaptivitySet = true;
         }
     }
     if (in == nullptr || (out == nullptr && uvOut == nullptr)) {
@@ -151,6 +157,9 @@ int main(int argc, char** argv) {
     AutoRemesher::AutoRemesher remesher(verts, tris);
     remesher.setTargetTriangleCount(static_cast<size_t>(targetQuads) * 2);  // GUI mapping
     remesher.setScaling(scaling);
+    if (adaptivitySet) {
+        remesher.setGradientAdaptivity(adaptivity);  // 1.0 = default; lower = smoother field
+    }
     remesher.setModelType(AutoRemesher::ModelType::Organic);
     if (!remesher.remesh()) {
         std::fprintf(stderr, "autoremesher_cli: remesh failed\n");

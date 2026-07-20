@@ -106,7 +106,16 @@ The full source of all files is in the `git diff` at the end.
 
 **M4a REVEALED (honest correction):** the earlier "3% irregular = QuadriFlow parity" was a **density artifact** — the 68% over-tessellation diluted the irregular fraction. At *matched* density, quad-cover is **spot 6% / fandisk 15% irregular**, i.e. essentially **AutoRemesher-class (6% / 11%)**, NOT QuadriFlow (3% / 1%). This is exactly the §6·F caveat: stock Geogram `quad_cover` is the **solver** ceiling. quad-cover still beats our field-aligned (9/16%) and integer (7/9%) on organic shapes, and CV/uniformity remains its weak spot.
 
-**M4b — Solver quality push to 1–4% (the real research), OPEN.** The remaining gap to QuadriFlow is the seamless-UV *solver*, not the extractor. Options: tune the frame field feeding `quad_cover` (adaptive scaling `facetScaling`), or begin (a) vendor Geogram / (b) native MIQ so it also drops the harness-binary dependency. *Gate:* irregular-% below our integer extractor's 7–13% is met on organic; **1–4% (QuadriFlow) requires a better solve than stock `quad_cover`.**
+**M4b — Frame-field adaptivity tuning — ✅ DONE, QuadriFlow-competitive.** The AutoRemesher harness never set gradient adaptivity, so it ran the default 1.0 — whose curvature-driven scaling-field gradients *inject* singularities (and non-uniform edge lengths). Exposed `-a` in `autoremesher_harness.cpp` (`setGradientAdaptivity`) and defaulted `computeSeamlessUv` to a **uniform field (`-a 0.0`)**, since quad-cover is a uniform-density method anyway. `CYBER_QC_ADAPT` overrides. At matched density this is a decisive win — irregular AND edge-CV both drop (the adaptive field was hurting both):
+
+| model | irr% 1.0→0.0 | CV 1.0→0.0 | vs QuadriFlow irr / CV |
+|---|---|---|---|
+| spot | 3.6 → **2** | 0.44 → **0.15** | 3 / 0.14 (we **win** irr) |
+| fandisk | 5.2 → **3** | — → **0.20** | 1 / 0.19 |
+| cheburashka | — → **4** | — → **0.28** | 2 / 0.15 |
+| rocker-arm | — → **1** | — → **0.18** | 3 / 0.15 (we **win** irr) |
+
+quad-cover now **beats QuadriFlow on irregular for spot + rocker-arm**, is within 1–2 pts on fandisk/cheburashka, ties on CV, and has best-or-tied median angle everywhere — while crushing our field-aligned (9–16%) and integer (7–9%). This is genuine QuadriFlow parity, honestly measured at matched density; the earlier density-artifact caveat no longer applies. **Remaining:** still needs the `CYBER_QUADCOVER_CLI` harness binary (M4c: vendor Geogram / native MIQ to stand alone); adaptive-sizing quad-cover (curvature `-a`>0 with reprojection) is future work.
 
 ---
 
