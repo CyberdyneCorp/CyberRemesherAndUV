@@ -3,6 +3,8 @@
 #include <array>
 #include <cmath>
 #include <cstddef>
+#include <map>
+#include <utility>
 #include <vector>
 
 #include "cyber/core/mesh.hpp"
@@ -158,6 +160,80 @@ TEST_CASE("quad-cover isoline extractor returns empty for an invalid UV") {
     auto out = remesh::extractIsolineQuads(mesh, invalid);
     CHECK(out.vertices.empty());
     CHECK(out.quads.empty());
+}
+
+namespace {
+
+// Max number of faces sharing any single undirected edge — must stay <= 2 for a manifold
+// re-partition. Also counts how many faces are non-quad.
+struct CapStats {
+    std::size_t maxEdgeFaces = 0;
+    std::size_t nonQuad = 0;
+};
+CapStats capStats(const std::vector<std::vector<std::size_t>>& faces) {
+    std::map<std::pair<std::size_t, std::size_t>, std::size_t> edge;
+    CapStats s;
+    for (const auto& f : faces) {
+        if (f.size() != 4) {
+            ++s.nonQuad;
+        }
+        for (std::size_t i = 0; i < f.size(); ++i) {
+            std::size_t a = f[i];
+            std::size_t b = f[(i + 1) % f.size()];
+            if (a > b) {
+                std::swap(a, b);
+            }
+            ++edge[{a, b}];
+        }
+    }
+    for (const auto& [e, n] : edge) {
+        (void)e;
+        s.maxEdgeFaces = std::max(s.maxEdgeFaces, n);
+    }
+    return s;
+}
+
+}  // namespace
+
+// Cap elimination: the tracer's non-quad caps must become quads before the pipeline's
+// pure-quad subdivision (each non-quad n-gon would otherwise Catmull-Clark into a
+// valence-n fan-centre irregular). The pass re-partitions over the SAME vertex set and
+// must stay manifold (no edge in > 2 faces).
+TEST_CASE("quad-cover cap elimination: adjacent triangles merge into a quad") {
+    std::vector<Vec3> verts = {{0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0}};
+    // A quad split by its diagonal into two triangles (the classic residual cap pair).
+    std::vector<std::vector<std::size_t>> faces = {{0, 1, 2}, {0, 2, 3}};
+    const std::size_t vBefore = verts.size();
+    remesh::eliminateNonQuadCaps(verts, faces);
+    CHECK(verts.size() == vBefore);          // no vertices added
+    CHECK(faces.size() == 1);                // two triangles -> one quad
+    CHECK(faces.front().size() == 4);
+    CHECK(capStats(faces).nonQuad == 0);
+    CHECK(capStats(faces).maxEdgeFaces <= 2);  // still manifold
+}
+
+TEST_CASE("quad-cover cap elimination: an even n-gon splits into quads") {
+    // Regular hexagon in the z = 0 plane.
+    std::vector<Vec3> verts;
+    for (int i = 0; i < 6; ++i) {
+        const float a = 2.0f * 3.14159265f * static_cast<float>(i) / 6.0f;
+        verts.push_back({std::cos(a), std::sin(a), 0.0f});
+    }
+    std::vector<std::vector<std::size_t>> faces = {{0, 1, 2, 3, 4, 5}};
+    const std::size_t vBefore = verts.size();
+    remesh::eliminateNonQuadCaps(verts, faces);
+    CHECK(verts.size() == vBefore);
+    CHECK(faces.size() == 2);                 // hexagon -> two quads
+    CHECK(capStats(faces).nonQuad == 0);
+    CHECK(capStats(faces).maxEdgeFaces <= 2);
+}
+
+TEST_CASE("quad-cover cap elimination: a lone quad is left untouched") {
+    std::vector<Vec3> verts = {{0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0}};
+    std::vector<std::vector<std::size_t>> faces = {{0, 1, 2, 3}};
+    remesh::eliminateNonQuadCaps(verts, faces);
+    CHECK(faces.size() == 1);
+    CHECK(faces.front().size() == 4);
 }
 
 // Milestone 1: computeSeamlessUv obtains a seamless integer-grid UV out-of-process

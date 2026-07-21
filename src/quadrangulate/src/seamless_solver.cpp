@@ -894,9 +894,19 @@ Parameterization solveParameterization(const Mesh& mesh, const SeamlessSetup& se
     out.cutVertexCount = static_cast<int>(nCut);
 
     // Assemble the cotangent Laplacian L and divergence RHS b_u, b_v over the cut vertices
-    // from the combed target gradients Gu = e0/spacing, Gv = e1/spacing per face.
+    // from the combed target gradients Gu = e0/spacing, Gv = e1/spacing per face. Per-face
+    // geometry (corner cut ids, gradient-of-hat vectors, area, the field frame e0/e1) is
+    // cached so the divergence RHS can be re-assembled cheaply for the ARAP polish below
+    // WITHOUT touching the Laplacian (only the target frame per face rotates).
+    struct FaceData {
+        std::array<std::size_t, 3> cut{};
+        std::array<Vec3, 3> gradPhi{};
+        float area = 0.0f;
+        Vec3 e0{}, e1{};
+    };
+    std::vector<FaceData> faceData;
+    faceData.reserve(mesh.faceCapacity());
     std::vector<std::unordered_map<std::size_t, float>> rows(nCut);
-    std::vector<float> bu(nCut, 0.0f), bv(nCut, 0.0f);
     for (Index fi = 0; fi < mesh.faceCapacity(); ++fi) {
         const FaceId f{fi};
         if (!mesh.isAlive(f) || mesh.faceSize(f) != 3) {
@@ -910,35 +920,55 @@ Parameterization solveParameterization(const Mesh& mesh, const SeamlessSetup& se
             continue;
         }
         const Vec3 n = nrm / area2;
-        const float area = 0.5f * area2;
-        const Vec3 e0 = normalized(rotQuarter(setup.field.direction(f), n, comb[fi]));
-        const Vec3 e1 = cross(n, e0);
-        const Vec3 gu = e0 * invS;
-        const Vec3 gv = e1 * invS;
-        std::array<std::size_t, 3> cut{};
+        FaceData fd;
+        fd.area = 0.5f * area2;
+        fd.e0 = normalized(rotQuarter(setup.field.direction(f), n, comb[fi]));
+        fd.e1 = cross(n, fd.e0);
         for (int k = 0; k < 3; ++k) {
-            cut[static_cast<std::size_t>(k)] = cutOf(fi, vs[static_cast<std::size_t>(k)].value);
+            fd.cut[static_cast<std::size_t>(k)] = cutOf(fi, vs[static_cast<std::size_t>(k)].value);
         }
         for (int k = 0; k < 3; ++k) {
             const Vec3 pk = p[static_cast<std::size_t>(k)];
             const Vec3 pa = p[static_cast<std::size_t>((k + 1) % 3)];
             const Vec3 pb = p[static_cast<std::size_t>((k + 2) % 3)];
-            const Vec3 gradPhi = cross(n, pb - pa) / area2;
-            bu[cut[static_cast<std::size_t>(k)]] += area * dot(gradPhi, gu);
-            bv[cut[static_cast<std::size_t>(k)]] += area * dot(gradPhi, gv);
+            fd.gradPhi[static_cast<std::size_t>(k)] = cross(n, pb - pa) / area2;
             const float cotK = dot(pa - pk, pb - pk) / area2;
-            const std::size_t ia = cut[static_cast<std::size_t>((k + 1) % 3)];
-            const std::size_t ib = cut[static_cast<std::size_t>((k + 2) % 3)];
+            const std::size_t ia = fd.cut[static_cast<std::size_t>((k + 1) % 3)];
+            const std::size_t ib = fd.cut[static_cast<std::size_t>((k + 2) % 3)];
             const float w = 0.5f * cotK;
             rows[ia][ib] -= w;
             rows[ib][ia] -= w;
             rows[ia][ia] += w;
             rows[ib][ib] += w;
         }
+        faceData.push_back(fd);
     }
     if (nCut == 0) {
         return out;
     }
+
+    // Re-assemble the divergence RHS from per-face target frames. angle[f] rotates the field
+    // frame (e0,e1) by theta before scaling to 1/spacing: target grad(u) = invS*R(theta)*e0,
+    // grad(v) = invS*R(theta)*e1. theta==0 reproduces the plain field-aligned target.
+    std::vector<float> bu(nCut, 0.0f), bv(nCut, 0.0f);
+    const auto assembleRhs = [&](const std::vector<float>& angle) {
+        std::fill(bu.begin(), bu.end(), 0.0f);
+        std::fill(bv.begin(), bv.end(), 0.0f);
+        for (std::size_t fdi = 0; fdi < faceData.size(); ++fdi) {
+            const FaceData& fd = faceData[fdi];
+            const float th = angle.empty() ? 0.0f : angle[fdi];
+            const float ct = std::cos(th), st = std::sin(th);
+            // R(theta) rows: (ct,-st) and (st,ct), applied to (e0,e1).
+            const Vec3 gu = (fd.e0 * ct - fd.e1 * st) * invS;
+            const Vec3 gv = (fd.e0 * st + fd.e1 * ct) * invS;
+            for (int k = 0; k < 3; ++k) {
+                const Vec3& gp = fd.gradPhi[static_cast<std::size_t>(k)];
+                bu[fd.cut[static_cast<std::size_t>(k)]] += fd.area * dot(gp, gu);
+                bv[fd.cut[static_cast<std::size_t>(k)]] += fd.area * dot(gp, gv);
+            }
+        }
+    };
+    assembleRhs({});
 
     // Pin ONE cut vertex PER CONNECTED COMPONENT of the (relaxed) Laplacian graph, so the
     // matrix is SPD for CG. With feature edges now cutting the surface into independent patches,
@@ -987,9 +1017,9 @@ Parameterization solveParameterization(const Mesh& mesh, const SeamlessSetup& se
         }
     }
 
-    // Keep the un-pinned divergence RHS for the constrained phase (the pin below mutates
-    // bu/bv in place for the relaxed CG solve).
-    const std::vector<float> bu0 = bu, bv0 = bv;
+    // Pinned SPD operator A (identity row per pin/isolated vertex, reduced cotan rows
+    // elsewhere). It depends only on the Laplacian, so it is built ONCE and reused across
+    // every ARAP re-solve (only the RHS rotates).
     accel::SparseMatrix A;
     A.rows = nCut;
     A.rowStart.reserve(nCut + 1);
@@ -998,8 +1028,6 @@ Parameterization solveParameterization(const Mesh& mesh, const SeamlessSetup& se
         if (isPin[i] || rows[i].empty()) {
             A.colIndex.push_back(i);
             A.value.push_back(1.0f);
-            bu[i] = 0.0f;
-            bv[i] = 0.0f;
             A.rowStart.push_back(A.colIndex.size());
             continue;
         }
@@ -1015,10 +1043,97 @@ Parameterization solveParameterization(const Mesh& mesh, const SeamlessSetup& se
 
     std::vector<float> u(nCut, 0.0f), v(nCut, 0.0f);
     const int maxIters = static_cast<int>(nCut) + 500;
-    out.cgIterationsU = conjugateGradient(backend, A, bu, u, maxIters, 1e-8f, cancel);
-    out.cgIterationsV = conjugateGradient(backend, A, bv, v, maxIters, 1e-8f, cancel);
+    // Solve the relaxed (per-component pinned) Poisson for the current full RHS bu/bv. The
+    // pin zeroes the RHS at the pinned/isolated vertices; u,v are warm-started from their
+    // incoming value so each ARAP re-solve (a small RHS perturbation) converges fast.
+    const auto relaxedSolve = [&]() {
+        std::vector<float> pbu = bu, pbv = bv;
+        for (std::size_t i = 0; i < nCut; ++i) {
+            if (isPin[i] || rows[i].empty()) {
+                pbu[i] = 0.0f;
+                pbv[i] = 0.0f;
+            }
+        }
+        out.cgIterationsU = conjugateGradient(backend, A, pbu, u, maxIters, 1e-8f, cancel);
+        out.cgIterationsV = conjugateGradient(backend, A, pbv, v, maxIters, 1e-8f, cancel);
+    };
+    relaxedSolve();
     if (cancel != nullptr && cancel->isCancelled()) {
         return out;  // out.valid stays false -> caller degrades cleanly
+    }
+
+    // ARAP local-global polish (docs/native-miq-plan.md). The plain field-aligned target has
+    // non-zero curl, so the Poisson projection introduces shear / non-uniform scale that makes
+    // integer isolines cross the field obliquely and leaves non-quad caps at cones. Each round:
+    //   LOCAL — per face, take the current UV Jacobian J in the (e0,e1) frame and find the
+    //           closest rotation R(theta), theta = atan2(J_yx - J_xy, J_xx + J_yy);
+    //   GLOBAL — re-assemble the divergence RHS with the target frame rotated by theta and
+    //           re-solve the (unchanged) pinned Poisson.
+    // Starting from theta==0 reproduces the field-aligned solve, so this only *relaxes* the map
+    // toward a locally rigid grid; it cannot move singularities (those are fixed by the cut /
+    // seam topology) and keeps the target frame norm at invS, so the map stays bounded. The
+    // refined RHS then feeds the integer-seamless phase, which re-enforces exact seamlessness.
+    //
+    // GATED to closed (no open boundary) surfaces. A free boundary has no downstream safety net:
+    // the isoline extractor's non-manifold/hole cleanup interacts badly with a boundary that the
+    // polish has shifted, so a small ARAP perturbation there flips the extracted mesh
+    // non-manifold — the one hard-constraint violation observed. A boundaried surface also
+    // regresses under this polish (measured), so skipping it both preserves watertightness and
+    // is the better-quality choice. The boundary fraction is ~0 for a closed (or numerically
+    // cracked) surface and jumps as soon as a genuine perimeter appears.
+    std::size_t nBoundaryEdge = 0, nAliveEdge = 0;
+    for (Index ei = 0; ei < mesh.edgeCapacity(); ++ei) {
+        const EdgeId e{ei};
+        if (!mesh.isAlive(e)) {
+            continue;
+        }
+        ++nAliveEdge;
+        if (mesh.edgeFaceCount(e) == 1) {
+            ++nBoundaryEdge;
+        }
+    }
+    const double boundaryFrac =
+        nAliveEdge == 0 ? 1.0
+                        : static_cast<double>(nBoundaryEdge) / static_cast<double>(nAliveEdge);
+    std::vector<float> angle(faceData.size(), 0.0f);
+    constexpr int kArapIters = 6;
+    constexpr float kMaxRot = kPi / 3.0f;  // ~60 deg cone: light insurance against sliver blow-ups
+    constexpr double kBoundaryGate = 0.01;
+    std::vector<float> raw(faceData.size(), 0.0f);
+    for (int iter = 0; boundaryFrac < kBoundaryGate && iter < kArapIters; ++iter) {
+        if (cancel != nullptr && cancel->isCancelled()) {
+            return out;
+        }
+        double maxDelta = 0.0;
+        for (std::size_t fdi = 0; fdi < faceData.size(); ++fdi) {
+            const FaceData& fd = faceData[fdi];
+            Vec3 gradU{0.0f, 0.0f, 0.0f}, gradV{0.0f, 0.0f, 0.0f};
+            for (int k = 0; k < 3; ++k) {
+                const Vec3& gp = fd.gradPhi[static_cast<std::size_t>(k)];
+                gradU = gradU + gp * u[fd.cut[static_cast<std::size_t>(k)]];
+                gradV = gradV + gp * v[fd.cut[static_cast<std::size_t>(k)]];
+            }
+            const float jxx = dot(gradU, fd.e0), jxy = dot(gradU, fd.e1);
+            const float jyx = dot(gradV, fd.e0), jyy = dot(gradV, fd.e1);
+            // Closest-rotation angle, CLAMPED to a wide cone about the field frame. The clamp
+            // only catches degenerate/sliver triangles whose noisy gradient would otherwise
+            // rotate the target far enough to fold the map; well-shaped faces are unaffected.
+            raw[fdi] = std::clamp(std::atan2(jyx - jxy, jxx + jyy), -kMaxRot, kMaxRot);
+            maxDelta = std::max(maxDelta, static_cast<double>(std::abs(raw[fdi] - angle[fdi])));
+        }
+        angle.swap(raw);
+        assembleRhs(angle);
+        relaxedSolve();
+        if (maxDelta < 1e-4) {
+            break;  // rotations settled
+        }
+    }
+    // Feed the ARAP-refined targets (field-aligned, unchanged, when the polish was skipped) into
+    // the integer-seamless phase.
+    assembleRhs(angle);
+    const std::vector<float> bu0 = bu, bv0 = bv;
+    if (cancel != nullptr && cancel->isCancelled()) {
+        return out;
     }
 
     // Integer-seamless phase: collect the seam edges with the rotation rho taken from the

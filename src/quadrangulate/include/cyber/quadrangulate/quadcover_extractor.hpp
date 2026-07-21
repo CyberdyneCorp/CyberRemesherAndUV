@@ -123,6 +123,15 @@ struct IsolineQuadMesh {
 };
 [[nodiscard]] IsolineQuadMesh extractIsolineQuads(const Mesh& mesh, const SeamlessUv& uv);
 
+// Post-extraction cap elimination. The isoline tracer leaves a few percent of non-quad
+// "cap" faces (triangles / pentagons / hexagons) at cone and boundary regions; under the
+// pipeline's pure-quad Catmull-Clark subdivision each becomes a valence-n fan-centre
+// irregular. This pass re-partitions those caps into quads over the SAME vertex set
+// (pairing adjacent odd faces, splitting even n-gons), keeping the mesh watertight and
+// never increasing the final irregular count. `faces` is edited in place.
+void eliminateNonQuadCaps(std::vector<Vec3>& vertices,
+                          std::vector<std::vector<std::size_t>>& faces);
+
 // -----------------------------------------------------------------------------
 // The IQuadrangulator seam (scaffold — returns a working stub).
 // -----------------------------------------------------------------------------

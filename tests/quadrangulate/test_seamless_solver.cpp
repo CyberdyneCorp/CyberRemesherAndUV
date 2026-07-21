@@ -53,6 +53,37 @@ Mesh makeSphere(int rings = 20, int segments = 30) {
     return Mesh::fromIndexed(p, f);
 }
 
+// An OPEN bowl: the northern cap of the sphere (rings 0..half), left open at the equator so its
+// whole equatorial ring is a genuine boundary. Exercises the free-boundary path where the ARAP
+// distortion polish is gated OFF (a shifted free boundary has no downstream cleanup safety net):
+// the solve must still return a valid, BOUNDED parameterization.
+Mesh makeOpenBowl(int rings = 20, int segments = 30) {
+    const int half = rings / 2;
+    std::vector<Vec3> p;
+    p.push_back({0, 0, 1});
+    for (int r = 1; r <= half; ++r) {
+        const float phi = 3.14159265f * static_cast<float>(r) / static_cast<float>(rings);
+        for (int s = 0; s < segments; ++s) {
+            const float th = 2.0f * 3.14159265f * static_cast<float>(s) / static_cast<float>(segments);
+            p.push_back({std::sin(phi) * std::cos(th), std::sin(phi) * std::sin(th), std::cos(phi)});
+        }
+    }
+    const auto ring = [&](int r, int s) {
+        return static_cast<Index>(1 + (r - 1) * segments + (s % segments));
+    };
+    std::vector<std::vector<Index>> f;
+    for (int s = 0; s < segments; ++s) {
+        f.push_back({0, ring(1, s), ring(1, s + 1)});
+    }
+    for (int r = 1; r < half; ++r) {
+        for (int s = 0; s < segments; ++s) {
+            f.push_back({ring(r, s), ring(r + 1, s), ring(r + 1, s + 1)});
+            f.push_back({ring(r, s), ring(r + 1, s + 1), ring(r, s + 1)});
+        }
+    }
+    return Mesh::fromIndexed(p, f);
+}
+
 // A subdivided cube projected to the unit sphere. Its 8 corners concentrate curvature into
 // EIGHT index-1 cross-field cones (sum 8 == 4*chi), so the cut graph is a branching tree over
 // the cones — the many-singularity case whose branch-point holonomy must be reconciled for the
@@ -324,6 +355,36 @@ TEST_CASE("seamless M2c: constrained solve is integer-seamless on a sphere (resi
     const remesh::IsolineQuadMesh quads = remesh::extractIsolineQuads(sphere, uv);
     CHECK(quads.quads.size() > 100);
     CHECK(quads.quads.size() < 2000);
+}
+
+// The ARAP distortion polish is GATED OFF on an open (free-boundary) surface, where a shifted
+// boundary has no downstream extractor cleanup to fall back on. This guards that the gated path
+// still returns a valid, BOUNDED parameterization (the divergence failure mode) on a genuinely
+// open surface, rather than being destabilised by a boundary-hugging polish.
+TEST_CASE("seamless ARAP gate: open bowl stays valid and bounded (polish skipped)") {
+    auto backend = cyber::accel::defaultBackend();
+    const Mesh bowl = makeOpenBowl();
+    const remesh::SeamlessSetup setup = remesh::buildSeamlessSetup(bowl, 50, *backend);
+    REQUIRE(setup.valid);
+
+    const remesh::Parameterization param =
+        remesh::solveParameterization(bowl, setup, 0.12f, *backend);
+    REQUIRE(param.valid);
+
+    // Every corner UV is finite and within a sane grid range: the target count implies O(10s) of
+    // isolines, so a correct bounded map stays well under a few hundred cells across (a divergent
+    // map, the failure this guards, blows up to 1e4+ before the magnitude cap even engages).
+    float maxAbs = 0.0f;
+    for (Index fi = 0; fi < bowl.faceCapacity(); ++fi) {
+        if (!bowl.isAlive(FaceId{fi}) || bowl.faceSize(FaceId{fi}) != 3) continue;
+        for (const cyber::Vec2& c : param.cornerUv[fi]) {
+            REQUIRE(std::isfinite(c.x));
+            REQUIRE(std::isfinite(c.y));
+            maxAbs = std::max(maxAbs, std::max(std::abs(c.x), std::abs(c.y)));
+        }
+    }
+    CHECK(maxAbs > 1.0f);    // a non-degenerate map spanning several isolines
+    CHECK(maxAbs < 500.0f);  // bounded, not divergent
 }
 
 // Milestone 2c (many-singularity / branch-point holonomy): the sparse constraint-elimination

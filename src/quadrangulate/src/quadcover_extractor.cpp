@@ -1693,6 +1693,342 @@ void IsolineExtractor::extract() {
 
 }  // namespace
 
+namespace {
+
+// Cap elimination (PRIMARY LEVER for native irregular %). The isoline tracer
+// leaves a few percent of NON-QUAD "cap" faces (triangles / pentagons / hexagons)
+// at cone and boundary regions. The pipeline's pure-quad path then linear-subdivides
+// (Catmull-Clark split), turning EVERY non-quad n-gon into a valence-n fan centre — a
+// permanent irregular vertex. Eliminating the non-quad caps in the COARSE mesh, before
+// that subdivision, removes exactly those fan-centre irregulars.
+//
+// Two operations, both provably non-regressing:
+//   (1) pair two edge-adjacent ODD faces (tri-tri, tri-pent, pent-pent) into an even
+//       polygon and split that into quads;
+//   (2) split a leftover even n-gon (hexagon/octagon) into quads by a chord.
+// A candidate is applied only when it does not INCREASE the final irregular count.
+// After a uniform Catmull-Clark split the final irregular set is exactly
+//   {coarse vertices with edge-valence != 4}  union  {centroids of non-quad faces},
+// so we can score each op on the coarse mesh: it is accepted iff
+//   delta(non-quad centroids) + delta(vertices whose valence crosses 4) <= 0.
+// This keeps the mesh watertight (we only re-partition faces over the SAME vertex set,
+// never touching outer boundaries) and never regresses c.irregular_pct.
+class QuadCapCleaner {
+public:
+    using Poly = std::vector<std::size_t>;
+
+    QuadCapCleaner(const std::vector<Vec3>& verts, std::vector<Poly>& faces)
+        : m_verts(verts), m_faces(faces) {}
+
+    void run() {
+        build();
+        // Phase 1: merge edge-adjacent odd faces, then split the even union into quads.
+        for (std::size_t i = 0; i < m_originalCount; ++i) {
+            if (isMergeCandidate(i)) {
+                tryMergeWithNeighbour(i);
+            }
+        }
+        // Phase 2: split any surviving even non-quad face (hexagons, octagons).
+        for (std::size_t i = 0; i < m_originalCount; ++i) {
+            if (!m_alive[i]) {
+                continue;
+            }
+            const std::size_t n = m_faces[i].size();
+            if (n > 4 && (n % 2) == 0) {
+                trySplitEven(i);
+            }
+        }
+        compact();
+    }
+
+private:
+    static std::uint64_t undirectedKey(std::size_t a, std::size_t b) {
+        if (a > b) {
+            std::swap(a, b);
+        }
+        return (static_cast<std::uint64_t>(a) << 32) | static_cast<std::uint64_t>(b);
+    }
+    static std::uint64_t directedKey(std::size_t a, std::size_t b) {
+        return (static_cast<std::uint64_t>(a) << 32) | static_cast<std::uint64_t>(b);
+    }
+    static bool isRegular(int valence) { return valence == 4; }
+
+    // Add (sign +1) or remove (sign -1) a face's undirected edges from the live edge
+    // multiset, tracking per-vertex edge valence as edges appear (0->1) / vanish (1->0).
+    void applyFaceEdges(const Poly& f, int sign) {
+        const std::size_t n = f.size();
+        for (std::size_t i = 0; i < n; ++i) {
+            const std::size_t a = f[i];
+            const std::size_t b = f[(i + 1) % n];
+            const std::uint64_t key = undirectedKey(a, b);
+            int& c = m_edgeCount[key];
+            if (sign > 0) {
+                if (c == 0) {
+                    ++m_deg[a];
+                    ++m_deg[b];
+                }
+                ++c;
+            } else {
+                --c;
+                if (c == 0) {
+                    --m_deg[a];
+                    --m_deg[b];
+                }
+            }
+        }
+    }
+
+    void build() {
+        m_originalCount = m_faces.size();
+        m_alive.assign(m_originalCount, true);
+        m_deg.assign(m_verts.size(), 0);
+        m_edgeCount.clear();
+        m_dirToFace.clear();
+        for (std::size_t fi = 0; fi < m_originalCount; ++fi) {
+            const Poly& f = m_faces[fi];
+            applyFaceEdges(f, +1);
+            for (std::size_t i = 0; i < f.size(); ++i) {
+                m_dirToFace[directedKey(f[i], f[(i + 1) % f.size()])] = fi;
+            }
+        }
+    }
+
+    bool isMergeCandidate(std::size_t i) const {
+        if (!m_alive[i]) {
+            return false;
+        }
+        const std::size_t n = m_faces[i].size();
+        return n != 4 && (n % 2) == 1;  // triangle / pentagon / heptagon
+    }
+
+    // Merge two polygons across shared directed edge a->b (in F1) / b->a (in F2).
+    // Returns the CCW union polygon, or empty on a degenerate share (repeated vertex).
+    static Poly mergePolys(const Poly& f1, const Poly& f2, std::size_t a, std::size_t b) {
+        Poly out;
+        out.reserve(f1.size() + f2.size() - 2);
+        // Walk f1 starting at b around to a (this is f1 minus the a->b edge).
+        std::size_t start1 = f1.size();
+        for (std::size_t i = 0; i < f1.size(); ++i) {
+            if (f1[i] == b) {
+                start1 = i;
+                break;
+            }
+        }
+        if (start1 == f1.size()) {
+            return {};
+        }
+        for (std::size_t k = 0; k < f1.size(); ++k) {
+            out.push_back(f1[(start1 + k) % f1.size()]);  // b ... a
+        }
+        // Insert f2's interior (from a to b, excluding both endpoints).
+        std::size_t startA = f2.size();
+        for (std::size_t i = 0; i < f2.size(); ++i) {
+            if (f2[i] == a) {
+                startA = i;
+                break;
+            }
+        }
+        if (startA == f2.size()) {
+            return {};
+        }
+        for (std::size_t k = 1; k + 1 < f2.size(); ++k) {
+            out.push_back(f2[(startA + k) % f2.size()]);
+        }
+        // Reject if any vertex repeats (the two faces shared more than one edge).
+        std::set<std::size_t> seen(out.begin(), out.end());
+        if (seen.size() != out.size()) {
+            return {};
+        }
+        return out;
+    }
+
+    // Fan-split an even polygon into quads from vertex index `start`.
+    static std::vector<Poly> fanSplit(const Poly& p, std::size_t start) {
+        std::vector<Poly> quads;
+        const std::size_t n = p.size();
+        for (std::size_t i = 1; i + 1 < n / 2 + 1; ++i) {
+            // quad: (start, start+2i-1, start+2i, start+2i+1)
+            quads.push_back({p[start], p[(start + 2 * i - 1) % n], p[(start + 2 * i) % n],
+                             p[(start + 2 * i + 1) % n]});
+        }
+        return quads;
+    }
+
+    double quadArea(const Poly& q) const {
+        const Vec3 a = m_verts[q[0]];
+        const Vec3 b = m_verts[q[1]];
+        const Vec3 c = m_verts[q[2]];
+        const Vec3 d = m_verts[q[3]];
+        const double t1 = 0.5 * static_cast<double>(length(cross(b - a, c - a)));
+        const double t2 = 0.5 * static_cast<double>(length(cross(c - a, d - a)));
+        return t1 + t2;
+    }
+
+    // Score replacing `oldIdx` faces by `newPolys`: feasibility (manifold, non-degenerate)
+    // plus the resulting change in irregular count. Returns {feasible, deltaIrregular}.
+    std::pair<bool, int> score(const std::vector<std::size_t>& oldIdx,
+                               const std::vector<Poly>& newPolys) const {
+        std::map<std::uint64_t, int> mult;  // net change in edge multiplicity
+        for (const std::size_t fi : oldIdx) {
+            const Poly& f = m_faces[fi];
+            for (std::size_t i = 0; i < f.size(); ++i) {
+                --mult[undirectedKey(f[i], f[(i + 1) % f.size()])];
+            }
+        }
+        int newNonQuad = 0;
+        for (const Poly& p : newPolys) {
+            if (p.size() != 4) {
+                ++newNonQuad;
+            }
+            if (p.size() == 4 && quadArea(p) <= 1e-12) {
+                return {false, 0};  // degenerate quad
+            }
+            for (std::size_t i = 0; i < p.size(); ++i) {
+                ++mult[undirectedKey(p[i], p[(i + 1) % p.size()])];
+            }
+        }
+        int deltaVert = 0;
+        for (const auto& [key, delta] : mult) {
+            if (delta == 0) {
+                continue;
+            }
+            const auto it = m_edgeCount.find(key);
+            const int before = (it == m_edgeCount.end()) ? 0 : it->second;
+            const int after = before + delta;
+            if (after < 0 || after > 2) {
+                return {false, 0};  // would create a non-manifold edge
+            }
+            const std::size_t a = static_cast<std::size_t>(key >> 32);
+            const std::size_t b = static_cast<std::size_t>(key & 0xffffffffU);
+            if (before == 0 && after > 0) {
+                deltaVert += valenceCross(a, +1) + valenceCross(b, +1);
+            } else if (before > 0 && after == 0) {
+                deltaVert += valenceCross(a, -1) + valenceCross(b, -1);
+            }
+        }
+        int oldNonQuad = 0;
+        for (const std::size_t fi : oldIdx) {
+            if (m_faces[fi].size() != 4) {
+                ++oldNonQuad;
+            }
+        }
+        return {true, deltaVert + (newNonQuad - oldNonQuad)};
+    }
+
+    // Irregular-count change if vertex v's edge valence shifts by `d` (+1/-1).
+    int valenceCross(std::size_t v, int d) const {
+        const int before = m_deg[v];
+        const int after = before + d;
+        return (isRegular(after) ? 0 : 1) - (isRegular(before) ? 0 : 1);
+    }
+
+    void commit(const std::vector<std::size_t>& oldIdx, std::vector<Poly>& newPolys) {
+        for (const std::size_t fi : oldIdx) {
+            applyFaceEdges(m_faces[fi], -1);
+            m_alive[fi] = false;
+        }
+        for (Poly& p : newPolys) {
+            applyFaceEdges(p, +1);
+            m_alive.push_back(true);
+            m_faces.push_back(std::move(p));
+        }
+    }
+
+    // Of every fan-split of `poly`, pick the feasible one with the lowest resulting
+    // irregular delta (ties -> largest minimum quad area). Returns {} if none feasible.
+    // `oldIdx` is the face set being replaced (so edge deltas are scored in context).
+    std::vector<Poly> chooseBestSplit(const Poly& poly, const std::vector<std::size_t>& oldIdx,
+                                      int& outDelta) const {
+        std::vector<Poly> best;
+        int bestDelta = std::numeric_limits<int>::max();
+        double bestMinArea = -1.0;
+        for (std::size_t s = 0; s < poly.size(); ++s) {
+            std::vector<Poly> quads = fanSplit(poly, s);
+            if (quads.empty()) {
+                continue;
+            }
+            const auto [feasible, delta] = score(oldIdx, quads);
+            if (!feasible) {
+                continue;
+            }
+            double minArea = std::numeric_limits<double>::max();
+            for (const Poly& q : quads) {
+                minArea = std::min(minArea, quadArea(q));
+            }
+            if (delta < bestDelta || (delta == bestDelta && minArea > bestMinArea)) {
+                bestDelta = delta;
+                bestMinArea = minArea;
+                best = std::move(quads);
+            }
+        }
+        outDelta = bestDelta;
+        return best;
+    }
+
+    void tryMergeWithNeighbour(std::size_t i) {
+        const Poly& fi = m_faces[i];
+        std::vector<std::size_t> bestOld;
+        std::vector<Poly> bestNew;
+        int bestDelta = 1;  // accept only non-regressing merges (delta <= 0)
+        for (std::size_t e = 0; e < fi.size(); ++e) {
+            const std::size_t a = fi[e];
+            const std::size_t b = fi[(e + 1) % fi.size()];
+            const auto it = m_dirToFace.find(directedKey(b, a));
+            if (it == m_dirToFace.end()) {
+                continue;
+            }
+            const std::size_t j = it->second;
+            if (j == i || !m_alive[j] || !isMergeCandidate(j)) {
+                continue;
+            }
+            const Poly merged = mergePolys(fi, m_faces[j], a, b);
+            if (merged.empty() || (merged.size() % 2) != 0) {
+                continue;
+            }
+            int delta = 0;
+            std::vector<Poly> quads = chooseBestSplit(merged, {i, j}, delta);
+            if (!quads.empty() && delta <= bestDelta) {
+                bestDelta = delta;
+                bestOld = {i, j};
+                bestNew = std::move(quads);
+            }
+        }
+        if (!bestNew.empty() && bestDelta <= 0) {
+            commit(bestOld, bestNew);
+        }
+    }
+
+    void trySplitEven(std::size_t i) {
+        int delta = 0;
+        std::vector<Poly> quads = chooseBestSplit(m_faces[i], {i}, delta);
+        if (!quads.empty() && delta <= 0) {
+            std::vector<std::size_t> old = {i};
+            commit(old, quads);
+        }
+    }
+
+    void compact() {
+        std::vector<Poly> kept;
+        kept.reserve(m_faces.size());
+        for (std::size_t i = 0; i < m_faces.size(); ++i) {
+            if (m_alive[i]) {
+                kept.push_back(std::move(m_faces[i]));
+            }
+        }
+        m_faces = std::move(kept);
+    }
+
+    const std::vector<Vec3>& m_verts;
+    std::vector<Poly>& m_faces;
+    std::size_t m_originalCount = 0;
+    std::vector<bool> m_alive;
+    std::vector<int> m_deg;
+    std::unordered_map<std::uint64_t, int> m_edgeCount;
+    std::unordered_map<std::uint64_t, std::size_t> m_dirToFace;
+};
+
+}  // namespace
+
 // Milestone 2 entry point: trace the seamless UV's integer isolines into an
 // oriented quad mesh. Returns empty for an invalid/empty UV.
 // Fraction of undirected edges that are on a boundary (incident to a single
@@ -1765,9 +2101,17 @@ IsolineQuadMesh extractIsolineQuads(const Mesh& /*mesh*/, const SeamlessUv& uv) 
     extractor.setRunClosedSurfaceCleanup(closed);
     extractor.extract();
     if (std::getenv("CYBER_QC_DEBUG") != nullptr) {
-        std::fprintf(stderr, "[qc] extract closed=%d bndFrac=%.3f uvTris=%zu -> quads=%zu verts=%zu\n",
+        std::map<std::size_t, std::size_t> hist;
+        for (const auto& f : extractor.remeshedQuads()) {
+            ++hist[f.size()];
+        }
+        std::string h;
+        for (const auto& [sz, cnt] : hist) {
+            h += " " + std::to_string(sz) + ":" + std::to_string(cnt);
+        }
+        std::fprintf(stderr, "[qc] extract closed=%d bndFrac=%.3f uvTris=%zu -> quads=%zu verts=%zu hist{%s}\n",
                      static_cast<int>(closed), boundaryFrac, uv.triangles.size(),
-                     extractor.remeshedQuads().size(), extractor.remeshedVertices().size());
+                     extractor.remeshedQuads().size(), extractor.remeshedVertices().size(), h.c_str());
     }
 
     IsolineQuadMesh out;
@@ -1778,6 +2122,14 @@ IsolineQuadMesh extractIsolineQuads(const Mesh& /*mesh*/, const SeamlessUv& uv) 
     }
     out.quads = extractor.remeshedQuads();
     return out;
+}
+
+// Cap elimination (see QuadCapCleaner): convert the tracer's non-quad "cap" faces into
+// quads so the pipeline's Catmull-Clark pure-quad subdivision does not turn each into a
+// valence-3/5 fan-centre irregular. Watertight- and irregular-count-non-regressing.
+void eliminateNonQuadCaps(std::vector<Vec3>& vertices,
+                          std::vector<std::vector<std::size_t>>& faces) {
+    QuadCapCleaner(vertices, faces).run();
 }
 
 namespace {
@@ -1858,6 +2210,24 @@ public:
         if (out.quads.empty()) {
             return {.success = false, .cancelled = false,
                     .failureReason = "quad-cover isoline extraction produced no faces"};
+        }
+        // Convert non-quad caps to quads before the pipeline's pure-quad subdivision so
+        // they do not become fan-centre irregulars. Runs AFTER the count calibration so it
+        // never perturbs the scaling feedback. Opt out via CYBER_QC_NO_CAPFIX for A/B.
+        if (std::getenv("CYBER_QC_NO_CAPFIX") == nullptr) {
+            eliminateNonQuadCaps(out.vertices, out.quads);
+            if (std::getenv("CYBER_QC_DEBUG") != nullptr) {
+                std::map<std::size_t, std::size_t> hist;
+                for (const auto& f : out.quads) {
+                    ++hist[f.size()];
+                }
+                std::string h;
+                for (const auto& [sz, cnt] : hist) {
+                    h += " " + std::to_string(sz) + ":" + std::to_string(cnt);
+                }
+                std::fprintf(stderr, "[qc] capfix -> quads=%zu hist{%s}\n", out.quads.size(),
+                             h.c_str());
+            }
         }
 
         std::vector<std::vector<Index>> faces;

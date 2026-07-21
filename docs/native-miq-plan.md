@@ -171,6 +171,31 @@ the holonomy reconciliation. No seam cap, no dense dual, no external solver.
 **Still open:** improve field feature-alignment (a diagonally-triangulated flat grid pulls the
 cross field ~27° off-axis).
 
+**M2d — ARAP distortion polish (closed surfaces) — ✅ DONE.** The plain field-aligned target
+gradient has non-zero curl, so the Dirichlet (Poisson) projection introduces shear / non-uniform
+scale; the integer isolines then cross the field obliquely and leave non-quad **caps** at cones,
+each of which the pure-quad subdivision turns into a valence-3/5 irregular. `solveParameterization`
+now runs a bounded ARAP **local-global** relaxation on the relaxed per-component Poisson *before*
+the integer phase (`seamless_solver.cpp`):
+- **Local.** Per face, take the current UV Jacobian `J` in the combed field frame `(e0,e1)` and
+  find the closest rotation `R(theta)`, `theta = atan2(J_yx − J_xy, J_xx + J_yy)`, clamped to a
+  wide ±60° cone so a sliver's noisy gradient can't fold the map.
+- **Global.** Re-assemble only the divergence RHS with the target frame rotated by `theta`
+  (the cotan Laplacian and the operator `A` are unchanged, so each re-solve is a warm-started CG),
+  a few rounds. The refined RHS then feeds the integer-seamless reduction unchanged, which
+  re-enforces exact seamlessness (`seamlessUvResidual` stays ~1e-6). `theta==0` reproduces the old
+  field-aligned solve, so this only *relaxes* toward a locally rigid grid — it cannot move
+  singularities (fixed by the cut/seam topology) and keeps the target norm at `1/spacing`, so the
+  map stays bounded.
+- **Gated to closed surfaces.** A free boundary has no downstream extractor cleanup safety net, so
+  a boundary-hugging polish can flip the extracted mesh non-manifold there; a boundaried surface
+  also measured *worse* under the polish. The solve skips ARAP when the mesh's boundary-edge
+  fraction exceeds ~1 % (guarded by `seamless ARAP gate: open bowl ...`).
+
+**Result (native, target 3000, pure-quads, quad-cover):** corpus irregular % drops
+spot 5.4→4.3, fandisk 4.0→3.6, rocker-arm **8.0→5.5**, cheburashka 5.7→5.5, bunny 5.8 (unchanged,
+gated); mean 5.8→4.9, worst 8.0→5.8, all watertight pure-quad, suite green.
+
 **M3 — Isotropic pre-remesh + wiring — ✅ DONE.** `computeSeamlessUvNative` (was a stub) now
 runs the full native pipeline: `triangulate` → `tagFeatureEdges` → **feature gate** (decline
 sharp-feature meshes up front — the M2 solve does not constrain feature edges and is
