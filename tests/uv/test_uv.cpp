@@ -5,6 +5,7 @@
 
 #include "cyber/core/math.hpp"
 #include "cyber/core/mesh.hpp"
+#include "cyber/uv/atlas.hpp"
 #include "cyber/uv/common.hpp"
 #include "cyber/uv/distortion.hpp"
 #include "cyber/uv/packing.hpp"
@@ -27,6 +28,16 @@ namespace {
 Mesh makeQuad(float w, float h) {
     const std::vector<Vec3> p = {{0, 0, 0}, {w, 0, 0}, {w, h, 0}, {0, h, 0}};
     const std::vector<std::vector<Index>> f = {{0, 1, 2, 3}};
+    return Mesh::fromIndexed(p, f);
+}
+
+// Unit cube, six quad faces — every face carries a distinct axis-aligned
+// normal, so normal-coherent chart growth must isolate each into its own chart.
+Mesh makeCube() {
+    const std::vector<Vec3> p = {{0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0},
+                                 {0, 0, 1}, {1, 0, 1}, {1, 1, 1}, {0, 1, 1}};
+    const std::vector<std::vector<Index>> f = {{0, 3, 2, 1}, {4, 5, 6, 7}, {0, 1, 5, 4},
+                                               {2, 3, 7, 6}, {1, 2, 6, 5}, {3, 0, 4, 7}};
     return Mesh::fromIndexed(p, f);
 }
 
@@ -146,6 +157,58 @@ TEST_CASE("island UV translate offsets every corner") {
     const Vec2 after = uv::islandUvCentroid(mesh, island);
     REQUIRE(after.x == doctest::Approx(before.x + 5.0f));
     REQUIRE(after.y == doctest::Approx(before.y - 2.0f));
+}
+
+TEST_CASE("autoSeams partitions a cube into one chart per face") {
+    Mesh mesh = makeCube();
+    const uv::SeamSet seams = uv::autoSeams(mesh);
+    // Six faces, each its own normal-coherent chart -> every one of the 12 cube
+    // edges lies between two different charts and is seamed.
+    REQUIRE(seams.size() == 12);
+    const auto islands = uv::computeIslands(mesh, seams);
+    REQUIRE(islands.size() == 6);
+    for (const auto& island : islands) {
+        REQUIRE(island.size() == 1);
+    }
+}
+
+TEST_CASE("unwrapAtlas produces a low-distortion, in-bounds cube atlas") {
+    Mesh mesh = makeCube();
+    const uv::AtlasResult atlas = uv::unwrapAtlas(mesh);
+
+    REQUIRE(atlas.ok);
+    REQUIRE(atlas.chartCount == 6);
+    REQUIRE(atlas.flippedCharts == 0);
+    // Each chart is a single planar quad, so LSCM is near-perfectly conformal.
+    REQUIRE(atlas.maxAngleDistortion < 1e-3f);
+
+    // Every corner UV must land inside the unit square with no chart overlap.
+    const std::vector<Vec2>* uvs = uv::uvColumn(mesh);
+    REQUIRE(uvs != nullptr);
+    for (const Vec2& p : *uvs) {
+        REQUIRE(p.x >= -1e-5f);
+        REQUIRE(p.y >= -1e-5f);
+        REQUIRE(p.x <= 1.0f + 1e-5f);
+        REQUIRE(p.y <= 1.0f + 1e-5f);
+    }
+}
+
+TEST_CASE("unwrapAtlas is deterministic") {
+    Mesh a = makeCube();
+    Mesh b = makeCube();
+    const uv::AtlasResult ra = uv::unwrapAtlas(a);
+    const uv::AtlasResult rb = uv::unwrapAtlas(b);
+    REQUIRE(ra.chartCount == rb.chartCount);
+    REQUIRE(ra.seamEdges == rb.seamEdges);
+    const std::vector<Vec2>* ua = uv::uvColumn(a);
+    const std::vector<Vec2>* ub = uv::uvColumn(b);
+    REQUIRE(ua != nullptr);
+    REQUIRE(ub != nullptr);
+    REQUIRE(ua->size() == ub->size());
+    for (std::size_t i = 0; i < ua->size(); ++i) {
+        REQUIRE((*ua)[i].x == doctest::Approx((*ub)[i].x));
+        REQUIRE((*ua)[i].y == doctest::Approx((*ub)[i].y));
+    }
 }
 
 TEST_CASE("mirrored UVs are detected as a flipped island") {

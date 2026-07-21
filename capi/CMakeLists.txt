@@ -11,6 +11,13 @@ add_library(cyber::capi ALIAS cyber_capi)
 target_include_directories(cyber_capi PUBLIC include)
 target_link_libraries(cyber_capi PUBLIC cyber_core cyber_bake cyber_imageio cyber_quadrangulate)
 
+# The UV atlas entry points (cyber_uv_atlas) are compiled in only when the UV
+# module is built; the symbols are always declared so the ABI stays stable.
+if(TARGET cyber_uv)
+    target_link_libraries(cyber_capi PUBLIC cyber_uv)
+    target_compile_definitions(cyber_capi PRIVATE CYBER_CAPI_WITH_UV)
+endif()
+
 # The C-facing version mirrors the CMake project() version.
 target_compile_definitions(cyber_capi PRIVATE
     CYBER_CAPI_VERSION_MAJOR=${PROJECT_VERSION_MAJOR}
@@ -29,6 +36,10 @@ if(CYBER_BUILD_CAPI_SHARED)
     )
     target_include_directories(cyber_capi_shared PUBLIC include)
     target_link_libraries(cyber_capi_shared PRIVATE cyber_core cyber_bake cyber_imageio cyber_quadrangulate)
+    if(TARGET cyber_uv)
+        target_link_libraries(cyber_capi_shared PRIVATE cyber_uv)
+        target_compile_definitions(cyber_capi_shared PRIVATE CYBER_CAPI_WITH_UV)
+    endif()
     set_target_properties(cyber_capi_shared PROPERTIES
         OUTPUT_NAME cyber_capi
         POSITION_INDEPENDENT_CODE ON

@@ -118,6 +118,39 @@ typedef struct CyberStats {
 /* Computes topology statistics for a mesh. */
 CyberStatus cyber_mesh_stats(const CyberMesh* mesh, CyberStats* out);
 
+/* ---- UV atlas -------------------------------------------------------- */
+
+/* Automatic UV-atlas parameters (POD mirror of cyber::uv::AtlasOptions).
+ * Fill with cyber_default_atlas_params, then override as needed. */
+typedef struct CyberAtlasParams {
+    float maxChartAngleDegrees; /* normal-coherence bound for chart growth */
+    float packMargin;           /* gap around each island, in UV units */
+    int textureSize;            /* resolution for the texel-density readout */
+} CyberAtlasParams;
+
+/* Aggregate atlas quality/packing report. */
+typedef struct CyberAtlasResult {
+    int chartCount;             /* number of charts (islands) */
+    size_t seamEdges;           /* edges cut to form the charts */
+    float maxAngleDistortion;   /* worst conformal error across charts, [0,1) */
+    float rmsAngleDistortion;   /* RMS conformal error across charts */
+    int flippedCharts;          /* charts with mirrored net UV winding */
+    int fallbackCharts;         /* charts unwrapped by planar-projection fallback */
+    float packedArea;           /* fraction of the unit square covered */
+    float texelDensity;         /* texels per UV unit at the packed scale */
+} CyberAtlasResult;
+
+/* Fills params with the engine defaults. No-op on NULL. */
+void cyber_default_atlas_params(CyberAtlasParams* params);
+
+/* Automatic UV atlas: seams `mesh` into normal-coherent charts, LSCM-unwraps
+ * each chart, packs them into the unit square and writes the per-corner UV
+ * attribute IN PLACE (so a subsequent cyber_mesh_save_obj emits vt / f v/vt).
+ * `params` may be NULL (defaults); `out` may be NULL. Returns CYBER_ERR_RUNTIME
+ * when the engine was built without the UV module. */
+CyberStatus cyber_uv_atlas(CyberMesh* mesh, const CyberAtlasParams* params,
+                           CyberAtlasResult* out);
+
 /* --- Accessors used by the language bindings (Python, Swift) ------------- */
 
 /* Creates an empty mesh handle (release with cyber_mesh_destroy/free). */

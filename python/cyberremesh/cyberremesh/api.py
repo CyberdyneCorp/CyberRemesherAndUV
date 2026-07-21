@@ -157,6 +157,52 @@ class RemeshParams:
         )
 
 
+@dataclass
+class AtlasParams:
+    """Automatic UV-atlas parameters (mirror of ``cyber::uv::AtlasOptions``)."""
+
+    # A face joins a growing chart while its normal stays within this angle of
+    # the chart's seed normal. Smaller => more, flatter charts (less angular
+    # distortion, more seams).
+    max_chart_angle_degrees: float = 40.0
+    pack_margin: float = 0.0  # gap around each island, in UV units
+    texture_size: int = 1024  # resolution for the texel-density readout
+
+    def _to_c(self) -> "_ffi.CyberAtlasParams":
+        return _ffi.CyberAtlasParams(
+            max_chart_angle_degrees=float(self.max_chart_angle_degrees),
+            pack_margin=float(self.pack_margin),
+            texture_size=int(self.texture_size),
+        )
+
+
+@dataclass
+class AtlasResult:
+    """Aggregate atlas quality/packing report (mirror of ``CyberAtlasResult``)."""
+
+    chart_count: int = 0
+    seam_edges: int = 0
+    max_angle_distortion: float = 0.0
+    rms_angle_distortion: float = 0.0
+    flipped_charts: int = 0
+    fallback_charts: int = 0
+    packed_area: float = 0.0
+    texel_density: float = 0.0
+
+    @classmethod
+    def _from_c(cls, c: "_ffi.CyberAtlasResult") -> "AtlasResult":
+        return cls(
+            chart_count=int(c.chart_count),
+            seam_edges=int(c.seam_edges),
+            max_angle_distortion=float(c.max_angle_distortion),
+            rms_angle_distortion=float(c.rms_angle_distortion),
+            flipped_charts=int(c.flipped_charts),
+            fallback_charts=int(c.fallback_charts),
+            packed_area=float(c.packed_area),
+            texel_density=float(c.texel_density),
+        )
+
+
 class Mesh:
     """A handle to an engine mesh.
 
@@ -219,6 +265,25 @@ class Mesh:
                 self.handle, str(path).encode("utf-8")
             )
         )
+
+    def unwrap_atlas(self, params: Optional["AtlasParams"] = None) -> "AtlasResult":
+        """Generate an automatic UV atlas for this mesh, IN PLACE.
+
+        Seams the mesh into normal-coherent charts, LSCM-unwraps each, packs
+        them into the unit square and writes the per-corner ``uv`` attribute, so
+        a subsequent :meth:`save_obj` emits ``vt`` / ``f v/vt``. Returns an
+        :class:`AtlasResult` with distortion and packing statistics.
+        """
+        if params is None:
+            params = AtlasParams()
+        c_params = params._to_c()
+        c_result = _ffi.CyberAtlasResult()
+        _check(
+            _ffi.get_lib().cyber_uv_atlas(
+                self.handle, ctypes.byref(c_params), ctypes.byref(c_result)
+            )
+        )
+        return AtlasResult._from_c(c_result)
 
     # -- queries ------------------------------------------------------------
     @property

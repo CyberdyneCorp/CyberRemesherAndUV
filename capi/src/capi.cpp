@@ -28,6 +28,9 @@
 #include "cyber/imageio/image.hpp"
 #include "cyber/core/progress.hpp"
 #include "cyber/core/remesh_params.hpp"
+#ifdef CYBER_CAPI_WITH_UV
+#include "cyber/uv/atlas.hpp"
+#endif
 
 // Version numbers are injected from the CMake project() version so this file
 // stays the single C-facing mirror of the engine version.
@@ -345,6 +348,63 @@ CyberStatus cyber_mesh_stats(const CyberMesh* mesh, CyberStats* out) {
         setError("cyber_mesh_stats: unknown error");
         return CYBER_ERR_RUNTIME;
     }
+}
+
+void cyber_default_atlas_params(CyberAtlasParams* params) {
+    if (params == nullptr) {
+        return;
+    }
+#ifdef CYBER_CAPI_WITH_UV
+    const cyber::uv::AtlasOptions defaults;
+    params->maxChartAngleDegrees = defaults.maxChartAngleDeg;
+    params->packMargin = defaults.pack.margin;
+    params->textureSize = defaults.pack.textureSize;
+#else
+    params->maxChartAngleDegrees = 40.0f;
+    params->packMargin = 0.0f;
+    params->textureSize = 1024;
+#endif
+}
+
+CyberStatus cyber_uv_atlas([[maybe_unused]] CyberMesh* mesh,
+                           [[maybe_unused]] const CyberAtlasParams* params,
+                           [[maybe_unused]] CyberAtlasResult* out) {
+#ifdef CYBER_CAPI_WITH_UV
+    if (mesh == nullptr) {
+        setError("cyber_uv_atlas: null mesh");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    try {
+        cyber::uv::AtlasOptions opts;
+        if (params != nullptr) {
+            opts.maxChartAngleDeg = params->maxChartAngleDegrees;
+            opts.pack.margin = params->packMargin;
+            opts.pack.textureSize = params->textureSize;
+        }
+        const cyber::uv::AtlasResult r = cyber::uv::unwrapAtlas(mesh->mesh, opts);
+        if (out != nullptr) {
+            out->chartCount = r.chartCount;
+            out->seamEdges = r.seamEdges;
+            out->maxAngleDistortion = r.maxAngleDistortion;
+            out->rmsAngleDistortion = r.rmsAngleDistortion;
+            out->flippedCharts = r.flippedCharts;
+            out->fallbackCharts = r.fallbackCharts;
+            out->packedArea = r.packedArea;
+            out->texelDensity = r.texelDensity;
+        }
+        clearError();
+        return r.ok ? CYBER_OK : CYBER_ERR_RUNTIME;
+    } catch (const std::exception& e) {
+        setError(std::string("cyber_uv_atlas: ") + e.what());
+        return CYBER_ERR_RUNTIME;
+    } catch (...) {
+        setError("cyber_uv_atlas: unknown error");
+        return CYBER_ERR_RUNTIME;
+    }
+#else
+    setError("cyber_uv_atlas: engine built without the UV module (CYBER_BUILD_UV=OFF)");
+    return CYBER_ERR_RUNTIME;
+#endif
 }
 
 CyberMesh* cyber_mesh_create(void) {

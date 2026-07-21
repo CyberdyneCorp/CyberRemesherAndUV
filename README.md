@@ -27,6 +27,18 @@ Both feed a pure-quad path (subdivision + surface-projected relaxation) for a
 QuadriFlow. GPL sources (AutoRemesher, its QuadCover/CoMISo path) were used only
 as idea references, never copied — see [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
 
+### Automatic UV atlas
+
+Beyond the interactive UV editor (hand-drawn seams, LSCM unwrap, packing,
+distortion overlay), the engine has a one-call automatic path: `Mesh.unwrap_atlas`
+(C: `cyber_uv_atlas`). It seams the mesh into normal-coherent charts, LSCM-unwraps
+each chart conformally, shelf-packs them into the unit square, and writes the
+per-corner UV attribute — mesh in, packed atlas out, no manual seams. It returns
+chart count, conformal (angle) distortion, flip count and packing efficiency. On
+the remeshed quad output it holds angular distortion under ~0.05 (conformal error,
+0 = angle-preserving) with no flipped charts. `examples/14_uv_atlas.py` renders the
+quad mesh next to its packed atlas, tinted by chart.
+
 ## Layout
 
 ```
