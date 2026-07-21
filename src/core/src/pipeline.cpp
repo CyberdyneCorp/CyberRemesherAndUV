@@ -3,8 +3,11 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <map>
+#include <thread>
 
 #include "cyber/core/bvh.hpp"
 #include "cyber/core/isotropic.hpp"
@@ -111,6 +114,33 @@ Mesh weldCoincidentVertices(const Mesh& mesh) {
         }
     }
     return Mesh::fromIndexed(welded, weldedFaces);
+}
+
+// Run fn over the vertex index range [0,n) split into hardware-concurrency chunks.
+// The relax loops are per-vertex independent, so the split is byte-identical to the
+// serial loop; each thread does enough work (thousands of BVH projections) that the
+// spawn/join overhead is negligible (unlike the tiny per-CG-iter spmv).
+template <typename Fn>
+void parallelVertexRange(std::size_t n, const Fn& fn) {
+    if (n == 0) {
+        return;
+    }
+    const std::size_t hw = std::max<std::size_t>(1, std::thread::hardware_concurrency());
+    const std::size_t workers = std::min<std::size_t>(hw, n);
+    if (workers <= 1) {
+        fn(std::size_t{0}, n);
+        return;
+    }
+    const std::size_t chunk = (n + workers - 1) / workers;
+    std::vector<std::thread> threads;
+    threads.reserve(workers);
+    for (std::size_t lo = 0; lo < n; lo += chunk) {
+        const std::size_t hi = std::min(n, lo + chunk);
+        threads.emplace_back([&fn, lo, hi] { fn(lo, hi); });
+    }
+    for (auto& t : threads) {
+        t.join();
+    }
 }
 
 // Tangential Laplacian step for an interior vertex: move toward the 1-ring
@@ -274,9 +304,18 @@ void relaxQuadMesh(Mesh& mesh, const ReferenceSurface& reference, float sharpEdg
 
     std::vector<Vec3> newPos(mesh.vertexCapacity());
     std::vector<bool> move(mesh.vertexCapacity(), false);
+    // Both per-vertex loops are independent (compute reads unchanged positions and writes
+    // its own newPos slot; project reads newPos and writes its own position slot), and the
+    // reference BVH is read-only — so running them across threads is byte-IDENTICAL (no
+    // reduction, per-vertex float ops). The dominant cost is the reference.project() BVH
+    // query per vertex per iteration; on a large source mesh this relax was ~half the whole
+    // remesh (8.3s on a 554k-tri source), embarrassingly parallel.
     for (int it = 0; it < iterations; ++it) {
         const float targetRadius = shapeMatch ? meanQuadEdge() * 0.70710678f : 0.0f;
         std::fill(move.begin(), move.end(), false);
+        // Compute pass stays serial: the target functions read the mesh's lazily-built
+        // topology/normal caches, which are not safe to populate concurrently. It is the
+        // cheap pass (no BVH).
         for (Index i = 0; i < mesh.vertexCapacity(); ++i) {
             const VertexId v{i};
             if (!mesh.isAlive(v) || constrained[i] || mesh.vertexEdges(v).empty()) {
@@ -286,13 +325,19 @@ void relaxQuadMesh(Mesh& mesh, const ReferenceSurface& reference, float sharpEdg
                                    : tangentialTarget(mesh, v, lambda);
             move[i] = true;
         }
-        for (Index i = 0; i < mesh.vertexCapacity(); ++i) {
-            if (!move[i]) {
-                continue;
+        // Project pass IS parallel: reference.project() is const with a local traversal
+        // stack (thread-safe), setPosition writes disjoint slots, and each vertex is
+        // independent — byte-identical to the serial loop. This is the expensive pass (a
+        // BVH closest-point query per vertex) and dominated the whole remesh on large meshes.
+        parallelVertexRange(mesh.vertexCapacity(), [&](std::size_t lo, std::size_t hi) {
+            for (std::size_t i = lo; i < hi; ++i) {
+                if (!move[i]) {
+                    continue;
+                }
+                mesh.setPosition(VertexId{static_cast<Index>(i)},
+                                 reference.empty() ? newPos[i] : reference.project(newPos[i]));
             }
-            mesh.setPosition(VertexId{i},
-                             reference.empty() ? newPos[i] : reference.project(newPos[i]));
-        }
+        });
     }
 }
 
@@ -595,15 +640,34 @@ PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSi
         // before the 4x split lifts the median quad angle a couple of degrees at no
         // CV / surface-deviation cost. Less-uniform bases (field-aligned) would trade
         // edge-length CV for that, so they keep the lighter default pass.
+        const bool pipeTime = std::getenv("CYBER_PIPE_TIME") != nullptr;
+        using PClk = std::chrono::steady_clock;
+        const auto pms = [](PClk::time_point a, PClk::time_point b) {
+            return std::chrono::duration_cast<std::chrono::milliseconds>(b - a).count();
+        };
+        auto pt = PClk::now();
         {
             const ReferenceSurface baseSurface(work, params.smoothNormalDegrees);
+            if (pipeTime) {
+                std::fprintf(stderr, "[pipe-time] baseSurface build (%zu src tris)=%ldms\n",
+                             work.faceCount(), pms(pt, PClk::now()));
+                pt = PClk::now();
+            }
             if (!baseSurface.empty()) {
                 const int baseRelaxIters = integerExtractor ? 40 : 10;
                 relaxQuadMesh(result.mesh, baseSurface, params.sharpEdgeDegrees,
                               baseRelaxIters, /*lambda=*/0.5f, shapeMatch);
             }
         }
+        if (pipeTime) {
+            std::fprintf(stderr, "[pipe-time] base relax=%ldms\n", pms(pt, PClk::now()));
+            pt = PClk::now();
+        }
         result.mesh = result.mesh.linearSubdivide();
+        if (pipeTime) {
+            std::fprintf(stderr, "[pipe-time] subdivide=%ldms\n", pms(pt, PClk::now()));
+            pt = PClk::now();
+        }
         // Linear subdivision only splits faces — the new vertices sit on the
         // coarse (quarter-density) base's flat facets, so the silhouette stays
         // faceted/jagged AND the split leaves many degenerate slivers. Build a
@@ -611,6 +675,10 @@ PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSi
         // onto it, then run tangential relaxation to de-sliver the quads while
         // following the original curvature (see relaxQuadMesh).
         const ReferenceSurface sourceSurface(work, params.smoothNormalDegrees);
+        if (pipeTime) {
+            std::fprintf(stderr, "[pipe-time] sourceSurface build=%ldms\n", pms(pt, PClk::now()));
+            pt = PClk::now();
+        }
         if (!sourceSurface.empty()) {
             for (Index vi = 0; vi < result.mesh.vertexCapacity(); ++vi) {
                 const VertexId v{vi};
@@ -620,6 +688,9 @@ PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSi
             }
             relaxQuadMesh(result.mesh, sourceSurface, params.sharpEdgeDegrees,
                           finalRelaxIters, finalRelaxLambda, shapeMatch);
+        }
+        if (pipeTime) {
+            std::fprintf(stderr, "[pipe-time] final project+relax=%ldms\n", pms(pt, PClk::now()));
         }
     }
     countFaces(result.mesh, result.stats);
