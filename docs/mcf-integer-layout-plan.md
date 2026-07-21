@@ -127,6 +127,22 @@ tube-aware coarsening), mirroring QF's pipeline rather than our MIQ/isoline path
 quad-cover behind the option), A/B on the bunny ears + full corpus, promote if it wins. Success =
 bunny ear irregulars toward QF's ~8 and overall irr% at/below QF, without regressing the corpus.
 
+**Confirmation experiment (before finishing M5b/M6) — ⚠️ FLOW IS NOT THE DIFFERENTIATOR.** Discovery:
+`computeIntegerGrid` (quad_extract.cpp) ALREADY runs a min-cost flow (`MinCostFlow`, cost-1 arcs) into
+`BuildTriangleManifold` + `FixValence` — so the integer path already has QF's flow-based layout, and it
+lands at bunny irr 12–14 (worse than quad-cover's 5). The original "we lack the min-cost-flow layout"
+premise was wrong. `integerGridFromMcf` (quad_extract.cpp, gated by `CYBER_MCF`, SciPP-only) builds an
+`IntegerGrid` from the M2–M3c SciPP flow and runs the SAME extraction. Bunny A/B (target 3000, integer):
+existing flow → 2543 q, irr 11.6 %, CV 0.39; **MCF flow → 1796 q, irr 7.3 %, CV 0.71**. The MCF flow does
+change the result (fewer singularities, even in absolute count) but undershoots the count and blows up
+edge-CV, and neither reaches quad-cover (5 % / 0.33) or QF (4 % / 0.17). **Conclusion:** a faithful QF
+flow alone does not close the gap; the remaining distance is the FIELD (QF's orientation+position
+hierarchy vs `computePositionField`) and EXTRACTION ROBUSTNESS at coarse counts, not the flow. M5b (a
+new tracer) is unnecessary — `BuildTriangleManifold` already exists. The M0–M3c SciPP flow is kept as a
+clean, tested, dependency-free component and an A/B lever; further quality work should target the field
+/ extraction, not the flow. Default engine (quad-cover) is unaffected — all MCF code is `CYBER_MCF`- and
+`CYBER_WITH_SCIPP`-gated.
+
 ## Risks
 
 - **Scale/perf of the flow solve** — meshes have 10k+ dual edges; `maximum_flow` must be fast on

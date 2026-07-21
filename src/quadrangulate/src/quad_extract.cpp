@@ -13,11 +13,13 @@
 #include "cyber/quadrangulate/position_field.hpp"
 
 #include "cyber/quadrangulate/field_quadrangulator.hpp"
+#include "cyber/quadrangulate/mcf_layout.hpp"
 
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <deque>
 #include <map>
 #include <numeric>
@@ -3556,8 +3558,68 @@ void writeDiffsBackToSubMesh(const IntegerGrid& g, SubMesh& m) {
 
 }  // namespace
 
+#ifdef CYBER_HAVE_SCIPP
+// Confirmation experiment (docs/mcf-integer-layout-plan.md): build the IntegerGrid from
+// the standalone SciPP min-cost-flow port (buildMcfEdgeInfo -> buildMcfConstraints ->
+// buildMcfFlowSetup -> solveMcfFlow) instead of the in-file MinCostFlow, then run the
+// SAME extraction. Lets us A/B whether the flow implementation is what separates our
+// integer path (irr 12-14) from QuadriFlow (irr 4). Gated by CYBER_MCF; returns an empty
+// grid (caller falls back) if the solve is unavailable/failed.
+IntegerGrid integerGridFromMcf(const Mesh& mesh, const PositionField& field) {
+    IntegerGrid g;
+    const McfEdgeInfo info = buildMcfEdgeInfo(mesh, field);
+    const McfConstraints con = buildMcfConstraints(mesh, field, info);
+    const McfFlowSetup setup = buildMcfFlowSetup(mesh, info, con);
+    const McfSolveResult res = solveMcfFlow(info, con, setup);
+    if (!res.valid || info.faceVerts.empty()) {
+        return g;
+    }
+    g.tris = info.faceVerts;
+    const int nTri = static_cast<int>(g.tris.size());
+    std::map<std::pair<Index, Index>, int> heMap;
+    for (int t = 0; t < nTri; ++t) {
+        for (int j = 0; j < 3; ++j) {
+            heMap[{g.tris[static_cast<std::size_t>(t)][static_cast<std::size_t>(j)],
+                   g.tris[static_cast<std::size_t>(t)][static_cast<std::size_t>((j + 1) % 3)]}] = t * 3 + j;
+        }
+    }
+    g.e2e.assign(static_cast<std::size_t>(nTri) * 3, -1);
+    for (int t = 0; t < nTri; ++t) {
+        for (int j = 0; j < 3; ++j) {
+            const auto it = heMap.find({g.tris[static_cast<std::size_t>(t)][static_cast<std::size_t>((j + 1) % 3)],
+                                        g.tris[static_cast<std::size_t>(t)][static_cast<std::size_t>(j)]});
+            if (it != heMap.end()) {
+                g.e2e[static_cast<std::size_t>(t * 3 + j)] = it->second;
+            }
+        }
+    }
+    g.edgeDiff.resize(res.edgeDiff.size());
+    for (std::size_t i = 0; i < res.edgeDiff.size(); ++i) {
+        g.edgeDiff[i] = Int2{res.edgeDiff[i].x, res.edgeDiff[i].y};
+    }
+    g.faceEdgeIds = info.faceEdgeIds;
+    g.orients = con.faceEdgeOrients;
+    for (const auto& [f, idx] : info.posSingularities) {
+        g.singular.insert(f);
+    }
+    g.flow = res.flow;
+    g.supply = res.supply;
+    return g;
+}
+#endif
+
 Mesh extractIntegerQuadMesh(const Mesh& mesh, const PositionField& field) {
-    IntegerGrid g = computeIntegerGrid(mesh, field);
+    IntegerGrid g;
+#ifdef CYBER_HAVE_SCIPP
+    if (std::getenv("CYBER_MCF") != nullptr) {
+        g = integerGridFromMcf(mesh, field);
+    }
+    if (g.tris.empty()) {
+        g = computeIntegerGrid(mesh, field);
+    }
+#else
+    g = computeIntegerGrid(mesh, field);
+#endif
     fixFlipHierarchy(g);  // Phase 5b: greedy flip repair (fast, the bulk of the win)
     const SubMesh m = subdivideToUnitCells(g, mesh, field, 1);
     // QuadriFlow's ComputeIndexMap additionally repairs folds on the *unit* grid (a 2nd

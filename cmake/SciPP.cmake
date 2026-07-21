@@ -62,9 +62,11 @@ endfunction()
 
 # Configure -> build -> install one vendored CMake project into `prefix`.
 function(_cyber_scipp_stage src prefix jobs extra_args name)
+    # -fPIC so the static libs can be linked into cyber_capi_shared (a .so).
     execute_process(
         COMMAND ${CMAKE_COMMAND} -S "${src}" -B "${src}/build"
-                -DCMAKE_BUILD_TYPE=Release "-DCMAKE_INSTALL_PREFIX=${prefix}" ${extra_args}
+                -DCMAKE_BUILD_TYPE=Release "-DCMAKE_INSTALL_PREFIX=${prefix}"
+                -DCMAKE_POSITION_INDEPENDENT_CODE=ON ${extra_args}
         RESULT_VARIABLE _rc)
     if(NOT _rc EQUAL 0)
         message(FATAL_ERROR "cyber_scipp: failed to configure ${name}")
