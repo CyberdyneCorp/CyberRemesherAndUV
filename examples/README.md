@@ -24,6 +24,10 @@ so quad-dominance reads at a glance.
 | `09_test_models.py` | remesh real community test models (spot, fandisk, bunny…) | `output/09_gallery.png` (+ `09_<model>.png`) |
 | `10_vs_reference.py` | side-by-side vs the QuadriFlow reference (both quadrangulators) | `output/10_vs_<model>.png` |
 | `11_benchmark.py` | scored corpus benchmark vs QuadriFlow (surface fidelity, angles, singularities, adaptivity) | `output/11_benchmark.png` |
+| `12_cad_robustness.py` | topological validity on CAD parts vs QuadriFlow | `output/12_cad_robustness.png` |
+| `13_broken_robustness.py` | clean quad output from deliberately-malformed input | `output/13_broken_robustness.png` |
+| `14_uv_atlas.py` | automatic UV atlas (auto-seam → LSCM → re-orient → skyline pack) | `output/14_uv_atlas.png` |
+| `15_uv_vs_xatlas.py` | UV atlas benchmark vs the xatlas reference (distortion / charts / packing) | `output/15_uv_vs_xatlas.png` |
 | `run_all.py` | runs all of the above + a stitched `output/gallery.png` | `output/gallery.png` |
 
 `08_load_model.py` loads a mesh and converts it to quads. It defaults to a

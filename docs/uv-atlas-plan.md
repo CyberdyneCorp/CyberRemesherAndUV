@@ -89,11 +89,36 @@ Re-orientation gives the biggest lift on box-like meshes (the cube's 45°-diamon
 faces become axis-aligned squares and double their coverage); skyline packing then
 adds a steady 6–7 points by filling the gaps between the irregular organic charts.
 
+## Benchmark vs xatlas
+
+`examples/15_uv_vs_xatlas.py` unwraps the *same* quad-remeshed geometry two ways —
+`unwrap_atlas` and [xatlas](https://github.com/jpcy/xatlas) (the de-facto open
+reference, `pip install xatlas`) on the triangulated quads — and scores both with
+the identical conformal metric (singular-value spread of each triangle's UV
+Jacobian, in each atlas's true texel space):
+
+| model        | ours charts | ours meanD | ours cov | xatlas charts | xatlas meanD | xatlas cov |
+|--------------|------------:|-----------:|---------:|--------------:|-------------:|-----------:|
+| cube         | 6           | 0.000      | 100%     | 6             | 0.000        | 95%        |
+| torus        | 39          | 0.004      | 45%      | 14            | 0.007        | 52%        |
+| bumpy sphere | 65          | 0.008      | 47%      | 28            | 0.017        | 58%        |
+| sphere       | 19          | 0.005      | 50%      | 8             | 0.007        | 57%        |
+
+**We win conformal distortion (~2× lower)** — the tight normal-coherent charts
+stay flat, so LSCM is nearly angle-preserving. **xatlas wins chart count and
+packing** — it merges far more aggressively (fewer seams) and packs ~7 points
+tighter. That is the tradeoff to close next: our distortion headroom is large
+enough to afford a looser merge (fewer, slightly less flat charts) and a
+polygon-aware packer.
+
 ## Known limitations / next steps
 
 - **Packing** — the skyline packer works on axis-aligned bounding *boxes*, so an
   L-shaped or ring chart still reserves its whole box. True polygon nesting (pack
   against the chart outline, not its box) is the next lever, worth most on the
   concave organic charts (the torus/sphere rings visibly waste their interior).
-- **Benchmark** — compare distortion + packing against xatlas / Blender Smart UV
-  Project on a shared corpus, mirroring the remesher-vs-QuadriFlow harness.
+- **Close the compactness gap to xatlas** — the benchmark above shows xatlas
+  using ~2–3× fewer charts and ~7 points more coverage. Our distortion lead is
+  large enough to spend: a looser, distortion-bounded merge (raise the merge cone
+  above the growth cone up to a distortion cap) plus polygon nesting should reach
+  parity on seams/packing while staying ahead on distortion.

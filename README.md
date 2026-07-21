@@ -41,7 +41,10 @@ mesh in, packed atlas out, no manual seams. It returns chart count, conformal
 it holds angular distortion under ~0.05 (conformal error, 0 = angle-preserving)
 with no flipped charts; min-area re-orientation roughly doubles usable coverage on
 box-like meshes (45°-diamond faces → axis-aligned squares). `examples/14_uv_atlas.py`
-renders the quad mesh next to its packed atlas, tinted by chart.
+renders the quad mesh next to its packed atlas, tinted by chart, and
+`examples/15_uv_vs_xatlas.py` benchmarks it against [xatlas](https://github.com/jpcy/xatlas)
+(the open reference): CyberRemesher holds ~2× lower conformal distortion, while
+xatlas still packs tighter with fewer charts.
 
 ## Layout
 
