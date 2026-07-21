@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstdio>
 #include <map>
+#include <queue>
 #include <thread>
 
 #include "cyber/core/bvh.hpp"
@@ -114,6 +115,107 @@ Mesh weldCoincidentVertices(const Mesh& mesh) {
         }
     }
     return Mesh::fromIndexed(welded, weldedFaces);
+}
+
+// Make every face's winding agree with its neighbours (flood-fill orientation
+// repair). Inconsistent winding — common in AI-generated, scanned, and CAD-export
+// meshes — leaves the field/extractor with contradictory normals and yields a
+// non-manifold quad output. BFS over faces across MANIFOLD shared edges (exactly two
+// faces): two consistently-oriented faces traverse a shared edge in OPPOSITE
+// directions, so a neighbour that traverses it the SAME way is flipped. Each closed
+// component is then flipped as a whole to outward (positive signed volume). On
+// already-consistent, outward input (the corpus) nothing flips — the result is
+// bit-identical, preserving determinism.
+Mesh orientFacesConsistently(const Mesh& mesh) {
+    std::vector<Vec3> pos;
+    std::vector<std::vector<Index>> faces;
+    mesh.toIndexed(pos, faces);
+    if (faces.empty()) {
+        return mesh;
+    }
+    // Undirected edge -> list of (face, loopIsMinToMax): whether the face's loop
+    // traverses the edge from min(a,b) to max(a,b).
+    std::map<std::pair<Index, Index>, std::vector<std::pair<int, bool>>> edgeMap;
+    for (int fi = 0; fi < static_cast<int>(faces.size()); ++fi) {
+        const auto& f = faces[static_cast<std::size_t>(fi)];
+        const std::size_t n = f.size();
+        for (std::size_t k = 0; k < n; ++k) {
+            const Index a = f[k], b = f[(k + 1) % n];
+            edgeMap[{std::min(a, b), std::max(a, b)}].push_back({fi, a < b});
+        }
+    }
+    std::vector<char> visited(faces.size(), 0);
+    std::vector<char> flip(faces.size(), 0);  // effective direction = loopIsMinToMax XOR flip
+    for (int s = 0; s < static_cast<int>(faces.size()); ++s) {
+        if (visited[static_cast<std::size_t>(s)]) {
+            continue;
+        }
+        std::vector<int> comp;
+        std::queue<int> q;
+        q.push(s);
+        visited[static_cast<std::size_t>(s)] = 1;
+        bool closedComponent = true;  // no boundary/non-manifold edges seen
+        while (!q.empty()) {
+            const int fi = q.front();
+            q.pop();
+            comp.push_back(fi);
+            const auto& f = faces[static_cast<std::size_t>(fi)];
+            const std::size_t n = f.size();
+            for (std::size_t k = 0; k < n; ++k) {
+                const Index a = f[k], b = f[(k + 1) % n];
+                const auto key = std::make_pair(std::min(a, b), std::max(a, b));
+                const auto& incident = edgeMap[key];
+                if (incident.size() != 2) {
+                    closedComponent = false;  // open patch: signed volume is meaningless
+                    continue;  // boundary or non-manifold edge: don't propagate across
+                }
+                for (const auto& [nf, nfwd] : incident) {
+                    if (nf == fi || visited[static_cast<std::size_t>(nf)]) {
+                        continue;
+                    }
+                    const bool effI = (a < b) != (flip[static_cast<std::size_t>(fi)] != 0);
+                    // neighbour must end up with the opposite effective direction.
+                    const bool wantJ = !effI;
+                    flip[static_cast<std::size_t>(nf)] = (nfwd != wantJ) ? 1 : 0;
+                    visited[static_cast<std::size_t>(nf)] = 1;
+                    q.push(nf);
+                }
+            }
+        }
+        // Orient the whole component outward: flip all if its signed volume is negative.
+        // Only meaningful for a CLOSED component — an open patch's signed volume is
+        // arbitrary, so leave it as the flood-fill made it (consistent, input-preserving).
+        if (!closedComponent) {
+            continue;
+        }
+        double vol = 0.0;
+        for (const int fi : comp) {
+            const auto& f = faces[static_cast<std::size_t>(fi)];
+            const bool fl = flip[static_cast<std::size_t>(fi)] != 0;
+            for (std::size_t k = 1; k + 1 < f.size(); ++k) {
+                const Vec3 p0 = pos[f[0]];
+                const Vec3 p1 = pos[fl ? f[f.size() - k] : f[k]];
+                const Vec3 p2 = pos[fl ? f[f.size() - k - 1] : f[k + 1]];
+                vol += static_cast<double>(dot(p0, cross(p1, p2))) / 6.0;
+            }
+        }
+        if (vol < 0.0) {
+            for (const int fi : comp) {
+                flip[static_cast<std::size_t>(fi)] ^= 1;
+            }
+        }
+    }
+    std::size_t flipped = 0;
+    for (std::size_t fi = 0; fi < faces.size(); ++fi) {
+        if (flip[fi]) {
+            std::reverse(faces[fi].begin(), faces[fi].end());
+            ++flipped;
+        }
+    }
+    if (flipped == 0) {
+        return mesh;  // already consistent + outward: bit-identical passthrough
+    }
+    return Mesh::fromIndexed(pos, faces);
 }
 
 // Run fn over the vertex index range [0,n) split into hardware-concurrency chunks.
@@ -423,6 +525,7 @@ PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSi
     Mesh work = input;
     work.triangulate();
     work = weldCoincidentVertices(work);  // fuse unwelded coincident patches (seam fix)
+    work = orientFacesConsistently(work);  // repair inconsistent face winding (robustness)
     const double area = totalSurfaceArea(work);
     const EdgeLengthResult lengthResult = targetEdgeLength(area, effectiveQuads, params.edgeScale);
     if (!lengthResult.ok()) {
