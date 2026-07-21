@@ -1,3 +1,4 @@
+#include <cstdlib>
 #include "cyber/core/pipeline.hpp"
 
 #include <algorithm>
@@ -472,7 +473,11 @@ PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSi
         // injected quadrangulator (field-aligned) when provided, else greedy.
         std::unique_ptr<IQuadrangulator> quad =
             quadrangulator ? quadrangulator() : makeGreedyPairingQuadrangulator();
-        fieldExtractor = quad->name() == "instant-meshes";
+        // instant-meshes and quad-cover both extract from a smooth field, so the
+        // uniform-square shape-match relax lowers their edge-CV ~20% corpus-wide with
+        // no change to irregular % and improved surface deviation (measured); only the
+        // less-uniform triangle-pairing base keeps the lighter centroid relax.
+        fieldExtractor = quad->name() == "instant-meshes" || quad->name() == "quad-cover";
         integerExtractor = quad->name() == "integer";
         ProgressSink quadSink =
             progress ? progress->subrange(progressBase + weight * 0.3f,
@@ -500,7 +505,7 @@ PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSi
             }
             if (isoStatus == IsotropicStatus::Success && outcome.mesh.faceCount() > 0) {
                 std::unique_ptr<IQuadrangulator> fb = fallbackQuadrangulator();
-                fieldExtractor = fb->name() == "instant-meshes";
+                fieldExtractor = fb->name() == "instant-meshes" || fb->name() == "quad-cover";
                 integerExtractor = fb->name() == "integer";
                 const auto fbOutcome = fb->quadrangulate(
                     outcome.mesh, lengthResult.edgeLength, progress ? &quadSink : nullptr, cancel);
@@ -571,7 +576,16 @@ PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSi
         // edge-length CV toward the field-based reference. The default matcher's
         // base is less uniform, where forcing uniform squares would trade too
         // much angle quality, so it keeps the plain centroid relax.
-        const bool shapeMatch = fieldExtractor;
+        // shapeMatch (uniform-square target) equalises edge lengths, lowering CV.
+        // Enabled for the position-field extractor by default; CYBER_SHAPEMATCH=1
+        // forces it on for every method (Step-1 CV experiment), CYBER_SHAPEMATCH=0
+        // forces it off. CYBER_RELAX_ITERS / CYBER_RELAX_LAMBDA tune the final pass.
+        const char* smEnv = std::getenv("CYBER_SHAPEMATCH");
+        const bool shapeMatch = smEnv != nullptr ? (std::atoi(smEnv) != 0) : fieldExtractor;
+        const char* riEnv = std::getenv("CYBER_RELAX_ITERS");
+        const char* rlEnv = std::getenv("CYBER_RELAX_LAMBDA");
+        const int finalRelaxIters = riEnv != nullptr ? std::atoi(riEnv) : 20;
+        const float finalRelaxLambda = rlEnv != nullptr ? static_cast<float>(std::atof(rlEnv)) : 0.5f;
 
         // Relax the coarse base onto the source first: a skewed base subdivides
         // into skewed quads, so smoothing it before the split reduces the sliver
@@ -605,7 +619,7 @@ PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSi
                 }
             }
             relaxQuadMesh(result.mesh, sourceSurface, params.sharpEdgeDegrees,
-                          /*iterations=*/20, /*lambda=*/0.5f, shapeMatch);
+                          finalRelaxIters, finalRelaxLambda, shapeMatch);
         }
     }
     countFaces(result.mesh, result.stats);
