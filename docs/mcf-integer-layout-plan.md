@@ -94,9 +94,18 @@ tube-aware coarsening), mirroring QF's pipeline rather than our MIQ/isoline path
   component's residual becomes reducible by the flow. Pure integer math (no SciPP). Test: on a clean
   no-feature grid every variable is free, the residual stays zero so `edgeDiff` is untouched, and
   interior edges' variables are referenced by two face slots; full suite (256) green.
-- **M3c — max-flow solve — TODO.** Build the CSR capacity graph from the constraints, solve with
-  `scipp::sparse::csgraph::maximum_flow`, iterate capacity to full flow, apply back onto `edge_diff`
-  (the first SciPP-using milestone).
+- **M3c — max-flow solve — ✅ DONE.** `solveMcfFlow(McfEdgeInfo, McfConstraints, McfFlowSetup)` in
+  `src/mcf_layout.cpp` (SciPP-gated) is a single-level port of `optimize_integer_constraints`
+  (optimizer.cpp): from each face's oriented edge-diff residual it builds the flow network
+  (source → surplus equations, deficit equations → sink, variable-arcs between equations), solves it
+  with `scipp::sparse::csgraph::maximum_flow`, and applies the flow back onto a working `edgeDiff`.
+  Each regular arc gets a unique middle node so parallel arcs stay distinct in the CSR (`from_coo`
+  sums duplicates); `edge_capacity` is raised (≤10 rounds) until the flow saturates supply. The
+  QuadriFlow hierarchy (`DownsampleEdgeGraph`) is skipped — a single finest-level solve is correct,
+  just slower. Tests (`test_mcf_flow.cpp`, built under `-DCYBER_WITH_SCIPP=ON`): an already-seamless
+  grid is left untouched (supply 0, full flow); a perturbed edge is **corrected back to a seamless
+  layout** (supply > 0, full flow, every non-singular face's oriented sum returns to zero). SciPP
+  suite (259) + default suite (256) green.
 
 **M4 — Min-cost refinement (optional).** Successive-shortest-paths over the residual graph using
 `csgraph::johnson`/`dijkstra` for minimum-cost placement (QF's `use_minimum_cost_flow` path).

@@ -68,7 +68,8 @@ endif()
 # Min-cost-flow integer layout (M1): the SciPP-linkage self-test builds only when
 # the vendored SciPP is enabled (cyber_quadrangulate carries scipp::scipp then).
 if(CYBER_WITH_SCIPP)
-    target_sources(cyber_tests PRIVATE quadrangulate/test_mcf_layout.cpp)
+    target_sources(cyber_tests PRIVATE quadrangulate/test_mcf_layout.cpp
+                                        quadrangulate/test_mcf_flow.cpp)
 endif()
 cyber_set_warnings(cyber_tests)
 

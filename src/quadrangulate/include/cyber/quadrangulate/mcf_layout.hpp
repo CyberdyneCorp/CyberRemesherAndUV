@@ -86,4 +86,23 @@ struct McfFlowSetup {
 [[nodiscard]] McfFlowSetup buildMcfFlowSetup(const Mesh& mesh, const McfEdgeInfo& info,
                                              const McfConstraints& con);
 
+// QuadriFlow-style integer max-flow (M3c): single-level port of
+// optimize_integer_constraints (optimizer.cpp). Builds the flow network from the
+// per-equation residuals (each face's oriented edge_diff sum) and the variable-arcs,
+// solves it with scipp::sparse::csgraph::maximum_flow (each arc gets a unique middle
+// node so parallel arcs stay distinguishable in the CSR), and applies the resulting
+// flow back onto edge_diff — yielding an integer-seamless layout when `fullFlow`.
+// `edge_capacity` is raised (up to 10 rounds) until the flow saturates supply. Needs
+// SciPP: returns an invalid result if built without CYBER_WITH_SCIPP.
+struct McfSolveResult {
+    std::vector<Vec2i> edgeDiff;  // corrected layout (integer-seamless when fullFlow)
+    int supply = 0;               // total residual the flow had to move
+    int flow = 0;                 // flow achieved; == supply iff full
+    bool fullFlow = false;
+    bool valid = false;
+};
+
+[[nodiscard]] McfSolveResult solveMcfFlow(const McfEdgeInfo& info, const McfConstraints& con,
+                                          const McfFlowSetup& setup);
+
 }  // namespace cyber::remesh
