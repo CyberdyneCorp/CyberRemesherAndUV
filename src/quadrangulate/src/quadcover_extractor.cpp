@@ -11,6 +11,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -172,6 +173,13 @@ SeamlessUv computeSeamlessUvNative(const Mesh& mesh, float targetEdgeLength, flo
         return uv;
     }
 
+    const bool timing = std::getenv("CYBER_QC_TIME") != nullptr;
+    const auto tick = []() { return std::chrono::steady_clock::now(); };
+    const auto ms = [](auto a, auto b) {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(b - a).count();
+    };
+    auto t0 = tick();
+
     const ReferenceSurface reference(work, 0.0f);
     IsotropicOptions iso;
     iso.targetEdgeLength = targetEdgeLength;
@@ -181,6 +189,7 @@ SeamlessUv computeSeamlessUvNative(const Mesh& mesh, float targetEdgeLength, flo
         logNative(false, "isotropic remesh failed (or cancelled)");
         return uv;
     }
+    const auto tIso = tick();
     // Re-tag features on the REMESHED mesh: the isotropic stage preserves the sharp geometry
     // (feature vertices are never smoothed off) but the newly-created edges do not inherit the
     // feature flag, so the seam logic in buildSeamlessSetup would see none. Re-detect them by
@@ -198,6 +207,7 @@ SeamlessUv computeSeamlessUvNative(const Mesh& mesh, float targetEdgeLength, flo
         logNative(false, "setup invalid");
         return uv;
     }
+    const auto tSetup = tick();
     if (std::getenv("CYBER_QC_DEBUG") != nullptr) {
         std::size_t featureEdges = 0;
         for (Index ei = 0; ei < work.edgeCapacity(); ++ei) {
@@ -221,6 +231,12 @@ SeamlessUv computeSeamlessUvNative(const Mesh& mesh, float targetEdgeLength, flo
     if (!param.valid) {
         logNative(false, "parameterization invalid (or cancelled)");
         return uv;
+    }
+    const auto tSolve = tick();
+    if (timing) {
+        std::fprintf(stderr, "[qc-time] faces=%zu | isotropic=%ldms field+setup=%ldms solve=%ldms\n",
+                     work.faceCount(), static_cast<long>(ms(t0, tIso)),
+                     static_cast<long>(ms(tIso, tSetup)), static_cast<long>(ms(tSetup, tSolve)));
     }
 
     // Assemble the seamless UV on the remeshed triangles from the per-corner parameterization.

@@ -657,7 +657,9 @@ int solveSeamlessReduced(accel::IBackend& backend, std::size_t nCut,
     std::vector<float> w(W, 0.0f);
     int totalCg = 0;
     const double ridge = 1e-8;
+    int maskedSolveCalls = 0;
     const auto maskedSolve = [&](const std::vector<char>& mask) {
+        ++maskedSolveCalls;
         // rhsEff = gReduced - A(wFixed), wFixed = w on !mask, 0 on mask.
         std::vector<float> wFixed(W, 0.0f);
         for (std::size_t i = 0; i < W; ++i) {
@@ -779,34 +781,42 @@ int solveSeamlessReduced(accel::IBackend& backend, std::size_t nCut,
         if (cancel != nullptr && cancel->isCancelled()) {
             break;
         }
-        std::size_t closest = intFree.size();
-        double bestFrac = 2.0;
+        // Pin every still-free integer that is already confidently near an integer.
+        const auto pin = [&](std::size_t k) {
+            const std::size_t ri = intFree[k];
+            w[ri] = static_cast<float>(clampInt(static_cast<double>(w[ri])));
+            mask[ri] = 0;
+            intPinned[k] = 1;
+            --remaining;
+        };
+        std::vector<std::pair<double, std::size_t>> frac;  // (|frac|, k) of the still-free ints
         std::size_t pinnedThisRound = 0;
         for (std::size_t k = 0; k < intFree.size(); ++k) {
             if (intPinned[k]) {
                 continue;
             }
-            const std::size_t ri = intFree[k];
-            const double val = static_cast<double>(w[ri]);
-            const double frac = std::abs(val - std::round(val));
-            if (frac < bestFrac) {
-                bestFrac = frac;
-                closest = k;
-            }
-            if (frac <= kConfident) {
-                w[ri] = static_cast<float>(clampInt(val));
-                mask[ri] = 0;
-                intPinned[k] = 1;
-                --remaining;
+            const double val = static_cast<double>(w[intFree[k]]);
+            const double f = std::abs(val - std::round(val));
+            if (f <= kConfident) {
+                pin(k);
                 ++pinnedThisRound;
+            } else {
+                frac.emplace_back(f, k);
             }
         }
-        if (pinnedThisRound == 0) {  // nothing confident: pin the single closest
-            const std::size_t ri = intFree[closest];
-            w[ri] = static_cast<float>(clampInt(static_cast<double>(w[ri])));
-            mask[ri] = 0;
-            intPinned[closest] = 1;
-            --remaining;
+        // Nothing confident: pin a BATCH of the closest-to-integer frees, not just one, so the
+        // solve count stays O(log) rounds instead of O(intFree). Seamlessness is unaffected (the
+        // reduced integers are unconstrained); batching only rounds a few more before the solve
+        // settles, which the next re-solve absorbs. Cuts the many single-pin tail rounds.
+        if (pinnedThisRound == 0 && !frac.empty()) {
+            const std::size_t batch = std::max<std::size_t>(1, frac.size() / 8);
+            std::partial_sort(frac.begin(),
+                              frac.begin() + static_cast<std::ptrdiff_t>(std::min(batch, frac.size())),
+                              frac.end(),
+                              [](const auto& a, const auto& b) { return a.first < b.first; });
+            for (std::size_t i = 0; i < batch && i < frac.size(); ++i) {
+                pin(frac[i].second);
+            }
         }
         maskedSolve(mask);
     }
@@ -822,8 +832,8 @@ int solveSeamlessReduced(accel::IBackend& backend, std::size_t nCut,
     const bool dbg = std::getenv("CYBER_QC_DEBUG") != nullptr;
     if (dbg) {
         std::fprintf(stderr,
-                     "[qc] reduced: nCut=%zu seams=%zu vars=%zu free=%zu intFree=%zu totalCg=%d\n",
-                     nCut, nSeam, N, W, intFree.size(), totalCg);
+                     "[qc] reduced: nCut=%zu seams=%zu vars=%zu free=%zu intFree=%zu maskedSolves=%d totalCg=%d\n",
+                     nCut, nSeam, N, W, intFree.size(), maskedSolveCalls, totalCg);
     }
     return totalCg;
 }
