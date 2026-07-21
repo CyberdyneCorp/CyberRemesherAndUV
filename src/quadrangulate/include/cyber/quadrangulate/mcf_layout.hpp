@@ -36,7 +36,9 @@ struct McfEdgeInfo {
     std::vector<Vec2i> edgeDiff;                       // per unique edge: integer lattice diff
     std::vector<std::pair<Index, Index>> edgeValues;   // per edge: endpoints (canonical, v1<v2)
     std::vector<std::array<int, 3>> faceEdgeIds;       // per compact face: its 3 edge ids
+    std::vector<std::array<Index, 3>> faceVerts;       // per compact face: its 3 vertex ids
     std::vector<Index> faceList;                        // compact face index -> mesh FaceId value
+    std::vector<Vec3> orient;                          // per vertex: post-flip 4-RoSy orientation q
     std::unordered_map<int, Vec2i> posSingularities;   // compact face -> position singularity index
     std::unordered_map<int, int> orientSingularities;  // compact face -> orientation index (mod 4)
     bool valid = false;
@@ -47,5 +49,23 @@ struct McfEdgeInfo {
 // + BuildEdgeInfo (parametrizer-sing.cpp, parametrizer-int.cpp). Pure integer/vector
 // math — no SciPP dependency. See docs/mcf-integer-layout-plan.md (M2).
 [[nodiscard]] McfEdgeInfo buildMcfEdgeInfo(const Mesh& mesh, const PositionField& field);
+
+// QuadriFlow-style integer-constraint graph (M3a), built on top of McfEdgeInfo: the
+// per-face-edge orientation (`faceEdgeOrients`, aligning shared edges into one frame
+// via a disjoint-set orient tree), the undirected-edge -> two-directed-edge map
+// (`e2d`), the connected components of non-fixed edges (`sharpColor`), and each
+// component's net integer residual (`totalFlow`) that the M3 flow must zero out.
+// Pure integer math. Ports BuildIntegerConstraints' setup (parametrizer-int.cpp).
+struct McfConstraints {
+    std::vector<std::array<int, 3>> faceEdgeOrients;  // per compact face: edge orientations (mod 4)
+    std::vector<std::pair<int, int>> e2d;             // per edge: its two directed half-edge ids
+    std::vector<int> sharpColor;                      // per compact face: component id
+    int numComponents = 0;
+    std::vector<int> totalFlow;                       // per component: net (u+v) residual
+    bool valid = false;
+};
+
+[[nodiscard]] McfConstraints buildMcfConstraints(const Mesh& mesh, const PositionField& field,
+                                                 const McfEdgeInfo& info);
 
 }  // namespace cyber::remesh

@@ -7,6 +7,7 @@ add_library(cyber_quadrangulate STATIC
     src/seamless_solver.cpp
     src/mcf_layout.cpp
     src/mcf_edgediff.cpp
+    src/mcf_constraints.cpp
 )
 add_library(cyber::quadrangulate ALIAS cyber_quadrangulate)
 

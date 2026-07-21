@@ -88,4 +88,22 @@ TEST_CASE("edge_diff on a flat unit grid has no singularities and unit lattice s
         CHECK(std::abs(sum.x) <= 3);
         CHECK(std::abs(sum.y) <= 3);
     }
+
+    // --- M3a: the integer-constraint graph on the same clean grid ---
+    const remesh::McfConstraints con = buildMcfConstraints(mesh, field, info);
+    REQUIRE(con.valid);
+    REQUIRE(con.faceEdgeOrients.size() == info.faceEdgeIds.size());
+    // The flat grid has no sharp/feature interior edges, so all faces join one
+    // orientation component.
+    CHECK(con.numComponents == 1);
+    REQUIRE(con.totalFlow.size() == 1);
+    // Already integer-seamless (no position singularities) -> the flow has nothing
+    // to correct: the net residual is zero.
+    CHECK(con.totalFlow[0] == 0);
+    for (const auto& o : con.faceEdgeOrients) {
+        for (const int r : o) {
+            CHECK((r >= 0));
+            CHECK((r < 4));
+        }
+    }
 }

@@ -75,10 +75,22 @@ edges `(±1,0)/(0,±1)`, diagonals `(±1,±1)`), and every face's stored edge id
 cases) green. NOTE: this consumes the `computePositionField` field foundation (with the M8 multires +
 tube-aware coarsening), mirroring QF's pipeline rather than our MIQ/isoline path.
 
-**M3 — Integer constraint graph + max-flow.** Port QF `BuildIntegerConstraints` +
-`optimize_integer_constraints`: build the CSR capacity graph (faces/components as nodes,
-supply/demand from the edge-diff residuals), solve with `csgraph::maximum_flow`, iterate capacity
-until full flow, and apply the flow back onto `edge_diff` → an integer-seamless layout.
+**M3 — Integer constraint graph + max-flow.** Port QF `BuildIntegerConstraints` (365 lines) +
+`optimize_integer_constraints`, done in verified sub-parts:
+- **M3a — constraint graph — ✅ DONE.** `buildMcfConstraints(mesh, field, McfEdgeInfo)` in
+  `src/mcf_constraints.cpp` ports the setup half of `BuildIntegerConstraints`: per-face edge
+  orientations that align shared edges into one frame via a ported disjoint-set orient tree
+  (QuadriFlow's `DisajointOrientTree`), the undirected→directed edge map (`e2d`), the connected
+  components of non-fixed edges (`sharpColor`/`numComponents`), and each component's net integer
+  residual (`totalFlow`) the flow must cancel. M2 now also exposes the post-flip orientation
+  (`McfEdgeInfo::orient`) so the two stages read the same field. Shared field-math helpers factored
+  into `src/mcf_detail.hpp`. Pure integer math (no SciPP). Test: on a flat grid → one orientation
+  component, zero residual, valid orientations; full suite (256) green.
+- **M3b — full-flow variables — TODO.** The `variables` map + randomized pre-adjustment that makes
+  each component full-flow (parametrizer-int.cpp tail).
+- **M3c — max-flow solve — TODO.** Build the CSR capacity graph from the constraints, solve with
+  `scipp::sparse::csgraph::maximum_flow`, iterate capacity to full flow, apply back onto `edge_diff`
+  (the first SciPP-using milestone).
 
 **M4 — Min-cost refinement (optional).** Successive-shortest-paths over the residual graph using
 `csgraph::johnson`/`dijkstra` for minimum-cost placement (QF's `use_minimum_cost_flow` path).

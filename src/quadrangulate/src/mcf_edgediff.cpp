@@ -6,6 +6,7 @@
 #include <map>
 
 #include "cyber/core/math.hpp"
+#include "mcf_detail.hpp"
 
 // M2 of docs/mcf-integer-layout-plan.md: build QuadriFlow's per-edge integer
 // difference (`edge_diff`) from the position field. This is a faithful port of
@@ -19,67 +20,7 @@ namespace cyber::remesh {
 
 namespace {
 
-// Minimal double 3-vector so the floor-index math matches QuadriFlow's precision.
-struct D3 {
-    double x = 0, y = 0, z = 0;
-};
-D3 d3(const Vec3& v) { return {v.x, v.y, v.z}; }
-D3 operator+(D3 a, D3 b) { return {a.x + b.x, a.y + b.y, a.z + b.z}; }
-D3 operator-(D3 a, D3 b) { return {a.x - b.x, a.y - b.y, a.z - b.z}; }
-D3 operator*(D3 a, double s) { return {a.x * s, a.y * s, a.z * s}; }
-double dot(D3 a, D3 b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
-D3 cross(D3 a, D3 b) { return {a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x}; }
-D3 normalize(D3 a) {
-    const double n = std::sqrt(dot(a, a));
-    return n > 1e-20 ? a * (1.0 / n) : a;
-}
-
-int modulo(int a, int b) {
-    const int r = a % b;
-    return r < 0 ? r + b : r;
-}
-
-// Unsigned index from a signed loop counter (the tree builds -Werror=sign-conversion).
-constexpr std::size_t uz(int v) { return static_cast<std::size_t>(v); }
-
-// field-math.hpp rotate90_by: rotate q by amount*90 degrees about n.
-D3 rotate90by(D3 q, D3 n, int amount) {
-    return ((amount & 1) ? cross(n, q) : q) * (amount < 2 ? 1.0 : -1.0);
-}
-
-// field-math.hpp rshift90: rotate an integer lattice offset by amount*90 degrees.
-Vec2i rshift90(Vec2i s, int amount) {
-    if (amount & 1) {
-        s = {-s.y, s.x};
-    }
-    if (amount >= 2) {
-        s = {-s.x, -s.y};
-    }
-    return s;
-}
-
-// field-math.hpp compat_orientation_extrinsic_index_4: the relative 4-RoSy index
-// (a,b) aligning q0 and q1; b in [0,4). Returns (best_a, best_b).
-std::pair<int, int> orientIndex4(D3 q0, D3 n0, D3 q1, D3 n1) {
-    const D3 A[2] = {q0, cross(n0, q0)};
-    const D3 B[2] = {q1, cross(n1, q1)};
-    double best = -std::numeric_limits<double>::infinity();
-    int ba = 0, bb = 0;
-    for (int i = 0; i < 2; ++i) {
-        for (int j = 0; j < 2; ++j) {
-            const double s = std::abs(dot(A[i], B[j]));
-            if (s > best) {
-                best = s;
-                ba = i;
-                bb = j;
-            }
-        }
-    }
-    if (dot(A[ba], B[bb]) < 0) {
-        bb += 2;
-    }
-    return {ba, bb};
-}
+using namespace cyber::remesh::mcf;  // D3, rshift90, rotate90by, orientIndex4, modulo, uz
 
 // field-math.hpp middle_point: the point minimizing distance to both tangent planes.
 D3 middlePoint(D3 p0, D3 n0, D3 p1, D3 n1) {
@@ -166,6 +107,7 @@ McfEdgeInfo buildMcfEdgeInfo(const Mesh& mesh, const PositionField& field) {
         }
         const std::vector<VertexId> fv = mesh.faceVertices(f);
         tris.push_back({fv[0].value, fv[1].value, fv[2].value});
+        info.faceVerts.push_back({fv[0].value, fv[1].value, fv[2].value});
         info.faceList.push_back(i);
     }
     const int m = static_cast<int>(tris.size());
@@ -284,6 +226,17 @@ McfEdgeInfo buildMcfEdgeInfo(const Mesh& mesh, const PositionField& field) {
                 const int eID2 = info.faceEdgeIds[sz(eid / 3)][sz(eid % 3)];
                 info.edgeDiff[sz(eID2)] = diff2;
             }
+        }
+    }
+
+    // Expose the post-flip orientation (Q, mutated by step 1) so the M3 constraint
+    // builder reads the same field the singularity/edge_diff computation used.
+    info.orient.assign(mesh.vertexCapacity(), Vec3{0, 0, 0});
+    for (int f = 0; f < m; ++f) {
+        for (int k = 0; k < 3; ++k) {
+            const Index v = tris[uz(f)][uz(k)];
+            info.orient[v] = Vec3{static_cast<float>(Q[v].x), static_cast<float>(Q[v].y),
+                                  static_cast<float>(Q[v].z)};
         }
     }
 
