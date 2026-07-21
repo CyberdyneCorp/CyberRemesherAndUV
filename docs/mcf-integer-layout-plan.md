@@ -62,10 +62,18 @@ option. Verified: `-DCYBER_WITH_SCIPP=ON` imports SciPP 1.6.0, the tree builds, 
 Wrinkle solved: SciPPConfig does `find_dependency(NumPP)`, so `cmake/SciPP.cmake` sets `NumPP_DIR` +
 prepends the prefix to `CMAKE_PREFIX_PATH` before `find_package(SciPP)`.
 
-**M2 — edge_diff representation.** From our seamless field/UV build the per-(dual-)edge integer
-difference (u,v steps per edge) + the orientation & position singularity set (we already compute
-`singularityIndex` in `buildSeamlessSetup`). Port QF's `ComputeIndexMap` prefix + `EstimateSlope`
-essentials.
+**M2 — edge_diff representation — ✅ DONE.** `buildMcfEdgeInfo(mesh, PositionField)` in
+`src/mcf_edgediff.cpp` ports QuadriFlow's `ComputeOrientationSingularities` +
+`ComputePositionSingularities` + `BuildEdgeInfo` (parametrizer-sing.cpp, parametrizer-int.cpp) onto
+our `Mesh` + `PositionField` (orientation `q`, lattice position `o`, normal, `spacing`). Produces
+per-edge integer differences (`edgeDiff`, a `Vec2i` = lattice cells spanned in u,v), `edgeValues`,
+`faceEdgeIds`, and the orientation/position singularity sets — the exact representation the M3 flow
+operates on. **Pure integer/vector math (no SciPP)**, done in `double` to match QF's floor-index
+precision, so it is covered by the default build. Regression test (`test_mcf_edgediff.cpp`): a flat
+unit grid yields zero orientation/position singularities, every edge spans ≤1 cell per axis (axis
+edges `(±1,0)/(0,±1)`, diagonals `(±1,±1)`), and every face's stored edge ids close. Full suite (256
+cases) green. NOTE: this consumes the `computePositionField` field foundation (with the M8 multires +
+tube-aware coarsening), mirroring QF's pipeline rather than our MIQ/isoline path.
 
 **M3 — Integer constraint graph + max-flow.** Port QF `BuildIntegerConstraints` +
 `optimize_integer_constraints`: build the CSR capacity graph (faces/components as nodes,

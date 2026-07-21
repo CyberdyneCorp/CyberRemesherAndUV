@@ -12,6 +12,7 @@ add_executable(cyber_tests
     quadrangulate/test_quadcover_extractor.cpp
     quadrangulate/test_seamless_solver.cpp
     quadrangulate/test_quad_cleanup.cpp
+    quadrangulate/test_mcf_edgediff.cpp
     core/test_bvh.cpp
     core/test_golden.cpp
     core/test_golden_organic.cpp
