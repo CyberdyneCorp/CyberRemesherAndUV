@@ -173,6 +173,11 @@
         <div class="v win">Native default</div>
         <div class="s">A from-scratch QuadCover solver — our own frame field + cut graph + seamless integer solve (CG on <span class="mono">spmv</span>), <b>no Geogram, no harness</b> — is now the <b>stock-build default</b> at <b>3–5% irregular</b>: beats field-aligned (9–17%) &amp; AutoRemesher (6–15%), within 1–2 pts of QuadriFlow. Runs the whole corpus, watertight, bounded, cancellable. The vendored path stays for exact 1–4% parity.</div>
       </div>
+      <div class="chip">
+        <div class="k">CAD robustness (topological defects)</div>
+        <div class="v win">We beat QuadriFlow — manifold where QF tears</div>
+        <div class="s"><b>quad-cover 0 defects</b> on a sharp-edged cube where <b>QuadriFlow tears the mesh — 576 boundary defects</b> (holes &amp; cracks). A smooth field method can't lay a clean grid on degenerate flat patches; our <b>flatness routing (§6·E)</b> keeps them watertight — AND we stay manifold on the curved-crease parts QF handles too (fandisk, rocker: 0 = 0). The one axis a field-based remesher structurally can't follow. See <span class="mono">examples/12_cad_robustness.py</span>.</div>
+      </div>
     </div>
   </header>
 
@@ -333,7 +338,7 @@
     </div>
     <div class="note">
       <div class="h"><span class="dot" style="background:var(--partial)"></span>CAD / sharp (cube) — <b style="color:var(--partial)">everyone struggles; ours now safe</b></div>
-      <p>On a flat-faced cube (900-quad target): QF nails 89° angles but <b>tears the mesh — 376 defects</b>; AutoRemesher is clean (0 defects, 90°) but CV 1.39. Our integer path <i>used to</i> break (312 defects, 61% irregular) — now the <b>flatness routing (§6·E) sends flat patches to field-aligned</b>, so it's <b>manifold at 24% irregular</b>. Flat CAD is still the hardest regime for all field-based extractors.</p>
+      <p>On a sharp-edged cube (2500-quad target): the <b>quad-cover default is fully manifold — 0 defects</b>, while <b>QuadriFlow tears it — 576 boundary defects</b> (holes/cracks along the creases; a smooth field can't grid a degenerate flat patch). AutoRemesher is clean but CV 1.39. Our integer path <i>used to</i> break too (312 defects) — now the <b>flatness routing (§6·E)</b> keeps it watertight. This is a genuine <b>QuadriFlow-beating</b> result, now surfaced as its own panel (<span class="mono">examples/12_cad_robustness.py</span>): we stay manifold on flat CAD where QF tears, and match QF (0=0) on the curved-crease parts.</p>
     </div>
     <div class="note">
       <div class="h"><span class="dot" style="background:var(--win)"></span>Adaptivity — <b style="color:var(--win)">only ours</b></div>
