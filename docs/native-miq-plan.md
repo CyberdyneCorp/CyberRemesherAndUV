@@ -251,6 +251,35 @@ tried but does **not** move output irregular % here — the bottleneck is seam/e
 not field cone count. Regression tests: sharp-cube runs bounded + seamless, and a pre-cancelled
 token aborts the solve.
 
+**M8 — Cone placement: multiresolution cross field + tube-aware coarsening — 🔬 EXPERIMENTAL.**
+Motivated by the Stanford-bunny **ears**: on thin high-curvature tubes the single-level field
+plants ~5× QuadriFlow's singularities (38 vs 8 irregular verts in the ear region), which shows up
+globally as edge CV 0.33 vs 0.17 and normal err 12.8° vs 10.7°. A diagnose→adversarially-verify→
+synthesize workflow (`.claude/workflows/quad-quality-push.js`) ranked the fixes; measurement then
+**refuted the two cheap ones** — raising the feature-edge threshold (noisy, regresses CAD) and
+curvature-weighted seam routing (net-negative corpus-wide, reverted). Two levers landed:
+
+1. **Multiresolution cross field** (`computeCrossFieldFromOrientation`, gated by
+   `CYBER_QC_CROSSFIELD_MULTIRES`). Derives the per-face cross from `computePositionField`'s
+   coarse-to-fine per-vertex 4-RoSy orientation instead of single-level face smoothing — the
+   global singularity placement a single level gets stuck on. Robustly lowers irregular % on
+   smooth models (spot 4.7→3.9, fandisk 3.2→2.5 + CV 0.27→0.20, cheburashka 5.5→4.0, rocker
+   4.6→4.0). **Off by default**: the stock quad-cover path and the field-aligned engine are
+   unchanged.
+2. **Tube-aware coarsening** (`coarsen` in `position_field.cpp`, `CYBER_QC_COARSEN_MINDOT`,
+   default 0.5, **on**). Matches each node to its most normal-coherent neighbour and refuses to
+   pair across a fold, so the hierarchy stops bridging thin necks (front/back of the ear) into a
+   coarse node with a meaningless averaged normal. Without it, multires *doubled* the bunny ear
+   count (38→73); with it, 73→46. Neutral-to-positive for the position-field/integer engines it
+   also feeds (bunny 20→19, 13→12); off the stock quad-cover path.
+
+**Open — the bunny ear is not yet robustly fixed.** Multires+tube-aware reaches ear 30 / CV 0.30 /
+Nerr 11.3 at `CYBER_QC_COARSEN_MINDOT=0.9` (all below stock) but with irr 8.6 — the quad-count
+calibration's ±10 run-to-run swing swamps the signal. The next blocker is **extraction
+determinism** (fix the scaling so the landed count, and thus the singularity count, is stable),
+after which mindot can be tuned and multires considered for default. Regression test:
+`test_crossfield.cpp` "orientation-derived cross field is a unit 4-RoSy aligned to a flat grid".
+
 ## Risks
 
 - **CG convergence on cone-heavy / thin-feature meshes** — mitigations: Eigen sparse

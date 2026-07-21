@@ -155,19 +155,41 @@ FieldGraph buildBaseGraph(const Mesh& mesh, std::vector<Index>& baseToVertex) {
 
 // Coarsens a graph by greedy edge matching: adjacent nodes are paired, each
 // pair (or lone node) becomes one coarse node. `parent[fine] = coarse index`.
+//
+// Tube-aware matching: pair each node with its most surface-coherent unmatched
+// neighbour (largest normal agreement) and REFUSE to pair across a sharp fold
+// (normals more than acos(kMinNormalDot) apart). Plain first-neighbour matching
+// bridges thin high-curvature necks — e.g. the two sides of the Stanford-bunny's
+// ear — collapsing front and back of the tube into one coarse node whose averaged
+// normal points nowhere; the multiresolution orientation smoothing on that node is
+// then meaningless and plants extra singularities on the ear. Requiring normal
+// coherence keeps every coarse node inside one smooth patch. On a smooth model all
+// neighbours agree, so this reduces to ordinary matching and preserves its output.
 FieldGraph coarsen(const FieldGraph& fine, std::vector<int>& parent) {
     const int n = static_cast<int>(fine.size());
     std::vector<int> match(fine.size(), -1);
+    const char* dotEnv = std::getenv("CYBER_QC_COARSEN_MINDOT");
+    const float kMinNormalDot = dotEnv != nullptr ? static_cast<float>(std::atof(dotEnv)) : 0.5f;
     for (int i = 0; i < n; ++i) {
         if (match[static_cast<std::size_t>(i)] >= 0) {
             continue;
         }
+        int bestJ = -1;
+        float bestDot = kMinNormalDot;  // a match must beat the fold threshold
         for (const int j : fine.nbr[static_cast<std::size_t>(i)]) {
-            if (match[static_cast<std::size_t>(j)] < 0 && j != i) {
-                match[static_cast<std::size_t>(i)] = j;
-                match[static_cast<std::size_t>(j)] = i;
-                break;
+            if (j == i || match[static_cast<std::size_t>(j)] >= 0) {
+                continue;
             }
+            const float d = dot(fine.normal[static_cast<std::size_t>(i)],
+                                fine.normal[static_cast<std::size_t>(j)]);
+            if (d > bestDot) {
+                bestDot = d;
+                bestJ = j;
+            }
+        }
+        if (bestJ >= 0) {
+            match[static_cast<std::size_t>(i)] = bestJ;
+            match[static_cast<std::size_t>(bestJ)] = i;
         }
     }
     parent.assign(fine.size(), -1);

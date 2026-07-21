@@ -172,7 +172,14 @@ SeamlessSetup buildSeamlessSetup(const Mesh& mesh, int iterations, accel::IBacke
     if (mesh.faceCapacity() == 0) {
         return setup;
     }
-    setup.field = computeCrossField(mesh, iterations, backend);
+    // Experimental: derive the cross field from the multiresolution per-vertex
+    // orientation (coarse-to-fine singularity placement) instead of single-level
+    // face smoothing. Gated so the stock seamless path is unchanged.
+    if (std::getenv("CYBER_QC_CROSSFIELD_MULTIRES") != nullptr) {
+        setup.field = computeCrossFieldFromOrientation(mesh, iterations);
+    } else {
+        setup.field = computeCrossField(mesh, iterations, backend);
+    }
 
     // Per-edge period jumps.
     setup.periodJump.assign(mesh.edgeCapacity(), 0);
