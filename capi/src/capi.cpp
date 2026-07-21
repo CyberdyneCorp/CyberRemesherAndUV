@@ -217,6 +217,10 @@ CyberStatus cyber_remesh(const CyberMesh* in, const CyberRemeshParams* params,
     try {
         const cyber::remesh::Parameters cppParams = toParameters(*params);
         const cyber::CancelToken token;
+        // Poll the C cancel callback directly from isCancelled(), so a long report-less
+        // stage (e.g. the native seamless-UV solve) is cancellable mid-flight, not only at
+        // the progress-report boundaries makeSink flips the flag on.
+        token.setPoll([cancel, user]() { return cancel != nullptr && cancel(user) != 0; });
         cyber::ProgressSink sink = makeSink(progress, cancel, user, token);
 
         // The field-aligned quadrangulator (maximum triangle matching over a
