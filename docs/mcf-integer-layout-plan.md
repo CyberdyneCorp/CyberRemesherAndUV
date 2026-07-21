@@ -110,8 +110,18 @@ tube-aware coarsening), mirroring QF's pipeline rather than our MIQ/isoline path
 **M4 — Min-cost refinement (optional).** Successive-shortest-paths over the residual graph using
 `csgraph::johnson`/`dijkstra` for minimum-cost placement (QF's `use_minimum_cost_flow` path).
 
-**M5 — Integer extraction.** Extract quads directly from the corrected integer layout (QF
-`ComputeIndexMap` tail + `subdivide` + face tracing) — replaces isoline tracing on this path.
+**M5 — Integer extraction.** Extract quads from the corrected integer layout (QF `AdvancedExtractQuad`
++ face tracing), in verified sub-parts:
+- **M5a — vertex collapse — ✅ DONE.** `buildMcfCollapse(mesh, field, McfEdgeInfo, edgeDiff)` in
+  `src/mcf_extract.cpp` ports the opening of QuadriFlow's extraction (ComputeSharpO / AdvancedExtractQuad):
+  a union-find merges vertices joined by a zero edge_diff (same lattice cell) into one output quad
+  vertex, positioned at the mean lattice position of its members. Pure integer math (no SciPP). Test:
+  at unit spacing every edge_diff is nonzero so the collapse is the identity (49 output verts on a
+  7×7 grid); forcing one interior edge's diff to zero merges its endpoints (48 verts, shared
+  component). Full suite (256) green.
+- **M5b — face tracing — TODO.** Build the output directed-edge graph (original edges with
+  |edge_diff| == 1 between distinct components) and trace the quad faces (QF `compute_direct_graph_quad`
+  + the F_compact construction), producing the final quad mesh.
 
 **M6 — Wire as a quadrangulator + benchmark.** Expose as a quad method (e.g. `mcf`, or fold into
 quad-cover behind the option), A/B on the bunny ears + full corpus, promote if it wins. Success =

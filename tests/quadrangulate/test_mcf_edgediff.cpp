@@ -131,4 +131,36 @@ TEST_CASE("edge_diff on a flat unit grid has no singularities and unit lattice s
         }
     }
     CHECK(twoSlot > 0);
+
+    // --- M5a: the extraction vertex-collapse ---
+    // At unit spacing every edge_diff is nonzero, so nothing collapses: the output
+    // vertex set equals the 49 live grid vertices (identity extraction).
+    const remesh::McfCollapse col = buildMcfCollapse(mesh, field, info, info.edgeDiff);
+    REQUIRE(col.valid);
+    std::size_t liveVerts = 0;
+    for (Index v = 0; v < mesh.vertexCapacity(); ++v) {
+        if (mesh.isAlive(VertexId{v})) {
+            ++liveVerts;
+        }
+    }
+    CHECK(col.numVertices == static_cast<int>(liveVerts));  // 7x7 grid = 49
+    CHECK(col.position.size() == static_cast<std::size_t>(col.numVertices));
+
+    // Forcing one interior edge's diff to zero must merge its two endpoints -> one
+    // fewer output vertex, and the two vertices share a component.
+    std::vector<remesh::Vec2i> zeroed = info.edgeDiff;
+    int mergedEdge = -1;
+    for (std::size_t e = 0; e < con.e2d.size(); ++e) {
+        if (con.e2d[e].first != -1 && con.e2d[e].second != -1) {
+            mergedEdge = static_cast<int>(e);
+            break;
+        }
+    }
+    REQUIRE(mergedEdge >= 0);
+    zeroed[static_cast<std::size_t>(mergedEdge)] = remesh::Vec2i{0, 0};
+    const remesh::McfCollapse col2 = buildMcfCollapse(mesh, field, info, zeroed);
+    REQUIRE(col2.valid);
+    CHECK(col2.numVertices == col.numVertices - 1);
+    const auto [ma, mb] = info.edgeValues[static_cast<std::size_t>(mergedEdge)];
+    CHECK(col2.component[ma] == col2.component[mb]);
 }

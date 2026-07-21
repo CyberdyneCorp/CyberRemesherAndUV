@@ -105,4 +105,20 @@ struct McfSolveResult {
 [[nodiscard]] McfSolveResult solveMcfFlow(const McfEdgeInfo& info, const McfConstraints& con,
                                           const McfFlowSetup& setup);
 
+// Extraction vertex-collapse (M5a): the opening of QuadriFlow's extraction. Vertices
+// joined by a zero edge_diff land in the same integer lattice cell, so they merge into
+// one output quad vertex (union-find). Each component becomes an output vertex whose
+// position is the mean lattice position of its members. Operates on the solved
+// (seamless) edge_diff; pure integer math — no SciPP. See docs/mcf-integer-layout-plan.md.
+struct McfCollapse {
+    std::vector<int> component;  // per mesh vertex -> output vertex id (-1 if not a live tri vertex)
+    std::vector<Vec3> position;  // per output vertex: mean lattice position of its members
+    int numVertices = 0;
+    bool valid = false;
+};
+
+[[nodiscard]] McfCollapse buildMcfCollapse(const Mesh& mesh, const PositionField& field,
+                                           const McfEdgeInfo& info,
+                                           const std::vector<Vec2i>& edgeDiff);
+
 }  // namespace cyber::remesh
