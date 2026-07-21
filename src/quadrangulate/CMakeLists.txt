@@ -8,6 +8,7 @@ add_library(cyber_quadrangulate STATIC
     src/mcf_layout.cpp
     src/mcf_edgediff.cpp
     src/mcf_constraints.cpp
+    src/mcf_flow.cpp
 )
 add_library(cyber::quadrangulate ALIAS cyber_quadrangulate)
 

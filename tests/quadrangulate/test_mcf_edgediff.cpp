@@ -37,7 +37,8 @@ Mesh makeGrid(int n) {
 
 TEST_CASE("edge_diff on a flat unit grid has no singularities and unit lattice steps") {
     Mesh mesh = makeGrid(6);
-    mesh.tagFeatureEdges(90.0f);
+    // No feature tagging: a clean interior lattice with no sharp edges, so every
+    // integer variable is free (allowChanges == 1) — the simplest correctness anchor.
     // A clean axis-aligned unit lattice: q = +X everywhere, o = the vertex itself,
     // spacing = 1 (matches the grid). This is the field a good solver converges to
     // on a flat grid, and the integer layout of it must be singularity-free.
@@ -106,4 +107,28 @@ TEST_CASE("edge_diff on a flat unit grid has no singularities and unit lattice s
             CHECK((r < 4));
         }
     }
+
+    // --- M3b: flow setup on the clean grid ---
+    const remesh::McfFlowSetup flow = buildMcfFlowSetup(mesh, info, con);
+    REQUIRE(flow.valid);
+    REQUIRE(flow.edgeDiff.size() == info.edgeDiff.size());
+    REQUIRE(flow.variable.size() == info.edgeDiff.size() * 2);
+    // No features -> every variable is free to change.
+    for (const char a : flow.allowChanges) {
+        CHECK(a == 1);
+    }
+    // Already full-flow (residual 0) -> the pre-adjustment changes nothing.
+    REQUIRE(flow.totalFlow.size() == 1);
+    CHECK(flow.totalFlow[0] == 0);
+    for (std::size_t e = 0; e < flow.edgeDiff.size(); ++e) {
+        CHECK((flow.edgeDiff[e] == info.edgeDiff[e]));
+    }
+    // Every interior edge's two scalar variables are referenced by two face slots.
+    std::size_t twoSlot = 0;
+    for (const auto& v : flow.variable) {
+        if (v.first[0] != -1 && v.first[1] != -1) {
+            ++twoSlot;
+        }
+    }
+    CHECK(twoSlot > 0);
 }

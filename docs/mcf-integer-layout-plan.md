@@ -86,8 +86,14 @@ tube-aware coarsening), mirroring QF's pipeline rather than our MIQ/isoline path
   (`McfEdgeInfo::orient`) so the two stages read the same field. Shared field-math helpers factored
   into `src/mcf_detail.hpp`. Pure integer math (no SciPP). Test: on a flat grid → one orientation
   component, zero residual, valid orientations; full suite (256) green.
-- **M3b — full-flow variables — TODO.** The `variables` map + randomized pre-adjustment that makes
-  each component full-flow (parametrizer-int.cpp tail).
+- **M3b — full-flow variables — ✅ DONE.** `buildMcfFlowSetup(mesh, McfEdgeInfo, McfConstraints)`
+  in `src/mcf_flow.cpp` ports the tail of `BuildIntegerConstraints`: the per-scalar-variable table
+  (which faces reference each edge_diff component + net sign), the `allowChanges` mask (a variable is
+  fixed when it is a zero-component of a sharp edge between two sharp vertices), and the deterministic
+  (`rng_seed = 0`) "full-flow" pre-adjustment that nudges a working COPY of `edgeDiff` so each
+  component's residual becomes reducible by the flow. Pure integer math (no SciPP). Test: on a clean
+  no-feature grid every variable is free, the residual stays zero so `edgeDiff` is untouched, and
+  interior edges' variables are referenced by two face slots; full suite (256) green.
 - **M3c — max-flow solve — TODO.** Build the CSR capacity graph from the constraints, solve with
   `scipp::sparse::csgraph::maximum_flow`, iterate capacity to full flow, apply back onto `edge_diff`
   (the first SciPP-using milestone).

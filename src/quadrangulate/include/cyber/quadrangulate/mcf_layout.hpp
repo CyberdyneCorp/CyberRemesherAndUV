@@ -68,4 +68,22 @@ struct McfConstraints {
 [[nodiscard]] McfConstraints buildMcfConstraints(const Mesh& mesh, const PositionField& field,
                                                  const McfEdgeInfo& info);
 
+// QuadriFlow-style flow setup (M3b): the tail of BuildIntegerConstraints. Builds the
+// per-scalar-variable table (which faces reference each edge_diff component and its net
+// sign), the `allowChanges` mask (a variable is fixed if it is a zero-component of a
+// sharp edge between two sharp vertices), and applies the deterministic "full-flow"
+// pre-adjustment that nudges `edgeDiff` so each component's residual becomes reducible
+// by the M3c max-flow. Holds a working COPY of edgeDiff (the input info is untouched).
+// Pure integer math — no SciPP. See docs/mcf-integer-layout-plan.md (M3b).
+struct McfFlowSetup {
+    std::vector<Vec2i> edgeDiff;                               // working layout (pre-adjusted)
+    std::vector<std::pair<std::array<int, 2>, int>> variable;  // per scalar var: (2 face slots, sign)
+    std::vector<char> allowChanges;                            // per scalar var: 1 = may change
+    std::vector<int> totalFlow;                                // residual per component after adjust
+    bool valid = false;
+};
+
+[[nodiscard]] McfFlowSetup buildMcfFlowSetup(const Mesh& mesh, const McfEdgeInfo& info,
+                                             const McfConstraints& con);
+
 }  // namespace cyber::remesh
