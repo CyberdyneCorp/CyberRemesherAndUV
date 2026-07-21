@@ -167,12 +167,16 @@ class AtlasParams:
     max_chart_angle_degrees: float = 40.0
     pack_margin: float = 0.0  # gap around each island, in UV units
     texture_size: int = 1024  # resolution for the texel-density readout
+    # Rotate each chart to its minimum-area bounding box before packing (tighter
+    # pack / higher texel density).
+    reorient_charts: bool = True
 
     def _to_c(self) -> "_ffi.CyberAtlasParams":
         return _ffi.CyberAtlasParams(
             max_chart_angle_degrees=float(self.max_chart_angle_degrees),
             pack_margin=float(self.pack_margin),
             texture_size=int(self.texture_size),
+            reorient_charts=1 if self.reorient_charts else 0,
         )
 
 

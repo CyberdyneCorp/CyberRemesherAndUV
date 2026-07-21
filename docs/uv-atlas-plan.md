@@ -21,10 +21,17 @@ from an arbitrary mesh to a packed UV atlas without a human drawing every seam.
 3. **Unwrap** — `lscmUnwrap` per chart (conformal, in-house CGLS). A degenerate
    chart LSCM rejects falls back to orthographic **planar projection** onto the
    chart's average-normal plane, so every chart always receives UVs.
-4. **Measure** — `measureDistortion` per chart, aggregated into max/RMS angular
-   (conformal) error and a flipped-chart count. Measured *before* packing, which
-   applies a per-chart similarity (angle-preserving).
-5. **Pack** — `packIslands` into the unit square with a uniform scale.
+4. **Re-orient** (`reorientCharts`, default on) — rotate each chart to its
+   minimum-area bounding rectangle. LSCM fixes orientation from its two pinned
+   corners, so charts otherwise land at arbitrary angles and waste space in the
+   axis-aligned shelf packer. The optimal rectangle always shares an edge with
+   the chart's convex hull, so it suffices to test every hull-edge direction
+   (Andrew's monotone-chain hull + per-edge bounding box); the longer side is
+   left horizontal. Being a similarity, this leaves conformal distortion and
+   flips unchanged.
+5. **Measure** — `measureDistortion` per chart, aggregated into max/RMS angular
+   (conformal) error and a flipped-chart count.
+6. **Pack** — `packIslands` into the unit square with a uniform scale.
 
 Returns `AtlasResult` (chart count, seam edges, max/RMS angle distortion,
 flipped + fallback chart counts, packed-area fraction, texel density).
@@ -41,28 +48,29 @@ flipped + fallback chart counts, packed-area fraction, texel density).
 
 ## Results
 
-`examples/14_uv_atlas.py` (remesh to quads → unwrap → pack), 40° chart angle:
+`examples/14_uv_atlas.py` (remesh to quads → unwrap → pack), 40° chart angle.
+*Coverage* is the fraction of the unit UV square filled by actual geometry (the
+real texel-efficiency measure), with chart re-orientation off vs on:
 
-| model        | quads | charts | max angle dist | flips | packed |
-|--------------|------:|-------:|---------------:|------:|-------:|
-| cube         | 1728  | 6      | 0.000          | 0     | 67%    |
-| torus        | 1364  | 42     | 0.024          | 0     | 64%    |
-| bumpy sphere | 1228  | 87     | 0.051          | 0     | 63%    |
-| sphere       | 1326  | 21     | 0.015          | 0     | 68%    |
+| model        | quads | charts | max angle dist | flips | coverage off → on |
+|--------------|------:|-------:|---------------:|------:|------------------:|
+| cube         | 1728  | 6      | 0.000          | 0     | 33% → **67%**     |
+| torus        | 1364  | 42     | 0.024          | 0     | 30% → 34%         |
+| bumpy sphere | 1228  | 87     | 0.051          | 0     | 31% → 34%         |
+| sphere       | 1326  | 21     | 0.015          | 0     | 38% → 42%         |
 
 Angle distortion is conformal error in `[0,1)`; 0 = angle-preserving. Normal-
 coherent charts stay near-flat, so LSCM is essentially conformal and never
-flips.
+flips. Re-orientation gives the biggest lift on box-like meshes (the cube's
+45°-diamond faces become axis-aligned squares and double their coverage) and a
+steady few points elsewhere.
 
 ## Known limitations / next steps
 
-- **Chart orientation** — LSCM fixes orientation from its two pinned corners, so
-  charts land at arbitrary angles (e.g. the cube's faces pack as 45°-rotated
-  squares). A principal-axis / min-bounding-box re-orientation before packing
-  would raise packing efficiency.
-- **Packing** — shelf packing on axis-aligned bounding boxes wastes the gaps
-  between rotated/irregular charts. A tighter (rotating / polygon) packer would
-  push past ~65%.
+- **Packing** — shelf packing on axis-aligned bounding boxes still wastes the
+  gaps between irregular charts. Now that charts are re-oriented to their
+  min-area box, a tighter (skyline / polygon-nesting) packer is the next lever
+  to push coverage further.
 - **Chart count on organic meshes** — a fixed normal threshold makes many small
   charts on bumpy surfaces. A merge pass (combine adjacent charts while distortion
   stays under a bound) would cut seam length.

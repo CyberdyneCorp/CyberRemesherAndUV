@@ -109,6 +109,7 @@ class CyberAtlasParams(Structure):
         ("max_chart_angle_degrees", c_float),
         ("pack_margin", c_float),
         ("texture_size", c_int32),
+        ("reorient_charts", c_int32),
     ]
 
 

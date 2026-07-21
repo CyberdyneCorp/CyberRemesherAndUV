@@ -126,6 +126,8 @@ typedef struct CyberAtlasParams {
     float maxChartAngleDegrees; /* normal-coherence bound for chart growth */
     float packMargin;           /* gap around each island, in UV units */
     int textureSize;            /* resolution for the texel-density readout */
+    int reorientCharts;         /* non-zero: rotate each chart to its minimum-
+                                 * area bounding box before packing */
 } CyberAtlasParams;
 
 /* Aggregate atlas quality/packing report. */

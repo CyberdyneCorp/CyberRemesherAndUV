@@ -21,6 +21,10 @@ struct AtlasOptions {
     // chart's seed normal stays within this bound (degrees). Smaller values
     // make more, flatter charts (lower angular distortion, more seams).
     float maxChartAngleDeg = 40.0f;
+    // Rotate each chart to its minimum-area bounding rectangle before packing.
+    // LSCM fixes orientation from its pinned corners, so charts otherwise land
+    // at arbitrary angles and waste space in the axis-aligned shelf packer.
+    bool reorientCharts = true;
     UnwrapOptions unwrap{};
     PackParams pack{};
 };

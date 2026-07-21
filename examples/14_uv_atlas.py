@@ -50,6 +50,21 @@ def load_obj_uv(path):
     return np.array(pos, dtype=float), np.array(uvs, dtype=float), faces_v, faces_vt
 
 
+def uv_coverage(uvs, faces_vt):
+    """Fraction of the unit UV square actually covered by geometry (sum of
+    per-face UV areas). This is the real texel-efficiency measure: chart
+    re-orientation shrinks each chart's slack, so more surface fits per texel.
+    Bounding-box packing coverage does not capture this."""
+    total = 0.0
+    for f in faces_vt:
+        if any(i < 0 for i in f) or len(f) < 3:
+            continue
+        p = uvs[f]
+        x, y = p[:, 0], p[:, 1]
+        total += abs(np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1))) * 0.5
+    return total
+
+
 def chart_ids(uvs, faces_v, faces_vt, eps=1e-5):
     """Chart index per face by union-find over 3D edges. Two faces sharing an
     edge merge only when they assign the SAME UV to both endpoints (continuous
@@ -147,8 +162,8 @@ def main():
     ]
 
     print(f"{'model':<15}{'quads':>7}{'charts':>8}{'max ang':>9}{'rms ang':>9}"
-          f"{'flip':>6}{'packed':>9}")
-    print("-" * 63)
+          f"{'flip':>6}{'coverage':>10}")
+    print("-" * 65)
 
     results = []
     cmap = plt.get_cmap("tab20")
@@ -160,27 +175,29 @@ def main():
             continue
         cids, ncharts = chart_ids(uvs, faces_v, faces_vt)
         colors = [cmap(cid % 20) for cid in cids]
-        results.append((name, pos, uvs, faces_v, faces_vt, colors, res))
+        coverage = uv_coverage(uvs, faces_vt)
+        results.append((name, pos, uvs, faces_v, faces_vt, colors, res, coverage))
         print(f"{name:<15}{len(faces_v):>7}{res.chart_count:>8}"
               f"{res.max_angle_distortion:>9.3f}{res.rms_angle_distortion:>9.3f}"
-              f"{res.flipped_charts:>6}{res.packed_area * 100:>8.1f}%")
+              f"{res.flipped_charts:>6}{coverage * 100:>9.1f}%")
 
-    print("-" * 63)
+    print("-" * 65)
     print("angle distortion is conformal error in [0,1); 0 = angle-preserving. "
-          "packed = fraction of the UV square filled.")
+          "coverage = fraction of the UV square filled by geometry (charts "
+          "re-oriented to their min-area box).")
 
     rows = len(results)
     fig = plt.figure(figsize=(9.0, 4.3 * rows), dpi=120)
     fig.suptitle("Automatic UV atlas — quad mesh (left) unwrapped and packed (right)",
                  fontsize=14, fontweight="bold", color="#12233a", y=0.995)
-    for r, (name, pos, uvs, faces_v, faces_vt, colors, res) in enumerate(results):
+    for r, (name, pos, uvs, faces_v, faces_vt, colors, res, coverage) in enumerate(results):
         ax3d = fig.add_subplot(rows, 2, 2 * r + 1, projection="3d")
         draw_mesh_3d(ax3d, pos, faces_v, colors,
                      f"{name} — {res.chart_count} charts")
         ax2d = fig.add_subplot(rows, 2, 2 * r + 2)
         draw_atlas_2d(ax2d, uvs, faces_vt, colors,
                       f"atlas — max dist {res.max_angle_distortion:.2f} · "
-                      f"packed {res.packed_area * 100:.0f}%")
+                      f"coverage {coverage * 100:.0f}%")
     fig.tight_layout(rect=(0, 0, 1, 0.985))
     out = os.path.join(c.OUTPUT_DIR, "14_uv_atlas.png")
     fig.savefig(out, bbox_inches="tight", facecolor="white")

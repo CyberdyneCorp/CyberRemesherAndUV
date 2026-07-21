@@ -193,6 +193,29 @@ TEST_CASE("unwrapAtlas produces a low-distortion, in-bounds cube atlas") {
     }
 }
 
+TEST_CASE("chart re-orientation tightens the cube atlas") {
+    // Without re-orientation LSCM leaves each cube face as a 45-degree diamond,
+    // whose axis-aligned bounding box wastes half its area. Re-orienting to the
+    // minimum-area box makes the faces axis-aligned squares, so the packer fits
+    // them at a larger scale -> higher texel density.
+    Mesh loose = makeCube();
+    uv::AtlasOptions noReorient;
+    noReorient.reorientCharts = false;
+    const uv::AtlasResult a = uv::unwrapAtlas(loose, noReorient);
+
+    Mesh tight = makeCube();
+    uv::AtlasOptions reorient;
+    reorient.reorientCharts = true;
+    const uv::AtlasResult b = uv::unwrapAtlas(tight, reorient);
+
+    REQUIRE(a.chartCount == b.chartCount);
+    REQUIRE(b.flippedCharts == 0);
+    // The conformal distortion is unaffected (rotation is a similarity)...
+    REQUIRE(b.maxAngleDistortion == doctest::Approx(a.maxAngleDistortion).epsilon(1e-4));
+    // ...but the pack is materially tighter (cube faces double their coverage).
+    REQUIRE(b.texelDensity > a.texelDensity * 1.2f);
+}
+
 TEST_CASE("unwrapAtlas is deterministic") {
     Mesh a = makeCube();
     Mesh b = makeCube();

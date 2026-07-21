@@ -1,11 +1,14 @@
 #include "cyber/uv/atlas.hpp"
 
+#include <algorithm>
 #include <cmath>
+#include <limits>
 #include <vector>
 
 #include "cyber/core/math.hpp"
 #include "cyber/uv/common.hpp"
 #include "cyber/uv/distortion.hpp"
+#include "cyber/uv/transforms.hpp"
 
 namespace cyber::uv {
 
@@ -91,6 +94,110 @@ UnwrapResult planarProject(const Mesh& mesh, std::span<const FaceId> island) {
     return out;
 }
 
+// 2D cross product of (b - a) and (c - a); >0 means a->b->c turns left.
+float cross2(Vec2 a, Vec2 b, Vec2 c) {
+    return (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
+}
+
+// Convex hull (Andrew's monotone chain), counter-clockwise, no repeated last
+// point. Returns the input as-is when it has fewer than three points.
+std::vector<Vec2> convexHull(std::vector<Vec2> pts) {
+    std::sort(pts.begin(), pts.end(),
+              [](Vec2 a, Vec2 b) { return a.x < b.x || (a.x == b.x && a.y < b.y); });
+    pts.erase(std::unique(pts.begin(), pts.end(),
+                          [](Vec2 a, Vec2 b) { return a.x == b.x && a.y == b.y; }),
+              pts.end());
+    const std::size_t n = pts.size();
+    if (n < 3) {
+        return pts;
+    }
+    std::vector<Vec2> hull(2 * n);
+    std::size_t k = 0;
+    for (std::size_t i = 0; i < n; ++i) {  // lower hull
+        while (k >= 2 && cross2(hull[k - 2], hull[k - 1], pts[i]) <= 0.0f) {
+            --k;
+        }
+        hull[k++] = pts[i];
+    }
+    const std::size_t lower = k + 1;
+    for (std::size_t i = n - 1; i-- > 0;) {  // upper hull
+        while (k >= lower && cross2(hull[k - 2], hull[k - 1], pts[i]) <= 0.0f) {
+            --k;
+        }
+        hull[k++] = pts[i];
+    }
+    hull.resize(k - 1);
+    return hull;
+}
+
+// Rotation (radians, about the centroid) that aligns the chart's minimum-area
+// bounding rectangle with the UV axes. The optimal rectangle always shares an
+// edge with the convex hull, so it suffices to test every hull-edge direction.
+// The longer box side is left horizontal for a consistent, shelf-friendly
+// landscape orientation. Returns 0 for a degenerate (sub-triangle) chart.
+float minAreaBoxRotation(const std::vector<Vec2>& points) {
+    const std::vector<Vec2> hull = convexHull(points);
+    if (hull.size() < 3) {
+        return 0.0f;
+    }
+    float bestArea = std::numeric_limits<float>::max();
+    float bestAngle = 0.0f;
+    float bestW = 0.0f;
+    float bestH = 0.0f;
+    for (std::size_t i = 0; i < hull.size(); ++i) {
+        const Vec2 edge = hull[(i + 1) % hull.size()] - hull[i];
+        if (std::fabs(edge.x) < 1e-12f && std::fabs(edge.y) < 1e-12f) {
+            continue;
+        }
+        const float angle = std::atan2(edge.y, edge.x);
+        const float c = std::cos(-angle);
+        const float s = std::sin(-angle);
+        float minX = std::numeric_limits<float>::max();
+        float minY = std::numeric_limits<float>::max();
+        float maxX = std::numeric_limits<float>::lowest();
+        float maxY = std::numeric_limits<float>::lowest();
+        for (const Vec2 p : hull) {
+            const float x = p.x * c - p.y * s;
+            const float y = p.x * s + p.y * c;
+            minX = std::fmin(minX, x);
+            minY = std::fmin(minY, y);
+            maxX = std::fmax(maxX, x);
+            maxY = std::fmax(maxY, y);
+        }
+        const float w = maxX - minX;
+        const float h = maxY - minY;
+        const float area = w * h;
+        if (area < bestArea) {
+            bestArea = area;
+            bestAngle = angle;
+            bestW = w;
+            bestH = h;
+        }
+    }
+    // Rotating the chart by -bestAngle makes the optimal box axis-aligned; a
+    // further quarter turn puts the longer side horizontal.
+    float rotation = -bestAngle;
+    if (bestH > bestW) {
+        rotation -= kPi * 0.5f;
+    }
+    return rotation;
+}
+
+// Collects the island's corner UVs (with the current parameterization).
+std::vector<Vec2> islandUvPoints(const Mesh& mesh, std::span<const FaceId> island) {
+    std::vector<Vec2> points;
+    const std::vector<Vec2>* uv = uvColumn(mesh);
+    if (uv == nullptr) {
+        return points;
+    }
+    for (const FaceId face : island) {
+        for (const LoopId loop : mesh.faceLoops(face)) {
+            points.push_back((*uv)[static_cast<std::size_t>(loop.value)]);
+        }
+    }
+    return points;
+}
+
 }  // namespace
 
 SeamSet autoSeams(const Mesh& mesh, const AtlasOptions& options) {
@@ -143,6 +250,18 @@ AtlasResult unwrapAtlas(Mesh& mesh, const AtlasOptions& options) {
         }
         if (unwrap.ok) {
             writeIslandUv(mesh, island, unwrap);
+        }
+    }
+
+    // Rotate each chart to its minimum-area bounding rectangle. This is a
+    // similarity, so it leaves conformal distortion and flips unchanged while
+    // giving the axis-aligned shelf packer far less wasted space.
+    if (options.reorientCharts) {
+        for (const std::vector<FaceId>& island : islands) {
+            const float rotation = minAreaBoxRotation(islandUvPoints(mesh, island));
+            if (std::fabs(rotation) > 1e-4f) {
+                rotateIslandUv(mesh, island, rotation);
+            }
         }
     }
 
