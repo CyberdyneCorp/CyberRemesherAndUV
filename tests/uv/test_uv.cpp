@@ -108,6 +108,48 @@ TEST_CASE("packing unit islands yields non-overlapping boxes in the unit square"
     }
 }
 
+TEST_CASE("skyline packing is tighter than shelf and stays valid") {
+    // Boxes of varied heights: tallest-first shelf packing leaves vertical gaps
+    // under the short boxes that the skyline strategy drops later boxes into.
+    std::vector<uv::Bounds2> boxes;
+    const float dims[][2] = {{1.0f, 1.0f}, {1.0f, 0.3f}, {0.5f, 1.0f}, {0.4f, 0.4f},
+                             {1.0f, 0.6f}, {0.7f, 0.9f}, {0.3f, 0.2f}, {0.9f, 0.5f}};
+    for (const auto& d : dims) {
+        uv::Bounds2 b;
+        b.expand({0.0f, 0.0f});
+        b.expand({d[0], d[1]});
+        boxes.push_back(b);
+    }
+
+    uv::PackParams shelf;
+    shelf.strategy = uv::PackStrategy::Shelf;
+    uv::PackParams sky;
+    sky.strategy = uv::PackStrategy::Skyline;
+    const uv::PackResult a = uv::packBoxes(boxes, shelf);
+    const uv::PackResult b = uv::packBoxes(boxes, sky);
+    REQUIRE(a.ok);
+    REQUIRE(b.ok);
+
+    // Skyline fits the same boxes into a smaller square -> higher coverage.
+    REQUIRE(b.usedArea > a.usedArea);
+
+    // ...while staying a valid packing: inside the unit square, no overlaps.
+    for (const uv::PackedIsland& island : b.islands) {
+        REQUIRE(island.placed.mn.x >= -1e-5f);
+        REQUIRE(island.placed.mn.y >= -1e-5f);
+        REQUIRE(island.placed.mx.x <= 1.0f + 1e-5f);
+        REQUIRE(island.placed.mx.y <= 1.0f + 1e-5f);
+    }
+    // Skyline places boxes edge-to-edge, so neighbours touch exactly; the slack
+    // absorbs the 1-ULP float noise at a shared boundary while still catching any
+    // real interior overlap.
+    for (std::size_t i = 0; i < b.islands.size(); ++i) {
+        for (std::size_t j = i + 1; j < b.islands.size(); ++j) {
+            REQUIRE_FALSE(uv::Bounds2::overlap(b.islands[i].placed, b.islands[j].placed, 1e-5f));
+        }
+    }
+}
+
 TEST_CASE("packing preserves relative scale of unequal islands") {
     uv::Bounds2 small;
     small.expand({0, 0});

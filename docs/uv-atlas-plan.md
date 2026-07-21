@@ -31,7 +31,12 @@ from an arbitrary mesh to a packed UV atlas without a human drawing every seam.
    flips unchanged.
 5. **Measure** — `measureDistortion` per chart, aggregated into max/RMS angular
    (conformal) error and a flipped-chart count.
-6. **Pack** — `packIslands` into the unit square with a uniform scale.
+6. **Pack** — `packIslands` into the unit square with a uniform scale, using the
+   bottom-left **skyline** strategy (`PackStrategy::Skyline`): a per-column height
+   map over a fixed-width strip drops each box into the lowest gap, filling the
+   vertical slack the shelf packer leaves. Several strip widths are tried and the
+   one with the smallest square bounding extent wins. (The interactive path keeps
+   the simpler `Shelf` default.)
 
 Returns `AtlasResult` (chart count, seam edges, max/RMS angle distortion,
 flipped + fallback chart counts, packed-area fraction, texel density).
@@ -52,27 +57,36 @@ flipped + fallback chart counts, packed-area fraction, texel density).
 *Coverage* is the fraction of the unit UV square filled by actual geometry (the
 real texel-efficiency measure), with chart re-orientation off vs on:
 
-| model        | quads | charts | max angle dist | flips | coverage off → on |
-|--------------|------:|-------:|---------------:|------:|------------------:|
-| cube         | 1728  | 6      | 0.000          | 0     | 33% → **67%**     |
-| torus        | 1364  | 42     | 0.024          | 0     | 30% → 34%         |
-| bumpy sphere | 1228  | 87     | 0.051          | 0     | 31% → 34%         |
-| sphere       | 1326  | 21     | 0.015          | 0     | 38% → 42%         |
+| model        | quads | charts | max angle dist | flips | coverage (final) |
+|--------------|------:|-------:|---------------:|------:|-----------------:|
+| cube         | 1728  | 6      | 0.000          | 0     | 67%              |
+| torus        | 1364  | 42     | 0.024          | 0     | 40%              |
+| bumpy sphere | 1228  | 87     | 0.051          | 0     | 41%              |
+| sphere       | 1326  | 21     | 0.015          | 0     | 48%              |
 
 Angle distortion is conformal error in `[0,1)`; 0 = angle-preserving. Normal-
-coherent charts stay near-flat, so LSCM is essentially conformal and never
-flips. Re-orientation gives the biggest lift on box-like meshes (the cube's
-45°-diamond faces become axis-aligned squares and double their coverage) and a
-steady few points elsewhere.
+coherent charts stay near-flat, so LSCM is essentially conformal and never flips.
+The two packing levers stack on top of the base LSCM+shelf coverage:
+
+| model        | base (shelf) | + re-orient | + skyline (final) |
+|--------------|-------------:|------------:|------------------:|
+| cube         | 33%          | 67%         | 67%               |
+| torus        | 30%          | 34%         | 40%               |
+| bumpy sphere | 31%          | 34%         | 41%               |
+| sphere       | 38%          | 42%         | 48%               |
+
+Re-orientation gives the biggest lift on box-like meshes (the cube's 45°-diamond
+faces become axis-aligned squares and double their coverage); skyline packing then
+adds a steady 6–7 points by filling the gaps between the irregular organic charts.
 
 ## Known limitations / next steps
 
-- **Packing** — shelf packing on axis-aligned bounding boxes still wastes the
-  gaps between irregular charts. Now that charts are re-oriented to their
-  min-area box, a tighter (skyline / polygon-nesting) packer is the next lever
-  to push coverage further.
+- **Packing** — the skyline packer works on axis-aligned bounding *boxes*, so an
+  L-shaped or ring chart still reserves its whole box. True polygon nesting (pack
+  against the chart outline, not its box) is the next lever, worth most on the
+  concave organic charts (the torus/sphere rings visibly waste their interior).
 - **Chart count on organic meshes** — a fixed normal threshold makes many small
-  charts on bumpy surfaces. A merge pass (combine adjacent charts while distortion
-  stays under a bound) would cut seam length.
+  charts on bumpy surfaces (87 on the bumpy sphere). A merge pass (combine
+  adjacent charts while distortion stays under a bound) would cut seam length.
 - **Benchmark** — compare distortion + packing against xatlas / Blender Smart UV
   Project on a shared corpus, mirroring the remesher-vs-QuadriFlow harness.

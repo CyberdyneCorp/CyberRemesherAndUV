@@ -285,10 +285,12 @@ AtlasResult unwrapAtlas(Mesh& mesh, const AtlasOptions& options) {
         result.rmsAngleDistortion = std::sqrt(sumSq / static_cast<float>(measured));
     }
 
-    const PackResult pack = packIslands(mesh, islands, options.pack);
-    result.packedArea = pack.usedArea;
-    result.texelDensity = pack.texelDensity;
-    result.ok = pack.ok;
+    PackParams pack = options.pack;
+    pack.strategy = PackStrategy::Skyline;
+    const PackResult packResult = packIslands(mesh, islands, pack);
+    result.packedArea = packResult.usedArea;
+    result.texelDensity = packResult.texelDensity;
+    result.ok = packResult.ok;
     return result;
 }
 
