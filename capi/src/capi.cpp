@@ -360,11 +360,13 @@ void cyber_default_atlas_params(CyberAtlasParams* params) {
     params->packMargin = defaults.pack.margin;
     params->textureSize = defaults.pack.textureSize;
     params->reorientCharts = defaults.reorientCharts ? 1 : 0;
+    params->mergeCharts = defaults.mergeCharts ? 1 : 0;
 #else
     params->maxChartAngleDegrees = 40.0f;
     params->packMargin = 0.0f;
     params->textureSize = 1024;
     params->reorientCharts = 1;
+    params->mergeCharts = 1;
 #endif
 }
 
@@ -383,6 +385,7 @@ CyberStatus cyber_uv_atlas([[maybe_unused]] CyberMesh* mesh,
             opts.pack.margin = params->packMargin;
             opts.pack.textureSize = params->textureSize;
             opts.reorientCharts = params->reorientCharts != 0;
+            opts.mergeCharts = params->mergeCharts != 0;
         }
         const cyber::uv::AtlasResult r = cyber::uv::unwrapAtlas(mesh->mesh, opts);
         if (out != nullptr) {

@@ -21,6 +21,12 @@ struct AtlasOptions {
     // chart's seed normal stays within this bound (degrees). Smaller values
     // make more, flatter charts (lower angular distortion, more seams).
     float maxChartAngleDeg = 40.0f;
+    // Merge adjacent charts whose union still fits within a `maxChartAngleDeg`
+    // normal cone. Greedy seed growth fragments bumpy surfaces into many small
+    // charts that share a compatible orientation; merging them cuts seam length
+    // (and packs better) without exceeding the per-chart flatness the growth
+    // already guarantees, so distortion does not rise.
+    bool mergeCharts = true;
     // Rotate each chart to its minimum-area bounding rectangle before packing.
     // LSCM fixes orientation from its pinned corners, so charts otherwise land
     // at arbitrary angles and waste space in the axis-aligned shelf packer.

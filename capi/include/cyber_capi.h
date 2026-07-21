@@ -128,6 +128,8 @@ typedef struct CyberAtlasParams {
     int textureSize;            /* resolution for the texel-density readout */
     int reorientCharts;         /* non-zero: rotate each chart to its minimum-
                                  * area bounding box before packing */
+    int mergeCharts;            /* non-zero: merge adjacent charts sharing a
+                                 * normal cone (fewer seams, same flatness) */
 } CyberAtlasParams;
 
 /* Aggregate atlas quality/packing report. */

@@ -11,17 +11,24 @@ from an arbitrary mesh to a packed UV atlas without a human drawing every seam.
 
 `unwrapAtlas(mesh, options)`:
 
-1. **Seam generation** (`autoSeams`) — greedy normal-coherent chart growth. From
-   each ascending-id seed face, flood-fill neighbours whose normal stays within
-   `maxChartAngleDeg` of the seed normal. Deterministic; every face lands in
-   exactly one chart. Edges between different charts become seams (mesh boundary
-   edges are already island boundaries and are left unmarked).
-2. **Charts** — `computeIslands(mesh, seams)` re-derives the face partition from
+1. **Chart growth** — greedy normal-coherent seed growth. From each ascending-id
+   seed face, flood-fill neighbours whose normal stays within `maxChartAngleDeg`
+   of the seed normal. Deterministic; every face lands in exactly one chart.
+2. **Merge** (`mergeCharts`, default on) — greedy seed growth fragments bumpy
+   surfaces into many small charts that share a compatible orientation. This pass
+   merges adjacent charts whose *union* still fits within a `maxChartAngleDeg`
+   normal cone (union-find to a fixpoint over the adjacency graph). Because every
+   face of a merged chart stays inside one cone, the result is at least as flat as
+   growth guarantees — so it cuts seam length (bumpy sphere 87 → 65 charts)
+   *without* raising distortion, and cannot wrap a tube (a sub-90° cone is convex).
+   `autoSeams` then marks the edges between the final charts as seams (mesh
+   boundary edges are already island boundaries and are left unmarked).
+3. **Charts** — `computeIslands(mesh, seams)` re-derives the face partition from
    the seams (single tested code path).
-3. **Unwrap** — `lscmUnwrap` per chart (conformal, in-house CGLS). A degenerate
+4. **Unwrap** — `lscmUnwrap` per chart (conformal, in-house CGLS). A degenerate
    chart LSCM rejects falls back to orthographic **planar projection** onto the
    chart's average-normal plane, so every chart always receives UVs.
-4. **Re-orient** (`reorientCharts`, default on) — rotate each chart to its
+5. **Re-orient** (`reorientCharts`, default on) — rotate each chart to its
    minimum-area bounding rectangle. LSCM fixes orientation from its two pinned
    corners, so charts otherwise land at arbitrary angles and waste space in the
    axis-aligned shelf packer. The optimal rectangle always shares an edge with
@@ -29,9 +36,9 @@ from an arbitrary mesh to a packed UV atlas without a human drawing every seam.
    (Andrew's monotone-chain hull + per-edge bounding box); the longer side is
    left horizontal. Being a similarity, this leaves conformal distortion and
    flips unchanged.
-5. **Measure** — `measureDistortion` per chart, aggregated into max/RMS angular
+6. **Measure** — `measureDistortion` per chart, aggregated into max/RMS angular
    (conformal) error and a flipped-chart count.
-6. **Pack** — `packIslands` into the unit square with a uniform scale, using the
+7. **Pack** — `packIslands` into the unit square with a uniform scale, using the
    bottom-left **skyline** strategy (`PackStrategy::Skyline`): a per-column height
    map over a fixed-width strip drops each box into the lowest gap, filling the
    vertical slack the shelf packer leaves. Several strip widths are tried and the
@@ -60,9 +67,12 @@ real texel-efficiency measure), with chart re-orientation off vs on:
 | model        | quads | charts | max angle dist | flips | coverage (final) |
 |--------------|------:|-------:|---------------:|------:|-----------------:|
 | cube         | 1728  | 6      | 0.000          | 0     | 67%              |
-| torus        | 1364  | 42     | 0.024          | 0     | 40%              |
-| bumpy sphere | 1228  | 87     | 0.051          | 0     | 41%              |
-| sphere       | 1326  | 21     | 0.015          | 0     | 48%              |
+| torus        | 1364  | 39     | 0.024          | 0     | 40%              |
+| bumpy sphere | 1228  | 65     | 0.048          | 0     | 41%              |
+| sphere       | 1326  | 19     | 0.015          | 0     | 48%              |
+
+Chart counts are after the merge pass (bumpy sphere 87 → 65, torus 42 → 39,
+sphere 21 → 19; the cube's orthogonal faces cannot merge).
 
 Angle distortion is conformal error in `[0,1)`; 0 = angle-preserving. Normal-
 coherent charts stay near-flat, so LSCM is essentially conformal and never flips.
@@ -85,8 +95,5 @@ adds a steady 6–7 points by filling the gaps between the irregular organic cha
   L-shaped or ring chart still reserves its whole box. True polygon nesting (pack
   against the chart outline, not its box) is the next lever, worth most on the
   concave organic charts (the torus/sphere rings visibly waste their interior).
-- **Chart count on organic meshes** — a fixed normal threshold makes many small
-  charts on bumpy surfaces (87 on the bumpy sphere). A merge pass (combine
-  adjacent charts while distortion stays under a bound) would cut seam length.
 - **Benchmark** — compare distortion + packing against xatlas / Blender Smart UV
   Project on a shared corpus, mirroring the remesher-vs-QuadriFlow harness.

@@ -41,6 +41,26 @@ Mesh makeCube() {
     return Mesh::fromIndexed(p, f);
 }
 
+// A strip of quads bending around the y-axis, `degPerQuad` per quad. Seed growth
+// splits it once the running normal exceeds the chart-angle bound; the merge pass
+// can re-unite the pieces when the whole strip still fits one normal cone.
+Mesh makeBentStrip(int quads, float degPerQuad) {
+    std::vector<Vec3> p;
+    std::vector<std::vector<Index>> f;
+    const float d = degPerQuad * 3.14159265f / 180.0f;
+    for (int i = 0; i <= quads; ++i) {
+        const float a = d * static_cast<float>(i);
+        p.push_back({std::cos(a), 0.0f, std::sin(a)});
+        p.push_back({std::cos(a), 1.0f, std::sin(a)});
+    }
+    for (int i = 0; i < quads; ++i) {
+        const Index b0 = static_cast<Index>(2 * i);
+        const Index b1 = static_cast<Index>(2 * (i + 1));
+        f.push_back({b0, b1, b1 + 1, b0 + 1});
+    }
+    return Mesh::fromIndexed(p, f);
+}
+
 std::vector<FaceId> aliveFaces(const Mesh& mesh) {
     std::vector<FaceId> faces;
     for (Index i = 0; i < mesh.faceCapacity(); ++i) {
@@ -233,6 +253,33 @@ TEST_CASE("unwrapAtlas produces a low-distortion, in-bounds cube atlas") {
         REQUIRE(p.x <= 1.0f + 1e-5f);
         REQUIRE(p.y <= 1.0f + 1e-5f);
     }
+}
+
+TEST_CASE("chart merge recombines fragmented coplanar-compatible charts") {
+    // 7 quads at 10 deg each span 60 deg of normal — seed growth (40 deg bound)
+    // splits them into two charts, but the whole strip fits a single 40 deg cone
+    // about its mean normal, so the merge pass reunites it.
+    Mesh split = makeBentStrip(7, 10.0f);
+    uv::AtlasOptions noMerge;
+    noMerge.mergeCharts = false;
+    const uv::AtlasResult a = uv::unwrapAtlas(split, noMerge);
+
+    Mesh merged = makeBentStrip(7, 10.0f);
+    uv::AtlasOptions merge;
+    merge.mergeCharts = true;
+    const uv::AtlasResult b = uv::unwrapAtlas(merged, merge);
+
+    REQUIRE(a.chartCount > 1);
+    REQUIRE(b.chartCount < a.chartCount);
+    REQUIRE(b.flippedCharts == 0);
+    // The reunited chart still lives inside one normal cone, so it stays a
+    // sanely-bounded conformal map (not an arbitrary blow-up).
+    REQUIRE(b.maxAngleDistortion < 0.35f);
+
+    // A cube's faces are 90 deg apart, so the merge must NOT combine them.
+    Mesh cube = makeCube();
+    const uv::AtlasResult c = uv::unwrapAtlas(cube, merge);
+    REQUIRE(c.chartCount == 6);
 }
 
 TEST_CASE("chart re-orientation tightens the cube atlas") {

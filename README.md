@@ -31,9 +31,11 @@ as idea references, never copied — see [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_
 
 Beyond the interactive UV editor (hand-drawn seams, LSCM unwrap, packing,
 distortion overlay), the engine has a one-call automatic path: `Mesh.unwrap_atlas`
-(C: `cyber_uv_atlas`). It seams the mesh into normal-coherent charts, LSCM-unwraps
-each chart conformally, re-orients each chart to its minimum-area bounding box,
-skyline-packs them into the unit square, and writes the per-corner UV attribute —
+(C: `cyber_uv_atlas`). It seams the mesh into normal-coherent charts, merges
+adjacent charts that still share a normal cone (fewer seams, same flatness),
+LSCM-unwraps each chart conformally, re-orients each chart to its minimum-area
+bounding box, skyline-packs them into the unit square, and writes the per-corner
+UV attribute —
 mesh in, packed atlas out, no manual seams. It returns chart count, conformal
 (angle) distortion, flip count and packing efficiency. On the remeshed quad output
 it holds angular distortion under ~0.05 (conformal error, 0 = angle-preserving)

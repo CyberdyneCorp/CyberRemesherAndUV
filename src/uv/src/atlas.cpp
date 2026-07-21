@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <utility>
 #include <vector>
 
 #include "cyber/core/math.hpp"
@@ -58,6 +59,131 @@ std::vector<int> computeCharts(const Mesh& mesh, const AtlasOptions& options) {
         }
     }
     return chartOf;
+}
+
+// Merges adjacent charts whose union still fits within a `maxChartAngleDeg`
+// normal cone, then relabels `chartOf` compactly. Greedy seed growth splits a
+// bumpy surface into many small charts that share a compatible orientation;
+// this recombines them. Because every face of a merged chart stays within one
+// cone, the result is at least as flat as growth guarantees (distortion cannot
+// rise) and stays disk-like (a cone under 90-degrees cannot wrap a tube).
+// Deterministic: candidate pairs are processed in sorted order to a fixpoint.
+void mergeCoplanarCharts(const Mesh& mesh, std::vector<int>& chartOf,
+                         const AtlasOptions& options) {
+    int chartCount = 0;
+    for (const int c : chartOf) {
+        chartCount = std::max(chartCount, c + 1);
+    }
+    if (chartCount <= 1) {
+        return;
+    }
+    const auto n = static_cast<std::size_t>(chartCount);
+    const float cosBound = std::cos(degreesToRadians(options.maxChartAngleDeg));
+
+    std::vector<int> parent(n);
+    std::vector<Vec3> normalSum(n, Vec3{0.0f, 0.0f, 0.0f});
+    std::vector<std::vector<FaceId>> chartFaces(n);
+    for (std::size_t i = 0; i < n; ++i) {
+        parent[i] = static_cast<int>(i);
+    }
+
+    const auto capacity = mesh.faceCapacity();
+    for (Index f = 0; f < capacity; ++f) {
+        const FaceId face{f};
+        if (!mesh.isAlive(face)) {
+            continue;
+        }
+        const int c = chartOf[static_cast<std::size_t>(f)];
+        if (c < 0) {
+            continue;
+        }
+        chartFaces[static_cast<std::size_t>(c)].push_back(face);
+        normalSum[static_cast<std::size_t>(c)] =
+            normalSum[static_cast<std::size_t>(c)] + normalized(mesh.faceNormal(face));
+    }
+
+    // Adjacent chart pairs (deduplicated, sorted for determinism).
+    std::vector<std::pair<int, int>> pairs;
+    for (Index f = 0; f < capacity; ++f) {
+        const FaceId face{f};
+        if (!mesh.isAlive(face)) {
+            continue;
+        }
+        const int cf = chartOf[static_cast<std::size_t>(f)];
+        const std::vector<VertexId> verts = mesh.faceVertices(face);
+        const std::size_t vn = verts.size();
+        for (std::size_t i = 0; i < vn; ++i) {
+            const EdgeId edge = mesh.edgeBetween(verts[i], verts[(i + 1) % vn]);
+            if (!edge.valid()) {
+                continue;
+            }
+            for (const FaceId nb : mesh.edgeFaces(edge)) {
+                const int cn = chartOf[static_cast<std::size_t>(nb.value)];
+                if (cn != cf) {
+                    pairs.emplace_back(std::min(cf, cn), std::max(cf, cn));
+                }
+            }
+        }
+    }
+    std::sort(pairs.begin(), pairs.end());
+    pairs.erase(std::unique(pairs.begin(), pairs.end()), pairs.end());
+
+    const auto findRoot = [&](int x) {
+        while (parent[static_cast<std::size_t>(x)] != x) {
+            parent[static_cast<std::size_t>(x)] =
+                parent[static_cast<std::size_t>(parent[static_cast<std::size_t>(x)])];
+            x = parent[static_cast<std::size_t>(x)];
+        }
+        return x;
+    };
+    const auto withinCone = [&](const std::vector<FaceId>& faces, Vec3 axis) {
+        for (const FaceId face : faces) {
+            if (dot(normalized(mesh.faceNormal(face)), axis) < cosBound) {
+                return false;
+            }
+        }
+        return true;
+    };
+
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        for (const std::pair<int, int>& pr : pairs) {
+            const int ra = findRoot(pr.first);
+            const int rb = findRoot(pr.second);
+            if (ra == rb) {
+                continue;
+            }
+            const std::size_t ia = static_cast<std::size_t>(ra);
+            const std::size_t ib = static_cast<std::size_t>(rb);
+            const Vec3 axis = normalized(normalSum[ia] + normalSum[ib]);
+            if (!withinCone(chartFaces[ia], axis) || !withinCone(chartFaces[ib], axis)) {
+                continue;
+            }
+            const std::size_t keep = static_cast<std::size_t>(std::min(ra, rb));
+            const std::size_t drop = static_cast<std::size_t>(std::max(ra, rb));
+            parent[drop] = static_cast<int>(keep);
+            normalSum[keep] = normalSum[ia] + normalSum[ib];
+            chartFaces[keep].insert(chartFaces[keep].end(), chartFaces[drop].begin(),
+                                    chartFaces[drop].end());
+            chartFaces[drop].clear();
+            changed = true;
+        }
+    }
+
+    std::vector<int> relabel(n, -1);
+    int next = 0;
+    for (Index f = 0; f < capacity; ++f) {
+        const int c = chartOf[static_cast<std::size_t>(f)];
+        if (c < 0) {
+            continue;
+        }
+        const int root = findRoot(c);
+        if (relabel[static_cast<std::size_t>(root)] < 0) {
+            relabel[static_cast<std::size_t>(root)] = next++;
+        }
+        chartOf[static_cast<std::size_t>(f)] = relabel[static_cast<std::size_t>(root)];
+    }
 }
 
 // Fallback UVs for a chart LSCM could not solve: orthographic projection onto
@@ -201,7 +327,10 @@ std::vector<Vec2> islandUvPoints(const Mesh& mesh, std::span<const FaceId> islan
 }  // namespace
 
 SeamSet autoSeams(const Mesh& mesh, const AtlasOptions& options) {
-    const std::vector<int> chartOf = computeCharts(mesh, options);
+    std::vector<int> chartOf = computeCharts(mesh, options);
+    if (options.mergeCharts) {
+        mergeCoplanarCharts(mesh, chartOf, options);
+    }
     SeamSet seams;
     const auto capacity = mesh.faceCapacity();
     for (Index f = 0; f < capacity; ++f) {

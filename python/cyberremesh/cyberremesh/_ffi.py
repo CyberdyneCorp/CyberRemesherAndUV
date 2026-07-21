@@ -110,6 +110,7 @@ class CyberAtlasParams(Structure):
         ("pack_margin", c_float),
         ("texture_size", c_int32),
         ("reorient_charts", c_int32),
+        ("merge_charts", c_int32),
     ]
 
 

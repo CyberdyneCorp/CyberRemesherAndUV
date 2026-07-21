@@ -167,6 +167,8 @@ class AtlasParams:
     max_chart_angle_degrees: float = 40.0
     pack_margin: float = 0.0  # gap around each island, in UV units
     texture_size: int = 1024  # resolution for the texel-density readout
+    # Merge adjacent charts sharing a normal cone (fewer seams, same flatness).
+    merge_charts: bool = True
     # Rotate each chart to its minimum-area bounding box before packing (tighter
     # pack / higher texel density).
     reorient_charts: bool = True
@@ -177,6 +179,7 @@ class AtlasParams:
             pack_margin=float(self.pack_margin),
             texture_size=int(self.texture_size),
             reorient_charts=1 if self.reorient_charts else 0,
+            merge_charts=1 if self.merge_charts else 0,
         )
 
 
