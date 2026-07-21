@@ -35,6 +35,12 @@ option(CYBER_ENABLE_OPENCL "Enable the OpenCL compute backend" OFF)
 # CYBER_QUADCOVER_CLI harness. Kept off for normal builds to avoid the dependency.
 option(CYBER_WITH_QUADCOVER "Build the in-process QuadCover seamless-UV solver" OFF)
 
+# Vendors NumPP + SciPP (github.com/CyberdyneCorp) and links scipp::scipp into
+# cyber_quadrangulate for the min-cost-flow integer quadrangulator that ports
+# QuadriFlow's integer-layout stage (docs/mcf-integer-layout-plan.md). Off by
+# default so normal builds stay dependency-free.
+option(CYBER_WITH_SCIPP "Build the min-cost-flow integer quadrangulator (vendored NumPP+SciPP)" OFF)
+
 include(cmake/CompilerWarnings.cmake)
 
 if(CYBER_WITH_QUADCOVER)
@@ -42,6 +48,11 @@ if(CYBER_WITH_QUADCOVER)
     # project only enables CXX, so enable C for the isolated solver library.
     enable_language(C)
     include(cmake/QuadCoverSolver.cmake)
+endif()
+
+if(CYBER_WITH_SCIPP)
+    include(cmake/SciPP.cmake)
+    cyber_add_scipp()
 endif()
 
 add_subdirectory(src/core)

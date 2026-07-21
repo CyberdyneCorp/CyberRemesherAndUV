@@ -64,6 +64,11 @@ if(TARGET cyber_bakecage)
     target_sources(cyber_tests PRIVATE bakecage/test_bakecage.cpp)
     target_link_libraries(cyber_tests PRIVATE cyber_bakecage)
 endif()
+# Min-cost-flow integer layout (M1): the SciPP-linkage self-test builds only when
+# the vendored SciPP is enabled (cyber_quadrangulate carries scipp::scipp then).
+if(CYBER_WITH_SCIPP)
+    target_sources(cyber_tests PRIVATE quadrangulate/test_mcf_layout.cpp)
+endif()
 cyber_set_warnings(cyber_tests)
 
 add_test(NAME unit COMMAND cyber_tests)
