@@ -27,13 +27,12 @@ EXAMPLES = [
 
 def main() -> None:
     c.require_engine()
-    # Point the default quad-cover method at the seamless-UV solver so the gallery
-    # showcases the actual default; without it the examples degrade to field-aligned.
-    ar = c.autoremesher_binary()
-    if ar:
-        os.environ["CYBER_QUADCOVER_CLI"] = ar
+    # quad-cover now DEFAULTS to the native (dependency-free) seamless-UV solver, so the
+    # gallery showcases it out of the box. Do NOT set CYBER_QUADCOVER_CLI here; set it in the
+    # shell to use the vendored Geogram solver instead. (The AutoRemesher reference panels
+    # build/call their binary directly, independent of this.)
     print(f"CyberRemesher engine {cyberremesh.version()} — via the Python (ctypes) binding")
-    print(f"quad-cover solver: {'ready · ' + ar if ar else 'unavailable (examples use field-aligned)'}\n")
+    print("quad-cover: native seamless-UV solver (dependency-free default)\n")
 
     produced = []
     for module_name, png in EXAMPLES:

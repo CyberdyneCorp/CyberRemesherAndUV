@@ -80,11 +80,9 @@ def main() -> None:
     print("building AutoRemesher reference (first run compiles QuadCover + Geogram)...")
     ar = c.autoremesher_binary()
     print(f"  AutoRemesher: {'ready' if ar else 'UNAVAILABLE'}")
-    # Our quad-cover method (Task F) obtains its seamless UV out-of-process from the same
-    # autoremesher_cli; point the engine at it so "ours quad-cover" is measured too.
-    if ar:
-        os.environ["CYBER_QUADCOVER_CLI"] = ar
-    print(f"  ours quad-cover: {'ready' if ar else 'UNAVAILABLE (needs AutoRemesher build)'}\n")
+    # "ours quad-cover" is measured with the NATIVE (dependency-free) seamless-UV solver, the
+    # stock-build default. Set CYBER_QUADCOVER_CLI in the shell to benchmark the vendored path.
+    print("  ours quad-cover: native seamless-UV solver (dependency-free default)\n")
 
     header = f"{'model':<15} {'engine':<20} {'quads':>6} {'med°':>5} {'dev%':>6} {'Nerr°':>6} {'irr%':>6} {'CV':>5}"
     print(header)

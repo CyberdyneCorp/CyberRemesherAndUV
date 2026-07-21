@@ -42,10 +42,9 @@ def main() -> None:
     print("building AutoRemesher reference (first run compiles QuadCover + Geogram)...")
     ar = c.autoremesher_binary()
     print(f"  AutoRemesher: {'ready' if ar else 'UNAVAILABLE'}")
-    # Point the engine's quad-cover method at the same solver binary so it renders here.
-    if ar:
-        os.environ["CYBER_QUADCOVER_CLI"] = ar
-    print(f"  ours quad-cover: {'ready' if ar else 'UNAVAILABLE (needs AutoRemesher build)'}\n")
+    # ours quad-cover uses the NATIVE (dependency-free) seamless-UV solver by default; do not
+    # set CYBER_QUADCOVER_CLI (set it in the shell to compare the vendored Geogram path).
+    print("  ours quad-cover: native seamless-UV solver (dependency-free default)\n")
 
     # Every CyberRemesher quadrangulator, so the visual comparison shows them all.
     OUR_METHODS = [
