@@ -207,22 +207,19 @@ never enumerates an astronomical grid / hangs). Verified end to end with `CYBER_
 Geogram OFF, no `CYBER_QUADCOVER_CLI`: a UV sphere yields **442 quads through the full pipeline**,
 entirely native.
 
-**M4 — Standalone availability (opt-in) — ✅ INFRA / ⏳ silent-default GATED.**
-`quadCoverAvailable()` returns true unconditionally (the native solver is compiled into
-`cyber_quadrangulate`), so quad-cover is selectable with **neither Geogram nor the harness**;
-`computeSeamlessUv` is ordered **native → vendored → subprocess**. The native solve is **opt-in
-via `CYBER_QC_NATIVE`**, deliberately NOT the silent default yet, because the M2 solve is not
-production-robust: (1) quality ~11% interior-irregular on the harness sphere gate vs the
-harness's <5% (not closed by field-iteration tuning); (2) integer-magnitude divergence on
-organic/many-cone meshes (an isotropically-remeshed spot with 156 cones explodes to a ~1e9-cell
-UV — caught by the divergence guard, but means no result); (3) the relaxed CG can run to its cap
-without converging on feature meshes (tens of seconds on a cube) and `computeSeamlessUvNative`
-does not honour the cancel token. All native-first machinery + guards are in place, so flipping
-to silent default is a one-line change once the solver is hardened: **feature-edge constraints,
-CG convergence + cancellation, integer-magnitude control, and closing the ~11%→<5% quality gap.**
-Stock default is unaffected (no `CYBER_QC_NATIVE` → field-aligned via the per-island fallback);
-suite 247/247. *Gate for silent default:* `11_benchmark.py` irregular/CV/median within noise of
-the vendored-solver numbers across all 5 models, robust + cancellable, full suite green.
+**M4 — Native is the stock-build default fallback — ✅ DONE.** `computeSeamlessUv` now tries the
+**vendored** Geogram `quad_cover` FIRST (in-process when built with `CYBER_WITH_QUADCOVER`, else
+the `CYBER_QUADCOVER_CLI` harness) — it keeps QuadriFlow parity (1–4%) where present — and falls
+through to the **native** solver otherwise. So a stock build with no Geogram and no harness gets
+the native solver by default (was: field-aligned per-island fallback at 9–16%). The
+`CYBER_QC_NATIVE` opt-in gate is gone; `CYBER_QC_NO_NATIVE` force-disables native (fall through to
+field-aligned) where speed/determinism matters. This flip was gated on M5+M6+M7 landing all the
+readiness items — now met: native runs on the whole corpus, watertight, bounded, cancellable, at
+**3.3–5.1% irregular** (below field-aligned's 9–16%; a hair above the vendored 2–4%). Verified: the
+default (no env) remesh of spot yields 4.1% via native; `CYBER_QC_NO_NATIVE=1` yields 8.6% via
+field-aligned in 0.5s; full ctest (unit + golden + document-invariants + api) green in ~62s. The
+one remaining tradeoff is latency (a few seconds vs sub-second field-aligned), documented and
+escapable; builds with the vendored solver are unaffected.
 
 **M5 — Hardening: the native solve now RUNS on the whole corpus, does not diverge, and is
 cancellable.** Four gaps closed:

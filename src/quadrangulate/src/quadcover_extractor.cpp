@@ -296,34 +296,18 @@ SeamlessUv computeSeamlessUvNative(const Mesh& mesh, float targetEdgeLength, flo
     return uv;
 }
 
-SeamlessUv computeSeamlessUv(const Mesh& mesh, float targetEdgeLength, float harnessScaling,
-                             float harnessAdaptivity, const CancelToken* cancel) {
+namespace {
+
+// Vendored seamless UV: Geogram quad_cover run in-process (built with CYBER_WITH_QUADCOVER)
+// or via the CYBER_QUADCOVER_CLI harness subprocess. QuadriFlow parity where available.
+// Returns an invalid UV when neither is present so computeSeamlessUv falls through to the
+// native solver.
+SeamlessUv computeSeamlessUvVendored(const Mesh& mesh, float targetEdgeLength, float harnessScaling,
+                                     float harnessAdaptivity,
+                                     [[maybe_unused]] const CancelToken* cancel) {
     SeamlessUv uv;
     if (targetEdgeLength <= 0.0f) {
         return uv;  // no target density -> caller degrades cleanly
-    }
-
-    // M4: the native seamless-UV solver (docs/native-miq-plan.md) is compiled into
-    // cyber_quadrangulate unconditionally, so quadCoverAvailable() is now true with neither
-    // Geogram nor the harness (the standalone path). It is ordered FIRST: when it returns a
-    // valid solve it is used directly and the vendored / subprocess paths below are skipped.
-    //
-    // It is opt-in via CYBER_QC_NATIVE rather than silently unconditional because the M2
-    // solve, while integer-seamless on smooth low-cone surfaces (sphere, cube-sphere — clean
-    // quads out of the extractor), is not yet production-robust: on organic / many-cone /
-    // sharp-feature meshes its integer phase diverges (a globally exploded but per-edge
-    // consistent map — spot: ~1e9-cell UV), it does not yet constrain feature edges, its
-    // relaxed CG can run to its cap without converging (tens of seconds on a unit cube), and
-    // it does not honour the cancel token. Making it the silent default would regress the
-    // harness-class sphere quality gate (native ~11% interior-irregular vs the harness's <5%)
-    // and slow / stall the default pipeline. Until those land it stays behind the flag; the
-    // full native-first ordering + guards are in place so flipping the default is a one-liner.
-    if (std::getenv("CYBER_QC_NATIVE") != nullptr) {
-        SeamlessUv native =
-            computeSeamlessUvNative(mesh, targetEdgeLength, harnessAdaptivity, harnessScaling, cancel);
-        if (native.valid) {
-            return native;
-        }
     }
 
 #ifdef CYBER_HAVE_QUADCOVER
@@ -455,6 +439,35 @@ SeamlessUv computeSeamlessUv(const Mesh& mesh, float targetEdgeLength, float har
     std::filesystem::remove(uvPath, ec);
     return uv;
 #endif  // CYBER_HAVE_QUADCOVER
+}
+
+}  // namespace
+
+SeamlessUv computeSeamlessUv(const Mesh& mesh, float targetEdgeLength, float harnessScaling,
+                             float harnessAdaptivity, const CancelToken* cancel) {
+    if (targetEdgeLength <= 0.0f) {
+        return SeamlessUv{};  // no target density -> caller degrades cleanly
+    }
+    // Vendored (Geogram quad_cover) FIRST — it holds QuadriFlow parity (1-4% irregular) and
+    // is fast, so a build/environment that has it keeps using it.
+    SeamlessUv uv =
+        computeSeamlessUvVendored(mesh, targetEdgeLength, harnessScaling, harnessAdaptivity, cancel);
+    if (uv.valid) {
+        return uv;
+    }
+    // Native FALLBACK — the dependency-free standalone solver. Now the stock-build default
+    // (no Geogram, no harness): it runs on the whole corpus, is watertight, bounded, and
+    // cancellable at ~4-5% irregular, well below the field-aligned fallback's 9-16%. It is
+    // slower (a few seconds), so CYBER_QC_NO_NATIVE force-disables it (fall through to the
+    // field-aligned per-island path) where speed/determinism matters.
+    if (std::getenv("CYBER_QC_NO_NATIVE") == nullptr) {
+        SeamlessUv native =
+            computeSeamlessUvNative(mesh, targetEdgeLength, harnessAdaptivity, harnessScaling, cancel);
+        if (native.valid) {
+            return native;
+        }
+    }
+    return uv;  // invalid -> caller (quad-cover quadrangulator) degrades to field-aligned
 }
 
 // Max integer-jump residual across interior edges: for each shared edge the grid
