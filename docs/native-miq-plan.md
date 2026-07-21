@@ -199,6 +199,36 @@ Stock default is unaffected (no `CYBER_QC_NATIVE` → field-aligned via the per-
 suite 247/247. *Gate for silent default:* `11_benchmark.py` irregular/CV/median within noise of
 the vendored-solver numbers across all 5 models, robust + cancellable, full suite green.
 
+**M5 — Hardening: the native solve now RUNS on the whole corpus, does not diverge, and is
+cancellable.** Four gaps closed:
+
+1. **Feature meshes RUN natively (no more decline gate).** The old "decline if any feature edge"
+   short-circuit is gone. Feature edges are re-tagged on the *remeshed* mesh (the isotropic stage
+   preserves the crease geometry but drops the edge flags) and marked as **hard seams** in
+   `buildSeamlessSetup`: the grid breaks along a crease so its isolines run along it, and the
+   corners split there instead of forcing a continuous UV over a ~45° field mismatch.
+2. **Integer-magnitude control replaces reject-only divergence.** The reduced integer solve now
+   pins **one gauge per connected component** of the cut-open mesh (feature seams fragment the
+   surface into patches; a single global gauge left the others on the Laplacian's constant
+   nullspace → the ~1e9-cell blow-up). The relaxed phase likewise pins one vertex per component,
+   and the rounded integer translations are clamped to an O(grid-extent) cap. `fandisk` etc. now
+   produce a sane bounded UV instead of being rejected.
+3. **Convergence + cancellation.** `solveParameterization`, the two Poisson CGs, the reduced
+   masked-CG and the greedy rounding loop all thread and poll a `CancelToken` (≤64-iter latency);
+   `computeSeamlessUv[Native]` check it between stages. A cancelled job returns an invalid result
+   promptly and the caller degrades cleanly.
+4. **Quad-count calibration.** The native grid honours the quadrangulator's `scaling` sweep as a
+   solve-spacing multiplier, so the extracted count tracks the request instead of landing ~5× low
+   (the dominant driver of the earlier high irregular %).
+
+Corpus (`CYBER_QC_NATIVE=1`, no Geogram/harness, `target_quad_count=3000`, pure-quads): native
+runs on **all 5** models — spot 5.4 %, fandisk 4.0 %, rocker-arm 8.0 %, cheburashka 5.7 %,
+bunny 5.8 % irregular (was: spot 9.8 % native + four models falling back to field-aligned at
+10–16 %), 10–21 s each, no divergence. Field-level cone reduction (extra smoothing sweeps) was
+tried but does **not** move output irregular % here — the bottleneck is seam/extraction density,
+not field cone count. Regression tests: sharp-cube runs bounded + seamless, and a pre-cancelled
+token aborts the solve.
+
 ## Risks
 
 - **CG convergence on cone-heavy / thin-feature meshes** — mitigations: Eigen sparse

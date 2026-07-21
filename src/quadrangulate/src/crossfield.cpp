@@ -1,6 +1,7 @@
 #include "cyber/quadrangulate/crossfield.hpp"
 
 #include <cmath>
+#include <cstdlib>
 #include <utility>
 #include <vector>
 
@@ -91,10 +92,14 @@ CrossField computeCrossField(const Mesh& mesh, int iterations, accel::IBackend& 
     }
 
     // Build the 2F x 2F transport-averaging operator as CSR: row 2c/2c+1 hold
-    // the real/imag equations for face c. Diagonal keeps the face's own value;
-    // each interior non-feature neighbour contributes a 2x2 rotation that
-    // transports its cross into this face's frame.
-    constexpr float kSelf = 1.0f;
+    // the real/imag equations for face c. The diagonal is a small self-damping
+    // term (kSelf); each interior non-feature neighbour contributes a 2x2 rotation
+    // that transports its cross into this face's frame. Smaller self-damping =>
+    // heavier neighbour averaging => the iteration converges to a smoother (fewer
+    // spurious singularities) harmonic field; the renormalise step keeps it a unit
+    // 4-RoSy. kSelf and the sweep count are env-tunable for calibration.
+    const char* dampEnv = std::getenv("CYBER_QC_FIELD_DAMP");
+    const float kSelf = dampEnv != nullptr ? static_cast<float>(std::atof(dampEnv)) : 0.15f;
     std::vector<std::vector<std::pair<std::size_t, float>>> rows(2 * nf);
     for (std::size_t c = 0; c < nf; ++c) {
         rows[2 * c].emplace_back(2 * c, kSelf);
@@ -146,8 +151,11 @@ CrossField computeCrossField(const Mesh& mesh, int iterations, accel::IBackend& 
         u[2 * c] = field.real[faces[c].value];
         u[2 * c + 1] = field.imag[faces[c].value];
     }
-    for (int it = 0; it < iterations; ++it) {
+    const char* itersEnv = std::getenv("CYBER_QC_FIELD_ITERS");
+    const int sweeps = itersEnv != nullptr ? std::atoi(itersEnv) : std::max(iterations, 120);
+    for (int it = 0; it < sweeps; ++it) {
         accel::spmv(backend, mat, u, y);
+        float maxDelta = 0.0f;
         for (std::size_t c = 0; c < nf; ++c) {
             if (constrained[c]) {
                 continue;
@@ -156,9 +164,16 @@ CrossField computeCrossField(const Mesh& mesh, int iterations, accel::IBackend& 
             const float im = y[2 * c + 1];
             const float len = std::sqrt(re * re + im * im);
             if (len > 1e-12f) {
-                u[2 * c] = re / len;
-                u[2 * c + 1] = im / len;
+                const float nr = re / len;
+                const float ni = im / len;
+                const float d = std::abs(nr - u[2 * c]) + std::abs(ni - u[2 * c + 1]);
+                maxDelta = std::max(maxDelta, d);
+                u[2 * c] = nr;
+                u[2 * c + 1] = ni;
             }
+        }
+        if (maxDelta < 1e-6f && it > 8) {
+            break;  // converged: further sweeps do not move the field
         }
     }
 

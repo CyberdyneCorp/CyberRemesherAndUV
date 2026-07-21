@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "cyber/core/mesh.hpp"
+#include "cyber/core/progress.hpp"
 #include "cyber/core/quadrangulate.hpp"
 
 // QuadCover-style seamless-UV isoline quad extractor (TASK F scaffold).
@@ -84,7 +85,8 @@ struct SeamlessUv {
 // per polygon, but more singularities). CYBER_QC_ADAPT overrides it.
 [[nodiscard]] SeamlessUv computeSeamlessUv(const Mesh& mesh, float targetEdgeLength,
                                            float harnessScaling = 0.5f,
-                                           float harnessAdaptivity = 0.0f);
+                                           float harnessAdaptivity = 0.0f,
+                                           const CancelToken* cancel = nullptr);
 
 // Native seamless integer-grid parameterizer (docs/native-miq-plan.md) — the path to
 // dropping the vendored-Geogram dependency entirely. QuadCover-style: reuse our own
@@ -94,7 +96,8 @@ struct SeamlessUv {
 // lands, so computeSeamlessUv falls through to the vendored/harness path. Opt-in via
 // CYBER_QC_NATIVE so it never affects the shipped path before it validates.
 [[nodiscard]] SeamlessUv computeSeamlessUvNative(const Mesh& mesh, float targetEdgeLength,
-                                                 float adaptivity = 0.0f);
+                                                 float adaptivity = 0.0f, float spacingScale = 1.0f,
+                                                 const CancelToken* cancel = nullptr);
 
 // Max integer-jump residual of a seamless UV across its interior edges: for each edge
 // shared by two triangles, the grid symmetry mapping one triangle's shared-vertex UVs

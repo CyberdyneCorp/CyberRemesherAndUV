@@ -5,6 +5,7 @@
 
 #include "cyber/accel/backend.hpp"
 #include "cyber/core/mesh.hpp"
+#include "cyber/core/progress.hpp"
 #include "cyber/quadrangulate/crossfield.hpp"
 
 // Native QuadCover-style seamless integer-grid parameterizer (docs/native-miq-plan.md).
@@ -72,6 +73,7 @@ struct Parameterization {
     bool valid = false;
 };
 [[nodiscard]] Parameterization solveParameterization(const Mesh& mesh, const SeamlessSetup& setup,
-                                                     float spacing, accel::IBackend& backend);
+                                                     float spacing, accel::IBackend& backend,
+                                                     const CancelToken* cancel = nullptr);
 
 }  // namespace cyber::remesh

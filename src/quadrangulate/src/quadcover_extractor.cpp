@@ -121,7 +121,24 @@ bool writeObjFor(const std::string& path, const Mesh& mesh, double& areaOut) {
 
 }  // namespace
 
-SeamlessUv computeSeamlessUvNative(const Mesh& mesh, float targetEdgeLength, float adaptivity) {
+namespace {
+// CYBER_QC_DEBUG-gated per-call trace of whether the native seamless solve RAN or DECLINED,
+// so the corpus harness can grep "native OK" / "native DECLINED <reason>" and confirm a model
+// took the native path rather than silently falling back to the vendored / field-aligned path.
+void logNative(bool ok, const char* reason) {
+    if (std::getenv("CYBER_QC_DEBUG") == nullptr) {
+        return;
+    }
+    if (ok) {
+        std::fprintf(stderr, "[qc] native OK\n");
+    } else {
+        std::fprintf(stderr, "[qc] native DECLINED %s\n", reason);
+    }
+}
+}  // namespace
+
+SeamlessUv computeSeamlessUvNative(const Mesh& mesh, float targetEdgeLength, float adaptivity,
+                                   float spacingScale, const CancelToken* cancel) {
     // M3 (docs/native-miq-plan.md): the fully native QuadCover-style seamless solve. No
     // Geogram, no subprocess. Pipeline:
     //   (pre) isotropic pre-remesh at `targetEdgeLength` so the solve runs on a clean,
@@ -133,47 +150,76 @@ SeamlessUv computeSeamlessUvNative(const Mesh& mesh, float targetEdgeLength, flo
     // Any degenerate stage returns an invalid UV so the caller falls through cleanly.
     SeamlessUv uv;
     if (targetEdgeLength <= 0.0f || mesh.faceCapacity() == 0) {
+        logNative(false, "empty/degenerate input");
         return uv;
     }
 
     // Isotropic pre-remesh. Tag features so sharp edges survive the resample, then project
     // onto a reference built from the raw island (flat projection: smoothNormalDegrees 0).
-    constexpr float kFeatureDihedralDegrees = 40.0f;
+    // Feature edges are NO LONGER a decline gate: buildSeamlessSetup marks them as hard seams
+    // (the grid breaks along creases, isolines run along them) and solveParameterization pins
+    // each feature-bounded patch, so CAD / sharp-feature meshes now run the native solve
+    // instead of falling back to the field-aligned path.
+    const char* featEnv = std::getenv("CYBER_QC_FEATURE_DEG");
+    const float kFeatureDihedralDegrees = featEnv != nullptr ? static_cast<float>(std::atof(featEnv)) : 40.0f;
     constexpr int kFieldIterations = 40;
     Mesh work = mesh;
     work.triangulate();  // feature tagging + the solve both need a pure-triangle mesh
     work.tagFeatureEdges(kFeatureDihedralDegrees);
 
-    // Feature gate. The M2 setup marks feature edges as dead (period jump 0) rather than
-    // constraining the grid to them, so on sharp-feature meshes the seamless solve is both
-    // ill-conditioned (the relaxed CG stops converging and runs to its cap — tens of seconds
-    // on a unit cube) and divergent. Decline such meshes up front, BEFORE the expensive
-    // solve, so the caller degrades to the vendored / subprocess / field-aligned path that
-    // does handle features, instead of paying a slow solve only to have the divergence guard
-    // reject it. (Smooth closed surfaces — no feature edges — take the native path.)
-    for (Index ei = 0; ei < work.edgeCapacity(); ++ei) {
-        if (work.isAlive(EdgeId{ei}) && work.isFeatureEdge(EdgeId{ei})) {
-            return uv;
-        }
+    if (cancel != nullptr && cancel->isCancelled()) {
+        logNative(false, "cancelled");
+        return uv;
     }
 
     const ReferenceSurface reference(work, 0.0f);
     IsotropicOptions iso;
     iso.targetEdgeLength = targetEdgeLength;
     iso.adaptivity = adaptivity;
-    if (isotropicRemesh(work, reference, iso) != IsotropicStatus::Success ||
+    if (isotropicRemesh(work, reference, iso, nullptr, cancel) != IsotropicStatus::Success ||
         work.faceCount() == 0) {
+        logNative(false, "isotropic remesh failed (or cancelled)");
+        return uv;
+    }
+    // Re-tag features on the REMESHED mesh: the isotropic stage preserves the sharp geometry
+    // (feature vertices are never smoothed off) but the newly-created edges do not inherit the
+    // feature flag, so the seam logic in buildSeamlessSetup would see none. Re-detect them by
+    // dihedral angle now that the crease geometry is intact.
+    work.tagFeatureEdges(kFeatureDihedralDegrees);
+
+    if (cancel != nullptr && cancel->isCancelled()) {
+        logNative(false, "cancelled");
         return uv;
     }
 
     auto backend = accel::defaultBackend();
     const SeamlessSetup setup = buildSeamlessSetup(work, kFieldIterations, *backend);
     if (!setup.valid) {
+        logNative(false, "setup invalid");
         return uv;
     }
+    if (std::getenv("CYBER_QC_DEBUG") != nullptr) {
+        std::size_t featureEdges = 0;
+        for (Index ei = 0; ei < work.edgeCapacity(); ++ei) {
+            if (work.isAlive(EdgeId{ei}) && work.edgeFaceCount(EdgeId{ei}) == 2 &&
+                work.isFeatureEdge(EdgeId{ei})) {
+                ++featureEdges;
+            }
+        }
+        std::fprintf(stderr, "[qc] native setup: faces=%zu featureEdges=%zu singular=%zu totalIndex=%d\n",
+                     work.faceCount(), featureEdges, setup.singularityCount(), setup.totalIndex());
+    }
+    // Grid spacing == targetEdgeLength gives ~1 UV cell per triangle. The isoline extractor
+    // then loses a large fraction of cells to short-edge collapse, so the quad count lands well
+    // under target. `spacingScale` < 1 traces denser isolines (several per triangle) so the
+    // extracted count tracks the request; the quadrangulator's calibration loop drives it, and
+    // CYBER_QC_SPACING_MUL overrides for experiments.
+    const char* spEnv = std::getenv("CYBER_QC_SPACING_MUL");
+    const float spacingMul = spEnv != nullptr ? static_cast<float>(std::atof(spEnv)) : spacingScale;
     const Parameterization param =
-        solveParameterization(work, setup, targetEdgeLength, *backend);
+        solveParameterization(work, setup, targetEdgeLength * spacingMul, *backend, cancel);
     if (!param.valid) {
+        logNative(false, "parameterization invalid (or cancelled)");
         return uv;
     }
 
@@ -203,6 +249,7 @@ SeamlessUv computeSeamlessUvNative(const Mesh& mesh, float targetEdgeLength, flo
         }
     }
     if (uv.triangles.empty()) {
+        logNative(false, "no triangles assembled");
         return uv;
     }
 
@@ -218,16 +265,23 @@ SeamlessUv computeSeamlessUvNative(const Mesh& mesh, float targetEdgeLength, flo
     const double spanCellsV = static_cast<double>(vMax - vMin);
     const double cellArea = spanCellsU * spanCellsV;
     const double sane = 100.0 * static_cast<double>(uv.triangles.size());
+    if (std::getenv("CYBER_QC_DEBUG") != nullptr) {
+        std::fprintf(stderr, "[qc] native UV span: u=[%.2f,%.2f] v=[%.2f,%.2f] cellArea=%.1f sane=%.1f\n",
+                     static_cast<double>(uMin), static_cast<double>(uMax),
+                     static_cast<double>(vMin), static_cast<double>(vMax), cellArea, sane);
+    }
     if (!(cellArea >= 0.0) || cellArea > sane) {
+        logNative(false, "divergence guard (UV bbox >> triangle count)");
         return SeamlessUv{};  // diverged -> invalid, caller degrades cleanly
     }
 
+    logNative(true, "");
     uv.valid = true;
     return uv;
 }
 
 SeamlessUv computeSeamlessUv(const Mesh& mesh, float targetEdgeLength, float harnessScaling,
-                             float harnessAdaptivity) {
+                             float harnessAdaptivity, const CancelToken* cancel) {
     SeamlessUv uv;
     if (targetEdgeLength <= 0.0f) {
         return uv;  // no target density -> caller degrades cleanly
@@ -249,7 +303,8 @@ SeamlessUv computeSeamlessUv(const Mesh& mesh, float targetEdgeLength, float har
     // and slow / stall the default pipeline. Until those land it stays behind the flag; the
     // full native-first ordering + guards are in place so flipping the default is a one-liner.
     if (std::getenv("CYBER_QC_NATIVE") != nullptr) {
-        SeamlessUv native = computeSeamlessUvNative(mesh, targetEdgeLength, harnessAdaptivity);
+        SeamlessUv native =
+            computeSeamlessUvNative(mesh, targetEdgeLength, harnessAdaptivity, harnessScaling, cancel);
         if (native.valid) {
             return native;
         }
@@ -1776,7 +1831,8 @@ public:
         IsolineQuadMesh out;
         float scaling = 0.5f;
         for (int attempt = 0; attempt < 2; ++attempt) {
-            const SeamlessUv uv = computeSeamlessUv(mesh, targetEdgeLength, scaling, m_adaptivity);
+            const SeamlessUv uv =
+                computeSeamlessUv(mesh, targetEdgeLength, scaling, m_adaptivity, cancel);
             if (!uv.valid) {
                 return {.success = false, .cancelled = false,
                         .failureReason = "quad-cover seamless UV unavailable "

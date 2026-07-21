@@ -260,6 +260,20 @@ SeamlessSetup buildSeamlessSetup(const Mesh& mesh, int iterations, accel::IBacke
         }
     }
 
+    // Feature edges are HARD seams. A sharp crease is a place the integer grid must break so
+    // its isolines run ALONG the feature (the cross field is already feature-aligned, so both
+    // sides carry a grid parallel/perpendicular to the crease). Marking every interior feature
+    // edge as a cut edge splits the corners there (the seam absorbs the field's discontinuity
+    // across the crease) instead of forcing a continuous UV over a ~45-degree field mismatch —
+    // which is what made CAD meshes ill-conditioned and divergent. This is what lets feature
+    // meshes run the native solve at all (replacing the old "decline if any feature" gate).
+    for (Index ei = 0; ei < mesh.edgeCapacity(); ++ei) {
+        const EdgeId e{ei};
+        if (mesh.isAlive(e) && mesh.edgeFaceCount(e) == 2 && mesh.isFeatureEdge(e)) {
+            setup.isCutEdge[e.value] = true;
+        }
+    }
+
     setup.valid = true;
     return setup;
 }
@@ -289,7 +303,7 @@ std::vector<EdgeId> faceEdges(const Mesh& mesh, FaceId f) {
 // the iteration count; x is seeded with its incoming value.
 int conjugateGradient(accel::IBackend& backend, const accel::SparseMatrix& A,
                       const std::vector<float>& b, std::vector<float>& x, int maxIters,
-                      float tol) {
+                      float tol, const CancelToken* cancel = nullptr) {
     const std::size_t n = A.rows;
     accel::Buffer<float> xb(std::vector<float>(x.begin(), x.end()));
     accel::Buffer<float> ax;
@@ -308,6 +322,9 @@ int conjugateGradient(accel::IBackend& backend, const accel::SparseMatrix& A,
     int it = 0;
     accel::Buffer<float> pb, apb;
     for (; it < maxIters; ++it) {
+        if (cancel != nullptr && (it & 63) == 0 && cancel->isCancelled()) {
+            break;
+        }
         pb.upload(p);
         accel::spmv(backend, A, pb, apb);  // Ap
         double pAp = 0.0;
@@ -424,8 +441,9 @@ struct SeamRef {
 int solveSeamlessReduced(accel::IBackend& backend, std::size_t nCut,
                          const std::vector<std::unordered_map<std::size_t, float>>& rows,
                          const std::vector<float>& bu, const std::vector<float>& bv,
-                         const std::vector<SeamRef>& seams, std::size_t gauge,
-                         std::vector<float>& u, std::vector<float>& v) {
+                         const std::vector<SeamRef>& seams, const std::vector<std::size_t>& gauges,
+                         std::vector<float>& u, std::vector<float>& v,
+                         const CancelToken* cancel = nullptr) {
     const std::size_t nSeam = seams.size();
     const std::size_t nUv = 2 * nCut;
     const std::size_t N = nUv + 2 * nSeam;
@@ -453,7 +471,7 @@ int solveSeamlessReduced(accel::IBackend& backend, std::size_t nCut,
 
     // Homogeneous constraint rows (== 0): 4 per seam edge (x,y at each endpoint) + gauge.
     std::vector<Row> cons;
-    cons.reserve(4 * nSeam + 2);
+    cons.reserve(4 * nSeam + 2 * gauges.size());
     for (std::size_t e = 0; e < nSeam; ++e) {
         const SeamRef& s = seams[e];
         double cxu, cxv, cyu, cyv;
@@ -480,7 +498,12 @@ int solveSeamlessReduced(accel::IBackend& backend, std::size_t nCut,
             }
         }
     }
-    {
+    // Gauge: pin u and v to 0 at ONE vertex PER CONNECTED COMPONENT of the cut-open mesh. The
+    // reduced Dirichlet operator inherits the cotan Laplacian's per-component constant nullspace,
+    // so each component needs its own translation pin or the CG drifts arbitrarily far along that
+    // nullspace (the ~1e9-cell blow-up the divergence guard rejected). Feature seams fragment the
+    // surface into several patches, so a single global gauge is not enough.
+    for (const std::size_t gauge : gauges) {
         Row rg;
         addC(rg, uIx(gauge), 1.0);
         cons.push_back(std::move(rg));
@@ -674,6 +697,9 @@ int solveSeamlessReduced(accel::IBackend& backend, std::size_t nCut,
         if (rs0 > 0.0) {
             const int maxIt = static_cast<int>(W) + 1000;
             for (int it = 0; it < maxIt; ++it) {
+                if (cancel != nullptr && (it & 63) == 0 && cancel->isCancelled()) {
+                    break;
+                }
                 applyA(pv, Ap);
                 double pAp = 0.0;
                 for (std::size_t i = 0; i < W; ++i) {
@@ -725,10 +751,34 @@ int solveSeamlessReduced(accel::IBackend& backend, std::size_t nCut,
     // (the reduction makes the free integers unconstrained); rounding only shapes distortion.
     std::vector<char> mask(W, 1);
     maskedSolve(mask);
+
+    // MAGNITUDE CONTROL. The reduction leaves the independent integer translations
+    // UNCONSTRAINED — any integers keep the map seamless — so a huge relaxed value would
+    // round to a huge integer and blow the map up (the failure the divergence guard used to
+    // reject). Bound each rounded translation to a physically sane range: a seamless integer
+    // grid crosses at most O(grid extent) cells along any seam, so cap by the number of grid
+    // lines the relaxed UV already spans (plus slack). Clamping here keeps seamlessness intact
+    // and simply refuses to place a seam translation the geometry never justified.
+    double uvSpan = 0.0;
+    {
+        accel::Buffer<float> wProbe(w), zProbe;
+        accel::spmv(backend, Tuv, wProbe, zProbe);
+        for (std::size_t i = 0; i < zProbe.size(); ++i) {
+            uvSpan = std::max(uvSpan, static_cast<double>(std::abs(zProbe[i])));
+        }
+    }
+    const double tCap = std::max(uvSpan * 2.0, std::sqrt(static_cast<double>(nCut))) + 8.0;
+    const auto clampInt = [tCap](double val) {
+        return std::clamp(std::round(val), -tCap, tCap);
+    };
+
     std::vector<char> intPinned(intFree.size(), 0);
     constexpr double kConfident = 0.2;
     std::size_t remaining = intFree.size();
     while (remaining > 0) {
+        if (cancel != nullptr && cancel->isCancelled()) {
+            break;
+        }
         std::size_t closest = intFree.size();
         double bestFrac = 2.0;
         std::size_t pinnedThisRound = 0;
@@ -744,7 +794,7 @@ int solveSeamlessReduced(accel::IBackend& backend, std::size_t nCut,
                 closest = k;
             }
             if (frac <= kConfident) {
-                w[ri] = static_cast<float>(std::round(val));
+                w[ri] = static_cast<float>(clampInt(val));
                 mask[ri] = 0;
                 intPinned[k] = 1;
                 --remaining;
@@ -753,7 +803,7 @@ int solveSeamlessReduced(accel::IBackend& backend, std::size_t nCut,
         }
         if (pinnedThisRound == 0) {  // nothing confident: pin the single closest
             const std::size_t ri = intFree[closest];
-            w[ri] = static_cast<float>(std::round(static_cast<double>(w[ri])));
+            w[ri] = static_cast<float>(clampInt(static_cast<double>(w[ri])));
             mask[ri] = 0;
             intPinned[closest] = 1;
             --remaining;
@@ -781,7 +831,8 @@ int solveSeamlessReduced(accel::IBackend& backend, std::size_t nCut,
 }  // namespace
 
 Parameterization solveParameterization(const Mesh& mesh, const SeamlessSetup& setup,
-                                       float spacing, accel::IBackend& backend) {
+                                       float spacing, accel::IBackend& backend,
+                                       const CancelToken* cancel) {
     Parameterization out;
     if (!setup.valid || spacing <= 0.0f || mesh.faceCapacity() == 0) {
         return out;
@@ -889,30 +940,71 @@ Parameterization solveParameterization(const Mesh& mesh, const SeamlessSetup& se
         return out;
     }
 
-    // Pin cut vertex 0 to make the Laplacian SPD for CG.
+    // Pin ONE cut vertex PER CONNECTED COMPONENT of the (relaxed) Laplacian graph, so the
+    // matrix is SPD for CG. With feature edges now cutting the surface into independent patches,
+    // the cut-open mesh can have several components; a single global pin would leave the others
+    // rank-deficient (constant nullspace) and the relaxed CG would drift arbitrarily far —
+    // exactly the "map blows up" divergence. Each component gets its own pin at value 0; the
+    // integer phase re-ties the components through their shared feature seams, so the per-patch
+    // gauge freedom is absorbed by the seam translations.
+    std::vector<std::size_t> comp(nCut, kInvalidIndex);
+    {
+        std::size_t nextComp = 0;
+        for (std::size_t s = 0; s < nCut; ++s) {
+            if (comp[s] != kInvalidIndex || rows[s].empty()) {
+                continue;
+            }
+            std::queue<std::size_t> bfs;
+            bfs.push(s);
+            comp[s] = nextComp;
+            while (!bfs.empty()) {
+                const std::size_t cur = bfs.front();
+                bfs.pop();
+                for (const auto& [j, wj] : rows[cur]) {
+                    if (j != cur && comp[j] == kInvalidIndex && !rows[j].empty()) {
+                        comp[j] = nextComp;
+                        bfs.push(j);
+                    }
+                }
+            }
+            ++nextComp;
+        }
+    }
+    std::vector<char> isPin(nCut, 0);
+    {
+        std::vector<char> compPinned;
+        for (std::size_t i = 0; i < nCut; ++i) {
+            if (comp[i] == kInvalidIndex) {
+                continue;
+            }
+            if (comp[i] >= compPinned.size()) {
+                compPinned.resize(comp[i] + 1, 0);
+            }
+            if (!compPinned[comp[i]]) {
+                compPinned[comp[i]] = 1;
+                isPin[i] = 1;
+            }
+        }
+    }
+
     // Keep the un-pinned divergence RHS for the constrained phase (the pin below mutates
     // bu/bv in place for the relaxed CG solve).
     const std::vector<float> bu0 = bu, bv0 = bv;
-    const std::size_t pin = 0;
     accel::SparseMatrix A;
     A.rows = nCut;
     A.rowStart.reserve(nCut + 1);
     A.rowStart.push_back(0);
     for (std::size_t i = 0; i < nCut; ++i) {
-        if (i == pin || rows[i].empty()) {
+        if (isPin[i] || rows[i].empty()) {
             A.colIndex.push_back(i);
             A.value.push_back(1.0f);
-            bu[i] = (i == pin) ? 0.0f : bu[i];
-            bv[i] = (i == pin) ? 0.0f : bv[i];
-            if (rows[i].empty() && i != pin) {
-                bu[i] = 0.0f;
-                bv[i] = 0.0f;
-            }
+            bu[i] = 0.0f;
+            bv[i] = 0.0f;
             A.rowStart.push_back(A.colIndex.size());
             continue;
         }
         for (const auto& [j, w] : rows[i]) {
-            if (j == pin) {
+            if (isPin[j]) {
                 continue;  // pinned to 0 -> no RHS contribution
             }
             A.colIndex.push_back(j);
@@ -920,13 +1012,14 @@ Parameterization solveParameterization(const Mesh& mesh, const SeamlessSetup& se
         }
         A.rowStart.push_back(A.colIndex.size());
     }
-    bu[pin] = 0.0f;
-    bv[pin] = 0.0f;
 
     std::vector<float> u(nCut, 0.0f), v(nCut, 0.0f);
     const int maxIters = static_cast<int>(nCut) + 500;
-    out.cgIterationsU = conjugateGradient(backend, A, bu, u, maxIters, 1e-8f);
-    out.cgIterationsV = conjugateGradient(backend, A, bv, v, maxIters, 1e-8f);
+    out.cgIterationsU = conjugateGradient(backend, A, bu, u, maxIters, 1e-8f, cancel);
+    out.cgIterationsV = conjugateGradient(backend, A, bv, v, maxIters, 1e-8f, cancel);
+    if (cancel != nullptr && cancel->isCancelled()) {
+        return out;  // out.valid stays false -> caller degrades cleanly
+    }
 
     // Integer-seamless phase: collect the seam edges with the rotation rho taken from the
     // COMBED field (rho = comb[B] - comb[A] - periodJump, mod 4) — the exact grid symmetry the
@@ -956,23 +1049,27 @@ Parameterization solveParameterization(const Mesh& mesh, const SeamlessSetup& se
         s.rho = (((comb[ef[1].value] - comb[ef[0].value] - p) % 4) + 4) % 4;
         seams.push_back(s);
     }
-    std::vector<std::size_t> singCuts;
-    for (Index vi = 0; vi < mesh.vertexCapacity(); ++vi) {
-        const VertexId vv{vi};
-        if (!mesh.isAlive(vv) || setup.singularityIndex[vi] == 0) {
-            continue;
-        }
-        const std::vector<FaceId> vf = mesh.vertexFaces(vv);
-        if (!vf.empty()) {
-            singCuts.push_back(cutOf(vf[0].value, vi));
+    // Gauges: one pin per connected component of the cut-open mesh (the isPin representatives
+    // from the relaxed phase). The reduced integer solve needs every component's translation
+    // nullspace pinned or it diverges. Empty components (all singular etc.) fall back to a
+    // single default pin so the solve is always well-posed.
+    std::vector<std::size_t> gauges;
+    for (std::size_t i = 0; i < nCut; ++i) {
+        if (isPin[i]) {
+            gauges.push_back(i);
         }
     }
-    // Sparse constraint-elimination MIQ: eliminates the seam rigidity + gauge to independent
-    // DOF and greedily rounds the integer translations. No dense dual, no seam cap — it scales
-    // to hundreds of cones (spot: ~350 seam edges), reconciling branch-point holonomy exactly.
-    const std::size_t gauge = singCuts.empty() ? std::size_t{0} : singCuts[0];
+    if (gauges.empty()) {
+        gauges.push_back(0);
+    }
+    // Sparse constraint-elimination MIQ: eliminates the seam rigidity + per-component gauges to
+    // independent DOF and greedily rounds the integer translations. No dense dual, no seam cap —
+    // it scales to hundreds of cones (spot: ~350 seam edges), reconciling branch-point holonomy.
     if (!seams.empty()) {
-        solveSeamlessReduced(backend, nCut, rows, bu0, bv0, seams, gauge, u, v);
+        solveSeamlessReduced(backend, nCut, rows, bu0, bv0, seams, gauges, u, v, cancel);
+    }
+    if (cancel != nullptr && cancel->isCancelled()) {
+        return out;  // out.valid stays false
     }
 
     // Per-corner UV.

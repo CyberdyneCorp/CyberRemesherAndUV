@@ -98,6 +98,51 @@ Mesh makeCubeSphere(int n = 8) {
     return Mesh::fromIndexed(p, f);
 }
 
+// A flat-faced cube tessellated n x n per side (welded along the 12 cube edges). Unlike the
+// cube-SPHERE, the faces stay planar so the 12 cube edges are genuine 90-degree creases: after
+// tagFeatureEdges they are feature edges. This is the CAD / sharp-feature case that used to be
+// declined by the native solver (and, once run, blew the integer map up); it exercises the
+// feature-as-seam path and the per-component gauge pinning that keeps the map bounded.
+Mesh makeCube(int n = 6) {
+    std::vector<Vec3> p;
+    std::vector<std::vector<Index>> f;
+    std::map<std::tuple<int, int, int>, Index> idx;
+    const auto add = [&](const Vec3& raw) -> Index {
+        const std::tuple<int, int, int> k{static_cast<int>(std::lround(raw.x * 1000.0f)),
+                                          static_cast<int>(std::lround(raw.y * 1000.0f)),
+                                          static_cast<int>(std::lround(raw.z * 1000.0f))};
+        const auto it = idx.find(k);
+        if (it != idx.end()) {
+            return it->second;
+        }
+        const Index id = static_cast<Index>(p.size());
+        p.push_back(raw);
+        idx.emplace(k, id);
+        return id;
+    };
+    const int dirs[6][3] = {{0, 0, 1}, {0, 0, -1}, {0, 1, 0}, {0, -1, 0}, {1, 0, 0}, {-1, 0, 0}};
+    for (const auto& d : dirs) {
+        const Vec3 nrm{static_cast<float>(d[0]), static_cast<float>(d[1]), static_cast<float>(d[2])};
+        const Vec3 a = std::abs(nrm.z) < 0.5f ? Vec3{0, 0, 1} : Vec3{1, 0, 0};
+        const Vec3 t1 = normalized(cross(nrm, a));
+        const Vec3 t2 = cross(nrm, t1);
+        const auto pt = [&](int i, int j) {
+            const float u = -1.0f + 2.0f * static_cast<float>(i) / static_cast<float>(n);
+            const float v = -1.0f + 2.0f * static_cast<float>(j) / static_cast<float>(n);
+            return nrm + t1 * u + t2 * v;
+        };
+        for (int i = 0; i < n; ++i) {
+            for (int j = 0; j < n; ++j) {
+                const Index a0 = add(pt(i, j)), a1 = add(pt(i + 1, j));
+                const Index a2 = add(pt(i + 1, j + 1)), a3 = add(pt(i, j + 1));
+                f.push_back({a0, a1, a2});
+                f.push_back({a0, a2, a3});
+            }
+        }
+    }
+    return Mesh::fromIndexed(p, f);
+}
+
 Mesh makeTorus(int major = 40, int minor = 20) {
     std::vector<Vec3> p;
     const float R0 = 1.0f, r0 = 0.35f;
@@ -313,4 +358,84 @@ TEST_CASE("seamless M2c: branching-cut many-cone surface stays seamless (residua
         }
     }
     CHECK(nQuad * 2 > quads.quads.size());  // > 50% are quads
+}
+
+namespace {
+
+// Max |UV| over all corners — a divergence probe. A sane integer-grid map spans O(grid extent)
+// cells; a divergent one explodes to 1e6+.
+float maxAbsUv(const Mesh& mesh, const remesh::Parameterization& param) {
+    float m = 0.0f;
+    for (Index fi = 0; fi < mesh.faceCapacity(); ++fi) {
+        if (!mesh.isAlive(FaceId{fi}) || mesh.faceSize(FaceId{fi}) != 3) continue;
+        for (const Vec2& c : param.cornerUv[fi]) {
+            m = std::max(m, std::max(std::abs(c.x), std::abs(c.y)));
+        }
+    }
+    return m;
+}
+
+}  // namespace
+
+// Regression (feature meshes RUN natively): a sharp-edged cube used to be declined by the native
+// solver — its feature edges were left as dead interior edges, so the integer map was
+// ill-conditioned and blew up. buildSeamlessSetup must now mark the 12 creases as cut (seam)
+// edges, and solveParameterization must produce a valid, BOUNDED (non-divergent) integer-seamless
+// map. This is the gate that lets CAD / sharp-feature models take the native path.
+TEST_CASE("seamless feature: sharp cube runs and stays bounded (feature edges become seams)") {
+    auto backend = cyber::accel::defaultBackend();
+    Mesh cube = makeCube(6);
+    // A 90-degree cube crease has a 90-degree normal angle, so it registers as a feature only
+    // above a ~90-degree dihedral threshold (tagFeatureEdges: feature when normalAngle >=
+    // 180 - threshold). Use 120 so the 12 cube edges are tagged.
+    cube.tagFeatureEdges(120.0f);
+
+    // Some interior edges are tagged as 90-degree creases.
+    std::size_t featureEdges = 0;
+    for (Index ei = 0; ei < cube.edgeCapacity(); ++ei) {
+        if (cube.isAlive(EdgeId{ei}) && cube.edgeFaceCount(EdgeId{ei}) == 2 &&
+            cube.isFeatureEdge(EdgeId{ei})) {
+            ++featureEdges;
+        }
+    }
+    REQUIRE(featureEdges > 0);
+
+    const remesh::SeamlessSetup setup = remesh::buildSeamlessSetup(cube, 50, *backend);
+    REQUIRE(setup.valid);
+
+    // Every interior feature edge is marked as a cut (seam) edge.
+    for (Index ei = 0; ei < cube.edgeCapacity(); ++ei) {
+        if (cube.isAlive(EdgeId{ei}) && cube.edgeFaceCount(EdgeId{ei}) == 2 &&
+            cube.isFeatureEdge(EdgeId{ei})) {
+            CHECK(setup.isCutEdge[ei]);
+        }
+    }
+
+    const remesh::Parameterization param =
+        remesh::solveParameterization(cube, setup, 0.25f, *backend);
+    REQUIRE(param.valid);
+
+    // The map is BOUNDED — the per-component gauge pinning kept it from diverging (pre-fix this
+    // exploded to ~1e6+). A sane map on a unit cube spans only a handful of grid cells.
+    CHECK(maxAbsUv(cube, param) < 1e3f);
+    // And it is integer-seamless across the (now feature-aware) seams.
+    const remesh::SeamlessUv uv = assembleUv(cube, param);
+    REQUIRE(uv.valid);
+    CHECK(remesh::seamlessUvResidual(uv) < 1e-3);
+}
+
+// Regression (cooperative cancellation): a token cancelled before the solve must make
+// solveParameterization return promptly with an INVALID parameterization (so computeSeamlessUv
+// degrades cleanly) rather than running the full CG + integer rounding to completion.
+TEST_CASE("seamless cancel: pre-cancelled token aborts the solve with an invalid result") {
+    auto backend = cyber::accel::defaultBackend();
+    const Mesh sphere = makeSphere();
+    const remesh::SeamlessSetup setup = remesh::buildSeamlessSetup(sphere, 30, *backend);
+    REQUIRE(setup.valid);
+
+    cyber::CancelToken cancel;
+    cancel.requestCancel();
+    const remesh::Parameterization param =
+        remesh::solveParameterization(sphere, setup, 0.12f, *backend, &cancel);
+    CHECK_FALSE(param.valid);
 }
