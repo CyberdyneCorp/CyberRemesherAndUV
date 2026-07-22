@@ -7,6 +7,7 @@
 
 #include <vulkan/vulkan.h>
 
+#include <algorithm>
 #include <cstring>
 #include <stdexcept>
 #include <vector>

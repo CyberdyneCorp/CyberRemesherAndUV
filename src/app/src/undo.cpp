@@ -1,5 +1,6 @@
 #include "cyber/app/undo.hpp"
 
+#include <algorithm>
 #include <utility>
 
 namespace cyber::app {

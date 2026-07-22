@@ -1,5 +1,6 @@
 #include <doctest.h>
 
+#include <algorithm>
 #include <cstddef>
 #include <numeric>
 #include <optional>
