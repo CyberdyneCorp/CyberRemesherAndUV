@@ -47,11 +47,14 @@ TEST_CASE("map applies the kernel across the whole buffer") {
 
 TEST_CASE("reduce matches a serial fold regardless of chunking") {
     auto backend = accel::defaultBackend();
-    std::vector<long> values(100'000);
+    // long is 32-bit on Windows, so both the running sum (5e9) and the closed-form
+    // 100000*100001/2 overflow it; use long long for a portable 64-bit accumulation.
+    std::vector<long long> values(100'000);
     std::iota(values.begin(), values.end(), 1);
-    accel::Buffer<long> in(values);
-    const long sum = accel::reduce(*backend, in, 0L, [](long a, long b) { return a + b; });
-    REQUIRE(sum == 100'000L * 100'001L / 2);
+    accel::Buffer<long long> in(values);
+    const long long sum =
+        accel::reduce(*backend, in, 0LL, [](long long a, long long b) { return a + b; });
+    REQUIRE(sum == 100'000LL * 100'001LL / 2);
 }
 
 TEST_CASE("reduce over an empty buffer returns the seed") {
