@@ -16,18 +16,43 @@ metrics, ~3000 quads, spot/fandisk/rocker/bunny) reframes Phase 4:
   ~100% *true* field cones (no extractor headroom). The old "36% spurious
   singularities" problem belongs to the retired extractor.
 - **Median-angle half** — the dependency-free *native* quad-cover solver trails
-  QuadriFlow by ~1.5–4.9° (mean ~3.4°). But the **vendored in-process Geogram
-  field** (`-DCYBER_WITH_QUADCOVER=ON`, MIT) **beats QuadriFlow on median AND
-  irregular on 3/4 organic models** — spot 83.6 vs 82.5, rocker 83.5 vs 82.2,
-  bunny 83.0 vs 82.2 — losing only fandisk (80.9 vs 85.0, a CAD crease-alignment
-  problem, not smoothness). Verified end-to-end, both backends reproduced.
+  QuadriFlow by ~1.5–4.9° (mean ~3.4°). The **vendored in-process Geogram field**
+  (`-DCYBER_WITH_QUADCOVER=ON`, MIT) beats QuadriFlow on median AND irregular on
+  spot (83.6 vs 82.5), rocker (83.5 vs 82.2) and bunny (83.0 vs 82.2), losing
+  fandisk (80.9 vs 85.0). Verified end-to-end, both backends reproduced.
+  - ⚠️ **Correction (2026-07-22): the "3/4 organic models" framing was selection
+    bias.** That trio counts **rocker-arm**, the *mechanical* model, as organic,
+    and omits **cheburashka**, an actual organic character — which **loses on
+    both axes** (80 vs 82 median, 4% vs 2% irregular, and the worst edge-CV gap
+    in the corpus at 0.22 vs 0.15). On the real organic set (spot, cheburashka,
+    bunny) it is **2/3**, not 3/4. Corpus-wide the default is **3/5 on median and
+    3/5 on irregular**. The win is real but narrower than recorded; quote 3/5,
+    and name cheburashka alongside fandisk as the losses.
 
 So Phase 4 is **not** the "only a global integer-parametrization rewrite can close
 it" hard core this doc claims. **DONE:** the `cpu-headless` preset now builds with
 `-DCYBER_WITH_QUADCOVER=ON`, so the stock default (no env vars) uses the vendored
-Geogram field and reproduces spot 83.6 / rocker 83.5 / bunny 83.0 — beating
-QuadriFlow on median *and* irregular on the organic corpus. Full test suite green
-against that build (only the pre-existing integer-extractor WIP fails).
+Geogram field and reproduces spot 84 / rocker 85 / bunny 83 — beating QuadriFlow
+on median *and* irregular on 3/5 of the corpus (losing fandisk and cheburashka).
+Full test suite green against that build (only the pre-existing integer-extractor
+WIP fails).
+
+**Current standing of the default vs QuadriFlow** (2026-07-22, `--target-quads
+3000`, re-measured after the harness was pointed at the shipped extractor — it had
+been scoring the retired one in Phases 2–3):
+
+| model | med° ours/QF | irr% ours/QF | CV ours/QF | defects ours/QF | feature ours/QF |
+|---|---|---|---|---|---|
+| spot | **84**/82 | **2**/3 | **0.12**/0.14 | **0**/0 | 0.46/**0.44** |
+| fandisk | 83/**85** | 3/**1** | **0.16**/0.19 | **0**/0 | 0.82/**0.41** |
+| rocker-arm | **85**/82 | **1**/3 | 0.15/0.15 | **0**/0 | 0.61/**0.40** |
+| cheburashka | 80/**82** | 4/**2** | 0.22/**0.15** | **0**/0 | 1.15/**0.57** |
+| stanford-bunny | **83**/82 | **3**/4 | 0.21/**0.17** | **8**/38 | 1.32/**0.58** |
+
+Read across: we lead on **topological validity (5/5)**, lead on median angle and
+irregular % (3/5 each), and trail on **feature-following (0/5)** — the one axis
+QuadriFlow wins everywhere, on smooth organics as much as on CAD parts. That, not
+the fandisk median residual, is the highest-value open item.
 
 **Relax lever measured + shipped.** Bumping the quad-cover base relax 10→40 (its
 Geogram base is uniform enough, like the integer grid) is a free, corpus-wide
@@ -86,13 +111,17 @@ do not claim "better" without a harness number that shows it.
   uses a **per-vertex spacing** derived from local mesh density, so it tracks
   adaptive sizing instead of over-merging it — the adaptive quad count no longer
   collapses (smooth model 72 → 625 quads, ~8×; uniform behaviour unchanged).
-  Adaptivity is now validated: it **beats our own uniform sizing on quality-per-
-  polygon on 4/5 models** (fandisk 0.46% vs 0.82% surface dev at matched count).
-  But it does **not** yet beat QuadriFlow's *absolute* fidelity per polygon —
-  that's limited by our base mesh quality (the ~36% spurious singularities), i.e.
-  **coupled to Phase 4, not to adaptivity.** (The earlier "3/5 win vs QuadriFlow"
-  was an artifact of the collapsed ~70–480-quad counts, where QuadriFlow itself
-  degrades; at honest counts it leads.)
+  ~~Adaptivity is now validated: it beats our own uniform sizing on quality-per-
+  polygon on 4/5 models (fandisk 0.46% vs 0.82% surface dev at matched count).~~
+  **RETRACTED 2026-07-22 — 2/5, see Phase 2 below.** Ironically this bullet
+  already diagnosed the failure mode it fell to: it notes the earlier "3/5 win vs
+  QuadriFlow" was an artifact of collapsed quad counts, but the 4/5 figure was
+  measured the same way — the arms never converged on a count, and fandisk's
+  "win" was scored against a degenerate 22.61% baseline.
+  Adaptivity also does **not** beat QuadriFlow's *absolute* fidelity per polygon.
+  The old explanation — capped by ~36% spurious singularities, **coupled to Phase
+  4** — no longer holds either: the default now runs at 1–4% irregular and still
+  trails, so per-polygon fidelity is not singularity-gated.
 - **Bonus finding:** the QuadriFlow-in-every-example panels show a clear
   feature-preservation win — on a cube QuadriFlow rounds the edges and tears
   holes (20% slivers) while our feature-aware remesh keeps them crisp. Feeds
@@ -123,16 +152,33 @@ quads where curvature is high → better fidelity per polygon.
 - ✅ **Variable-spacing extractor** — the position-field extractor now takes a
   per-vertex spacing (local density), so it tracks adaptive sizing instead of
   over-merging it. Count no longer collapses; uniform path unchanged.
-- ✅ **Adaptivity validated** — beats our own uniform sizing on quality-per-polygon
-  on 4/5 corpus models.
-- ⛓ **Beating QuadriFlow absolutely is coupled to Phase 4** — our per-polygon
-  fidelity is capped by the ~36% spurious singularities, not by sizing. Revisit
-  this exit after Phase 4 lands.
+- ❌ **The 4/5 "adaptivity validated" claim does NOT reproduce — it was a
+  measurement artifact (2026-07-22).** The harness matched counts by requesting
+  `achieved * 1.3` once, which left the adaptive and uniform arms 20–30% apart
+  down at ~200–400 quads, where both extractors degrade. fandisk's "win" rested
+  on a *uniform* baseline reporting **22.61%** surface deviation — a degenerate
+  extraction, not a measurement; at matched count that same run is **0.30%**.
+  With both arms driven through `search_matched_count`, adaptivity beats uniform
+  on **2/5** — and one of those (cheburashka, 0.28 vs 0.29%) is inside noise,
+  while rocker-arm is ~5× *worse* (1.30 vs 0.27%).
+- ❌ **Adaptive sizing cannot even reach benchmark density on 2/5 models** —
+  it saturates at 2034 quads (cheburashka) and 916 (stanford-bunny) against a
+  3000 request, so those models have no matched-count comparison at all.
+- ⚠️ **Caveat on the corrected numbers:** the count-match request ceiling bounds
+  how hard the adaptive arm can be pushed, so on saturating models the pair is
+  matched to each other but below target (spot lands ~657q). Rows are
+  self-consistent; cross-model comparison is not meaningful.
 - ◻ **Optional:** budget-preserving sizing so `adaptivity` honors the target count
   (a renorm was tried and reverted — it destabilized dev on 2 models; needs a
   gentler, mesh-quality-aware formulation).
-**Exit:** ours ≥ QuadriFlow on quality-per-polygon on ≥ 4/5 corpus models *(blocked
-on Phase 4)*; adaptivity beats our own uniform sizing on ≥ 4/5 *(met)*.
+**Exit:** ours ≥ QuadriFlow on quality-per-polygon on ≥ 4/5 corpus models *(not
+met — QuadriFlow leads on all 5)*; adaptivity beats our own uniform sizing on
+≥ 4/5 *(**NOT met — 2/5**; the earlier "met" was the artifact above)*.
+
+**Recommendation: descope.** The shipped `quad-cover` default is uniform-only by
+design (capi hardcodes adaptivity 0; the isotropic stage that consumes
+`params.adaptivity` is bypassed for it), so this phase measures a lever the
+default cannot use, and the lever does not win where it can be used.
 
 ## Phase 3 — Win on features & robustness — 🟡 measured; MIXED (win on hard geometry)
 
@@ -142,14 +188,27 @@ Honest finding — **not a clean win**:
   subdivided cube QuadriFlow catastrophically tears (598 boundary edges, 2.87%
   feature error) while ours is clean (0 defects, 0.3%). QuadriFlow degenerates on
   sharp box corners; we don't.
-- ❌ **Complex smooth CAD/organic** — QuadriFlow leads. Better crease alignment
-  (fandisk 0.43% vs 0.83%, cheburashka 0.57% vs 1.27%) and our extractor still
-  leaves validity **defects** it doesn't (cheburashka 74 boundary edges, fandisk
-  2 non-manifold). Hole-fill doesn't close them — a real extractor bug.
-**Follow-ups:** (a) fix the extractor's scattered validity defects on complex
-models; (b) hard-align the field to sharp creases for better CAD feature loops.
-**Exit (partial):** robustness win on hard-surface geometry *(met)*; ≥ QuadriFlow
-feature alignment + validity on the smooth corpus *(not met — extractor bugs)*.
+- ✅ **Validity on the smooth corpus — MET, and we beat QuadriFlow (2026-07-22).**
+  Follow-up (a) below was a property of the **retired** position-field extractor,
+  which the harness was still scoring. Re-measured on the shipped `quad-cover`
+  default, topological defects are **0 on 4/5 models** and 8 vs QuadriFlow's 38
+  on stanford-bunny — **5/5 ≥ QuadriFlow**. The same run shows the retired
+  extractor's 110 (cheburashka) and 30 (fandisk), which is what the old
+  "hole-fill doesn't close them — a real extractor bug" note referred to. It does
+  not describe what ships.
+- ❌ **Feature-following — NOT met, and the gap is corpus-wide, not CAD-only.**
+  The default trails QuadriFlow on **0/5** models: spot 0.46 vs 0.44%, rocker-arm
+  0.61 vs 0.40%, fandisk 0.82 vs 0.41%, cheburashka 1.15 vs 0.57%, bunny 1.32 vs
+  0.58%. This reframes the "fandisk CAD residual" story at the top of this doc:
+  crease alignment is the one axis where QuadriFlow consistently leads, on smooth
+  organics as much as on CAD parts.
+**Follow-ups:** ~~(a) fix the extractor's scattered validity defects~~ *(done —
+retired-extractor issue; the default is clean)*; **(b) hard-align the field to
+sharp creases — now the single highest-value open item in retopology, and the
+only unmet half of this phase.**
+**Exit (partial):** robustness win on hard-surface geometry *(met)*; validity on
+the smooth corpus *(**met** — 5/5 vs QuadriFlow)*; feature alignment *(not met —
+0/5, corpus-wide)*.
 
 ## Phase 4 — Close the median-angle gap (the hard core) — 🔴 local approaches exhausted
 
