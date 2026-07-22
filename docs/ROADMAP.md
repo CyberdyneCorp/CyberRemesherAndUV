@@ -33,11 +33,21 @@ against that build (only the pre-existing integer-extractor WIP fails).
 Geogram base is uniform enough, like the integer grid) is a free, corpus-wide
 median win — measured +0.3..+1.0° on organic with edge-CV flat-to-lower and
 irregular % unchanged; now the default (spot 84.2 / rocker 84.5 / bunny 83.3,
-cv 0.12–0.21). It is a *general* position lever, not model-specific. **What
-remains:** the fandisk/CAD median (80.7 vs 85.0) is a crease-alignment problem,
-not relaxation — dropping shape-match lifts fandisk only to 82.5 at a real CV cost
-(0.159→0.191), still short of QuadriFlow. Closing it needs field-level crease
-alignment, not more relax. Everything below is retained for history.
+cv 0.12–0.21). It is a *general* position lever, not model-specific.
+
+**Fandisk/CAD median — mostly closed by backend routing (shipped).** A workflow
+reframed it: the gap was **84% global extractor squareness** (vendored Geogram's
+quads sit at ~81° even *far* from creases), not crease-following. Our native
+feature-aware seamless solver marks sharp edges as hard seams and pins the
+feature-bounded patches, so it makes squarer quads on CAD parts. `computeSeamlessUv`
+now routes crease-heavy meshes (interior-crease-fraction ≥ 2%, via the non-mutating
+`creaseEdgeFraction`) to the native solver first, keeping smooth organics on the
+vendored Geogram path. Verified count-matched (~2970 quads, not a resolution
+artifact): **fandisk 80.7 → 83.4 (+2.7°, ~63% of the gap), 0 defects**; every
+organic **byte-identical** (`CYBER_QC_NO_ROUTE` kill-switch A/B). The residual to
+QuadriFlow (83.4 vs 85.0) is the ~16% crease-localized part — a genuine field-level
+per-edge integer-constraint project (QuadriFlow's feature flow), **deferred** as
+not worth the multi-week cost for 1.6°. Everything below is retained for history.
 
 ## Where we are (2026-07)
 

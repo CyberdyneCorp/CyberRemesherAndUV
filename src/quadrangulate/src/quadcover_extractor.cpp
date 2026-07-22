@@ -443,24 +443,74 @@ SeamlessUv computeSeamlessUvVendored(const Mesh& mesh, float targetEdgeLength, f
 
 }  // namespace
 
+// Fraction of interior (exactly-two-face) edges whose dihedral angle exceeds
+// `dihedralDegrees` — a CAD discriminator: high on crease-heavy parts (fandisk
+// ~4%), near zero on smooth organic meshes (spot/rocker/bunny < 0.2%). Const and
+// non-mutating (unlike Mesh::tagFeatureEdges, which writes edge flags).
+float creaseEdgeFraction(const Mesh& mesh, float dihedralDegrees) {
+    const float cosThresh = std::cos(dihedralDegrees * 3.14159265358979324f / 180.0f);
+    std::size_t interior = 0;
+    std::size_t creases = 0;
+    for (Index e = 0; e < mesh.edgeCapacity(); ++e) {
+        const EdgeId edge{e};
+        if (!mesh.isAlive(edge)) {
+            continue;
+        }
+        const std::vector<FaceId> faces = mesh.edgeFaces(edge);
+        if (faces.size() != 2) {
+            continue;
+        }
+        ++interior;
+        const Vec3 n0 = normalized(mesh.faceNormal(faces[0]));
+        const Vec3 n1 = normalized(mesh.faceNormal(faces[1]));
+        if (dot(n0, n1) < cosThresh) {
+            ++creases;
+        }
+    }
+    return interior > 0 ? static_cast<float>(creases) / static_cast<float>(interior) : 0.0f;
+}
+
 SeamlessUv computeSeamlessUv(const Mesh& mesh, float targetEdgeLength, float harnessScaling,
                              float harnessAdaptivity, const CancelToken* cancel) {
     if (targetEdgeLength <= 0.0f) {
         return SeamlessUv{};  // no target density -> caller degrades cleanly
     }
-    // Vendored (Geogram quad_cover) FIRST — it holds QuadriFlow parity (1-4% irregular) and
-    // is fast, so a build/environment that has it keeps using it.
+
+    const bool haveNative = std::getenv("CYBER_QC_NO_NATIVE") == nullptr;
+    // CAD / crease-heavy meshes: the native feature-aware seamless solver marks
+    // sharp edges as hard seams and pins the feature-bounded patches, so it makes
+    // markedly squarer quads on such parts than the vendored Geogram extractor
+    // (measured fandisk median 83.6 vs 80.7 at matched quad count, 0 defects
+    // either way). Route them to native FIRST; smooth organic meshes keep the
+    // vendored-first order (Geogram wins there). CYBER_QC_ROUTE_CREASE tunes the
+    // interior-crease-fraction threshold (0 disables); CYBER_QC_NO_ROUTE forces
+    // the original vendored-first order for A/B.
+    const char* routeEnv = std::getenv("CYBER_QC_ROUTE_CREASE");
+    const float routeThresh = routeEnv != nullptr ? static_cast<float>(std::atof(routeEnv)) : 0.02f;
+    const bool routeNative = haveNative && std::getenv("CYBER_QC_NO_ROUTE") == nullptr &&
+                             routeThresh > 0.0f && creaseEdgeFraction(mesh, 45.0f) >= routeThresh;
+
+    if (routeNative) {
+        SeamlessUv native =
+            computeSeamlessUvNative(mesh, targetEdgeLength, harnessAdaptivity, harnessScaling, cancel);
+        if (native.valid) {
+            return native;
+        }
+        // Native declined -> fall back to the vendored path (valid or not).
+        return computeSeamlessUvVendored(mesh, targetEdgeLength, harnessScaling, harnessAdaptivity,
+                                         cancel);
+    }
+
+    // Vendored (Geogram quad_cover) FIRST — QuadriFlow parity (1-4% irregular),
+    // fast, and best on organic meshes.
     SeamlessUv uv =
         computeSeamlessUvVendored(mesh, targetEdgeLength, harnessScaling, harnessAdaptivity, cancel);
     if (uv.valid) {
         return uv;
     }
-    // Native FALLBACK — the dependency-free standalone solver. Now the stock-build default
-    // (no Geogram, no harness): it runs on the whole corpus, is watertight, bounded, and
-    // cancellable at ~4-5% irregular, well below the field-aligned fallback's 9-16%. It is
-    // slower (a few seconds), so CYBER_QC_NO_NATIVE force-disables it (fall through to the
-    // field-aligned per-island path) where speed/determinism matters.
-    if (std::getenv("CYBER_QC_NO_NATIVE") == nullptr) {
+    // Native FALLBACK — the dependency-free standalone solver, and the stock
+    // (no-Geogram) default: watertight, bounded, cancellable at ~4-5% irregular.
+    if (haveNative) {
         SeamlessUv native =
             computeSeamlessUvNative(mesh, targetEdgeLength, harnessAdaptivity, harnessScaling, cancel);
         if (native.valid) {

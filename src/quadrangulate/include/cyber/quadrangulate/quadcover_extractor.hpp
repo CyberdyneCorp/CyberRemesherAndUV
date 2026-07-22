@@ -105,6 +105,14 @@ struct SeamlessUv {
 // validation hook (M1); returns 0 for an empty/invalid UV.
 [[nodiscard]] double seamlessUvResidual(const SeamlessUv& uv);
 
+// Fraction of interior (exactly-two-face) edges whose dihedral angle exceeds
+// `dihedralDegrees` — a CAD discriminator. High on sharp/crease-heavy parts
+// (fandisk ~4%), near zero on smooth organic meshes. computeSeamlessUv uses it
+// to route crease-heavy meshes to the feature-aware native seamless solver
+// (squarer quads on CAD) while smooth meshes keep the vendored Geogram path.
+// Const / non-mutating (unlike Mesh::tagFeatureEdges).
+[[nodiscard]] float creaseEdgeFraction(const Mesh& mesh, float dihedralDegrees);
+
 // -----------------------------------------------------------------------------
 // Collaborator 2 (NOT IMPLEMENTED): the isoline tracer / mesh extractor.
 // -----------------------------------------------------------------------------

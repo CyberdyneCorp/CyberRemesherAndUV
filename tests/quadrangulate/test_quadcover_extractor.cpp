@@ -60,6 +60,16 @@ Mesh makeSphere(int rings = 16, int segments = 24) {
     return Mesh::fromIndexed(p, f);
 }
 
+// A unit cube (6 quad faces) — every one of its 12 edges is a sharp 90-degree
+// crease, so its crease-edge fraction is 1.0.
+Mesh makeCube() {
+    const std::vector<Vec3> p = {{0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0},
+                                 {0, 0, 1}, {1, 0, 1}, {1, 1, 1}, {0, 1, 1}};
+    const std::vector<std::vector<Index>> f = {{0, 3, 2, 1}, {4, 5, 6, 7}, {0, 1, 5, 4},
+                                               {2, 3, 7, 6}, {1, 2, 6, 5}, {3, 0, 4, 7}};
+    return Mesh::fromIndexed(p, f);
+}
+
 std::size_t aliveFaces(const Mesh& mesh) {
     std::size_t n = 0;
     for (Index i = 0; i < mesh.faceCapacity(); ++i) {
@@ -259,6 +269,18 @@ TEST_CASE("quad-cover M1: harness seamless UV has zero integer-jump residual") {
 // the grid cells as transversal-crossing quads. The result is an open disk, so its
 // perimeter is a legitimate boundary; every INTERIOR vertex must be valence 4 (zero
 // irregular), all faces must be quads, and the half-edge structure must be sound.
+TEST_CASE("creaseEdgeFraction routes sharp CAD to native, keeps smooth meshes vendored") {
+    // The discriminator behind computeSeamlessUv's CAD routing: a sharp cube sits
+    // above the 2% routing threshold (-> feature-aware native solver), a smooth
+    // sphere far below it (-> vendored Geogram path). This is what keeps fandisk
+    // routed while the organic corpus stays byte-identical on the vendored path.
+    const float smooth = remesh::creaseEdgeFraction(makeSphere(), 45.0f);
+    const float sharp = remesh::creaseEdgeFraction(makeCube(), 45.0f);
+    REQUIRE(smooth < 0.02f);
+    REQUIRE(sharp > 0.02f);
+    REQUIRE(sharp > smooth);
+}
+
 TEST_CASE("quad-cover M2: flat integer-grid UV extracts a clean quad grid") {
     const int n = 6;
     const remesh::SeamlessUv uv = makeFlatGridUv(n);
