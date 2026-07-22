@@ -50,9 +50,16 @@ been scoring the retired one in Phases 2–3):
 | stanford-bunny | **83**/82 | **3**/4 | 0.21/**0.17** | **8**/38 | 1.32/**0.58** |
 
 Read across: we lead on **topological validity (5/5)**, lead on median angle and
-irregular % (3/5 each), and trail on **feature-following (0/5)** — the one axis
-QuadriFlow wins everywhere, on smooth organics as much as on CAD parts. That, not
-the fandisk median residual, is the highest-value open item.
+irregular % (3/5 each), and trail on **feature-following**.
+
+Read the feature column carefully — the raw 0/5 overstates it. `feature_error`
+counts open boundaries as features (`examples/common.py:359`), and per-model crease
+data is: spot 73 creases, fandisk 710, rocker-arm 394, cheburashka 316, bunny 774
+of which **223 (29%) are the scan hole's boundary**. So the honest reading is
+**3 real losses** — fandisk 2.0x, cheburashka 2.0x, rocker-arm 1.5x — with **spot
+a tie** (0.46 vs 0.44 on only 73 creases) and **bunny confounded**. Still the
+largest open quality gap, and notably **not CAD-only**: cheburashka is an organic
+character with 316 genuine creases and a full 2x gap.
 
 **Relax lever measured + shipped.** Bumping the quad-cover base relax 10→40 (its
 Geogram base is uniform enough, like the integer grid) is a free, corpus-wide
@@ -196,16 +203,31 @@ Honest finding — **not a clean win**:
   extractor's 110 (cheburashka) and 30 (fandisk), which is what the old
   "hole-fill doesn't close them — a real extractor bug" note referred to. It does
   not describe what ships.
-- ❌ **Feature-following — NOT met, and the gap is corpus-wide, not CAD-only.**
-  The default trails QuadriFlow on **0/5** models: spot 0.46 vs 0.44%, rocker-arm
-  0.61 vs 0.40%, fandisk 0.82 vs 0.41%, cheburashka 1.15 vs 0.57%, bunny 1.32 vs
-  0.58%. This reframes the "fandisk CAD residual" story at the top of this doc:
-  crease alignment is the one axis where QuadriFlow consistently leads, on smooth
-  organics as much as on CAD parts.
+- ❌ **Feature-following — NOT met. 3 real losses, and not CAD-only.** fandisk
+  0.82 vs 0.41% (2.0x), cheburashka 1.15 vs 0.57% (2.0x), rocker-arm 0.61 vs
+  0.40% (1.5x); **spot is a tie** (0.46 vs 0.44, only 73 crease edges) and
+  **bunny is confounded** (1.32 vs 0.58, but 29% of its "features" are the scan
+  hole's open boundary, which the metric counts as a feature). The new datum vs
+  the earlier CAD-only scoping: **cheburashka is an organic character with 316
+  genuine dihedral creases and a full 2x gap**, so this is broader than the
+  "fandisk CAD residual" framing at the top of this doc.
+- 🔴 **Cheap levers are exhausted — three measured and reverted.** Root cause is
+  known (M1: the cross-field IS crease-aligned, but the integer grid **phase** is
+  un-pinned, so loops sit ~half a cell off the creases — a grid-phase problem, not
+  an alignment one). **M2a** post-extraction vertex snap: fandisk 1.20→1.05, still
+  2x QF — a vertex snap cannot create a loop that isn't there. **M2b** crease
+  gauge-pin in `solveSeamlessReduced`: no feature gain and **introduced 8 defects**,
+  breaking the validity win. **M2c** (2026-07-22) lowering `CYBER_QC_ROUTE_CREASE`
+  so lightly-creased meshes reach the feature-aware native solver: cheburashka
+  1.15→1.06% (~8%, still 1.9x QF) but **rocker-arm regresses −7° median**, irr
+  1→5% — net-negative, threshold stays 2%. See `cad-feature-robustness` memory.
 **Follow-ups:** ~~(a) fix the extractor's scattered validity defects~~ *(done —
-retired-extractor issue; the default is clean)*; **(b) hard-align the field to
-sharp creases — now the single highest-value open item in retopology, and the
-only unmet half of this phase.**
+retired-extractor issue; the default is clean)*; **(b) per-feature-edge integer
+constraints in the parameterization** (QuadriFlow's `ComputeIndexMap` sharp-edge
+path — constrain each feature edge's UV difference to a pure integer along the
+crease). This is the only remaining lever, and it is a **multi-week solver
+project**, not a tweak. Highest-value open quality item; cost unchanged by the
+2026-07-22 re-measurement, but the payoff is broader than previously scoped.
 **Exit (partial):** robustness win on hard-surface geometry *(met)*; validity on
 the smooth corpus *(**met** — 5/5 vs QuadriFlow)*; feature alignment *(not met —
 0/5, corpus-wide)*.
