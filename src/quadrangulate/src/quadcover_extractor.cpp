@@ -773,10 +773,19 @@ public:
 
     void extract();
 
-    // Enable the closed-surface graph cleanup + hole fill. Correct (and required)
-    // for closed inputs, corrupting for open ones — the caller gates on whether the
-    // isotropic mesh has a boundary. See extract() and extractIsolineQuads().
+    // Enable the graph cleanup + hole fill. Quality depends on it for ANY input —
+    // without it the redundant mid-isoline samples survive and every cell traces as
+    // an n-gon (open paraboloid: 282 hexagons of 310 faces, median 50°) — but on an
+    // open surface it is only safe together with setPreserveInputBoundary, and even
+    // then incompletely; see the gating comment in extractIsolineQuads.
     void setRunClosedSurfaceCleanup(bool on) { m_runClosedSurfaceCleanup = on; }
+
+    // Preserve the input surface's genuine boundary (M3). The cleanup's hole fill
+    // cannot itself tell the outer boundary of an open surface from a hole the
+    // extraction opened, so it fills the perimeter and closes the mesh. With this
+    // on, fixHoles leaves loops that trace the INPUT boundary alone, which lets an
+    // open surface get the cleanup's quality without losing its rim.
+    void setPreserveInputBoundary(bool on) { m_preserveInputBoundary = on; }
 
     const std::vector<DVec3>& remeshedVertices() const { return m_remeshedVertices; }
     const std::vector<std::vector<std::size_t>>& remeshedQuads() const {
@@ -790,9 +799,17 @@ private:
     std::vector<DVec3> m_remeshedVertices;
     std::vector<std::vector<std::size_t>> m_remeshedPolygons;
     std::set<EdgePair> m_halfEdges;
-    // Closed-surface graph cleanup + hole fill (faithfully ported below) is off by
-    // default: it corrupts OPEN boundaries. See extract() and TODO(M3).
+    // Graph cleanup + hole fill (faithfully ported below); the caller enables it.
     bool m_runClosedSurfaceCleanup = false;
+    // M3 open-surface support: when set, fixHoles skips loops tracing the input's
+    // genuine boundary. m_inputBoundary holds those segments and m_boundaryTol the
+    // on-boundary distance threshold; both are built lazily by buildInputBoundary().
+    bool m_preserveInputBoundary = false;
+    std::vector<std::pair<DVec3, DVec3>> m_inputBoundary;
+    double m_boundaryTol = 0.0;
+
+    void buildInputBoundary();
+    bool tracesInputBoundary(const std::vector<std::size_t>& loop) const;
 
     void extractConnections(std::vector<DVec3>& crossPoints,
                             std::vector<std::size_t>& sourceTriangles,
@@ -1516,11 +1533,86 @@ void IsolineExtractor::rebuildHalfEdges() {
     }
 }
 
+// Squared distance from `p` to segment [a,b].
+static double pointSegmentDistanceSq(const DVec3& p, const DVec3& a, const DVec3& b) {
+    const DVec3 ab{b.x - a.x, b.y - a.y, b.z - a.z};
+    const DVec3 ap{p.x - a.x, p.y - a.y, p.z - a.z};
+    const double len2 = ab.x * ab.x + ab.y * ab.y + ab.z * ab.z;
+    double t = 0.0;
+    if (len2 > 0.0) {
+        t = (ap.x * ab.x + ap.y * ab.y + ap.z * ab.z) / len2;
+        t = std::max(0.0, std::min(1.0, t));
+    }
+    const DVec3 d{ap.x - t * ab.x, ap.y - t * ab.y, ap.z - t * ab.z};
+    return d.x * d.x + d.y * d.y + d.z * d.z;
+}
+
+// Collect the INPUT surface's genuine boundary: triangle edges used by exactly one
+// triangle. Isolines terminate on those edges, so an output loop tracing the real
+// rim sits on them, while a loop around a hole the extraction opened does not.
+void IsolineExtractor::buildInputBoundary() {
+    std::map<EdgePair, int> edgeUse;
+    for (const auto& tri : m_triangles) {
+        for (std::size_t k = 0; k < 3; ++k) {
+            const std::size_t a = tri[k];
+            const std::size_t b = tri[(k + 1) % 3];
+            ++edgeUse[{std::min(a, b), std::max(a, b)}];
+        }
+    }
+    double lenSum = 0.0;
+    for (const auto& [edge, uses] : edgeUse) {
+        if (uses != 1) {
+            continue;
+        }
+        const DVec3& a = m_vertices[edge.first];
+        const DVec3& b = m_vertices[edge.second];
+        m_inputBoundary.emplace_back(a, b);
+        const double dx = a.x - b.x;
+        const double dy = a.y - b.y;
+        const double dz = a.z - b.z;
+        lenSum += std::sqrt(dx * dx + dy * dy + dz * dz);
+    }
+    // "On the boundary" means within a quarter of a mean boundary edge. The
+    // crossing points start exactly on those edges; the quarter-edge slack absorbs
+    // the drift collapseShortEdges introduces by averaging merged samples.
+    m_boundaryTol = m_inputBoundary.empty()
+                        ? 0.0
+                        : 0.25 * lenSum / static_cast<double>(m_inputBoundary.size());
+}
+
+// True if most of `loop` sits on the input boundary. A majority vote (not "all")
+// because the cleanup may pull an occasional loop vertex slightly inboard; a hole
+// in the surface interior scores ~0 either way, so the two cases separate cleanly.
+bool IsolineExtractor::tracesInputBoundary(const std::vector<std::size_t>& loop) const {
+    if (m_inputBoundary.empty() || loop.empty()) {
+        return false;
+    }
+    const double tolSq = m_boundaryTol * m_boundaryTol;
+    std::size_t onBoundary = 0;
+    for (const std::size_t vi : loop) {
+        const DVec3& p = m_remeshedVertices[vi];
+        for (const auto& [a, b] : m_inputBoundary) {
+            if (pointSegmentDistanceSq(p, a, b) <= tolSq) {
+                ++onBoundary;
+                break;
+            }
+        }
+    }
+    return onBoundary * 2 > loop.size();
+}
+
 void IsolineExtractor::fixHoles() {
+    if (m_preserveInputBoundary && m_inputBoundary.empty()) {
+        buildInputBoundary();
+    }
     std::vector<std::vector<std::size_t>> loops;
     searchBoundaries(m_halfEdges, loops);
     for (auto& loop : loops) {
         if (loop.size() > 65) {
+            continue;
+        }
+        // The surface's own rim is not a hole — filling it would close the mesh.
+        if (m_preserveInputBoundary && tracesInputBoundary(loop)) {
             continue;
         }
         fixHoleWithQuads(loop, true);
@@ -2192,8 +2284,28 @@ IsolineQuadMesh extractIsolineQuads(const Mesh& /*mesh*/, const SeamlessUv& uv) 
     const double boundaryFrac = boundaryEdgeFraction(uv.triangles);
     const bool closed = boundaryFrac < 0.10;
 
+    // M3 (PARTIAL — opt-in via CYBER_QC_OPEN_CLEANUP, not yet the default).
+    //
+    // Running the cleanup on an OPEN surface is a large latent win: it merges the
+    // redundant mid-isoline samples, without which every cell traces as an n-gon
+    // that cap elimination can only fan-split. Measured on an open paraboloid at
+    // target 1200, pure-quads: 105 quads / median 50° / 282 hexagons of 310 faces
+    // WITHOUT cleanup, versus 1010 quads / median 80° with it.
+    //
+    // The TODO this implements names two guards; only the first is built:
+    //   [done] fixHoles must not fill the surface's own rim -> setPreserveInputBoundary
+    //          (verified: the rim survives, boundary edges 93 preserved at pure_quads=false)
+    //   [TODO] simplifyGraph must not delete genuine valence-2 boundary corners; it
+    //          needs a turn-angle guard. Without it the cleanup merges legitimate
+    //          grid vertices on an open surface (flat 6x6 grid: interior 25 -> 20,
+    //          7 triangles introduced), which is why this stays opt-in.
+    // Two further open questions before it can default on: at pure_quads=true the
+    // rim is still lost downstream of the extractor (boundary 0 even though the
+    // extractor preserves it), and edge-length CV degrades 0.48 -> 1.73.
+    const bool openCleanup = std::getenv("CYBER_QC_OPEN_CLEANUP") != nullptr;
     IsolineExtractor extractor(std::move(vertices), std::move(triangles), std::move(triangleUvs));
-    extractor.setRunClosedSurfaceCleanup(closed);
+    extractor.setRunClosedSurfaceCleanup(closed || openCleanup);
+    extractor.setPreserveInputBoundary(!closed);
     extractor.extract();
     if (std::getenv("CYBER_QC_DEBUG") != nullptr) {
         std::map<std::size_t, std::size_t> hist;
