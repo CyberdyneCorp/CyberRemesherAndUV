@@ -1,5 +1,9 @@
 #include "cyber/quadrangulate/quadcover_extractor.hpp"
 
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
+
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -147,7 +151,11 @@ SeamlessUv computeSeamlessUv(const Mesh& mesh, float targetEdgeLength, float har
         std::fprintf(stderr, "[qc] edgeLen=%g area=%g quads=%ld cmd=%s\n",
                      static_cast<double>(targetEdgeLength), area, quads, cmd.c_str());
     }
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+    const int rc = -1;  // out-of-process QuadCover CLI is unavailable on iOS
+#else
     const int rc = std::system(cmd.c_str());
+#endif
     if (rc == 0) {
         uv.valid = parseUvDump(uvPath, uv);
     }

@@ -112,4 +112,120 @@ inline std::size_t applySymmetry(Mesh& mesh, const Symmetry& sym,
     return added;
 }
 
+// ---- re-symmetrize --------------------------------------------------------
+//
+// Restores symmetry to a mesh that has DRIFTED asymmetric (manual-retopology
+// spec, "a re-symmetrize tool SHALL restore symmetry to a mesh that has
+// drifted asymmetric", "preserving topology correspondence where it exists").
+//
+// Unlike applySymmetry this adds and removes NOTHING: topology is preserved
+// exactly. Every vertex on the non-working side is matched to the working-side
+// vertex whose mirror image is nearest, and — when that image is within
+// `matchTolerance` — moved exactly onto it. Off-side vertices with no
+// counterpart in range are left untouched and reported as `unmatched`, which
+// is precisely the "where it exists" clause: geometry that only exists on one
+// side survives re-symmetrize instead of being destroyed by it.
+
+struct ResymmetrizeReport {
+    // Vertices welded onto the plane first. Counts every vertex WITHIN the
+    // weld tolerance, including ones already exactly on the plane — it is a
+    // population count, not a change signal. `maxCorrection` is the change
+    // signal, and it includes the weld displacement.
+    std::size_t snapped = 0;
+    std::size_t matched = 0;    // off-side vertices moved onto their mirror image
+    std::size_t unmatched = 0;  // off-side vertices with no counterpart in range
+    float maxCorrection = 0.0f; // largest displacement actually applied
+};
+
+namespace detail {
+
+// Largest distance any vertex will travel when it welds onto the plane.
+[[nodiscard]] inline float maxWeldDisplacement(const Mesh& mesh, const Symmetry& sym) {
+    float worst = 0.0f;
+    for (Index i = 0; i < mesh.vertexCapacity(); ++i) {
+        const VertexId v{i};
+        if (!mesh.isAlive(v)) {
+            continue;
+        }
+        const float d = std::fabs(signedDistance(sym.plane, mesh.position(v)));
+        if (d <= sym.weldTolerance) {
+            worst = std::max(worst, d);
+        }
+    }
+    return worst;
+}
+
+// Live vertices strictly on the working side, in ascending id order.
+[[nodiscard]] inline std::vector<VertexId> workingSideVertices(const Mesh& mesh,
+                                                               const Symmetry& sym) {
+    std::vector<VertexId> result;
+    for (Index i = 0; i < mesh.vertexCapacity(); ++i) {
+        const VertexId v{i};
+        if (mesh.isAlive(v) && workingSideDistance(sym, mesh.position(v)) > sym.weldTolerance) {
+            result.push_back(v);
+        }
+    }
+    return result;
+}
+
+// Mirror image of the working-side vertex nearest to `p`, or nothing when the
+// nearest image is further away than `tolerance`. Ties break on the smaller
+// vertex id so the result is deterministic.
+[[nodiscard]] inline const Vec3* nearestMirrorImage(const std::vector<Vec3>& images, Vec3 p,
+                                                    float tolerance) {
+    const Vec3* best = nullptr;
+    float bestDistance = 0.0f;
+    for (const Vec3& image : images) {
+        const float d = length(image - p);
+        if (d > tolerance) {
+            continue;
+        }
+        if (best == nullptr || d < bestDistance) {
+            bestDistance = d;
+            best = &image;
+        }
+    }
+    return best;
+}
+
+}  // namespace detail
+
+// Mirrors the working half onto the other half in place. `matchTolerance` is
+// the world-space radius within which an off-side vertex is considered the
+// counterpart of a working-side vertex's mirror image; callers scale it to the
+// mesh (a fraction of the bounding-box diagonal) so the verdict is scale-free.
+inline ResymmetrizeReport resymmetrize(Mesh& mesh, const Symmetry& sym, float matchTolerance) {
+    ResymmetrizeReport report;
+    report.maxCorrection = detail::maxWeldDisplacement(mesh, sym);
+    report.snapped = snapNearPlane(mesh, sym);
+
+    const std::vector<VertexId> sources = detail::workingSideVertices(mesh, sym);
+    std::vector<Vec3> images;
+    images.reserve(sources.size());
+    for (const VertexId v : sources) {
+        images.push_back(mirrorAcrossPlane(sym.plane, mesh.position(v)));
+    }
+
+    const float tolerance = matchTolerance > 0.0f ? matchTolerance : sym.weldTolerance;
+    for (Index i = 0; i < mesh.vertexCapacity(); ++i) {
+        const VertexId v{i};
+        if (!mesh.isAlive(v)) {
+            continue;
+        }
+        const Vec3 p = mesh.position(v);
+        if (workingSideDistance(sym, p) >= -sym.weldTolerance) {
+            continue;  // working side or on the plane: the authority, never moved
+        }
+        const Vec3* image = detail::nearestMirrorImage(images, p, tolerance);
+        if (image == nullptr) {
+            ++report.unmatched;
+            continue;
+        }
+        report.maxCorrection = std::max(report.maxCorrection, length(*image - p));
+        mesh.setPosition(v, *image);
+        ++report.matched;
+    }
+    return report;
+}
+
 }  // namespace cyber::retopo

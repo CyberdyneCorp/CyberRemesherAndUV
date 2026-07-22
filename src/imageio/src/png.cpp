@@ -38,7 +38,8 @@ Bytes zlibStored(const Bytes& raw) {
         out.push_back(final ? 0x01 : 0x00);
         const std::uint16_t len = static_cast<std::uint16_t>(block);
         detail::appendU16LE(out, len);
-        detail::appendU16LE(out, static_cast<std::uint16_t>(~len & 0xffffu));
+        detail::appendU16LE(out, static_cast<std::uint16_t>(
+            ~static_cast<std::uint32_t>(len) & 0xffffu));
         out.insert(out.end(), raw.begin() + static_cast<std::ptrdiff_t>(pos),
                    raw.begin() + static_cast<std::ptrdiff_t>(pos + block));
         pos += block;
