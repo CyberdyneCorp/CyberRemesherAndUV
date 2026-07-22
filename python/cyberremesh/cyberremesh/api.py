@@ -121,14 +121,21 @@ class RemeshParams:
     adaptivity: float = 1.0  # 0.0 .. 1.0
     pure_quads: bool = False
     hole_fill_max_boundary: int = 64  # 0 (never) .. 10_000
-    # Quadrangulator: "field-aligned" (default, max-matching, highest
-    # dominance), "instant-meshes" (position-field extractor, more uniform
-    # field-aligned flow with fewer/better singularities), "integer" (the
-    # integer-parametrization extractor, Milestones 3-5 — watertight/manifold,
-    # experimental; degrades at coarse target counts), or "quad-cover"
-    # (QuadCover seamless-UV isoline extractor — ~1% irregular on closed
-    # surfaces, but requires the CYBER_QUADCOVER_CLI environment variable to
-    # point at a built autoremesher_cli; without it the run fails cleanly).
+    # Quadrangulator: "quad-cover" (default), "field-aligned" (max-matching,
+    # highest dominance), "instant-meshes" (position-field extractor, more
+    # uniform field-aligned flow with fewer/better singularities), or "integer"
+    # (the integer-parametrization extractor, Milestones 3-5 — watertight/
+    # manifold, experimental; degrades at coarse target counts).
+    #
+    # "quad-cover" (QuadCover seamless-UV isoline extractor) always works: a
+    # dependency-free native seamless-UV solver is compiled in unconditionally
+    # (~4% irregular, median angle a few degrees below QuadriFlow). Building the
+    # engine with -DCYBER_WITH_QUADCOVER=ON links a vendored in-process Geogram
+    # solver that beats QuadriFlow on median angle *and* irregular-vertex count
+    # on organic meshes (spot/rocker/bunny); the optional CYBER_QUADCOVER_CLI is
+    # only a faster external reference path. (Earlier docs claimed the CLI was
+    # required and the run "fails cleanly" without it — that was never true for
+    # the shipped native solver.)
     quad_method: str = "quad-cover"
 
     _QUAD_METHODS = {

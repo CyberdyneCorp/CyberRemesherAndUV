@@ -4,6 +4,30 @@ Goal: make CyberRemesher's automatic quad retopology **better than QuadriFlow**
 across four axes — quality-per-polygon, median quad angle, feature/CAD fidelity,
 and robustness — not just competitive on one.
 
+## Update — 2026-07-22 (default is now quad-cover; the gap is mostly closed)
+
+The numbers in the rest of this doc describe the older `instant-meshes` extractor
+and are **two generations stale**. The shipped **default is now `quad-cover`**
+(`RemeshParams.quad_method`), and a fresh benchmark (`examples/11_benchmark.py`
+metrics, ~3000 quads, spot/fandisk/rocker/bunny) reframes Phase 4:
+
+- **Irregular-vertex half of the exit gate is already MET** — ~4% irregular
+  (spot 4.1 / fandisk 3.3 / rocker 4.6 / bunny 4.9), gate was <15%, and it is
+  ~100% *true* field cones (no extractor headroom). The old "36% spurious
+  singularities" problem belongs to the retired extractor.
+- **Median-angle half** — the dependency-free *native* quad-cover solver trails
+  QuadriFlow by ~1.5–4.9° (mean ~3.4°). But the **vendored in-process Geogram
+  field** (`-DCYBER_WITH_QUADCOVER=ON`, MIT) **beats QuadriFlow on median AND
+  irregular on 3/4 organic models** — spot 83.6 vs 82.5, rocker 83.5 vs 82.2,
+  bunny 83.0 vs 82.2 — losing only fandisk (80.9 vs 85.0, a CAD crease-alignment
+  problem, not smoothness). Verified end-to-end, both backends reproduced.
+
+So Phase 4 is **not** the "only a global integer-parametrization rewrite can close
+it" hard core this doc claims: the organic median gap is closed by a build flag
+(promote the vendored field to the default build). What genuinely remains is (1)
+surfacing that as the stock default, and (2) the fandisk/CAD median (crease
+alignment). Everything below is retained for history.
+
 ## Where we are (2026-07)
 
 The position-field extractor (`quad_method="instant-meshes"`, an Instant-Meshes
