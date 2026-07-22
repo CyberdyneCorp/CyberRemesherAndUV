@@ -53,6 +53,10 @@ jobs:
       - name: CLI smoke
         shell: bash
         run: |
+          # The Windows runner builds with MinGW GCC; its exe needs the compiler's
+          # runtime DLLs (libstdc++-6/libgcc_s/libwinpthread), which Git-bash's
+          # minimal PATH omits — without them the exe can't start (exit 127).
+          [ -d /c/mingw64/bin ] && export PATH="/c/mingw64/bin:$PATH"
           # Locate the CLI wherever the generator put it (Windows adds .exe and may
           # use a config subdir), so the smoke test is path/generator-agnostic.
           CLI="$(find ./build -type f \( -name cyberremesh -o -name cyberremesh.exe \) | head -1)"
