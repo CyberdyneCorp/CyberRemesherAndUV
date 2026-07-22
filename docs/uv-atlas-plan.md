@@ -128,13 +128,24 @@ and irregular. Polygon nesting is the sole remaining lever.
 
 ## Known limitations / next steps
 
-- **Packing** — the skyline packer works on axis-aligned bounding *boxes*, so an
-  L-shaped or ring chart still reserves its whole box. True polygon nesting (pack
-  against the chart outline, not its box) is the next lever, worth most on the
-  concave organic charts (the torus/sphere rings visibly waste their interior).
-- **Polygon nesting** — the last gap to xatlas is coverage: the skyline packer
-  reserves each chart's whole bounding box, and the distortion-bounded merge
-  produces long, irregular, often-concave charts (ribbons, rings) whose boxes are
-  mostly empty. Packing against the chart outline (no-fit-polygon / raster-mask
-  nesting) instead of its box is the remaining lever, and now the highest-value
-  one — the chart-count gap is already closed.
+- **Coverage (packing) — the last gap to xatlas (~15 pts), still open.** The
+  skyline packer reserves each chart's axis-aligned bounding *box*, so a concave
+  chart (ribbon, ring) wastes its interior.
+  - **Profile/raster nesting — TRIED, does not win safely (reverted).** A raster
+    footprint + per-column skyline-profile nester was implemented and measured on
+    the corpus. Overlap-safe (a one-cell dilation so charts never bleed) it
+    *regressed* coverage (torus 36→31, bumpy 37→34): the dilation over-inflates
+    the many small charts more than the profile interlock saves, and re-oriented
+    charts are already near-boxy so their profiles ≈ their boxes. The only wins
+    (bumpy +3, sphere +9) appeared when dilation was off — i.e. tolerating chart
+    overlap, which is wrong for a texture atlas. It also broke the re-orient
+    invariant (45° diamonds interlock better than axis-aligned squares under
+    raster). Net: skyline stays the packer.
+  - **The real lever is TRUE 2D nesting (hole-filling), a larger project.** The
+    dominant waste is concave *interiors* — a torus ring's central hole, which a
+    per-column skyline cannot fill because it has no overhang/hole placement.
+    Closing it means placing small charts *inside* big charts' holes: full 2D
+    occupancy-grid bottom-left with overhang collision (bitset-row masks), plus
+    likely per-chart rotation search — perf-sensitive and genuinely multi-session.
+    Deferred until it is worth that cost; the chart-count and distortion gaps are
+    already closed/won.
