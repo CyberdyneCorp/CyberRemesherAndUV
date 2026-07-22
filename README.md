@@ -32,10 +32,11 @@ as idea references, never copied — see [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_
 Beyond the interactive UV editor (hand-drawn seams, LSCM unwrap, packing,
 distortion overlay), the engine has a one-call automatic path: `Mesh.unwrap_atlas`
 (C: `cyber_uv_atlas`). It seams the mesh into normal-coherent charts, merges
-adjacent charts that still share a normal cone (fewer seams, same flatness),
-LSCM-unwraps each chart conformally, re-orients each chart to its minimum-area
-bounding box, skyline-packs them into the unit square, and writes the per-corner
-UV attribute —
+adjacent charts (first any that still share a normal cone — free, no distortion
+rise; then a looser distortion-bounded pass that folds developable regions
+together, e.g. a cube's six faces into two flat strips), LSCM-unwraps each chart
+conformally, re-orients each chart to its minimum-area bounding box, skyline-packs
+them into the unit square, and writes the per-corner UV attribute —
 mesh in, packed atlas out, no manual seams. It returns chart count, conformal
 (angle) distortion, flip count and packing efficiency. On the remeshed quad output
 it holds angular distortion under ~0.05 (conformal error, 0 = angle-preserving)
@@ -43,8 +44,9 @@ with no flipped charts; min-area re-orientation roughly doubles usable coverage 
 box-like meshes (45°-diamond faces → axis-aligned squares). `examples/14_uv_atlas.py`
 renders the quad mesh next to its packed atlas, tinted by chart, and
 `examples/15_uv_vs_xatlas.py` benchmarks it against [xatlas](https://github.com/jpcy/xatlas)
-(the open reference): CyberRemesher holds ~2× lower conformal distortion, while
-xatlas still packs tighter with fewer charts.
+(the open reference): CyberRemesher matches or beats xatlas on chart count while
+holding ~2× lower conformal distortion; xatlas's polygon packer still fits its
+charts tighter (higher coverage), the one remaining gap.
 
 ## Layout
 

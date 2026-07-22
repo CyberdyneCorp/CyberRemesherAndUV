@@ -15,12 +15,23 @@ from an arbitrary mesh to a packed UV atlas without a human drawing every seam.
    seed face, flood-fill neighbours whose normal stays within `maxChartAngleDeg`
    of the seed normal. Deterministic; every face lands in exactly one chart.
 2. **Merge** (`mergeCharts`, default on) — greedy seed growth fragments bumpy
-   surfaces into many small charts that share a compatible orientation. This pass
-   merges adjacent charts whose *union* still fits within a `maxChartAngleDeg`
-   normal cone (union-find to a fixpoint over the adjacency graph). Because every
-   face of a merged chart stays inside one cone, the result is at least as flat as
-   growth guarantees — so it cuts seam length (bumpy sphere 87 → 65 charts)
-   *without* raising distortion, and cannot wrap a tube (a sub-90° cone is convex).
+   surfaces into many small charts. Two greedy union-find passes (each to a
+   fixpoint over the chart adjacency graph) recombine them:
+   - **Cone merge** — merges adjacent charts whose *union* still fits within a
+     `maxChartAngleDeg` normal cone. Because every face stays inside one cone, the
+     result is at least as flat as growth guarantees, so this cuts seams *without*
+     raising distortion and cannot wrap a tube (a sub-90° cone is convex).
+   - **Distortion-bounded merge** (`maxChartDistortion`, default 0.10) — the
+     looser pass: it LSCM-unwraps each candidate union and merges only if the
+     combined distortion — the max of per-face conformal (angle) error and the
+     chart-wide area-scale spread — stays under the cap and the layout does not
+     fold. Conformal error alone is not enough: a chart of flat facets (three cube
+     faces) has ~0 angle error however the facets splay, because no triangle
+     straddles a fold — the area-scale term catches that. This spends the large
+     distortion headroom the cone merge leaves to fold developable regions
+     together (a cube's six faces → two flat three-face strips), cutting the chart
+     count to xatlas levels while staying ~2× under its distortion.
+
    `autoSeams` then marks the edges between the final charts as seams (mesh
    boundary edges are already island boundaries and are left unmarked).
 3. **Charts** — `computeIslands(mesh, seams)` re-derives the face partition from
@@ -66,13 +77,16 @@ real texel-efficiency measure), with chart re-orientation off vs on:
 
 | model        | quads | charts | max angle dist | flips | coverage (final) |
 |--------------|------:|-------:|---------------:|------:|-----------------:|
-| cube         | 1728  | 6      | 0.000          | 0     | 67%              |
-| torus        | 1364  | 39     | 0.024          | 0     | 40%              |
-| bumpy sphere | 1228  | 65     | 0.048          | 0     | 41%              |
-| sphere       | 1326  | 19     | 0.015          | 0     | 48%              |
+| cube         | 1728  | 2      | 0.000          | 0     | 67%              |
+| torus        | 1364  | 12     | 0.025          | 0     | 36%              |
+| bumpy sphere | 1228  | 30     | 0.048          | 0     | 37%              |
+| sphere       | 1326  | 8      | 0.015          | 0     | 35%              |
 
-Chart counts are after the merge pass (bumpy sphere 87 → 65, torus 42 → 39,
-sphere 21 → 19; the cube's orthogonal faces cannot merge).
+Chart counts are after both merge passes. The distortion-bounded pass drives the
+big reduction — cube 6 → 2 (two developable strips), torus 39 → 12, bumpy sphere
+65 → 30, sphere 19 → 8 — while max distortion stays put. Coverage dips a little:
+the merged charts are larger and more irregular (long ribbons, rings), which the
+axis-aligned box packer handles worse — the polygon-nesting motivation below.
 
 Angle distortion is conformal error in `[0,1)`; 0 = angle-preserving. Normal-
 coherent charts stay near-flat, so LSCM is essentially conformal and never flips.
@@ -99,17 +113,18 @@ Jacobian, in each atlas's true texel space):
 
 | model        | ours charts | ours meanD | ours cov | xatlas charts | xatlas meanD | xatlas cov |
 |--------------|------------:|-----------:|---------:|--------------:|-------------:|-----------:|
-| cube         | 6           | 0.000      | 100%     | 6             | 0.000        | 95%        |
-| torus        | 39          | 0.004      | 45%      | 14            | 0.007        | 52%        |
-| bumpy sphere | 65          | 0.008      | 47%      | 28            | 0.017        | 58%        |
-| sphere       | 19          | 0.005      | 50%      | 8             | 0.007        | 57%        |
+| cube         | 2           | 0.000      | 100%     | 6             | 0.000        | 95%        |
+| torus        | 12          | 0.006      | 36%      | 14            | 0.007        | 52%        |
+| bumpy sphere | 30          | 0.010      | 40%      | 28            | 0.017        | 58%        |
+| sphere       | 8           | 0.005      | 47%      | 8             | 0.007        | 57%        |
 
 **We win conformal distortion (~2× lower)** — the tight normal-coherent charts
-stay flat, so LSCM is nearly angle-preserving. **xatlas wins chart count and
-packing** — it merges far more aggressively (fewer seams) and packs ~7 points
-tighter. That is the tradeoff to close next: our distortion headroom is large
-enough to afford a looser merge (fewer, slightly less flat charts) and a
-polygon-aware packer.
+stay flat, so LSCM is nearly angle-preserving. **The distortion-bounded merge now
+also matches or beats xatlas on chart count** (cube 2 vs 6, torus 12 vs 14, sphere
+8 vs 8) while keeping that distortion lead. The one remaining gap is **coverage**:
+xatlas's polygon packer fits its charts ~15 points tighter than our axis-aligned
+box packer, a gap the merge widened because our developable-strip charts are long
+and irregular. Polygon nesting is the sole remaining lever.
 
 ## Known limitations / next steps
 
@@ -117,8 +132,9 @@ polygon-aware packer.
   L-shaped or ring chart still reserves its whole box. True polygon nesting (pack
   against the chart outline, not its box) is the next lever, worth most on the
   concave organic charts (the torus/sphere rings visibly waste their interior).
-- **Close the compactness gap to xatlas** — the benchmark above shows xatlas
-  using ~2–3× fewer charts and ~7 points more coverage. Our distortion lead is
-  large enough to spend: a looser, distortion-bounded merge (raise the merge cone
-  above the growth cone up to a distortion cap) plus polygon nesting should reach
-  parity on seams/packing while staying ahead on distortion.
+- **Polygon nesting** — the last gap to xatlas is coverage: the skyline packer
+  reserves each chart's whole bounding box, and the distortion-bounded merge
+  produces long, irregular, often-concave charts (ribbons, rings) whose boxes are
+  mostly empty. Packing against the chart outline (no-fit-polygon / raster-mask
+  nesting) instead of its box is the remaining lever, and now the highest-value
+  one — the chart-count gap is already closed.

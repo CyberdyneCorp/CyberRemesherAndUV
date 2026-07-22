@@ -223,9 +223,12 @@ TEST_CASE("island UV translate offsets every corner") {
 
 TEST_CASE("autoSeams partitions a cube into one chart per face") {
     Mesh mesh = makeCube();
-    const uv::SeamSet seams = uv::autoSeams(mesh);
-    // Six faces, each its own normal-coherent chart -> every one of the 12 cube
-    // edges lies between two different charts and is seamed.
+    // No merging: each cube face is its own normal-coherent chart.
+    uv::AtlasOptions opts;
+    opts.mergeCharts = false;
+    const uv::SeamSet seams = uv::autoSeams(mesh, opts);
+    // Six faces -> every one of the 12 cube edges lies between two different
+    // charts and is seamed.
     REQUIRE(seams.size() == 12);
     const auto islands = uv::computeIslands(mesh, seams);
     REQUIRE(islands.size() == 6);
@@ -236,7 +239,10 @@ TEST_CASE("autoSeams partitions a cube into one chart per face") {
 
 TEST_CASE("unwrapAtlas produces a low-distortion, in-bounds cube atlas") {
     Mesh mesh = makeCube();
-    const uv::AtlasResult atlas = uv::unwrapAtlas(mesh);
+    // Cone-only charting (no distortion merge) keeps one chart per cube face.
+    uv::AtlasOptions opts;
+    opts.maxChartDistortion = 0.0f;
+    const uv::AtlasResult atlas = uv::unwrapAtlas(mesh, opts);
 
     REQUIRE(atlas.ok);
     REQUIRE(atlas.chartCount == 6);
@@ -267,6 +273,7 @@ TEST_CASE("chart merge recombines fragmented coplanar-compatible charts") {
     Mesh merged = makeBentStrip(7, 10.0f);
     uv::AtlasOptions merge;
     merge.mergeCharts = true;
+    merge.maxChartDistortion = 0.0f;  // cone merge only
     const uv::AtlasResult b = uv::unwrapAtlas(merged, merge);
 
     REQUIRE(a.chartCount > 1);
@@ -276,10 +283,34 @@ TEST_CASE("chart merge recombines fragmented coplanar-compatible charts") {
     // sanely-bounded conformal map (not an arbitrary blow-up).
     REQUIRE(b.maxAngleDistortion < 0.35f);
 
-    // A cube's faces are 90 deg apart, so the merge must NOT combine them.
+    // A cube's faces are 90 deg apart, so the cone merge must NOT combine them.
     Mesh cube = makeCube();
     const uv::AtlasResult c = uv::unwrapAtlas(cube, merge);
     REQUIRE(c.chartCount == 6);
+}
+
+TEST_CASE("distortion-bounded merge folds developable strips together") {
+    // With the looser distortion cap on, the cube's six faces collapse to two
+    // developable three-face strips (each unrolls flat), so the chart count
+    // drops below the six cone-only charts while distortion stays ~0.
+    Mesh cube = makeCube();
+    uv::AtlasOptions opts;
+    opts.maxChartDistortion = 0.10f;
+    const uv::AtlasResult atlas = uv::unwrapAtlas(cube, opts);
+
+    REQUIRE(atlas.ok);
+    REQUIRE(atlas.chartCount < 6);
+    REQUIRE(atlas.flippedCharts == 0);
+    // Developable strips unwrap with essentially no distortion.
+    REQUIRE(atlas.maxAngleDistortion <= 0.10f);
+
+    // The cap is honoured relative to disabling the pass: it never raises the
+    // chart count and here strictly lowers it.
+    Mesh coneCube = makeCube();
+    uv::AtlasOptions coneOnly;
+    coneOnly.maxChartDistortion = 0.0f;
+    const uv::AtlasResult base = uv::unwrapAtlas(coneCube, coneOnly);
+    REQUIRE(atlas.chartCount < base.chartCount);
 }
 
 TEST_CASE("chart re-orientation tightens the cube atlas") {
@@ -290,11 +321,13 @@ TEST_CASE("chart re-orientation tightens the cube atlas") {
     Mesh loose = makeCube();
     uv::AtlasOptions noReorient;
     noReorient.reorientCharts = false;
+    noReorient.maxChartDistortion = 0.0f;  // per-face charts, so faces are diamonds
     const uv::AtlasResult a = uv::unwrapAtlas(loose, noReorient);
 
     Mesh tight = makeCube();
     uv::AtlasOptions reorient;
     reorient.reorientCharts = true;
+    reorient.maxChartDistortion = 0.0f;
     const uv::AtlasResult b = uv::unwrapAtlas(tight, reorient);
 
     REQUIRE(a.chartCount == b.chartCount);

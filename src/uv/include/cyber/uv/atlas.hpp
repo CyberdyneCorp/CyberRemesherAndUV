@@ -27,6 +27,12 @@ struct AtlasOptions {
     // (and packs better) without exceeding the per-chart flatness the growth
     // already guarantees, so distortion does not rise.
     bool mergeCharts = true;
+    // Second, looser merge pass: after the cone merge, keep merging adjacent
+    // charts as long as LSCM-unwrapping the union keeps its maximum conformal
+    // (angle) error at or below this cap. Spends distortion headroom to cut the
+    // chart/seam count toward what aggressive reference packers achieve. 0
+    // disables it (cone merge only). Only consulted when `mergeCharts` is true.
+    float maxChartDistortion = 0.10f;
     // Rotate each chart to its minimum-area bounding rectangle before packing.
     // LSCM fixes orientation from its pinned corners, so charts otherwise land
     // at arbitrary angles and waste space in the axis-aligned shelf packer.

@@ -169,6 +169,10 @@ class AtlasParams:
     texture_size: int = 1024  # resolution for the texel-density readout
     # Merge adjacent charts sharing a normal cone (fewer seams, same flatness).
     merge_charts: bool = True
+    # Looser second merge pass: keep merging while the union's max conformal
+    # error stays <= this cap (0 disables). Spends distortion headroom for fewer
+    # seams. Only used when ``merge_charts`` is True.
+    max_chart_distortion: float = 0.10
     # Rotate each chart to its minimum-area bounding box before packing (tighter
     # pack / higher texel density).
     reorient_charts: bool = True
@@ -180,6 +184,7 @@ class AtlasParams:
             texture_size=int(self.texture_size),
             reorient_charts=1 if self.reorient_charts else 0,
             merge_charts=1 if self.merge_charts else 0,
+            max_chart_distortion=float(self.max_chart_distortion),
         )
 
 

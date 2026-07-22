@@ -130,6 +130,9 @@ typedef struct CyberAtlasParams {
                                  * area bounding box before packing */
     int mergeCharts;            /* non-zero: merge adjacent charts sharing a
                                  * normal cone (fewer seams, same flatness) */
+    float maxChartDistortion;   /* looser merge cap: keep merging while the
+                                 * union's max conformal error stays <= this
+                                 * (0 disables the second pass) */
 } CyberAtlasParams;
 
 /* Aggregate atlas quality/packing report. */

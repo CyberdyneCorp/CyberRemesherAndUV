@@ -61,15 +61,11 @@ std::vector<int> computeCharts(const Mesh& mesh, const AtlasOptions& options) {
     return chartOf;
 }
 
-// Merges adjacent charts whose union still fits within a `maxChartAngleDeg`
-// normal cone, then relabels `chartOf` compactly. Greedy seed growth splits a
-// bumpy surface into many small charts that share a compatible orientation;
-// this recombines them. Because every face of a merged chart stays within one
-// cone, the result is at least as flat as growth guarantees (distortion cannot
-// rise) and stays disk-like (a cone under 90-degrees cannot wrap a tube).
-// Deterministic: candidate pairs are processed in sorted order to a fixpoint.
-void mergeCoplanarCharts(const Mesh& mesh, std::vector<int>& chartOf,
-                         const AtlasOptions& options) {
+// Greedy chart-merge driver: repeatedly merges any adjacent chart pair for which
+// `accept(facesA, facesB)` holds, to a fixpoint, then relabels `chartOf`
+// compactly. Deterministic — candidate pairs are visited in sorted order.
+template <typename AcceptFn>
+void greedyMergeCharts(const Mesh& mesh, std::vector<int>& chartOf, AcceptFn accept) {
     int chartCount = 0;
     for (const int c : chartOf) {
         chartCount = std::max(chartCount, c + 1);
@@ -78,10 +74,7 @@ void mergeCoplanarCharts(const Mesh& mesh, std::vector<int>& chartOf,
         return;
     }
     const auto n = static_cast<std::size_t>(chartCount);
-    const float cosBound = std::cos(degreesToRadians(options.maxChartAngleDeg));
-
     std::vector<int> parent(n);
-    std::vector<Vec3> normalSum(n, Vec3{0.0f, 0.0f, 0.0f});
     std::vector<std::vector<FaceId>> chartFaces(n);
     for (std::size_t i = 0; i < n; ++i) {
         parent[i] = static_cast<int>(i);
@@ -94,12 +87,9 @@ void mergeCoplanarCharts(const Mesh& mesh, std::vector<int>& chartOf,
             continue;
         }
         const int c = chartOf[static_cast<std::size_t>(f)];
-        if (c < 0) {
-            continue;
+        if (c >= 0) {
+            chartFaces[static_cast<std::size_t>(c)].push_back(face);
         }
-        chartFaces[static_cast<std::size_t>(c)].push_back(face);
-        normalSum[static_cast<std::size_t>(c)] =
-            normalSum[static_cast<std::size_t>(c)] + normalized(mesh.faceNormal(face));
     }
 
     // Adjacent chart pairs (deduplicated, sorted for determinism).
@@ -136,14 +126,6 @@ void mergeCoplanarCharts(const Mesh& mesh, std::vector<int>& chartOf,
         }
         return x;
     };
-    const auto withinCone = [&](const std::vector<FaceId>& faces, Vec3 axis) {
-        for (const FaceId face : faces) {
-            if (dot(normalized(mesh.faceNormal(face)), axis) < cosBound) {
-                return false;
-            }
-        }
-        return true;
-    };
 
     bool changed = true;
     while (changed) {
@@ -154,16 +136,13 @@ void mergeCoplanarCharts(const Mesh& mesh, std::vector<int>& chartOf,
             if (ra == rb) {
                 continue;
             }
-            const std::size_t ia = static_cast<std::size_t>(ra);
-            const std::size_t ib = static_cast<std::size_t>(rb);
-            const Vec3 axis = normalized(normalSum[ia] + normalSum[ib]);
-            if (!withinCone(chartFaces[ia], axis) || !withinCone(chartFaces[ib], axis)) {
+            if (!accept(chartFaces[static_cast<std::size_t>(ra)],
+                        chartFaces[static_cast<std::size_t>(rb)])) {
                 continue;
             }
             const std::size_t keep = static_cast<std::size_t>(std::min(ra, rb));
             const std::size_t drop = static_cast<std::size_t>(std::max(ra, rb));
             parent[drop] = static_cast<int>(keep);
-            normalSum[keep] = normalSum[ia] + normalSum[ib];
             chartFaces[keep].insert(chartFaces[keep].end(), chartFaces[drop].begin(),
                                     chartFaces[drop].end());
             chartFaces[drop].clear();
@@ -184,6 +163,146 @@ void mergeCoplanarCharts(const Mesh& mesh, std::vector<int>& chartOf,
         }
         chartOf[static_cast<std::size_t>(f)] = relabel[static_cast<std::size_t>(root)];
     }
+}
+
+// Merges adjacent charts whose union still fits within a `maxChartAngleDeg`
+// normal cone. Because every face of a merged chart stays within one cone, the
+// result is at least as flat as growth guarantees (distortion cannot rise) and
+// stays disk-like (a cone under 90 degrees cannot wrap a tube).
+void mergeCoplanarCharts(const Mesh& mesh, std::vector<int>& chartOf,
+                         const AtlasOptions& options) {
+    const float cosBound = std::cos(degreesToRadians(options.maxChartAngleDeg));
+    greedyMergeCharts(mesh, chartOf,
+                      [&](const std::vector<FaceId>& a, const std::vector<FaceId>& b) {
+                          Vec3 sum{0.0f, 0.0f, 0.0f};
+                          for (const FaceId face : a) {
+                              sum = sum + normalized(mesh.faceNormal(face));
+                          }
+                          for (const FaceId face : b) {
+                              sum = sum + normalized(mesh.faceNormal(face));
+                          }
+                          const Vec3 axis = normalized(sum);
+                          for (const FaceId face : a) {
+                              if (dot(normalized(mesh.faceNormal(face)), axis) < cosBound) {
+                                  return false;
+                              }
+                          }
+                          for (const FaceId face : b) {
+                              if (dot(normalized(mesh.faceNormal(face)), axis) < cosBound) {
+                                  return false;
+                              }
+                          }
+                          return true;
+                      });
+}
+
+// Distortion of an unwrap given its per-vertex UVs: the maximum of the per-face
+// conformal (angle) error and the chart-wide AREA-scale spread. Conformal error
+// alone misses inter-facet stretch — a chart of flat facets (e.g. three cube
+// faces) has ~0 angle error per triangle no matter how the facets splay, because
+// no triangle straddles a fold. The area-scale spread (how much the tightest and
+// loosest faces differ in UV-area-per-surface-area) catches exactly that. Both
+// are in [0,1); 0 = isometric. Also reports whether the layout folds. Mirrors
+// the per-triangle Jacobian SVD in distortion.hpp measureDistortion.
+float unwrapDistortion(const Mesh& mesh, const std::vector<FaceId>& faces,
+                       const UnwrapResult& result, bool& folded) {
+    std::vector<Vec2> uvOf(mesh.vertexCapacity(), Vec2{0.0f, 0.0f});
+    for (std::size_t i = 0; i < result.vertices.size(); ++i) {
+        uvOf[static_cast<std::size_t>(result.vertices[i].value)] = result.uv[i];
+    }
+    float maxAngle = 0.0f;
+    float minRatio = std::numeric_limits<float>::max();
+    float maxRatio = 0.0f;
+    int positive = 0;
+    int negative = 0;
+    for (const FaceId face : faces) {
+        const std::vector<VertexId> verts = mesh.faceVertices(face);
+        if (verts.size() < 3) {
+            continue;
+        }
+        const Vec3 p0 = mesh.position(verts[0]);
+        const Vec2 q0 = uvOf[static_cast<std::size_t>(verts[0].value)];
+        float faceAngle = 0.0f;
+        float faceUvArea = 0.0f;    // signed
+        float faceSurfArea = 0.0f;  // positive
+        std::size_t tris = 0;
+        for (std::size_t i = 1; i + 1 < verts.size(); ++i) {
+            const Vec3 p1 = mesh.position(verts[i]);
+            const Vec3 p2 = mesh.position(verts[i + 1]);
+            const Vec2 q1 = uvOf[static_cast<std::size_t>(verts[i].value)];
+            const Vec2 q2 = uvOf[static_cast<std::size_t>(verts[i + 1].value)];
+            const Vec3 e1 = p1 - p0;
+            const Vec3 e2 = p2 - p0;
+            const float baseLen = length(e1);
+            const Vec3 xAxis = baseLen > 0.0f ? e1 * (1.0f / baseLen) : Vec3{1.0f, 0.0f, 0.0f};
+            const Vec3 nrm = normalized(cross(e1, e2));
+            const Vec3 yAxis = cross(nrm, xAxis);
+            const Vec2 s1v{baseLen, 0.0f};
+            const Vec2 s2v{dot(e2, xAxis), dot(e2, yAxis)};
+            const Vec2 du = q1 - q0;
+            const Vec2 dv = q2 - q0;
+            const float uvArea = 0.5f * (du.x * dv.y - dv.x * du.y);
+            faceUvArea += uvArea;
+            faceSurfArea += 0.5f * (s1v.x * s2v.y - s2v.x * s1v.y);
+            if (uvArea > 0.0f) {
+                ++positive;
+            } else if (uvArea < 0.0f) {
+                ++negative;
+            }
+            const float detP = s1v.x * s2v.y - s2v.x * s1v.y;
+            if (std::fabs(detP) > 1e-20f) {
+                const float invDet = 1.0f / detP;
+                const float ia = s2v.y * invDet, ib = -s2v.x * invDet;
+                const float ic = -s1v.y * invDet, id = s1v.x * invDet;
+                const float ja = du.x * ia + dv.x * ic;
+                const float jb = du.x * ib + dv.x * id;
+                const float jc = du.y * ia + dv.y * ic;
+                const float jd = du.y * ib + dv.y * id;
+                float sv1 = 0.0f, sv2 = 0.0f;
+                detail::singularValues2x2(ja, jb, jc, jd, sv1, sv2);
+                const float denom = sv1 + sv2;
+                faceAngle += denom > 0.0f ? (sv1 - sv2) / denom : 0.0f;
+                ++tris;
+            }
+        }
+        maxAngle = std::fmax(maxAngle, tris > 0 ? faceAngle / static_cast<float>(tris) : 0.0f);
+        if (faceSurfArea > 0.0f) {
+            const float ratio = std::fabs(faceUvArea) / faceSurfArea;
+            minRatio = std::fmin(minRatio, ratio);
+            maxRatio = std::fmax(maxRatio, ratio);
+        }
+    }
+    folded = positive > 0 && negative > 0;
+    const float areaSpread =
+        (maxRatio > minRatio && maxRatio > 0.0f) ? (maxRatio - minRatio) / (maxRatio + minRatio)
+                                                 : 0.0f;
+    return std::fmax(maxAngle, areaSpread);
+}
+
+// Second, looser merge pass: merges adjacent charts when LSCM-unwrapping their
+// union keeps the combined (conformal + area-spread) distortion at or below
+// `maxChartDistortion` (and does not fold). This spends the distortion headroom
+// the cone merge leaves on the table to cut the chart count further. A no-op
+// when the cap is <= 0.
+void mergeByDistortion(const Mesh& mesh, std::vector<int>& chartOf,
+                       const AtlasOptions& options) {
+    if (options.maxChartDistortion <= 0.0f) {
+        return;
+    }
+    const float cap = options.maxChartDistortion;
+    greedyMergeCharts(mesh, chartOf,
+                      [&](const std::vector<FaceId>& a, const std::vector<FaceId>& b) {
+                          std::vector<FaceId> merged;
+                          merged.reserve(a.size() + b.size());
+                          merged.insert(merged.end(), a.begin(), a.end());
+                          merged.insert(merged.end(), b.begin(), b.end());
+                          const UnwrapResult r = lscmUnwrap(mesh, merged);
+                          if (!r.ok) {
+                              return false;
+                          }
+                          bool folded = false;
+                          return unwrapDistortion(mesh, merged, r, folded) <= cap && !folded;
+                      });
 }
 
 // Fallback UVs for a chart LSCM could not solve: orthographic projection onto
@@ -329,7 +448,8 @@ std::vector<Vec2> islandUvPoints(const Mesh& mesh, std::span<const FaceId> islan
 SeamSet autoSeams(const Mesh& mesh, const AtlasOptions& options) {
     std::vector<int> chartOf = computeCharts(mesh, options);
     if (options.mergeCharts) {
-        mergeCoplanarCharts(mesh, chartOf, options);
+        mergeCoplanarCharts(mesh, chartOf, options);  // free: no distortion rise
+        mergeByDistortion(mesh, chartOf, options);    // spend headroom up to the cap
     }
     SeamSet seams;
     const auto capacity = mesh.faceCapacity();

@@ -33,8 +33,9 @@ def main() -> int:
     out.close()
     try:
         with Mesh.load_obj(obj.name) as mesh:
-            res = mesh.unwrap_atlas(AtlasParams(max_chart_angle_degrees=40.0))
-            # One normal-coherent chart per cube face.
+            # Cone-only charting (no distortion merge) = one chart per cube face.
+            res = mesh.unwrap_atlas(AtlasParams(max_chart_angle_degrees=40.0,
+                                                max_chart_distortion=0.0))
             assert res.chart_count == 6, res.chart_count
             # Each chart is a single planar quad -> LSCM is near-perfectly
             # conformal and never mirrored.
@@ -51,9 +52,18 @@ def main() -> int:
 
         # A second run on a fresh handle must be deterministic.
         with Mesh.load_obj(obj.name) as mesh2:
-            res2 = mesh2.unwrap_atlas(AtlasParams(max_chart_angle_degrees=40.0))
+            res2 = mesh2.unwrap_atlas(AtlasParams(max_chart_angle_degrees=40.0,
+                                                  max_chart_distortion=0.0))
             assert res2.chart_count == res.chart_count
             assert res2.seam_edges == res.seam_edges
+
+        # The default distortion-bounded merge folds the cube's six faces into
+        # developable strips (fewer charts), while staying near-conformal.
+        with Mesh.load_obj(obj.name) as mesh3:
+            res3 = mesh3.unwrap_atlas(AtlasParams())  # defaults (merge on, cap 0.10)
+            assert res3.chart_count < res.chart_count, res3.chart_count
+            assert res3.max_angle_distortion <= 0.10, res3.max_angle_distortion
+            assert res3.flipped_charts == 0
         print(f"PASS uv atlas: {res.chart_count} charts, "
               f"max distortion {res.max_angle_distortion:.4f}, "
               f"packed {res.packed_area * 100:.0f}%")

@@ -111,6 +111,7 @@ class CyberAtlasParams(Structure):
         ("texture_size", c_int32),
         ("reorient_charts", c_int32),
         ("merge_charts", c_int32),
+        ("max_chart_distortion", c_float),
     ]
 
 
