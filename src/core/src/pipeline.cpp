@@ -750,13 +750,16 @@ PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSi
         const bool pipeTime = std::getenv("CYBER_PIPE_TIME") != nullptr;
         using PClk = std::chrono::steady_clock;
         const auto pms = [](PClk::time_point a, PClk::time_point b) {
-            return std::chrono::duration_cast<std::chrono::milliseconds>(b - a).count();
+            // chrono::rep is long on 64-bit Linux but long long on Windows/macOS;
+            // normalize to long long so the %lld format is portable.
+            return static_cast<long long>(
+                std::chrono::duration_cast<std::chrono::milliseconds>(b - a).count());
         };
         auto pt = PClk::now();
         {
             const ReferenceSurface baseSurface(work, params.smoothNormalDegrees);
             if (pipeTime) {
-                std::fprintf(stderr, "[pipe-time] baseSurface build (%zu src tris)=%ldms\n",
+                std::fprintf(stderr, "[pipe-time] baseSurface build (%zu src tris)=%lldms\n",
                              work.faceCount(), pms(pt, PClk::now()));
                 pt = PClk::now();
             }
@@ -778,12 +781,12 @@ PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSi
             }
         }
         if (pipeTime) {
-            std::fprintf(stderr, "[pipe-time] base relax=%ldms\n", pms(pt, PClk::now()));
+            std::fprintf(stderr, "[pipe-time] base relax=%lldms\n", pms(pt, PClk::now()));
             pt = PClk::now();
         }
         result.mesh = result.mesh.linearSubdivide();
         if (pipeTime) {
-            std::fprintf(stderr, "[pipe-time] subdivide=%ldms\n", pms(pt, PClk::now()));
+            std::fprintf(stderr, "[pipe-time] subdivide=%lldms\n", pms(pt, PClk::now()));
             pt = PClk::now();
         }
         // Linear subdivision only splits faces — the new vertices sit on the
@@ -794,7 +797,7 @@ PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSi
         // following the original curvature (see relaxQuadMesh).
         const ReferenceSurface sourceSurface(work, params.smoothNormalDegrees);
         if (pipeTime) {
-            std::fprintf(stderr, "[pipe-time] sourceSurface build=%ldms\n", pms(pt, PClk::now()));
+            std::fprintf(stderr, "[pipe-time] sourceSurface build=%lldms\n", pms(pt, PClk::now()));
             pt = PClk::now();
         }
         if (!sourceSurface.empty()) {
@@ -808,7 +811,7 @@ PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSi
                           finalRelaxLambda, shapeMatch);
         }
         if (pipeTime) {
-            std::fprintf(stderr, "[pipe-time] final project+relax=%ldms\n", pms(pt, PClk::now()));
+            std::fprintf(stderr, "[pipe-time] final project+relax=%lldms\n", pms(pt, PClk::now()));
         }
     }
     countFaces(result.mesh, result.stats);

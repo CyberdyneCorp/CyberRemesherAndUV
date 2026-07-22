@@ -373,7 +373,7 @@ IsotropicStatus isotropicRemesh(Mesh& mesh, const ReferenceSurface& reference,
     const auto t0 = Clk::now();
     std::vector<float>& scales = mesh.vertexAttributes().create<float>(kScaleAttribute);
     computeTargetScales(mesh, options.adaptivity, scales);
-    long tScale = 0, tSplit = 0, tCollapse = 0, tFlip = 0, tSmooth = 0;
+    long long tScale = 0, tSplit = 0, tCollapse = 0, tFlip = 0, tSmooth = 0;
     const auto ms = [](Clk::time_point a, Clk::time_point b) {
         return std::chrono::duration_cast<std::chrono::milliseconds>(b - a).count();
     };
@@ -382,11 +382,11 @@ IsotropicStatus isotropicRemesh(Mesh& mesh, const ReferenceSurface& reference,
     }
     auto finish = [&](IsotropicStatus status) {
         if (isoTime) {
-            std::fprintf(stderr,
-                         "[iso-time] iters=%d faces=%zu | scales=%ldms split=%ldms collapse=%ldms "
-                         "flip=%ldms smooth+project=%ldms\n",
-                         options.iterations, mesh.faceCount(), tScale, tSplit, tCollapse, tFlip,
-                         tSmooth);
+            std::fprintf(
+                stderr,
+                "[iso-time] iters=%d faces=%zu | scales=%lldms split=%lldms collapse=%lldms "
+                "flip=%lldms smooth+project=%lldms\n",
+                options.iterations, mesh.faceCount(), tScale, tSplit, tCollapse, tFlip, tSmooth);
         }
         mesh.vertexAttributes().remove(kScaleAttribute);
         return status;
