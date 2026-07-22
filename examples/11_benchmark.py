@@ -4,10 +4,12 @@ that actually matters — how faithfully the quads follow the source surface, ho
 clean the singularity structure is, and the usual angle/uniformity — across the
 community test-model corpus at matched polygon count.
 
-It also runs the Phase-2 adaptivity comparison: ours with curvature-adaptive
-sizing vs QuadriFlow's uniform sizing at matched quad count. Adaptive sizing
-spends polygons where the surface bends, so it should reproduce the surface more
-accurately per polygon — something QuadriFlow's uniform grid cannot do.
+It also runs the Phase-2 adaptivity comparison: ours with curvature-adaptive sizing
+vs ours with uniform sizing, at matched *achieved* quad count (QuadriFlow shown for
+context). Adaptive sizing spends polygons where the surface bends, so it should
+reproduce the surface more accurately per polygon — something QuadriFlow's uniform
+grid cannot do. Phase 2 necessarily runs on the position-field extractor, the only
+one exposing the knob; the shipped quad-cover default is uniform-only by design.
 
     examples/run.sh examples/11_benchmark.py
     examples/run.sh examples/11_benchmark.py --models spot fandisk --target-quads 3000
@@ -18,6 +20,7 @@ built (offline / no Eigen), the reference columns are omitted and ours still run
 
 import argparse
 import os
+import sys
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -66,6 +69,73 @@ def ours(path: str, target: int, method: str, adaptivity: float) -> "c.MeshData 
         return None
 
 
+# Hard ceiling on the count-match request, as a multiple of the desired count.
+# The request drives mesh resolution, so cost grows with it: an unbounded
+# multiplicative correction escalated a non-converging model to 40x (120k quads),
+# which allocated ~4 GB and never returned. If 4x the desired count still cannot
+# reach the density, the extractor simply saturates there — keep the best attempt
+# and report the miss rather than chasing it.
+_COUNT_MATCH_CEILING = 4.0
+
+
+def search_matched_count(probe, desired: int, tol: float = 0.08, iters: int = 3):
+    """Bounded search for a request whose ACHIEVED count lands near `desired`.
+
+    `probe(target) -> (payload, achieved_count)`; returns the payload of the
+    closest attempt, or None if the first probe failed. Pure control flow with no
+    engine dependency, so the termination guarantees below are unit-testable
+    (see test_count_match.py).
+
+    Bounded on every axis — each guard exists because its absence hangs:
+      * at most `iters` probes;
+      * the request never exceeds `_COUNT_MATCH_CEILING` x `desired`;
+      * stop once a raise buys < 2% more (the extractor has saturated);
+      * stop once the correction can no longer raise the request.
+    """
+    ceiling = int(desired * _COUNT_MATCH_CEILING)
+    target, best, best_err, prev_got = desired, None, float("inf"), 0
+    for _ in range(iters):
+        payload, got = probe(target)
+        if payload is None or got <= 0:
+            return best
+        err = abs(got - desired) / desired
+        if err < best_err:
+            best, best_err = payload, err
+        if err <= tol:
+            return payload
+        # Saturated: the last raise bought < 2% more quads, so further raises are
+        # just cost. Stop instead of escalating into a pathological resolution.
+        if prev_got and got <= prev_got * 1.02:
+            return best
+        prev_got = got
+        # Achieved count rises with the request; correct multiplicatively, bounded.
+        nxt = int(max(desired * 0.25, min(ceiling, target * desired / got)))
+        if nxt <= target:  # already at the ceiling and still short — no point retrying
+            return best
+        target = nxt
+    return best
+
+
+def ours_at_count(path: str, desired: int, method: str, adaptivity: float,
+                  tol: float = 0.08, iters: int = 3) -> "c.MeshData | None":
+    """Remesh so the ACHIEVED quad count lands near `desired`.
+
+    `target_quad_count` is a request, not a guarantee — the extractors undershoot
+    it, and curvature-adaptive sizing undershoots it severely (spot: target 3000 ->
+    268 achieved). Comparing an adaptive run against a uniform run at the same
+    *requested* target therefore compares two different, and often degenerate,
+    densities. Rescale the request until the output count is within `tol`, so
+    per-polygon fidelity is a fair comparison.
+
+    Returns the closest attempt, which the caller must check against its
+    counterpart — a miss is reported, never silently scored."""
+    def probe(target: int):
+        mesh = ours(path, target, method, adaptivity)
+        return (None, 0) if mesh is None else (mesh, c.face_counts(mesh)[0])
+
+    return search_matched_count(probe, desired, tol, iters)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="CyberRemesher vs QuadriFlow benchmark")
     parser.add_argument("--models", nargs="+", default=DEFAULT_MODELS,
@@ -94,7 +164,15 @@ def main() -> None:
     adaptive_rows: list = []  # (model, our_adaptive_metrics, qf_metrics) for Phase 2
     wins = {m[0]: [0, 0] for m in METRICS}  # metric -> [ours_better, total] vs QF
 
+    # Unbuffered: this run is long, and a redirected stdout otherwise hides all
+    # progress, so a stall is indistinguishable from slow work.
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+    except AttributeError:  # pragma: no cover - non-reconfigurable stream
+        pass
+
     for name in args.models:
+        print(f"[{name}] ...", flush=True)
         try:
             path = c.download_model(name)
             src = c.load_any(path)
@@ -137,14 +215,34 @@ def main() -> None:
                 wins[key][0] += int(better)
                 wins[key][1] += 1
 
-        # --- Phase 2: does curvature-adaptive sizing improve fidelity per
-        # polygon? Compare ours-adaptive against ours-UNIFORM at the same output
-        # count (isolates the sizing benefit from the mesh-quality gap that also
-        # separates us from QuadriFlow), with QuadriFlow at that count for context.
-        ad = ours(path, args.target_quads, "instant-meshes", 1.0)
+        # --- Phase 2: does curvature-adaptive sizing improve fidelity per polygon?
+        # Compare ours-adaptive against ours-UNIFORM at the same ACHIEVED count
+        # (isolates the sizing benefit from the mesh-quality gap that also separates
+        # us from QuadriFlow), with QuadriFlow at that count for context.
+        #
+        # This runs on "instant-meshes", NOT on the shipped quad-cover default:
+        # quad-cover is deliberately uniform-only (capi.cpp hardcodes adaptivity 0
+        # and the pipeline's isotropic stage — the only consumer of params.adaptivity
+        # — is bypassed for it), so an adaptive/uniform split on the default would
+        # compare a mesh against itself. This measures the adaptivity LEVER, and says
+        # nothing about the default's fidelity; Phase 1 covers that.
+        #
+        # The adaptive arm is driven toward target_quads, then the uniform arm is
+        # matched to whatever the adaptive arm ACHIEVED, so the pair is comparable.
+        # The old code instead requested `achieved * 1.3` once, which left the two
+        # arms 20-30% apart down at ~200-400 quads, where both extractors degrade —
+        # that regime produced fandisk's 22.61% "uniform" deviation and the bogus
+        # WIN scored against it.
+        #
+        # CAVEAT: adaptive sizing undershoots the request ~4-5x, and the ceiling in
+        # ours_at_count bounds how far the request may be raised to compensate. So on
+        # models where adaptive saturates early the pair is matched to each other but
+        # sits below target_quads (spot lands ~657q). Cross-MODEL comparison of these
+        # rows is therefore not meaningful; each row is only self-consistent.
+        ad = ours_at_count(path, args.target_quads, "instant-meshes", 1.0)
         if ad:
             am = evaluate(ad, src)
-            uni = ours(path, int(am["quads"] * 1.3), "instant-meshes", 0.0)
+            uni = ours_at_count(path, am["quads"], "instant-meshes", 0.0)
             qf_matched = c.quadriflow_try(qf, path, am["quads"])
             if uni:
                 adaptive_rows.append((name, am, evaluate(uni, src),
@@ -157,21 +255,41 @@ def main() -> None:
 
 
 def _phase3(rows: list) -> None:
-    """Phase 3 — features & robustness: our position-field extractor vs QuadriFlow
-    on feature-following error (edges on sharp creases) and topological defects
-    (non-manifold edges + holes/tears + degenerate faces)."""
+    """Phase 3 — features & robustness: the SHIPPED default (quad-cover) vs
+    QuadriFlow on feature-following error (edges on sharp creases) and topological
+    defects (non-manifold edges + holes/tears + degenerate faces).
+
+    Scored on the default. The retired position-field extractor is printed beside it
+    for continuity with the historical numbers in docs/ROADMAP.md — its defect counts
+    (cheburashka 110, bunny 92) are what the roadmap's open "real extractor bug"
+    follow-up refers to, and they say nothing about what ships today."""
     import math as _m
+
+    def _fmt(mtr: dict) -> str:
+        return "n/a" if _m.isnan(mtr["feature"]) else f"{mtr['feature']:.2f}%"
+
     models = sorted({r[0] for r in rows})
-    print("\nPHASE 3 — features & robustness (position-field extractor vs QuadriFlow):")
+    print("\nPHASE 3 — features & robustness (quad-cover DEFAULT vs QuadriFlow):")
     print("  feature-follow % (edges on source creases, lower better) · topo defects (count, lower better)")
+    def pick(model: str, engine: str) -> "dict | None":
+        return next((r[2] for r in rows if r[0] == model and r[1] == engine), None)
+
+    feat_wins = def_wins = total = 0
     for name in models:
-        o = next((r[2] for r in rows if r[0] == name and r[1] == "ours position-field"), None)
-        q = next((r[2] for r in rows if r[0] == name and r[1] == "QuadriFlow"), None)
+        o, q = pick(name, "ours quad-cover"), pick(name, "QuadriFlow")
+        legacy = pick(name, "ours position-field")
         if not o or not q:
             continue
-        of = "n/a" if _m.isnan(o["feature"]) else f"{o['feature']:.2f}%"
-        qfv = "n/a" if _m.isnan(q["feature"]) else f"{q['feature']:.2f}%"
-        print(f"  {name:<15} feature ours={of:<7} QF={qfv:<7} | defects ours={o['defects']:<4} QF={q['defects']}")
+        total += 1
+        feat_wins += (not _m.isnan(o["feature"]) and not _m.isnan(q["feature"])
+                      and o["feature"] <= q["feature"])
+        def_wins += o["defects"] <= q["defects"]
+        legacy_txt = f"  (retired position-field: {_fmt(legacy)}/{legacy['defects']})" if legacy else ""
+        print(f"  {name:<15} feature ours={_fmt(o):<7} QF={_fmt(q):<7} | "
+              f"defects ours={o['defects']:<4} QF={q['defects']}{legacy_txt}")
+    if total:
+        print(f"  default ≥ QuadriFlow: feature-follow {feat_wins}/{total} · "
+              f"topo defects {def_wins}/{total}")
 
 
 def _print_verdict(wins: dict, adaptive_rows: list) -> None:
@@ -184,15 +302,28 @@ def _print_verdict(wins: dict, adaptive_rows: list) -> None:
     if adaptive_rows:
         print("\nPHASE 2 — adaptivity: does curvature-adaptive sizing beat uniform per polygon?")
         print("  (ours adaptive vs ours uniform at matched count — lower surface dev is better;")
+        print("   measured on the position-field extractor: the quad-cover DEFAULT is")
+        print("   uniform-only, so it has no adaptive/uniform split to compare.")
         print("   QuadriFlow shown for context — beating it absolutely is Phase-4-gated)")
-        better = 0
+        better = scored = 0
         for name, ad, uni, ref in adaptive_rows:
-            mark = "WIN " if ad["rms"] < uni["rms"] else "----"
-            better += ad["rms"] < uni["rms"]
+            # A run whose count missed the other side's, or whose deviation blew up,
+            # is a degenerate extraction — report it, never score it as a win.
+            skew = abs(ad["quads"] - uni["quads"]) / max(1, uni["quads"])
+            bad = max(ad["rms"], uni["rms"])
+            if skew > 0.15:
+                mark = "SKIP"  # counts never converged; not an apples-to-apples pair
+            elif bad > 5.0:
+                mark = "DEGN"  # implausible surface deviation -> extraction failed
+            else:
+                scored += 1
+                better += ad["rms"] < uni["rms"]
+                mark = "WIN " if ad["rms"] < uni["rms"] else "----"
             qtxt = f"  ·  QF {ref['rms']:.2f}%" if ref else ""
             print(f"  {mark} {name:<15} adaptive {ad['rms']:.2f}% ({ad['quads']}q)  vs  "
                   f"uniform {uni['rms']:.2f}% ({uni['quads']}q){qtxt}")
-        print(f"  adaptive beats uniform per-polygon: {better}/{len(adaptive_rows)} models")
+        print(f"  adaptive beats uniform per-polygon: {better}/{scored} models scored"
+              f" ({len(adaptive_rows) - scored} excluded as degenerate/unmatched)")
     print("=" * 60)
 
 
