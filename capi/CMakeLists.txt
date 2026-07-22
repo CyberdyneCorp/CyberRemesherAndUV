@@ -34,7 +34,10 @@ if(CYBER_BUILD_CAPI_SHARED)
     add_library(cyber_capi_shared SHARED
         src/capi.cpp
     )
-    target_include_directories(cyber_capi_shared PUBLIC include)
+    include(GNUInstallDirs)
+    target_include_directories(cyber_capi_shared PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+        $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
     target_link_libraries(cyber_capi_shared PRIVATE cyber_core cyber_bake cyber_imageio cyber_quadrangulate)
     if(TARGET cyber_uv)
         target_link_libraries(cyber_capi_shared PRIVATE cyber_uv)
@@ -42,6 +45,7 @@ if(CYBER_BUILD_CAPI_SHARED)
     endif()
     set_target_properties(cyber_capi_shared PROPERTIES
         OUTPUT_NAME cyber_capi
+        EXPORT_NAME capi           # find_package(CyberRemesher) -> cyber::capi
         POSITION_INDEPENDENT_CODE ON
         VERSION ${PROJECT_VERSION}
         SOVERSION ${PROJECT_VERSION_MAJOR})
@@ -50,4 +54,15 @@ if(CYBER_BUILD_CAPI_SHARED)
         CYBER_CAPI_VERSION_MINOR=${PROJECT_VERSION_MINOR}
         CYBER_CAPI_VERSION_PATCH=${PROJECT_VERSION_PATCH})
     cyber_set_warnings(cyber_capi_shared)
+
+    # Install the self-contained C ABI + header so downstream projects can
+    # find_package(CyberRemesher CONFIG) and link cyber::capi. (The C++ core and
+    # the optional Geogram solver are PRIVATE-linked into the .so, so the export
+    # is self-contained — no transitive target exports needed.)
+    install(TARGETS cyber_capi_shared
+        EXPORT CyberRemesherTargets
+        LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+        ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
+    install(FILES include/cyber_capi.h DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 endif()

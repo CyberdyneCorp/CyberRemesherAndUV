@@ -12,3 +12,4 @@ examples/reference/QuadriFlow/
 examples/reference/autoremesher-src/
 examples/reference/scipp-src/
 .claude/worktrees/
+dist/

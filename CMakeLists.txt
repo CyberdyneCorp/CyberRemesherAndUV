@@ -97,3 +97,36 @@ if(CYBER_BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests)
 endif()
+
+# ---------------------------------------------------------------------------
+# Install / export — find_package(CyberRemesher CONFIG) -> cyber::capi
+# ---------------------------------------------------------------------------
+# Downstream projects (like the sibling CyberdyneCorp libraries) consume the
+# stable C ABI shared library as an imported target. The C++ core, quadrangulate,
+# UV, and the optional in-process Geogram solver are all PRIVATE-linked into the
+# .so, so exporting only cyber_capi_shared yields a self-contained package.
+if(CYBER_BUILD_CAPI AND CYBER_BUILD_CAPI_SHARED)
+    include(CMakePackageConfigHelpers)
+    include(GNUInstallDirs)
+    set(CYBER_CMAKE_DIR "${CMAKE_INSTALL_LIBDIR}/cmake/CyberRemesher")
+
+    install(EXPORT CyberRemesherTargets
+        NAMESPACE cyber::
+        DESTINATION "${CYBER_CMAKE_DIR}"
+        FILE CyberRemesherTargets.cmake)
+
+    configure_package_config_file(
+        "${CMAKE_CURRENT_SOURCE_DIR}/cmake/CyberRemesherConfig.cmake.in"
+        "${CMAKE_CURRENT_BINARY_DIR}/CyberRemesherConfig.cmake"
+        INSTALL_DESTINATION "${CYBER_CMAKE_DIR}")
+
+    write_basic_package_version_file(
+        "${CMAKE_CURRENT_BINARY_DIR}/CyberRemesherConfigVersion.cmake"
+        VERSION "${PROJECT_VERSION}"
+        COMPATIBILITY SameMajorVersion)
+
+    install(FILES
+        "${CMAKE_CURRENT_BINARY_DIR}/CyberRemesherConfig.cmake"
+        "${CMAKE_CURRENT_BINARY_DIR}/CyberRemesherConfigVersion.cmake"
+        DESTINATION "${CYBER_CMAKE_DIR}")
+endif()

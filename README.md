@@ -70,7 +70,21 @@ thirdparty/      vendored permissive dependencies (manifest.json)
 
 ## Build
 
-Requires CMake ≥ 3.24, Ninja, and a C++20 compiler.
+Requires CMake ≥ 3.24, Ninja, and a C++20 compiler. A [`just`](https://github.com/casey/just)
+task runner mirrors the sibling CyberdyneCorp libraries (SciPP / NumPP):
+
+```sh
+just build      # configure + build (library, CLI, tests)
+just test       # build + run the full suite
+just debug      # ASan/UBSan build
+just gcc        # build + test with GCC
+just spec       # validate the OpenSpec changes
+just ci         # local CI: test + gcc + spec
+just gpu-detect # probe CUDA / OpenCL / Metal
+just clean      # remove build dirs
+```
+
+`just` is a thin wrapper over the CMake presets, which you can also drive directly:
 
 ```sh
 cmake --preset cpu-headless      # core + accel + CLI + tests, no GPU SDK needed
@@ -89,6 +103,23 @@ on organic meshes. To skip it for faster iteration, override
 `-DCYBER_WITH_QUADCOVER=OFF` — the engine falls back to the dependency-free native
 seamless-UV solver (a few degrees lower median, still fully functional). Mobile
 presets (`ios`/`android`) leave it off.
+
+### Use as a library
+
+`just install` (or `cmake --install`) installs a `find_package(CyberRemesher)`
+CONFIG package — the self-contained C ABI shared library plus its header. Consume
+it from another CMake project the same way as the sibling CyberdyneCorp libraries:
+
+```cmake
+find_package(CyberRemesher CONFIG REQUIRED)
+target_link_libraries(your_app PRIVATE cyber::capi)   # + #include <cyber_capi.h>
+```
+
+The `cyber::capi` target carries the include path and links the versioned
+`libcyber_capi.so`; the C++ core, quadrangulator, UV, and the in-process Geogram
+solver are all baked into it, so the package has no transitive dependencies. In
+the same build tree, `add_subdirectory()` also exposes the `cyber::*` targets
+(`cyber::core`, `cyber::uv`, …). Python bindings live in `python/cyberremesh/`.
 
 ## Development
 

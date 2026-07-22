@@ -1,0 +1,13 @@
+@PACKAGE_INIT@
+
+# CyberRemesher — quad remeshing / retopology / UV / bake engine.
+# Exposes the stable C ABI shared library as the imported target `cyber::capi`
+# (self-contained; the C++ core and the optional in-process Geogram solver are
+# linked into the .so). Consume with:
+#
+#   find_package(CyberRemesher CONFIG REQUIRED)
+#   target_link_libraries(your_app PRIVATE cyber::capi)   # + #include <cyber_capi.h>
+
+include("${CMAKE_CURRENT_LIST_DIR}/CyberRemesherTargets.cmake")
+
+check_required_components(CyberRemesher)
