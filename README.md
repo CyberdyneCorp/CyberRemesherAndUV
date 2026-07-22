@@ -11,21 +11,25 @@ capability specs, task plan).
 
 ### Auto-retopology
 
-Two triangle→quad strategies (`RemeshParams.quad_method`), both clean-room and
-permissively licensed:
+Triangle→quad remeshing via `RemeshParams.quad_method`, clean-room and permissively
+licensed. The default **`quad-cover`** — a QuadCover seamless-UV isoline extractor —
+**beats [QuadriFlow](https://github.com/hjwdzh/QuadriFlow) on both median quad angle
+and irregular-vertex count** across the organic corpus (spot, rocker-arm,
+stanford-bunny), and routes crease-heavy CAD parts to a feature-aware solver. Other
+strategies: **`field-aligned`** (max-matching over a smoothed cross field, ~95%+
+quad-dominance, strongest on box/CAD geometry), **`instant-meshes`** (Instant-Meshes-style
+position-field extractor), and **`integer`** (experimental integer parametrization).
 
-- **`field-aligned`** (default) — maximum-matching over a smoothed cross field;
-  highest quad-dominance (~95%+) with curvature-following flow.
-- **`instant-meshes`** — an Instant-Meshes-style position-field extractor
-  (4-RoSy orientation + lattice position field → collapse → extract). More
-  uniform, field-aligned flow; **matches [QuadriFlow](https://github.com/hjwdzh/QuadriFlow)
-  on edge-length uniformity** (CV ≈ 0.17–0.21 vs 0.12–0.17) and trails it a few
-  degrees on median quad angle.
+![Community test models remeshed to clean quads](examples/output/09_gallery.png)
 
-Both feed a pure-quad path (subdivision + surface-projected relaxation) for a
-100%-quad result. `examples/10_vs_reference.py` renders the side-by-side against
-QuadriFlow. GPL sources (AutoRemesher, its QuadCover/CoMISo path) were used only
-as idea references, never copied — see [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
+<sub>Real scanned / CAD models → quad-dominant retopology · <code>examples/09_test_models.py</code></sub>
+
+Every strategy feeds a pure-quad path (subdivision + surface-projected relaxation)
+for a 100%-quad result. `examples/10_vs_reference.py` and `examples/11_benchmark.py`
+score the output side-by-side against QuadriFlow and AutoRemesher — e.g. the
+stanford-bunny at median **83° / 3% irregular** vs QuadriFlow's 80° / 6% and
+AutoRemesher's 75° / 14%. GPL sources (AutoRemesher, its QuadCover/CoMISo path) were
+idea references only, never copied — see [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
 
 ### Automatic UV atlas
 
@@ -47,6 +51,10 @@ renders the quad mesh next to its packed atlas, tinted by chart, and
 (the open reference): CyberRemesher matches or beats xatlas on chart count while
 holding ~2× lower conformal distortion; xatlas's polygon packer still fits its
 charts tighter (higher coverage), the one remaining gap.
+
+![Automatic UV atlas: quad mesh and its packed chart layout](examples/output/14_uv_atlas.png)
+
+<sub>Each quad mesh (left) auto-seamed, unwrapped, re-oriented, and packed into a UV atlas (right), tinted by chart · <code>examples/14_uv_atlas.py</code></sub>
 
 ## Layout
 
