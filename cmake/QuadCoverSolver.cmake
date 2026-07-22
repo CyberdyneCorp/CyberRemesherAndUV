@@ -12,6 +12,20 @@ function(cyber_add_quadcover_solver)
     set(_ref "${PROJECT_SOURCE_DIR}/examples/reference")
     set(_ar "${_ref}/autoremesher-src")
 
+    # The vendored Geogram/AutoRemesher solver needs OpenMP and TBB. Where either
+    # is absent (a minimal CI runner, a macOS box without libomp), skip it and
+    # let the dependency-free native seamless-UV solver take over. This keeps
+    # -DCYBER_WITH_QUADCOVER=ON portable — best-effort, never a hard configure
+    # failure — so the tree builds everywhere and the vendored field is used only
+    # where its dependencies are present.
+    find_package(OpenMP QUIET)
+    find_path(CYBER_QC_TBB_INCLUDE tbb/blocked_range.h)
+    if(NOT OpenMP_CXX_FOUND OR NOT CYBER_QC_TBB_INCLUDE)
+        message(STATUS "cyber_quadcover_solver: OpenMP/TBB not found — skipping the "
+                       "in-process Geogram field; using the native seamless-UV solver")
+        return()
+    endif()
+
     # The AutoRemesher/Geogram sources are vendored on demand by the reference
     # build script (git clone). Fetch them here too so a clean checkout can
     # configure with -DCYBER_WITH_QUADCOVER=ON without a separate manual step.

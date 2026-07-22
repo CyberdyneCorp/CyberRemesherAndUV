@@ -25,8 +25,15 @@ cyber_set_warnings(cyber_quadrangulate)
 # (no CYBER_QUADCOVER_CLI subprocess / temp files). See cmake/QuadCoverSolver.cmake.
 if(CYBER_WITH_QUADCOVER)
     cyber_add_quadcover_solver()
-    target_link_libraries(cyber_quadrangulate PRIVATE cyber_quadcover_solver)
-    target_compile_definitions(cyber_quadrangulate PRIVATE CYBER_HAVE_QUADCOVER)
+    # cyber_add_quadcover_solver() skips the target when OpenMP/TBB are missing;
+    # only link + enable the vendored path when it was actually built.
+    if(TARGET cyber_quadcover_solver)
+        target_link_libraries(cyber_quadrangulate PRIVATE cyber_quadcover_solver)
+        target_compile_definitions(cyber_quadrangulate PRIVATE CYBER_HAVE_QUADCOVER)
+    else()
+        message(STATUS "cyber_quadrangulate: quad-cover falls back to the native "
+                       "seamless-UV solver (in-process Geogram field unavailable)")
+    endif()
 endif()
 
 # Min-cost-flow integer quadrangulator: link the vendored SciPP (scipp::scipp)
