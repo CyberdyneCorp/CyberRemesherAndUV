@@ -53,5 +53,7 @@ jobs:
       - name: CLI smoke
         shell: bash
         run: |
-          ./build/cpu-headless/apps/cli/cyberremesh --version
-          ./build/cpu-headless/apps/cli/cyberremesh --list-backends
+          CLI=./build/cpu-headless/apps/cli/cyberremesh
+          [ -x "$CLI.exe" ] && CLI="$CLI.exe"   # Windows names it cyberremesh.exe
+          "$CLI" --version
+          "$CLI" --list-backends
