@@ -104,6 +104,12 @@ Stage by stage:
    property is exactly what makes the UV grid line up across the cut.
 3. **Isoline extraction.** Tracing the integer isolines of that UV and intersecting
    them yields the quad mesh. Field singularities become the irregular vertices.
+   A graph-cleanup pass then merges the redundant samples left along each isoline;
+   without it every cell traces as an n-gon. On a **closed** surface that pass runs
+   by default. On an **open** one it is still opt-in (`CYBER_QC_OPEN_CLEANUP`,
+   experimental) because it is only half-built: it no longer fills the surface's
+   own rim, but the graph simplification can still merge genuine boundary corners.
+   The win it is chasing is large — on an open paraboloid, median 50° → 80°.
 4. **Pure-quad path.** The extracted mesh is relaxed onto the original surface
    (longer for the uniform quad-cover/integer bases, which tolerate it — see
    `CYBER_BASE_RELAX_ITERS`), subdivided 4× so any residual triangle or pentagon

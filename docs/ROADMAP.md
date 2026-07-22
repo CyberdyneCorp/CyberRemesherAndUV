@@ -81,7 +81,13 @@ QuadriFlow (83.4 vs 85.0) is the ~16% crease-localized part — a genuine field-
 per-edge integer-constraint project (QuadriFlow's feature flow), **deferred** as
 not worth the multi-week cost for 1.6°. Everything below is retained for history.
 
-## Where we are (2026-07)
+## Where we are — HISTORICAL (2026-07, the retired `instant-meshes` extractor)
+
+> ⚠️ **This section is superseded.** It describes `quad_method="instant-meshes"`,
+> which has not been the default since quad-cover took over. For the shipped
+> default's standing vs QuadriFlow, see the per-model table in the 2026-07-22
+> update at the top of this doc. Kept because the phases below still reference
+> its diagnosis, and because it records how the earlier picture was framed.
 
 The position-field extractor (`quad_method="instant-meshes"`, an Instant-Meshes
 clean-room port) is shipped and opt-in. Measured against QuadriFlow (uniform
@@ -100,6 +106,12 @@ quads are bulk — ~36% of vertices are irregular (val-3/5), and most are
 *extraction artifacts*, not true field singularities. Cheap levers (extraction
 density, field iterations, geometric relaxation, valence recovery) are exhausted
 and characterised; closing the last gap is a genuine topology build.
+
+**How stale, concretely** — the same three models on today's default: median
+**84 / 83 / 83°** (was 78/79/76) against QuadriFlow's 82/85/82, edge CV **0.12 /
+0.16 / 0.21**, and irregular **2 / 3 / 3%** — not the ~36% above. The "36%
+spurious singularities" problem, and every phase below that is gated on it,
+belongs to this retired extractor.
 
 ## North Star
 
