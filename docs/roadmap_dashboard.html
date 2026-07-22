@@ -147,10 +147,12 @@
     <p class="lede">A field-based quad remesher, measured honestly against the QuadriFlow
       reference on the community test-model corpus. Every claim below is a number from the
       <code>examples/11_benchmark.py</code> harness — target ~3000 quads, uniform, matched.
-      <b>Headline: the <span class="mono">quad-cover</span> extractor reaches QuadriFlow parity</b>
-      — it beats QuadriFlow on irregular for 2/5 models, ties a 3rd, and wins median angle on 4/5.
-      <b>And it now ships a fully native, <span class="q" style="color:var(--win)">dependency-free</span>
-      solver</b> (no Geogram) as the stock-build default at 3–5% irregular.</p>
+      <b>Headline: the <span class="mono">quad-cover</span> extractor now <span class="q" style="color:var(--win)">BEATS QuadriFlow by default</span></b>
+      — with the in-process Geogram field (the <span class="mono">cpu-headless</span> shipping preset) it wins
+      median angle AND irregular on 3/4 organic models (spot 84.2 / rocker 84.5 / bunny 83.3), and
+      <b>CAD crease-routing</b> lifts fandisk 80.7 → 83.4 (0 defects). A fully native,
+      <b>dependency-free</b> solver (no Geogram) remains the fallback for minimal builds at 3–5% irregular.
+      The engine also ships an <b>automatic UV atlas</b> — see §7.</p>
 
     <div class="chips">
       <div class="chip">
@@ -160,8 +162,8 @@
       </div>
       <div class="chip">
         <div class="k">Median quad angle</div>
-        <div class="v win">Best-or-tied 4/5</div>
-        <div class="s"><b>quad-cover 81–85°</b> vs QuadriFlow 82° — highest median on spot, rocker, bunny, cheb; within 3° on fandisk. Straighter quads follow from killing the excess singularities.</div>
+        <div class="v win">Beats QF — organic 3/4</div>
+        <div class="s"><b>quad-cover 83–85°</b> (Geogram default) vs QuadriFlow 82° — <b>beats QF on median AND irregular</b> on spot (84.2), rocker (84.5), bunny (83.3); the <b>base-relax-40</b> lever added a free +0.3–1° corpus-wide at no CV cost. <b>CAD crease-routing</b> lifts fandisk 80.7 → 83.4 (still −1.6° to QF; a deferred field-level residual).</div>
       </div>
       <div class="chip">
         <div class="k">Uniformity (edge-length CV)</div>
@@ -169,9 +171,9 @@
         <div class="s"><b>quad-cover CV 0.18–0.29</b> (native default) vs QuadriFlow 0.14–0.19 — the <b>shape-match relax (§6·K)</b> cut CV ~20% corpus-wide, <b>beating QF on fandisk</b>, on top of the uniform-field fix (§6·F/M4b) that closed the old 0.29–0.44 gap; still crushes AutoRemesher (0.41–0.56).</div>
       </div>
       <div class="chip">
-        <div class="k">Dependency-free (native solver)</div>
-        <div class="v win">Native default</div>
-        <div class="s">A from-scratch QuadCover solver — our own frame field + cut graph + seamless integer solve (CG on <span class="mono">spmv</span>), <b>no Geogram, no harness</b> — is now the <b>stock-build default</b> at <b>3–5% irregular</b>: beats field-aligned (9–17%) &amp; AutoRemesher (6–15%), within 1–2 pts of QuadriFlow. Runs the whole corpus, watertight, bounded, cancellable. The vendored path stays for exact 1–4% parity.</div>
+        <div class="k">Backends — Geogram default, native fallback</div>
+        <div class="v win">3 backends, routed</div>
+        <div class="s">The shipping default (<span class="mono">cpu-headless</span>, <span class="mono">-DCYBER_WITH_QUADCOVER</span>) is the in-process <b>Geogram field</b> — beats QF on organic. A from-scratch <b>native</b> solver (our frame field + cut graph + seamless MIQ on <span class="mono">spmv</span>, no Geogram) is the <b>dependency-free fallback</b> at 3–5% irregular, and the <b>feature-aware</b> path CAD meshes route to. <span class="mono">computeSeamlessUv</span> orders vendored → native → field-aligned.</div>
       </div>
       <div class="chip">
         <div class="k">CAD robustness (topological defects)</div>
@@ -440,17 +442,45 @@
     </div>
   </div>
 
+  <h2><span class="n">§7</span> Automatic UV atlas — beyond retopology</h2>
+  <div class="note" style="margin-bottom:16px">
+    <div class="h"><span class="dot" style="background:var(--accent)"></span>Mesh in, packed atlas out — no hand-drawn seams</div>
+    <p>The engine also ships a one-call automatic UV atlas (<span class="mono">Mesh.unwrap_atlas</span> /
+      C <span class="mono">cyber_uv_atlas</span>): auto-seam (normal-coherent charts) → cone +
+      distortion-bounded chart merge → per-chart <b>LSCM</b> → minimum-area re-orient → skyline pack,
+      reporting chart count and conformal distortion. Benchmarked against <b>xatlas</b> (the open
+      reference) on the same quad-remeshed geometry — <span class="mono">examples/15_uv_vs_xatlas.py</span>.</p>
+  </div>
+  <div class="chips">
+    <div class="chip">
+      <div class="k">Conformal (angle) distortion</div>
+      <div class="v win">~2× lower than xatlas</div>
+      <div class="s">Tight normal-coherent charts stay flat → LSCM is near angle-preserving. Mean conformal error <b>0.004–0.010</b> vs xatlas 0.007–0.017, <b>0 flipped charts</b>.</div>
+    </div>
+    <div class="chip">
+      <div class="k">Chart count (seam length)</div>
+      <div class="v win">Matches / beats xatlas</div>
+      <div class="s">The distortion-bounded merge folds developable regions together: <b>cube 2 v 6, torus 12 v 14, sphere 8 v 8</b> — fewer seams while keeping the distortion lead.</div>
+    </div>
+    <div class="chip">
+      <div class="k">Packing coverage</div>
+      <div class="v partial">Behind xatlas — open</div>
+      <div class="s">Skyline (bounding-box) packer: <b>~40–47%</b> vs xatlas 52–58%. Profile/raster nesting was tried and <b>reverted (non-win)</b>; true 2D hole-filling nesting is the deferred lever. Detail in <span class="mono">docs/uv-atlas-plan.md</span>.</div>
+    </div>
+  </div>
+
   <footer>
-    Snapshot: 2026-07-21 · corpus = spot · fandisk · rocker-arm · cheburashka · stanford-bunny ·
+    Snapshot: 2026-07-22 · corpus = spot · fandisk · rocker-arm · cheburashka · stanford-bunny ·
     target ~3000 quads · references = QuadriFlow (headless, boost-free) + AutoRemesher/QuadCover ·
     numbers from <code>examples/11_benchmark.py</code>. Roadmap detail in <code>docs/ROADMAP.md</code>,
     QuadCover milestones in <code>docs/quadcover-plan.md</code>, native solver in
     <code>docs/native-miq-plan.md</code>.
     <br>
-    <span style="opacity:.75">Dashboard content as of commit <code>031d5ac</code> (2026-07-21),
-    QuadCover at QuadriFlow parity (vendored) + a native dependency-free solver as the stock default
-    (3–5% irregular) — a manual artifact; it does not auto-track the repo, so a later commit may have
-    moved past this.</span>
+    <span style="opacity:.75">Dashboard content as of 2026-07-22: quad-cover <b>beats QuadriFlow by
+    default</b> (in-process Geogram field, <code>cpu-headless</code>) on organic median+irregular, with
+    <b>CAD crease-routing</b> (fandisk 83.4) and an <b>automatic UV atlas</b> (§7). Specs synced via
+    OpenSpec change <code>quadcover-default-and-auto-uv-atlas</code>. A manual artifact; it does not
+    auto-track the repo, so a later commit may have moved past this.</span>
   </footer>
 </div>
 
@@ -459,12 +489,13 @@
   // dir: +1 = higher is better (median), -1 = lower is better (rest).
   const DIR = [+1, -1, -1, -1, -1];
   // Per row: ours = the QUAD-COVER extractor (seamless-UV isoline, uniform field) · QuadriFlow · AutoRemesher.
+  // ours = quad-cover, the DEFAULT (in-process Geogram field + base-relax-40; fandisk via CAD routing).
   const ROWS = [
-    ["spot",           [85,0.26,7.0,2,0.15],   [82,0.24,6.7,3,0.14],   [80,0.29,7.6,6,0.41]],
-    ["fandisk",        [82,0.29,7.1,3,0.20],    [85,0.28,5.3,1,0.19],   [69,0.26,3.4,11,0.56]],
-    ["rocker-arm",     [85,0.29,9.1,1,0.18],    [82,0.26,8.0,3,0.15],   [77,0.29,7.7,6,0.48]],
-    ["cheburashka",    [81,0.28,9.5,4,0.28],    [82,0.23,7.3,2,0.15],   [77,0.28,7.8,15,0.43]],
-    ["stanford-bunny", [84,0.35,11.8,4,0.23],   [82,0.32,10.7,4,0.17],  [75,0.32,10.3,14,0.43]],
+    ["spot",           [84,0.25,7.0,2,0.12],   [82,0.24,6.7,3,0.14],   [80,0.29,7.6,6,0.41]],
+    ["fandisk",        [83,0.29,7.1,2,0.16],    [85,0.28,5.3,1,0.19],   [69,0.26,3.4,11,0.56]],
+    ["rocker-arm",     [84,0.28,9.0,1,0.15],    [82,0.26,8.0,3,0.15],   [77,0.29,7.7,6,0.48]],
+    ["cheburashka",    [80,0.27,9.3,4,0.22],    [82,0.23,7.3,2,0.15],   [77,0.28,7.8,15,0.43]],
+    ["stanford-bunny", [83,0.34,11.7,3,0.21],   [82,0.32,10.7,4,0.17],  [75,0.32,10.3,14,0.43]],
   ];
   const fmt = (v, i) => (i===0 || i===3) ? String(Math.round(v)) : v.toFixed(2);
   const tb = document.getElementById("bench");

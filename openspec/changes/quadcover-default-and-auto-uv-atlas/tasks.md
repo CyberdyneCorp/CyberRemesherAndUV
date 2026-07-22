@@ -44,4 +44,4 @@ into sync with it. Checked items are complete in the codebase.
 
 - [x] `examples/14_uv_atlas.py`, `examples/15_uv_vs_xatlas.py`.
 - [x] `docs/uv-atlas-plan.md`, `docs/ROADMAP.md`, README updated.
-- [ ] `docs/roadmap_dashboard.html` refreshed (this change's companion task).
+- [x] `docs/roadmap_dashboard.html` refreshed (UV section + Geogram-default/CAD-routing numbers).
