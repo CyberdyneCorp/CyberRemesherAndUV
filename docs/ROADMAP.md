@@ -27,10 +27,17 @@ it" hard core this doc claims. **DONE:** the `cpu-headless` preset now builds wi
 `-DCYBER_WITH_QUADCOVER=ON`, so the stock default (no env vars) uses the vendored
 Geogram field and reproduces spot 83.6 / rocker 83.5 / bunny 83.0 — beating
 QuadriFlow on median *and* irregular on the organic corpus. Full test suite green
-against that build (only the pre-existing integer-extractor WIP fails). **What
-remains:** the fandisk/CAD median (80.9 vs 85.0) — a crease-alignment problem, not
-smoothness; the cheap next lever is the relax retune (baseRelaxIters 10→40 +
-shapeMatch blend on the quad-cover path). Everything below is retained for history.
+against that build (only the pre-existing integer-extractor WIP fails).
+
+**Relax lever measured + shipped.** Bumping the quad-cover base relax 10→40 (its
+Geogram base is uniform enough, like the integer grid) is a free, corpus-wide
+median win — measured +0.3..+1.0° on organic with edge-CV flat-to-lower and
+irregular % unchanged; now the default (spot 84.2 / rocker 84.5 / bunny 83.3,
+cv 0.12–0.21). It is a *general* position lever, not model-specific. **What
+remains:** the fandisk/CAD median (80.7 vs 85.0) is a crease-alignment problem,
+not relaxation — dropping shape-match lifts fandisk only to 82.5 at a real CV cost
+(0.159→0.191), still short of QuadriFlow. Closing it needs field-level crease
+alignment, not more relax. Everything below is retained for history.
 
 ## Where we are (2026-07)
 

@@ -757,7 +757,18 @@ PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSi
                 pt = PClk::now();
             }
             if (!baseSurface.empty()) {
-                const int baseRelaxIters = integerExtractor ? 40 : 10;
+                // A uniform base tolerates a longer projected relax before the 4x
+                // split — it lifts median angle at no CV cost. Both the integer-grid
+                // and the (Geogram/native) quad-cover seamless bases are uniform
+                // enough: measured across the corpus, base=40 raises quad-cover
+                // median +0.3..+1.0 deg with CV flat-to-lower and irregular %
+                // unchanged. Less-uniform bases (field-aligned, position-field)
+                // would trade edge-CV, so they keep the lighter pass.
+                // CYBER_BASE_RELAX_ITERS overrides it for further tuning.
+                const char* briEnv = std::getenv("CYBER_BASE_RELAX_ITERS");
+                const int baseRelaxIters =
+                    briEnv != nullptr ? std::atoi(briEnv)
+                                      : ((integerExtractor || quadCoverMethod) ? 40 : 10);
                 relaxQuadMesh(result.mesh, baseSurface, params.sharpEdgeDegrees,
                               baseRelaxIters, /*lambda=*/0.5f, shapeMatch);
             }
