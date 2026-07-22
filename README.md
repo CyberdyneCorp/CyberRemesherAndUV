@@ -56,6 +56,105 @@ charts tighter (higher coverage), the one remaining gap.
 
 <sub>Each quad mesh (left) auto-seamed, unwrapped, re-oriented, and packed into a UV atlas (right), tinted by chart · <code>examples/14_uv_atlas.py</code></sub>
 
+## How it works
+
+Two algorithms carry the project: the quad retopology pipeline (triangles in, an
+all-quad mesh out) and the automatic UV atlas (a mesh in, a packed chart layout
+out). Both are described here at the level of "what each stage is for" — the
+authoritative detail lives in [`openspec/`](openspec/) and the sources named below.
+
+### Quad retopology
+
+The idea in one line: **don't chase quads directly — solve for a smooth field of
+directions over the surface, integrate it into a seamless UV, and read the quads
+off that UV's integer isolines.** Where the field can't be combed flat, it pinches
+into a *singularity* (a valence-3 or -5 vertex); those are unavoidable on curved
+closed surfaces, and a good algorithm is one that produces few of them and puts
+them where curvature already wanted them.
+
+```mermaid
+flowchart TD
+    A[Input triangles] --> B{crease fraction<br/>≥ CYBER_QC_ROUTE_CREASE?}
+    B -- "CAD, sharp edges" --> N[Native feature-aware solver<br/>seams pinned to creases]
+    B -- "organic" --> V[Vendored Geogram QuadCover<br/>cross field + seamless UV]
+    N -- declines --> V
+    V -- unavailable --> N
+    N --> ISO[Integer isolines of the seamless UV<br/>→ quad-dominant mesh]
+    V --> ISO
+    ISO -- solver produced nothing --> FB[field-aligned fallback<br/>always produces output]
+    ISO --> R1
+    FB --> R1
+    R1[Base relax onto the source surface<br/>40 iters for uniform bases, else 10] --> S[4× subdivision<br/>every face becomes quads]
+    S --> R2[Final project + relax<br/>creases and boundaries frozen]
+    R2 --> OUT[100% quad mesh]
+```
+
+Stage by stage:
+
+1. **Backend routing.** `computeSeamlessUv` measures `creaseEdgeFraction` — the
+   share of interior edges sharper than 45°. Crease-heavy CAD parts go to the
+   native feature-aware solver first (it pins seams to the creases so loops follow
+   the hard edges); everything else goes to the vendored in-process Geogram
+   QuadCover field first, which wins on organic geometry. Either side falls back to
+   the other, so a decline is never a failure. `CYBER_QC_NO_ROUTE` disables the
+   routing, `CYBER_QC_DEBUG` traces the decision.
+2. **Seamless UV.** The solver builds a smooth cross field, cuts the surface along
+   seams, and solves for a UV parametrization whose transitions across those seams
+   are rotations by multiples of 90° plus integer translations. That "seamless"
+   property is exactly what makes the UV grid line up across the cut.
+3. **Isoline extraction.** Tracing the integer isolines of that UV and intersecting
+   them yields the quad mesh. Field singularities become the irregular vertices.
+4. **Pure-quad path.** The extracted mesh is relaxed onto the original surface
+   (longer for the uniform quad-cover/integer bases, which tolerate it — see
+   `CYBER_BASE_RELAX_ITERS`), subdivided 4× so any residual triangle or pentagon
+   becomes quads, then projected and relaxed once more. Feature and boundary
+   vertices are frozen throughout, so relaxation never rounds off a crease.
+
+Sources: `src/quadrangulate/src/quadcover_extractor.cpp` (routing and both
+solvers), `src/core/src/pipeline.cpp` (stage orchestration and the relax levers).
+
+### Automatic UV atlas
+
+The idea in one line: **grow charts that are already nearly flat, merge them as
+aggressively as a distortion budget allows, unwrap each one conformally, then pack
+the results.** Fewer, larger charts mean fewer seams for the artist and less
+wasted texel area — the merge passes are where most of the quality comes from.
+
+```mermaid
+flowchart TD
+    M[Mesh] --> S[autoSeams<br/>grow normal-coherent charts]
+    S --> C[mergeCoplanarCharts<br/>union still inside the 40° normal cone]
+    C --> D[mergeByDistortion<br/>trial-unwrap the union, accept if<br/>conformal + area-scale spread ≤ 0.10]
+    D --> L[lscmUnwrap per chart<br/>planar fallback for degenerate charts]
+    L --> O[Min-area re-orient<br/>a similarity: distortion and flips unchanged]
+    O --> P[Skyline pack into the unit square]
+    P --> U[Per-corner UV attribute]
+    P --> ST[Stats: charts · conformal distortion<br/>flips · packing efficiency]
+```
+
+Stage by stage:
+
+1. **Seam.** `autoSeams` grows charts from seed faces, adding neighbours whose
+   normals stay inside a cone (`maxChartAngleDeg`, default 40°). Cheap, and it
+   never produces a chart that is wildly non-developable.
+2. **Free merge.** `mergeCoplanarCharts` unions adjacent charts whose combined
+   normals *still* fit the cone. Distortion cannot rise, so this pass is pure win.
+3. **Budgeted merge.** `mergeByDistortion` is the looser pass: it actually
+   LSCM-unwraps the candidate union and accepts only if the result stays under
+   `maxChartDistortion`. The acceptance test is conformal (angle) error **plus an
+   area-scale spread term** — angle error alone is ~0 for a cube's flat facets and
+   would happily fold the whole cube into one badly stretched chart. This is what
+   folds a cube's six faces into two strips.
+4. **Unwrap and orient.** Each surviving chart gets an LSCM conformal unwrap, then
+   is rotated to its minimum-area bounding box. That rotation is a similarity, so
+   distortion and flip counts are untouched — it just roughly doubles usable
+   coverage on box-like meshes (45° diamonds become axis-aligned squares).
+5. **Pack.** Skyline packing into the unit square, then the per-corner UV attribute
+   and the reported stats.
+
+Source: `src/uv/src/atlas.cpp` (`greedyMergeCharts` is the shared fixpoint driver
+behind both merge passes).
+
 ## Layout
 
 ```
