@@ -244,7 +244,15 @@ project**, not a tweak. Highest-value open quality item; cost unchanged by the
 the smooth corpus *(**met** — 5/5 vs QuadriFlow)*; feature alignment *(not met —
 0/5, corpus-wide)*.
 
-## Phase 4 — Close the median-angle gap (the hard core) — 🔴 local approaches exhausted
+## Phase 4 — Close the median-angle gap — ✅ largely closed by the quad-cover default
+
+> ⚠️ **Premise superseded.** The framing below — "the hard core", 36% irregular,
+> only a global rewrite can close it — describes the retired extractor. The
+> shipped default runs at **1–4% irregular** and **beats QuadriFlow on median on
+> 3/5** (spot 84/82, rocker 85/82, bunny 83/82; losing fandisk 83/85 and
+> cheburashka 80/82). The remaining median gap is the crease-alignment problem
+> tracked in Phase 3, not a singularity problem. The 4a/4b history is retained
+> because it records what was measured and why the local levers failed.
 
 Reduce spurious singularities (36% irregular → target < 10%) for angle parity.
 - ❌ **4a. Local valence optimization** (edge rotation to cancel val-3/5 pairs) —
