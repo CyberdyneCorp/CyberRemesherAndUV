@@ -114,7 +114,7 @@ def unwrap_model(build, target_quads=1400):
     build(src_path)
     with Mesh.load_obj(src_path) as src:
         quad = remesh(src, RemeshParams(target_quad_count=target_quads, pure_quads=True,
-                                        adaptivity=0.0, quad_method="field-aligned"))
+                                        adaptivity=0.0, quad_method="field-aligned"))  # field-aligned gives clean uniform quads across mixed shapes (incl. the box); the UV atlas is method-agnostic
     res = quad.unwrap_atlas(AtlasParams(max_chart_angle_degrees=40.0))
     out_path = os.path.join(tmp, "atlas.obj")
     quad.save_obj(out_path)

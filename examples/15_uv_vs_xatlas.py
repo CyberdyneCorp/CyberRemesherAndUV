@@ -204,7 +204,7 @@ def main():
         build(src_path)
         with Mesh.load_obj(src_path) as src:
             q = remesh(src, RemeshParams(target_quad_count=1400, pure_quads=True,
-                                         adaptivity=0.0, quad_method="field-aligned"))
+                                         adaptivity=0.0, quad_method="field-aligned"))  # field-aligned gives clean uniform quads across mixed shapes (incl. the box); the UV atlas is method-agnostic
         quad_path = os.path.join(d, "quad.obj")
         q.save_obj(quad_path)
         q.close()
