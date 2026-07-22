@@ -53,7 +53,12 @@ jobs:
       - name: CLI smoke
         shell: bash
         run: |
-          CLI=./build/cpu-headless/apps/cli/cyberremesh
-          [ -x "$CLI.exe" ] && CLI="$CLI.exe"   # Windows names it cyberremesh.exe
+          # Locate the CLI wherever the generator put it (Windows adds .exe and may
+          # use a config subdir), so the smoke test is path/generator-agnostic.
+          CLI="$(find ./build -type f \( -name cyberremesh -o -name cyberremesh.exe \) | head -1)"
+          if [ -z "$CLI" ]; then
+            echo "cyberremesh binary not found under ./build:"; find ./build -name 'cyberremesh*'; exit 1
+          fi
+          echo "using $CLI"
           "$CLI" --version
           "$CLI" --list-backends
