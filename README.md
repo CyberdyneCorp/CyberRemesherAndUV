@@ -73,6 +73,15 @@ ctest --preset cpu-headless
 Other presets: `cpu-headless-debug` (ASan/UBSan), `macos-metal`, `linux-cuda`,
 `windows-cuda`, `ios`, `android`.
 
+The `cpu-headless` preset builds with `-DCYBER_WITH_QUADCOVER=ON`, which vendors
+and compiles an in-process Geogram QuadCover solver (~102 sources, a one-time
+build-time cost). This is the field that lets the default `quad-cover`
+quadrangulator **beat QuadriFlow on median quad angle and irregular-vertex count**
+on organic meshes. To skip it for faster iteration, override
+`-DCYBER_WITH_QUADCOVER=OFF` — the engine falls back to the dependency-free native
+seamless-UV solver (a few degrees lower median, still fully functional). Mobile
+presets (`ios`/`android`) leave it off.
+
 ## Development
 
 - Specs first: medium/large changes go through OpenSpec (`openspec list`).

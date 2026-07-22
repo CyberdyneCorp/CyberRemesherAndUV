@@ -23,10 +23,14 @@ metrics, ~3000 quads, spot/fandisk/rocker/bunny) reframes Phase 4:
   problem, not smoothness). Verified end-to-end, both backends reproduced.
 
 So Phase 4 is **not** the "only a global integer-parametrization rewrite can close
-it" hard core this doc claims: the organic median gap is closed by a build flag
-(promote the vendored field to the default build). What genuinely remains is (1)
-surfacing that as the stock default, and (2) the fandisk/CAD median (crease
-alignment). Everything below is retained for history.
+it" hard core this doc claims. **DONE:** the `cpu-headless` preset now builds with
+`-DCYBER_WITH_QUADCOVER=ON`, so the stock default (no env vars) uses the vendored
+Geogram field and reproduces spot 83.6 / rocker 83.5 / bunny 83.0 — beating
+QuadriFlow on median *and* irregular on the organic corpus. Full test suite green
+against that build (only the pre-existing integer-extractor WIP fails). **What
+remains:** the fandisk/CAD median (80.9 vs 85.0) — a crease-alignment problem, not
+smoothness; the cheap next lever is the relax retune (baseRelaxIters 10→40 +
+shapeMatch blend on the quad-cover path). Everything below is retained for history.
 
 ## Where we are (2026-07)
 

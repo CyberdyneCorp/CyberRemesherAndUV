@@ -13,7 +13,10 @@
     {
       "name": "cpu-headless",
       "displayName": "CPU-only headless (core + accel + CLI + tests)",
-      "inherits": "base"
+      "inherits": "base",
+      "cacheVariables": {
+        "CYBER_WITH_QUADCOVER": "ON"
+      }
     },
     {
       "name": "cpu-headless-debug",
