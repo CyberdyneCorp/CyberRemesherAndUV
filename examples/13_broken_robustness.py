@@ -54,10 +54,13 @@ def build_cases(tmp):
     cv, cf = list(map(tuple, cube["positions"])), list(map(list, cube["faces"]))
     cases = {}
 
-    # NOTE: open surfaces (a mesh with a genuine boundary/hole) remain a known
-    # limitation — the quad-cover extractor closes the hole but can leave a few
-    # non-manifold edges at the rim. This set covers the closed-input failure modes
-    # the front-end now repairs; open-surface handling is tracked separately.
+    # Every case below — including a genuine open boundary (open_hole) — now
+    # produces clean manifold quad output on the default build: the vendored
+    # Geogram seamless solver fills and closes the hole. (The dependency-free
+    # native fallback can still leave a few non-manifold edges at an open rim.)
+    v, f = uv_sphere()  # open hole: drop the top 4 rings of faces -> a real boundary
+    cases["open_hole"] = (v, list(f)[4 * 2 * 20:])
+
     v2, nf = list(cv), list(cf)  # non-manifold: a fin sharing a cube edge
     v2.append((cv[cf[0][0]][0] + 0.3, cv[cf[0][0]][1] + 0.3, cv[cf[0][0]][2]))
     nf.append([cf[0][0], cf[0][1], len(v2) - 1])
