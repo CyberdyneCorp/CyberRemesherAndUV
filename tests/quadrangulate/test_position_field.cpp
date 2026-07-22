@@ -48,7 +48,8 @@ Mesh uvSphere(float radius, int rings, int segments) {
     std::vector<std::vector<Index>> f;
     const auto id = [&](int i, int j) { return static_cast<Index>(i * segments + (j % segments)); };
     for (int i = 0; i <= rings; ++i) {
-        const float theta = 3.14159265358979323846f * static_cast<float>(i) / static_cast<float>(rings);
+        const float theta =
+            3.14159265358979323846f * static_cast<float>(i) / static_cast<float>(rings);
         for (int j = 0; j < segments; ++j) {
             const float phi = 2.0f * 3.14159265358979323846f * static_cast<float>(j) /
                               static_cast<float>(segments);
@@ -70,12 +71,13 @@ Mesh uvSphere(float radius, int rings, int segments) {
 // clean, high valence — the right probe for the edge-recovery pass.
 Mesh icosphere(int subdivisions) {
     const float t = (1.0f + std::sqrt(5.0f)) * 0.5f;
-    std::vector<Vec3> p = {{-1, t, 0}, {1, t, 0}, {-1, -t, 0}, {1, -t, 0}, {0, -1, t}, {0, 1, t},
-                           {0, -1, -t}, {0, 1, -t}, {t, 0, -1}, {t, 0, 1}, {-t, 0, -1}, {-t, 0, 1}};
+    std::vector<Vec3> p = {{-1, t, 0}, {1, t, 0}, {-1, -t, 0}, {1, -t, 0},
+                           {0, -1, t}, {0, 1, t}, {0, -1, -t}, {0, 1, -t},
+                           {t, 0, -1}, {t, 0, 1}, {-t, 0, -1}, {-t, 0, 1}};
     std::vector<std::array<int, 3>> tri = {
-        {0, 11, 5}, {0, 5, 1}, {0, 1, 7}, {0, 7, 10}, {0, 10, 11}, {1, 5, 9}, {5, 11, 4},
-        {11, 10, 2}, {10, 7, 6}, {7, 1, 8}, {3, 9, 4}, {3, 4, 2}, {3, 2, 6}, {3, 6, 8},
-        {3, 8, 9}, {4, 9, 5}, {2, 4, 11}, {6, 2, 10}, {8, 6, 7}, {9, 8, 1}};
+        {0, 11, 5},  {0, 5, 1},  {0, 1, 7},  {0, 7, 10}, {0, 10, 11}, {1, 5, 9}, {5, 11, 4},
+        {11, 10, 2}, {10, 7, 6}, {7, 1, 8},  {3, 9, 4},  {3, 4, 2},   {3, 2, 6}, {3, 6, 8},
+        {3, 8, 9},   {4, 9, 5},  {2, 4, 11}, {6, 2, 10}, {8, 6, 7},   {9, 8, 1}};
     for (int s = 0; s < subdivisions; ++s) {
         std::vector<std::array<int, 3>> nt;
         std::map<std::pair<int, int>, int> mid;
@@ -105,7 +107,8 @@ Mesh icosphere(int subdivisions) {
         pn.push_back(normalized(v));
     }
     for (const auto& f : tri) {
-        fn.push_back({static_cast<Index>(f[0]), static_cast<Index>(f[1]), static_cast<Index>(f[2])});
+        fn.push_back(
+            {static_cast<Index>(f[0]), static_cast<Index>(f[1]), static_cast<Index>(f[2])});
     }
     return Mesh::fromIndexed(pn, fn);
 }
@@ -259,8 +262,8 @@ TEST_CASE("position field: orientation is smooth and principal-direction aligned
     const double alignment = alignSum / static_cast<double>(vertCount);
     CAPTURE(agreement);
     CAPTURE(alignment);
-    CHECK(agreement > 0.95);   // neighbouring crosses nearly identical under RoSy
-    CHECK(alignment > 0.9);    // one field axis runs along the cylinder axis
+    CHECK(agreement > 0.95);  // neighbouring crosses nearly identical under RoSy
+    CHECK(alignment > 0.9);   // one field axis runs along the cylinder axis
 }
 
 // The wired position-field quadrangulator must turn a closed triangle mesh at
@@ -339,7 +342,7 @@ TEST_CASE("position field: extraction gives a clean quad grid on a cylinder") {
     CAPTURE(F.size());
     CAPTURE(quadCount);
     REQUIRE(F.size() > 0);
-    CHECK(quads.validate().empty());                                             // manifold
+    CHECK(quads.validate().empty());                                               // manifold
     CHECK(static_cast<double>(quadCount) / static_cast<double>(F.size()) > 0.90);  // quad grid
 }
 
@@ -377,7 +380,7 @@ TEST_CASE("position field: per-vertex scale tracks local density") {
     }
     CAPTURE(uMin);
     CAPTURE(uMax);
-    CHECK(uMin > 0.8f);   // uniform: scale stays near 1
+    CHECK(uMin > 0.8f);  // uniform: scale stays near 1
     CHECK(uMax < 1.25f);
 }
 
@@ -392,9 +395,7 @@ TEST_CASE("integer solve: min-cost max-flow engine is correct") {
 // minisat shell-out for FixFlipSat. Repairs a flipped-but-loop-closed face,
 // reports UNSAT on an over-pinned inconsistent system, preserves an already-valid
 // assignment, and times out (leaving the value untouched) under a zero budget.
-TEST_CASE("flip repair: ternary-CSP solver is correct") {
-    CHECK(remesh::debugTernaryCsp());
-}
+TEST_CASE("flip repair: ternary-CSP solver is correct") { CHECK(remesh::debugTernaryCsp()); }
 
 // Milestone 2 — the integer solve. On a closed genus-0 icosphere the min-cost
 // flow must cancel most of the position-field's spurious divergences: the residual
@@ -412,8 +413,8 @@ TEST_CASE("integer solve: min-cost flow cancels spurious singularities") {
     CAPTURE(s.residualMismatch);
     CAPTURE(s.postSingular);
     REQUIRE(s.preSingular > 0);
-    CHECK(s.residualMismatch < s.faces / 50);          // setup consistent (checkpoint A)
-    CHECK(s.postSingular < s.preSingular * 2 / 5);      // flow removed most spurious singularities
+    CHECK(s.residualMismatch < s.faces / 50);       // setup consistent (checkpoint A)
+    CHECK(s.postSingular < s.preSingular * 2 / 5);  // flow removed most spurious singularities
 }
 
 // Milestone 3, stage (a): after subdivision every triangle edge spans at most one
@@ -430,9 +431,9 @@ TEST_CASE("integer solve: subdivision makes every edge span at most one cell") {
     CAPTURE(s.vertsAfter);
     CAPTURE(s.maxDiff);
     REQUIRE(s.trisBefore > 0);
-    CHECK(s.maxDiff <= 1);                        // the extraction invariant
-    CHECK(s.trisAfter >= s.trisBefore);           // refinement only
-    CHECK(s.trisAfter < s.trisBefore * 4);        // no runaway (few edges span >1 cell)
+    CHECK(s.maxDiff <= 1);                  // the extraction invariant
+    CHECK(s.trisAfter >= s.trisBefore);     // refinement only
+    CHECK(s.trisAfter < s.trisBefore * 4);  // no runaway (few edges span >1 cell)
 }
 
 // Milestone 5a — the flip-repair layer's coarsen+propagate round trip. On a clean
@@ -450,17 +451,18 @@ TEST_CASE("flip repair: coarsen+propagate is an identity on a clean cylinder gri
     CAPTURE(s.flippedBefore);
     CAPTURE(s.flippedAfter);
     REQUIRE(s.faces > 0);
-    CHECK(s.levels > 1);                            // coarsening actually happened
-    CHECK(s.roundTripMismatch == 0);                // exact round trip (transport correct)
-    CHECK(s.residualAfter == s.residualBefore);     // integrability preserved
-    CHECK(s.flippedAfter <= s.flippedBefore);       // never introduces folds
+    CHECK(s.levels > 1);                         // coarsening actually happened
+    CHECK(s.roundTripMismatch == 0);             // exact round trip (transport correct)
+    CHECK(s.residualAfter == s.residualBefore);  // integrability preserved
+    CHECK(s.flippedAfter <= s.flippedBefore);    // never introduces folds
 }
 
 // Milestone 5a — the round trip is an identity on the closed icosphere too (a
 // curved grid with genuine singularities, unlike the developable cylinder).
 TEST_CASE("flip repair: coarsen+propagate is an identity on an icosphere grid") {
     const Mesh sphere = icosphere(3);
-    const remesh::PositionField field = remesh::computePositionField(sphere, meanEdgeLength(sphere), 40);
+    const remesh::PositionField field =
+        remesh::computePositionField(sphere, meanEdgeLength(sphere), 40);
     const remesh::FlipRepairStats s = remesh::debugFlipRepair(sphere, field);
     CAPTURE(s.levels);
     CAPTURE(s.roundTripMismatch);
@@ -480,9 +482,9 @@ TEST_CASE("flip repair: FixFlip reduces folded cells on a curved grid") {
     const remesh::FlipRepairStats s = remesh::debugFlipRepair(sphere, field);
     CAPTURE(s.flippedBefore);
     CAPTURE(s.flippedAfter);
-    REQUIRE(s.flippedBefore > 0);                 // the curved grid has folds to fix
-    CHECK(s.flippedAfter < s.flippedBefore);      // greedy FixFlip removes some
-    CHECK(s.residualAfter == s.residualBefore);   // integrability preserved
+    REQUIRE(s.flippedBefore > 0);                // the curved grid has folds to fix
+    CHECK(s.flippedAfter < s.flippedBefore);     // greedy FixFlip removes some
+    CHECK(s.residualAfter == s.residualBefore);  // integrability preserved
 }
 
 // Phase 5d — the SubMesh<->IntegerGrid inversion the SAT repair runs on must be an
@@ -493,7 +495,8 @@ TEST_CASE("flip repair: SubMesh<->IntegerGrid round trip is an identity") {
     CHECK(remesh::debugSubMeshDiffRoundTrip(cyl, cfield) == 0);
 
     const Mesh sphere = icosphere(3);
-    const remesh::PositionField sfield = remesh::computePositionField(sphere, meanEdgeLength(sphere), 40);
+    const remesh::PositionField sfield =
+        remesh::computePositionField(sphere, meanEdgeLength(sphere), 40);
     CHECK(remesh::debugSubMeshDiffRoundTrip(sphere, sfield) == 0);
 }
 
@@ -527,7 +530,7 @@ TEST_CASE("valence cleanup: dipole canceller lowers irregular count and stays ma
     const remesh::ValenceCleanupStats s = remesh::debugValenceCleanup(sphere, field);
     CAPTURE(s.irregularWithout);
     CAPTURE(s.irregularWith);
-    CHECK(s.manifoldWith);                        // never breaks the manifold
+    CHECK(s.manifoldWith);                         // never breaks the manifold
     CHECK(s.irregularWith <= s.irregularWithout);  // monotone: never worse
     CHECK(s.irregularWith < s.irregularWithout);   // and it helps on a curved mesh
 }
@@ -598,7 +601,8 @@ TEST_CASE("position field: collapse graph reaches near-grid valence") {
     const remesh::PositionField field = remesh::computePositionField(sphere, spacing, 60);
     const remesh::CollapsedGraphStats st = remesh::debugCollapse(sphere, field);
     REQUIRE(st.nodes > 0);
-    const double valence = 2.0 * static_cast<double>(st.latticeEdges) / static_cast<double>(st.nodes);
+    const double valence =
+        2.0 * static_cast<double>(st.latticeEdges) / static_cast<double>(st.nodes);
     CAPTURE(st.nodes);
     CAPTURE(st.latticeEdges);
     CAPTURE(valence);
@@ -648,8 +652,8 @@ TEST_CASE("position field: greedy-cut hole fill avoids pie-slice slivers") {
     CAPTURE(F.size());
     CAPTURE(quadFrac);
     CAPTURE(sliverFrac);
-    CHECK(quadFrac > 0.75);       // strongly quad-dominant despite the two poles
-    CHECK(sliverFrac < 0.10);     // greedy-cut keeps pie-slice slivers rare
+    CHECK(quadFrac > 0.75);    // strongly quad-dominant despite the two poles
+    CHECK(sliverFrac < 0.10);  // greedy-cut keeps pie-slice slivers rare
 }
 
 // Regression: a field far finer than the mesh (period << edge length) yields an
@@ -689,8 +693,7 @@ struct QuadHealth {
     std::size_t irregularInterior = 0;
     std::size_t debrisVertices = 0;
     [[nodiscard]] double irregularFraction() const {
-        return interior ? static_cast<double>(irregularInterior) /
-                          static_cast<double>(interior)
+        return interior ? static_cast<double>(irregularInterior) / static_cast<double>(interior)
                         : 0.0;
     }
 };
@@ -755,13 +758,13 @@ TEST_CASE("integer quadrangulator: flat cube falls back to a manifold, non-degen
     CAPTURE(h.interior);
     CAPTURE(h.irregularInterior);
     CAPTURE(h.debrisVertices);
-    CHECK(h.debrisVertices < 20);              // no isolated-vertex debris (was ~195)
+    CHECK(h.debrisVertices < 20);  // no isolated-vertex debris (was ~195)
     // Count not collapsed. The field-aligned fallback deterministically emits ~340
     // quads for this coarse target (400) on the raw cube — a normal ~85% of target,
     // far from the collapse bug this guards (~150 of 400). The debris + irregular
     // checks above/below are the real collapse signals; this is the count floor.
     CHECK(h.quads >= 300);
-    CHECK(h.irregularFraction() < 0.5);        // not mostly-irregular (was ~0.62)
+    CHECK(h.irregularFraction() < 0.5);  // not mostly-irregular (was ~0.62)
 }
 
 // TASK E gap: at higher target density the extractor emits many small LOCALLY-VALID

@@ -17,8 +17,7 @@ inline void tweakVertex(Mesh& mesh, VertexId v, Vec3 target, const SurfaceSnappe
     if (!mesh.isAlive(v)) {
         return;
     }
-    const Vec3 p =
-        (snap != nullptr && !snap->empty()) ? snap->snapToSurface(target).point : target;
+    const Vec3 p = (snap != nullptr && !snap->empty()) ? snap->snapToSurface(target).point : target;
     mesh.setPosition(v, p);
 }
 

@@ -97,9 +97,7 @@ Mesh makeTorus(int major, int minor, float R, float r) {
             p.push_back({(R + r * cv) * cu, (R + r * cv) * su, r * sv});
         }
     }
-    auto idx = [&](int i, int j) {
-        return static_cast<Index>((i % major) * minor + (j % minor));
-    };
+    auto idx = [&](int i, int j) { return static_cast<Index>((i % major) * minor + (j % minor)); };
     std::vector<std::vector<Index>> f;
     for (int i = 0; i < major; ++i) {
         for (int j = 0; j < minor; ++j) {
@@ -133,11 +131,11 @@ void checkGolden(const GoldenCase& c) {
     //    0.55 is the recorded floor of the greedy-pairing baseline (the cube
     //    measures ~0.59, curved meshes higher); the QuadCover port (5.4) is
     //    expected to raise this — tighten the floor when it lands.
-    const std::size_t faces = result.stats.quadCount + result.stats.triangleCount +
-                              result.stats.otherPolygonCount;
+    const std::size_t faces =
+        result.stats.quadCount + result.stats.triangleCount + result.stats.otherPolygonCount;
     REQUIRE(faces > 0);
-    const double quadRatio = static_cast<double>(result.stats.quadCount) /
-                             static_cast<double>(faces);
+    const double quadRatio =
+        static_cast<double>(result.stats.quadCount) / static_cast<double>(faces);
     REQUIRE(quadRatio > 0.55);
 
     // 3. Density within a recorded band around the request (guards runaway

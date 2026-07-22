@@ -97,8 +97,8 @@ struct GridPatch {
 
 // BuildQuad: a grid of nu x nv quads bilinearly spanning the four corner
 // positions (c00->c10 is +u, c00->c01 is +v). Corners wind consistently.
-[[nodiscard]] inline GridPatch buildQuad(Mesh& mesh, Vec3 c00, Vec3 c10, Vec3 c11, Vec3 c01,
-                                         int nu, int nv, const SurfaceSnapper* snap = nullptr) {
+[[nodiscard]] inline GridPatch buildQuad(Mesh& mesh, Vec3 c00, Vec3 c10, Vec3 c11, Vec3 c01, int nu,
+                                         int nv, const SurfaceSnapper* snap = nullptr) {
     GridPatch patch;
     if (nu < 1 || nv < 1) {
         return patch;
@@ -123,8 +123,8 @@ struct GridPatch {
 }
 
 // BuildTri: same bilinear grid, each cell split into two triangles.
-[[nodiscard]] inline GridPatch buildTri(Mesh& mesh, Vec3 c00, Vec3 c10, Vec3 c11, Vec3 c01,
-                                        int nu, int nv, const SurfaceSnapper* snap = nullptr) {
+[[nodiscard]] inline GridPatch buildTri(Mesh& mesh, Vec3 c00, Vec3 c10, Vec3 c11, Vec3 c01, int nu,
+                                        int nv, const SurfaceSnapper* snap = nullptr) {
     GridPatch patch;
     if (nu < 1 || nv < 1) {
         return patch;
@@ -153,7 +153,8 @@ struct GridPatch {
 // DrawStrip: a quad strip whose centerline follows `path`; each sample spawns a
 // left/right pair offset by +/- side/2, and consecutive pairs bridge into quads.
 [[nodiscard]] inline std::vector<FaceId> drawStrip(Mesh& mesh, std::span<const Vec3> path,
-                                                   Vec3 side, const SurfaceSnapper* snap = nullptr) {
+                                                   Vec3 side,
+                                                   const SurfaceSnapper* snap = nullptr) {
     std::vector<FaceId> faces;
     if (path.size() < 2) {
         return faces;

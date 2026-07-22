@@ -51,10 +51,10 @@ struct FieldGraph {
     std::vector<Vec3> pos;
     std::vector<Vec3> normal;
     std::vector<std::vector<int>> nbr;
-    std::vector<bool> constrained;   // feature/boundary
+    std::vector<bool> constrained;  // feature/boundary
     std::vector<Vec3> constraintDir;
-    std::vector<Vec3> q;  // orientation field
-    std::vector<Vec3> o;  // position field
+    std::vector<Vec3> q;       // orientation field
+    std::vector<Vec3> o;       // position field
     std::vector<float> scale;  // per-node lattice-spacing multiplier (1 = uniform)
     [[nodiscard]] std::size_t size() const { return pos.size(); }
 };
@@ -96,8 +96,8 @@ FieldGraph buildBaseGraph(const Mesh& mesh, std::vector<Index>& baseToVertex) {
             }
             if (mesh.isFeatureEdge(e) || mesh.isBoundaryEdge(e)) {
                 g.constrained[base] = true;
-                g.constraintDir[base] = projectUnit(mesh.position(other) - mesh.position(v),
-                                                    g.normal[base]);
+                g.constraintDir[base] =
+                    projectUnit(mesh.position(other) - mesh.position(v), g.normal[base]);
             }
         }
     }
@@ -298,8 +298,8 @@ void smoothPosition(FieldGraph& g, float s, int iterations) {
             }
             sum = sum / w;
             const Vec3 d = g.pos[i] - sum;
-            const Vec3 anchored =
-                sum + qi * (std::round(dot(qi, d) * invS) * si) + ti * (std::round(dot(ti, d) * invS) * si);
+            const Vec3 anchored = sum + qi * (std::round(dot(qi, d) * invS) * si) +
+                                  ti * (std::round(dot(ti, d) * invS) * si);
             Vec3 rel = anchored - g.pos[i];
             rel = rel - g.normal[i] * dot(g.normal[i], rel);
             next[i] = g.pos[i] + rel;
@@ -344,9 +344,10 @@ PositionField computePositionField(const Mesh& mesh, float spacing, int iteratio
         const FieldGraph& coarse = levels[static_cast<std::size_t>(lvl) + 1];
         const std::vector<int>& parent = parents[static_cast<std::size_t>(lvl)];
         for (std::size_t i = 0; i < fine.size(); ++i) {
-            fine.q[i] = fine.constrained[i]
-                            ? fine.constraintDir[i]
-                            : projectUnit(coarse.q[static_cast<std::size_t>(parent[i])], fine.normal[i]);
+            fine.q[i] =
+                fine.constrained[i]
+                    ? fine.constraintDir[i]
+                    : projectUnit(coarse.q[static_cast<std::size_t>(parent[i])], fine.normal[i]);
         }
         smoothOrientation(fine, iterations);
     }

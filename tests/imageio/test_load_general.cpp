@@ -167,15 +167,15 @@ struct BitWriter {
     }
 };
 
-constexpr std::array<int, 29> kLengthBase = {3,  4,  5,  6,   7,   8,   9,   10,  11,  13,
-                                             15, 17, 19, 23,  27,  31,  35,  43,  51,  59,
+constexpr std::array<int, 29> kLengthBase = {3,  4,  5,  6,   7,   8,   9,   10,  11, 13,
+                                             15, 17, 19, 23,  27,  31,  35,  43,  51, 59,
                                              67, 83, 99, 115, 131, 163, 195, 227, 258};
 constexpr std::array<int, 29> kLengthExtra = {0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2,
                                               2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0};
-constexpr std::array<int, 30> kDistBase = {1,    2,    3,    4,     5,    7,    9,     13,    17,   25,
-                                           33,   49,   65,   97,    129,  193,  257,   385,   513,  769,
-                                           1025, 1537, 2049, 3073,  4097, 6145, 8193,  12289, 16385, 24577};
-constexpr std::array<int, 30> kDistExtra = {0, 0, 0, 0, 1, 1, 2, 2, 3, 3,  4,  4,  5,  5, 6,
+constexpr std::array<int, 30> kDistBase = {
+    1,   2,   3,   4,   5,   7,    9,    13,   17,   25,   33,   49,   65,    97,    129,
+    193, 257, 385, 513, 769, 1025, 1537, 2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577};
+constexpr std::array<int, 30> kDistExtra = {0, 0, 0, 0, 1, 1, 2, 2,  3,  3,  4,  4,  5,  5,  6,
                                             6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13};
 
 // Fixed-Huffman literal (0..143 → 8-bit code 0x30+lit).
@@ -315,9 +315,8 @@ TEST_CASE("loadPng reconstructs every scanline filter type") {
         const Bytes filtered = applyFilter(img, w, h, bpp, ft);
         const Bytes png = buildPng(static_cast<std::uint32_t>(w), static_cast<std::uint32_t>(h), 8,
                                    2, 0, zlibStored(filtered), {}, {});
-        const std::string path =
-            writeTemp((std::string("cyber_general_filter_") + std::to_string(fti) + ".png").c_str(),
-                      png);
+        const std::string path = writeTemp(
+            (std::string("cyber_general_filter_") + std::to_string(fti) + ".png").c_str(), png);
         const auto loaded = cyber::imageio::loadPng(path);
         REQUIRE(loaded.has_value());
         CHECK(loaded->channels == 3);
@@ -346,9 +345,9 @@ TEST_CASE("loadPng expands a paletted image and honours tRNS") {
     REQUIRE(loaded->pixels.size() == static_cast<std::size_t>(2 * 2 * 4));
 
     const std::array<std::array<float, 4>, 4> expected = {{
-        {255.0f / 255, 0, 0, 0.0f / 255},          // idx0
-        {0, 255.0f / 255, 0, 128.0f / 255},        // idx1
-        {0, 0, 255.0f / 255, 255.0f / 255},        // idx2
+        {255.0f / 255, 0, 0, 0.0f / 255},                  // idx0
+        {0, 255.0f / 255, 0, 128.0f / 255},                // idx1
+        {0, 0, 255.0f / 255, 255.0f / 255},                // idx2
         {255.0f / 255, 255.0f / 255, 255.0f / 255, 1.0f},  // idx3, no tRNS entry
     }};
     for (std::size_t px = 0; px < 4; ++px) {

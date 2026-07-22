@@ -51,9 +51,8 @@ Mesh makeQuad(float cx, float cy) {
 // Two quads as two disconnected components: far one first, near one second.
 Mesh makeTwoQuads(float x0, float x1) {
     const std::vector<Vec3> p = {
-        {x0 - 0.5f, -0.5f, 0.0f}, {x0 + 0.5f, -0.5f, 0.0f},
-        {x0 + 0.5f, 0.5f, 0.0f},  {x0 - 0.5f, 0.5f, 0.0f},
-        {x1 - 0.5f, -0.5f, 0.0f}, {x1 + 0.5f, -0.5f, 0.0f},
+        {x0 - 0.5f, -0.5f, 0.0f}, {x0 + 0.5f, -0.5f, 0.0f}, {x0 + 0.5f, 0.5f, 0.0f},
+        {x0 - 0.5f, 0.5f, 0.0f},  {x1 - 0.5f, -0.5f, 0.0f}, {x1 + 0.5f, -0.5f, 0.0f},
         {x1 + 0.5f, 0.5f, 0.0f},  {x1 - 0.5f, 0.5f, 0.0f},
     };
     const std::vector<std::vector<Index>> f = {{0, 1, 2, 3}, {4, 5, 6, 7}};

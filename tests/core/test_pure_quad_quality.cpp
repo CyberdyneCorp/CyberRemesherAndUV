@@ -25,12 +25,12 @@ namespace {
 // remesher produces reflect the algorithm rather than a degenerate input.
 Mesh makeIcosphere(int subdivisions) {
     const float t = (1.0f + std::sqrt(5.0f)) / 2.0f;
-    std::vector<Vec3> pos = {{-1, t, 0}, {1, t, 0},  {-1, -t, 0}, {1, -t, 0},
-                             {0, -1, t}, {0, 1, t},  {0, -1, -t}, {0, 1, -t},
-                             {t, 0, -1}, {t, 0, 1},  {-t, 0, -1}, {-t, 0, 1}};
+    std::vector<Vec3> pos = {{-1, t, 0}, {1, t, 0}, {-1, -t, 0}, {1, -t, 0},
+                             {0, -1, t}, {0, 1, t}, {0, -1, -t}, {0, 1, -t},
+                             {t, 0, -1}, {t, 0, 1}, {-t, 0, -1}, {-t, 0, 1}};
     std::vector<std::array<int, 3>> tris = {
-        {0, 11, 5}, {0, 5, 1},  {0, 1, 7},  {0, 7, 10}, {0, 10, 11}, {1, 5, 9},   {5, 11, 4},
-        {11, 10, 2}, {10, 7, 6}, {7, 1, 8}, {3, 9, 4},  {3, 4, 2},   {3, 2, 6},   {3, 6, 8},
+        {0, 11, 5},  {0, 5, 1},  {0, 1, 7},  {0, 7, 10}, {0, 10, 11}, {1, 5, 9}, {5, 11, 4},
+        {11, 10, 2}, {10, 7, 6}, {7, 1, 8},  {3, 9, 4},  {3, 4, 2},   {3, 2, 6}, {3, 6, 8},
         {3, 8, 9},   {4, 9, 5},  {2, 4, 11}, {6, 2, 10}, {8, 6, 7},   {9, 8, 1}};
     for (int s = 0; s < subdivisions; ++s) {
         std::vector<std::array<int, 3>> next;
@@ -41,8 +41,8 @@ Mesh makeIcosphere(int subdivisions) {
             if (it != midCache.end()) {
                 return it->second;
             }
-            const Vec3 m = (pos[static_cast<std::size_t>(a)] + pos[static_cast<std::size_t>(b)]) *
-                           0.5f;
+            const Vec3 m =
+                (pos[static_cast<std::size_t>(a)] + pos[static_cast<std::size_t>(b)]) * 0.5f;
             const int idx = static_cast<int>(pos.size());
             pos.push_back(m);
             midCache[{key.first, key.second}] = idx;
@@ -66,8 +66,8 @@ Mesh makeIcosphere(int subdivisions) {
         normalizedPos.push_back(cyber::normalized(p));
     }
     for (const auto& tr : tris) {
-        faces.push_back({static_cast<Index>(tr[0]), static_cast<Index>(tr[1]),
-                         static_cast<Index>(tr[2])});
+        faces.push_back(
+            {static_cast<Index>(tr[0]), static_cast<Index>(tr[1]), static_cast<Index>(tr[2])});
     }
     return Mesh::fromIndexed(normalizedPos, faces);
 }
@@ -146,7 +146,8 @@ QuadQuality measure(const Mesh& mesh) {
             continue;
         }
         for (std::size_t k = 0; k < 4; ++k) {
-            const double d = static_cast<double>(cyber::length(P[f[k]] - P[f[(k + 1) % 4]])) - meanEdge;
+            const double d =
+                static_cast<double>(cyber::length(P[f[k]] - P[f[(k + 1) % 4]])) - meanEdge;
             var += d * d;
         }
     }
@@ -180,11 +181,11 @@ TEST_CASE("pure-quad remeshing produces well-shaped quads on a clean sphere") {
         CAPTURE(q.maxRadiusError);
 
         CHECK(q.quads > 0);
-        CHECK(q.nonQuads == 0);                 // genuinely pure quads
-        CHECK(q.worstMinAngleDeg > 30.0f);      // no slivers (relaxation ~51 deg)
-        CHECK(q.shortestEdgeRatio > 0.15f);     // no collapsed edges
-        CHECK(q.maxRadiusError < 0.01f);        // shape preserved on the unit sphere
-        CHECK(res.mesh.validate().empty());     // still a valid manifold
+        CHECK(q.nonQuads == 0);              // genuinely pure quads
+        CHECK(q.worstMinAngleDeg > 30.0f);   // no slivers (relaxation ~51 deg)
+        CHECK(q.shortestEdgeRatio > 0.15f);  // no collapsed edges
+        CHECK(q.maxRadiusError < 0.01f);     // shape preserved on the unit sphere
+        CHECK(res.mesh.validate().empty());  // still a valid manifold
     }
 }
 
@@ -200,18 +201,17 @@ TEST_CASE("position-field pure-quad path equalizes edge length") {
     params.targetQuadCount = 2500;
     params.pureQuads = true;
     params.adaptivity = 0.0f;
-    const remesh::PipelineResult res =
-        remesh::remesh(sphere, params, nullptr, nullptr,
-                       [] { return remesh::makeInstantMeshesQuadrangulator(); });
+    const remesh::PipelineResult res = remesh::remesh(
+        sphere, params, nullptr, nullptr, [] { return remesh::makeInstantMeshesQuadrangulator(); });
     REQUIRE(res.status == remesh::RunStatus::Success);
 
     const QuadQuality q = measure(res.mesh);
     CAPTURE(q.edgeCV);
     CAPTURE(q.sliverFraction);
     CHECK(q.quads > 0);
-    CHECK(q.nonQuads == 0);            // still pure quads
-    CHECK(q.edgeCV < 0.21f);           // length blend tightens uniformity (~0.20; >0.23 without)
-    CHECK(q.sliverFraction < 0.05f);   // the blend does not shear quads into slivers
+    CHECK(q.nonQuads == 0);           // still pure quads
+    CHECK(q.edgeCV < 0.21f);          // length blend tightens uniformity (~0.20; >0.23 without)
+    CHECK(q.sliverFraction < 0.05f);  // the blend does not shear quads into slivers
     CHECK(res.mesh.validate().empty());
 }
 
@@ -239,9 +239,8 @@ TEST_CASE("integer extractor pure-quad path lifts the median quad angle") {
     params.targetQuadCount = 2500;
     params.pureQuads = true;
     params.adaptivity = 0.0f;
-    const remesh::PipelineResult res =
-        remesh::remesh(sphere, params, nullptr, nullptr,
-                       [] { return remesh::makeIntegerQuadrangulator(); });
+    const remesh::PipelineResult res = remesh::remesh(
+        sphere, params, nullptr, nullptr, [] { return remesh::makeIntegerQuadrangulator(); });
     REQUIRE(res.status == remesh::RunStatus::Success);
 
     const QuadQuality q = measure(res.mesh);
@@ -249,10 +248,10 @@ TEST_CASE("integer extractor pure-quad path lifts the median quad angle") {
     CAPTURE(q.edgeCV);
     CAPTURE(q.sliverFraction);
     CHECK(q.quads > 0);
-    CHECK(q.nonQuads == 0);                 // still pure quads
-    CHECK(q.medianMinAngleDeg > 80.0f);     // stronger base relax (~80.7; ~79.1 without)
-    CHECK(q.edgeCV < 0.24f);                // median gain must not cost uniformity (~0.23)
-    CHECK(q.sliverFraction < 0.05f);        // and must not shear quads into slivers
+    CHECK(q.nonQuads == 0);              // still pure quads
+    CHECK(q.medianMinAngleDeg > 80.0f);  // stronger base relax (~80.7; ~79.1 without)
+    CHECK(q.edgeCV < 0.24f);             // median gain must not cost uniformity (~0.23)
+    CHECK(q.sliverFraction < 0.05f);     // and must not shear quads into slivers
     CHECK(res.mesh.validate().empty());
 }
 

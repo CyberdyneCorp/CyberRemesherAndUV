@@ -56,14 +56,12 @@ TEST_CASE("frame decoder rejects an oversized length without allocating it") {
 
 TEST_CASE("handshake accepts a matching version and rejects a mismatch") {
     bool accept = false;
-    const std::string ok =
-        net::processHandshake(R"({"type":"hello","protocol":1})", accept);
+    const std::string ok = net::processHandshake(R"({"type":"hello","protocol":1})", accept);
     REQUIRE(accept);
     REQUIRE(ok.find("welcome") != std::string::npos);
 
     accept = true;
-    const std::string bad =
-        net::processHandshake(R"({"type":"hello","protocol":99})", accept);
+    const std::string bad = net::processHandshake(R"({"type":"hello","protocol":99})", accept);
     REQUIRE_FALSE(accept);
     REQUIRE(bad.find("reject") != std::string::npos);
     REQUIRE(bad.find("99") != std::string::npos);  // reports the client version back

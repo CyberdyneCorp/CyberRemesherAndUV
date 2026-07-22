@@ -8,9 +8,9 @@
 // has never been compiled — treat symbol names/signatures as the contract to
 // reconcile against the real capi header on first Android build.
 
-#include <jni.h>
 #include <android/native_window.h>
 #include <android/native_window_jni.h>
+#include <jni.h>
 
 #include <cstdint>
 #include <string>
@@ -56,8 +56,7 @@ void throwCyber(JNIEnv* env, int status) {
     }
     jmethodID ctor = env->GetMethodID(cls, "<init>", "(ILjava/lang/String;)V");
     jstring jmsg = env->NewStringUTF(msg != nullptr ? msg : "");
-    auto* ex = static_cast<jthrowable>(
-        env->NewObject(cls, ctor, static_cast<jint>(status), jmsg));
+    auto* ex = static_cast<jthrowable>(env->NewObject(cls, ctor, static_cast<jint>(status), jmsg));
     env->Throw(ex);
 }
 
@@ -70,8 +69,8 @@ jlong box(void* p) { return reinterpret_cast<jlong>(p); }
 // Function0<Boolean>) for the duration of one blocking remesh call.
 struct RemeshBridge {
     JNIEnv* env;
-    jobject progress; // kotlin.jvm.functions.Function1
-    jobject cancel;   // kotlin.jvm.functions.Function0
+    jobject progress;  // kotlin.jvm.functions.Function1
+    jobject cancel;    // kotlin.jvm.functions.Function0
     jmethodID progressInvoke;
     jmethodID cancelInvoke;
     jclass doubleCls;
@@ -82,8 +81,7 @@ struct RemeshBridge {
 
 void progressTrampoline(float fraction, const char* /*stage*/, void* user) {
     auto* b = static_cast<RemeshBridge*>(user);
-    jobject boxed = b->env->NewObject(b->doubleCls, b->doubleCtor,
-                                      static_cast<jdouble>(fraction));
+    jobject boxed = b->env->NewObject(b->doubleCls, b->doubleCtor, static_cast<jdouble>(fraction));
     b->env->CallObjectMethod(b->progress, b->progressInvoke, boxed);
     b->env->DeleteLocalRef(boxed);
 }
@@ -96,22 +94,20 @@ int cancelTrampoline(void* user) {
     return requested == JNI_TRUE ? 1 : 0;
 }
 
-} // namespace
+}  // namespace
 
 extern "C" {
 
-JNIEXPORT jstring JNICALL
-Java_com_cyberremesher_mobile_CyberEngine_version(JNIEnv* env, jobject) {
+JNIEXPORT jstring JNICALL Java_com_cyberremesher_mobile_CyberEngine_version(JNIEnv* env, jobject) {
     return env->NewStringUTF(cyber_version_string());
 }
 
-JNIEXPORT jint JNICALL
-Java_com_cyberremesher_mobile_CyberEngine_abiVersion(JNIEnv*, jobject) {
+JNIEXPORT jint JNICALL Java_com_cyberremesher_mobile_CyberEngine_abiVersion(JNIEnv*, jobject) {
     return static_cast<jint>(cyber_abi_version());
 }
 
-JNIEXPORT jlong JNICALL
-Java_com_cyberremesher_mobile_CyberEngine_meshLoad(JNIEnv* env, jobject, jstring path) {
+JNIEXPORT jlong JNICALL Java_com_cyberremesher_mobile_CyberEngine_meshLoad(JNIEnv* env, jobject,
+                                                                           jstring path) {
     const char* cpath = env->GetStringUTFChars(path, nullptr);
     CyberMesh* out = nullptr;
     int status = cyber_mesh_load_obj(cpath, &out);
@@ -123,8 +119,8 @@ Java_com_cyberremesher_mobile_CyberEngine_meshLoad(JNIEnv* env, jobject, jstring
     return box(out);
 }
 
-JNIEXPORT void JNICALL
-Java_com_cyberremesher_mobile_CyberEngine_meshSave(JNIEnv* env, jobject, jlong h, jstring path) {
+JNIEXPORT void JNICALL Java_com_cyberremesher_mobile_CyberEngine_meshSave(JNIEnv* env, jobject,
+                                                                          jlong h, jstring path) {
     const char* cpath = env->GetStringUTFChars(path, nullptr);
     int status = cyber_mesh_save_obj(mesh(h), cpath);
     env->ReleaseStringUTFChars(path, cpath);
@@ -133,23 +129,24 @@ Java_com_cyberremesher_mobile_CyberEngine_meshSave(JNIEnv* env, jobject, jlong h
     }
 }
 
-JNIEXPORT jlong JNICALL
-Java_com_cyberremesher_mobile_CyberEngine_meshVertexCount(JNIEnv*, jobject, jlong h) {
+JNIEXPORT jlong JNICALL Java_com_cyberremesher_mobile_CyberEngine_meshVertexCount(JNIEnv*, jobject,
+                                                                                  jlong h) {
     return static_cast<jlong>(cyber_mesh_vertex_count(mesh(h)));
 }
 
-JNIEXPORT jlong JNICALL
-Java_com_cyberremesher_mobile_CyberEngine_meshFaceCount(JNIEnv*, jobject, jlong h) {
+JNIEXPORT jlong JNICALL Java_com_cyberremesher_mobile_CyberEngine_meshFaceCount(JNIEnv*, jobject,
+                                                                                jlong h) {
     return static_cast<jlong>(cyber_mesh_face_count(mesh(h)));
 }
 
-JNIEXPORT void JNICALL
-Java_com_cyberremesher_mobile_CyberEngine_meshDestroy(JNIEnv*, jobject, jlong h) {
+JNIEXPORT void JNICALL Java_com_cyberremesher_mobile_CyberEngine_meshDestroy(JNIEnv*, jobject,
+                                                                             jlong h) {
     cyber_mesh_free(mesh(h));
 }
 
-JNIEXPORT jlong JNICALL
-Java_com_cyberremesher_mobile_CyberEngine_sessionCreate(JNIEnv* env, jobject, jlong meshH) {
+JNIEXPORT jlong JNICALL Java_com_cyberremesher_mobile_CyberEngine_sessionCreate(JNIEnv* env,
+                                                                                jobject,
+                                                                                jlong meshH) {
     CyberSession* out = nullptr;
     int status = cyber_session_create(mesh(meshH), &out);
     if (status != CYBER_OK) {
@@ -159,13 +156,14 @@ Java_com_cyberremesher_mobile_CyberEngine_sessionCreate(JNIEnv* env, jobject, jl
     return box(out);
 }
 
-JNIEXPORT void JNICALL
-Java_com_cyberremesher_mobile_CyberEngine_sessionDestroy(JNIEnv*, jobject, jlong h) {
+JNIEXPORT void JNICALL Java_com_cyberremesher_mobile_CyberEngine_sessionDestroy(JNIEnv*, jobject,
+                                                                                jlong h) {
     cyber_session_destroy(session(h));
 }
 
-JNIEXPORT jlong JNICALL
-Java_com_cyberremesher_mobile_CyberEngine_sessionSnapshot(JNIEnv* env, jobject, jlong h) {
+JNIEXPORT jlong JNICALL Java_com_cyberremesher_mobile_CyberEngine_sessionSnapshot(JNIEnv* env,
+                                                                                  jobject,
+                                                                                  jlong h) {
     CyberMesh* out = nullptr;
     int status = cyber_session_snapshot_mesh(session(h), &out);
     if (status != CYBER_OK) {
@@ -175,8 +173,7 @@ Java_com_cyberremesher_mobile_CyberEngine_sessionSnapshot(JNIEnv* env, jobject, 
     return box(out);
 }
 
-JNIEXPORT void JNICALL
-Java_com_cyberremesher_mobile_CyberEngine_sessionInjectStroke(
+JNIEXPORT void JNICALL Java_com_cyberremesher_mobile_CyberEngine_sessionInjectStroke(
     JNIEnv* env, jobject, jlong h, jdoubleArray xs, jdoubleArray ys, jdoubleArray pressures,
     jdoubleArray altitudes, jdoubleArray azimuths, jdoubleArray timestamps) {
     const jsize count = env->GetArrayLength(xs);
@@ -208,17 +205,17 @@ Java_com_cyberremesher_mobile_CyberEngine_sessionInjectStroke(
     }
 }
 
-JNIEXPORT void JNICALL
-Java_com_cyberremesher_mobile_CyberEngine_sessionInjectTap(
-    JNIEnv* env, jobject, jlong h, jdouble x, jdouble y) {
+JNIEXPORT void JNICALL Java_com_cyberremesher_mobile_CyberEngine_sessionInjectTap(JNIEnv* env,
+                                                                                  jobject, jlong h,
+                                                                                  jdouble x,
+                                                                                  jdouble y) {
     int status = cyber_session_inject_tap(session(h), x, y);
     if (status != CYBER_OK) {
         throwCyber(env, status);
     }
 }
 
-JNIEXPORT void JNICALL
-Java_com_cyberremesher_mobile_CyberEngine_sessionInjectChord(
+JNIEXPORT void JNICALL Java_com_cyberremesher_mobile_CyberEngine_sessionInjectChord(
     JNIEnv* env, jobject, jlong h, jlongArray buttons) {
     const jsize count = env->GetArrayLength(buttons);
     jlong* raw = env->GetLongArrayElements(buttons, nullptr);
@@ -233,8 +230,7 @@ Java_com_cyberremesher_mobile_CyberEngine_sessionInjectChord(
     }
 }
 
-JNIEXPORT void JNICALL
-Java_com_cyberremesher_mobile_CyberEngine_sessionAttachSurface(
+JNIEXPORT void JNICALL Java_com_cyberremesher_mobile_CyberEngine_sessionAttachSurface(
     JNIEnv* env, jobject, jlong h, jobject surface) {
     ANativeWindow* window = ANativeWindow_fromSurface(env, surface);
     int status = cyber_session_attach_android_surface(session(h), window);
@@ -247,8 +243,7 @@ Java_com_cyberremesher_mobile_CyberEngine_sessionAttachSurface(
     }
 }
 
-JNIEXPORT void JNICALL
-Java_com_cyberremesher_mobile_CyberEngine_sessionSetDrawableSize(
+JNIEXPORT void JNICALL Java_com_cyberremesher_mobile_CyberEngine_sessionSetDrawableSize(
     JNIEnv* env, jobject, jlong h, jint width, jint height) {
     int status = cyber_session_set_drawable_size(session(h), static_cast<double>(width),
                                                  static_cast<double>(height));
@@ -257,15 +252,15 @@ Java_com_cyberremesher_mobile_CyberEngine_sessionSetDrawableSize(
     }
 }
 
-JNIEXPORT void JNICALL
-Java_com_cyberremesher_mobile_CyberEngine_sessionDetachSurface(JNIEnv*, jobject, jlong h) {
+JNIEXPORT void JNICALL Java_com_cyberremesher_mobile_CyberEngine_sessionDetachSurface(JNIEnv*,
+                                                                                      jobject,
+                                                                                      jlong h) {
     cyber_session_detach_surface(session(h));
 }
 
-JNIEXPORT jlong JNICALL
-Java_com_cyberremesher_mobile_CyberEngine_remesh(
-    JNIEnv* env, jobject, jlong meshH, jint targetQuads, jboolean pureQuad,
-    jboolean preserveSharp, jdouble sharpAngleDegrees, jobject progress, jobject cancel) {
+JNIEXPORT jlong JNICALL Java_com_cyberremesher_mobile_CyberEngine_remesh(
+    JNIEnv* env, jobject, jlong meshH, jint targetQuads, jboolean pureQuad, jboolean preserveSharp,
+    jdouble sharpAngleDegrees, jobject progress, jobject cancel) {
     CyberRemeshParams params;
     cyber_default_params(&params);
     params.targetQuads = targetQuads;
@@ -277,18 +272,18 @@ Java_com_cyberremesher_mobile_CyberEngine_remesh(
     bridge.env = env;
     bridge.progress = progress;
     bridge.cancel = cancel;
-    bridge.progressInvoke = env->GetMethodID(
-        env->GetObjectClass(progress), "invoke", "(Ljava/lang/Object;)Ljava/lang/Object;");
-    bridge.cancelInvoke = env->GetMethodID(
-        env->GetObjectClass(cancel), "invoke", "()Ljava/lang/Object;");
+    bridge.progressInvoke = env->GetMethodID(env->GetObjectClass(progress), "invoke",
+                                             "(Ljava/lang/Object;)Ljava/lang/Object;");
+    bridge.cancelInvoke =
+        env->GetMethodID(env->GetObjectClass(cancel), "invoke", "()Ljava/lang/Object;");
     bridge.doubleCls = env->FindClass("java/lang/Double");
     bridge.doubleCtor = env->GetMethodID(bridge.doubleCls, "<init>", "(D)V");
     bridge.booleanCls = env->FindClass("java/lang/Boolean");
     bridge.booleanValue = env->GetMethodID(bridge.booleanCls, "booleanValue", "()Z");
 
     CyberMesh* out = nullptr;
-    int status = cyber_remesh(mesh(meshH), &params, progressTrampoline, cancelTrampoline,
-                              &bridge, &out);
+    int status =
+        cyber_remesh(mesh(meshH), &params, progressTrampoline, cancelTrampoline, &bridge, &out);
     if (status != CYBER_OK) {
         throwCyber(env, status);
         return 0;
@@ -296,4 +291,4 @@ Java_com_cyberremesher_mobile_CyberEngine_remesh(
     return box(out);
 }
 
-} // extern "C"
+}  // extern "C"

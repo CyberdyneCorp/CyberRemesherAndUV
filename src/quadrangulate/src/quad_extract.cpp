@@ -10,11 +10,6 @@
 // mixed-integer / holonomy solve — so field singularities surface as irregular
 // vertices automatically.
 
-#include "cyber/quadrangulate/position_field.hpp"
-
-#include "cyber/quadrangulate/field_quadrangulator.hpp"
-#include "cyber/quadrangulate/mcf_layout.hpp"
-
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -29,6 +24,10 @@
 #include <unordered_map>
 #include <utility>
 #include <vector>
+
+#include "cyber/quadrangulate/field_quadrangulator.hpp"
+#include "cyber/quadrangulate/mcf_layout.hpp"
+#include "cyber/quadrangulate/position_field.hpp"
 
 namespace cyber::remesh {
 
@@ -48,7 +47,8 @@ std::pair<Vec3, Vec3> compatOrientation(Vec3 q0, Vec3 n0, Vec3 q1, Vec3 n1) {
     int ba = 0, bb = 0;
     for (int i = 0; i < 2; ++i) {
         for (int j = 0; j < 2; ++j) {
-            const float d = std::fabs(dot(a[static_cast<std::size_t>(i)], b[static_cast<std::size_t>(j)]));
+            const float d =
+                std::fabs(dot(a[static_cast<std::size_t>(i)], b[static_cast<std::size_t>(j)]));
             if (d > best) {
                 best = d;
                 ba = i;
@@ -104,11 +104,13 @@ PosCompat compatPosition(Vec3 p0, Vec3 n0, Vec3 q0, Vec3 o0, Vec3 p1, Vec3 n1, V
     float best = 1e30f;
     int bi = 0, bj = 0;
     for (int i = 0; i < 4; ++i) {
-        const Vec3 o0t =
-            o0 + (q0 * static_cast<float>((i & 1) + f0.x) + t0 * static_cast<float>(((i & 2) >> 1) + f0.y)) * s;
+        const Vec3 o0t = o0 + (q0 * static_cast<float>((i & 1) + f0.x) +
+                               t0 * static_cast<float>(((i & 2) >> 1) + f0.y)) *
+                                  s;
         for (int j = 0; j < 4; ++j) {
-            const Vec3 o1t =
-                o1 + (q1 * static_cast<float>((j & 1) + f1.x) + t1 * static_cast<float>(((j & 2) >> 1) + f1.y)) * s;
+            const Vec3 o1t = o1 + (q1 * static_cast<float>((j & 1) + f1.x) +
+                                   t1 * static_cast<float>(((j & 2) >> 1) + f1.y)) *
+                                      s;
             const float d = lengthSquared(o0t - o1t);
             if (d < best) {
                 best = d;
@@ -117,7 +119,8 @@ PosCompat compatPosition(Vec3 p0, Vec3 n0, Vec3 q0, Vec3 o0, Vec3 p1, Vec3 n1, V
             }
         }
     }
-    return {{f0.x + (bi & 1), f0.y + ((bi & 2) >> 1)}, {f1.x + (bj & 1), f1.y + ((bj & 2) >> 1)}, best};
+    return {
+        {f0.x + (bi & 1), f0.y + ((bi & 2) >> 1)}, {f1.x + (bj & 1), f1.y + ((bj & 2) >> 1)}, best};
 }
 
 // Union-find with union-by-size; unite() returns the surviving representative.
@@ -184,7 +187,8 @@ std::pair<int, int> orientIndex(Vec3 q0, Vec3 n0, Vec3 q1, Vec3 n1) {
     int ba = 0, bb = 0;
     for (int i = 0; i < 2; ++i) {
         for (int j = 0; j < 2; ++j) {
-            const float s = std::fabs(dot(a[static_cast<std::size_t>(i)], b[static_cast<std::size_t>(j)]));
+            const float s =
+                std::fabs(dot(a[static_cast<std::size_t>(i)], b[static_cast<std::size_t>(j)]));
             if (s > best) {
                 best = s;
                 ba = i;
@@ -204,7 +208,8 @@ std::pair<int, int> orientIndex(Vec3 q0, Vec3 n0, Vec3 q1, Vec3 n1) {
 struct OrientTree {
     std::vector<std::pair<int, int>> parent;  // (parent, orientation to parent, mod 4)
     std::vector<int> rank;
-    explicit OrientTree(int nn) : parent(static_cast<std::size_t>(nn)), rank(static_cast<std::size_t>(nn), 1) {
+    explicit OrientTree(int nn)
+        : parent(static_cast<std::size_t>(nn)), rank(static_cast<std::size_t>(nn), 1) {
         for (int i = 0; i < nn; ++i) {
             parent[static_cast<std::size_t>(i)] = {i, 0};
         }
@@ -295,12 +300,13 @@ public:
                 break;  // no augmenting path
             }
             int push = kInf;
-            for (int v = t; v != s; ) {
-                const Edge& e = edges_[static_cast<std::size_t>(prevEdge[static_cast<std::size_t>(v)])];
+            for (int v = t; v != s;) {
+                const Edge& e =
+                    edges_[static_cast<std::size_t>(prevEdge[static_cast<std::size_t>(v)])];
                 push = std::min(push, e.cap - e.flow);
                 v = edges_[static_cast<std::size_t>(prevEdge[static_cast<std::size_t>(v)] ^ 1)].to;
             }
-            for (int v = t; v != s; ) {
+            for (int v = t; v != s;) {
                 const int id = prevEdge[static_cast<std::size_t>(v)];
                 edges_[static_cast<std::size_t>(id)].flow += push;
                 edges_[static_cast<std::size_t>(id ^ 1)].flow -= push;
@@ -383,7 +389,8 @@ bool snapMergeProject(std::vector<Vec3>& pos, std::vector<Vec3>& normal,
     bool changed = false;
     for (const Cand& cd : cands) {
         const int i = cd.i, j = cd.j, k = cd.k;
-        if (!adj[static_cast<std::size_t>(i)].count(j) || !adj[static_cast<std::size_t>(j)].count(k)) {
+        if (!adj[static_cast<std::size_t>(i)].count(j) ||
+            !adj[static_cast<std::size_t>(j)].count(k)) {
             continue;
         }
         if (height(i, j, k) != cd.h) {
@@ -396,7 +403,8 @@ bool snapMergeProject(std::vector<Vec3>& pos, std::vector<Vec3>& normal,
             pos[static_cast<std::size_t>(i)] =
                 (pos[static_cast<std::size_t>(i)] + pos[static_cast<std::size_t>(mid)]) * 0.5f;
             normal[static_cast<std::size_t>(i)] =
-                (normal[static_cast<std::size_t>(i)] + normal[static_cast<std::size_t>(mid)]) * 0.5f;
+                (normal[static_cast<std::size_t>(i)] + normal[static_cast<std::size_t>(mid)]) *
+                0.5f;
             for (const int n : adj[static_cast<std::size_t>(mid)]) {
                 if (n == i) {
                     continue;
@@ -411,8 +419,8 @@ bool snapMergeProject(std::vector<Vec3>& pos, std::vector<Vec3>& normal,
         } else {  // PROJECT: slide i onto edge (j,k), splitting it
             pos[static_cast<std::size_t>(i)] =
                 (pos[static_cast<std::size_t>(j)] + pos[static_cast<std::size_t>(k)]) * 0.5f;
-            normal[static_cast<std::size_t>(i)] =
-                normalized(normal[static_cast<std::size_t>(j)] + normal[static_cast<std::size_t>(k)]);
+            normal[static_cast<std::size_t>(i)] = normalized(normal[static_cast<std::size_t>(j)] +
+                                                             normal[static_cast<std::size_t>(k)]);
             adj[static_cast<std::size_t>(j)].erase(k);
             adj[static_cast<std::size_t>(k)].erase(j);
             if (!hasKI) {
@@ -456,11 +464,13 @@ bool removeDiagonals(const std::vector<Vec3>& pos, std::vector<std::set<int>>& a
             }
             const float diag = len(i, j);
             const float expDiag = outer / 4.0f * std::sqrt(2.0f);
-            const float score = std::fabs(diag - expDiag) / std::fmax(1e-9f, std::fmin(diag, expDiag));
+            const float score =
+                std::fabs(diag - expDiag) / std::fmax(1e-9f, std::fmin(diag, expDiag));
             cands.push_back({score, i, j});
         }
     }
-    std::sort(cands.begin(), cands.end(), [](const DCand& x, const DCand& y) { return x.score < y.score; });
+    std::sort(cands.begin(), cands.end(),
+              [](const DCand& x, const DCand& y) { return x.score < y.score; });
 
     bool changed = false;
     for (const DCand& dc : cands) {
@@ -513,9 +523,7 @@ Graph buildCollapsedGraph(const Mesh& mesh, const PositionField& field) {
     // multiplier (1 on a uniform mesh, so these reduce to the global s; on an
     // adaptive mesh the cell size follows local density so coarse regions are not
     // over-merged). Per-edge uses the two endpoints' average.
-    const auto nodeS = [&](std::size_t i) {
-        return field.scale.empty() ? s : s * field.scale[i];
-    };
+    const auto nodeS = [&](std::size_t i) { return field.scale.empty() ? s : s * field.scale[i]; };
     const auto edgeS = [&](std::size_t i, std::size_t j) {
         return field.scale.empty() ? s : s * 0.5f * (field.scale[i] + field.scale[j]);
     };
@@ -735,17 +743,16 @@ void fillFace(std::vector<Index> loop, const std::vector<Vec3>& pos,
         for (std::size_t i = 0; i < n; ++i) {
             const Index a = loop[i], b = loop[(i + 1) % n], c = loop[(i + 2) % n],
                         d = loop[(i + 3) % n];
-            const float score = std::fabs(angle(d, a, b) - kPi / 2.0f) +
-                                std::fabs(angle(a, b, c) - kPi / 2.0f) +
-                                std::fabs(angle(b, c, d) - kPi / 2.0f) +
-                                std::fabs(angle(c, d, a) - kPi / 2.0f);
+            const float score =
+                std::fabs(angle(d, a, b) - kPi / 2.0f) + std::fabs(angle(a, b, c) - kPi / 2.0f) +
+                std::fabs(angle(b, c, d) - kPi / 2.0f) + std::fabs(angle(c, d, a) - kPi / 2.0f);
             if (score < best) {
                 best = score;
                 bestI = i;
             }
         }
-        faces.push_back({loop[bestI], loop[(bestI + 1) % n], loop[(bestI + 2) % n],
-                         loop[(bestI + 3) % n]});
+        faces.push_back(
+            {loop[bestI], loop[(bestI + 1) % n], loop[(bestI + 2) % n], loop[(bestI + 3) % n]});
         const std::size_t r1 = (bestI + 1) % n, r2 = (bestI + 2) % n;
         std::vector<Index> rest;
         for (std::size_t k = 0; k < n; ++k) {
@@ -872,7 +879,8 @@ public:
         const PositionField field = computePositionField(mesh, targetEdgeLength, m_iterations);
         Mesh quads = extractQuadMesh(mesh, field);
         if (quads.faceCount() == 0) {
-            return {.success = false, .cancelled = false,
+            return {.success = false,
+                    .cancelled = false,
                     .failureReason = "position-field extraction produced no faces"};
         }
         mesh = std::move(quads);
@@ -962,8 +970,8 @@ namespace {
     }
     // Count collapse: far fewer quads than the target density implies.
     if (targetEdgeLength > 0.0f && inputArea > 0.0) {
-        const double cell = static_cast<double>(targetEdgeLength) *
-                            static_cast<double>(targetEdgeLength);
+        const double cell =
+            static_cast<double>(targetEdgeLength) * static_cast<double>(targetEdgeLength);
         const double expected = inputArea / cell;
         if (expected >= 8.0 && static_cast<double>(quads.faceCount()) < 0.30 * expected) {
             return false;
@@ -1184,14 +1192,16 @@ IntegerGrid computeIntegerGrid(const Mesh& mesh, const PositionField& field) {
     for (int t = 0; t < nTri; ++t) {
         for (int j = 0; j < 3; ++j) {
             heMap[{tris[static_cast<std::size_t>(t)][static_cast<std::size_t>(j)],
-                   tris[static_cast<std::size_t>(t)][static_cast<std::size_t>((j + 1) % 3)]}] = t * 3 + j;
+                   tris[static_cast<std::size_t>(t)][static_cast<std::size_t>((j + 1) % 3)]}] =
+                t * 3 + j;
         }
     }
     std::vector<int> e2e(static_cast<std::size_t>(nTri) * 3, -1);
     for (int t = 0; t < nTri; ++t) {
         for (int j = 0; j < 3; ++j) {
-            const auto it = heMap.find({tris[static_cast<std::size_t>(t)][static_cast<std::size_t>((j + 1) % 3)],
-                                        tris[static_cast<std::size_t>(t)][static_cast<std::size_t>(j)]});
+            const auto it = heMap.find(
+                {tris[static_cast<std::size_t>(t)][static_cast<std::size_t>((j + 1) % 3)],
+                 tris[static_cast<std::size_t>(t)][static_cast<std::size_t>(j)]});
             if (it != heMap.end()) {
                 e2e[static_cast<std::size_t>(t * 3 + j)] = it->second;
             }
@@ -1267,12 +1277,15 @@ IntegerGrid computeIntegerGrid(const Mesh& mesh, const PositionField& field) {
             const Index v2 = tris[static_cast<std::size_t>(t)][static_cast<std::size_t>(k2)];
             Int2 diff2;
             if (v1 > v2) {
-                const Int2 neg{-posIndex[static_cast<std::size_t>(t)][static_cast<std::size_t>(k1)].x,
-                               -posIndex[static_cast<std::size_t>(t)][static_cast<std::size_t>(k1)].y};
-                diff2 = rshift90i(neg, posRank[static_cast<std::size_t>(t)][static_cast<std::size_t>(k2)]);
+                const Int2 neg{
+                    -posIndex[static_cast<std::size_t>(t)][static_cast<std::size_t>(k1)].x,
+                    -posIndex[static_cast<std::size_t>(t)][static_cast<std::size_t>(k1)].y};
+                diff2 = rshift90i(
+                    neg, posRank[static_cast<std::size_t>(t)][static_cast<std::size_t>(k2)]);
             } else {
-                diff2 = rshift90i(posIndex[static_cast<std::size_t>(t)][static_cast<std::size_t>(k1)],
-                                  posRank[static_cast<std::size_t>(t)][static_cast<std::size_t>(k1)]);
+                diff2 =
+                    rshift90i(posIndex[static_cast<std::size_t>(t)][static_cast<std::size_t>(k1)],
+                              posRank[static_cast<std::size_t>(t)][static_cast<std::size_t>(k1)]);
             }
             const int he = t * 3 + k1;
             const int opp = e2e[static_cast<std::size_t>(he)];
@@ -1281,10 +1294,12 @@ IntegerGrid computeIntegerGrid(const Mesh& mesh, const PositionField& field) {
                 edgeDiff.push_back(diff2);
                 faceEdgeIds[static_cast<std::size_t>(t)][static_cast<std::size_t>(k1)] = eid;
                 if (opp != -1) {
-                    faceEdgeIds[static_cast<std::size_t>(opp / 3)][static_cast<std::size_t>(opp % 3)] = eid;
+                    faceEdgeIds[static_cast<std::size_t>(opp / 3)]
+                               [static_cast<std::size_t>(opp % 3)] = eid;
                 }
             } else if (!singular.count(t) && opp != -1) {
-                const int eid = faceEdgeIds[static_cast<std::size_t>(opp / 3)][static_cast<std::size_t>(opp % 3)];
+                const int eid = faceEdgeIds[static_cast<std::size_t>(opp / 3)]
+                                           [static_cast<std::size_t>(opp % 3)];
                 edgeDiff[static_cast<std::size_t>(eid)] = diff2;
             }
         }
@@ -1293,7 +1308,8 @@ IntegerGrid computeIntegerGrid(const Mesh& mesh, const PositionField& field) {
     // 4. BuildIntegerConstraints: per-face edge orientations + global alignment.
     std::vector<std::array<int, 3>> orients(static_cast<std::size_t>(nTri));
     for (int t = 0; t < nTri; ++t) {
-        const Index v0 = tris[static_cast<std::size_t>(t)][0], v1 = tris[static_cast<std::size_t>(t)][1],
+        const Index v0 = tris[static_cast<std::size_t>(t)][0],
+                    v1 = tris[static_cast<std::size_t>(t)][1],
                     v2 = tris[static_cast<std::size_t>(t)][2];
         const auto i1 = orientIndex(field.q[v0], field.normal[v0], field.q[v1], field.normal[v1]);
         const auto i2 = orientIndex(field.q[v0], field.normal[v0], field.q[v2], field.normal[v2]);
@@ -1328,18 +1344,24 @@ IntegerGrid computeIntegerGrid(const Mesh& mesh, const PositionField& field) {
             continue;
         }
         const int o1 = orients[static_cast<std::size_t>(f0)][static_cast<std::size_t>(c.first % 3)];
-        const int o0 = (orients[static_cast<std::size_t>(f1)][static_cast<std::size_t>(c.second % 3)] + 2) % 4;
+        const int o0 =
+            (orients[static_cast<std::size_t>(f1)][static_cast<std::size_t>(c.second % 3)] + 2) % 4;
         tree.merge(f0, f1, o0, o1);
     }
     for (const int fs : singular) {
         for (int j = 0; j < 3; ++j) {
-            const auto& c = e2d[static_cast<std::size_t>(faceEdgeIds[static_cast<std::size_t>(fs)][static_cast<std::size_t>(j)])];
+            const auto& c = e2d[static_cast<std::size_t>(
+                faceEdgeIds[static_cast<std::size_t>(fs)][static_cast<std::size_t>(j)])];
             if (c.first == -1 || c.second == -1) {
                 continue;
             }
             const int f0 = c.first / 3, f1 = c.second / 3;
-            const int o1 = orients[static_cast<std::size_t>(f0)][static_cast<std::size_t>(c.first % 3)];
-            const int o0 = (orients[static_cast<std::size_t>(f1)][static_cast<std::size_t>(c.second % 3)] + 2) % 4;
+            const int o1 =
+                orients[static_cast<std::size_t>(f0)][static_cast<std::size_t>(c.first % 3)];
+            const int o0 =
+                (orients[static_cast<std::size_t>(f1)][static_cast<std::size_t>(c.second % 3)] +
+                 2) %
+                4;
             tree.merge(f0, f1, o0, o1);
         }
     }
@@ -1457,8 +1479,9 @@ std::size_t countResidualSingularities(const IntegerGrid& g) {
     for (std::size_t t = 0; t < g.tris.size(); ++t) {
         Int2 r{0, 0};
         for (int j = 0; j < 3; ++j) {
-            const Int2 contrib = rshift90i(g.edgeDiff[static_cast<std::size_t>(g.faceEdgeIds[t][static_cast<std::size_t>(j)])],
-                                           g.orients[t][static_cast<std::size_t>(j)]);
+            const Int2 contrib = rshift90i(
+                g.edgeDiff[static_cast<std::size_t>(g.faceEdgeIds[t][static_cast<std::size_t>(j)])],
+                g.orients[t][static_cast<std::size_t>(j)]);
             r.x += contrib.x;
             r.y += contrib.y;
         }
@@ -1570,8 +1593,7 @@ private:
                 }
             }
         }
-        return narrow(e.a, okA, changed) && narrow(e.b, okB, changed) &&
-               narrow(e.c, okC, changed);
+        return narrow(e.a, okA, changed) && narrow(e.b, okB, changed) && narrow(e.c, okC, changed);
     }
 
     // A no-flip inequality: enforce only once <= 1 of its 4 vars is still free.
@@ -2214,7 +2236,8 @@ int EdgeHierarchy::fixFlipSat(int level, int threshold) {
         }
     }
     for (int i = 0; i < static_cast<int>(cDiff.size()); ++i) {
-        if (cE2F[uz(i)][0] == cE2F[uz(i)][1] || cAllow[uz(i * 2)] == 0 || cAllow[uz(i * 2 + 1)] == 0) {
+        if (cE2F[uz(i)][0] == cE2F[uz(i)][1] || cAllow[uz(i * 2)] == 0 ||
+            cAllow[uz(i * 2 + 1)] == 0) {
             flexible[uz(i)] = 0;
         }
     }
@@ -2300,8 +2323,8 @@ int EdgeHierarchy::fixFlipSat(int level, int threshold) {
         }
         eqs[uz(grp)].push_back(EqRow{var[0].x, var[1].x, var[2].x, cst[0].x, cst[1].x, cst[2].x});
         eqs[uz(grp)].push_back(EqRow{var[0].y, var[1].y, var[2].y, cst[0].y, cst[1].y, cst[2].y});
-        ges[uz(grp)].push_back(GeRow{var[0].x, var[1].y, var[0].y, var[1].x,
-                                     cst[0].x * cst[1].y, cst[0].y * cst[1].x});
+        ges[uz(grp)].push_back(GeRow{var[0].x, var[1].y, var[0].y, var[1].x, cst[0].x * cst[1].y,
+                                     cst[0].y * cst[1].x});
     }
 
     for (int gi = 0; gi < numGroup; ++gi) {
@@ -2394,8 +2417,7 @@ void fixFlipHierarchy(IntegerGrid& g) {
     // inconsistent; propagating that down inflates edge diffs and breaks
     // integrability, which makes the downstream subdivision blow up. The repair
     // must never make the grid worse — if it did by either measure, discard it.
-    if (maxDiff(g.edgeDiff) > diffBefore ||
-        countResidualSingularities(g) > residBefore) {
+    if (maxDiff(g.edgeDiff) > diffBefore || countResidualSingularities(g) > residBefore) {
         g.edgeDiff = origDiff;
     }
 }
@@ -2473,7 +2495,9 @@ void subdivideUnitCellsInPlace(SubMesh& m, int maxLen) {
     const auto sqLen = [&](int a, int b) {
         return lengthSquared(m.p[static_cast<std::size_t>(a)] - m.p[static_cast<std::size_t>(b)]);
     };
-    const auto vtx = [&](int he) { return m.tris[static_cast<std::size_t>(he / 3)][static_cast<std::size_t>(he % 3)]; };
+    const auto vtx = [&](int he) {
+        return m.tris[static_cast<std::size_t>(he / 3)][static_cast<std::size_t>(he % 3)];
+    };
 
     struct EdgeLink {
         int id;
@@ -2509,8 +2533,10 @@ void subdivideUnitCellsInPlace(SubMesh& m, int maxLen) {
         for (int i = 0; i < 3; ++i) {
             const Int2 d = m.diffs[static_cast<std::size_t>(f * 3 + i)];
             if (i2maxComp(d) > maxLen) {
-                queue.push({f * 3 + i, sqLen(m.tris[static_cast<std::size_t>(f)][static_cast<std::size_t>(i)],
-                                             m.tris[static_cast<std::size_t>(f)][static_cast<std::size_t>((i + 1) % 3)]),
+                queue.push({f * 3 + i,
+                            sqLen(m.tris[static_cast<std::size_t>(f)][static_cast<std::size_t>(i)],
+                                  m.tris[static_cast<std::size_t>(f)]
+                                        [static_cast<std::size_t>((i + 1) % 3)]),
                             i2maxComp(d)});
             }
         }
@@ -2540,9 +2566,12 @@ void subdivideUnitCellsInPlace(SubMesh& m, int maxLen) {
 
         // New split vertex at the edge midpoint (field + mesh position).
         const int vn = static_cast<int>(m.o.size());
-        m.o.push_back((m.o[static_cast<std::size_t>(v0)] + m.o[static_cast<std::size_t>(v1)]) * 0.5f);
-        m.p.push_back((m.p[static_cast<std::size_t>(v0)] + m.p[static_cast<std::size_t>(v1)]) * 0.5f);
-        m.n.push_back(normalized(m.n[static_cast<std::size_t>(v0)] + m.n[static_cast<std::size_t>(v1)]));
+        m.o.push_back((m.o[static_cast<std::size_t>(v0)] + m.o[static_cast<std::size_t>(v1)]) *
+                      0.5f);
+        m.p.push_back((m.p[static_cast<std::size_t>(v0)] + m.p[static_cast<std::size_t>(v1)]) *
+                      0.5f);
+        m.n.push_back(
+            normalized(m.n[static_cast<std::size_t>(v0)] + m.n[static_cast<std::size_t>(v1)]));
 
         // Parent local diffs (read before overwriting).
         const Int2 D01 = m.diffs[static_cast<std::size_t>(e0)];
@@ -2630,8 +2659,8 @@ SubMesh subdivideToUnitCells(const IntegerGrid& g, const Mesh& mesh, const Posit
     m.diffs.resize(g.tris.size() * 3);
     for (std::size_t t = 0; t < g.tris.size(); ++t) {
         for (std::size_t j = 0; j < 3; ++j) {
-            m.diffs[t * 3 + j] = rshift90i(g.edgeDiff[static_cast<std::size_t>(g.faceEdgeIds[t][j])],
-                                           g.orients[t][j]);
+            m.diffs[t * 3 + j] = rshift90i(
+                g.edgeDiff[static_cast<std::size_t>(g.faceEdgeIds[t][j])], g.orients[t][j]);
         }
     }
 
@@ -3275,7 +3304,8 @@ bool rotateValencePass(std::vector<std::array<int, 4>>& faces, int nV) {
     std::set<std::pair<int, int>> edges;
     for (const auto& f : faces) {
         for (int i = 0; i < 4; ++i) {
-            const int a = f[static_cast<std::size_t>(i)], b = f[static_cast<std::size_t>((i + 1) % 4)];
+            const int a = f[static_cast<std::size_t>(i)],
+                      b = f[static_cast<std::size_t>((i + 1) % 4)];
             if (a != b) {
                 edges.insert(std::minmax(a, b));
             }
@@ -3319,8 +3349,10 @@ bool rotateValencePass(std::vector<std::array<int, 4>>& faces, int nV) {
             const int yv = faces[f2][static_cast<std::size_t>((j + 2) % 4)];
             const int zv = faces[f2][static_cast<std::size_t>((j + 3) % 4)];
             // Both rotations decrement u and v; keep them interior and >= valence 4.
-            if (qv.val[static_cast<std::size_t>(u)] < 4 || qv.val[static_cast<std::size_t>(v)] < 4 ||
-                qv.bnd[static_cast<std::size_t>(u)] != 0 || qv.bnd[static_cast<std::size_t>(v)] != 0) {
+            if (qv.val[static_cast<std::size_t>(u)] < 4 ||
+                qv.val[static_cast<std::size_t>(v)] < 4 ||
+                qv.bnd[static_cast<std::size_t>(u)] != 0 ||
+                qv.bnd[static_cast<std::size_t>(v)] != 0) {
                 continue;
             }
             const std::array<int, 6> hex{u, v, w, x, yv, zv};
@@ -3380,7 +3412,8 @@ void relaxPositions(const std::vector<std::array<int, 4>>& faces, std::vector<Ve
     std::map<std::pair<int, int>, int> edgeCount;
     for (const auto& q : faces) {
         for (int k = 0; k < 4; ++k) {
-            const int a = q[static_cast<std::size_t>(k)], b = q[static_cast<std::size_t>((k + 1) % 4)];
+            const int a = q[static_cast<std::size_t>(k)],
+                      b = q[static_cast<std::size_t>((k + 1) % 4)];
             adj[static_cast<std::size_t>(a)].push_back(b);
             adj[static_cast<std::size_t>(b)].push_back(a);
             ++edgeCount[a < b ? std::make_pair(a, b) : std::make_pair(b, a)];
@@ -3511,15 +3544,17 @@ IntegerGrid integerGridFromSubMesh(const SubMesh& m) {
     const int nTri = static_cast<int>(m.tris.size());
     g.tris.resize(static_cast<std::size_t>(nTri));
     for (int t = 0; t < nTri; ++t) {
-        g.tris[static_cast<std::size_t>(t)] = {static_cast<Index>(m.tris[static_cast<std::size_t>(t)][0]),
-                                               static_cast<Index>(m.tris[static_cast<std::size_t>(t)][1]),
-                                               static_cast<Index>(m.tris[static_cast<std::size_t>(t)][2])};
+        g.tris[static_cast<std::size_t>(t)] = {
+            static_cast<Index>(m.tris[static_cast<std::size_t>(t)][0]),
+            static_cast<Index>(m.tris[static_cast<std::size_t>(t)][1]),
+            static_cast<Index>(m.tris[static_cast<std::size_t>(t)][2])};
     }
     g.e2e = m.e2e;
     g.faceEdgeIds.assign(static_cast<std::size_t>(nTri), {-1, -1, -1});
     g.orients.assign(static_cast<std::size_t>(nTri), {0, 0, 0});
     for (int he = 0; he < nTri * 3; ++he) {
-        const std::size_t t = static_cast<std::size_t>(he / 3), j = static_cast<std::size_t>(he % 3);
+        const std::size_t t = static_cast<std::size_t>(he / 3),
+                          j = static_cast<std::size_t>(he % 3);
         if (g.faceEdgeIds[t][j] != -1) {
             continue;
         }
@@ -3529,7 +3564,8 @@ IntegerGrid integerGridFromSubMesh(const SubMesh& m) {
         g.orients[t][j] = 0;
         const int opp = m.e2e[static_cast<std::size_t>(he)];
         if (opp != -1) {
-            const std::size_t ot = static_cast<std::size_t>(opp / 3), oj = static_cast<std::size_t>(opp % 3);
+            const std::size_t ot = static_cast<std::size_t>(opp / 3),
+                              oj = static_cast<std::size_t>(opp % 3);
             g.faceEdgeIds[ot][oj] = eid;
             int k = 0;
             for (; k < 4; ++k) {
@@ -3550,7 +3586,8 @@ IntegerGrid integerGridFromSubMesh(const SubMesh& m) {
 // identity on `m.diffs`.
 void writeDiffsBackToSubMesh(const IntegerGrid& g, SubMesh& m) {
     for (int he = 0; he < static_cast<int>(m.diffs.size()); ++he) {
-        const std::size_t t = static_cast<std::size_t>(he / 3), j = static_cast<std::size_t>(he % 3);
+        const std::size_t t = static_cast<std::size_t>(he / 3),
+                          j = static_cast<std::size_t>(he % 3);
         m.diffs[static_cast<std::size_t>(he)] =
             rshift90i(g.edgeDiff[static_cast<std::size_t>(g.faceEdgeIds[t][j])], g.orients[t][j]);
     }
@@ -3580,14 +3617,16 @@ IntegerGrid integerGridFromMcf(const Mesh& mesh, const PositionField& field) {
     for (int t = 0; t < nTri; ++t) {
         for (int j = 0; j < 3; ++j) {
             heMap[{g.tris[static_cast<std::size_t>(t)][static_cast<std::size_t>(j)],
-                   g.tris[static_cast<std::size_t>(t)][static_cast<std::size_t>((j + 1) % 3)]}] = t * 3 + j;
+                   g.tris[static_cast<std::size_t>(t)][static_cast<std::size_t>((j + 1) % 3)]}] =
+                t * 3 + j;
         }
     }
     g.e2e.assign(static_cast<std::size_t>(nTri) * 3, -1);
     for (int t = 0; t < nTri; ++t) {
         for (int j = 0; j < 3; ++j) {
-            const auto it = heMap.find({g.tris[static_cast<std::size_t>(t)][static_cast<std::size_t>((j + 1) % 3)],
-                                        g.tris[static_cast<std::size_t>(t)][static_cast<std::size_t>(j)]});
+            const auto it = heMap.find(
+                {g.tris[static_cast<std::size_t>(t)][static_cast<std::size_t>((j + 1) % 3)],
+                 g.tris[static_cast<std::size_t>(t)][static_cast<std::size_t>(j)]});
             if (it != heMap.end()) {
                 g.e2e[static_cast<std::size_t>(t * 3 + j)] = it->second;
             }
@@ -3889,15 +3928,16 @@ IntegerConsistency measureIntegerConsistency(const Mesh& mesh, const PositionFie
         // rotation is (bb - ba), plus 2 (a 180-degree turn) when the match needed a
         // sign flip. This is the 90-degree turn count taking u's frame to v's.
         const Vec3 nu = field.normal[u], nv = field.normal[v];
-        const std::array<Vec3, 4> a{field.q[u], cross(nu, field.q[u]),
-                                    field.q[u] * -1.0f, cross(nu, field.q[u]) * -1.0f};
-        const std::array<Vec3, 4> b{field.q[v], cross(nv, field.q[v]),
-                                    field.q[v] * -1.0f, cross(nv, field.q[v]) * -1.0f};
+        const std::array<Vec3, 4> a{field.q[u], cross(nu, field.q[u]), field.q[u] * -1.0f,
+                                    cross(nu, field.q[u]) * -1.0f};
+        const std::array<Vec3, 4> b{field.q[v], cross(nv, field.q[v]), field.q[v] * -1.0f,
+                                    cross(nv, field.q[v]) * -1.0f};
         int ba = 0, bb = 0;
         float best = -2.0f;
         for (int i = 0; i < 4; ++i) {
             for (int j = 0; j < 4; ++j) {
-                const float dt = dot(a[static_cast<std::size_t>(i)], b[static_cast<std::size_t>(j)]);
+                const float dt =
+                    dot(a[static_cast<std::size_t>(i)], b[static_cast<std::size_t>(j)]);
                 if (dt > best) {
                     best = dt;
                     ba = i;
@@ -3911,9 +3951,9 @@ IntegerConsistency measureIntegerConsistency(const Mesh& mesh, const PositionFie
         const float sU = field.scale.empty() ? field.spacing : field.spacing * field.scale[u];
         const float sV = field.scale.empty() ? field.spacing : field.spacing * field.scale[v];
         const float s = 0.5f * (sU + sV);
-        const PosCompat pc =
-            compatPosition(mesh.position(VertexId{u}), field.normal[u], q0, field.o[u],
-                           mesh.position(VertexId{v}), field.normal[v], q1, field.o[v], s, 1.0f / s);
+        const PosCompat pc = compatPosition(mesh.position(VertexId{u}), field.normal[u], q0,
+                                            field.o[u], mesh.position(VertexId{v}), field.normal[v],
+                                            q1, field.o[v], s, 1.0f / s);
         tOut = Int2{pc.i1.x - pc.i0.x, pc.i1.y - pc.i0.y};
     };
 
@@ -3963,7 +4003,8 @@ IntegerConsistency measureIntegerConsistency(const Mesh& mesh, const PositionFie
         defSum += static_cast<double>(d1);
     }
     r.meanDefect = r.loopEdges ? defSum / static_cast<double>(r.loopEdges) : 0.0;
-    r.closedFraction = r.loopEdges ? static_cast<double>(clean) / static_cast<double>(r.loopEdges) : 1.0;
+    r.closedFraction =
+        r.loopEdges ? static_cast<double>(clean) / static_cast<double>(r.loopEdges) : 1.0;
     return r;
 }
 

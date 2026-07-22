@@ -17,11 +17,11 @@
 namespace cyber::retopo {
 
 struct RelaxParams {
-    float strength = 0.5f;         // per-iteration blend toward the tangent target
-    int iterations = 1;            // Jacobi sweeps
-    Vec3 brushCenter{};            // visible-radius mask centre
-    float brushRadius = 0.0f;      // <= 0 relaxes the whole mesh (no mask)
-    bool autoPinCorners = true;    // pin low-valence (grid-corner) vertices
+    float strength = 0.5f;       // per-iteration blend toward the tangent target
+    int iterations = 1;          // Jacobi sweeps
+    Vec3 brushCenter{};          // visible-radius mask centre
+    float brushRadius = 0.0f;    // <= 0 relaxes the whole mesh (no mask)
+    bool autoPinCorners = true;  // pin low-valence (grid-corner) vertices
 };
 
 // Smooth 0..1 brush falloff; 1 at the centre, 0 at the radius.

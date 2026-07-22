@@ -1,10 +1,10 @@
-#include <chrono>
-#include <cstdio>
-#include <cstdlib>
 #include "cyber/core/isotropic.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <vector>
 
 namespace cyber::remesh {

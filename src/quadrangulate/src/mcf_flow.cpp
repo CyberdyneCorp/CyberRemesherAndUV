@@ -1,5 +1,3 @@
-#include "cyber/quadrangulate/mcf_layout.hpp"
-
 #include <algorithm>
 #include <array>
 #include <cstdlib>
@@ -7,6 +5,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include "cyber/quadrangulate/mcf_layout.hpp"
 #include "mcf_detail.hpp"
 
 // M3b of docs/mcf-integer-layout-plan.md: the flow setup — the tail of QuadriFlow's
@@ -130,7 +129,8 @@ McfFlowSetup buildMcfFlowSetup(const Mesh& mesh, const McfEdgeInfo& info,
                 continue;
             }
             const int avail = static_cast<int>(modified[uz(ii)][uz(j)].size());
-            const int want = (ii == 0) ? std::abs(out.totalFlow[uz(j)]) / 2 : std::abs(out.totalFlow[uz(j)]);
+            const int want =
+                (ii == 0) ? std::abs(out.totalFlow[uz(j)]) / 2 : std::abs(out.totalFlow[uz(j)]);
             const int maxNum = std::min(want, avail);
             const int dir = (out.totalFlow[uz(j)] > 0) ? -1 : 1;
             for (int i = 0; i < maxNum; ++i) {

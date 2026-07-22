@@ -14,10 +14,10 @@
 namespace cyber::render {
 
 enum class PreviewStage : std::uint8_t {
-    Source,      // input triangle soup / cage
-    Isotropic,   // isotropic triangle remesh
-    Param,       // parametrization / cross field
-    Result,      // final quad-dominant mesh
+    Source,     // input triangle soup / cage
+    Isotropic,  // isotropic triangle remesh
+    Param,      // parametrization / cross field
+    Result,     // final quad-dominant mesh
 };
 
 [[nodiscard]] const char* toString(PreviewStage stage);

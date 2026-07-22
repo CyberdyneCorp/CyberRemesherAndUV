@@ -68,8 +68,7 @@ std::uint32_t findMemoryType(VkPhysicalDevice physical, std::uint32_t typeBits,
     vkGetPhysicalDeviceMemoryProperties(physical, &memProps);
     for (std::uint32_t i = 0; i < memProps.memoryTypeCount; ++i) {
         const bool typeOk = (typeBits & (1u << i)) != 0u;
-        const bool propOk =
-            (memProps.memoryTypes[i].propertyFlags & properties) == properties;
+        const bool propOk = (memProps.memoryTypes[i].propertyFlags & properties) == properties;
         if (typeOk && propOk) {
             return i;
         }
@@ -301,8 +300,8 @@ public:
     void setPipeline(IPipeline& pipeline) override {
         auto& vk = static_cast<VulkanPipeline&>(pipeline);
         if (vk.handle() != VK_NULL_HANDLE) {
-            const VkPipelineBindPoint bind = vk.isCompute() ? VK_PIPELINE_BIND_POINT_COMPUTE
-                                                            : VK_PIPELINE_BIND_POINT_GRAPHICS;
+            const VkPipelineBindPoint bind =
+                vk.isCompute() ? VK_PIPELINE_BIND_POINT_COMPUTE : VK_PIPELINE_BIND_POINT_GRAPHICS;
             vkCmdBindPipeline(m_cmd, bind, vk.handle());
         }
     }
@@ -316,9 +315,9 @@ public:
 
     void setIndexBuffer(IBuffer& buffer, IndexType type) override {
         auto& vk = static_cast<VulkanBuffer&>(buffer);
-        vkCmdBindIndexBuffer(m_cmd, vk.handle(), 0,
-                             type == IndexType::Uint16 ? VK_INDEX_TYPE_UINT16
-                                                       : VK_INDEX_TYPE_UINT32);
+        vkCmdBindIndexBuffer(
+            m_cmd, vk.handle(), 0,
+            type == IndexType::Uint16 ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32);
     }
 
     void setPushConstants(std::span<const std::uint8_t> bytes) override {

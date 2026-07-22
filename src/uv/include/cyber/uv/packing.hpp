@@ -63,7 +63,6 @@ PackResult packIslands(Mesh& mesh, std::span<const std::vector<FaceId>> islands,
 // Texel density of one island: texels (at `textureSize`) per unit of 3D
 // surface length, averaged over the island's edges. Zero when the island has
 // no UVs or no measurable surface length.
-[[nodiscard]] float texelDensity(const Mesh& mesh, std::span<const FaceId> island,
-                                 int textureSize);
+[[nodiscard]] float texelDensity(const Mesh& mesh, std::span<const FaceId> island, int textureSize);
 
 }  // namespace cyber::uv

@@ -40,6 +40,14 @@ gcc:
     cmake --build build/gcc
     ctest --test-dir build/gcc --output-on-failure
 
+# Apply clang-format (the CI-pinned version) to all C/C++ sources.
+format:
+    find src apps tests \( -name '*.hpp' -o -name '*.cpp' \) | xargs clang-format -i
+
+# Check formatting without editing (mirrors the CI format gate).
+format-check:
+    find src apps tests \( -name '*.hpp' -o -name '*.cpp' \) | xargs clang-format --dry-run --Werror
+
 # Validate the OpenSpec change proposals + specs.
 spec:
     openspec list

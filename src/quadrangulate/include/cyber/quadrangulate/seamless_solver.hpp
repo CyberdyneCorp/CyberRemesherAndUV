@@ -67,7 +67,7 @@ struct SeamlessSetup {
 // hundreds of singularities (e.g. spot: 92 cones).
 struct Parameterization {
     std::vector<std::array<Vec2, 3>> cornerUv;  // per FaceId; empty array for dead faces
-    int cutVertexCount = 0;   // vertices of the cut-open (disk) mesh the solve ran on
+    int cutVertexCount = 0;  // vertices of the cut-open (disk) mesh the solve ran on
     int cgIterationsU = 0;
     int cgIterationsV = 0;
     bool valid = false;

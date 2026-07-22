@@ -41,9 +41,8 @@ public:
     [[nodiscard]] virtual float dot(const float* x, const float* y, std::size_t n);
     // y = A * x for a CSR matrix A with `rows` rows (rowStart has rows + 1
     // entries; colIndex/value have nnz entries).
-    virtual void spmvCsr(std::size_t rows, const std::size_t* rowStart,
-                         const std::size_t* colIndex, const float* value, const float* x,
-                         float* y);
+    virtual void spmvCsr(std::size_t rows, const std::size_t* rowStart, const std::size_t* colIndex,
+                         const float* value, const float* x, float* y);
 
     // Batched geometry queries over a flattened BVH (roadmap 4.6/5.8/11.1), so
     // baking and surface projection run on the GPU. Inputs are host pointers to
@@ -62,10 +61,9 @@ public:
     // Casts n rays; outHitXYZ[i] holds the nearest hit point and outFace[i] the
     // owning FaceId::value, or outFace[i] = -1 on a miss (directions need not be
     // normalized; nearest positive t along the ray is kept).
-    virtual void raycastBvh(const FlatBvhNode* nodes, std::size_t nodeCount,
-                            const FlatBvhTri* tris, std::size_t triCount,
-                            const float* originsXYZ, const float* dirsXYZ, std::size_t n,
-                            float* outHitXYZ, int* outFace);
+    virtual void raycastBvh(const FlatBvhNode* nodes, std::size_t nodeCount, const FlatBvhTri* tris,
+                            std::size_t triCount, const float* originsXYZ, const float* dirsXYZ,
+                            std::size_t n, float* outHitXYZ, int* outFace);
 };
 
 // Enumerates available backends, best first (Metal/CUDA > OpenCL > CPU).

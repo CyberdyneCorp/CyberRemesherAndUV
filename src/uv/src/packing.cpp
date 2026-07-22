@@ -48,8 +48,9 @@ PackResult packBoxes(std::span<const Bounds2> boxes, const PackParams& params) {
     for (std::size_t i = 0; i < order.size(); ++i) {
         order[i] = i;
     }
-    std::stable_sort(order.begin(), order.end(),
-                     [&](std::size_t a, std::size_t b) { return items[a].size.y > items[b].size.y; });
+    std::stable_sort(order.begin(), order.end(), [&](std::size_t a, std::size_t b) {
+        return items[a].size.y > items[b].size.y;
+    });
 
     float boundWidth = 0.0f;
     float boundHeight = 0.0f;
@@ -141,8 +142,7 @@ PackResult packBoxes(std::span<const Bounds2> boxes, const PackParams& params) {
         // padding, offset by half the margin.
         const float half = margin * 0.5f;
         packed.offset = {(item.pos.x + half) * scale, (item.pos.y + half) * scale};
-        const Vec2 islandSize =
-            packed.source.valid() ? packed.source.size() : Vec2{0.0f, 0.0f};
+        const Vec2 islandSize = packed.source.valid() ? packed.source.size() : Vec2{0.0f, 0.0f};
         packed.placed.mn = packed.offset;
         packed.placed.mx = {packed.offset.x + islandSize.x * scale,
                             packed.offset.y + islandSize.y * scale};

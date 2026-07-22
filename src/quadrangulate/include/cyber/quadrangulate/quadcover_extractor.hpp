@@ -152,7 +152,7 @@ void eliminateNonQuadCaps(std::vector<Vec3>& vertices,
 // curvature-adaptive sizing) is forwarded to the seamless-UV solve as the frame-field
 // gradient adaptivity. The pipeline passes the run's adaptivity through here.
 std::unique_ptr<IQuadrangulator> makeQuadCoverQuadrangulator(int fieldIterations = 40,
-                                                            float adaptivity = 0.0f);
+                                                             float adaptivity = 0.0f);
 
 // Whether a seamless-UV solver is available for the quad-cover method: true when the
 // in-process solver is linked (built with -DCYBER_WITH_QUADCOVER=ON) or the

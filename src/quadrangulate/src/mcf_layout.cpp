@@ -82,7 +82,8 @@ McfSolveResult solveMcfFlow(const McfEdgeInfo& info, const McfConstraints& con,
         for (int i = 0; i < m; ++i) {
             for (int j = 0; j < 3; ++j) {
                 const int e = info.faceEdgeIds[uz(i)][uz(j)];
-                const Vec2i index = rshift90({e * 2 + 1, e * 2 + 2}, con.faceEdgeOrients[uz(i)][uz(j)]);
+                const Vec2i index =
+                    rshift90({e * 2 + 1, e * 2 + 2}, con.faceEdgeOrients[uz(i)][uz(j)]);
                 for (int k = 0; k < 2; ++k) {
                     const int idx = comp(index, k);
                     const int l = std::abs(idx), s = idx / l, ind = l - 1, eq = i * 2 + k;
@@ -150,7 +151,8 @@ McfSolveResult solveMcfFlow(const McfEdgeInfo& info, const McfConstraints& con,
 
         const int nNodes = nextNode;
         const int nnz = static_cast<int>(cooData.size());
-        ndarray data = zeros({nnz}, kFloat64), row = zeros({nnz}, kInt64), col = zeros({nnz}, kInt64);
+        ndarray data = zeros({nnz}, kFloat64), row = zeros({nnz}, kInt64),
+                col = zeros({nnz}, kInt64);
         for (int i = 0; i < nnz; ++i) {
             data.typed_data<double>()[i] = cooData[uz(i)];
             row.typed_data<std::int64_t>()[i] = cooRow[uz(i)];

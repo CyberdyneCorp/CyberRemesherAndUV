@@ -1,7 +1,6 @@
-#include "cyber/quadrangulate/mcf_layout.hpp"
-
 #include <vector>
 
+#include "cyber/quadrangulate/mcf_layout.hpp"
 #include "mcf_detail.hpp"
 
 // M5a of docs/mcf-integer-layout-plan.md: the extraction vertex-collapse — the opening
@@ -89,7 +88,8 @@ McfCollapse buildMcfCollapse(const Mesh& mesh, const PositionField& field, const
     out.position.resize(uz(out.numVertices));
     for (int i = 0; i < out.numVertices; ++i) {
         const float inv = count[uz(i)] > 0 ? 1.0f / static_cast<float>(count[uz(i)]) : 1.0f;
-        out.position[uz(i)] = Vec3{accum[uz(i)].x * inv, accum[uz(i)].y * inv, accum[uz(i)].z * inv};
+        out.position[uz(i)] =
+            Vec3{accum[uz(i)].x * inv, accum[uz(i)].y * inv, accum[uz(i)].z * inv};
     }
 
     out.valid = true;

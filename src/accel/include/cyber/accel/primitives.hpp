@@ -119,9 +119,8 @@ inline void closestPoints(IBackend& backend, const Bvh& bvh, const Buffer<Vec3>&
     out.resize(queries.size());
     const FlatBvh flat = bvh.flatten();
     backend.closestPointsBvh(flat.nodes.data(), flat.nodes.size(), flat.tris.data(),
-                             flat.tris.size(),
-                             reinterpret_cast<const float*>(queries.data()), queries.size(),
-                             reinterpret_cast<float*>(out.data()));
+                             flat.tris.size(), reinterpret_cast<const float*>(queries.data()),
+                             queries.size(), reinterpret_cast<float*>(out.data()));
 }
 
 // Batched ray cast: out[i] holds the hit for ray i, or nullopt on a miss.

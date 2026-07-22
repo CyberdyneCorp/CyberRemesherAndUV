@@ -111,8 +111,8 @@ TEST_CASE("selectBackend honours the request and falls back to CPU") {
     REQUIRE(cpu->kind() == accel::BackendKind::Cpu);
 
     // Selecting any kind never returns null; an absent GPU degrades to CPU.
-    for (const auto kind : {accel::BackendKind::Metal, accel::BackendKind::Cuda,
-                            accel::BackendKind::OpenCl}) {
+    for (const auto kind :
+         {accel::BackendKind::Metal, accel::BackendKind::Cuda, accel::BackendKind::OpenCl}) {
         const auto backend = accel::selectBackend(kind);
         REQUIRE(backend != nullptr);
         // Either the requested GPU kind (if present) or the CPU fallback.

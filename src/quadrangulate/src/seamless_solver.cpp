@@ -159,8 +159,8 @@ int vertexIndex(const Mesh& mesh, const CrossField& field, VertexId v) {
 }  // namespace
 
 std::size_t SeamlessSetup::singularityCount() const {
-    return static_cast<std::size_t>(
-        std::count_if(singularityIndex.begin(), singularityIndex.end(), [](int k) { return k != 0; }));
+    return static_cast<std::size_t>(std::count_if(singularityIndex.begin(), singularityIndex.end(),
+                                                  [](int k) { return k != 0; }));
 }
 
 int SeamlessSetup::totalIndex() const {
@@ -309,8 +309,8 @@ std::vector<EdgeId> faceEdges(const Mesh& mesh, FaceId f) {
 // accel spmv for the matrix-vector product (so a GPU backend accelerates it). Returns
 // the iteration count; x is seeded with its incoming value.
 int conjugateGradient(accel::IBackend& backend, const accel::SparseMatrix& A,
-                      const std::vector<float>& b, std::vector<float>& x, int maxIters,
-                      float tol, const CancelToken* cancel = nullptr) {
+                      const std::vector<float>& b, std::vector<float>& x, int maxIters, float tol,
+                      const CancelToken* cancel = nullptr) {
     const std::size_t n = A.rows;
     accel::Buffer<float> xb(std::vector<float>(x.begin(), x.end()));
     accel::Buffer<float> ax;
@@ -365,13 +365,32 @@ int conjugateGradient(accel::IBackend& backend, const accel::SparseMatrix& A,
 //   (R^rho (u,v))_x = cxu*u + cxv*v ;  (R^rho (u,v))_y = cyu*u + cyv*v.
 void rotCoeffs(int rho, double& cxu, double& cxv, double& cyu, double& cyv) {
     switch (((rho % 4) + 4) % 4) {
-        case 0: cxu = 1; cxv = 0; cyu = 0; cyv = 1; break;
-        case 1: cxu = 0; cxv = -1; cyu = 1; cyv = 0; break;
-        case 2: cxu = -1; cxv = 0; cyu = 0; cyv = -1; break;
-        default: cxu = 0; cxv = 1; cyu = -1; cyv = 0; break;
+        case 0:
+            cxu = 1;
+            cxv = 0;
+            cyu = 0;
+            cyv = 1;
+            break;
+        case 1:
+            cxu = 0;
+            cxv = -1;
+            cyu = 1;
+            cyv = 0;
+            break;
+        case 2:
+            cxu = -1;
+            cxv = 0;
+            cyu = 0;
+            cyv = -1;
+            break;
+        default:
+            cxu = 0;
+            cxv = 1;
+            cyu = -1;
+            cyv = 0;
+            break;
     }
 }
-
 
 // Rotate direction d by r quarter-turns about axis n (r mod 4).
 Vec3 rotQuarter(Vec3 d, const Vec3& n, int r) {
@@ -483,8 +502,8 @@ int solveSeamlessReduced(accel::IBackend& backend, std::size_t nCut,
         const SeamRef& s = seams[e];
         double cxu, cxv, cyu, cyv;
         rotCoeffs(s.rho, cxu, cxv, cyu, cyv);
-        const std::array<std::pair<std::size_t, std::size_t>, 2> ends{
-            std::make_pair(s.aA, s.aB), std::make_pair(s.bA, s.bB)};
+        const std::array<std::pair<std::size_t, std::size_t>, 2> ends{std::make_pair(s.aA, s.aB),
+                                                                      std::make_pair(s.bA, s.bB)};
         for (const auto& [pA, pB] : ends) {
             Row rx, ry;
             addC(rx, uIx(pB), 1.0);
@@ -595,7 +614,8 @@ int solveSeamlessReduced(accel::IBackend& backend, std::size_t nCut,
     }
 
     // Reduction map on the UV block only: Tuv (nUv x W) and its transpose Tt (W x nUv).
-    const auto buildCsr = [](std::size_t nr, const std::vector<std::vector<std::pair<std::size_t, double>>>& r) {
+    const auto buildCsr = [](std::size_t nr,
+                             const std::vector<std::vector<std::pair<std::size_t, double>>>& r) {
         accel::SparseMatrix m;
         m.rows = nr;
         m.rowStart.reserve(nr + 1);
@@ -777,9 +797,7 @@ int solveSeamlessReduced(accel::IBackend& backend, std::size_t nCut,
         }
     }
     const double tCap = std::max(uvSpan * 2.0, std::sqrt(static_cast<double>(nCut))) + 8.0;
-    const auto clampInt = [tCap](double val) {
-        return std::clamp(std::round(val), -tCap, tCap);
-    };
+    const auto clampInt = [tCap](double val) { return std::clamp(std::round(val), -tCap, tCap); };
 
     std::vector<char> intPinned(intFree.size(), 0);
     constexpr double kConfident = 0.2;
@@ -817,10 +835,10 @@ int solveSeamlessReduced(accel::IBackend& backend, std::size_t nCut,
         // settles, which the next re-solve absorbs. Cuts the many single-pin tail rounds.
         if (pinnedThisRound == 0 && !frac.empty()) {
             const std::size_t batch = std::max<std::size_t>(1, frac.size() / 8);
-            std::partial_sort(frac.begin(),
-                              frac.begin() + static_cast<std::ptrdiff_t>(std::min(batch, frac.size())),
-                              frac.end(),
-                              [](const auto& a, const auto& b) { return a.first < b.first; });
+            std::partial_sort(
+                frac.begin(),
+                frac.begin() + static_cast<std::ptrdiff_t>(std::min(batch, frac.size())),
+                frac.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
             for (std::size_t i = 0; i < batch && i < frac.size(); ++i) {
                 pin(frac[i].second);
             }
@@ -839,7 +857,8 @@ int solveSeamlessReduced(accel::IBackend& backend, std::size_t nCut,
     const bool dbg = std::getenv("CYBER_QC_DEBUG") != nullptr;
     if (dbg) {
         std::fprintf(stderr,
-                     "[qc] reduced: nCut=%zu seams=%zu vars=%zu free=%zu intFree=%zu maskedSolves=%d totalCg=%d\n",
+                     "[qc] reduced: nCut=%zu seams=%zu vars=%zu free=%zu intFree=%zu "
+                     "maskedSolves=%d totalCg=%d\n",
                      nCut, nSeam, N, W, intFree.size(), maskedSolveCalls, totalCg);
     }
     return totalCg;
@@ -847,9 +866,8 @@ int solveSeamlessReduced(accel::IBackend& backend, std::size_t nCut,
 
 }  // namespace
 
-Parameterization solveParameterization(const Mesh& mesh, const SeamlessSetup& setup,
-                                       float spacing, accel::IBackend& backend,
-                                       const CancelToken* cancel) {
+Parameterization solveParameterization(const Mesh& mesh, const SeamlessSetup& setup, float spacing,
+                                       accel::IBackend& backend, const CancelToken* cancel) {
     Parameterization out;
     if (!setup.valid || spacing <= 0.0f || mesh.faceCapacity() == 0) {
         return out;
@@ -930,7 +948,8 @@ Parameterization solveParameterization(const Mesh& mesh, const SeamlessSetup& se
             continue;
         }
         const std::vector<VertexId> vs = mesh.faceVertices(f);
-        const std::array<Vec3, 3> p{mesh.position(vs[0]), mesh.position(vs[1]), mesh.position(vs[2])};
+        const std::array<Vec3, 3> p{mesh.position(vs[0]), mesh.position(vs[1]),
+                                    mesh.position(vs[2])};
         const Vec3 nrm = cross(p[1] - p[0], p[2] - p[0]);
         const float area2 = length(nrm);
         if (area2 < 1e-20f) {

@@ -429,8 +429,7 @@ std::size_t Mesh::fillHoles(std::size_t maxBoundaryEdges) {
                 break;
             }
         }
-        if (ok && loop.size() >= 3 && loop.size() <= maxBoundaryEdges &&
-            addFace(loop).valid()) {
+        if (ok && loop.size() >= 3 && loop.size() <= maxBoundaryEdges && addFace(loop).valid()) {
             ++filled;
         }
     }

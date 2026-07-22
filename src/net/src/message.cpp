@@ -1,7 +1,6 @@
 #include "cyber/net/message.hpp"
 
 #include <exception>
-
 #include <json.hpp>
 
 #include "mesh_json.hpp"
@@ -10,13 +9,11 @@ namespace cyber::net {
 
 namespace {
 
-using nlohmann::json;
 using detail::meshFromJson;
 using detail::meshToJson;
+using nlohmann::json;
 
-json error(const std::string& message) {
-    return json{{"type", "error"}, {"message", message}};
-}
+json error(const std::string& message) { return json{{"type", "error"}, {"message", message}}; }
 
 json handle(BridgeSession& session, const json& req) {
     const std::string type = req.at("type").get<std::string>();

@@ -16,11 +16,11 @@
 namespace cyber::bake {
 
 enum class BakeMap {
-    Normal,             // tangent-space normal map (RGB, encoded [0,1])
-    AmbientOcclusion,   // openness in [0,1] (1 = fully lit), single channel
-    Displacement,       // signed height along the low-poly normal, single channel
-    Position,           // high-poly hit position (RGB, world space)
-    Color,              // Target vertex color sampled at the hit (RGB)
+    Normal,            // tangent-space normal map (RGB, encoded [0,1])
+    AmbientOcclusion,  // openness in [0,1] (1 = fully lit), single channel
+    Displacement,      // signed height along the low-poly normal, single channel
+    Position,          // high-poly hit position (RGB, world space)
+    Color,             // Target vertex color sampled at the hit (RGB)
 };
 
 struct Image {

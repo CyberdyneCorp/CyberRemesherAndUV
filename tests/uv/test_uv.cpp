@@ -191,8 +191,7 @@ TEST_CASE("packing preserves relative scale of unequal islands") {
 TEST_CASE("seam ring cuts a mesh into two islands") {
     // Two quads sharing an edge form one island; seaming the shared edge
     // splits them.
-    const std::vector<Vec3> p = {{0, 0, 0}, {1, 0, 0}, {1, 1, 0},
-                                 {0, 1, 0}, {2, 0, 0}, {2, 1, 0}};
+    const std::vector<Vec3> p = {{0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0}, {2, 0, 0}, {2, 1, 0}};
     const std::vector<std::vector<Index>> f = {{0, 1, 2, 3}, {1, 4, 5, 2}};
     Mesh mesh = Mesh::fromIndexed(p, f);
 

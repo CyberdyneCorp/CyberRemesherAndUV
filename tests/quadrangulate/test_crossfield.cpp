@@ -37,9 +37,9 @@ Mesh makeGrid(int n) {
 // Angular distance of a planar direction to the nearest grid axis, folded into
 // the cross's 90-degree symmetry, in degrees.
 float axisMisalignmentDeg(Vec3 d) {
-    float theta = std::atan2(d.y, d.x);           // (-pi, pi]
+    float theta = std::atan2(d.y, d.x);                        // (-pi, pi]
     float m = std::fmod(std::fabs(theta), cyber::kPi / 2.0f);  // [0, pi/2)
-    m = std::fmin(m, cyber::kPi / 2.0f - m);       // fold to nearest axis
+    m = std::fmin(m, cyber::kPi / 2.0f - m);                   // fold to nearest axis
     return m * 180.0f / cyber::kPi;
 }
 

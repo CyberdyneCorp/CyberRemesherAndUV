@@ -1,4 +1,3 @@
-#include <cstdlib>
 #include "cyber/core/pipeline.hpp"
 
 #include <algorithm>
@@ -6,6 +5,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <map>
 #include <queue>
 #include <thread>
@@ -88,7 +88,8 @@ Mesh weldCoincidentVertices(const Mesh& mesh) {
     std::vector<Vec3> welded;
     std::vector<Index> remap(pos.size());
     for (std::size_t i = 0; i < pos.size(); ++i) {
-        const auto [it, inserted] = lookup.try_emplace(key(pos[i]), static_cast<Index>(welded.size()));
+        const auto [it, inserted] =
+            lookup.try_emplace(key(pos[i]), static_cast<Index>(welded.size()));
         if (inserted) {
             welded.push_back(pos[i]);
         }
@@ -396,8 +397,8 @@ void relaxQuadMesh(Mesh& mesh, const ReferenceSurface& reference, float sharpEdg
             }
             const auto verts = mesh.faceVertices(f);
             for (std::size_t k = 0; k < 4; ++k) {
-                sum += static_cast<double>(length(mesh.position(verts[k]) -
-                                                  mesh.position(verts[(k + 1) % 4])));
+                sum += static_cast<double>(
+                    length(mesh.position(verts[k]) - mesh.position(verts[(k + 1) % 4])));
                 ++n;
             }
         }
@@ -524,7 +525,7 @@ PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSi
     // Stage 1: guarded target edge length.
     Mesh work = input;
     work.triangulate();
-    work = weldCoincidentVertices(work);  // fuse unwelded coincident patches (seam fix)
+    work = weldCoincidentVertices(work);   // fuse unwelded coincident patches (seam fix)
     work = orientFacesConsistently(work);  // repair inconsistent face winding (robustness)
     const double area = totalSurfaceArea(work);
     const EdgeLengthResult lengthResult = targetEdgeLength(area, effectiveQuads, params.edgeScale);
@@ -555,7 +556,7 @@ PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSi
     }
 
     float progressBase = 0.0f;
-    bool fieldExtractor = false;   // did the position-field extractor run? (drives CV relax)
+    bool fieldExtractor = false;    // did the position-field extractor run? (drives CV relax)
     bool integerExtractor = false;  // integer-grid extractor? (drives base-relax strength)
     // The quad-cover method runs its own (harness) isotropic remesh + seamless-UV solve on
     // the raw triangles; a preceding pipeline isotropic remesh would double-remesh and leave
@@ -579,10 +580,12 @@ PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSi
             progress ? progress->subrange(base, base + span, "isotropic") : ProgressSink{};
         const IsotropicStatus st =
             isotropicRemesh(m, reference, iso, progress ? &isoSink : nullptr, cancel);
-        if (st != IsotropicStatus::Cancelled && (st != IsotropicStatus::Success || m.faceCount() == 0)) {
+        if (st != IsotropicStatus::Cancelled &&
+            (st != IsotropicStatus::Success || m.faceCount() == 0)) {
             oc.stage = "isotropic";
-            oc.reason = st == IsotropicStatus::InvalidInput ? "invalid island input"
-                                                            : "island vanished during isotropic remeshing";
+            oc.reason = st == IsotropicStatus::InvalidInput
+                            ? "invalid island input"
+                            : "island vanished during isotropic remeshing";
         }
         return st;
     };
@@ -631,8 +634,8 @@ PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSi
             progress ? progress->subrange(progressBase + weight * 0.3f,
                                           progressBase + weight * 0.9f, "quadrangulate")
                      : ProgressSink{};
-        const auto quadOutcome = quad->quadrangulate(
-            outcome.mesh, lengthResult.edgeLength, progress ? &quadSink : nullptr, cancel);
+        const auto quadOutcome = quad->quadrangulate(outcome.mesh, lengthResult.edgeLength,
+                                                     progress ? &quadSink : nullptr, cancel);
         if (quadOutcome.cancelled) {
             result.status = RunStatus::Cancelled;
             return result;
@@ -655,8 +658,8 @@ PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSi
                 std::unique_ptr<IQuadrangulator> fb = fallbackQuadrangulator();
                 fieldExtractor = fb->name() == "instant-meshes" || fb->name() == "quad-cover";
                 integerExtractor = fb->name() == "integer";
-                const auto fbOutcome = fb->quadrangulate(
-                    outcome.mesh, lengthResult.edgeLength, progress ? &quadSink : nullptr, cancel);
+                const auto fbOutcome = fb->quadrangulate(outcome.mesh, lengthResult.edgeLength,
+                                                         progress ? &quadSink : nullptr, cancel);
                 if (fbOutcome.cancelled) {
                     result.status = RunStatus::Cancelled;
                     return result;
@@ -733,7 +736,8 @@ PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSi
         const char* riEnv = std::getenv("CYBER_RELAX_ITERS");
         const char* rlEnv = std::getenv("CYBER_RELAX_LAMBDA");
         const int finalRelaxIters = riEnv != nullptr ? std::atoi(riEnv) : 20;
-        const float finalRelaxLambda = rlEnv != nullptr ? static_cast<float>(std::atof(rlEnv)) : 0.5f;
+        const float finalRelaxLambda =
+            rlEnv != nullptr ? static_cast<float>(std::atof(rlEnv)) : 0.5f;
 
         // Relax the coarse base onto the source first: a skewed base subdivides
         // into skewed quads, so smoothing it before the split reduces the sliver
@@ -766,11 +770,11 @@ PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSi
                 // would trade edge-CV, so they keep the lighter pass.
                 // CYBER_BASE_RELAX_ITERS overrides it for further tuning.
                 const char* briEnv = std::getenv("CYBER_BASE_RELAX_ITERS");
-                const int baseRelaxIters =
-                    briEnv != nullptr ? std::atoi(briEnv)
-                                      : ((integerExtractor || quadCoverMethod) ? 40 : 10);
-                relaxQuadMesh(result.mesh, baseSurface, params.sharpEdgeDegrees,
-                              baseRelaxIters, /*lambda=*/0.5f, shapeMatch);
+                const int baseRelaxIters = briEnv != nullptr
+                                               ? std::atoi(briEnv)
+                                               : ((integerExtractor || quadCoverMethod) ? 40 : 10);
+                relaxQuadMesh(result.mesh, baseSurface, params.sharpEdgeDegrees, baseRelaxIters,
+                              /*lambda=*/0.5f, shapeMatch);
             }
         }
         if (pipeTime) {
@@ -800,8 +804,8 @@ PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSi
                     result.mesh.setPosition(v, sourceSurface.project(result.mesh.position(v)));
                 }
             }
-            relaxQuadMesh(result.mesh, sourceSurface, params.sharpEdgeDegrees,
-                          finalRelaxIters, finalRelaxLambda, shapeMatch);
+            relaxQuadMesh(result.mesh, sourceSurface, params.sharpEdgeDegrees, finalRelaxIters,
+                          finalRelaxLambda, shapeMatch);
         }
         if (pipeTime) {
             std::fprintf(stderr, "[pipe-time] final project+relax=%ldms\n", pms(pt, PClk::now()));

@@ -75,11 +75,11 @@ bool writePng(const std::string& path, int width, int height, int channels,
     Bytes ihdr;
     detail::appendU32BE(ihdr, static_cast<std::uint32_t>(width));
     detail::appendU32BE(ihdr, static_cast<std::uint32_t>(height));
-    ihdr.push_back(8);                                              // bit depth
+    ihdr.push_back(8);                                                 // bit depth
     ihdr.push_back(static_cast<std::uint8_t>(channels == 4 ? 6 : 2));  // color type
-    ihdr.push_back(0);                                              // compression
-    ihdr.push_back(0);                                              // filter method
-    ihdr.push_back(0);                                              // interlace
+    ihdr.push_back(0);                                                 // compression
+    ihdr.push_back(0);                                                 // filter method
+    ihdr.push_back(0);                                                 // interlace
     writeChunk(out, "IHDR", ihdr);
 
     writeChunk(out, "IDAT", zlibStored(raw));
@@ -93,9 +93,8 @@ bool writePngTonemapped(const std::string& path, int width, int height, int chan
     if (width <= 0 || height <= 0 || (channels != 3 && channels != 4) || pixels == nullptr) {
         return false;
     }
-    const std::size_t count =
-        static_cast<std::size_t>(width) * static_cast<std::size_t>(height) *
-        static_cast<std::size_t>(channels);
+    const std::size_t count = static_cast<std::size_t>(width) * static_cast<std::size_t>(height) *
+                              static_cast<std::size_t>(channels);
     detail::Bytes bytes(count);
     for (std::size_t i = 0; i < count; ++i) {
         const float clamped = std::min(1.0f, std::max(0.0f, pixels[i]));

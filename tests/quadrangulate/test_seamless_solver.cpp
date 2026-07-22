@@ -28,8 +28,10 @@ Mesh makeSphere(int rings = 20, int segments = 30) {
     for (int r = 1; r < rings; ++r) {
         const float phi = 3.14159265f * static_cast<float>(r) / static_cast<float>(rings);
         for (int s = 0; s < segments; ++s) {
-            const float th = 2.0f * 3.14159265f * static_cast<float>(s) / static_cast<float>(segments);
-            p.push_back({std::sin(phi) * std::cos(th), std::sin(phi) * std::sin(th), std::cos(phi)});
+            const float th =
+                2.0f * 3.14159265f * static_cast<float>(s) / static_cast<float>(segments);
+            p.push_back(
+                {std::sin(phi) * std::cos(th), std::sin(phi) * std::sin(th), std::cos(phi)});
         }
     }
     p.push_back({0, 0, -1});
@@ -64,8 +66,10 @@ Mesh makeOpenBowl(int rings = 20, int segments = 30) {
     for (int r = 1; r <= half; ++r) {
         const float phi = 3.14159265f * static_cast<float>(r) / static_cast<float>(rings);
         for (int s = 0; s < segments; ++s) {
-            const float th = 2.0f * 3.14159265f * static_cast<float>(s) / static_cast<float>(segments);
-            p.push_back({std::sin(phi) * std::cos(th), std::sin(phi) * std::sin(th), std::cos(phi)});
+            const float th =
+                2.0f * 3.14159265f * static_cast<float>(s) / static_cast<float>(segments);
+            p.push_back(
+                {std::sin(phi) * std::cos(th), std::sin(phi) * std::sin(th), std::cos(phi)});
         }
     }
     const auto ring = [&](int r, int s) {
@@ -108,7 +112,8 @@ Mesh makeCubeSphere(int n = 8) {
     };
     const int dirs[6][3] = {{0, 0, 1}, {0, 0, -1}, {0, 1, 0}, {0, -1, 0}, {1, 0, 0}, {-1, 0, 0}};
     for (const auto& d : dirs) {
-        const Vec3 nrm{static_cast<float>(d[0]), static_cast<float>(d[1]), static_cast<float>(d[2])};
+        const Vec3 nrm{static_cast<float>(d[0]), static_cast<float>(d[1]),
+                       static_cast<float>(d[2])};
         const Vec3 a = std::abs(nrm.z) < 0.5f ? Vec3{0, 0, 1} : Vec3{1, 0, 0};
         const Vec3 t1 = normalized(cross(nrm, a));
         const Vec3 t2 = cross(nrm, t1);
@@ -153,7 +158,8 @@ Mesh makeCube(int n = 6) {
     };
     const int dirs[6][3] = {{0, 0, 1}, {0, 0, -1}, {0, 1, 0}, {0, -1, 0}, {1, 0, 0}, {-1, 0, 0}};
     for (const auto& d : dirs) {
-        const Vec3 nrm{static_cast<float>(d[0]), static_cast<float>(d[1]), static_cast<float>(d[2])};
+        const Vec3 nrm{static_cast<float>(d[0]), static_cast<float>(d[1]),
+                       static_cast<float>(d[2])};
         const Vec3 a = std::abs(nrm.z) < 0.5f ? Vec3{0, 0, 1} : Vec3{1, 0, 0};
         const Vec3 t1 = normalized(cross(nrm, a));
         const Vec3 t2 = cross(nrm, t1);
@@ -249,7 +255,7 @@ TEST_CASE("seamless M1: cut graph opens a genus-0 surface to a disk (chi == 1)")
     const Mesh sphere = makeSphere();
     const remesh::SeamlessSetup setup = remesh::buildSeamlessSetup(sphere, 30, *backend);
     REQUIRE(setup.valid);
-    CHECK(eulerCharacteristic(sphere) == 2);  // closed sphere
+    CHECK(eulerCharacteristic(sphere) == 2);                        // closed sphere
     CHECK(remesh::cutOpenEulerCharacteristic(sphere, setup) == 1);  // cut open -> disk
 }
 

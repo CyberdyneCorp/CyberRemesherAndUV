@@ -97,16 +97,16 @@ TEST_CASE("color bake samples a target texture at the interpolated Target UV") {
 
     // Four texels near the UV quadrant centres. Pixels 7 and 24 map to UVs that
     // clamp onto the 2x2 texel centres, so bilinear returns the pure texel.
-    const Vec3 topLeft = pixel(r.image, 7, 7);    // u<0.5, v>0.5
-    const Vec3 topRight = pixel(r.image, 24, 7);  // u>0.5, v>0.5
-    const Vec3 botLeft = pixel(r.image, 7, 24);   // u<0.5, v<0.5
+    const Vec3 topLeft = pixel(r.image, 7, 7);     // u<0.5, v>0.5
+    const Vec3 topRight = pixel(r.image, 24, 7);   // u>0.5, v>0.5
+    const Vec3 botLeft = pixel(r.image, 7, 24);    // u<0.5, v<0.5
     const Vec3 botRight = pixel(r.image, 24, 24);  // u>0.5, v<0.5
 
     // The checker reproduces regardless of the sampler's V orientation: the two
     // UV-diagonal samples match, the two anti-diagonal samples match, and the
     // diagonals carry different colors.
-    REQUIRE(rgbEqual(topLeft, botRight));   // one diagonal
-    REQUIRE(rgbEqual(topRight, botLeft));   // the other diagonal
+    REQUIRE(rgbEqual(topLeft, botRight));  // one diagonal
+    REQUIRE(rgbEqual(topRight, botLeft));  // the other diagonal
     REQUIRE_FALSE(rgbEqual(topLeft, topRight));
 
     // Each sample is a pure checker texel (red or green), not a blended mix, and

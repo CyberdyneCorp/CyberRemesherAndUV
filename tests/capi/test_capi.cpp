@@ -68,8 +68,7 @@ TEST_CASE("capi rejects null arguments") {
 
 TEST_CASE("capi reports a missing OBJ as an I/O error") {
     CyberMesh* mesh = nullptr;
-    const CyberStatus status =
-        cyber_mesh_load_obj("/nonexistent/definitely/missing.obj", &mesh);
+    const CyberStatus status = cyber_mesh_load_obj("/nonexistent/definitely/missing.obj", &mesh);
     REQUIRE(status == CYBER_ERR_IO);
     REQUIRE(mesh == nullptr);
     REQUIRE(std::string(cyber_last_error()).size() > 0);

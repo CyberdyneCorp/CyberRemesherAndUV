@@ -1,9 +1,8 @@
-#include "cyber/quadrangulate/mcf_layout.hpp"
-
 #include <queue>
 #include <utility>
 #include <vector>
 
+#include "cyber/quadrangulate/mcf_layout.hpp"
 #include "mcf_detail.hpp"
 
 // M3a of docs/mcf-integer-layout-plan.md: the integer-constraint graph — a faithful
@@ -22,7 +21,7 @@ using namespace cyber::remesh::mcf;
 // carry a mod-4 relative orientation, so a whole face patch can be rotated into one
 // consistent frame.
 class OrientTree {
-   public:
+public:
     explicit OrientTree(int n) : parent_(uz(n)), rank_(uz(n), 1) {
         for (int i = 0; i < n; ++i) {
             parent_[uz(i)] = {i, 0};
@@ -59,7 +58,7 @@ class OrientTree {
         }
     }
 
-   private:
+private:
     std::vector<std::pair<int, int>> parent_;  // (parent index, relative orient mod 4)
     std::vector<int> rank_;
 };

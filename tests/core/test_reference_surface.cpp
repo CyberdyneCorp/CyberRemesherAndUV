@@ -140,13 +140,13 @@ TEST_CASE("the smoothing angle gates whether a ridge is creased or blended") {
     // averaged across it, so each slope projects flat. Above it the normals
     // blend and the patch curves. Comparing both against the flat baseline
     // isolates the effect without depending on the winding-derived sign.
-    const std::vector<Vec3> p = {{0, 0, 0},  {2, 0, 0},   {2, 0, 1},
-                                 {0, 0, 1},  {2, -1, 2}, {0, -1, 2}};
+    const std::vector<Vec3> p = {{0, 0, 0}, {2, 0, 0},  {2, 0, 1},
+                                 {0, 0, 1}, {2, -1, 2}, {0, -1, 2}};
     const std::vector<std::vector<Index>> f = {{0, 1, 2}, {0, 2, 3}, {3, 2, 4}, {3, 4, 5}};
     Mesh mesh = Mesh::fromIndexed(p, f);
 
     const remesh::ReferenceSurface flat(mesh, 0.0f);
-    const remesh::ReferenceSurface crease(mesh, 10.0f);   // ridge far exceeds 10 deg -> crease kept
+    const remesh::ReferenceSurface crease(mesh, 10.0f);  // ridge far exceeds 10 deg -> crease kept
     const remesh::ReferenceSurface blended(mesh, 179.0f);  // everything smooths together
 
     const Vec3 q{1.0f, 1.0f, 0.5f};

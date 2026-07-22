@@ -171,9 +171,7 @@ Mesh makeTrefoilTube(int major, int minor, float tube) {
         }
     }
 
-    auto idx = [&](int i, int j) {
-        return static_cast<Index>((i % major) * minor + (j % minor));
-    };
+    auto idx = [&](int i, int j) { return static_cast<Index>((i % major) * minor + (j % minor)); };
     std::vector<std::vector<Index>> f;
     for (int i = 0; i < major; ++i) {
         for (int j = 0; j < minor; ++j) {
@@ -219,8 +217,8 @@ void checkOrganic(const std::string& name, const Mesh& input, int targetQuads) {
     // 2. Quad-dominant. 0.55 is the recorded floor of the greedy-pairing
     //    baseline shared with the analytic corpus; curved organic inputs
     //    measure comfortably above it. Tighten when the QuadCover port lands.
-    const std::size_t faces = result.stats.quadCount + result.stats.triangleCount +
-                              result.stats.otherPolygonCount;
+    const std::size_t faces =
+        result.stats.quadCount + result.stats.triangleCount + result.stats.otherPolygonCount;
     REQUIRE(faces > 0);
     const double quadRatio =
         static_cast<double>(result.stats.quadCount) / static_cast<double>(faces);

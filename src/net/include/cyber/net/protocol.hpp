@@ -23,10 +23,10 @@ inline constexpr std::size_t kMaxMessageBytes = 256u * 1024u * 1024u;
 // is the document layer's job (group 8), so this stays deliberately decoupled
 // from the core Mesh attribute schema.
 struct WireMesh {
-    std::vector<float> positions;              // xyz per vertex, size = 3 * V
+    std::vector<float> positions;                   // xyz per vertex, size = 3 * V
     std::vector<std::vector<std::uint32_t>> faces;  // indices per face (n-gon)
-    std::vector<float> uvs;                    // uv per vertex, size = 2 * V or empty
-    std::vector<float> colors;                 // rgb per vertex, size = 3 * V or empty
+    std::vector<float> uvs;                         // uv per vertex, size = 2 * V or empty
+    std::vector<float> colors;                      // rgb per vertex, size = 3 * V or empty
 
     [[nodiscard]] std::size_t vertexCount() const { return positions.size() / 3; }
     friend bool operator==(const WireMesh& a, const WireMesh& b) {

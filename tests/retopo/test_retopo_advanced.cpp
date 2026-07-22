@@ -79,8 +79,7 @@ TEST_CASE("extendBoundaryGrid extrudes a chain into rings of quads") {
     for (int i = 0; i < 4; ++i) {
         chain.push_back(mesh.addVertex({static_cast<float>(i), 0, 0}));
     }
-    const std::vector<FaceId> faces =
-        retopo::extendBoundaryGrid(mesh, chain, {0, 1, 0}, 2);
+    const std::vector<FaceId> faces = retopo::extendBoundaryGrid(mesh, chain, {0, 1, 0}, 2);
     CHECK(faces.size() == 6);  // 3 segments x 2 rings
     CHECK(isManifold(mesh));
 }
@@ -155,9 +154,9 @@ TEST_CASE("surfaceCut splits faces along a plane and stays manifold") {
 TEST_CASE("loopInfo reports edge count, length and closedness") {
     Mesh mesh;
     // A closed square loop of edges via a face so edgeBetween() exists.
-    const FaceId f = mesh.addFace(std::array<VertexId, 4>{
-        mesh.addVertex({0, 0, 0}), mesh.addVertex({2, 0, 0}), mesh.addVertex({2, 2, 0}),
-        mesh.addVertex({0, 2, 0})});
+    const FaceId f =
+        mesh.addFace(std::array<VertexId, 4>{mesh.addVertex({0, 0, 0}), mesh.addVertex({2, 0, 0}),
+                                             mesh.addVertex({2, 2, 0}), mesh.addVertex({0, 2, 0})});
     REQUIRE(f.valid());
     const std::vector<VertexId> loop = mesh.faceVertices(f);
 
@@ -211,9 +210,8 @@ TEST_CASE("mirrorAll bakes symmetry into geometry") {
     Mesh mesh;
     const std::array<Vec3, 4> quad = {Vec3{0.1f, 0, 0}, Vec3{1, 0, 0}, Vec3{1, 1, 0},
                                       Vec3{0.1f, 1, 0}};
-    REQUIRE(mesh.addFace(std::array<VertexId, 4>{
-                    mesh.addVertex(quad[0]), mesh.addVertex(quad[1]), mesh.addVertex(quad[2]),
-                    mesh.addVertex(quad[3])})
+    REQUIRE(mesh.addFace(std::array<VertexId, 4>{mesh.addVertex(quad[0]), mesh.addVertex(quad[1]),
+                                                 mesh.addVertex(quad[2]), mesh.addVertex(quad[3])})
                 .valid());
     retopo::Symmetry sym;
     sym.plane = {{0, 0, 0}, {1, 0, 0}};

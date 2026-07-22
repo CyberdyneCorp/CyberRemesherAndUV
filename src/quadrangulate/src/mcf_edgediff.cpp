@@ -1,11 +1,10 @@
-#include "cyber/quadrangulate/mcf_layout.hpp"
-
 #include <algorithm>
 #include <cmath>
 #include <limits>
 #include <map>
 
 #include "cyber/core/math.hpp"
+#include "cyber/quadrangulate/mcf_layout.hpp"
 #include "mcf_detail.hpp"
 
 // M2 of docs/mcf-integer-layout-plan.md: build QuadriFlow's per-edge integer
@@ -52,7 +51,8 @@ std::pair<Vec2i, Vec2i> positionIndex4(D3 p0, D3 n0, D3 q0, D3 o0, D3 p1, D3 n1,
     for (int i = 0; i < 4; ++i) {
         const D3 o0t = o0 + q0 * (((i & 1) + o0p.x) * sx) + t0 * ((((i & 2) >> 1) + o0p.y) * sy);
         for (int j = 0; j < 4; ++j) {
-            const D3 o1t = o1 + q1 * (((j & 1) + o1p.x) * sx) + t1 * ((((j & 2) >> 1) + o1p.y) * sy);
+            const D3 o1t =
+                o1 + q1 * (((j & 1) + o1p.x) * sx) + t1 * ((((j & 2) >> 1) + o1p.y) * sy);
             const D3 e = o0t - o1t;
             const double c = dot(e, e);
             if (c < best) {
@@ -208,8 +208,8 @@ McfEdgeInfo buildMcfEdgeInfo(const Mesh& mesh, const PositionField& field) {
                                  rank2);
             } else {
                 const int rank2 = posRank[sz(f)][sz(k1)];
-                diff2 = rshift90({posIndex[sz(f)][sz(k1 * 2)], posIndex[sz(f)][sz(k1 * 2 + 1)]},
-                                 rank2);
+                diff2 =
+                    rshift90({posIndex[sz(f)][sz(k1 * 2)], posIndex[sz(f)][sz(k1 * 2 + 1)]}, rank2);
             }
             const int currentEid = f * 3 + k1;
             const int eid = e2e[sz(currentEid)];

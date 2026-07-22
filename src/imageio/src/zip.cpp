@@ -53,22 +53,22 @@ bool ZipWriter::finish(const std::string& path) {
         const Entry& e = entries_[i];
         const std::uint32_t size = static_cast<std::uint32_t>(e.data.size());
         const std::uint16_t nameLen = static_cast<std::uint16_t>(e.name.size());
-        detail::appendU32LE(out, 0x02014b50u);  // central directory signature
-        detail::appendU16LE(out, 20);           // version made by
-        detail::appendU16LE(out, 20);           // version needed to extract
-        detail::appendU16LE(out, 0);            // general purpose flags
-        detail::appendU16LE(out, 0);            // compression method: stored
-        detail::appendU16LE(out, 0);            // last mod time
-        detail::appendU16LE(out, 0);            // last mod date
-        detail::appendU32LE(out, e.crc);        // CRC-32
-        detail::appendU32LE(out, size);         // compressed size
-        detail::appendU32LE(out, size);         // uncompressed size
-        detail::appendU16LE(out, nameLen);      // file name length
-        detail::appendU16LE(out, 0);            // extra field length
-        detail::appendU16LE(out, 0);            // file comment length
-        detail::appendU16LE(out, 0);            // disk number start
-        detail::appendU16LE(out, 0);            // internal file attributes
-        detail::appendU32LE(out, 0);            // external file attributes
+        detail::appendU32LE(out, 0x02014b50u);      // central directory signature
+        detail::appendU16LE(out, 20);               // version made by
+        detail::appendU16LE(out, 20);               // version needed to extract
+        detail::appendU16LE(out, 0);                // general purpose flags
+        detail::appendU16LE(out, 0);                // compression method: stored
+        detail::appendU16LE(out, 0);                // last mod time
+        detail::appendU16LE(out, 0);                // last mod date
+        detail::appendU32LE(out, e.crc);            // CRC-32
+        detail::appendU32LE(out, size);             // compressed size
+        detail::appendU32LE(out, size);             // uncompressed size
+        detail::appendU16LE(out, nameLen);          // file name length
+        detail::appendU16LE(out, 0);                // extra field length
+        detail::appendU16LE(out, 0);                // file comment length
+        detail::appendU16LE(out, 0);                // disk number start
+        detail::appendU16LE(out, 0);                // internal file attributes
+        detail::appendU32LE(out, 0);                // external file attributes
         detail::appendU32LE(out, localOffsets[i]);  // local header offset
         appendName(out, e.name);
     }

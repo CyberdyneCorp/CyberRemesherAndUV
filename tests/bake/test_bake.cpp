@@ -46,9 +46,7 @@ Mesh makePlane(float z, float x0, float x1, float y0, float y1, bool withUv, boo
 }
 
 // Value at the layout centre (UV ~ 0.5, 0.5).
-float center(const bake::Image& img, int c) {
-    return img.at(img.width / 2, img.height / 2, c);
-}
+float center(const bake::Image& img, int c) { return img.at(img.width / 2, img.height / 2, c); }
 
 bake::BakeParams params32() {
     bake::BakeParams p;
@@ -134,7 +132,7 @@ TEST_CASE("bake honors cooperative cancellation") {
     const Mesh high = makePlane(0, 0, 1, 0, 1, false, false);
     CancelToken cancel;
     cancel.requestCancel();
-    const bake::BakeResult r = bake::bake(low, high, bake::BakeMap::Normal, params32(), nullptr,
-                                          &cancel);
+    const bake::BakeResult r =
+        bake::bake(low, high, bake::BakeMap::Normal, params32(), nullptr, &cancel);
     REQUIRE(r.cancelled);
 }

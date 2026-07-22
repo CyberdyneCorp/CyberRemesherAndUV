@@ -40,9 +40,7 @@ inline void relaxAll(Mesh& mesh, const PinSet* pins = nullptr, int iterations = 
 
 // Whole-mesh subdivide-all: linear (Catmull-Clark topology) subdivision to
 // quads, replacing the mesh in place.
-inline void subdivideAll(Mesh& mesh) {
-    mesh = mesh.linearSubdivide();
-}
+inline void subdivideAll(Mesh& mesh) { mesh = mesh.linearSubdivide(); }
 
 // Whole-mesh mirror-all: bake the symmetry plane into real geometry. Returns
 // the number of faces added.

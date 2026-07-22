@@ -45,8 +45,7 @@ inline std::vector<float> straightenAxis(const std::vector<float>& values, float
     float sum = values[order.front()];
     std::size_t clusterStart = 0;
     for (std::size_t k = 1; k <= order.size(); ++k) {
-        const bool boundary =
-            k == order.size() || values[order[k]] - values[order[k - 1]] > eps;
+        const bool boundary = k == order.size() || values[order[k]] - values[order[k - 1]] > eps;
         if (boundary) {
             const std::size_t n = k - clusterStart;
             clusterCenter.push_back(sum / static_cast<float>(n));

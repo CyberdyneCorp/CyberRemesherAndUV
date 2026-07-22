@@ -258,9 +258,7 @@ std::vector<EdgeId> maximumTrianglePairing(std::vector<PairEdge> edges, std::siz
 
 // ---- valence cleanup (roadmap 5.4/5.5) -------------------------------------
 
-int valence(const Mesh& mesh, VertexId v) {
-    return static_cast<int>(mesh.vertexEdges(v).size());
-}
+int valence(const Mesh& mesh, VertexId v) { return static_cast<int>(mesh.vertexEdges(v).size()); }
 
 int deviation(int val) {
     const int d = val - 4;
@@ -383,7 +381,8 @@ FlipChoice evaluate(const Mesh& mesh, const QuadPair& qp, FaceId f0, FaceId f1,
             return;
         }
         const int oldC = shOld + deviation(valence(mesh, m0)) + deviation(valence(mesh, m1));
-        const int newC = shNew + deviation(valence(mesh, m0) + 1) + deviation(valence(mesh, m1) + 1);
+        const int newC =
+            shNew + deviation(valence(mesh, m0) + 1) + deviation(valence(mesh, m1) + 1);
         const int imp = oldC - newC;
         if (imp <= 0) {
             return;
@@ -473,8 +472,8 @@ public:
         // pass this replaces left far more triangles unpaired.
         std::vector<FaceId> nodeFace;
         std::vector<PairEdge> pairEdges = collectPairEdges(mesh, &field, nodeFace);
-        const std::vector<EdgeId> merges = maximumTrianglePairing(std::move(pairEdges),
-                                                                  nodeFace.size());
+        const std::vector<EdgeId> merges =
+            maximumTrianglePairing(std::move(pairEdges), nodeFace.size());
         const std::size_t total = merges.size();
         for (std::size_t k = 0; k < total; ++k) {
             if (cancel && k % kCancelStride == 0 && cancel->isCancelled()) {
@@ -490,7 +489,8 @@ public:
             }
             mergePair(mesh, e, faces[0], faces[1]);
             if (progress && k % kCancelStride == 0) {
-                progress->report(static_cast<float>(k) / static_cast<float>(total), "quadrangulate");
+                progress->report(static_cast<float>(k) / static_cast<float>(total),
+                                 "quadrangulate");
             }
         }
 

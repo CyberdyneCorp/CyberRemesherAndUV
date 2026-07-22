@@ -19,7 +19,7 @@ namespace cyber::remesh {
 struct IsotropicOptions {
     float targetEdgeLength = 0.0f;  // required, > 0
     int iterations = 3;
-    float adaptivity = 0.0f;         // 0 = uniform; curvature-adaptive otherwise
+    float adaptivity = 0.0f;           // 0 = uniform; curvature-adaptive otherwise
     float smoothNormalDegrees = 0.0f;  // 0 = flat projection; > 0 = PN-triangle smoothing
 };
 

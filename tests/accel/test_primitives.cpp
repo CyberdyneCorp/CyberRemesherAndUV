@@ -124,7 +124,7 @@ TEST_CASE("batched raycast matches per-ray BVH traversal") {
     accel::raycast(*backend, bvh, origins, directions, out);
 
     REQUIRE(out.size() == 2);
-    REQUIRE(out[0].has_value());   // straight down onto the plane
+    REQUIRE(out[0].has_value());  // straight down onto the plane
     REQUIRE(out[0]->point.z == doctest::Approx(0.0f));
     REQUIRE_FALSE(out[1].has_value());  // misses the unit quad
 }

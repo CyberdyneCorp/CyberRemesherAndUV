@@ -37,7 +37,7 @@ struct McfEdgeInfo {
     std::vector<std::pair<Index, Index>> edgeValues;   // per edge: endpoints (canonical, v1<v2)
     std::vector<std::array<int, 3>> faceEdgeIds;       // per compact face: its 3 edge ids
     std::vector<std::array<Index, 3>> faceVerts;       // per compact face: its 3 vertex ids
-    std::vector<Index> faceList;                        // compact face index -> mesh FaceId value
+    std::vector<Index> faceList;                       // compact face index -> mesh FaceId value
     std::vector<Vec3> orient;                          // per vertex: post-flip 4-RoSy orientation q
     std::unordered_map<int, Vec2i> posSingularities;   // compact face -> position singularity index
     std::unordered_map<int, int> orientSingularities;  // compact face -> orientation index (mod 4)
@@ -61,7 +61,7 @@ struct McfConstraints {
     std::vector<std::pair<int, int>> e2d;             // per edge: its two directed half-edge ids
     std::vector<int> sharpColor;                      // per compact face: component id
     int numComponents = 0;
-    std::vector<int> totalFlow;                       // per component: net (u+v) residual
+    std::vector<int> totalFlow;  // per component: net (u+v) residual
     bool valid = false;
 };
 
@@ -76,10 +76,11 @@ struct McfConstraints {
 // by the M3c max-flow. Holds a working COPY of edgeDiff (the input info is untouched).
 // Pure integer math — no SciPP. See docs/mcf-integer-layout-plan.md (M3b).
 struct McfFlowSetup {
-    std::vector<Vec2i> edgeDiff;                               // working layout (pre-adjusted)
-    std::vector<std::pair<std::array<int, 2>, int>> variable;  // per scalar var: (2 face slots, sign)
-    std::vector<char> allowChanges;                            // per scalar var: 1 = may change
-    std::vector<int> totalFlow;                                // residual per component after adjust
+    std::vector<Vec2i> edgeDiff;  // working layout (pre-adjusted)
+    std::vector<std::pair<std::array<int, 2>, int>>
+        variable;                    // per scalar var: (2 face slots, sign)
+    std::vector<char> allowChanges;  // per scalar var: 1 = may change
+    std::vector<int> totalFlow;      // residual per component after adjust
     bool valid = false;
 };
 
@@ -111,7 +112,8 @@ struct McfSolveResult {
 // position is the mean lattice position of its members. Operates on the solved
 // (seamless) edge_diff; pure integer math — no SciPP. See docs/mcf-integer-layout-plan.md.
 struct McfCollapse {
-    std::vector<int> component;  // per mesh vertex -> output vertex id (-1 if not a live tri vertex)
+    std::vector<int>
+        component;  // per mesh vertex -> output vertex id (-1 if not a live tri vertex)
     std::vector<Vec3> position;  // per output vertex: mean lattice position of its members
     int numVertices = 0;
     bool valid = false;

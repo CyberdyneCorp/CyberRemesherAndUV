@@ -43,9 +43,9 @@ Vec3 transformPoint(const Mat4& m, Vec3 p) {
 }
 
 Mat4 lookAt(Vec3 eye, Vec3 target, Vec3 up) {
-    const Vec3 f = normalized(target - eye);      // forward (toward target)
-    const Vec3 s = normalized(cross(f, up));      // right
-    const Vec3 u = cross(s, f);                   // recomputed up
+    const Vec3 f = normalized(target - eye);  // forward (toward target)
+    const Vec3 s = normalized(cross(f, up));  // right
+    const Vec3 u = cross(s, f);               // recomputed up
     Mat4 m = identityMatrix();
     m[0] = s.x;
     m[4] = s.y;
@@ -69,7 +69,7 @@ Mat4 perspective(float fovYRadians, float aspect, float nearZ, float farZ) {
     Mat4 m{};
     m[0] = invT * invAspect;
     m[5] = invT;
-    m[10] = farZ / (nearZ - farZ);       // 0..1 depth range
+    m[10] = farZ / (nearZ - farZ);  // 0..1 depth range
     m[11] = -1.0f;
     m[14] = (farZ * nearZ) / (nearZ - farZ);
     return m;
@@ -237,8 +237,8 @@ GestureSample GestureRecognizer::update(std::span<const TouchPoint> contacts) {
     // Strict contact count: every tracked finger must persist from last frame,
     // otherwise the gesture is ambiguous (finger added/lifted) and we bail.
     auto tracked = [&](const TouchPoint* f) { return previous.find(f->id) != previous.end(); };
-    const bool allTracked = std::all_of(fingers.begin(), fingers.end(), tracked) &&
-                            previous.size() == fingers.size();
+    const bool allTracked =
+        std::all_of(fingers.begin(), fingers.end(), tracked) && previous.size() == fingers.size();
 
     if (m_config.strictContactCount && !allTracked) {
         return sample;

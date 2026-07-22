@@ -198,8 +198,8 @@ void IBackend::raycastBvh(const FlatBvhNode* nodes, std::size_t nodeCount, const
                 if (node.triCount > 0) {
                     for (std::uint32_t i = 0; i < node.triCount; ++i) {
                         const FlatBvhTri& tri = tris[node.leftFirst + i];
-                        const float t = rayTriangle(origin, dir, triVertex(tri.a),
-                                                    triVertex(tri.b), triVertex(tri.c));
+                        const float t = rayTriangle(origin, dir, triVertex(tri.a), triVertex(tri.b),
+                                                    triVertex(tri.c));
                         if (t >= 0.0f && t < bestT) {
                             bestT = t;
                             bestFace = static_cast<int>(tri.face);

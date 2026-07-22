@@ -169,8 +169,7 @@ void greedyMergeCharts(const Mesh& mesh, std::vector<int>& chartOf, AcceptFn acc
 // normal cone. Because every face of a merged chart stays within one cone, the
 // result is at least as flat as growth guarantees (distortion cannot rise) and
 // stays disk-like (a cone under 90 degrees cannot wrap a tube).
-void mergeCoplanarCharts(const Mesh& mesh, std::vector<int>& chartOf,
-                         const AtlasOptions& options) {
+void mergeCoplanarCharts(const Mesh& mesh, std::vector<int>& chartOf, const AtlasOptions& options) {
     const float cosBound = std::cos(degreesToRadians(options.maxChartAngleDeg));
     greedyMergeCharts(mesh, chartOf,
                       [&](const std::vector<FaceId>& a, const std::vector<FaceId>& b) {
@@ -273,9 +272,9 @@ float unwrapDistortion(const Mesh& mesh, const std::vector<FaceId>& faces,
         }
     }
     folded = positive > 0 && negative > 0;
-    const float areaSpread =
-        (maxRatio > minRatio && maxRatio > 0.0f) ? (maxRatio - minRatio) / (maxRatio + minRatio)
-                                                 : 0.0f;
+    const float areaSpread = (maxRatio > minRatio && maxRatio > 0.0f)
+                                 ? (maxRatio - minRatio) / (maxRatio + minRatio)
+                                 : 0.0f;
     return std::fmax(maxAngle, areaSpread);
 }
 
@@ -284,8 +283,7 @@ float unwrapDistortion(const Mesh& mesh, const std::vector<FaceId>& faces,
 // `maxChartDistortion` (and does not fold). This spends the distortion headroom
 // the cone merge leaves on the table to cut the chart count further. A no-op
 // when the cap is <= 0.
-void mergeByDistortion(const Mesh& mesh, std::vector<int>& chartOf,
-                       const AtlasOptions& options) {
+void mergeByDistortion(const Mesh& mesh, std::vector<int>& chartOf, const AtlasOptions& options) {
     if (options.maxChartDistortion <= 0.0f) {
         return;
     }

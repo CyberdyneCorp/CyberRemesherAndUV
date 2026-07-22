@@ -91,8 +91,7 @@ TEST_CASE("one fingertip dragging is Orbit") {
 TEST_CASE("two fingertips translating together is Pan") {
     GestureRecognizer rec;
     feed(rec, {TouchPoint{1, {0, 0}, 5, 1}, TouchPoint{2, {10, 0}, 5, 1}});
-    const GestureSample s =
-        feed(rec, {TouchPoint{1, {5, 5}, 5, 1}, TouchPoint{2, {15, 5}, 5, 1}});
+    const GestureSample s = feed(rec, {TouchPoint{1, {5, 5}, 5, 1}, TouchPoint{2, {15, 5}, 5, 1}});
     CHECK(s.kind == GestureKind::Pan);
     CHECK(s.delta.x == doctest::Approx(5.0f));
     CHECK(s.delta.y == doctest::Approx(5.0f));
@@ -123,7 +122,6 @@ TEST_CASE("large-radius contacts are rejected as palm") {
 TEST_CASE("strict contact count rejects a frame where a finger is added") {
     GestureRecognizer rec;
     feed(rec, {TouchPoint{1, {0, 0}, 5, 1}});
-    const GestureSample s =
-        feed(rec, {TouchPoint{1, {5, 0}, 5, 1}, TouchPoint{2, {10, 0}, 5, 1}});
+    const GestureSample s = feed(rec, {TouchPoint{1, {5, 0}, 5, 1}, TouchPoint{2, {10, 0}, 5, 1}});
     CHECK(s.kind == GestureKind::None);  // count changed 1 -> 2, ambiguous
 }

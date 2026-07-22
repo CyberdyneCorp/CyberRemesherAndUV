@@ -50,8 +50,8 @@ struct Brush {
 // One projection ray produced from the cage, ready for src/bake to cast: it
 // starts on the outside of the surface and travels inward toward the Target.
 struct CageRay {
-    Vec3 origin;       // position + normal * cageDistance
-    Vec3 direction;    // -normal (unit), or {0,0,0} for an isolated vertex
+    Vec3 origin;        // position + normal * cageDistance
+    Vec3 direction;     // -normal (unit), or {0,0,0} for an isolated vertex
     float maxDistance;  // 2 * cageDistance (full sweep through the surface)
     VertexId vertex;
 };
@@ -59,8 +59,8 @@ struct CageRay {
 // Flat, POD-array snapshot of a cage's state; the serialisation payload.
 struct CageState {
     float defaultDistance = 0.1f;
-    std::vector<float> distances;              // per vertex slot (by VertexId)
-    std::vector<std::uint8_t> overridden;      // 1 = pinned by setVertexDistance
+    std::vector<float> distances;          // per vertex slot (by VertexId)
+    std::vector<std::uint8_t> overridden;  // 1 = pinned by setVertexDistance
 };
 
 class Cage {

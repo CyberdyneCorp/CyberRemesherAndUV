@@ -35,8 +35,10 @@ Mesh makeSphere(int rings = 16, int segments = 24) {
     for (int r = 1; r < rings; ++r) {
         const float phi = 3.14159265f * static_cast<float>(r) / static_cast<float>(rings);
         for (int s = 0; s < segments; ++s) {
-            const float th = 2.0f * 3.14159265f * static_cast<float>(s) / static_cast<float>(segments);
-            p.push_back({std::sin(phi) * std::cos(th), std::sin(phi) * std::sin(th), std::cos(phi)});
+            const float th =
+                2.0f * 3.14159265f * static_cast<float>(s) / static_cast<float>(segments);
+            p.push_back(
+                {std::sin(phi) * std::cos(th), std::sin(phi) * std::sin(th), std::cos(phi)});
         }
     }
     p.push_back({0, 0, -1});
@@ -215,8 +217,8 @@ TEST_CASE("quad-cover cap elimination: adjacent triangles merge into a quad") {
     std::vector<std::vector<std::size_t>> faces = {{0, 1, 2}, {0, 2, 3}};
     const std::size_t vBefore = verts.size();
     remesh::eliminateNonQuadCaps(verts, faces);
-    CHECK(verts.size() == vBefore);          // no vertices added
-    CHECK(faces.size() == 1);                // two triangles -> one quad
+    CHECK(verts.size() == vBefore);  // no vertices added
+    CHECK(faces.size() == 1);        // two triangles -> one quad
     CHECK(faces.front().size() == 4);
     CHECK(capStats(faces).nonQuad == 0);
     CHECK(capStats(faces).maxEdgeFaces <= 2);  // still manifold
@@ -233,7 +235,7 @@ TEST_CASE("quad-cover cap elimination: an even n-gon splits into quads") {
     const std::size_t vBefore = verts.size();
     remesh::eliminateNonQuadCaps(verts, faces);
     CHECK(verts.size() == vBefore);
-    CHECK(faces.size() == 2);                 // hexagon -> two quads
+    CHECK(faces.size() == 2);  // hexagon -> two quads
     CHECK(capStats(faces).nonQuad == 0);
     CHECK(capStats(faces).maxEdgeFaces <= 2);
 }

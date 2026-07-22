@@ -29,9 +29,9 @@
 #include "cyber/accel/backend.hpp"
 #include "cyber/core/io.hpp"
 #include "cyber/core/pipeline.hpp"
-#include "cyber/quadrangulate/field_quadrangulator.hpp"
 #include "cyber/core/progress.hpp"
 #include "cyber/core/version.hpp"
+#include "cyber/quadrangulate/field_quadrangulator.hpp"
 
 namespace {
 
