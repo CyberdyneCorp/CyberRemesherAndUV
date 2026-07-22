@@ -41,17 +41,28 @@ def main() -> None:
     print(f"  QuadriFlow: {'ready' if qf else 'UNAVAILABLE (offline / no Eigen)'}")
     print("building AutoRemesher reference (first run compiles QuadCover + Geogram)...")
     ar = c.autoremesher_binary()
-    print(f"  AutoRemesher: {'ready' if ar else 'UNAVAILABLE'}\n")
+    print(f"  AutoRemesher: {'ready' if ar else 'UNAVAILABLE'}")
+    # ours quad-cover uses the NATIVE (dependency-free) seamless-UV solver by default; do not
+    # set CYBER_QUADCOVER_CLI (set it in the shell to compare the vendored Geogram path).
+    print("  ours quad-cover: native seamless-UV solver (dependency-free default)\n")
+
+    # Every CyberRemesher quadrangulator, so the visual comparison shows them all.
+    OUR_METHODS = [
+        ("field-aligned", "field-aligned"),
+        ("position-field", "instant-meshes"),
+        ("integer", "integer"),
+        ("quad-cover", "quad-cover"),
+    ]
+
+    def label(engine: str, n: int, q: "dict") -> str:
+        return (f"{engine} · {n} quads\nmedian {q['median']:.0f}° · "
+                f"slivers {q['slivers']:.1f}% · CV {q['cv']:.2f}")
 
     for name in args.models:
         path = c.download_model(name)
         src = c.load_any(path)
 
-        # Uniform sizing (adaptivity=0) so the sizing matches QuadriFlow's. We
-        # show BOTH quadrangulators: the default field-aligned matcher and the
-        # Instant-Meshes position-field extractor (quad_method="instant-meshes"),
-        # since the extractor is where the field-based edge flow lives — the
-        # apples-to-apples fight with QuadriFlow's own field-based approach.
+        # Uniform sizing (adaptivity=0) so the sizing matches QuadriFlow's, matched count.
         def our_result(method: str) -> "tuple":
             mesh, _ = c.remesh_obj(
                 path, c.RemeshParams(target_quad_count=args.target_quads, pure_quads=True,
@@ -59,41 +70,41 @@ def main() -> None:
             q, _, _ = c.face_counts(mesh)
             return mesh, q, c.quad_quality(mesh)
 
-        matched, mq, mqual = our_result("field-aligned")
-        extracted, eq, equal = our_result("instant-meshes")
-
-        def label(engine: str, n: int, q: "dict") -> str:
-            return (f"{engine} · {n} quads\nmedian {q['median']:.0f}° · "
-                    f"slivers {q['slivers']:.1f}% · CV {q['cv']:.2f}")
-
-        panels = [src, matched, extracted]
-        titles = [f"{name} · {len(src['faces'])} tris",
-                  label("CyberRemesher (field-aligned)", mq, mqual),
-                  label("CyberRemesher (position-field)", eq, equal)]
+        panels = [src]
+        titles = [f"{name} · {len(src['faces'])} tris"]
+        matched_count = args.target_quads
+        summary = []
+        for display, method in OUR_METHODS:
+            try:
+                mesh, q, qual = our_result(method)
+            except Exception as exc:  # noqa: BLE001 - a method may be unavailable
+                print(f"{name}: {display} SKIP ({exc})")
+                continue
+            if method == "quad-cover":
+                matched_count = q  # match references to the headline method
+            panels.append(mesh)
+            titles.append(label(f"CyberRemesher ({display})", q, qual))
+            summary.append(f"{display} med={qual['median']:.0f}° irr={c.irregular_pct(mesh):.0f}% "
+                           f"cv={qual['cv']:.2f}")
 
         if qf:
-            ref = c.quadriflow_remesh(qf, path, eq)  # match the extractor's quad count
+            ref = c.quadriflow_remesh(qf, path, matched_count)
             rq, _, _ = c.face_counts(ref)
             rqual = c.quad_quality(ref)
             panels.append(ref)
             titles.append(label("QuadriFlow", rq, rqual))
-            print(f"{name}: field-aligned median={mqual['median']:.0f}° cv={mqual['cv']:.2f} | "
-                  f"position-field median={equal['median']:.0f}° slivers={equal['slivers']:.1f}% "
-                  f"cv={equal['cv']:.2f} | QF median={rqual['median']:.0f}° "
-                  f"slivers={rqual['slivers']:.1f}% cv={rqual['cv']:.2f}")
-        else:
-            print(f"{name}: field-aligned median={mqual['median']:.0f}° cv={mqual['cv']:.2f} | "
-                  f"position-field median={equal['median']:.0f}° slivers={equal['slivers']:.1f}% "
-                  f"cv={equal['cv']:.2f} (QuadriFlow unavailable)")
+            summary.append(f"QF med={rqual['median']:.0f}° irr={c.irregular_pct(ref):.0f}% "
+                           f"cv={rqual['cv']:.2f}")
 
-        aref = c.autoremesher_try(ar, path, eq)  # QuadCover, matched quad count
+        aref = c.autoremesher_try(ar, path, matched_count)
         if aref is not None:
             arq, _, _ = c.face_counts(aref)
             panels.append(aref)
             titles.append(label("AutoRemesher", arq, c.quad_quality(aref)))
 
-        c.render_panels(panels, titles, os.path.join(c.OUTPUT_DIR, f"10_vs_{name}.png"),
-                        suptitle=f"{name}: CyberRemesher (both) vs QuadriFlow vs AutoRemesher")
+        print(f"{name}: " + " | ".join(summary))
+        c.render_grid(panels, titles, os.path.join(c.OUTPUT_DIR, f"10_vs_{name}.png"), cols=4,
+                      suptitle=f"{name}: CyberRemesher (all methods) vs QuadriFlow vs AutoRemesher")
 
 
 if __name__ == "__main__":

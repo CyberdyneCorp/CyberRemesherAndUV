@@ -22,6 +22,12 @@ def main() -> int:
         print("SKIP: cyber_capi shared library not loadable")
         return 77  # CTest SKIP_RETURN_CODE — reported as Skipped, never a vacuous pass
 
+    try:
+        import numpy  # noqa: F401  (the pixel checks below use Image.to_numpy())
+    except ImportError:
+        print("SKIP: numpy not available")
+        return 77
+
     from cyberremesh import BakeMap, BakeParams, Mesh, bake
 
     obj = tempfile.NamedTemporaryFile(suffix=".obj", delete=False, mode="w")

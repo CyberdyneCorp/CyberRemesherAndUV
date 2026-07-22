@@ -79,10 +79,9 @@ Mesh makeIcosphere(int subdivisions) {
         {z, -o, -t}, {z, o, -t}, {t, z, -o},  {t, z, o},  {-t, z, -o}, {-t, z, o},
     };
     std::vector<std::array<Index, 3>> tris = {
-        {0, 11, 5}, {0, 5, 1}, {0, 1, 7}, {0, 7, 10}, {0, 10, 11},
-        {1, 5, 9}, {5, 11, 4}, {11, 10, 2}, {10, 7, 6}, {7, 1, 8},
-        {3, 9, 4}, {3, 4, 2}, {3, 2, 6}, {3, 6, 8}, {3, 8, 9},
-        {4, 9, 5}, {2, 4, 11}, {6, 2, 10}, {8, 6, 7}, {9, 8, 1},
+        {0, 11, 5},  {0, 5, 1},  {0, 1, 7},  {0, 7, 10}, {0, 10, 11}, {1, 5, 9}, {5, 11, 4},
+        {11, 10, 2}, {10, 7, 6}, {7, 1, 8},  {3, 9, 4},  {3, 4, 2},   {3, 2, 6}, {3, 6, 8},
+        {3, 8, 9},   {4, 9, 5},  {2, 4, 11}, {6, 2, 10}, {8, 6, 7},   {9, 8, 1},
     };
     for (int s = 0; s < subdivisions; ++s) {
         std::map<std::pair<Index, Index>, Index> midCache;
@@ -152,7 +151,9 @@ TEST_CASE("valence cleanup rotates a seeded defect back to all-valence-4") {
     // seeding a valence {5,5,3,3} defect (edge 7-12 -> edge 8-11), then check
     // the cleanup rotates it back so every interior vertex is valence 4 again.
     const int cols = 5, rows = 4;
-    const auto idx = [cols](int r, int c) { return static_cast<Index>(r * cols + c); };
+    // cols is a const-int constant expression, usable without capture (AppleClang
+    // flags an explicit capture here as unused under -Werror=unused-lambda-capture).
+    const auto idx = [](int r, int c) { return static_cast<Index>(r * cols + c); };
 
     std::vector<Vec3> pos;
     for (int r = 0; r < rows; ++r) {
@@ -197,7 +198,7 @@ TEST_CASE("valence cleanup on an already-regular grid is a no-op") {
     // A clean 5x5 vertex grid (16 quads, all interior vertices valence 4): the
     // cleanup must find nothing to do and leave the mesh bit-for-bit valid.
     const int n = 5;
-    const auto idx = [n](int r, int c) { return static_cast<Index>(r * n + c); };
+    const auto idx = [](int r, int c) { return static_cast<Index>(r * n + c); };
     std::vector<Vec3> pos;
     for (int r = 0; r < n; ++r) {
         for (int c = 0; c < n; ++c) {

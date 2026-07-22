@@ -121,15 +121,22 @@ class RemeshParams:
     adaptivity: float = 1.0  # 0.0 .. 1.0
     pure_quads: bool = False
     hole_fill_max_boundary: int = 64  # 0 (never) .. 10_000
-    # Quadrangulator: "field-aligned" (default, max-matching, highest
-    # dominance), "instant-meshes" (position-field extractor, more uniform
-    # field-aligned flow with fewer/better singularities), "integer" (the
-    # integer-parametrization extractor, Milestones 3-5 — watertight/manifold,
-    # experimental; degrades at coarse target counts), or "quad-cover"
-    # (QuadCover seamless-UV isoline extractor — ~1% irregular on closed
-    # surfaces, but requires the CYBER_QUADCOVER_CLI environment variable to
-    # point at a built autoremesher_cli; without it the run fails cleanly).
-    quad_method: str = "field-aligned"
+    # Quadrangulator: "quad-cover" (default), "field-aligned" (max-matching,
+    # highest dominance), "instant-meshes" (position-field extractor, more
+    # uniform field-aligned flow with fewer/better singularities), or "integer"
+    # (the integer-parametrization extractor, Milestones 3-5 — watertight/
+    # manifold, experimental; degrades at coarse target counts).
+    #
+    # "quad-cover" (QuadCover seamless-UV isoline extractor) always works: a
+    # dependency-free native seamless-UV solver is compiled in unconditionally
+    # (~4% irregular, median angle a few degrees below QuadriFlow). Building the
+    # engine with -DCYBER_WITH_QUADCOVER=ON links a vendored in-process Geogram
+    # solver that beats QuadriFlow on median angle *and* irregular-vertex count
+    # on organic meshes (spot/rocker/bunny); the optional CYBER_QUADCOVER_CLI is
+    # only a faster external reference path. (Earlier docs claimed the CLI was
+    # required and the run "fails cleanly" without it — that was never true for
+    # the shipped native solver.)
+    quad_method: str = "quad-cover"
 
     _QUAD_METHODS = {
         "field-aligned": 0,
@@ -154,6 +161,64 @@ class RemeshParams:
             pure_quads=1 if self.pure_quads else 0,
             hole_fill_max_boundary=int(self.hole_fill_max_boundary),
             quad_method=method,
+        )
+
+
+@dataclass
+class AtlasParams:
+    """Automatic UV-atlas parameters (mirror of ``cyber::uv::AtlasOptions``)."""
+
+    # A face joins a growing chart while its normal stays within this angle of
+    # the chart's seed normal. Smaller => more, flatter charts (less angular
+    # distortion, more seams).
+    max_chart_angle_degrees: float = 40.0
+    pack_margin: float = 0.0  # gap around each island, in UV units
+    texture_size: int = 1024  # resolution for the texel-density readout
+    # Merge adjacent charts sharing a normal cone (fewer seams, same flatness).
+    merge_charts: bool = True
+    # Looser second merge pass: keep merging while the union's max conformal
+    # error stays <= this cap (0 disables). Spends distortion headroom for fewer
+    # seams. Only used when ``merge_charts`` is True.
+    max_chart_distortion: float = 0.10
+    # Rotate each chart to its minimum-area bounding box before packing (tighter
+    # pack / higher texel density).
+    reorient_charts: bool = True
+
+    def _to_c(self) -> "_ffi.CyberAtlasParams":
+        return _ffi.CyberAtlasParams(
+            max_chart_angle_degrees=float(self.max_chart_angle_degrees),
+            pack_margin=float(self.pack_margin),
+            texture_size=int(self.texture_size),
+            reorient_charts=1 if self.reorient_charts else 0,
+            merge_charts=1 if self.merge_charts else 0,
+            max_chart_distortion=float(self.max_chart_distortion),
+        )
+
+
+@dataclass
+class AtlasResult:
+    """Aggregate atlas quality/packing report (mirror of ``CyberAtlasResult``)."""
+
+    chart_count: int = 0
+    seam_edges: int = 0
+    max_angle_distortion: float = 0.0
+    rms_angle_distortion: float = 0.0
+    flipped_charts: int = 0
+    fallback_charts: int = 0
+    packed_area: float = 0.0
+    texel_density: float = 0.0
+
+    @classmethod
+    def _from_c(cls, c: "_ffi.CyberAtlasResult") -> "AtlasResult":
+        return cls(
+            chart_count=int(c.chart_count),
+            seam_edges=int(c.seam_edges),
+            max_angle_distortion=float(c.max_angle_distortion),
+            rms_angle_distortion=float(c.rms_angle_distortion),
+            flipped_charts=int(c.flipped_charts),
+            fallback_charts=int(c.fallback_charts),
+            packed_area=float(c.packed_area),
+            texel_density=float(c.texel_density),
         )
 
 
@@ -219,6 +284,25 @@ class Mesh:
                 self.handle, str(path).encode("utf-8")
             )
         )
+
+    def unwrap_atlas(self, params: Optional["AtlasParams"] = None) -> "AtlasResult":
+        """Generate an automatic UV atlas for this mesh, IN PLACE.
+
+        Seams the mesh into normal-coherent charts, LSCM-unwraps each, packs
+        them into the unit square and writes the per-corner ``uv`` attribute, so
+        a subsequent :meth:`save_obj` emits ``vt`` / ``f v/vt``. Returns an
+        :class:`AtlasResult` with distortion and packing statistics.
+        """
+        if params is None:
+            params = AtlasParams()
+        c_params = params._to_c()
+        c_result = _ffi.CyberAtlasResult()
+        _check(
+            _ffi.get_lib().cyber_uv_atlas(
+                self.handle, ctypes.byref(c_params), ctypes.byref(c_result)
+            )
+        )
+        return AtlasResult._from_c(c_result)
 
     # -- queries ------------------------------------------------------------
     @property

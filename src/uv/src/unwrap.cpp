@@ -132,8 +132,8 @@ void matVecTranspose(const std::vector<Triplet>& m, const std::vector<double>& x
 [[nodiscard]] int solveCgls(const std::vector<Triplet>& a, std::size_t rows, std::size_t cols,
                             const std::vector<double>& rhs, std::vector<double>& x, int maxIter,
                             double tolerance) {
-    std::vector<double> residual = rhs;          // r = rhs - A x, with x = 0
-    std::vector<double> z(cols, 0.0);            // z = A^T r
+    std::vector<double> residual = rhs;  // r = rhs - A x, with x = 0
+    std::vector<double> z(cols, 0.0);    // z = A^T r
     std::vector<double> p(cols, 0.0);
     std::vector<double> w(rows, 0.0);
     x.assign(cols, 0.0);
@@ -182,7 +182,8 @@ UnwrapResult lscmUnwrap(const Mesh& mesh, std::span<const FaceId> island,
 
     // Columns: [0, n) hold u, [n, 2n) hold v.
     const auto [pinA, pinB] = choosePins(mesh, topo);
-    const float pinLen = length(mesh.position(topo.vertices[pinB]) - mesh.position(topo.vertices[pinA]));
+    const float pinLen =
+        length(mesh.position(topo.vertices[pinB]) - mesh.position(topo.vertices[pinA]));
     std::vector<Vec2> pinnedUv(n);
     std::vector<bool> pinned(2 * n, false);
     pinnedUv[pinA] = {0.0f, 0.0f};
@@ -244,8 +245,10 @@ UnwrapResult lscmUnwrap(const Mesh& mesh, std::span<const FaceId> island,
         for (int j = 0; j < 3; ++j) {
             const Vec2 next = pts[static_cast<std::size_t>((j + 1) % 3)];
             const Vec2 prev = pts[static_cast<std::size_t>((j + 2) % 3)];
-            const double wRe = (static_cast<double>(prev.x) - static_cast<double>(next.x)) * invSqrt;
-            const double wIm = (static_cast<double>(prev.y) - static_cast<double>(next.y)) * invSqrt;
+            const double wRe =
+                (static_cast<double>(prev.x) - static_cast<double>(next.x)) * invSqrt;
+            const double wIm =
+                (static_cast<double>(prev.y) - static_cast<double>(next.y)) * invSqrt;
             const std::size_t uCol = vids[static_cast<std::size_t>(j)];
             const std::size_t vCol = n + vids[static_cast<std::size_t>(j)];
             // Re(W u) = wRe*u - wIm*v ; Im(W u) = wIm*u + wRe*v

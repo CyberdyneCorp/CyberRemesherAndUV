@@ -80,11 +80,11 @@ def main() -> None:
     print("building AutoRemesher reference (first run compiles QuadCover + Geogram)...")
     ar = c.autoremesher_binary()
     print(f"  AutoRemesher: {'ready' if ar else 'UNAVAILABLE'}")
-    # Our quad-cover method (Task F) obtains its seamless UV out-of-process from the same
-    # autoremesher_cli; point the engine at it so "ours quad-cover" is measured too.
-    if ar:
-        os.environ["CYBER_QUADCOVER_CLI"] = ar
-    print(f"  ours quad-cover: {'ready' if ar else 'UNAVAILABLE (needs AutoRemesher build)'}\n")
+    # "ours quad-cover" is the default method. Built with -DCYBER_WITH_QUADCOVER=ON
+    # (the cpu-headless preset) it uses the in-process Geogram field that beats
+    # QuadriFlow on organic meshes; otherwise the dependency-free native seamless-UV
+    # solver (a few degrees lower median).
+    print("  ours quad-cover: default method (Geogram field under -DCYBER_WITH_QUADCOVER)\n")
 
     header = f"{'model':<15} {'engine':<20} {'quads':>6} {'med°':>5} {'dev%':>6} {'Nerr°':>6} {'irr%':>6} {'CV':>5}"
     print(header)
@@ -107,7 +107,7 @@ def main() -> None:
         fa = ours(path, args.target_quads, "field-aligned", 0.0)
         im = ours(path, args.target_quads, "instant-meshes", 0.0)
         intg = ours(path, args.target_quads, "integer", 0.0)
-        qc = ours(path, args.target_quads, "quad-cover", 0.0) if ar else None
+        qc = ours(path, args.target_quads, "quad-cover", 0.0)
         if fa:
             engines["ours field-aligned"] = evaluate(fa, src)
         if im:
@@ -201,9 +201,10 @@ def _render(rows: list, adaptive_rows: list, target: int) -> None:
         print("no results to render")
         return
     models = sorted({r[0] for r in rows}, key=lambda m: m)
-    engines = ["ours position-field", "ours integer", "QuadriFlow", "AutoRemesher"]
+    engines = ["ours position-field", "ours integer", "ours quad-cover", "QuadriFlow", "AutoRemesher"]
     colors = {"ours field-aligned": "#5b9bd5", "ours position-field": "#2e8b57",
-              "ours integer": "#7b4fa0", "QuadriFlow": "#c05640", "AutoRemesher": "#d98e2b"}
+              "ours integer": "#7b4fa0", "ours quad-cover": "#e64980",
+              "QuadriFlow": "#c05640", "AutoRemesher": "#d98e2b"}
     panel_metrics = [("median", "median angle° (higher better)", False),
                      ("rms", "surface dev % (lower better)", True),
                      ("irregular", "irregular vertices % (lower better)", True)]
@@ -214,7 +215,7 @@ def _render(rows: list, adaptive_rows: list, target: int) -> None:
     fig.suptitle(f"CyberRemesher vs QuadriFlow — retopology benchmark "
                  f"(~{target} quads, uniform)", fontsize=14, fontweight="bold", color="#12233a")
     x = np.arange(len(models))
-    width = 0.2
+    width = 0.16
     for ax, (key, label, _lower) in zip(axes, panel_metrics):
         for e_i, engine in enumerate(engines):
             vals = []

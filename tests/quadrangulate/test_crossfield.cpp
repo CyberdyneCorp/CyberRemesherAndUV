@@ -37,9 +37,9 @@ Mesh makeGrid(int n) {
 // Angular distance of a planar direction to the nearest grid axis, folded into
 // the cross's 90-degree symmetry, in degrees.
 float axisMisalignmentDeg(Vec3 d) {
-    float theta = std::atan2(d.y, d.x);           // (-pi, pi]
+    float theta = std::atan2(d.y, d.x);                        // (-pi, pi]
     float m = std::fmod(std::fabs(theta), cyber::kPi / 2.0f);  // [0, pi/2)
-    m = std::fmin(m, cyber::kPi / 2.0f - m);       // fold to nearest axis
+    m = std::fmin(m, cyber::kPi / 2.0f - m);                   // fold to nearest axis
     return m * 180.0f / cyber::kPi;
 }
 
@@ -68,6 +68,32 @@ TEST_CASE("cross field on a flat grid relaxes to the axis-aligned directions") {
     }
     REQUIRE(count > 0);
     // A boundary-constrained flat field aligns tightly to the grid axes.
+    REQUIRE(totalErr / static_cast<double>(count) < 8.0);
+}
+
+TEST_CASE("orientation-derived cross field is a unit 4-RoSy aligned to a flat grid") {
+    // computeCrossFieldFromOrientation (the multiresolution-field path, gated by
+    // CYBER_QC_CROSSFIELD_MULTIRES in the seamless solver) must produce a valid,
+    // feature-aligned per-face cross just like the single-level solver.
+    Mesh mesh = makeGrid(6);
+    mesh.tagFeatureEdges(90.0f);
+
+    const remesh::CrossField field = remesh::computeCrossFieldFromOrientation(mesh, 30);
+    REQUIRE(field.size() == mesh.faceCapacity());
+
+    double totalErr = 0.0;
+    std::size_t count = 0;
+    for (Index i = 0; i < mesh.faceCapacity(); ++i) {
+        const FaceId f{i};
+        if (!mesh.isAlive(f)) {
+            continue;
+        }
+        const float len = std::sqrt(field.real[i] * field.real[i] + field.imag[i] * field.imag[i]);
+        REQUIRE(len == doctest::Approx(1.0f).epsilon(0.01));
+        totalErr += axisMisalignmentDeg(field.direction(f));
+        ++count;
+    }
+    REQUIRE(count > 0);
     REQUIRE(totalErr / static_cast<double>(count) < 8.0);
 }
 

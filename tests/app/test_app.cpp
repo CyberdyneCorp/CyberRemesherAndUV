@@ -164,8 +164,8 @@ TEST_CASE("undo/redo respects the memory budget, evicting oldest") {
     }
 
     CHECK(value == 5);
-    CHECK(stack.undoDepth() == 3);      // only three fit under the budget
-    CHECK(stack.evictedCount() == 2);   // two oldest were evicted
+    CHECK(stack.undoDepth() == 3);     // only three fit under the budget
+    CHECK(stack.evictedCount() == 2);  // two oldest were evicted
     CHECK(stack.usedBytes() == 90);
 
     // The three surviving commands undo; the evicted two cannot.
@@ -240,7 +240,7 @@ TEST_CASE("press-hold recognizer fires after the hold duration") {
     CHECK(rec.move(Vec2{3.0f, 3.0f}));  // small move within slop is fine
     CHECK(rec.update(0.5));             // fires exactly once at the threshold
     CHECK(rec.fired());
-    CHECK_FALSE(rec.update(0.6));       // does not fire again
+    CHECK_FALSE(rec.update(0.6));  // does not fire again
 }
 
 TEST_CASE("press-hold is cancelled by movement beyond the slop") {

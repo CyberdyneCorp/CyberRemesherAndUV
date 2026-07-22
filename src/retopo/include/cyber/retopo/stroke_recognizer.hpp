@@ -136,8 +136,7 @@ inline StrokeStats analyze(std::span<const Vec3> pts, const StrokeParams& params
     centroid = centroid * (1.0f / static_cast<float>(pts.size()));
     for (const Vec3 p : pts) s.boundingRadius = std::fmax(s.boundingRadius, length(p - centroid));
 
-    s.closed = s.pathLength > 0.0f &&
-               s.endpointDistance < params.closedFraction * s.pathLength;
+    s.closed = s.pathLength > 0.0f && s.endpointDistance < params.closedFraction * s.pathLength;
     const std::vector<Vec2> flat = projectTo2D(pts);
     s.selfIntersections = countSelfIntersections(flat);
     return s;

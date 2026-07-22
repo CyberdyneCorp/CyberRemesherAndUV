@@ -38,11 +38,16 @@ Mesh lowPlane() {
 // wall standing at x=0.5 (its own vertices, so the base keeps a clean +z
 // normal). A smooth low-poly baked against this should darken beside the ridge.
 Mesh highWithRidge() {
-    const std::vector<Vec3> p = {
-        // base quad [0,1]^2 at z=0
-        {0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0},
-        // ridge wall at x=0.5, y in [0,1], z in [0,0.15]
-        {0.5f, 0, 0}, {0.5f, 1, 0}, {0.5f, 1, 0.15f}, {0.5f, 0, 0.15f}};
+    const std::vector<Vec3> p = {// base quad [0,1]^2 at z=0
+                                 {0, 0, 0},
+                                 {1, 0, 0},
+                                 {1, 1, 0},
+                                 {0, 1, 0},
+                                 // ridge wall at x=0.5, y in [0,1], z in [0,0.15]
+                                 {0.5f, 0, 0},
+                                 {0.5f, 1, 0},
+                                 {0.5f, 1, 0.15f},
+                                 {0.5f, 0, 0.15f}};
     const std::vector<std::vector<Index>> f = {{0, 1, 2, 3}, {4, 5, 6, 7}};
     return Mesh::fromIndexed(p, f);
 }
@@ -71,8 +76,7 @@ bake::BakeParams aoParams() {
 TEST_CASE("AO projects the low-poly texel onto the high-poly before sampling") {
     const Mesh low = lowPlane();
     const Mesh high = highWithRidge();
-    const bake::BakeResult r =
-        bake::bake(low, high, bake::BakeMap::AmbientOcclusion, aoParams());
+    const bake::BakeResult r = bake::bake(low, high, bake::BakeMap::AmbientOcclusion, aoParams());
     REQUIRE_FALSE(r.image.pixels.empty());
 
     // Beside the ridge (u ~ 0.51) the projected high-poly hit is occluded by the
@@ -81,15 +85,14 @@ TEST_CASE("AO projects the low-poly texel onto the high-poly before sampling") {
     const float occluded = aoAt(r.image, 0.51f, 0.5f);
     const float open = aoAt(r.image, 0.1f, 0.5f);
 
-    CHECK(open > 0.8f);            // open away from the ridge
+    CHECK(open > 0.8f);             // open away from the ridge
     CHECK(occluded < open - 0.2f);  // measurably darker beside the ridge
 }
 
 TEST_CASE("AO self-occlusion of a flat mesh against itself stays open") {
     const Mesh low = lowPlane();
     const Mesh same = lowPlane();
-    const bake::BakeResult r =
-        bake::bake(low, same, bake::BakeMap::AmbientOcclusion, aoParams());
+    const bake::BakeResult r = bake::bake(low, same, bake::BakeMap::AmbientOcclusion, aoParams());
     REQUIRE_FALSE(r.image.pixels.empty());
     // Projection hits the coincident surface at ~0 distance -> fully open.
     CHECK(aoAt(r.image, 0.5f, 0.5f) > 0.9f);

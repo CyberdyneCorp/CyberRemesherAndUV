@@ -5,6 +5,7 @@
 
 #include "cyber/core/math.hpp"
 #include "cyber/core/mesh.hpp"
+#include "cyber/uv/atlas.hpp"
 #include "cyber/uv/common.hpp"
 #include "cyber/uv/distortion.hpp"
 #include "cyber/uv/packing.hpp"
@@ -27,6 +28,36 @@ namespace {
 Mesh makeQuad(float w, float h) {
     const std::vector<Vec3> p = {{0, 0, 0}, {w, 0, 0}, {w, h, 0}, {0, h, 0}};
     const std::vector<std::vector<Index>> f = {{0, 1, 2, 3}};
+    return Mesh::fromIndexed(p, f);
+}
+
+// Unit cube, six quad faces — every face carries a distinct axis-aligned
+// normal, so normal-coherent chart growth must isolate each into its own chart.
+Mesh makeCube() {
+    const std::vector<Vec3> p = {{0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0},
+                                 {0, 0, 1}, {1, 0, 1}, {1, 1, 1}, {0, 1, 1}};
+    const std::vector<std::vector<Index>> f = {{0, 3, 2, 1}, {4, 5, 6, 7}, {0, 1, 5, 4},
+                                               {2, 3, 7, 6}, {1, 2, 6, 5}, {3, 0, 4, 7}};
+    return Mesh::fromIndexed(p, f);
+}
+
+// A strip of quads bending around the y-axis, `degPerQuad` per quad. Seed growth
+// splits it once the running normal exceeds the chart-angle bound; the merge pass
+// can re-unite the pieces when the whole strip still fits one normal cone.
+Mesh makeBentStrip(int quads, float degPerQuad) {
+    std::vector<Vec3> p;
+    std::vector<std::vector<Index>> f;
+    const float d = degPerQuad * 3.14159265f / 180.0f;
+    for (int i = 0; i <= quads; ++i) {
+        const float a = d * static_cast<float>(i);
+        p.push_back({std::cos(a), 0.0f, std::sin(a)});
+        p.push_back({std::cos(a), 1.0f, std::sin(a)});
+    }
+    for (int i = 0; i < quads; ++i) {
+        const Index b0 = static_cast<Index>(2 * i);
+        const Index b1 = static_cast<Index>(2 * (i + 1));
+        f.push_back({b0, b1, b1 + 1, b0 + 1});
+    }
     return Mesh::fromIndexed(p, f);
 }
 
@@ -97,6 +128,48 @@ TEST_CASE("packing unit islands yields non-overlapping boxes in the unit square"
     }
 }
 
+TEST_CASE("skyline packing is tighter than shelf and stays valid") {
+    // Boxes of varied heights: tallest-first shelf packing leaves vertical gaps
+    // under the short boxes that the skyline strategy drops later boxes into.
+    std::vector<uv::Bounds2> boxes;
+    const float dims[][2] = {{1.0f, 1.0f}, {1.0f, 0.3f}, {0.5f, 1.0f}, {0.4f, 0.4f},
+                             {1.0f, 0.6f}, {0.7f, 0.9f}, {0.3f, 0.2f}, {0.9f, 0.5f}};
+    for (const auto& d : dims) {
+        uv::Bounds2 b;
+        b.expand({0.0f, 0.0f});
+        b.expand({d[0], d[1]});
+        boxes.push_back(b);
+    }
+
+    uv::PackParams shelf;
+    shelf.strategy = uv::PackStrategy::Shelf;
+    uv::PackParams sky;
+    sky.strategy = uv::PackStrategy::Skyline;
+    const uv::PackResult a = uv::packBoxes(boxes, shelf);
+    const uv::PackResult b = uv::packBoxes(boxes, sky);
+    REQUIRE(a.ok);
+    REQUIRE(b.ok);
+
+    // Skyline fits the same boxes into a smaller square -> higher coverage.
+    REQUIRE(b.usedArea > a.usedArea);
+
+    // ...while staying a valid packing: inside the unit square, no overlaps.
+    for (const uv::PackedIsland& island : b.islands) {
+        REQUIRE(island.placed.mn.x >= -1e-5f);
+        REQUIRE(island.placed.mn.y >= -1e-5f);
+        REQUIRE(island.placed.mx.x <= 1.0f + 1e-5f);
+        REQUIRE(island.placed.mx.y <= 1.0f + 1e-5f);
+    }
+    // Skyline places boxes edge-to-edge, so neighbours touch exactly; the slack
+    // absorbs the 1-ULP float noise at a shared boundary while still catching any
+    // real interior overlap.
+    for (std::size_t i = 0; i < b.islands.size(); ++i) {
+        for (std::size_t j = i + 1; j < b.islands.size(); ++j) {
+            REQUIRE_FALSE(uv::Bounds2::overlap(b.islands[i].placed, b.islands[j].placed, 1e-5f));
+        }
+    }
+}
+
 TEST_CASE("packing preserves relative scale of unequal islands") {
     uv::Bounds2 small;
     small.expand({0, 0});
@@ -118,8 +191,7 @@ TEST_CASE("packing preserves relative scale of unequal islands") {
 TEST_CASE("seam ring cuts a mesh into two islands") {
     // Two quads sharing an edge form one island; seaming the shared edge
     // splits them.
-    const std::vector<Vec3> p = {{0, 0, 0}, {1, 0, 0}, {1, 1, 0},
-                                 {0, 1, 0}, {2, 0, 0}, {2, 1, 0}};
+    const std::vector<Vec3> p = {{0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0}, {2, 0, 0}, {2, 1, 0}};
     const std::vector<std::vector<Index>> f = {{0, 1, 2, 3}, {1, 4, 5, 2}};
     Mesh mesh = Mesh::fromIndexed(p, f);
 
@@ -146,6 +218,141 @@ TEST_CASE("island UV translate offsets every corner") {
     const Vec2 after = uv::islandUvCentroid(mesh, island);
     REQUIRE(after.x == doctest::Approx(before.x + 5.0f));
     REQUIRE(after.y == doctest::Approx(before.y - 2.0f));
+}
+
+TEST_CASE("autoSeams partitions a cube into one chart per face") {
+    Mesh mesh = makeCube();
+    // No merging: each cube face is its own normal-coherent chart.
+    uv::AtlasOptions opts;
+    opts.mergeCharts = false;
+    const uv::SeamSet seams = uv::autoSeams(mesh, opts);
+    // Six faces -> every one of the 12 cube edges lies between two different
+    // charts and is seamed.
+    REQUIRE(seams.size() == 12);
+    const auto islands = uv::computeIslands(mesh, seams);
+    REQUIRE(islands.size() == 6);
+    for (const auto& island : islands) {
+        REQUIRE(island.size() == 1);
+    }
+}
+
+TEST_CASE("unwrapAtlas produces a low-distortion, in-bounds cube atlas") {
+    Mesh mesh = makeCube();
+    // Cone-only charting (no distortion merge) keeps one chart per cube face.
+    uv::AtlasOptions opts;
+    opts.maxChartDistortion = 0.0f;
+    const uv::AtlasResult atlas = uv::unwrapAtlas(mesh, opts);
+
+    REQUIRE(atlas.ok);
+    REQUIRE(atlas.chartCount == 6);
+    REQUIRE(atlas.flippedCharts == 0);
+    // Each chart is a single planar quad, so LSCM is near-perfectly conformal.
+    REQUIRE(atlas.maxAngleDistortion < 1e-3f);
+
+    // Every corner UV must land inside the unit square with no chart overlap.
+    const std::vector<Vec2>* uvs = uv::uvColumn(mesh);
+    REQUIRE(uvs != nullptr);
+    for (const Vec2& p : *uvs) {
+        REQUIRE(p.x >= -1e-5f);
+        REQUIRE(p.y >= -1e-5f);
+        REQUIRE(p.x <= 1.0f + 1e-5f);
+        REQUIRE(p.y <= 1.0f + 1e-5f);
+    }
+}
+
+TEST_CASE("chart merge recombines fragmented coplanar-compatible charts") {
+    // 7 quads at 10 deg each span 60 deg of normal — seed growth (40 deg bound)
+    // splits them into two charts, but the whole strip fits a single 40 deg cone
+    // about its mean normal, so the merge pass reunites it.
+    Mesh split = makeBentStrip(7, 10.0f);
+    uv::AtlasOptions noMerge;
+    noMerge.mergeCharts = false;
+    const uv::AtlasResult a = uv::unwrapAtlas(split, noMerge);
+
+    Mesh merged = makeBentStrip(7, 10.0f);
+    uv::AtlasOptions merge;
+    merge.mergeCharts = true;
+    merge.maxChartDistortion = 0.0f;  // cone merge only
+    const uv::AtlasResult b = uv::unwrapAtlas(merged, merge);
+
+    REQUIRE(a.chartCount > 1);
+    REQUIRE(b.chartCount < a.chartCount);
+    REQUIRE(b.flippedCharts == 0);
+    // The reunited chart still lives inside one normal cone, so it stays a
+    // sanely-bounded conformal map (not an arbitrary blow-up).
+    REQUIRE(b.maxAngleDistortion < 0.35f);
+
+    // A cube's faces are 90 deg apart, so the cone merge must NOT combine them.
+    Mesh cube = makeCube();
+    const uv::AtlasResult c = uv::unwrapAtlas(cube, merge);
+    REQUIRE(c.chartCount == 6);
+}
+
+TEST_CASE("distortion-bounded merge folds developable strips together") {
+    // With the looser distortion cap on, the cube's six faces collapse to two
+    // developable three-face strips (each unrolls flat), so the chart count
+    // drops below the six cone-only charts while distortion stays ~0.
+    Mesh cube = makeCube();
+    uv::AtlasOptions opts;
+    opts.maxChartDistortion = 0.10f;
+    const uv::AtlasResult atlas = uv::unwrapAtlas(cube, opts);
+
+    REQUIRE(atlas.ok);
+    REQUIRE(atlas.chartCount < 6);
+    REQUIRE(atlas.flippedCharts == 0);
+    // Developable strips unwrap with essentially no distortion.
+    REQUIRE(atlas.maxAngleDistortion <= 0.10f);
+
+    // The cap is honoured relative to disabling the pass: it never raises the
+    // chart count and here strictly lowers it.
+    Mesh coneCube = makeCube();
+    uv::AtlasOptions coneOnly;
+    coneOnly.maxChartDistortion = 0.0f;
+    const uv::AtlasResult base = uv::unwrapAtlas(coneCube, coneOnly);
+    REQUIRE(atlas.chartCount < base.chartCount);
+}
+
+TEST_CASE("chart re-orientation tightens the cube atlas") {
+    // Without re-orientation LSCM leaves each cube face as a 45-degree diamond,
+    // whose axis-aligned bounding box wastes half its area. Re-orienting to the
+    // minimum-area box makes the faces axis-aligned squares, so the packer fits
+    // them at a larger scale -> higher texel density.
+    Mesh loose = makeCube();
+    uv::AtlasOptions noReorient;
+    noReorient.reorientCharts = false;
+    noReorient.maxChartDistortion = 0.0f;  // per-face charts, so faces are diamonds
+    const uv::AtlasResult a = uv::unwrapAtlas(loose, noReorient);
+
+    Mesh tight = makeCube();
+    uv::AtlasOptions reorient;
+    reorient.reorientCharts = true;
+    reorient.maxChartDistortion = 0.0f;
+    const uv::AtlasResult b = uv::unwrapAtlas(tight, reorient);
+
+    REQUIRE(a.chartCount == b.chartCount);
+    REQUIRE(b.flippedCharts == 0);
+    // The conformal distortion is unaffected (rotation is a similarity)...
+    REQUIRE(b.maxAngleDistortion == doctest::Approx(a.maxAngleDistortion).epsilon(1e-4));
+    // ...but the pack is materially tighter (cube faces double their coverage).
+    REQUIRE(b.texelDensity > a.texelDensity * 1.2f);
+}
+
+TEST_CASE("unwrapAtlas is deterministic") {
+    Mesh a = makeCube();
+    Mesh b = makeCube();
+    const uv::AtlasResult ra = uv::unwrapAtlas(a);
+    const uv::AtlasResult rb = uv::unwrapAtlas(b);
+    REQUIRE(ra.chartCount == rb.chartCount);
+    REQUIRE(ra.seamEdges == rb.seamEdges);
+    const std::vector<Vec2>* ua = uv::uvColumn(a);
+    const std::vector<Vec2>* ub = uv::uvColumn(b);
+    REQUIRE(ua != nullptr);
+    REQUIRE(ub != nullptr);
+    REQUIRE(ua->size() == ub->size());
+    for (std::size_t i = 0; i < ua->size(); ++i) {
+        REQUIRE((*ua)[i].x == doctest::Approx((*ub)[i].x));
+        REQUIRE((*ua)[i].y == doctest::Approx((*ub)[i].y));
+    }
 }
 
 TEST_CASE("mirrored UVs are detected as a flipped island") {

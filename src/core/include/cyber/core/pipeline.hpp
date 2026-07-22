@@ -1,5 +1,5 @@
 #pragma once
-
+#include <algorithm>
 #include <functional>
 #include <memory>
 #include <string>
@@ -54,11 +54,20 @@ struct PipelineResult {
 // caller can inject the field-aligned quadrangulator (which lives in the
 // accel-dependent quadrangulate module). The factory is called once per island
 // so each island gets an independent instance.
+//
+// `fallbackQuadrangulator` is used only when the primary is the quad-cover method
+// (which skips our isotropic remesh and can decline an island when the seamless-UV
+// solve is unavailable or fails). On such a per-island failure the island — left
+// untouched by quad-cover — is recovered through the normal isotropic remesh + this
+// fallback quadrangulator, so making quad-cover the default never sacrifices the
+// always-produces-output robustness of the field-aligned path. Ignored for other
+// methods; nullptr disables recovery (the island is simply reported failed).
 using QuadrangulatorFactory = std::function<std::unique_ptr<IQuadrangulator>()>;
 [[nodiscard]] PipelineResult remesh(const Mesh& input, const Parameters& rawParams,
                                     ProgressSink* progress = nullptr,
                                     const CancelToken* cancel = nullptr,
-                                    const QuadrangulatorFactory& quadrangulator = {});
+                                    const QuadrangulatorFactory& quadrangulator = {},
+                                    const QuadrangulatorFactory& fallbackQuadrangulator = {});
 
 // Cleanup policy from the canonical parameters, applied per island result:
 // KeepLargest keeps only the biggest connected patch, KeepAll keeps

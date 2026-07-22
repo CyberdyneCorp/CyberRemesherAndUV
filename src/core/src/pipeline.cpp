@@ -2,8 +2,13 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <map>
+#include <queue>
+#include <thread>
 
 #include "cyber/core/bvh.hpp"
 #include "cyber/core/isotropic.hpp"
@@ -83,7 +88,8 @@ Mesh weldCoincidentVertices(const Mesh& mesh) {
     std::vector<Vec3> welded;
     std::vector<Index> remap(pos.size());
     for (std::size_t i = 0; i < pos.size(); ++i) {
-        const auto [it, inserted] = lookup.try_emplace(key(pos[i]), static_cast<Index>(welded.size()));
+        const auto [it, inserted] =
+            lookup.try_emplace(key(pos[i]), static_cast<Index>(welded.size()));
         if (inserted) {
             welded.push_back(pos[i]);
         }
@@ -110,6 +116,134 @@ Mesh weldCoincidentVertices(const Mesh& mesh) {
         }
     }
     return Mesh::fromIndexed(welded, weldedFaces);
+}
+
+// Make every face's winding agree with its neighbours (flood-fill orientation
+// repair). Inconsistent winding — common in AI-generated, scanned, and CAD-export
+// meshes — leaves the field/extractor with contradictory normals and yields a
+// non-manifold quad output. BFS over faces across MANIFOLD shared edges (exactly two
+// faces): two consistently-oriented faces traverse a shared edge in OPPOSITE
+// directions, so a neighbour that traverses it the SAME way is flipped. Each closed
+// component is then flipped as a whole to outward (positive signed volume). On
+// already-consistent, outward input (the corpus) nothing flips — the result is
+// bit-identical, preserving determinism.
+Mesh orientFacesConsistently(const Mesh& mesh) {
+    std::vector<Vec3> pos;
+    std::vector<std::vector<Index>> faces;
+    mesh.toIndexed(pos, faces);
+    if (faces.empty()) {
+        return mesh;
+    }
+    // Undirected edge -> list of (face, loopIsMinToMax): whether the face's loop
+    // traverses the edge from min(a,b) to max(a,b).
+    std::map<std::pair<Index, Index>, std::vector<std::pair<int, bool>>> edgeMap;
+    for (int fi = 0; fi < static_cast<int>(faces.size()); ++fi) {
+        const auto& f = faces[static_cast<std::size_t>(fi)];
+        const std::size_t n = f.size();
+        for (std::size_t k = 0; k < n; ++k) {
+            const Index a = f[k], b = f[(k + 1) % n];
+            edgeMap[{std::min(a, b), std::max(a, b)}].push_back({fi, a < b});
+        }
+    }
+    std::vector<char> visited(faces.size(), 0);
+    std::vector<char> flip(faces.size(), 0);  // effective direction = loopIsMinToMax XOR flip
+    for (int s = 0; s < static_cast<int>(faces.size()); ++s) {
+        if (visited[static_cast<std::size_t>(s)]) {
+            continue;
+        }
+        std::vector<int> comp;
+        std::queue<int> q;
+        q.push(s);
+        visited[static_cast<std::size_t>(s)] = 1;
+        bool closedComponent = true;  // no boundary/non-manifold edges seen
+        while (!q.empty()) {
+            const int fi = q.front();
+            q.pop();
+            comp.push_back(fi);
+            const auto& f = faces[static_cast<std::size_t>(fi)];
+            const std::size_t n = f.size();
+            for (std::size_t k = 0; k < n; ++k) {
+                const Index a = f[k], b = f[(k + 1) % n];
+                const auto key = std::make_pair(std::min(a, b), std::max(a, b));
+                const auto& incident = edgeMap[key];
+                if (incident.size() != 2) {
+                    closedComponent = false;  // open patch: signed volume is meaningless
+                    continue;  // boundary or non-manifold edge: don't propagate across
+                }
+                for (const auto& [nf, nfwd] : incident) {
+                    if (nf == fi || visited[static_cast<std::size_t>(nf)]) {
+                        continue;
+                    }
+                    const bool effI = (a < b) != (flip[static_cast<std::size_t>(fi)] != 0);
+                    // neighbour must end up with the opposite effective direction.
+                    const bool wantJ = !effI;
+                    flip[static_cast<std::size_t>(nf)] = (nfwd != wantJ) ? 1 : 0;
+                    visited[static_cast<std::size_t>(nf)] = 1;
+                    q.push(nf);
+                }
+            }
+        }
+        // Orient the whole component outward: flip all if its signed volume is negative.
+        // Only meaningful for a CLOSED component — an open patch's signed volume is
+        // arbitrary, so leave it as the flood-fill made it (consistent, input-preserving).
+        if (!closedComponent) {
+            continue;
+        }
+        double vol = 0.0;
+        for (const int fi : comp) {
+            const auto& f = faces[static_cast<std::size_t>(fi)];
+            const bool fl = flip[static_cast<std::size_t>(fi)] != 0;
+            for (std::size_t k = 1; k + 1 < f.size(); ++k) {
+                const Vec3 p0 = pos[f[0]];
+                const Vec3 p1 = pos[fl ? f[f.size() - k] : f[k]];
+                const Vec3 p2 = pos[fl ? f[f.size() - k - 1] : f[k + 1]];
+                vol += static_cast<double>(dot(p0, cross(p1, p2))) / 6.0;
+            }
+        }
+        if (vol < 0.0) {
+            for (const int fi : comp) {
+                flip[static_cast<std::size_t>(fi)] ^= 1;
+            }
+        }
+    }
+    std::size_t flipped = 0;
+    for (std::size_t fi = 0; fi < faces.size(); ++fi) {
+        if (flip[fi]) {
+            std::reverse(faces[fi].begin(), faces[fi].end());
+            ++flipped;
+        }
+    }
+    if (flipped == 0) {
+        return mesh;  // already consistent + outward: bit-identical passthrough
+    }
+    return Mesh::fromIndexed(pos, faces);
+}
+
+// Run fn over the vertex index range [0,n) split into hardware-concurrency chunks.
+// The relax loops are per-vertex independent, so the split is byte-identical to the
+// serial loop; each thread does enough work (thousands of BVH projections) that the
+// spawn/join overhead is negligible (unlike the tiny per-CG-iter spmv).
+template <typename Fn>
+void parallelVertexRange(std::size_t n, const Fn& fn) {
+    if (n == 0) {
+        return;
+    }
+    const std::size_t hw = std::max<std::size_t>(1, std::thread::hardware_concurrency());
+    const std::size_t workers = std::min<std::size_t>(hw, n);
+    if (workers <= 1) {
+        fn(std::size_t{0}, n);
+        return;
+    }
+    const std::size_t chunk = (n + workers - 1) / workers;
+    std::vector<std::thread> threads;
+    threads.reserve(workers);
+    for (std::size_t lo = 0; lo < n; lo += chunk) {
+        const std::size_t hi = std::min(n, lo + chunk);
+        threads.emplace_back([&fn, lo, hi] { fn(lo, hi); });
+    }
+    for (auto& t : threads) {
+        t.join();
+    }
 }
 
 // Tangential Laplacian step for an interior vertex: move toward the 1-ring
@@ -263,8 +397,8 @@ void relaxQuadMesh(Mesh& mesh, const ReferenceSurface& reference, float sharpEdg
             }
             const auto verts = mesh.faceVertices(f);
             for (std::size_t k = 0; k < 4; ++k) {
-                sum += static_cast<double>(length(mesh.position(verts[k]) -
-                                                  mesh.position(verts[(k + 1) % 4])));
+                sum += static_cast<double>(
+                    length(mesh.position(verts[k]) - mesh.position(verts[(k + 1) % 4])));
                 ++n;
             }
         }
@@ -273,9 +407,18 @@ void relaxQuadMesh(Mesh& mesh, const ReferenceSurface& reference, float sharpEdg
 
     std::vector<Vec3> newPos(mesh.vertexCapacity());
     std::vector<bool> move(mesh.vertexCapacity(), false);
+    // Both per-vertex loops are independent (compute reads unchanged positions and writes
+    // its own newPos slot; project reads newPos and writes its own position slot), and the
+    // reference BVH is read-only — so running them across threads is byte-IDENTICAL (no
+    // reduction, per-vertex float ops). The dominant cost is the reference.project() BVH
+    // query per vertex per iteration; on a large source mesh this relax was ~half the whole
+    // remesh (8.3s on a 554k-tri source), embarrassingly parallel.
     for (int it = 0; it < iterations; ++it) {
         const float targetRadius = shapeMatch ? meanQuadEdge() * 0.70710678f : 0.0f;
         std::fill(move.begin(), move.end(), false);
+        // Compute pass stays serial: the target functions read the mesh's lazily-built
+        // topology/normal caches, which are not safe to populate concurrently. It is the
+        // cheap pass (no BVH).
         for (Index i = 0; i < mesh.vertexCapacity(); ++i) {
             const VertexId v{i};
             if (!mesh.isAlive(v) || constrained[i] || mesh.vertexEdges(v).empty()) {
@@ -285,13 +428,19 @@ void relaxQuadMesh(Mesh& mesh, const ReferenceSurface& reference, float sharpEdg
                                    : tangentialTarget(mesh, v, lambda);
             move[i] = true;
         }
-        for (Index i = 0; i < mesh.vertexCapacity(); ++i) {
-            if (!move[i]) {
-                continue;
+        // Project pass IS parallel: reference.project() is const with a local traversal
+        // stack (thread-safe), setPosition writes disjoint slots, and each vertex is
+        // independent — byte-identical to the serial loop. This is the expensive pass (a
+        // BVH closest-point query per vertex) and dominated the whole remesh on large meshes.
+        parallelVertexRange(mesh.vertexCapacity(), [&](std::size_t lo, std::size_t hi) {
+            for (std::size_t i = lo; i < hi; ++i) {
+                if (!move[i]) {
+                    continue;
+                }
+                mesh.setPosition(VertexId{static_cast<Index>(i)},
+                                 reference.empty() ? newPos[i] : reference.project(newPos[i]));
             }
-            mesh.setPosition(VertexId{i},
-                             reference.empty() ? newPos[i] : reference.project(newPos[i]));
-        }
+        });
     }
 }
 
@@ -345,7 +494,8 @@ void applySmallPatchPolicy(Mesh& mesh, SmallPatchPolicy policy, int minFaces) {
 }
 
 PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSink* progress,
-                      const CancelToken* cancel, const QuadrangulatorFactory& quadrangulator) {
+                      const CancelToken* cancel, const QuadrangulatorFactory& quadrangulator,
+                      const QuadrangulatorFactory& fallbackQuadrangulator) {
     PipelineResult result;
 
     // Stage 0: parameters (validated at every entry point — spec).
@@ -375,7 +525,8 @@ PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSi
     // Stage 1: guarded target edge length.
     Mesh work = input;
     work.triangulate();
-    work = weldCoincidentVertices(work);  // fuse unwelded coincident patches (seam fix)
+    work = weldCoincidentVertices(work);   // fuse unwelded coincident patches (seam fix)
+    work = orientFacesConsistently(work);  // repair inconsistent face winding (robustness)
     const double area = totalSurfaceArea(work);
     const EdgeLengthResult lengthResult = targetEdgeLength(area, effectiveQuads, params.edgeScale);
     if (!lengthResult.ok()) {
@@ -405,7 +556,7 @@ PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSi
     }
 
     float progressBase = 0.0f;
-    bool fieldExtractor = false;   // did the position-field extractor run? (drives CV relax)
+    bool fieldExtractor = false;    // did the position-field extractor run? (drives CV relax)
     bool integerExtractor = false;  // integer-grid extractor? (drives base-relax strength)
     // The quad-cover method runs its own (harness) isotropic remesh + seamless-UV solve on
     // the raw triangles; a preceding pipeline isotropic remesh would double-remesh and leave
@@ -414,6 +565,31 @@ PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSi
     const std::string quadMethodName =
         quadrangulator ? quadrangulator()->name() : std::string("greedy");
     const bool quadCoverMethod = quadMethodName == "quad-cover";
+
+    // Isotropic remesh of one island in place. Returns the status; on a non-cancel
+    // failure it records the stage/reason on `oc`. Factored out so the quad-cover
+    // fallback path can reuse it after quad-cover declines an island.
+    const auto runIsotropicStage = [&](Mesh& m, float base, float span,
+                                       IslandOutcome& oc) -> IsotropicStatus {
+        const ReferenceSurface reference(m, params.smoothNormalDegrees);
+        IsotropicOptions iso;
+        iso.targetEdgeLength = lengthResult.edgeLength;
+        iso.adaptivity = params.adaptivity;
+        iso.smoothNormalDegrees = params.smoothNormalDegrees;
+        ProgressSink isoSink =
+            progress ? progress->subrange(base, base + span, "isotropic") : ProgressSink{};
+        const IsotropicStatus st =
+            isotropicRemesh(m, reference, iso, progress ? &isoSink : nullptr, cancel);
+        if (st != IsotropicStatus::Cancelled &&
+            (st != IsotropicStatus::Success || m.faceCount() == 0)) {
+            oc.stage = "isotropic";
+            oc.reason = st == IsotropicStatus::InvalidInput
+                            ? "invalid island input"
+                            : "island vanished during isotropic remeshing";
+        }
+        return st;
+    };
+
     for (std::size_t i = 0; i < islandFaces.size(); ++i) {
         IslandOutcome& outcome = outcomes[i];
         outcome.inputFaces = islandFaces[i].size();
@@ -432,25 +608,13 @@ PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSi
         // Isotropic stage: overall 0.0-0.3 of this island's slice. Skipped for quad-cover,
         // which does its own isotropic remesh downstream (see quadCoverMethod above).
         if (!quadCoverMethod) {
-            const ReferenceSurface reference(outcome.mesh, params.smoothNormalDegrees);
-            IsotropicOptions iso;
-            iso.targetEdgeLength = lengthResult.edgeLength;
-            iso.adaptivity = params.adaptivity;
-            iso.smoothNormalDegrees = params.smoothNormalDegrees;
-            ProgressSink isoSink =
-                progress ? progress->subrange(progressBase, progressBase + weight * 0.3f, "isotropic")
-                         : ProgressSink{};
             const IsotropicStatus isoStatus =
-                isotropicRemesh(outcome.mesh, reference, iso, progress ? &isoSink : nullptr, cancel);
+                runIsotropicStage(outcome.mesh, progressBase, weight * 0.3f, outcome);
             if (isoStatus == IsotropicStatus::Cancelled) {
                 result.status = RunStatus::Cancelled;
                 return result;
             }
             if (isoStatus != IsotropicStatus::Success || outcome.mesh.faceCount() == 0) {
-                outcome.stage = "isotropic";
-                outcome.reason = isoStatus == IsotropicStatus::InvalidInput
-                                     ? "invalid island input"
-                                     : "island vanished during isotropic remeshing";
                 progressBase += weight;
                 continue;
             }
@@ -460,22 +624,55 @@ PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSi
         // injected quadrangulator (field-aligned) when provided, else greedy.
         std::unique_ptr<IQuadrangulator> quad =
             quadrangulator ? quadrangulator() : makeGreedyPairingQuadrangulator();
-        fieldExtractor = quad->name() == "instant-meshes";
+        // instant-meshes and quad-cover both extract from a smooth field, so the
+        // uniform-square shape-match relax lowers their edge-CV ~20% corpus-wide with
+        // no change to irregular % and improved surface deviation (measured); only the
+        // less-uniform triangle-pairing base keeps the lighter centroid relax.
+        fieldExtractor = quad->name() == "instant-meshes" || quad->name() == "quad-cover";
         integerExtractor = quad->name() == "integer";
         ProgressSink quadSink =
             progress ? progress->subrange(progressBase + weight * 0.3f,
                                           progressBase + weight * 0.9f, "quadrangulate")
                      : ProgressSink{};
-        const auto quadOutcome = quad->quadrangulate(
-            outcome.mesh, lengthResult.edgeLength, progress ? &quadSink : nullptr, cancel);
+        const auto quadOutcome = quad->quadrangulate(outcome.mesh, lengthResult.edgeLength,
+                                                     progress ? &quadSink : nullptr, cancel);
         if (quadOutcome.cancelled) {
             result.status = RunStatus::Cancelled;
             return result;
         }
-        if (!quadOutcome.success || outcome.mesh.faceCount() == 0) {
-            outcome.stage = "quadrangulate";
-            outcome.reason =
-                quadOutcome.failureReason.empty() ? "no faces produced" : quadOutcome.failureReason;
+        bool quadOk = quadOutcome.success && outcome.mesh.faceCount() > 0;
+
+        // Quad-cover recovery: it skipped the isotropic stage and declined this island
+        // (no seamless-UV solver, or a solve/extraction failure). The mesh is untouched,
+        // so recover the island via the normal isotropic remesh + fallback quadrangulator
+        // (field-aligned) — the default never loses field-aligned's always-produces-output
+        // guarantee.
+        if (!quadOk && quadCoverMethod && fallbackQuadrangulator) {
+            const IsotropicStatus isoStatus =
+                runIsotropicStage(outcome.mesh, progressBase, weight * 0.3f, outcome);
+            if (isoStatus == IsotropicStatus::Cancelled) {
+                result.status = RunStatus::Cancelled;
+                return result;
+            }
+            if (isoStatus == IsotropicStatus::Success && outcome.mesh.faceCount() > 0) {
+                std::unique_ptr<IQuadrangulator> fb = fallbackQuadrangulator();
+                fieldExtractor = fb->name() == "instant-meshes" || fb->name() == "quad-cover";
+                integerExtractor = fb->name() == "integer";
+                const auto fbOutcome = fb->quadrangulate(outcome.mesh, lengthResult.edgeLength,
+                                                         progress ? &quadSink : nullptr, cancel);
+                if (fbOutcome.cancelled) {
+                    result.status = RunStatus::Cancelled;
+                    return result;
+                }
+                quadOk = fbOutcome.success && outcome.mesh.faceCount() > 0;
+            }
+        }
+        if (!quadOk) {
+            if (outcome.stage.empty()) {  // not already set by a failed fallback isotropic
+                outcome.stage = "quadrangulate";
+                outcome.reason = quadOutcome.failureReason.empty() ? "no faces produced"
+                                                                   : quadOutcome.failureReason;
+            }
             progressBase += weight;
             continue;
         }
@@ -530,7 +727,17 @@ PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSi
         // edge-length CV toward the field-based reference. The default matcher's
         // base is less uniform, where forcing uniform squares would trade too
         // much angle quality, so it keeps the plain centroid relax.
-        const bool shapeMatch = fieldExtractor;
+        // shapeMatch (uniform-square target) equalises edge lengths, lowering CV.
+        // Enabled for the position-field extractor by default; CYBER_SHAPEMATCH=1
+        // forces it on for every method (Step-1 CV experiment), CYBER_SHAPEMATCH=0
+        // forces it off. CYBER_RELAX_ITERS / CYBER_RELAX_LAMBDA tune the final pass.
+        const char* smEnv = std::getenv("CYBER_SHAPEMATCH");
+        const bool shapeMatch = smEnv != nullptr ? (std::atoi(smEnv) != 0) : fieldExtractor;
+        const char* riEnv = std::getenv("CYBER_RELAX_ITERS");
+        const char* rlEnv = std::getenv("CYBER_RELAX_LAMBDA");
+        const int finalRelaxIters = riEnv != nullptr ? std::atoi(riEnv) : 20;
+        const float finalRelaxLambda =
+            rlEnv != nullptr ? static_cast<float>(std::atof(rlEnv)) : 0.5f;
 
         // Relax the coarse base onto the source first: a skewed base subdivides
         // into skewed quads, so smoothing it before the split reduces the sliver
@@ -540,15 +747,48 @@ PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSi
         // before the 4x split lifts the median quad angle a couple of degrees at no
         // CV / surface-deviation cost. Less-uniform bases (field-aligned) would trade
         // edge-length CV for that, so they keep the lighter default pass.
+        const bool pipeTime = std::getenv("CYBER_PIPE_TIME") != nullptr;
+        using PClk = std::chrono::steady_clock;
+        const auto pms = [](PClk::time_point a, PClk::time_point b) {
+            // chrono::rep is long on 64-bit Linux but long long on Windows/macOS;
+            // normalize to long long so the %lld format is portable.
+            return static_cast<long long>(
+                std::chrono::duration_cast<std::chrono::milliseconds>(b - a).count());
+        };
+        auto pt = PClk::now();
         {
             const ReferenceSurface baseSurface(work, params.smoothNormalDegrees);
+            if (pipeTime) {
+                std::fprintf(stderr, "[pipe-time] baseSurface build (%zu src tris)=%lldms\n",
+                             work.faceCount(), pms(pt, PClk::now()));
+                pt = PClk::now();
+            }
             if (!baseSurface.empty()) {
-                const int baseRelaxIters = integerExtractor ? 40 : 10;
-                relaxQuadMesh(result.mesh, baseSurface, params.sharpEdgeDegrees,
-                              baseRelaxIters, /*lambda=*/0.5f, shapeMatch);
+                // A uniform base tolerates a longer projected relax before the 4x
+                // split — it lifts median angle at no CV cost. Both the integer-grid
+                // and the (Geogram/native) quad-cover seamless bases are uniform
+                // enough: measured across the corpus, base=40 raises quad-cover
+                // median +0.3..+1.0 deg with CV flat-to-lower and irregular %
+                // unchanged. Less-uniform bases (field-aligned, position-field)
+                // would trade edge-CV, so they keep the lighter pass.
+                // CYBER_BASE_RELAX_ITERS overrides it for further tuning.
+                const char* briEnv = std::getenv("CYBER_BASE_RELAX_ITERS");
+                const int baseRelaxIters = briEnv != nullptr
+                                               ? std::atoi(briEnv)
+                                               : ((integerExtractor || quadCoverMethod) ? 40 : 10);
+                relaxQuadMesh(result.mesh, baseSurface, params.sharpEdgeDegrees, baseRelaxIters,
+                              /*lambda=*/0.5f, shapeMatch);
             }
         }
+        if (pipeTime) {
+            std::fprintf(stderr, "[pipe-time] base relax=%lldms\n", pms(pt, PClk::now()));
+            pt = PClk::now();
+        }
         result.mesh = result.mesh.linearSubdivide();
+        if (pipeTime) {
+            std::fprintf(stderr, "[pipe-time] subdivide=%lldms\n", pms(pt, PClk::now()));
+            pt = PClk::now();
+        }
         // Linear subdivision only splits faces — the new vertices sit on the
         // coarse (quarter-density) base's flat facets, so the silhouette stays
         // faceted/jagged AND the split leaves many degenerate slivers. Build a
@@ -556,6 +796,10 @@ PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSi
         // onto it, then run tangential relaxation to de-sliver the quads while
         // following the original curvature (see relaxQuadMesh).
         const ReferenceSurface sourceSurface(work, params.smoothNormalDegrees);
+        if (pipeTime) {
+            std::fprintf(stderr, "[pipe-time] sourceSurface build=%lldms\n", pms(pt, PClk::now()));
+            pt = PClk::now();
+        }
         if (!sourceSurface.empty()) {
             for (Index vi = 0; vi < result.mesh.vertexCapacity(); ++vi) {
                 const VertexId v{vi};
@@ -563,8 +807,11 @@ PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSi
                     result.mesh.setPosition(v, sourceSurface.project(result.mesh.position(v)));
                 }
             }
-            relaxQuadMesh(result.mesh, sourceSurface, params.sharpEdgeDegrees,
-                          /*iterations=*/20, /*lambda=*/0.5f, shapeMatch);
+            relaxQuadMesh(result.mesh, sourceSurface, params.sharpEdgeDegrees, finalRelaxIters,
+                          finalRelaxLambda, shapeMatch);
+        }
+        if (pipeTime) {
+            std::fprintf(stderr, "[pipe-time] final project+relax=%lldms\n", pms(pt, PClk::now()));
         }
     }
     countFaces(result.mesh, result.stats);

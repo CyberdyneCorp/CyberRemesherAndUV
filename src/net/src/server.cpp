@@ -93,7 +93,8 @@ bool BridgeServer::start(std::uint16_t port) {
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);  // local-only bind (spec)
     addr.sin_port = htons(port);
-    if (::bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0 || ::listen(fd, 16) != 0) {
+    if (::bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0 ||
+        ::listen(fd, 16) != 0) {
         ::close(fd);
         return false;
     }

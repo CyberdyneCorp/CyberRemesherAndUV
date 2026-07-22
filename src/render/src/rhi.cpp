@@ -1,5 +1,7 @@
 #include "cyber/render/rhi.hpp"
 
+#include <algorithm>
+
 namespace cyber::render {
 
 // Backend makers are defined in their own best-effort translation units and

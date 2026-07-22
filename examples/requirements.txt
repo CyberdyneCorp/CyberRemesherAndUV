@@ -1,2 +1,5 @@
 numpy>=1.21
 matplotlib>=3.5
+# Optional: the reference unwrapper for 15_uv_vs_xatlas.py (the example self-skips
+# when it is absent).
+xatlas>=0.0.9

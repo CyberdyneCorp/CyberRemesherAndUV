@@ -13,7 +13,6 @@
 #define CL_HPP_ENABLE_EXCEPTIONS
 
 #include <CL/opencl.hpp>
-
 #include <algorithm>
 #include <memory>
 #include <string>
@@ -355,8 +354,9 @@ public:
 private:
     // Repacks the flat BVH into scalar arrays matching the kernel layout.
     static void packBvh(const FlatBvhNode* nodes, std::size_t nodeCount, const FlatBvhTri* tris,
-                        std::size_t triCount, std::vector<float>& bounds, std::vector<cl_uint>& meta,
-                        std::vector<float>& triV, std::vector<cl_uint>& triFace) {
+                        std::size_t triCount, std::vector<float>& bounds,
+                        std::vector<cl_uint>& meta, std::vector<float>& triV,
+                        std::vector<cl_uint>& triFace) {
         bounds.resize(nodeCount * 6);
         meta.resize(nodeCount * 2);
         for (std::size_t i = 0; i < nodeCount; ++i) {
@@ -389,8 +389,8 @@ private:
 
     template <class T>
     cl::Buffer readBuffer(std::vector<T>& host) {
-        return cl::Buffer(m_context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, host.size() * sizeof(T),
-                          host.data());
+        return cl::Buffer(m_context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                          host.size() * sizeof(T), host.data());
     }
 
     cl::Device m_device;

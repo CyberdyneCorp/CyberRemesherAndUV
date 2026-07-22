@@ -41,8 +41,8 @@ TEST_CASE("cloneIslandUv copies UVs onto a matching island") {
 }
 
 TEST_CASE("cloneIslandUv rejects mismatched islands") {
-    const std::vector<Vec3> p = {{0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0}, {2, 0, 0}, {3, 0, 0},
-                                 {2, 1, 0}};
+    const std::vector<Vec3> p = {{0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0},
+                                 {2, 0, 0}, {3, 0, 0}, {2, 1, 0}};
     const std::vector<std::vector<Index>> f = {{0, 1, 2, 3}, {4, 5, 6}};  // quad vs triangle
     Mesh mesh = Mesh::fromIndexed(p, f);
     static_cast<void>(cyber::uv::ensureUvColumn(mesh));

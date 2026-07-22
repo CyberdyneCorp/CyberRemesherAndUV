@@ -185,6 +185,21 @@ TEST_CASE("cancellation returns Cancelled and an empty result (spec: atomic)") {
     REQUIRE(result.mesh.faceCount() == 0);  // nothing committed
 }
 
+TEST_CASE("cancel token poll is observed by isCancelled (mid-solve cancellation)") {
+    // A long report-less stage (e.g. the native seamless-UV solve) polls the token but
+    // never triggers the progress-report path that the C-API flips the flag on. The poll
+    // callback lets isCancelled() observe the cancel directly.
+    CancelToken token;
+    CHECK_FALSE(token.isCancelled());
+    bool wantCancel = false;
+    token.setPoll([&wantCancel]() { return wantCancel; });
+    CHECK_FALSE(token.isCancelled());  // poll returns false -> not cancelled
+    wantCancel = true;
+    CHECK(token.isCancelled());  // poll now true -> cancelled, and the flag latches
+    wantCancel = false;
+    CHECK(token.isCancelled());  // latched: stays cancelled even after the poll clears
+}
+
 TEST_CASE("progress is monotonic and finishes at 1.0") {
     const Mesh sphere = makeSphere(10, 14);
     std::vector<float> values;

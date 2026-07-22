@@ -123,7 +123,8 @@ struct Huffman {
         for (int sym = 0; sym < static_cast<int>(lengths.size()); ++sym) {
             const int len = lengths[static_cast<std::size_t>(sym)];
             if (len != 0) {
-                const std::size_t slot = static_cast<std::size_t>(offsets[static_cast<std::size_t>(len)]++);
+                const std::size_t slot =
+                    static_cast<std::size_t>(offsets[static_cast<std::size_t>(len)]++);
                 symbols[slot] = sym;
             }
         }
@@ -150,16 +151,16 @@ struct Huffman {
 };
 
 // RFC 1951 length codes 257..285: base value and count of extra bits.
-constexpr std::array<int, 29> kLengthBase = {3,  4,  5,  6,   7,   8,   9,   10,  11,  13,
-                                             15, 17, 19, 23,  27,  31,  35,  43,  51,  59,
+constexpr std::array<int, 29> kLengthBase = {3,  4,  5,  6,   7,   8,   9,   10,  11, 13,
+                                             15, 17, 19, 23,  27,  31,  35,  43,  51, 59,
                                              67, 83, 99, 115, 131, 163, 195, 227, 258};
 constexpr std::array<int, 29> kLengthExtra = {0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2,
                                               2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0};
 // Distance codes 0..29.
-constexpr std::array<int, 30> kDistBase = {1,    2,    3,    4,    5,    7,     9,    13,   17,   25,
-                                           33,   49,   65,   97,   129,  193,   257,  385,  513,  769,
-                                           1025, 1537, 2049, 3073, 4097, 6145,  8193, 12289, 16385, 24577};
-constexpr std::array<int, 30> kDistExtra = {0, 0, 0, 0, 1, 1, 2, 2, 3, 3,  4,  4,  5,  5, 6,
+constexpr std::array<int, 30> kDistBase = {
+    1,   2,   3,   4,   5,   7,    9,    13,   17,   25,   33,   49,   65,    97,    129,
+    193, 257, 385, 513, 769, 1025, 1537, 2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577};
+constexpr std::array<int, 30> kDistExtra = {0, 0, 0, 0, 1, 1, 2, 2,  3,  3,  4,  4,  5,  5,  6,
                                             6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13};
 
 Huffman fixedLiteralTable() {
@@ -220,15 +221,15 @@ bool inflateHuffman(BitReader& br, Bytes& out, const Huffman& lit, const Huffman
         if (lidx >= kLengthBase.size()) {
             return false;
         }
-        const unsigned length =
-            static_cast<unsigned>(kLengthBase[lidx]) + br.getBits(static_cast<unsigned>(kLengthExtra[lidx]));
+        const unsigned length = static_cast<unsigned>(kLengthBase[lidx]) +
+                                br.getBits(static_cast<unsigned>(kLengthExtra[lidx]));
         const int dsym = dist.decode(br);
         if (br.error || dsym < 0 || dsym >= static_cast<int>(kDistBase.size())) {
             return false;
         }
         const std::size_t didx = static_cast<std::size_t>(dsym);
-        const std::size_t distance =
-            static_cast<std::size_t>(kDistBase[didx]) + br.getBits(static_cast<unsigned>(kDistExtra[didx]));
+        const std::size_t distance = static_cast<std::size_t>(kDistBase[didx]) +
+                                     br.getBits(static_cast<unsigned>(kDistExtra[didx]));
         if (distance == 0 || distance > out.size()) {
             return false;
         }
@@ -294,8 +295,10 @@ bool buildDynamicTables(BitReader& br, Huffman& lit, Huffman& dist) {
     if (br.error || lengths.size() != total) {  // a repeat must not overrun the table
         return false;
     }
-    std::vector<int> litLengths(lengths.begin(), lengths.begin() + static_cast<std::ptrdiff_t>(hlit));
-    std::vector<int> distLengths(lengths.begin() + static_cast<std::ptrdiff_t>(hlit), lengths.end());
+    std::vector<int> litLengths(lengths.begin(),
+                                lengths.begin() + static_cast<std::ptrdiff_t>(hlit));
+    std::vector<int> distLengths(lengths.begin() + static_cast<std::ptrdiff_t>(hlit),
+                                 lengths.end());
     return lit.build(litLengths) && dist.build(distLengths);
 }
 

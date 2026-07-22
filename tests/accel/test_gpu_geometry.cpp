@@ -39,7 +39,8 @@ Mesh makeSphere(int stacks, int slices) {
         const float y = std::cos(phi);
         const float r = std::sin(phi);
         for (int j = 0; j < slices; ++j) {
-            const float theta = 2.0f * cyber::kPi * static_cast<float>(j) / static_cast<float>(slices);
+            const float theta =
+                2.0f * cyber::kPi * static_cast<float>(j) / static_cast<float>(slices);
             points.push_back({r * std::cos(theta), y, r * std::sin(theta)});
         }
     }

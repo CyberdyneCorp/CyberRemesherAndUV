@@ -48,6 +48,9 @@
 #include "cyber/retopo/stroke_interpreter.hpp"
 #include "cyber/retopo/symmetry.hpp"
 #include "cyber/retopo/tweak.hpp"
+#ifdef CYBER_CAPI_WITH_UV
+#include "cyber/uv/atlas.hpp"
+#endif
 
 // Version numbers are injected from the CMake project() version so this file
 // stays the single C-facing mirror of the engine version.
@@ -244,7 +247,9 @@ void cyber_default_params(CyberRemeshParams* params) {
     params->adaptivity = defaults.adaptivity;
     params->pureQuads = defaults.pureQuads ? 1 : 0;
     params->holeFillMaxBoundary = defaults.holeFillMaxBoundary;
-    params->quadMethod = CYBER_QUAD_FIELD_ALIGNED;
+    // quad-cover is the default: it reaches QuadriFlow-class irregular/CV where a solver
+    // is available, and degrades to field-aligned (per-island) when it is not.
+    params->quadMethod = CYBER_QUAD_QUADCOVER;
 }
 
 CyberStatus cyber_remesh(const CyberMesh* in, const CyberRemeshParams* params,
@@ -258,6 +263,10 @@ CyberStatus cyber_remesh(const CyberMesh* in, const CyberRemeshParams* params,
     try {
         const cyber::remesh::Parameters cppParams = toParameters(*params);
         const cyber::CancelToken token;
+        // Poll the C cancel callback directly from isCancelled(), so a long report-less
+        // stage (e.g. the native seamless-UV solve) is cancellable mid-flight, not only at
+        // the progress-report boundaries makeSink flips the flag on.
+        token.setPoll([cancel, user]() { return cancel != nullptr && cancel(user) != 0; });
         cyber::ProgressSink sink = makeSink(progress, cancel, user, token);
 
         // The field-aligned quadrangulator (maximum triangle matching over a
@@ -270,21 +279,40 @@ CyberStatus cyber_remesh(const CyberMesh* in, const CyberRemeshParams* params,
         // quadMethod selects the extractor: field-aligned (default), the
         // Instant-Meshes position-field extractor, or the integer-parametrization
         // extractor (Milestones 3-5, experimental).
-        const int quadMethod = params->quadMethod;
+        // quad-cover is the default, but it needs a seamless-UV solver (in-process build
+        // or the CYBER_QUADCOVER_CLI harness). When neither is present, fall back to the
+        // field-aligned quadrangulator so a default build still produces output; when it
+        // IS present, pass field-aligned as the per-island fallback the pipeline uses if
+        // quad-cover declines an island.
+        int quadMethod = params->quadMethod;
+        if (quadMethod == CYBER_QUAD_QUADCOVER && !cyber::remesh::quadCoverAvailable()) {
+            quadMethod = CYBER_QUAD_FIELD_ALIGNED;
+        }
+        const auto makeQuad = [](int method) -> std::unique_ptr<cyber::remesh::IQuadrangulator> {
+            if (method == CYBER_QUAD_INSTANT_MESHES) {
+                return cyber::remesh::makeInstantMeshesQuadrangulator();
+            }
+            if (method == CYBER_QUAD_INTEGER) {
+                return cyber::remesh::makeIntegerQuadrangulator();
+            }
+            if (method == CYBER_QUAD_QUADCOVER) {
+                // Uniform (adaptivity 0): quad-cover is a seamless global-grid method whose
+                // strength is uniform clean topology. Measured, curvature-adaptive sizing on
+                // it gives no surface-fidelity gain but injects singularities and edge-length
+                // variance (spot irr 2->6%, fandisk 3->15%), so — unlike the field/integer
+                // paths — it stays uniform-only here. The adaptivity knob remains available
+                // for experiments via makeQuadCoverQuadrangulator(iters, a) / CYBER_QC_ADAPT.
+                return cyber::remesh::makeQuadCoverQuadrangulator(40, 0.0f);
+            }
+            return cyber::remesh::makeFieldAlignedQuadrangulator();
+        };
+        cyber::remesh::QuadrangulatorFactory fallback;
+        if (quadMethod == CYBER_QUAD_QUADCOVER) {
+            fallback = []() { return cyber::remesh::makeFieldAlignedQuadrangulator(); };
+        }
         cyber::remesh::PipelineResult result = cyber::remesh::remesh(
             in->mesh, cppParams, &sink, &token,
-            [quadMethod]() -> std::unique_ptr<cyber::remesh::IQuadrangulator> {
-                if (quadMethod == CYBER_QUAD_INSTANT_MESHES) {
-                    return cyber::remesh::makeInstantMeshesQuadrangulator();
-                }
-                if (quadMethod == CYBER_QUAD_INTEGER) {
-                    return cyber::remesh::makeIntegerQuadrangulator();
-                }
-                if (quadMethod == CYBER_QUAD_QUADCOVER) {
-                    return cyber::remesh::makeQuadCoverQuadrangulator();
-                }
-                return cyber::remesh::makeFieldAlignedQuadrangulator();
-            });
+            [quadMethod, makeQuad]() { return makeQuad(quadMethod); }, fallback);
 
         switch (result.status) {
             case cyber::remesh::RunStatus::Success:
@@ -363,6 +391,72 @@ CyberStatus cyber_mesh_stats(const CyberMesh* mesh, CyberStats* out) {
         setError("cyber_mesh_stats: unknown error");
         return CYBER_ERR_RUNTIME;
     }
+}
+
+void cyber_default_atlas_params(CyberAtlasParams* params) {
+    if (params == nullptr) {
+        return;
+    }
+#ifdef CYBER_CAPI_WITH_UV
+    const cyber::uv::AtlasOptions defaults;
+    params->maxChartAngleDegrees = defaults.maxChartAngleDeg;
+    params->packMargin = defaults.pack.margin;
+    params->textureSize = defaults.pack.textureSize;
+    params->reorientCharts = defaults.reorientCharts ? 1 : 0;
+    params->mergeCharts = defaults.mergeCharts ? 1 : 0;
+    params->maxChartDistortion = defaults.maxChartDistortion;
+#else
+    params->maxChartAngleDegrees = 40.0f;
+    params->packMargin = 0.0f;
+    params->textureSize = 1024;
+    params->reorientCharts = 1;
+    params->mergeCharts = 1;
+    params->maxChartDistortion = 0.10f;
+#endif
+}
+
+CyberStatus cyber_uv_atlas([[maybe_unused]] CyberMesh* mesh,
+                           [[maybe_unused]] const CyberAtlasParams* params,
+                           [[maybe_unused]] CyberAtlasResult* out) {
+#ifdef CYBER_CAPI_WITH_UV
+    if (mesh == nullptr) {
+        setError("cyber_uv_atlas: null mesh");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    try {
+        cyber::uv::AtlasOptions opts;
+        if (params != nullptr) {
+            opts.maxChartAngleDeg = params->maxChartAngleDegrees;
+            opts.pack.margin = params->packMargin;
+            opts.pack.textureSize = params->textureSize;
+            opts.reorientCharts = params->reorientCharts != 0;
+            opts.mergeCharts = params->mergeCharts != 0;
+            opts.maxChartDistortion = params->maxChartDistortion;
+        }
+        const cyber::uv::AtlasResult r = cyber::uv::unwrapAtlas(mesh->mesh, opts);
+        if (out != nullptr) {
+            out->chartCount = r.chartCount;
+            out->seamEdges = r.seamEdges;
+            out->maxAngleDistortion = r.maxAngleDistortion;
+            out->rmsAngleDistortion = r.rmsAngleDistortion;
+            out->flippedCharts = r.flippedCharts;
+            out->fallbackCharts = r.fallbackCharts;
+            out->packedArea = r.packedArea;
+            out->texelDensity = r.texelDensity;
+        }
+        clearError();
+        return r.ok ? CYBER_OK : CYBER_ERR_RUNTIME;
+    } catch (const std::exception& e) {
+        setError(std::string("cyber_uv_atlas: ") + e.what());
+        return CYBER_ERR_RUNTIME;
+    } catch (...) {
+        setError("cyber_uv_atlas: unknown error");
+        return CYBER_ERR_RUNTIME;
+    }
+#else
+    setError("cyber_uv_atlas: engine built without the UV module (CYBER_BUILD_UV=OFF)");
+    return CYBER_ERR_RUNTIME;
+#endif
 }
 
 CyberMesh* cyber_mesh_create(void) {

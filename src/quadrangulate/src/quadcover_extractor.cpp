@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -25,12 +26,26 @@
 #include <utility>
 #include <vector>
 
+#include "cyber/accel/backend.hpp"
+#include "cyber/core/isotropic.hpp"
+#include "cyber/core/reference_surface.hpp"
+#include "cyber/quadrangulate/seamless_solver.hpp"
+
+#ifdef CYBER_HAVE_QUADCOVER
+#include "autoremesher_solve.hpp"
+#endif
+
 // TASK F. The isoline extractor and the IQuadrangulator seam are still stubs
 // (Milestones 2-3); Milestone 1 fills computeSeamlessUv by obtaining a seamless
 // integer-grid UV out-of-process from AutoRemesher's Geogram quad_cover harness.
 namespace cyber::remesh {
 
 namespace {
+
+#ifndef CYBER_HAVE_QUADCOVER
+// The OBJ writer and UV-dump parser serve only the out-of-process subprocess path.
+// With the in-process solver linked in they are unused, so compile them out to keep
+// -Werror=unused-function happy.
 
 // Parse the harness UV dump (autoremesher_harness.cpp writeUvDump): the isotropic
 // mesh (V) plus per-triangle vertex indices and 3 corner UVs (T).
@@ -51,8 +66,8 @@ bool parseUvDump(const std::string& path, SeamlessUv& uv) {
                 }
                 double x = 0, y = 0, z = 0;
                 std::sscanf(line, "%lf %lf %lf", &x, &y, &z);
-                uv.vertices.push_back(Vec3{static_cast<float>(x), static_cast<float>(y),
-                                           static_cast<float>(z)});
+                uv.vertices.push_back(
+                    Vec3{static_cast<float>(x), static_cast<float>(y), static_cast<float>(z)});
             }
         } else if (line[0] == 'T') {
             long n = 0;
@@ -66,8 +81,8 @@ bool parseUvDump(const std::string& path, SeamlessUv& uv) {
                 double u0 = 0, v0 = 0, u1 = 0, v1 = 0, u2 = 0, v2 = 0;
                 std::sscanf(line, "%ld %ld %ld %lf %lf %lf %lf %lf %lf", &a, &b, &c, &u0, &v0, &u1,
                             &v1, &u2, &v2);
-                uv.triangles.push_back({static_cast<Index>(a), static_cast<Index>(b),
-                                        static_cast<Index>(c)});
+                uv.triangles.push_back(
+                    {static_cast<Index>(a), static_cast<Index>(b), static_cast<Index>(c)});
                 uv.triangleUv.push_back({Vec2{static_cast<float>(u0), static_cast<float>(v0)},
                                          Vec2{static_cast<float>(u1), static_cast<float>(v1)},
                                          Vec2{static_cast<float>(u2), static_cast<float>(v2)}});
@@ -99,21 +114,288 @@ bool writeObjFor(const std::string& path, const Mesh& mesh, double& areaOut) {
         }
         std::fprintf(f, "\n");
         for (std::size_t k = 1; k + 1 < fc.size(); ++k) {
-            area += 0.5 * static_cast<double>(length(cross(pos[fc[k]] - pos[fc[0]],
-                                                           pos[fc[k + 1]] - pos[fc[0]])));
+            area += 0.5 * static_cast<double>(
+                              length(cross(pos[fc[k]] - pos[fc[0]], pos[fc[k + 1]] - pos[fc[0]])));
         }
     }
     std::fclose(f);
     areaOut = area;
     return true;
 }
+#endif  // CYBER_HAVE_QUADCOVER
 
 }  // namespace
 
-SeamlessUv computeSeamlessUv(const Mesh& mesh, float targetEdgeLength, float harnessScaling) {
+namespace {
+// CYBER_QC_DEBUG-gated per-call trace of whether the native seamless solve RAN or DECLINED,
+// so the corpus harness can grep "native OK" / "native DECLINED <reason>" and confirm a model
+// took the native path rather than silently falling back to the vendored / field-aligned path.
+void logNative(bool ok, const char* reason) {
+    if (std::getenv("CYBER_QC_DEBUG") == nullptr) {
+        return;
+    }
+    if (ok) {
+        std::fprintf(stderr, "[qc] native OK\n");
+    } else {
+        std::fprintf(stderr, "[qc] native DECLINED %s\n", reason);
+    }
+}
+}  // namespace
+
+SeamlessUv computeSeamlessUvNative(const Mesh& mesh, float targetEdgeLength, float adaptivity,
+                                   float spacingScale, const CancelToken* cancel) {
+    // M3 (docs/native-miq-plan.md): the fully native QuadCover-style seamless solve. No
+    // Geogram, no subprocess. Pipeline:
+    //   (pre) isotropic pre-remesh at `targetEdgeLength` so the solve runs on a clean,
+    //         uniformly-sized triangulation (the role the harness's internal remesh played);
+    //   (M1)  frame field + period jumps + singularities + cut graph (buildSeamlessSetup);
+    //   (M2)  seamless integer-grid Poisson solve at grid cell == targetEdgeLength
+    //         (solveParameterization) -> per-corner UV;
+    //   assemble a SeamlessUv on the remeshed verts/tris from the per-corner UV.
+    // Any degenerate stage returns an invalid UV so the caller falls through cleanly.
     SeamlessUv uv;
+    if (targetEdgeLength <= 0.0f || mesh.faceCapacity() == 0) {
+        logNative(false, "empty/degenerate input");
+        return uv;
+    }
+
+    // Isotropic pre-remesh. Tag features so sharp edges survive the resample, then project
+    // onto a reference built from the raw island (flat projection: smoothNormalDegrees 0).
+    // Feature edges are NO LONGER a decline gate: buildSeamlessSetup marks them as hard seams
+    // (the grid breaks along creases, isolines run along them) and solveParameterization pins
+    // each feature-bounded patch, so CAD / sharp-feature meshes now run the native solve
+    // instead of falling back to the field-aligned path.
+    const char* featEnv = std::getenv("CYBER_QC_FEATURE_DEG");
+    const float kFeatureDihedralDegrees =
+        featEnv != nullptr ? static_cast<float>(std::atof(featEnv)) : 40.0f;
+    constexpr int kFieldIterations = 40;
+    Mesh work = mesh;
+    work.triangulate();  // feature tagging + the solve both need a pure-triangle mesh
+    work.tagFeatureEdges(kFeatureDihedralDegrees);
+
+    if (cancel != nullptr && cancel->isCancelled()) {
+        logNative(false, "cancelled");
+        return uv;
+    }
+
+    const bool timing = std::getenv("CYBER_QC_TIME") != nullptr;
+    const auto tick = []() { return std::chrono::steady_clock::now(); };
+    const auto ms = [](auto a, auto b) {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(b - a).count();
+    };
+    auto t0 = tick();
+
+    const ReferenceSurface reference(work, 0.0f);
+    IsotropicOptions iso;
+    iso.targetEdgeLength = targetEdgeLength;
+    iso.adaptivity = adaptivity;
+    if (isotropicRemesh(work, reference, iso, nullptr, cancel) != IsotropicStatus::Success ||
+        work.faceCount() == 0) {
+        logNative(false, "isotropic remesh failed (or cancelled)");
+        return uv;
+    }
+    const auto tIso = tick();
+    // Re-tag features on the REMESHED mesh: the isotropic stage preserves the sharp geometry
+    // (feature vertices are never smoothed off) but the newly-created edges do not inherit the
+    // feature flag, so the seam logic in buildSeamlessSetup would see none. Re-detect them by
+    // dihedral angle now that the crease geometry is intact.
+    work.tagFeatureEdges(kFeatureDihedralDegrees);
+
+    if (cancel != nullptr && cancel->isCancelled()) {
+        logNative(false, "cancelled");
+        return uv;
+    }
+
+    auto backend = accel::defaultBackend();
+    const SeamlessSetup setup = buildSeamlessSetup(work, kFieldIterations, *backend);
+    if (!setup.valid) {
+        logNative(false, "setup invalid");
+        return uv;
+    }
+    const auto tSetup = tick();
+    if (std::getenv("CYBER_QC_DEBUG") != nullptr) {
+        std::size_t featureEdges = 0;
+        for (Index ei = 0; ei < work.edgeCapacity(); ++ei) {
+            if (work.isAlive(EdgeId{ei}) && work.edgeFaceCount(EdgeId{ei}) == 2 &&
+                work.isFeatureEdge(EdgeId{ei})) {
+                ++featureEdges;
+            }
+        }
+        std::fprintf(stderr,
+                     "[qc] native setup: faces=%zu featureEdges=%zu singular=%zu totalIndex=%d\n",
+                     work.faceCount(), featureEdges, setup.singularityCount(), setup.totalIndex());
+    }
+    // Grid spacing == targetEdgeLength gives ~1 UV cell per triangle. The isoline extractor
+    // then loses a large fraction of cells to short-edge collapse, so the quad count lands well
+    // under target. `spacingScale` < 1 traces denser isolines (several per triangle) so the
+    // extracted count tracks the request; the quadrangulator's calibration loop drives it, and
+    // CYBER_QC_SPACING_MUL overrides for experiments.
+    const char* spEnv = std::getenv("CYBER_QC_SPACING_MUL");
+    const float spacingMul = spEnv != nullptr ? static_cast<float>(std::atof(spEnv)) : spacingScale;
+    const Parameterization param =
+        solveParameterization(work, setup, targetEdgeLength * spacingMul, *backend, cancel);
+    if (!param.valid) {
+        logNative(false, "parameterization invalid (or cancelled)");
+        return uv;
+    }
+    const auto tSolve = tick();
+    if (timing) {
+        std::fprintf(stderr,
+                     "[qc-time] faces=%zu | isotropic=%ldms field+setup=%ldms solve=%ldms\n",
+                     work.faceCount(), static_cast<long>(ms(t0, tIso)),
+                     static_cast<long>(ms(tIso, tSetup)), static_cast<long>(ms(tSetup, tSolve)));
+    }
+
+    // Assemble the seamless UV on the remeshed triangles from the per-corner parameterization.
+    uv.vertices.assign(work.vertexCapacity(), Vec3{0, 0, 0});
+    for (Index vi = 0; vi < work.vertexCapacity(); ++vi) {
+        if (work.isAlive(VertexId{vi})) {
+            uv.vertices[vi] = work.position(VertexId{vi});
+        }
+    }
+    float uMin = std::numeric_limits<float>::max();
+    float uMax = std::numeric_limits<float>::lowest();
+    float vMin = uMin, vMax = uMax;
+    for (Index fi = 0; fi < work.faceCapacity(); ++fi) {
+        const FaceId f{fi};
+        if (!work.isAlive(f) || work.faceSize(f) != 3) {
+            continue;
+        }
+        const std::vector<VertexId> vs = work.faceVertices(f);
+        uv.triangles.push_back({vs[0].value, vs[1].value, vs[2].value});
+        uv.triangleUv.push_back(param.cornerUv[fi]);
+        for (const Vec2& c : param.cornerUv[fi]) {
+            uMin = std::min(uMin, c.x);
+            uMax = std::max(uMax, c.x);
+            vMin = std::min(vMin, c.y);
+            vMax = std::max(vMax, c.y);
+        }
+    }
+    if (uv.triangles.empty()) {
+        logNative(false, "no triangles assembled");
+        return uv;
+    }
+
+    // Divergence guard. The seam being locally integer-seamless (residual ~0) does NOT
+    // guarantee a globally usable map: on organic, many-cone meshes the integer phase can
+    // blow the map up while staying per-edge consistent (spot: whole UV spans ~1e9 cells).
+    // Such a UV makes the isoline tracer enumerate an astronomical grid and effectively
+    // hang. A sane integer-grid UV covers ~one cell per triangle, so its bounding box in
+    // cells is O(triangleCount); reject anything wildly beyond that so the caller degrades
+    // cleanly (falls through to the vendored / subprocess path, or the field-aligned
+    // fallback) instead of feeding the extractor a divergent map.
+    const double spanCellsU = static_cast<double>(uMax - uMin);
+    const double spanCellsV = static_cast<double>(vMax - vMin);
+    const double cellArea = spanCellsU * spanCellsV;
+    const double sane = 100.0 * static_cast<double>(uv.triangles.size());
+    if (std::getenv("CYBER_QC_DEBUG") != nullptr) {
+        std::fprintf(stderr,
+                     "[qc] native UV span: u=[%.2f,%.2f] v=[%.2f,%.2f] cellArea=%.1f sane=%.1f\n",
+                     static_cast<double>(uMin), static_cast<double>(uMax),
+                     static_cast<double>(vMin), static_cast<double>(vMax), cellArea, sane);
+    }
+    if (!(cellArea >= 0.0) || cellArea > sane) {
+        logNative(false, "divergence guard (UV bbox >> triangle count)");
+        return SeamlessUv{};  // diverged -> invalid, caller degrades cleanly
+    }
+
+    logNative(true, "");
+    uv.valid = true;
+    return uv;
+}
+
+namespace {
+
+// Vendored seamless UV: Geogram quad_cover run in-process (built with CYBER_WITH_QUADCOVER)
+// or via the CYBER_QUADCOVER_CLI harness subprocess. QuadriFlow parity where available.
+// Returns an invalid UV when neither is present so computeSeamlessUv falls through to the
+// native solver.
+SeamlessUv computeSeamlessUvVendored(const Mesh& mesh, float targetEdgeLength, float harnessScaling,
+                                     float harnessAdaptivity,
+                                     [[maybe_unused]] const CancelToken* cancel) {
+    SeamlessUv uv;
+    if (targetEdgeLength <= 0.0f) {
+        return uv;  // no target density -> caller degrades cleanly
+    }
+
+#ifdef CYBER_HAVE_QUADCOVER
+    // In-process solve (M4c): no subprocess, no temp files, no CYBER_QUADCOVER_CLI.
+    // Convert the mesh to indexed verts/tris, derive the target quad count from the
+    // requested edge length exactly as the subprocess path did, and run AutoRemesher's
+    // Geogram quad_cover directly via the isolated cyber_quadcover_solver library.
+    std::vector<Vec3> pos;
+    std::vector<std::vector<Index>> faces;
+    mesh.toIndexed(pos, faces);
+    if (pos.empty() || faces.empty()) {
+        return uv;
+    }
+    std::vector<std::array<double, 3>> verts;
+    verts.reserve(pos.size());
+    for (const Vec3& p : pos) {
+        verts.push_back(
+            {static_cast<double>(p.x), static_cast<double>(p.y), static_cast<double>(p.z)});
+    }
+    std::vector<std::array<std::size_t, 3>> tris;
+    double area = 0.0;
+    for (const auto& fc : faces) {
+        for (std::size_t k = 1; k + 1 < fc.size(); ++k) {  // fan-triangulate
+            tris.push_back({static_cast<std::size_t>(fc[0]), static_cast<std::size_t>(fc[k]),
+                            static_cast<std::size_t>(fc[k + 1])});
+            area += 0.5 * static_cast<double>(
+                              length(cross(pos[fc[k]] - pos[fc[0]], pos[fc[k + 1]] - pos[fc[0]])));
+        }
+    }
+    if (tris.empty()) {
+        return uv;
+    }
+    const double cell =
+        static_cast<double>(targetEdgeLength) * static_cast<double>(targetEdgeLength);
+    const long quads = cell > 0.0 ? std::max(64L, std::lround(area / cell)) : 3000L;
+    // Scaling defaults to the passed harnessScaling (the QuadCoverQuadrangulator
+    // calibration loop sweeps it); CYBER_QC_SCALING overrides for calibration sweeps.
+    // Adaptivity defaults to a uniform field (0.0) matching the subprocess `-a 0.0`;
+    // CYBER_QC_ADAPT overrides. Both env overrides honored in BOTH paths.
+    const char* scalingEnv = std::getenv("CYBER_QC_SCALING");
+    const double scaling =
+        scalingEnv != nullptr ? std::atof(scalingEnv) : static_cast<double>(harnessScaling);
+    const char* adaptEnv = std::getenv("CYBER_QC_ADAPT");
+    const double adapt =
+        adaptEnv != nullptr ? std::atof(adaptEnv) : static_cast<double>(harnessAdaptivity);
+    const bool dbg = std::getenv("CYBER_QC_DEBUG") != nullptr;
+    if (dbg) {
+        std::fprintf(stderr, "[qc] in-process edgeLen=%g area=%g quads=%ld s=%g a=%g\n",
+                     static_cast<double>(targetEdgeLength), area, quads, scaling, adapt);
+    }
+    const qcsolver::SeamlessSolveResult res =
+        qcsolver::solveSeamlessUv(verts, tris, quads, scaling, adapt);
+    if (dbg) {
+        std::fprintf(stderr, "[qc] in-process ok=%d isoTris=%zu\n", static_cast<int>(res.ok),
+                     res.triangles.size());
+    }
+    if (!res.ok) {
+        return uv;
+    }
+    uv.vertices.reserve(res.vertices.size());
+    for (const auto& v : res.vertices) {
+        uv.vertices.push_back(
+            Vec3{static_cast<float>(v[0]), static_cast<float>(v[1]), static_cast<float>(v[2])});
+    }
+    uv.triangles.reserve(res.triangles.size());
+    uv.triangleUv.reserve(res.triangleUvs.size());
+    for (std::size_t t = 0; t < res.triangles.size(); ++t) {
+        const auto& tri = res.triangles[t];
+        const auto& q = res.triangleUvs[t];
+        uv.triangles.push_back(
+            {static_cast<Index>(tri[0]), static_cast<Index>(tri[1]), static_cast<Index>(tri[2])});
+        uv.triangleUv.push_back({Vec2{static_cast<float>(q[0]), static_cast<float>(q[1])},
+                                 Vec2{static_cast<float>(q[2]), static_cast<float>(q[3])},
+                                 Vec2{static_cast<float>(q[4]), static_cast<float>(q[5])}});
+    }
+    uv.valid = !uv.triangles.empty();
+    return uv;
+#else
     const char* cli = std::getenv("CYBER_QUADCOVER_CLI");
-    if (cli == nullptr || targetEdgeLength <= 0.0f) {
+    if (cli == nullptr) {
         return uv;  // no solver available -> caller degrades cleanly
     }
     static std::atomic<unsigned> counter{0};
@@ -126,7 +408,8 @@ SeamlessUv computeSeamlessUv(const Mesh& mesh, float targetEdgeLength, float har
     if (!writeObjFor(objPath, mesh, area)) {
         return uv;
     }
-    const double cell = static_cast<double>(targetEdgeLength) * static_cast<double>(targetEdgeLength);
+    const double cell =
+        static_cast<double>(targetEdgeLength) * static_cast<double>(targetEdgeLength);
     const long quads = cell > 0.0 ? std::max(64L, std::lround(area / cell)) : 3000L;
     // The harness scaling controls the isotropic-remesh density that in turn sets the
     // seamless-UV grid resolution (and thus our extracted quad count). Overridable via
@@ -143,9 +426,11 @@ SeamlessUv computeSeamlessUv(const Mesh& mesh, float targetEdgeLength, float har
     // lifts quad-dominance to ~99.6% (M4b). CYBER_QC_ADAPT overrides for sweeps.
     const char* adaptEnv = std::getenv("CYBER_QC_ADAPT");
     const std::string adaptArg =
-        std::string(" -a ") + (adaptEnv != nullptr ? std::string(adaptEnv) : std::string("0.0"));
+        std::string(" -a ") +
+        (adaptEnv != nullptr ? std::string(adaptEnv) : std::to_string(harnessAdaptivity));
     const std::string cmd = std::string(cli) + " -i " + objPath + " -u " + uvPath + " -f " +
-                            std::to_string(quads) + " -s " + scaling + adaptArg + " >/dev/null 2>&1";
+                            std::to_string(quads) + " -s " + scaling + adaptArg +
+                            " >/dev/null 2>&1";
     const bool dbg = std::getenv("CYBER_QC_DEBUG") != nullptr;
     if (dbg) {
         std::fprintf(stderr, "[qc] edgeLen=%g area=%g quads=%ld cmd=%s\n",
@@ -167,6 +452,86 @@ SeamlessUv computeSeamlessUv(const Mesh& mesh, float targetEdgeLength, float har
     std::filesystem::remove(objPath, ec);
     std::filesystem::remove(uvPath, ec);
     return uv;
+#endif  // CYBER_HAVE_QUADCOVER
+}
+
+}  // namespace
+
+// Fraction of interior (exactly-two-face) edges whose dihedral angle exceeds
+// `dihedralDegrees` — a CAD discriminator: high on crease-heavy parts (fandisk
+// ~4%), near zero on smooth organic meshes (spot/rocker/bunny < 0.2%). Const and
+// non-mutating (unlike Mesh::tagFeatureEdges, which writes edge flags).
+float creaseEdgeFraction(const Mesh& mesh, float dihedralDegrees) {
+    const float cosThresh = std::cos(dihedralDegrees * 3.14159265358979324f / 180.0f);
+    std::size_t interior = 0;
+    std::size_t creases = 0;
+    for (Index e = 0; e < mesh.edgeCapacity(); ++e) {
+        const EdgeId edge{e};
+        if (!mesh.isAlive(edge)) {
+            continue;
+        }
+        const std::vector<FaceId> faces = mesh.edgeFaces(edge);
+        if (faces.size() != 2) {
+            continue;
+        }
+        ++interior;
+        const Vec3 n0 = normalized(mesh.faceNormal(faces[0]));
+        const Vec3 n1 = normalized(mesh.faceNormal(faces[1]));
+        if (dot(n0, n1) < cosThresh) {
+            ++creases;
+        }
+    }
+    return interior > 0 ? static_cast<float>(creases) / static_cast<float>(interior) : 0.0f;
+}
+
+SeamlessUv computeSeamlessUv(const Mesh& mesh, float targetEdgeLength, float harnessScaling,
+                             float harnessAdaptivity, const CancelToken* cancel) {
+    if (targetEdgeLength <= 0.0f) {
+        return SeamlessUv{};  // no target density -> caller degrades cleanly
+    }
+
+    const bool haveNative = std::getenv("CYBER_QC_NO_NATIVE") == nullptr;
+    // CAD / crease-heavy meshes: the native feature-aware seamless solver marks
+    // sharp edges as hard seams and pins the feature-bounded patches, so it makes
+    // markedly squarer quads on such parts than the vendored Geogram extractor
+    // (measured fandisk median 83.6 vs 80.7 at matched quad count, 0 defects
+    // either way). Route them to native FIRST; smooth organic meshes keep the
+    // vendored-first order (Geogram wins there). CYBER_QC_ROUTE_CREASE tunes the
+    // interior-crease-fraction threshold (0 disables); CYBER_QC_NO_ROUTE forces
+    // the original vendored-first order for A/B.
+    const char* routeEnv = std::getenv("CYBER_QC_ROUTE_CREASE");
+    const float routeThresh = routeEnv != nullptr ? static_cast<float>(std::atof(routeEnv)) : 0.02f;
+    const bool routeNative = haveNative && std::getenv("CYBER_QC_NO_ROUTE") == nullptr &&
+                             routeThresh > 0.0f && creaseEdgeFraction(mesh, 45.0f) >= routeThresh;
+
+    if (routeNative) {
+        SeamlessUv native = computeSeamlessUvNative(mesh, targetEdgeLength, harnessAdaptivity,
+                                                    harnessScaling, cancel);
+        if (native.valid) {
+            return native;
+        }
+        // Native declined -> fall back to the vendored path (valid or not).
+        return computeSeamlessUvVendored(mesh, targetEdgeLength, harnessScaling, harnessAdaptivity,
+                                         cancel);
+    }
+
+    // Vendored (Geogram quad_cover) FIRST — QuadriFlow parity (1-4% irregular),
+    // fast, and best on organic meshes.
+    SeamlessUv uv = computeSeamlessUvVendored(mesh, targetEdgeLength, harnessScaling,
+                                              harnessAdaptivity, cancel);
+    if (uv.valid) {
+        return uv;
+    }
+    // Native FALLBACK — the dependency-free standalone solver, and the stock
+    // (no-Geogram) default: watertight, bounded, cancellable at ~4-5% irregular.
+    if (haveNative) {
+        SeamlessUv native = computeSeamlessUvNative(mesh, targetEdgeLength, harnessAdaptivity,
+                                                    harnessScaling, cancel);
+        if (native.valid) {
+            return native;
+        }
+    }
+    return uv;  // invalid -> caller (quad-cover quadrangulator) degrades to field-aligned
 }
 
 // Max integer-jump residual across interior edges: for each shared edge the grid
@@ -408,8 +773,7 @@ using EdgePair = std::pair<std::size_t, std::size_t>;
 
 class IsolineExtractor {
 public:
-    IsolineExtractor(std::vector<DVec3> vertices,
-                     std::vector<std::array<std::size_t, 3>> triangles,
+    IsolineExtractor(std::vector<DVec3> vertices, std::vector<std::array<std::size_t, 3>> triangles,
                      std::vector<std::array<DVec2, 3>> triangleUvs)
         : m_vertices(std::move(vertices)),
           m_triangles(std::move(triangles)),
@@ -423,7 +787,9 @@ public:
     void setRunClosedSurfaceCleanup(bool on) { m_runClosedSurfaceCleanup = on; }
 
     const std::vector<DVec3>& remeshedVertices() const { return m_remeshedVertices; }
-    const std::vector<std::vector<std::size_t>>& remeshedQuads() const { return m_remeshedPolygons; }
+    const std::vector<std::vector<std::size_t>>& remeshedQuads() const {
+        return m_remeshedPolygons;
+    }
 
 private:
     std::vector<DVec3> m_vertices;
@@ -436,7 +802,8 @@ private:
     // default: it corrupts OPEN boundaries. See extract() and TODO(M3).
     bool m_runClosedSurfaceCleanup = false;
 
-    void extractConnections(std::vector<DVec3>& crossPoints, std::vector<std::size_t>& sourceTriangles,
+    void extractConnections(std::vector<DVec3>& crossPoints,
+                            std::vector<std::size_t>& sourceTriangles,
                             std::set<EdgePair>& connections);
     void extractEdges(const std::set<EdgePair>& connections, Graph& edgeConnectMap);
     void simplifyGraph(Graph& graph);
@@ -444,8 +811,8 @@ private:
     bool collapseTriangles(std::vector<DVec3>& crossPoints, Graph& edgeConnectMap);
     bool removeSingleEndpoints(Graph& edgeConnectMap);
     void collapseEdge(std::vector<DVec3>& crossPoints, Graph& edgeConnectMap, const EdgePair& edge);
-    void extractMesh(std::vector<DVec3>& points, const std::vector<std::size_t>& pointSourceTriangles,
-                     Graph& edgeConnectMap);
+    void extractMesh(std::vector<DVec3>& points,
+                     const std::vector<std::size_t>& pointSourceTriangles, Graph& edgeConnectMap);
     bool testPointInTriangle(const std::vector<DVec3>& points,
                              const std::array<std::size_t, 3>& triangle,
                              const std::vector<std::size_t>& testPoints);
@@ -868,7 +1235,8 @@ void IsolineExtractor::extractMesh(std::vector<DVec3>& points,
                                 }
                                 for (const std::size_t level5 : findLevel5->second) {
                                     if (level0 != level5) {
-                                        if (level3 == level5 || level2 == level5 || level1 == level5) {
+                                        if (level3 == level5 || level2 == level5 ||
+                                            level1 == level5) {
                                             continue;
                                         }
                                         if (round < 2) {
@@ -895,19 +1263,22 @@ void IsolineExtractor::extractMesh(std::vector<DVec3>& points,
                                                 if (findLevel7 == edgeConnectMap.end()) {
                                                     continue;
                                                 }
-                                                if (halfEdges.find({level5, level6}) != halfEdges.end() &&
-                                                    halfEdges.find({level6, level5}) != halfEdges.end()) {
+                                                if (halfEdges.find({level5, level6}) !=
+                                                        halfEdges.end() &&
+                                                    halfEdges.find({level6, level5}) !=
+                                                        halfEdges.end()) {
                                                     continue;
                                                 }
-                                                for (const std::size_t level7 : findLevel7->second) {
+                                                for (const std::size_t level7 :
+                                                     findLevel7->second) {
                                                     if (level0 != level7) {
                                                         continue;
                                                     }
                                                     if (3 != round) {
                                                         break;
                                                     }
-                                                    emitFace({level0, level1, level2, level3, level4,
-                                                              level5, level6});
+                                                    emitFace({level0, level1, level2, level3,
+                                                              level4, level5, level6});
                                                     break;
                                                 }
                                                 continue;
@@ -915,7 +1286,8 @@ void IsolineExtractor::extractMesh(std::vector<DVec3>& points,
                                             if (2 != round) {
                                                 break;
                                             }
-                                            emitFace({level0, level1, level2, level3, level4, level5});
+                                            emitFace(
+                                                {level0, level1, level2, level3, level4, level5});
                                             break;
                                         }
                                         continue;
@@ -949,7 +1321,8 @@ void IsolineExtractor::extractConnections(std::vector<DVec3>& crossPoints,
     std::map<PositionKey, std::size_t> crossPointMap;
 
     auto addCrossPoint = [&](const DVec3& position3, std::size_t triangleIndex) {
-        const auto insertResult = crossPointMap.insert({PositionKey(position3), crossPoints.size()});
+        const auto insertResult =
+            crossPointMap.insert({PositionKey(position3), crossPoints.size()});
         if (insertResult.second) {
             crossPoints.push_back(position3);
             sourceTriangles.push_back(triangleIndex);
@@ -1022,7 +1395,8 @@ void IsolineExtractor::extractConnections(std::vector<DVec3>& crossPoints,
                         toIndex = j;
                     }
                     for (int integer = lowInteger; integer <= highInteger; ++integer) {
-                        const double ratio = (static_cast<double>(integer) - fromPosition) / distance;
+                        const double ratio =
+                            (static_cast<double>(integer) - fromPosition) / distance;
                         if (ratio < 0 || ratio > 1) {
                             continue;
                         }
@@ -1044,7 +1418,8 @@ void IsolineExtractor::extractConnections(std::vector<DVec3>& crossPoints,
             for (const auto& pt : points) {
                 for (std::size_t pointIndex = 0; pointIndex < pt.second.size(); ++pointIndex) {
                     const std::size_t nextPointIndex = (pointIndex + 1) % pt.second.size();
-                    lines[i][pt.first].push_back({pt.second[pointIndex], pt.second[nextPointIndex]});
+                    lines[i][pt.first].push_back(
+                        {pt.second[pointIndex], pt.second[nextPointIndex]});
                 }
             }
         }
@@ -1114,7 +1489,8 @@ void IsolineExtractor::extractConnections(std::vector<DVec3>& crossPoints,
 bool IsolineExtractor::testPointInTriangle(const std::vector<DVec3>& points,
                                            const std::array<std::size_t, 3>& triangle,
                                            const std::vector<std::size_t>& testPoints) {
-    const DVec3 triangleNormal = dNormal(points[triangle[0]], points[triangle[1]], points[triangle[2]]);
+    const DVec3 triangleNormal =
+        dNormal(points[triangle[0]], points[triangle[1]], points[triangle[2]]);
     std::vector<DVec3> pointsIn3d;
     for (const std::size_t it : triangle) {
         pointsIn3d.push_back(points[it]);
@@ -1213,10 +1589,9 @@ void IsolineExtractor::fixHoleWithQuads(std::vector<std::size_t>& hole, bool che
             const int h = (i + n - 1) % n;
             const int j = (i + 1) % n;
             const int k = (j + 1) % n;
-            std::vector<std::size_t> candidate = {hole[static_cast<std::size_t>(k)],
-                                                  hole[static_cast<std::size_t>(j)],
-                                                  hole[static_cast<std::size_t>(i)],
-                                                  hole[static_cast<std::size_t>(h)]};
+            std::vector<std::size_t> candidate = {
+                hole[static_cast<std::size_t>(k)], hole[static_cast<std::size_t>(j)],
+                hole[static_cast<std::size_t>(i)], hole[static_cast<std::size_t>(h)]};
             if (m_halfEdges.end() != m_halfEdges.find({candidate[0], candidate[1]}) ||
                 m_halfEdges.end() != m_halfEdges.find({candidate[1], candidate[2]}) ||
                 m_halfEdges.end() != m_halfEdges.find({candidate[2], candidate[3]}) ||
@@ -1421,6 +1796,342 @@ void IsolineExtractor::extract() {
 
 }  // namespace
 
+namespace {
+
+// Cap elimination (PRIMARY LEVER for native irregular %). The isoline tracer
+// leaves a few percent of NON-QUAD "cap" faces (triangles / pentagons / hexagons)
+// at cone and boundary regions. The pipeline's pure-quad path then linear-subdivides
+// (Catmull-Clark split), turning EVERY non-quad n-gon into a valence-n fan centre — a
+// permanent irregular vertex. Eliminating the non-quad caps in the COARSE mesh, before
+// that subdivision, removes exactly those fan-centre irregulars.
+//
+// Two operations, both provably non-regressing:
+//   (1) pair two edge-adjacent ODD faces (tri-tri, tri-pent, pent-pent) into an even
+//       polygon and split that into quads;
+//   (2) split a leftover even n-gon (hexagon/octagon) into quads by a chord.
+// A candidate is applied only when it does not INCREASE the final irregular count.
+// After a uniform Catmull-Clark split the final irregular set is exactly
+//   {coarse vertices with edge-valence != 4}  union  {centroids of non-quad faces},
+// so we can score each op on the coarse mesh: it is accepted iff
+//   delta(non-quad centroids) + delta(vertices whose valence crosses 4) <= 0.
+// This keeps the mesh watertight (we only re-partition faces over the SAME vertex set,
+// never touching outer boundaries) and never regresses c.irregular_pct.
+class QuadCapCleaner {
+public:
+    using Poly = std::vector<std::size_t>;
+
+    QuadCapCleaner(const std::vector<Vec3>& verts, std::vector<Poly>& faces)
+        : m_verts(verts), m_faces(faces) {}
+
+    void run() {
+        build();
+        // Phase 1: merge edge-adjacent odd faces, then split the even union into quads.
+        for (std::size_t i = 0; i < m_originalCount; ++i) {
+            if (isMergeCandidate(i)) {
+                tryMergeWithNeighbour(i);
+            }
+        }
+        // Phase 2: split any surviving even non-quad face (hexagons, octagons).
+        for (std::size_t i = 0; i < m_originalCount; ++i) {
+            if (!m_alive[i]) {
+                continue;
+            }
+            const std::size_t n = m_faces[i].size();
+            if (n > 4 && (n % 2) == 0) {
+                trySplitEven(i);
+            }
+        }
+        compact();
+    }
+
+private:
+    static std::uint64_t undirectedKey(std::size_t a, std::size_t b) {
+        if (a > b) {
+            std::swap(a, b);
+        }
+        return (static_cast<std::uint64_t>(a) << 32) | static_cast<std::uint64_t>(b);
+    }
+    static std::uint64_t directedKey(std::size_t a, std::size_t b) {
+        return (static_cast<std::uint64_t>(a) << 32) | static_cast<std::uint64_t>(b);
+    }
+    static bool isRegular(int valence) { return valence == 4; }
+
+    // Add (sign +1) or remove (sign -1) a face's undirected edges from the live edge
+    // multiset, tracking per-vertex edge valence as edges appear (0->1) / vanish (1->0).
+    void applyFaceEdges(const Poly& f, int sign) {
+        const std::size_t n = f.size();
+        for (std::size_t i = 0; i < n; ++i) {
+            const std::size_t a = f[i];
+            const std::size_t b = f[(i + 1) % n];
+            const std::uint64_t key = undirectedKey(a, b);
+            int& c = m_edgeCount[key];
+            if (sign > 0) {
+                if (c == 0) {
+                    ++m_deg[a];
+                    ++m_deg[b];
+                }
+                ++c;
+            } else {
+                --c;
+                if (c == 0) {
+                    --m_deg[a];
+                    --m_deg[b];
+                }
+            }
+        }
+    }
+
+    void build() {
+        m_originalCount = m_faces.size();
+        m_alive.assign(m_originalCount, true);
+        m_deg.assign(m_verts.size(), 0);
+        m_edgeCount.clear();
+        m_dirToFace.clear();
+        for (std::size_t fi = 0; fi < m_originalCount; ++fi) {
+            const Poly& f = m_faces[fi];
+            applyFaceEdges(f, +1);
+            for (std::size_t i = 0; i < f.size(); ++i) {
+                m_dirToFace[directedKey(f[i], f[(i + 1) % f.size()])] = fi;
+            }
+        }
+    }
+
+    bool isMergeCandidate(std::size_t i) const {
+        if (!m_alive[i]) {
+            return false;
+        }
+        const std::size_t n = m_faces[i].size();
+        return n != 4 && (n % 2) == 1;  // triangle / pentagon / heptagon
+    }
+
+    // Merge two polygons across shared directed edge a->b (in F1) / b->a (in F2).
+    // Returns the CCW union polygon, or empty on a degenerate share (repeated vertex).
+    static Poly mergePolys(const Poly& f1, const Poly& f2, std::size_t a, std::size_t b) {
+        Poly out;
+        out.reserve(f1.size() + f2.size() - 2);
+        // Walk f1 starting at b around to a (this is f1 minus the a->b edge).
+        std::size_t start1 = f1.size();
+        for (std::size_t i = 0; i < f1.size(); ++i) {
+            if (f1[i] == b) {
+                start1 = i;
+                break;
+            }
+        }
+        if (start1 == f1.size()) {
+            return {};
+        }
+        for (std::size_t k = 0; k < f1.size(); ++k) {
+            out.push_back(f1[(start1 + k) % f1.size()]);  // b ... a
+        }
+        // Insert f2's interior (from a to b, excluding both endpoints).
+        std::size_t startA = f2.size();
+        for (std::size_t i = 0; i < f2.size(); ++i) {
+            if (f2[i] == a) {
+                startA = i;
+                break;
+            }
+        }
+        if (startA == f2.size()) {
+            return {};
+        }
+        for (std::size_t k = 1; k + 1 < f2.size(); ++k) {
+            out.push_back(f2[(startA + k) % f2.size()]);
+        }
+        // Reject if any vertex repeats (the two faces shared more than one edge).
+        std::set<std::size_t> seen(out.begin(), out.end());
+        if (seen.size() != out.size()) {
+            return {};
+        }
+        return out;
+    }
+
+    // Fan-split an even polygon into quads from vertex index `start`.
+    static std::vector<Poly> fanSplit(const Poly& p, std::size_t start) {
+        std::vector<Poly> quads;
+        const std::size_t n = p.size();
+        for (std::size_t i = 1; i + 1 < n / 2 + 1; ++i) {
+            // quad: (start, start+2i-1, start+2i, start+2i+1)
+            quads.push_back({p[start], p[(start + 2 * i - 1) % n], p[(start + 2 * i) % n],
+                             p[(start + 2 * i + 1) % n]});
+        }
+        return quads;
+    }
+
+    double quadArea(const Poly& q) const {
+        const Vec3 a = m_verts[q[0]];
+        const Vec3 b = m_verts[q[1]];
+        const Vec3 c = m_verts[q[2]];
+        const Vec3 d = m_verts[q[3]];
+        const double t1 = 0.5 * static_cast<double>(length(cross(b - a, c - a)));
+        const double t2 = 0.5 * static_cast<double>(length(cross(c - a, d - a)));
+        return t1 + t2;
+    }
+
+    // Score replacing `oldIdx` faces by `newPolys`: feasibility (manifold, non-degenerate)
+    // plus the resulting change in irregular count. Returns {feasible, deltaIrregular}.
+    std::pair<bool, int> score(const std::vector<std::size_t>& oldIdx,
+                               const std::vector<Poly>& newPolys) const {
+        std::map<std::uint64_t, int> mult;  // net change in edge multiplicity
+        for (const std::size_t fi : oldIdx) {
+            const Poly& f = m_faces[fi];
+            for (std::size_t i = 0; i < f.size(); ++i) {
+                --mult[undirectedKey(f[i], f[(i + 1) % f.size()])];
+            }
+        }
+        int newNonQuad = 0;
+        for (const Poly& p : newPolys) {
+            if (p.size() != 4) {
+                ++newNonQuad;
+            }
+            if (p.size() == 4 && quadArea(p) <= 1e-12) {
+                return {false, 0};  // degenerate quad
+            }
+            for (std::size_t i = 0; i < p.size(); ++i) {
+                ++mult[undirectedKey(p[i], p[(i + 1) % p.size()])];
+            }
+        }
+        int deltaVert = 0;
+        for (const auto& [key, delta] : mult) {
+            if (delta == 0) {
+                continue;
+            }
+            const auto it = m_edgeCount.find(key);
+            const int before = (it == m_edgeCount.end()) ? 0 : it->second;
+            const int after = before + delta;
+            if (after < 0 || after > 2) {
+                return {false, 0};  // would create a non-manifold edge
+            }
+            const std::size_t a = static_cast<std::size_t>(key >> 32);
+            const std::size_t b = static_cast<std::size_t>(key & 0xffffffffU);
+            if (before == 0 && after > 0) {
+                deltaVert += valenceCross(a, +1) + valenceCross(b, +1);
+            } else if (before > 0 && after == 0) {
+                deltaVert += valenceCross(a, -1) + valenceCross(b, -1);
+            }
+        }
+        int oldNonQuad = 0;
+        for (const std::size_t fi : oldIdx) {
+            if (m_faces[fi].size() != 4) {
+                ++oldNonQuad;
+            }
+        }
+        return {true, deltaVert + (newNonQuad - oldNonQuad)};
+    }
+
+    // Irregular-count change if vertex v's edge valence shifts by `d` (+1/-1).
+    int valenceCross(std::size_t v, int d) const {
+        const int before = m_deg[v];
+        const int after = before + d;
+        return (isRegular(after) ? 0 : 1) - (isRegular(before) ? 0 : 1);
+    }
+
+    void commit(const std::vector<std::size_t>& oldIdx, std::vector<Poly>& newPolys) {
+        for (const std::size_t fi : oldIdx) {
+            applyFaceEdges(m_faces[fi], -1);
+            m_alive[fi] = false;
+        }
+        for (Poly& p : newPolys) {
+            applyFaceEdges(p, +1);
+            m_alive.push_back(true);
+            m_faces.push_back(std::move(p));
+        }
+    }
+
+    // Of every fan-split of `poly`, pick the feasible one with the lowest resulting
+    // irregular delta (ties -> largest minimum quad area). Returns {} if none feasible.
+    // `oldIdx` is the face set being replaced (so edge deltas are scored in context).
+    std::vector<Poly> chooseBestSplit(const Poly& poly, const std::vector<std::size_t>& oldIdx,
+                                      int& outDelta) const {
+        std::vector<Poly> best;
+        int bestDelta = std::numeric_limits<int>::max();
+        double bestMinArea = -1.0;
+        for (std::size_t s = 0; s < poly.size(); ++s) {
+            std::vector<Poly> quads = fanSplit(poly, s);
+            if (quads.empty()) {
+                continue;
+            }
+            const auto [feasible, delta] = score(oldIdx, quads);
+            if (!feasible) {
+                continue;
+            }
+            double minArea = std::numeric_limits<double>::max();
+            for (const Poly& q : quads) {
+                minArea = std::min(minArea, quadArea(q));
+            }
+            if (delta < bestDelta || (delta == bestDelta && minArea > bestMinArea)) {
+                bestDelta = delta;
+                bestMinArea = minArea;
+                best = std::move(quads);
+            }
+        }
+        outDelta = bestDelta;
+        return best;
+    }
+
+    void tryMergeWithNeighbour(std::size_t i) {
+        const Poly& fi = m_faces[i];
+        std::vector<std::size_t> bestOld;
+        std::vector<Poly> bestNew;
+        int bestDelta = 1;  // accept only non-regressing merges (delta <= 0)
+        for (std::size_t e = 0; e < fi.size(); ++e) {
+            const std::size_t a = fi[e];
+            const std::size_t b = fi[(e + 1) % fi.size()];
+            const auto it = m_dirToFace.find(directedKey(b, a));
+            if (it == m_dirToFace.end()) {
+                continue;
+            }
+            const std::size_t j = it->second;
+            if (j == i || !m_alive[j] || !isMergeCandidate(j)) {
+                continue;
+            }
+            const Poly merged = mergePolys(fi, m_faces[j], a, b);
+            if (merged.empty() || (merged.size() % 2) != 0) {
+                continue;
+            }
+            int delta = 0;
+            std::vector<Poly> quads = chooseBestSplit(merged, {i, j}, delta);
+            if (!quads.empty() && delta <= bestDelta) {
+                bestDelta = delta;
+                bestOld = {i, j};
+                bestNew = std::move(quads);
+            }
+        }
+        if (!bestNew.empty() && bestDelta <= 0) {
+            commit(bestOld, bestNew);
+        }
+    }
+
+    void trySplitEven(std::size_t i) {
+        int delta = 0;
+        std::vector<Poly> quads = chooseBestSplit(m_faces[i], {i}, delta);
+        if (!quads.empty() && delta <= 0) {
+            std::vector<std::size_t> old = {i};
+            commit(old, quads);
+        }
+    }
+
+    void compact() {
+        std::vector<Poly> kept;
+        kept.reserve(m_faces.size());
+        for (std::size_t i = 0; i < m_faces.size(); ++i) {
+            if (m_alive[i]) {
+                kept.push_back(std::move(m_faces[i]));
+            }
+        }
+        m_faces = std::move(kept);
+    }
+
+    const std::vector<Vec3>& m_verts;
+    std::vector<Poly>& m_faces;
+    std::size_t m_originalCount = 0;
+    std::vector<bool> m_alive;
+    std::vector<int> m_deg;
+    std::unordered_map<std::uint64_t, int> m_edgeCount;
+    std::unordered_map<std::uint64_t, std::size_t> m_dirToFace;
+};
+
+}  // namespace
+
 // Milestone 2 entry point: trace the seamless UV's integer isolines into an
 // oriented quad mesh. Returns empty for an invalid/empty UV.
 // Fraction of undirected edges that are on a boundary (incident to a single
@@ -1460,8 +2171,8 @@ IsolineQuadMesh extractIsolineQuads(const Mesh& /*mesh*/, const SeamlessUv& uv) 
     std::vector<DVec3> vertices;
     vertices.reserve(uv.vertices.size());
     for (const Vec3& p : uv.vertices) {
-        vertices.push_back({static_cast<double>(p.x), static_cast<double>(p.y),
-                            static_cast<double>(p.z)});
+        vertices.push_back(
+            {static_cast<double>(p.x), static_cast<double>(p.y), static_cast<double>(p.z)});
     }
     std::vector<std::array<std::size_t, 3>> triangles;
     triangles.reserve(uv.triangles.size());
@@ -1493,19 +2204,37 @@ IsolineQuadMesh extractIsolineQuads(const Mesh& /*mesh*/, const SeamlessUv& uv) 
     extractor.setRunClosedSurfaceCleanup(closed);
     extractor.extract();
     if (std::getenv("CYBER_QC_DEBUG") != nullptr) {
-        std::fprintf(stderr, "[qc] extract closed=%d bndFrac=%.3f uvTris=%zu -> quads=%zu verts=%zu\n",
-                     static_cast<int>(closed), boundaryFrac, uv.triangles.size(),
-                     extractor.remeshedQuads().size(), extractor.remeshedVertices().size());
+        std::map<std::size_t, std::size_t> hist;
+        for (const auto& f : extractor.remeshedQuads()) {
+            ++hist[f.size()];
+        }
+        std::string h;
+        for (const auto& [sz, cnt] : hist) {
+            h += " " + std::to_string(sz) + ":" + std::to_string(cnt);
+        }
+        std::fprintf(
+            stderr,
+            "[qc] extract closed=%d bndFrac=%.3f uvTris=%zu -> quads=%zu verts=%zu hist{%s}\n",
+            static_cast<int>(closed), boundaryFrac, uv.triangles.size(),
+            extractor.remeshedQuads().size(), extractor.remeshedVertices().size(), h.c_str());
     }
 
     IsolineQuadMesh out;
     out.vertices.reserve(extractor.remeshedVertices().size());
     for (const DVec3& v : extractor.remeshedVertices()) {
-        out.vertices.push_back({static_cast<float>(v.x), static_cast<float>(v.y),
-                                static_cast<float>(v.z)});
+        out.vertices.push_back(
+            {static_cast<float>(v.x), static_cast<float>(v.y), static_cast<float>(v.z)});
     }
     out.quads = extractor.remeshedQuads();
     return out;
+}
+
+// Cap elimination (see QuadCapCleaner): convert the tracer's non-quad "cap" faces into
+// quads so the pipeline's Catmull-Clark pure-quad subdivision does not turn each into a
+// valence-3/5 fan-centre irregular. Watertight- and irregular-count-non-regressing.
+void eliminateNonQuadCaps(std::vector<Vec3>& vertices,
+                          std::vector<std::vector<std::size_t>>& faces) {
+    QuadCapCleaner(vertices, faces).run();
 }
 
 namespace {
@@ -1522,11 +2251,12 @@ double meshTargetQuads(const Mesh& mesh, float targetEdgeLength) {
     double area = 0.0;
     for (const auto& fc : faces) {
         for (std::size_t k = 1; k + 1 < fc.size(); ++k) {
-            area += 0.5 * static_cast<double>(length(cross(pos[fc[k]] - pos[fc[0]],
-                                                           pos[fc[k + 1]] - pos[fc[0]])));
+            area += 0.5 * static_cast<double>(
+                              length(cross(pos[fc[k]] - pos[fc[0]], pos[fc[k + 1]] - pos[fc[0]])));
         }
     }
-    const double cell = static_cast<double>(targetEdgeLength) * static_cast<double>(targetEdgeLength);
+    const double cell =
+        static_cast<double>(targetEdgeLength) * static_cast<double>(targetEdgeLength);
     return area / cell;
 }
 
@@ -1538,7 +2268,8 @@ double meshTargetQuads(const Mesh& mesh, float targetEdgeLength) {
 // a reason without corrupting the input triangle island).
 class QuadCoverQuadrangulator final : public IQuadrangulator {
 public:
-    explicit QuadCoverQuadrangulator(int fieldIterations) : m_fieldIterations(fieldIterations) {}
+    QuadCoverQuadrangulator(int fieldIterations, float adaptivity)
+        : m_fieldIterations(fieldIterations), m_adaptivity(adaptivity) {}
 
     Outcome quadrangulate(Mesh& mesh, float targetEdgeLength, ProgressSink* progress,
                           const CancelToken* cancel) override {
@@ -1558,11 +2289,14 @@ public:
         IsolineQuadMesh out;
         float scaling = 0.5f;
         for (int attempt = 0; attempt < 2; ++attempt) {
-            const SeamlessUv uv = computeSeamlessUv(mesh, targetEdgeLength, scaling);
+            const SeamlessUv uv =
+                computeSeamlessUv(mesh, targetEdgeLength, scaling, m_adaptivity, cancel);
             if (!uv.valid) {
-                return {.success = false, .cancelled = false,
-                        .failureReason = "quad-cover seamless UV unavailable "
-                                         "(set CYBER_QUADCOVER_CLI to the autoremesher_cli build)"};
+                return {.success = false,
+                        .cancelled = false,
+                        .failureReason =
+                            "quad-cover seamless UV unavailable "
+                            "(set CYBER_QUADCOVER_CLI to the autoremesher_cli build)"};
             }
             if (cancel != nullptr && cancel->isCancelled()) {
                 return {.success = false, .cancelled = true, .failureReason = {}};
@@ -1582,8 +2316,27 @@ public:
             progress->report(0.5f, "quadrangulate (quad-cover: isoline extract)");
         }
         if (out.quads.empty()) {
-            return {.success = false, .cancelled = false,
+            return {.success = false,
+                    .cancelled = false,
                     .failureReason = "quad-cover isoline extraction produced no faces"};
+        }
+        // Convert non-quad caps to quads before the pipeline's pure-quad subdivision so
+        // they do not become fan-centre irregulars. Runs AFTER the count calibration so it
+        // never perturbs the scaling feedback. Opt out via CYBER_QC_NO_CAPFIX for A/B.
+        if (std::getenv("CYBER_QC_NO_CAPFIX") == nullptr) {
+            eliminateNonQuadCaps(out.vertices, out.quads);
+            if (std::getenv("CYBER_QC_DEBUG") != nullptr) {
+                std::map<std::size_t, std::size_t> hist;
+                for (const auto& f : out.quads) {
+                    ++hist[f.size()];
+                }
+                std::string h;
+                for (const auto& [sz, cnt] : hist) {
+                    h += " " + std::to_string(sz) + ":" + std::to_string(cnt);
+                }
+                std::fprintf(stderr, "[qc] capfix -> quads=%zu hist{%s}\n", out.quads.size(),
+                             h.c_str());
+            }
         }
 
         std::vector<std::vector<Index>> faces;
@@ -1598,7 +2351,8 @@ public:
         }
         Mesh quads = Mesh::fromIndexed(out.vertices, faces);
         if (quads.faceCount() == 0) {
-            return {.success = false, .cancelled = false,
+            return {.success = false,
+                    .cancelled = false,
                     .failureReason = "quad-cover extraction yielded a degenerate mesh"};
         }
         mesh = std::move(quads);
@@ -1612,12 +2366,22 @@ public:
 
 private:
     int m_fieldIterations;
+    float m_adaptivity;
 };
 
 }  // namespace
 
-std::unique_ptr<IQuadrangulator> makeQuadCoverQuadrangulator(int fieldIterations) {
-    return std::make_unique<QuadCoverQuadrangulator>(fieldIterations);
+std::unique_ptr<IQuadrangulator> makeQuadCoverQuadrangulator(int fieldIterations,
+                                                             float adaptivity) {
+    return std::make_unique<QuadCoverQuadrangulator>(fieldIterations, adaptivity);
+}
+
+bool quadCoverAvailable() {
+    // M4: the native QuadCover-style seamless solver (computeSeamlessUvNative) is compiled
+    // into cyber_quadrangulate unconditionally, so a seamless-UV solver is ALWAYS available
+    // — quad-cover no longer needs Geogram (CYBER_HAVE_QUADCOVER) or the CYBER_QUADCOVER_CLI
+    // harness. The vendored / subprocess paths remain as faster/reference fallbacks.
+    return true;
 }
 
 }  // namespace cyber::remesh

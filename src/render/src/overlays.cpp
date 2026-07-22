@@ -77,7 +77,8 @@ std::vector<Vec3> brushRing(const BrushRadiusOverlay& brush) {
     const float step = (2.0f * kPi) / static_cast<float>(segments);
     for (std::uint32_t i = 0; i < segments; ++i) {
         const float angle = step * static_cast<float>(i);
-        const Vec3 offset = u * (std::cos(angle) * brush.radius) + v * (std::sin(angle) * brush.radius);
+        const Vec3 offset =
+            u * (std::cos(angle) * brush.radius) + v * (std::sin(angle) * brush.radius);
         ring.push_back(brush.center + offset);
     }
     return ring;

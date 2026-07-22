@@ -18,9 +18,9 @@
 namespace cyber::retopo {
 
 struct Symmetry {
-    Plane plane;                     // mirror plane
-    float weldTolerance = 1e-4f;     // vertices this close to the plane weld onto it
-    bool workingSidePositive = true; // which half is authored (mirrored to the other)
+    Plane plane;                      // mirror plane
+    float weldTolerance = 1e-4f;      // vertices this close to the plane weld onto it
+    bool workingSidePositive = true;  // which half is authored (mirrored to the other)
 };
 
 // Signed distance oriented so positive means "on the working side".

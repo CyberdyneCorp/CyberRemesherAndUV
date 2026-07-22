@@ -37,6 +37,25 @@ float IBackend::dot(const float* x, const float* y, std::size_t n) {
 
 void IBackend::spmvCsr(std::size_t rows, const std::size_t* rowStart, const std::size_t* colIndex,
                        const float* value, const float* x, float* y) {
+    // spmvCsr runs once per CG iteration; on the small operators the native seamless
+    // solve produces (~1e3 rows), spawning+joining ~hardware_concurrency std::threads
+    // per call costs far more than the row loop (measured: taskset -c 0 matches the
+    // 24-core solve time — the solve is thread-launch-bound, not compute-bound). Run
+    // small operators serially: byte-IDENTICAL to the parallel path (each row is
+    // independent and the inner accumulation order is unchanged), only faster. Genuinely
+    // large operators still thread.
+    const std::size_t nnz = rows > 0 ? rowStart[rows] : 0;
+    constexpr std::size_t kThreadThreshold = 1u << 16;  // ~65k nonzeros
+    if (nnz < kThreadThreshold) {
+        for (std::size_t row = 0; row < rows; ++row) {
+            float sum = 0.0f;
+            for (std::size_t k = rowStart[row]; k < rowStart[row + 1]; ++k) {
+                sum += value[k] * x[colIndex[k]];
+            }
+            y[row] = sum;
+        }
+        return;
+    }
     parallelFor(0, rows, [=](std::size_t lo, std::size_t hi) {
         for (std::size_t row = lo; row < hi; ++row) {
             float sum = 0.0f;
@@ -179,8 +198,8 @@ void IBackend::raycastBvh(const FlatBvhNode* nodes, std::size_t nodeCount, const
                 if (node.triCount > 0) {
                     for (std::uint32_t i = 0; i < node.triCount; ++i) {
                         const FlatBvhTri& tri = tris[node.leftFirst + i];
-                        const float t = rayTriangle(origin, dir, triVertex(tri.a),
-                                                    triVertex(tri.b), triVertex(tri.c));
+                        const float t = rayTriangle(origin, dir, triVertex(tri.a), triVertex(tri.b),
+                                                    triVertex(tri.c));
                         if (t >= 0.0f && t < bestT) {
                             bestT = t;
                             bestFace = static_cast<int>(tri.face);

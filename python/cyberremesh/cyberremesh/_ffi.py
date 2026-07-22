@@ -102,6 +102,34 @@ class CyberStatistics(Structure):
     ]
 
 
+class CyberAtlasParams(Structure):
+    """Mirror of ``CyberAtlasParams`` in capi/include/cyber_capi.h."""
+
+    _fields_ = [
+        ("max_chart_angle_degrees", c_float),
+        ("pack_margin", c_float),
+        ("texture_size", c_int32),
+        ("reorient_charts", c_int32),
+        ("merge_charts", c_int32),
+        ("max_chart_distortion", c_float),
+    ]
+
+
+class CyberAtlasResult(Structure):
+    """Mirror of ``CyberAtlasResult`` in capi/include/cyber_capi.h."""
+
+    _fields_ = [
+        ("chart_count", c_int32),
+        ("seam_edges", c_uint64),
+        ("max_angle_distortion", c_float),
+        ("rms_angle_distortion", c_float),
+        ("flipped_charts", c_int32),
+        ("fallback_charts", c_int32),
+        ("packed_area", c_float),
+        ("texel_density", c_float),
+    ]
+
+
 # CyberBakeMap values (must match the enum in cyber_capi.h).
 BAKE_NORMAL = 0
 BAKE_AO = 1
@@ -238,6 +266,11 @@ def _declare(lib: ctypes.CDLL) -> None:
     # CyberStatus cyber_mesh_stats(const CyberMesh*, CyberStats* out)
     lib.cyber_mesh_stats.argtypes = [c_void_p, POINTER(CyberStatistics)]
     lib.cyber_mesh_stats.restype = c_int32
+
+    lib.cyber_default_atlas_params.argtypes = [POINTER(CyberAtlasParams)]
+    lib.cyber_default_atlas_params.restype = None
+    lib.cyber_uv_atlas.argtypes = [c_void_p, POINTER(CyberAtlasParams), POINTER(CyberAtlasResult)]
+    lib.cyber_uv_atlas.restype = c_int32
 
     # -- mesh queries --------------------------------------------------------
     lib.cyber_mesh_vertex_count.argtypes = [c_void_p]

@@ -51,10 +51,10 @@ struct FieldGraph {
     std::vector<Vec3> pos;
     std::vector<Vec3> normal;
     std::vector<std::vector<int>> nbr;
-    std::vector<bool> constrained;   // feature/boundary
+    std::vector<bool> constrained;  // feature/boundary
     std::vector<Vec3> constraintDir;
-    std::vector<Vec3> q;  // orientation field
-    std::vector<Vec3> o;  // position field
+    std::vector<Vec3> q;       // orientation field
+    std::vector<Vec3> o;       // position field
     std::vector<float> scale;  // per-node lattice-spacing multiplier (1 = uniform)
     [[nodiscard]] std::size_t size() const { return pos.size(); }
 };
@@ -96,8 +96,8 @@ FieldGraph buildBaseGraph(const Mesh& mesh, std::vector<Index>& baseToVertex) {
             }
             if (mesh.isFeatureEdge(e) || mesh.isBoundaryEdge(e)) {
                 g.constrained[base] = true;
-                g.constraintDir[base] = projectUnit(mesh.position(other) - mesh.position(v),
-                                                    g.normal[base]);
+                g.constraintDir[base] =
+                    projectUnit(mesh.position(other) - mesh.position(v), g.normal[base]);
             }
         }
     }
@@ -155,19 +155,41 @@ FieldGraph buildBaseGraph(const Mesh& mesh, std::vector<Index>& baseToVertex) {
 
 // Coarsens a graph by greedy edge matching: adjacent nodes are paired, each
 // pair (or lone node) becomes one coarse node. `parent[fine] = coarse index`.
+//
+// Tube-aware matching: pair each node with its most surface-coherent unmatched
+// neighbour (largest normal agreement) and REFUSE to pair across a sharp fold
+// (normals more than acos(kMinNormalDot) apart). Plain first-neighbour matching
+// bridges thin high-curvature necks — e.g. the two sides of the Stanford-bunny's
+// ear — collapsing front and back of the tube into one coarse node whose averaged
+// normal points nowhere; the multiresolution orientation smoothing on that node is
+// then meaningless and plants extra singularities on the ear. Requiring normal
+// coherence keeps every coarse node inside one smooth patch. On a smooth model all
+// neighbours agree, so this reduces to ordinary matching and preserves its output.
 FieldGraph coarsen(const FieldGraph& fine, std::vector<int>& parent) {
     const int n = static_cast<int>(fine.size());
     std::vector<int> match(fine.size(), -1);
+    const char* dotEnv = std::getenv("CYBER_QC_COARSEN_MINDOT");
+    const float kMinNormalDot = dotEnv != nullptr ? static_cast<float>(std::atof(dotEnv)) : 0.5f;
     for (int i = 0; i < n; ++i) {
         if (match[static_cast<std::size_t>(i)] >= 0) {
             continue;
         }
+        int bestJ = -1;
+        float bestDot = kMinNormalDot;  // a match must beat the fold threshold
         for (const int j : fine.nbr[static_cast<std::size_t>(i)]) {
-            if (match[static_cast<std::size_t>(j)] < 0 && j != i) {
-                match[static_cast<std::size_t>(i)] = j;
-                match[static_cast<std::size_t>(j)] = i;
-                break;
+            if (j == i || match[static_cast<std::size_t>(j)] >= 0) {
+                continue;
             }
+            const float d = dot(fine.normal[static_cast<std::size_t>(i)],
+                                fine.normal[static_cast<std::size_t>(j)]);
+            if (d > bestDot) {
+                bestDot = d;
+                bestJ = j;
+            }
+        }
+        if (bestJ >= 0) {
+            match[static_cast<std::size_t>(i)] = bestJ;
+            match[static_cast<std::size_t>(bestJ)] = i;
         }
     }
     parent.assign(fine.size(), -1);
@@ -276,8 +298,8 @@ void smoothPosition(FieldGraph& g, float s, int iterations) {
             }
             sum = sum / w;
             const Vec3 d = g.pos[i] - sum;
-            const Vec3 anchored =
-                sum + qi * (std::round(dot(qi, d) * invS) * si) + ti * (std::round(dot(ti, d) * invS) * si);
+            const Vec3 anchored = sum + qi * (std::round(dot(qi, d) * invS) * si) +
+                                  ti * (std::round(dot(ti, d) * invS) * si);
             Vec3 rel = anchored - g.pos[i];
             rel = rel - g.normal[i] * dot(g.normal[i], rel);
             next[i] = g.pos[i] + rel;
@@ -322,9 +344,10 @@ PositionField computePositionField(const Mesh& mesh, float spacing, int iteratio
         const FieldGraph& coarse = levels[static_cast<std::size_t>(lvl) + 1];
         const std::vector<int>& parent = parents[static_cast<std::size_t>(lvl)];
         for (std::size_t i = 0; i < fine.size(); ++i) {
-            fine.q[i] = fine.constrained[i]
-                            ? fine.constraintDir[i]
-                            : projectUnit(coarse.q[static_cast<std::size_t>(parent[i])], fine.normal[i]);
+            fine.q[i] =
+                fine.constrained[i]
+                    ? fine.constraintDir[i]
+                    : projectUnit(coarse.q[static_cast<std::size_t>(parent[i])], fine.normal[i]);
         }
         smoothOrientation(fine, iterations);
     }

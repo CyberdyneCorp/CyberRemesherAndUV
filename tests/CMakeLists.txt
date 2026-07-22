@@ -10,7 +10,9 @@ add_executable(cyber_tests
     quadrangulate/test_field_quadrangulator.cpp
     quadrangulate/test_position_field.cpp
     quadrangulate/test_quadcover_extractor.cpp
+    quadrangulate/test_seamless_solver.cpp
     quadrangulate/test_quad_cleanup.cpp
+    quadrangulate/test_mcf_edgediff.cpp
     core/test_bvh.cpp
     core/test_golden.cpp
     core/test_golden_organic.cpp
@@ -63,6 +65,12 @@ if(TARGET cyber_bakecage)
     target_sources(cyber_tests PRIVATE bakecage/test_bakecage.cpp)
     target_link_libraries(cyber_tests PRIVATE cyber_bakecage)
 endif()
+# Min-cost-flow integer layout (M1): the SciPP-linkage self-test builds only when
+# the vendored SciPP is enabled (cyber_quadrangulate carries scipp::scipp then).
+if(CYBER_WITH_SCIPP)
+    target_sources(cyber_tests PRIVATE quadrangulate/test_mcf_layout.cpp
+                                        quadrangulate/test_mcf_flow.cpp)
+endif()
 cyber_set_warnings(cyber_tests)
 
 add_test(NAME unit COMMAND cyber_tests)
@@ -101,7 +109,7 @@ if(TARGET cyber_capi_shared AND Python3_FOUND)
     if(EXISTS "${_toolchain_libstdcxx}")
         list(APPEND _py_test_env "LD_PRELOAD=${_toolchain_libstdcxx}")
     endif()
-    foreach(_pyt test_api test_golden test_document_invariants test_bake)
+    foreach(_pyt test_api test_golden test_document_invariants test_bake test_uv_atlas)
         add_test(NAME python_${_pyt}
             COMMAND ${Python3_EXECUTABLE} ${_pydir}/${_pyt}.py)
         set_tests_properties(python_${_pyt} PROPERTIES

@@ -33,7 +33,8 @@ std::uint32_t readU32BE(const Bytes& b, std::size_t o) {
 
 std::uint32_t readU32LE(const Bytes& b, std::size_t o) {
     return static_cast<std::uint32_t>(b[o]) | (static_cast<std::uint32_t>(b[o + 1]) << 8) |
-           (static_cast<std::uint32_t>(b[o + 2]) << 16) | (static_cast<std::uint32_t>(b[o + 3]) << 24);
+           (static_cast<std::uint32_t>(b[o + 2]) << 16) |
+           (static_cast<std::uint32_t>(b[o + 3]) << 24);
 }
 
 std::uint16_t readU16LE(const Bytes& b, std::size_t o) {
@@ -114,14 +115,13 @@ TEST_CASE("PNG rejects invalid arguments") {
 TEST_CASE("EXR has correct magic and version") {
     const std::string path = tempPath("cyber_imageio_test.exr");
     const std::array<float, 2 * 2 * 3> px = {
-        1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f,
-        0.0f, 0.0f, 1.0f, 0.5f, 0.5f, 0.5f,
+        1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.5f, 0.5f, 0.5f,
     };
     REQUIRE(cyber::imageio::writeExr(path, 2, 2, 3, px.data()));
 
     const Bytes bytes = readFile(path);
     REQUIRE(bytes.size() > 8);
-    CHECK(readU32LE(bytes, 0) == 0x01312f76u);  // OpenEXR magic
+    CHECK(readU32LE(bytes, 0) == 0x01312f76u);   // OpenEXR magic
     CHECK((readU32LE(bytes, 4) & 0xffu) == 2u);  // version number
     // Header must contain the required channels attribute.
     bool sawChannels = false;

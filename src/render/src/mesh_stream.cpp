@@ -150,8 +150,7 @@ void MeshStreamManager::build(const Mesh& mesh, const StreamConfig& config) {
         const std::uint32_t cx = cellIndex(c.x, m_bounds.min.x, invSpan.x, nx);
         const std::uint32_t cy = cellIndex(c.y, m_bounds.min.y, invSpan.y, ny);
         const std::uint32_t cz = cellIndex(c.z, m_bounds.min.z, invSpan.z, nz);
-        const std::size_t bucket =
-            (static_cast<std::size_t>(cz) * ny + cy) * nx + cx;
+        const std::size_t bucket = (static_cast<std::size_t>(cz) * ny + cy) * nx + cx;
         buckets[bucket].push_back(f);
     }
 
@@ -178,8 +177,8 @@ void MeshStreamManager::build(const Mesh& mesh, const StreamConfig& config) {
                 m_triangleIndices.push_back(verts[i + 1].value);
             }
         }
-        const auto triCount = static_cast<std::uint32_t>(
-            (m_triangleIndices.size() / 3u) - chunk.triangleOffset);
+        const auto triCount =
+            static_cast<std::uint32_t>((m_triangleIndices.size() / 3u) - chunk.triangleOffset);
         chunk.triangleCount = triCount;
         chunk.centroid = centroidSum * (1.0f / static_cast<float>(chunk.faces.size()));
         m_totalTriangles += triCount;

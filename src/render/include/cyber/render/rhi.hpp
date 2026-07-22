@@ -1,5 +1,5 @@
 #pragma once
-
+#include <algorithm>
 #include <cstdint>
 #include <memory>
 #include <span>
@@ -196,7 +196,8 @@ public:
     [[nodiscard]] virtual std::unique_ptr<IBuffer> createBuffer(const BufferDesc& desc) = 0;
     [[nodiscard]] virtual std::unique_ptr<ITexture> createTexture(const TextureDesc& desc) = 0;
     [[nodiscard]] virtual std::unique_ptr<IPipeline> createPipeline(const PipelineDesc& desc) = 0;
-    [[nodiscard]] virtual std::unique_ptr<ISwapchain> createSwapchain(const SwapchainDesc& desc) = 0;
+    [[nodiscard]] virtual std::unique_ptr<ISwapchain> createSwapchain(
+        const SwapchainDesc& desc) = 0;
 
     // A fresh command encoder for the current frame.
     [[nodiscard]] virtual std::unique_ptr<ICommandEncoder> createCommandEncoder() = 0;

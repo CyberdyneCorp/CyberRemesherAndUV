@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <limits>
+#include <vector>
 
 namespace cyber::uv {
 namespace {
@@ -41,31 +43,90 @@ PackResult packBoxes(std::span<const Bounds2> boxes, const PackParams& params) {
     // narrower than the widest island.
     const float shelfWidth = std::fmax(maxWidth, static_cast<float>(std::sqrt(totalArea)));
 
-    // Tallest first: shelf packing wastes less vertical space this way.
+    // Tallest first: both strategies waste less vertical space this way.
     std::vector<std::size_t> order(items.size());
     for (std::size_t i = 0; i < order.size(); ++i) {
         order[i] = i;
     }
-    std::stable_sort(order.begin(), order.end(),
-                     [&](std::size_t a, std::size_t b) { return items[a].size.y > items[b].size.y; });
+    std::stable_sort(order.begin(), order.end(), [&](std::size_t a, std::size_t b) {
+        return items[a].size.y > items[b].size.y;
+    });
 
-    float cursorX = 0.0f;
-    float shelfY = 0.0f;
-    float shelfHeight = 0.0f;
     float boundWidth = 0.0f;
     float boundHeight = 0.0f;
-    for (const std::size_t oi : order) {
-        ShelfItem& item = items[oi];
-        if (cursorX > 0.0f && cursorX + item.size.x > shelfWidth) {
-            shelfY += shelfHeight;
-            cursorX = 0.0f;
-            shelfHeight = 0.0f;
+    if (params.strategy == PackStrategy::Skyline && shelfWidth > 0.0f) {
+        // Bottom-left skyline over a fixed-width strip, tracked as a per-column
+        // height map: each box drops into the columns whose highest point is
+        // lowest, filling the vertical gaps a shelf leaves open. The best strip
+        // width depends on the island shapes (too narrow forces a tall, poorly
+        // normalizing stack), so several widths are tried and the one with the
+        // smallest square bounding extent wins.
+        constexpr int kCols = 512;
+        const float baseWidth = static_cast<float>(std::sqrt(totalArea));
+        const float factors[] = {0.6f, 0.75f, 0.9f, 1.0f, 1.15f, 1.35f, 1.6f, 2.0f};
+
+        std::vector<Vec2> bestPos(items.size());
+        float bestExtent = std::numeric_limits<float>::max();
+        for (const float factor : factors) {
+            const float stripWidth = std::fmax(maxWidth, baseWidth * factor);
+            const float colWidth = stripWidth / static_cast<float>(kCols);
+            std::vector<float> heights(kCols, 0.0f);
+            std::vector<Vec2> pos(items.size());
+            float bw = 0.0f;
+            float bh = 0.0f;
+            for (const std::size_t oi : order) {
+                const ShelfItem& item = items[oi];
+                int span = static_cast<int>(std::ceil(item.size.x / colWidth));
+                span = std::clamp(span, 1, kCols);
+                int bestCol = 0;
+                float bestY = std::numeric_limits<float>::max();
+                for (int col = 0; col + span <= kCols; ++col) {
+                    float y = 0.0f;
+                    for (int k = 0; k < span; ++k) {
+                        y = std::fmax(y, heights[static_cast<std::size_t>(col + k)]);
+                    }
+                    if (y < bestY) {
+                        bestY = y;
+                        bestCol = col;
+                    }
+                }
+                pos[oi] = {static_cast<float>(bestCol) * colWidth, bestY};
+                const float top = bestY + item.size.y;
+                for (int k = 0; k < span; ++k) {
+                    heights[static_cast<std::size_t>(bestCol + k)] = top;
+                }
+                bw = std::fmax(bw, pos[oi].x + item.size.x);
+                bh = std::fmax(bh, top);
+            }
+            const float extent = std::fmax(bw, bh);
+            if (extent < bestExtent) {
+                bestExtent = extent;
+                bestPos = pos;
+                boundWidth = bw;
+                boundHeight = bh;
+            }
         }
-        item.pos = {cursorX, shelfY};
-        cursorX += item.size.x;
-        shelfHeight = std::fmax(shelfHeight, item.size.y);
-        boundWidth = std::fmax(boundWidth, cursorX);
-        boundHeight = std::fmax(boundHeight, shelfY + shelfHeight);
+        for (std::size_t i = 0; i < items.size(); ++i) {
+            items[i].pos = bestPos[i];
+        }
+    } else {
+        // Tallest first: shelf packing wastes less vertical space this way.
+        float cursorX = 0.0f;
+        float shelfY = 0.0f;
+        float shelfHeight = 0.0f;
+        for (const std::size_t oi : order) {
+            ShelfItem& item = items[oi];
+            if (cursorX > 0.0f && cursorX + item.size.x > shelfWidth) {
+                shelfY += shelfHeight;
+                cursorX = 0.0f;
+                shelfHeight = 0.0f;
+            }
+            item.pos = {cursorX, shelfY};
+            cursorX += item.size.x;
+            shelfHeight = std::fmax(shelfHeight, item.size.y);
+            boundWidth = std::fmax(boundWidth, cursorX);
+            boundHeight = std::fmax(boundHeight, shelfY + shelfHeight);
+        }
     }
 
     const float extent = std::fmax(boundWidth, boundHeight);
@@ -81,8 +142,7 @@ PackResult packBoxes(std::span<const Bounds2> boxes, const PackParams& params) {
         // padding, offset by half the margin.
         const float half = margin * 0.5f;
         packed.offset = {(item.pos.x + half) * scale, (item.pos.y + half) * scale};
-        const Vec2 islandSize =
-            packed.source.valid() ? packed.source.size() : Vec2{0.0f, 0.0f};
+        const Vec2 islandSize = packed.source.valid() ? packed.source.size() : Vec2{0.0f, 0.0f};
         packed.placed.mn = packed.offset;
         packed.placed.mx = {packed.offset.x + islandSize.x * scale,
                             packed.offset.y + islandSize.y * scale};

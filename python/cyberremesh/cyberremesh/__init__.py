@@ -14,6 +14,8 @@ imports cleanly on a machine where the engine has not been built.
 """
 
 from .api import (
+    AtlasParams,
+    AtlasResult,
     BakeMap,
     BakeParams,
     CyberError,
@@ -41,5 +43,7 @@ __all__ = [
     "BakeParams",
     "Image",
     "bake",
+    "AtlasParams",
+    "AtlasResult",
 ]
 __version__ = "0.1.0"

@@ -39,4 +39,14 @@ public:
 [[nodiscard]] CrossField computeCrossField(const Mesh& mesh, int iterations,
                                            accel::IBackend& backend);
 
+// Alternative cross field derived from the multiresolution per-vertex 4-RoSy
+// orientation field (computePositionField): the coarse-to-fine hierarchy places
+// singularities globally, which a single-level face smoothing gets stuck on —
+// fewer, better-placed cones on thin high-curvature features (e.g. the bunny
+// ears). The smoothed vertex orientation is projected onto each face and encoded
+// as the per-face cross; faces touching a feature/boundary edge are re-pinned to
+// it exactly, matching computeCrossField. Gated behind CYBER_QC_CROSSFIELD_MULTIRES
+// so the stock seamless path (and the field-aligned engine) are unchanged.
+[[nodiscard]] CrossField computeCrossFieldFromOrientation(const Mesh& mesh, int iterations);
+
 }  // namespace cyber::remesh

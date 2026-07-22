@@ -1,7 +1,10 @@
 #include "cyber/core/isotropic.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <vector>
 
 namespace cyber::remesh {
@@ -365,27 +368,60 @@ IsotropicStatus isotropicRemesh(Mesh& mesh, const ReferenceSurface& reference,
 
     // One scale field for the whole run, carried as a vertex attribute so
     // splits interpolate it and collapses keep the survivor's value.
+    const bool isoTime = std::getenv("CYBER_ISO_TIME") != nullptr;
+    using Clk = std::chrono::steady_clock;
+    const auto t0 = Clk::now();
     std::vector<float>& scales = mesh.vertexAttributes().create<float>(kScaleAttribute);
     computeTargetScales(mesh, options.adaptivity, scales);
-    auto finish = [&mesh](IsotropicStatus status) {
+    long long tScale = 0, tSplit = 0, tCollapse = 0, tFlip = 0, tSmooth = 0;
+    const auto ms = [](Clk::time_point a, Clk::time_point b) {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(b - a).count();
+    };
+    if (isoTime) {
+        tScale = ms(t0, Clk::now());
+    }
+    auto finish = [&](IsotropicStatus status) {
+        if (isoTime) {
+            std::fprintf(
+                stderr,
+                "[iso-time] iters=%d faces=%zu | scales=%lldms split=%lldms collapse=%lldms "
+                "flip=%lldms smooth+project=%lldms\n",
+                options.iterations, mesh.faceCount(), tScale, tSplit, tCollapse, tFlip, tSmooth);
+        }
         mesh.vertexAttributes().remove(kScaleAttribute);
         return status;
     };
 
     for (int iteration = 0; iteration < options.iterations; ++iteration) {
+        auto a = Clk::now();
         SplitPass(mesh, options).run(scales, cancel);
+        if (isoTime) {
+            tSplit += ms(a, Clk::now());
+            a = Clk::now();
+        }
         if (cancel && cancel->isCancelled()) {
             return finish(IsotropicStatus::Cancelled);
         }
         CollapsePass(mesh, options).run(scales, cancel);
+        if (isoTime) {
+            tCollapse += ms(a, Clk::now());
+            a = Clk::now();
+        }
         if (cancel && cancel->isCancelled()) {
             return finish(IsotropicStatus::Cancelled);
         }
         FlipPass(mesh, options).run(cancel);
+        if (isoTime) {
+            tFlip += ms(a, Clk::now());
+            a = Clk::now();
+        }
         if (cancel && cancel->isCancelled()) {
             return finish(IsotropicStatus::Cancelled);
         }
         SmoothAndProjectPass(mesh, options, reference).run(cancel);
+        if (isoTime) {
+            tSmooth += ms(a, Clk::now());
+        }
         if (cancel && cancel->isCancelled()) {
             return finish(IsotropicStatus::Cancelled);
         }

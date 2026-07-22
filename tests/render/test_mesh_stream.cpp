@@ -71,7 +71,8 @@ TEST_CASE("build partitions the mesh and counts every triangle") {
     config.gridResolution = 4;
     mgr.build(mesh, config);
 
-    const std::uint64_t quads = static_cast<std::uint64_t>(cells) * static_cast<std::uint64_t>(cells);
+    const std::uint64_t quads =
+        static_cast<std::uint64_t>(cells) * static_cast<std::uint64_t>(cells);
     CHECK(mgr.totalTriangles() == quads * 2);  // each quad fan-triangulates to 2
     CHECK_FALSE(mgr.chunks().empty());
 

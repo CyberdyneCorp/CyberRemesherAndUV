@@ -19,9 +19,9 @@
 namespace cyber::retopo {
 
 struct MoveParams {
-    VertexId seed;             // grabbed vertex (brush centre on the surface)
-    Vec3 displacement{};       // full drag applied at the seed, falling off outward
-    float radius = 1.0f;       // geodesic reach of the brush
+    VertexId seed;        // grabbed vertex (brush centre on the surface)
+    Vec3 displacement{};  // full drag applied at the seed, falling off outward
+    float radius = 1.0f;  // geodesic reach of the brush
 };
 
 inline void move(Mesh& mesh, const MoveParams& params, const PinSet* pins = nullptr,

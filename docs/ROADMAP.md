@@ -4,6 +4,51 @@ Goal: make CyberRemesher's automatic quad retopology **better than QuadriFlow**
 across four axes — quality-per-polygon, median quad angle, feature/CAD fidelity,
 and robustness — not just competitive on one.
 
+## Update — 2026-07-22 (default is now quad-cover; the gap is mostly closed)
+
+The numbers in the rest of this doc describe the older `instant-meshes` extractor
+and are **two generations stale**. The shipped **default is now `quad-cover`**
+(`RemeshParams.quad_method`), and a fresh benchmark (`examples/11_benchmark.py`
+metrics, ~3000 quads, spot/fandisk/rocker/bunny) reframes Phase 4:
+
+- **Irregular-vertex half of the exit gate is already MET** — ~4% irregular
+  (spot 4.1 / fandisk 3.3 / rocker 4.6 / bunny 4.9), gate was <15%, and it is
+  ~100% *true* field cones (no extractor headroom). The old "36% spurious
+  singularities" problem belongs to the retired extractor.
+- **Median-angle half** — the dependency-free *native* quad-cover solver trails
+  QuadriFlow by ~1.5–4.9° (mean ~3.4°). But the **vendored in-process Geogram
+  field** (`-DCYBER_WITH_QUADCOVER=ON`, MIT) **beats QuadriFlow on median AND
+  irregular on 3/4 organic models** — spot 83.6 vs 82.5, rocker 83.5 vs 82.2,
+  bunny 83.0 vs 82.2 — losing only fandisk (80.9 vs 85.0, a CAD crease-alignment
+  problem, not smoothness). Verified end-to-end, both backends reproduced.
+
+So Phase 4 is **not** the "only a global integer-parametrization rewrite can close
+it" hard core this doc claims. **DONE:** the `cpu-headless` preset now builds with
+`-DCYBER_WITH_QUADCOVER=ON`, so the stock default (no env vars) uses the vendored
+Geogram field and reproduces spot 83.6 / rocker 83.5 / bunny 83.0 — beating
+QuadriFlow on median *and* irregular on the organic corpus. Full test suite green
+against that build (only the pre-existing integer-extractor WIP fails).
+
+**Relax lever measured + shipped.** Bumping the quad-cover base relax 10→40 (its
+Geogram base is uniform enough, like the integer grid) is a free, corpus-wide
+median win — measured +0.3..+1.0° on organic with edge-CV flat-to-lower and
+irregular % unchanged; now the default (spot 84.2 / rocker 84.5 / bunny 83.3,
+cv 0.12–0.21). It is a *general* position lever, not model-specific.
+
+**Fandisk/CAD median — mostly closed by backend routing (shipped).** A workflow
+reframed it: the gap was **84% global extractor squareness** (vendored Geogram's
+quads sit at ~81° even *far* from creases), not crease-following. Our native
+feature-aware seamless solver marks sharp edges as hard seams and pins the
+feature-bounded patches, so it makes squarer quads on CAD parts. `computeSeamlessUv`
+now routes crease-heavy meshes (interior-crease-fraction ≥ 2%, via the non-mutating
+`creaseEdgeFraction`) to the native solver first, keeping smooth organics on the
+vendored Geogram path. Verified count-matched (~2970 quads, not a resolution
+artifact): **fandisk 80.7 → 83.4 (+2.7°, ~63% of the gap), 0 defects**; every
+organic **byte-identical** (`CYBER_QC_NO_ROUTE` kill-switch A/B). The residual to
+QuadriFlow (83.4 vs 85.0) is the ~16% crease-localized part — a genuine field-level
+per-edge integer-constraint project (QuadriFlow's feature flow), **deferred** as
+not worth the multi-week cost for 1.6°. Everything below is retained for history.
+
 ## Where we are (2026-07)
 
 The position-field extractor (`quad_method="instant-meshes"`, an Instant-Meshes

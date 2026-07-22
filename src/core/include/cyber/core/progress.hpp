@@ -13,13 +13,33 @@ namespace cyber {
 // untouched. Copyable; all copies share one flag.
 class CancelToken {
 public:
-    CancelToken() : m_flag(std::make_shared<std::atomic<bool>>(false)) {}
+    CancelToken()
+        : m_flag(std::make_shared<std::atomic<bool>>(false)),
+          m_poll(std::make_shared<std::function<bool()>>()) {}
 
     void requestCancel() const { m_flag->store(true, std::memory_order_relaxed); }
-    [[nodiscard]] bool isCancelled() const { return m_flag->load(std::memory_order_relaxed); }
+
+    // Install a poll: isCancelled() invokes it directly (and latches the flag) whenever
+    // the flag is not already set. This lets long-running calls that only poll the token
+    // — not the progress sink — observe a cancel promptly (the C-API bridge otherwise only
+    // flips the flag on a progress report, so a report-less solve could never be cancelled
+    // mid-flight). Shared across copies. Callable is polled cheaply on each isCancelled().
+    void setPoll(std::function<bool()> poll) const { *m_poll = std::move(poll); }
+
+    [[nodiscard]] bool isCancelled() const {
+        if (m_flag->load(std::memory_order_relaxed)) {
+            return true;
+        }
+        if (*m_poll && (*m_poll)()) {
+            m_flag->store(true, std::memory_order_relaxed);
+            return true;
+        }
+        return false;
+    }
 
 private:
     std::shared_ptr<std::atomic<bool>> m_flag;
+    std::shared_ptr<std::function<bool()>> m_poll;
 };
 
 // Monotonic progress reporting: values are clamped so the merged progress

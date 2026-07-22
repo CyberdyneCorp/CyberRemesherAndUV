@@ -1,5 +1,5 @@
 #pragma once
-
+#include <algorithm>
 #include <cstddef>
 #include <memory>
 #include <vector>
@@ -22,12 +22,12 @@ namespace cyber::remesh {
 // the vertex tangent plane) + position-field point (`o`, a point near the vertex
 // on the field lattice). Exposed for testing and for the extractor.
 struct PositionField {
-    std::vector<Vec3> normal;    // per-vertex unit normal (area-weighted)
-    std::vector<Vec3> q;         // per-vertex orientation direction (tangent plane)
-    std::vector<Vec3> o;         // per-vertex lattice position (near the vertex)
-    std::vector<bool> valid;     // false for dead/isolated vertices
-    std::vector<float> scale;    // per-vertex lattice-spacing multiplier (1 = uniform)
-    float spacing = 1.0f;        // base lattice spacing; local spacing = spacing * scale[i]
+    std::vector<Vec3> normal;  // per-vertex unit normal (area-weighted)
+    std::vector<Vec3> q;       // per-vertex orientation direction (tangent plane)
+    std::vector<Vec3> o;       // per-vertex lattice position (near the vertex)
+    std::vector<bool> valid;   // false for dead/isolated vertices
+    std::vector<float> scale;  // per-vertex lattice-spacing multiplier (1 = uniform)
+    float spacing = 1.0f;      // base lattice spacing; local spacing = spacing * scale[i]
 
     [[nodiscard]] std::size_t size() const { return q.size(); }
     // The orthogonal field direction q_perp = normal x q.
@@ -86,12 +86,12 @@ struct CollapsedGraphStats {
 // orientation field must be strengthened (Phase 5) first. Pure measurement — it
 // does not modify the mesh and is not yet on the production path.
 struct IntegerConsistency {
-    std::size_t vertices = 0;      // vertices reached by the spanning tree
-    std::size_t loopEdges = 0;     // non-tree (independent-loop) interior edges tested
-    std::size_t rotSingular = 0;   // loop edges where the orientation index disagrees
-    std::size_t transDefect = 0;   // loop edges whose integer translation defect != 0
-    double meanDefect = 0.0;       // mean L1 translation defect over loop edges
-    double closedFraction = 0.0;   // fraction of loop edges with zero defect (higher = better)
+    std::size_t vertices = 0;     // vertices reached by the spanning tree
+    std::size_t loopEdges = 0;    // non-tree (independent-loop) interior edges tested
+    std::size_t rotSingular = 0;  // loop edges where the orientation index disagrees
+    std::size_t transDefect = 0;  // loop edges whose integer translation defect != 0
+    double meanDefect = 0.0;      // mean L1 translation defect over loop edges
+    double closedFraction = 0.0;  // fraction of loop edges with zero defect (higher = better)
 };
 [[nodiscard]] IntegerConsistency measureIntegerConsistency(const Mesh& mesh,
                                                            const PositionField& field);

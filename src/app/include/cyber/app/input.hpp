@@ -64,7 +64,7 @@ struct Stroke {
 
     [[nodiscard]] bool empty() const { return samples.empty(); }
     [[nodiscard]] std::size_t size() const { return samples.size(); }
-    [[nodiscard]] Time duration() const;   // last.time - first.time (0 if <2)
+    [[nodiscard]] Time duration() const;    // last.time - first.time (0 if <2)
     [[nodiscard]] float arcLength() const;  // summed segment lengths
 };
 
@@ -75,7 +75,10 @@ public:
     void extend(Vec2 position, float pressure, Time time);
     // Ends the active stroke and returns it; empty stroke if none was active.
     [[nodiscard]] Stroke end(Vec2 position, float pressure, Time time);
-    void cancel() { m_active = false; m_current.samples.clear(); }
+    void cancel() {
+        m_active = false;
+        m_current.samples.clear();
+    }
 
     [[nodiscard]] bool active() const { return m_active; }
     [[nodiscard]] const Stroke& current() const { return m_current; }
@@ -87,7 +90,7 @@ private:
 
 // ---- double-tap recognizer -------------------------------------------
 struct DoubleTapConfig {
-    Time maxInterval = 0.30;   // max seconds between the two taps
+    Time maxInterval = 0.30;    // max seconds between the two taps
     float maxDistance = 24.0f;  // max points between the two taps
 };
 
@@ -110,7 +113,7 @@ private:
 // ---- press-hold recognizer -------------------------------------------
 struct PressHoldConfig {
     Time holdDuration = 0.50;  // seconds held before firing
-    float moveSlop = 12.0f;     // movement beyond this cancels the hold
+    float moveSlop = 12.0f;    // movement beyond this cancels the hold
 };
 
 class PressHoldRecognizer {

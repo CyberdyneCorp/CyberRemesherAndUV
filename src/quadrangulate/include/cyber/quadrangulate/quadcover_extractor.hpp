@@ -1,5 +1,5 @@
 #pragma once
-
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <memory>
@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "cyber/core/mesh.hpp"
+#include "cyber/core/progress.hpp"
 #include "cyber/core/quadrangulate.hpp"
 
 // QuadCover-style seamless-UV isoline quad extractor (TASK F scaffold).
@@ -77,14 +78,40 @@ struct SeamlessUv {
 // density that drives the seamless-UV grid resolution and thus the extracted quad
 // count (lower -> denser -> more quads, ~1/s^2). The quad-cover quadrangulator sweeps
 // it in a short closed loop to hit the requested count. CYBER_QC_SCALING overrides it.
+//
+// `harnessAdaptivity` is passed to the harness (-a): the frame-field gradient
+// adaptivity. 0.0 is a uniform field (fewest singularities, cleanest topology — the
+// default); higher packs quads into high-curvature regions (better surface fidelity
+// per polygon, but more singularities). CYBER_QC_ADAPT overrides it.
 [[nodiscard]] SeamlessUv computeSeamlessUv(const Mesh& mesh, float targetEdgeLength,
-                                           float harnessScaling = 0.5f);
+                                           float harnessScaling = 0.5f,
+                                           float harnessAdaptivity = 0.0f,
+                                           const CancelToken* cancel = nullptr);
+
+// Native seamless integer-grid parameterizer (docs/native-miq-plan.md) — the path to
+// dropping the vendored-Geogram dependency entirely. QuadCover-style: reuse our own
+// 4-RoSy frame field (computePositionField) + a cut graph, solve the seamless Poisson
+// system with Conjugate Gradient on accel::spmv, round seam jumps with MinCostFlow.
+// M0 SCAFFOLD: returns an INVALID SeamlessUv (valid == false) until the solve (M2)
+// lands, so computeSeamlessUv falls through to the vendored/harness path. Opt-in via
+// CYBER_QC_NATIVE so it never affects the shipped path before it validates.
+[[nodiscard]] SeamlessUv computeSeamlessUvNative(const Mesh& mesh, float targetEdgeLength,
+                                                 float adaptivity = 0.0f, float spacingScale = 1.0f,
+                                                 const CancelToken* cancel = nullptr);
 
 // Max integer-jump residual of a seamless UV across its interior edges: for each edge
 // shared by two triangles, the grid symmetry mapping one triangle's shared-vertex UVs
 // to the other's must have an INTEGER translation. 0 == perfectly seamless. A
 // validation hook (M1); returns 0 for an empty/invalid UV.
 [[nodiscard]] double seamlessUvResidual(const SeamlessUv& uv);
+
+// Fraction of interior (exactly-two-face) edges whose dihedral angle exceeds
+// `dihedralDegrees` — a CAD discriminator. High on sharp/crease-heavy parts
+// (fandisk ~4%), near zero on smooth organic meshes. computeSeamlessUv uses it
+// to route crease-heavy meshes to the feature-aware native seamless solver
+// (squarer quads on CAD) while smooth meshes keep the vendored Geogram path.
+// Const / non-mutating (unlike Mesh::tagFeatureEdges).
+[[nodiscard]] float creaseEdgeFraction(const Mesh& mesh, float dihedralDegrees);
 
 // -----------------------------------------------------------------------------
 // Collaborator 2 (NOT IMPLEMENTED): the isoline tracer / mesh extractor.
@@ -104,6 +131,15 @@ struct IsolineQuadMesh {
 };
 [[nodiscard]] IsolineQuadMesh extractIsolineQuads(const Mesh& mesh, const SeamlessUv& uv);
 
+// Post-extraction cap elimination. The isoline tracer leaves a few percent of non-quad
+// "cap" faces (triangles / pentagons / hexagons) at cone and boundary regions; under the
+// pipeline's pure-quad Catmull-Clark subdivision each becomes a valence-n fan-centre
+// irregular. This pass re-partitions those caps into quads over the SAME vertex set
+// (pairing adjacent odd faces, splitting even n-gons), keeping the mesh watertight and
+// never increasing the final irregular count. `faces` is edited in place.
+void eliminateNonQuadCaps(std::vector<Vec3>& vertices,
+                          std::vector<std::vector<std::size_t>>& faces);
+
 // -----------------------------------------------------------------------------
 // The IQuadrangulator seam (scaffold — returns a working stub).
 // -----------------------------------------------------------------------------
@@ -112,6 +148,17 @@ struct IsolineQuadMesh {
 // grid constraints by the solve. SCAFFOLD STATUS: quadrangulate() currently
 // leaves the mesh untouched and returns a failure Outcome with a "not
 // implemented" reason, so the pipeline degrades cleanly rather than crashing.
-std::unique_ptr<IQuadrangulator> makeQuadCoverQuadrangulator(int fieldIterations = 40);
+// `adaptivity` (0.0 = uniform, the cleanest topology; up to 1.0 = fully
+// curvature-adaptive sizing) is forwarded to the seamless-UV solve as the frame-field
+// gradient adaptivity. The pipeline passes the run's adaptivity through here.
+std::unique_ptr<IQuadrangulator> makeQuadCoverQuadrangulator(int fieldIterations = 40,
+                                                             float adaptivity = 0.0f);
+
+// Whether a seamless-UV solver is available for the quad-cover method: true when the
+// in-process solver is linked (built with -DCYBER_WITH_QUADCOVER=ON) or the
+// CYBER_QUADCOVER_CLI harness binary is configured. Callers making quad-cover the
+// default use this to fall back to the field-aligned quadrangulator when neither is
+// present, so a build without the solver still produces output.
+[[nodiscard]] bool quadCoverAvailable();
 
 }  // namespace cyber::remesh

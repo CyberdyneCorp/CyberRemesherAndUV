@@ -6,7 +6,6 @@
 #include <unistd.h>
 
 #include <exception>
-
 #include <json.hpp>
 
 #include "cyber/net/protocol.hpp"
@@ -46,8 +45,7 @@ struct BridgeClient::Impl {
     // Convenience for commands whose success is just a non-error reply.
     bool command(const json& request) {
         json response;
-        return exchange(request, response) &&
-               response.value("type", std::string{}) != "error";
+        return exchange(request, response) && response.value("type", std::string{}) != "error";
     }
 };
 
@@ -75,9 +73,8 @@ bool BridgeClient::connect(std::uint16_t port, const std::string& host) {
     json hello{{"type", "hello"}, {"protocol", kProtocolVersion}, {"client", "cyber-cpp"}};
     json response;
     if (!m->exchange(hello, response) || response.value("type", std::string{}) != "welcome") {
-        m->handshakeError = response.contains("reason")
-                                ? response.at("reason").get<std::string>()
-                                : "handshake failed";
+        m->handshakeError = response.contains("reason") ? response.at("reason").get<std::string>()
+                                                        : "handshake failed";
         close();
         return false;
     }

@@ -34,7 +34,8 @@ namespace cyber::retopo {
 // `offset`, welding new vertices shared between adjacent edges. Returns the new
 // faces (may be empty).
 [[nodiscard]] std::vector<FaceId> extrudeBoundary(Mesh& mesh, std::span<const EdgeId> boundary,
-                                                  Vec3 offset, const SurfaceSnapper* snap = nullptr);
+                                                  Vec3 offset,
+                                                  const SurfaceSnapper* snap = nullptr);
 
 // Bridge two equal-length boundary vertex sequences with a band of quads.
 // Returns the new faces; empty if the sequences differ in length or are too
@@ -62,6 +63,7 @@ bool rotateEdge(Mesh& mesh, EdgeId edge);
 // quads connecting `ring` to a copy offset by `direction` (both rings snapped).
 // `ring` is an ordered, closed polyline. Returns the band faces.
 [[nodiscard]] std::vector<FaceId> extrudeCylinder(Mesh& mesh, std::span<const Vec3> ring,
-                                                  Vec3 direction, const SurfaceSnapper* snap = nullptr);
+                                                  Vec3 direction,
+                                                  const SurfaceSnapper* snap = nullptr);
 
 }  // namespace cyber::retopo

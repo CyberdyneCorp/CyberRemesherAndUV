@@ -161,9 +161,7 @@ std::vector<CageRay> Cage::projectionRays() const {
     return rays;
 }
 
-CageState Cage::save() const {
-    return CageState{m_defaultDistance, m_distance, m_overridden};
-}
+CageState Cage::save() const { return CageState{m_defaultDistance, m_distance, m_overridden}; }
 
 bool Cage::load(const CageState& state) {
     if (state.distances.size() != m_distance.size() ||

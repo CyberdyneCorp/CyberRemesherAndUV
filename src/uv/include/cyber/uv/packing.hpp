@@ -13,12 +13,24 @@
 // large island counts without failure.
 namespace cyber::uv {
 
+// Placement strategy for packBoxes.
+enum class PackStrategy {
+    // Tallest-first shelf packing: simple, stable, good for interactive edits.
+    Shelf,
+    // Bottom-left skyline over a fixed-width strip: drops each box into the
+    // lowest gap, filling the vertical slack shelves leave. Tighter, at a
+    // little more compute — the default for the automatic atlas.
+    Skyline,
+};
+
 struct PackParams {
     // Gap left around every island, in the SAME units as the input boxes
     // (i.e. UV units before the final normalize).
     float margin = 0.0f;
     // Texture resolution used for the texel-density readout.
     int textureSize = 1024;
+    // Placement strategy (see PackStrategy).
+    PackStrategy strategy = PackStrategy::Shelf;
 };
 
 struct PackedIsland {
@@ -51,7 +63,6 @@ PackResult packIslands(Mesh& mesh, std::span<const std::vector<FaceId>> islands,
 // Texel density of one island: texels (at `textureSize`) per unit of 3D
 // surface length, averaged over the island's edges. Zero when the island has
 // no UVs or no measurable surface length.
-[[nodiscard]] float texelDensity(const Mesh& mesh, std::span<const FaceId> island,
-                                 int textureSize);
+[[nodiscard]] float texelDensity(const Mesh& mesh, std::span<const FaceId> island, int textureSize);
 
 }  // namespace cyber::uv

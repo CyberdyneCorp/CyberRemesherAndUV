@@ -27,7 +27,12 @@ EXAMPLES = [
 
 def main() -> None:
     c.require_engine()
-    print(f"CyberRemesher engine {cyberremesh.version()} — via the Python (ctypes) binding\n")
+    # quad-cover now DEFAULTS to the native (dependency-free) seamless-UV solver, so the
+    # gallery showcases it out of the box. Do NOT set CYBER_QUADCOVER_CLI here; set it in the
+    # shell to use the vendored Geogram solver instead. (The AutoRemesher reference panels
+    # build/call their binary directly, independent of this.)
+    print(f"CyberRemesher engine {cyberremesh.version()} — via the Python (ctypes) binding")
+    print("quad-cover: native seamless-UV solver (dependency-free default)\n")
 
     produced = []
     for module_name, png in EXAMPLES:

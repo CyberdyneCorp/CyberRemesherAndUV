@@ -180,10 +180,15 @@ std::vector<Texel> rasterize(const Mesh& mesh, const std::vector<Vec3>& vnormals
                 minV = std::fmin(minV, t.y);
                 maxV = std::fmax(maxV, t.y);
             }
-            const int x0 = std::max(0, static_cast<int>(std::floor(minU * static_cast<float>(width))));
-            const int x1 = std::min(width - 1, static_cast<int>(std::ceil(maxU * static_cast<float>(width))));
-            const int y0 = std::max(0, static_cast<int>(std::floor((1.0f - maxV) * static_cast<float>(height))));
-            const int y1 = std::min(height - 1, static_cast<int>(std::ceil((1.0f - minV) * static_cast<float>(height))));
+            const int x0 =
+                std::max(0, static_cast<int>(std::floor(minU * static_cast<float>(width))));
+            const int x1 =
+                std::min(width - 1, static_cast<int>(std::ceil(maxU * static_cast<float>(width))));
+            const int y0 = std::max(
+                0, static_cast<int>(std::floor((1.0f - maxV) * static_cast<float>(height))));
+            const int y1 =
+                std::min(height - 1,
+                         static_cast<int>(std::ceil((1.0f - minV) * static_cast<float>(height))));
 
             for (int py = y0; py <= y1; ++py) {
                 for (int px = x0; px <= x1; ++px) {
@@ -282,7 +287,8 @@ BakeResult bake(const Mesh& lowPoly, const Mesh& highPoly, BakeMap map, const Ba
     const bool useTexture = params.colorSource.kind == ColorSource::Texture &&
                             params.colorSource.texture != nullptr && highUvs != nullptr;
 
-    const std::vector<Texel> texels = rasterize(lowPoly, lowNormals, *uvs, params.width, params.height);
+    const std::vector<Texel> texels =
+        rasterize(lowPoly, lowNormals, *uvs, params.width, params.height);
     result.texelsCovered = texels.size();
     result.image = makeImage(params.width, params.height, channelsFor(map));
 
@@ -313,9 +319,9 @@ BakeResult bake(const Mesh& lowPoly, const Mesh& highPoly, BakeMap map, const Ba
             accel::Buffer<Vec3> dirs(static_cast<std::size_t>(params.aoSamples));
             for (int k = 0; k < params.aoSamples; ++k) {
                 origins[static_cast<std::size_t>(k)] = aoPosition + aoNormal * params.aoBias;
-                dirs[static_cast<std::size_t>(k)] = hemisphereDir(static_cast<std::size_t>(k),
-                                                                  static_cast<std::size_t>(params.aoSamples),
-                                                                  aoTangent, aoBitangent, aoNormal);
+                dirs[static_cast<std::size_t>(k)] = hemisphereDir(
+                    static_cast<std::size_t>(k), static_cast<std::size_t>(params.aoSamples),
+                    aoTangent, aoBitangent, aoNormal);
             }
             accel::Buffer<std::optional<Bvh::RayHit>> hits;
             accel::raycast(backend, bvh, origins, dirs, hits);

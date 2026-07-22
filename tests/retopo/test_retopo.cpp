@@ -111,8 +111,7 @@ TEST_CASE("insertLoop splits a quad into two quads and stays manifold") {
 
 TEST_CASE("recognizeStroke classifies canonical gestures") {
     // Roughly square closed stroke -> create quad.
-    const std::vector<Vec3> square = {{0, 0, 0}, {1, 0, 0}, {1, 1, 0},
-                                      {0, 1, 0}, {0, 0.01f, 0}};
+    const std::vector<Vec3> square = {{0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0}, {0, 0.01f, 0}};
     CHECK(retopo::recognizeStroke(square).action == retopo::StrokeAction::CreateQuad);
 
     // Straight line between two points -> merge.
@@ -135,8 +134,8 @@ TEST_CASE("recognizeStroke ignores zero-length segments from duplicate points") 
 
     // Same triangle with a corner sample duplicated: still a triangle, not a
     // quad, because the coincident point does not invent a corner.
-    const std::vector<Vec3> triDup = {{0, 0, 0},      {2, 0, 0},        {2, 0, 0},
-                                      {1, 1.5f, 0},   {0.01f, 0.01f, 0}};
+    const std::vector<Vec3> triDup = {
+        {0, 0, 0}, {2, 0, 0}, {2, 0, 0}, {1, 1.5f, 0}, {0.01f, 0.01f, 0}};
     CHECK(retopo::recognizeStroke(triDup).action == retopo::StrokeAction::CreateTri);
 }
 

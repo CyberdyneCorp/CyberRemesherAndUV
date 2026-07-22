@@ -29,8 +29,8 @@ struct IslandDistortion {
     std::vector<FaceDistortion> faces;
     float maxAngle = 0.0f;
     float rmsAngle = 0.0f;
-    float maxArea = 0.0f;   // largest area ratio
-    float minArea = 0.0f;   // smallest area ratio
+    float maxArea = 0.0f;  // largest area ratio
+    float minArea = 0.0f;  // smallest area ratio
     // The island as a whole is flipped when its net signed UV area is
     // negative (mirrored layout — spec scenario "Flipped island is visible").
     bool flipped = false;

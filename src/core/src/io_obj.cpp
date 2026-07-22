@@ -54,6 +54,18 @@ Result<ImportedMesh> importObj(const std::filesystem::path& path, const ImportOp
     std::size_t skipped = 0;
     std::vector<VertexId> faceVerts;
 
+    // Create the UV/normal corner columns ONCE. addFace grows every existing corner
+    // column, so the columns track the corner count; the per-face loop below just
+    // re-fetches the (possibly reallocated) pointer with the cheap find(). Calling
+    // create() per face instead reconstructs a size-m_size temporary every time —
+    // O(faces * corners) = O(n^2), ~126 s on a 554k-face mesh.
+    if (hasUvs) {
+        out.mesh.cornerAttributes().create<Vec2>(kUvAttribute);
+    }
+    if (hasNormals) {
+        out.mesh.cornerAttributes().create<Vec3>(kNormalAttribute);
+    }
+
     for (const tinyobj::shape_t& shape : reader.GetShapes()) {
         std::size_t indexOffset = 0;
         for (const std::size_t fv : shape.mesh.num_face_vertices) {
@@ -75,11 +87,11 @@ Result<ImportedMesh> importObj(const std::filesystem::path& path, const ImportOp
             }
 
             if (hasUvs || hasNormals) {
-                auto* uvs =
-                    hasUvs ? &out.mesh.cornerAttributes().create<Vec2>(kUvAttribute) : nullptr;
-                auto* normals = hasNormals
-                                    ? &out.mesh.cornerAttributes().create<Vec3>(kNormalAttribute)
-                                    : nullptr;
+                // Cheap re-fetch (map lookup, no allocation); addFace above may have
+                // reallocated the columns as it grew them for this face's corners.
+                auto* uvs = hasUvs ? out.mesh.cornerAttributes().find<Vec2>(kUvAttribute) : nullptr;
+                auto* normals =
+                    hasNormals ? out.mesh.cornerAttributes().find<Vec3>(kNormalAttribute) : nullptr;
                 const std::vector<LoopId> loops = out.mesh.faceLoops(f);
                 for (std::size_t v = 0; v < fv; ++v) {
                     const tinyobj::index_t idx = shape.mesh.indices[indexOffset + v];

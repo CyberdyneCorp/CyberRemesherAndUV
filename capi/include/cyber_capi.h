@@ -69,20 +69,21 @@ typedef struct CyberRemeshParams {
     float adaptivity;          /* 0 uniform .. 1 fully curvature-adaptive */
     int pureQuads;             /* non-zero: forbid residual triangles */
     int holeFillMaxBoundary;   /* max boundary edges of holes to fill; 0 off */
-    int quadMethod;            /* 0 = field-aligned matching (default),
+    int quadMethod;            /* 0 = field-aligned matching,
                                 * 1 = Instant-Meshes position-field extractor,
                                 * 2 = integer-parametrization extractor,
-                                * 3 = QuadCover seamless-UV isoline extractor */
+                                * 3 = QuadCover seamless-UV isoline extractor (default;
+                                *     falls back to field-aligned where no solver is present) */
 } CyberRemeshParams;
 
 /* Quadrangulator selection values for CyberRemeshParams.quadMethod. */
 #define CYBER_QUAD_FIELD_ALIGNED 0
 #define CYBER_QUAD_INSTANT_MESHES 1
 #define CYBER_QUAD_INTEGER 2
-/* QuadCover seamless-UV isoline extractor (Task F). Reaches ~1% irregular on closed
- * surfaces but requires an out-of-process seamless-UV solve: set the CYBER_QUADCOVER_CLI
- * environment variable to a built autoremesher_cli. Without it the run reports failure
- * and the input is left unchanged. */
+/* QuadCover seamless-UV isoline extractor (Task F). QuadriFlow-class irregular/CV. The
+ * seamless-UV solve runs in-process when built with -DCYBER_WITH_QUADCOVER=ON, or
+ * out-of-process when the CYBER_QUADCOVER_CLI environment variable points at a built
+ * autoremesher_cli. When neither is present the engine falls back to field-aligned. */
 #define CYBER_QUAD_QUADCOVER 3
 
 /* Fills params with the engine defaults. No-op on NULL. */
@@ -117,6 +118,46 @@ typedef struct CyberStats {
 
 /* Computes topology statistics for a mesh. */
 CyberStatus cyber_mesh_stats(const CyberMesh* mesh, CyberStats* out);
+
+/* ---- UV atlas -------------------------------------------------------- */
+
+/* Automatic UV-atlas parameters (POD mirror of cyber::uv::AtlasOptions).
+ * Fill with cyber_default_atlas_params, then override as needed. */
+typedef struct CyberAtlasParams {
+    float maxChartAngleDegrees; /* normal-coherence bound for chart growth */
+    float packMargin;           /* gap around each island, in UV units */
+    int textureSize;            /* resolution for the texel-density readout */
+    int reorientCharts;         /* non-zero: rotate each chart to its minimum-
+                                 * area bounding box before packing */
+    int mergeCharts;            /* non-zero: merge adjacent charts sharing a
+                                 * normal cone (fewer seams, same flatness) */
+    float maxChartDistortion;   /* looser merge cap: keep merging while the
+                                 * union's max conformal error stays <= this
+                                 * (0 disables the second pass) */
+} CyberAtlasParams;
+
+/* Aggregate atlas quality/packing report. */
+typedef struct CyberAtlasResult {
+    int chartCount;             /* number of charts (islands) */
+    size_t seamEdges;           /* edges cut to form the charts */
+    float maxAngleDistortion;   /* worst conformal error across charts, [0,1) */
+    float rmsAngleDistortion;   /* RMS conformal error across charts */
+    int flippedCharts;          /* charts with mirrored net UV winding */
+    int fallbackCharts;         /* charts unwrapped by planar-projection fallback */
+    float packedArea;           /* fraction of the unit square covered */
+    float texelDensity;         /* texels per UV unit at the packed scale */
+} CyberAtlasResult;
+
+/* Fills params with the engine defaults. No-op on NULL. */
+void cyber_default_atlas_params(CyberAtlasParams* params);
+
+/* Automatic UV atlas: seams `mesh` into normal-coherent charts, LSCM-unwraps
+ * each chart, packs them into the unit square and writes the per-corner UV
+ * attribute IN PLACE (so a subsequent cyber_mesh_save_obj emits vt / f v/vt).
+ * `params` may be NULL (defaults); `out` may be NULL. Returns CYBER_ERR_RUNTIME
+ * when the engine was built without the UV module. */
+CyberStatus cyber_uv_atlas(CyberMesh* mesh, const CyberAtlasParams* params,
+                           CyberAtlasResult* out);
 
 /* --- Accessors used by the language bindings (Python, Swift) ------------- */
 

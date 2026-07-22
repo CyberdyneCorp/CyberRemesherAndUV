@@ -82,8 +82,8 @@ TEST_CASE("fillHoles keeps orientation consistent across a 6-edge hole") {
     // 6-edge interior hole; filling it with the limit at 6 must produce a
     // manifold, validate-clean mesh.
     Mesh grid = makeQuadGrid(4);
-    grid.removeFace(FaceId{5});  // (1,1)
-    grid.removeFace(FaceId{6});  // (1,2), shares an edge with (1,1)
+    grid.removeFace(FaceId{5});              // (1,1)
+    grid.removeFace(FaceId{6});              // (1,2), shares an edge with (1,1)
     REQUIRE(boundaryEdgeCount(grid) == 22);  // 16 outer + 6 hole
 
     const std::size_t filled = grid.fillHoles(6);

@@ -40,8 +40,8 @@ public:
     [[nodiscard]] bool hasTarget() const;
     [[nodiscard]] WireMesh target() const;
 
-    void setEditMesh(WireMesh mesh);            // bumps the revision
-    [[nodiscard]] WireMesh editMesh() const;    // pulled by clients
+    void setEditMesh(WireMesh mesh);          // bumps the revision
+    [[nodiscard]] WireMesh editMesh() const;  // pulled by clients
     [[nodiscard]] std::uint64_t editMeshRevision() const;
 
     void clearScene();     // drop target + editmesh, bump revision
@@ -53,7 +53,7 @@ public:
     void addAction(std::string id, std::string label);
     void removeAction(const std::string& id);
     [[nodiscard]] std::vector<ActionButton> actions() const;
-    void pressAction(const std::string& id);       // user tap (or injected in tests)
+    void pressAction(const std::string& id);               // user tap (or injected in tests)
     [[nodiscard]] std::vector<std::string> takePresses();  // drains the queue
 
     void setSymmetry(SymmetryState symmetry);

@@ -94,10 +94,9 @@ TEST_CASE("sampleBilinear at a texel centre returns that texel exactly") {
             const float u = (static_cast<float>(x) + 0.5f) / static_cast<float>(w);
             const float v = (static_cast<float>(y) + 0.5f) / static_cast<float>(h);
             const std::array<float, 4> s = cyber::imageio::sampleBilinear(*loaded, u, v);
-            const std::size_t base =
-                (static_cast<std::size_t>(y) * static_cast<std::size_t>(w) +
-                 static_cast<std::size_t>(x)) *
-                static_cast<std::size_t>(ch);
+            const std::size_t base = (static_cast<std::size_t>(y) * static_cast<std::size_t>(w) +
+                                      static_cast<std::size_t>(x)) *
+                                     static_cast<std::size_t>(ch);
             for (std::size_t c = 0; c < 4; ++c) {
                 CHECK(s[c] == doctest::Approx(loaded->pixels[base + c]));
             }
@@ -110,8 +109,8 @@ TEST_CASE("sampleBilinear clamps to edge and reports alpha 1 for RGB") {
     constexpr int h = 2;
     constexpr int ch = 3;
     const std::array<std::uint8_t, w * h * ch> src = {
-        10, 20, 30,  40, 50, 60,   // row 0
-        70, 80, 90,  100, 110, 120  // row 1
+        10, 20, 30, 40,  50,  60,  // row 0
+        70, 80, 90, 100, 110, 120  // row 1
     };
     const std::string path = tempPath("cyber_load_clamp.png");
     REQUIRE(cyber::imageio::writePng(path, w, h, ch, src.data()));

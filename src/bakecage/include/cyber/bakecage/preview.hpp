@@ -25,9 +25,7 @@ struct PreviewLight {
     // For a directional light, the unit direction the light travels along
     // (from the light toward the surface). For a point light, returns the
     // stored position unchanged.
-    [[nodiscard]] Vec3 direction() const {
-        return directional ? normalized(position) : position;
-    }
+    [[nodiscard]] Vec3 direction() const { return directional ? normalized(position) : position; }
 };
 
 // How the viewport shades the preview.
@@ -46,9 +44,9 @@ struct BakePreview {
     PreviewLight light;
 
     // Overlays.
-    bool showCage = false;      // draw the projection cage envelope
-    bool showRays = false;      // draw per-vertex projection rays
-    bool showLinks = false;     // draw component-link connections
+    bool showCage = false;   // draw the projection cage envelope
+    bool showRays = false;   // draw per-vertex projection rays
+    bool showLinks = false;  // draw component-link connections
     bool showWireframe = false;
 
     // Blend of the cage overlay when shown, in [0,1].

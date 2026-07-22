@@ -97,8 +97,8 @@ struct InteractivityCost {
             c.meshOps = 1u;  // flipEdge
             break;
         case StrokeAction::ExtrudeCylinder:
-            c.newVertices = strokePoints;       // one lifted ring
-            c.newFaces = strokePoints;          // one quad per segment
+            c.newVertices = strokePoints;             // one lifted ring
+            c.newFaces = strokePoints;                // one quad per segment
             c.meshOps = strokePoints + strokePoints;  // addVertex + addFace per segment
             break;
         case StrokeAction::Tweak:

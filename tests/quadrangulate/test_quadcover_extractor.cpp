@@ -3,6 +3,8 @@
 #include <array>
 #include <cmath>
 #include <cstddef>
+#include <map>
+#include <utility>
 #include <vector>
 
 #include "cyber/core/mesh.hpp"
@@ -33,8 +35,10 @@ Mesh makeSphere(int rings = 16, int segments = 24) {
     for (int r = 1; r < rings; ++r) {
         const float phi = 3.14159265f * static_cast<float>(r) / static_cast<float>(rings);
         for (int s = 0; s < segments; ++s) {
-            const float th = 2.0f * 3.14159265f * static_cast<float>(s) / static_cast<float>(segments);
-            p.push_back({std::sin(phi) * std::cos(th), std::sin(phi) * std::sin(th), std::cos(phi)});
+            const float th =
+                2.0f * 3.14159265f * static_cast<float>(s) / static_cast<float>(segments);
+            p.push_back(
+                {std::sin(phi) * std::cos(th), std::sin(phi) * std::sin(th), std::cos(phi)});
         }
     }
     p.push_back({0, 0, -1});
@@ -55,6 +59,16 @@ Mesh makeSphere(int rings = 16, int segments = 24) {
     for (int s = 0; s < segments; ++s) {
         f.push_back({south, ring(rings - 1, s + 1), ring(rings - 1, s)});
     }
+    return Mesh::fromIndexed(p, f);
+}
+
+// A unit cube (6 quad faces) — every one of its 12 edges is a sharp 90-degree
+// crease, so its crease-edge fraction is 1.0.
+Mesh makeCube() {
+    const std::vector<Vec3> p = {{0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0},
+                                 {0, 0, 1}, {1, 0, 1}, {1, 1, 1}, {0, 1, 1}};
+    const std::vector<std::vector<Index>> f = {{0, 3, 2, 1}, {4, 5, 6, 7}, {0, 1, 5, 4},
+                                               {2, 3, 7, 6}, {1, 2, 6, 5}, {3, 0, 4, 7}};
     return Mesh::fromIndexed(p, f);
 }
 
@@ -160,6 +174,80 @@ TEST_CASE("quad-cover isoline extractor returns empty for an invalid UV") {
     CHECK(out.quads.empty());
 }
 
+namespace {
+
+// Max number of faces sharing any single undirected edge — must stay <= 2 for a manifold
+// re-partition. Also counts how many faces are non-quad.
+struct CapStats {
+    std::size_t maxEdgeFaces = 0;
+    std::size_t nonQuad = 0;
+};
+CapStats capStats(const std::vector<std::vector<std::size_t>>& faces) {
+    std::map<std::pair<std::size_t, std::size_t>, std::size_t> edge;
+    CapStats s;
+    for (const auto& f : faces) {
+        if (f.size() != 4) {
+            ++s.nonQuad;
+        }
+        for (std::size_t i = 0; i < f.size(); ++i) {
+            std::size_t a = f[i];
+            std::size_t b = f[(i + 1) % f.size()];
+            if (a > b) {
+                std::swap(a, b);
+            }
+            ++edge[{a, b}];
+        }
+    }
+    for (const auto& [e, n] : edge) {
+        (void)e;
+        s.maxEdgeFaces = std::max(s.maxEdgeFaces, n);
+    }
+    return s;
+}
+
+}  // namespace
+
+// Cap elimination: the tracer's non-quad caps must become quads before the pipeline's
+// pure-quad subdivision (each non-quad n-gon would otherwise Catmull-Clark into a
+// valence-n fan-centre irregular). The pass re-partitions over the SAME vertex set and
+// must stay manifold (no edge in > 2 faces).
+TEST_CASE("quad-cover cap elimination: adjacent triangles merge into a quad") {
+    std::vector<Vec3> verts = {{0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0}};
+    // A quad split by its diagonal into two triangles (the classic residual cap pair).
+    std::vector<std::vector<std::size_t>> faces = {{0, 1, 2}, {0, 2, 3}};
+    const std::size_t vBefore = verts.size();
+    remesh::eliminateNonQuadCaps(verts, faces);
+    CHECK(verts.size() == vBefore);  // no vertices added
+    CHECK(faces.size() == 1);        // two triangles -> one quad
+    CHECK(faces.front().size() == 4);
+    CHECK(capStats(faces).nonQuad == 0);
+    CHECK(capStats(faces).maxEdgeFaces <= 2);  // still manifold
+}
+
+TEST_CASE("quad-cover cap elimination: an even n-gon splits into quads") {
+    // Regular hexagon in the z = 0 plane.
+    std::vector<Vec3> verts;
+    for (int i = 0; i < 6; ++i) {
+        const float a = 2.0f * 3.14159265f * static_cast<float>(i) / 6.0f;
+        verts.push_back({std::cos(a), std::sin(a), 0.0f});
+    }
+    std::vector<std::vector<std::size_t>> faces = {{0, 1, 2, 3, 4, 5}};
+    const std::size_t vBefore = verts.size();
+    remesh::eliminateNonQuadCaps(verts, faces);
+    CHECK(verts.size() == vBefore);
+    CHECK(faces.size() == 2);  // hexagon -> two quads
+    CHECK(capStats(faces).nonQuad == 0);
+    CHECK(capStats(faces).maxEdgeFaces <= 2);
+}
+
+TEST_CASE("quad-cover cap elimination: a lone quad is left untouched") {
+    std::vector<Vec3> verts = {{0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0}};
+    std::vector<std::vector<std::size_t>> faces = {{0, 1, 2, 3}};
+    remesh::eliminateNonQuadCaps(verts, faces);
+    CHECK(faces.size() == 1);
+    CHECK(faces.front().size() == 4);
+}
+
 // Milestone 1: computeSeamlessUv obtains a seamless integer-grid UV out-of-process
 // from AutoRemesher's Geogram quad_cover when CYBER_QUADCOVER_CLI points at a built
 // autoremesher_cli. The UV must be genuinely seamless — the integer-jump residual
@@ -183,6 +271,18 @@ TEST_CASE("quad-cover M1: harness seamless UV has zero integer-jump residual") {
 // the grid cells as transversal-crossing quads. The result is an open disk, so its
 // perimeter is a legitimate boundary; every INTERIOR vertex must be valence 4 (zero
 // irregular), all faces must be quads, and the half-edge structure must be sound.
+TEST_CASE("creaseEdgeFraction routes sharp CAD to native, keeps smooth meshes vendored") {
+    // The discriminator behind computeSeamlessUv's CAD routing: a sharp cube sits
+    // above the 2% routing threshold (-> feature-aware native solver), a smooth
+    // sphere far below it (-> vendored Geogram path). This is what keeps fandisk
+    // routed while the organic corpus stays byte-identical on the vendored path.
+    const float smooth = remesh::creaseEdgeFraction(makeSphere(), 45.0f);
+    const float sharp = remesh::creaseEdgeFraction(makeCube(), 45.0f);
+    REQUIRE(smooth < 0.02f);
+    REQUIRE(sharp > 0.02f);
+    REQUIRE(sharp > smooth);
+}
+
 TEST_CASE("quad-cover M2: flat integer-grid UV extracts a clean quad grid") {
     const int n = 6;
     const remesh::SeamlessUv uv = makeFlatGridUv(n);

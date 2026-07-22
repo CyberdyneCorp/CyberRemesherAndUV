@@ -6,7 +6,8 @@
 namespace cyber::retopo {
 
 VertexId addSnappedVertex(Mesh& mesh, Vec3 position, const SurfaceSnapper* snap) {
-    const Vec3 p = (snap != nullptr && !snap->empty()) ? snap->snapToSurface(position).point : position;
+    const Vec3 p =
+        (snap != nullptr && !snap->empty()) ? snap->snapToSurface(position).point : position;
     return mesh.addVertex(p);
 }
 

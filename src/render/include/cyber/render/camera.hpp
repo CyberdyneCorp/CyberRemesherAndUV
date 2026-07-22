@@ -65,9 +65,9 @@ public:
 private:
     Vec3 m_target{0.0f, 0.0f, 0.0f};
     float m_distance = 5.0f;
-    float m_yaw = 0.0f;      // radians around world up (+Y)
-    float m_pitch = 0.0f;    // radians, clamped away from the poles
-    Quat m_orientation{};    // arcball accumulator
+    float m_yaw = 0.0f;    // radians around world up (+Y)
+    float m_pitch = 0.0f;  // radians, clamped away from the poles
+    Quat m_orientation{};  // arcball accumulator
     bool m_arcballMode = false;
     float m_fovY = 0.9599310886f;  // ~55 degrees
     float m_nearZ = 0.01f;
@@ -87,15 +87,15 @@ struct TouchPoint {
 };
 
 enum class GestureKind : std::uint8_t {
-    None,    // ambiguous / rejected — do not move the camera
-    Orbit,   // exactly one fingertip dragging
-    Pan,     // exactly two fingertips translating together
-    Dolly,   // exactly two fingertips pinching
+    None,   // ambiguous / rejected — do not move the camera
+    Orbit,  // exactly one fingertip dragging
+    Pan,    // exactly two fingertips translating together
+    Dolly,  // exactly two fingertips pinching
 };
 
 struct GestureSample {
     GestureKind kind = GestureKind::None;
-    Vec2 delta{0.0f, 0.0f};  // centroid translation in pixels (Orbit/Pan)
+    Vec2 delta{0.0f, 0.0f};    // centroid translation in pixels (Orbit/Pan)
     float dollyFactor = 1.0f;  // pinch scale (Dolly); 1 = no change
     int fingertipCount = 0;    // contacts surviving palm rejection
     int rejectedCount = 0;     // contacts discarded as palm/noise
