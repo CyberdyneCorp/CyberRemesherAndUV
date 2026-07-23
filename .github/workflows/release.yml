@@ -1,8 +1,21 @@
-# UNVERIFIED: release lane. Requires platform runners (macOS/Windows) and
-# signing secrets that are unavailable in the headless Linux CI validated by
-# ci.yml. Additive to ci.yml (which is unchanged). Implements build-and-
-# packaging tasks 14.1 (versioned platform packages from a single version
-# source) and 14.3 (GitHub Release publication on tags).
+# Release lane: versioned platform packages from a single version source
+# (build-and-packaging 14.1) and GitHub Release publication on tags (14.3).
+#
+# Scope note (2026-07-23): this lane never published a release — every tag from
+# v0.1.0 onward failed, because five of six package targets cannot build what
+# they were written to package:
+#   - ios / android   apps/mobile is a placeholder (README + .gitkeep); there is
+#                     no Xcode project and no gradlew to drive.
+#   - windows-installer  needs the WiX toolset (candle/light), not installed on
+#                     the runner, and stages from build_zip.ps1.
+# Those three are therefore gated to manual workflow_dispatch runs, so a tag
+# push publishes instead of failing on packages for software that does not
+# exist yet. Re-enable a target on tags by flipping `on_tag` below once its
+# application actually builds.
+#
+# The desktop shell (apps/desktop) is likewise a placeholder, so the macOS and
+# Linux packages are CLI-only by design; their scripts fall back rather than
+# fail.
 name: release
 
 on:
@@ -15,6 +28,11 @@ on:
         description: "Override version (defaults to project() VERSION)"
         required: false
         type: string
+      include_app_packages:
+        description: "Also run the app-shell packages (ios/android/windows-installer) — expected to fail until those apps exist"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: write
@@ -48,22 +66,30 @@ jobs:
           - target: macos
             os: macos-latest
             script: packaging/macos/build_dmg.sh
+            on_tag: true
           - target: linux
             os: ubuntu-latest
             script: packaging/linux/appimage.sh
+            on_tag: true
           - target: windows-zip
             os: windows-latest
             script: packaging/windows/build_zip.ps1
+            on_tag: true
+          # Manual-only until the thing each one packages exists (see header).
           - target: windows-installer
             os: windows-latest
             script: packaging/windows/build_installer.ps1
+            on_tag: false
           - target: ios
             os: macos-latest
             script: packaging/ios/build_archive.sh
+            on_tag: false
           - target: android
             os: ubuntu-latest
             script: packaging/android/build_aab.sh
+            on_tag: false
     runs-on: ${{ matrix.os }}
+    if: ${{ matrix.on_tag || inputs.include_app_packages }}
     env:
       CYBER_VERSION_OVERRIDE: ${{ needs.version.outputs.version }}
     steps:
@@ -134,5 +160,12 @@ jobs:
           name: CyberRemesher ${{ needs.version.outputs.version }}
           draft: false
           prerelease: false
-          fail_on_unmatched_files: true
+          # Auto-generate notes from the commits since the previous tag. Without
+          # this the published release had an empty body, which is part of why
+          # the lane was worth fixing rather than just making green.
+          generate_release_notes: true
+          # Do not fail the publish when a package is missing: three targets are
+          # gated off on tags (see header), and a release with the artifacts that
+          # do exist beats no release at all.
+          fail_on_unmatched_files: false
           files: release-artifacts/cyberremesh-*

@@ -41,7 +41,12 @@ cp "${APPDIR}/usr/share/icons/hicolor/256x256/apps/cyberremesher.png" \
 cat >"${APPDIR}/AppRun" <<'APPRUN'
 #!/usr/bin/env bash
 HERE="$(dirname "$(readlink -f "${0}")")"
-exec "${HERE}/usr/bin/CyberRemesher" "$@"
+# The desktop shell is a placeholder today, so fall back to the CLI rather than
+# exec'ing a binary the AppDir does not contain.
+if [ -x "${HERE}/usr/bin/CyberRemesher" ]; then
+  exec "${HERE}/usr/bin/CyberRemesher" "$@"
+fi
+exec "${HERE}/usr/bin/cyberremesh" "$@"
 APPRUN
 chmod +x "${APPDIR}/AppRun"
 

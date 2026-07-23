@@ -32,9 +32,13 @@ rm -rf "${STAGE_DIR}"
 mkdir -p "${STAGE_DIR}/${APP_NAME}/Contents/MacOS"
 mkdir -p "${STAGE_DIR}/${APP_NAME}/Contents/Resources"
 
-# Bundle the desktop shell and the headless CLI so smoke tests can drive it.
+# Bundle the desktop shell when it exists and the headless CLI always, so smoke
+# tests can drive it. apps/desktop is currently a placeholder (only .gitkeep), so
+# the shell is absent on every build — package CLI-only rather than failing, the
+# same fallback packaging/linux/appimage.sh uses.
 cp "${REPO_ROOT}/build/macos-metal/apps/desktop/CyberRemesher" \
-   "${STAGE_DIR}/${APP_NAME}/Contents/MacOS/CyberRemesher"
+   "${STAGE_DIR}/${APP_NAME}/Contents/MacOS/CyberRemesher" 2>/dev/null \
+   || echo "   (desktop shell not built; CLI-only bundle)"
 cp "${REPO_ROOT}/build/macos-metal/apps/cli/cyberremesh" \
    "${STAGE_DIR}/${APP_NAME}/Contents/MacOS/cyberremesh"
 cp "${SCRIPT_DIR}/Info.plist.in" \

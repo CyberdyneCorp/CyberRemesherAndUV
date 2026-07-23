@@ -18,16 +18,19 @@ $Version = $Matches[1]
 $ZipName = "cyberremesh-$Version-windows-x64.zip"
 
 Write-Host "==> Building CyberRemesher $Version (Windows, x64)"
-cmake --preset windows-cuda
-cmake --build --preset windows-cuda --config Release
+# cpu-headless, not windows-cuda: the CUDA preset requires nvcc, which the
+# GitHub windows-latest runner does not ship, so configure failed outright.
+# The packaged artifact is the headless CLI + C ABI, neither of which needs CUDA.
+cmake --preset cpu-headless
+cmake --build --preset cpu-headless
 
 $Dist  = Join-Path $RepoRoot "dist"
 $Stage = Join-Path $Dist "windows\stage"
 Remove-Item -Recurse -Force $Stage -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $Stage | Out-Null
 
-Copy-Item (Join-Path $RepoRoot "build\windows-cuda\apps\cli\Release\cyberremesh.exe") $Stage
-Copy-Item (Join-Path $RepoRoot "build\windows-cuda\apps\desktop\Release\CyberRemesher.exe") $Stage -ErrorAction SilentlyContinue
+Copy-Item (Join-Path $RepoRoot "build\cpu-headless\apps\cli\cyberremesh.exe") $Stage
+Copy-Item (Join-Path $RepoRoot "build\cpu-headless\apps\desktop\CyberRemesher.exe") $Stage -ErrorAction SilentlyContinue
 Copy-Item (Join-Path $RepoRoot "LICENSE") $Stage
 Copy-Item (Join-Path $RepoRoot "README.md") $Stage
 
