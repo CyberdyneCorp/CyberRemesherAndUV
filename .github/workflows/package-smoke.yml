@@ -50,7 +50,10 @@ jobs:
           case "${{ matrix.target }}" in
             macos)
               dmg="$(ls pkg/cyberremesh-*-macos.dmg)"
-              mnt="$(hdiutil attach "${dmg}" -nobrowse -readonly | awk 'END{print $NF}')"
+              # hdiutil's output is TAB-separated and the volume name contains a
+              # space ("CyberRemesher 0.2.2"), so whitespace-splitting awk returned
+              # "0.2.2" and the CLI path never resolved. Split on tabs only.
+              mnt="$(hdiutil attach "${dmg}" -nobrowse -readonly | awk -F'\t' 'END{print $NF}')"
               cli="${mnt}/CyberRemesher.app/Contents/MacOS/cyberremesh"
               ;;
             linux)
@@ -89,8 +92,12 @@ jobs:
           if-no-files-found: ignore
 
   # Mobile artifacts: at minimum boot in a simulator/emulator.
+  #
+  # Manual-only, matching release.yml: the ios/android packages are gated off on
+  # tag pushes (apps/mobile is a placeholder), so on a tag this job could only
+  # ever fail looking for artifacts nothing produced.
   mobile-smoke:
-    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    if: ${{ github.event_name == 'workflow_dispatch' }}
     strategy:
       fail-fast: false
       matrix:

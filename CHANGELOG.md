@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.2.3
+
+### Fixed
+
+- **The published Windows zip could not run on a clean machine.** The build uses
+  MinGW GCC, so the exe needs `libstdc++-6` / `libgcc_s_seh-1` /
+  `libwinpthread-1` beside it; without them the loader fails and it exits 127
+  ("command not found") despite the exe being present. CI worked around this by
+  putting `/c/mingw64/bin` on PATH for its own smoke test — a distributable
+  archive has to carry the DLLs, and now does.
+- **macOS package smoke never resolved the CLI.** `hdiutil` output is
+  tab-separated and the volume name contains a space ("CyberRemesher 0.2.3"), so
+  whitespace-splitting `awk` returned just the version string.
+- `mobile-smoke` is manual-only, matching the release lane: the ios/android
+  packages are gated off on tags, so on a tag it could only fail looking for
+  artifacts nothing produced.
+
 ## 0.2.2
 
 ### Fixed

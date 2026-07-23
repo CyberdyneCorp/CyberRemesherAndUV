@@ -31,6 +31,21 @@ New-Item -ItemType Directory -Force -Path $Stage | Out-Null
 
 Copy-Item (Join-Path $RepoRoot "build\cpu-headless\apps\cli\cyberremesh.exe") $Stage
 Copy-Item (Join-Path $RepoRoot "build\cpu-headless\apps\desktop\CyberRemesher.exe") $Stage -ErrorAction SilentlyContinue
+# The Windows build uses MinGW GCC, so the exe needs the compiler's runtime
+# DLLs beside it. Without them it cannot start at all — the loader failure
+# surfaces as exit 127 ("command not found") even though the exe is present,
+# which is what made the packaged zip unrunnable on a clean machine. ci.yml
+# works around this by putting /c/mingw64/bin on PATH for its own smoke test;
+# a distributable archive has to carry them instead.
+foreach ($dll in @("libstdc++-6.dll", "libgcc_s_seh-1.dll", "libwinpthread-1.dll")) {
+    $src = Join-Path "C:\mingw64\bin" $dll
+    if (Test-Path $src) {
+        Copy-Item $src $Stage
+    } else {
+        Write-Host "   (runtime $dll not found at $src; zip may not run standalone)"
+    }
+}
+
 Copy-Item (Join-Path $RepoRoot "LICENSE") $Stage
 Copy-Item (Join-Path $RepoRoot "README.md") $Stage
 
