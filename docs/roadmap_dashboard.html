@@ -176,9 +176,9 @@
         <div class="s">The shipping default (<span class="mono">cpu-headless</span>, <span class="mono">-DCYBER_WITH_QUADCOVER</span>) is the in-process <b>Geogram field</b> — beats QF on organic. A from-scratch <b>native</b> solver (our frame field + cut graph + seamless MIQ on <span class="mono">spmv</span>, no Geogram) is the <b>dependency-free fallback</b> at 3–5% irregular, and the <b>feature-aware</b> path CAD meshes route to. <span class="mono">computeSeamlessUv</span> orders vendored → native → field-aligned.</div>
       </div>
       <div class="chip">
-        <div class="k">CAD robustness (topological defects)</div>
-        <div class="v win">We beat QuadriFlow — manifold where QF tears</div>
-        <div class="s"><b>quad-cover 0 defects</b> on a sharp-edged cube where <b>QuadriFlow tears the mesh — 576 boundary defects</b> (holes &amp; cracks). A smooth field method can't lay a clean grid on degenerate flat patches; our <b>flatness routing (§6·E)</b> keeps them watertight — AND we stay manifold on the curved-crease parts QF handles too (fandisk, rocker: 0 = 0). The one axis a field-based remesher structurally can't follow. See <span class="mono">examples/12_cad_robustness.py</span>.</div>
+        <div class="k">Topological validity (defects)</div>
+        <div class="v win">0 on 5/5 — beats QuadriFlow outright</div>
+        <div class="s"><b>quad-cover 0 defects on the whole corpus</b> across 5 densities (2600–4200), the one axis it wins clean corpus-wide. The last residual (stanford-bunny) was a hole-filler <b>double-close bug</b>, not scan geometry — fixed, <b>40→0</b> (PR #1), other four byte-identical. On a sharp-edged cube <b>QuadriFlow tears — 576 boundary defects</b>; on bunny it still tears (32). A smooth field can't grid degenerate flat patches, so our <b>flatness routing (§6·E)</b> keeps them watertight. See <span class="mono">examples/12_cad_robustness.py</span>.</div>
       </div>
     </div>
   </header>
@@ -213,15 +213,18 @@
       <div class="idx">3</div>
       <div class="body">
         <div class="t">Win on features &amp; robustness</div>
-        <div class="d">Metrics built (feature-follow, mesh-validity). <b>Mixed:</b> we win
-          decisively on hard-edged/box geometry — a subdivided cube tears QuadriFlow (598 boundary
-          edges, 2.87% feature err) while ours is clean (0 defects, 0.3%). But on smooth CAD/organic
-          QuadriFlow leads on crease alignment and our extractor leaves validity defects (cheburashka
-          34, stanford-bunny 132) — real bugs to fix.</div>
-        <div class="exit">Exit: hard-surface robustness <b>✓</b> · smooth-corpus feature+validity
-          <b>✗ (extractor bugs)</b></div>
+        <div class="d">Metrics built (feature-follow, mesh-validity). <b>Two of three axes won;
+          feature-following is the one open gap:</b>
+          <div class="ms">
+            <span class="msrow"><span class="msdot done"></span><b>Hard-edged / box geometry</b> — a subdivided cube tears QuadriFlow (576 boundary edges) while ours is clean (0 defects). <span class="mstag done">win</span></span>
+            <span class="msrow"><span class="msdot done"></span><b>Topological validity — now 0 on 5/5.</b> The last residual (stanford-bunny) was a hole-filler <b>double-close bug</b>, not scan geometry: <span class="mono">fixHoleWithQuads</span> closed a 4-edge loop twice → a non-manifold rim. Fixed (bunny <b>40→0</b> across 5 densities, other four byte-identical); QuadriFlow still tears bunny (32). <span class="mstag done">done · #1</span></span>
+            <span class="msrow"><span class="msdot partial"></span><b>Feature-following — still 0/5.</b> Count-matched: fandisk 0.75 v 0.41, cheburashka 1.00 v 0.56, rocker 0.48 v 0.42, spot 0.41 v 0.35, bunny confounded (scan rim). The roadmap's "only remaining lever" — <b>per-feature-edge integer constraints</b> (QuadriFlow's <span class="mono">ComputeIndexMap</span>) — was <b>built and refuted</b>: only 1/5 clears the native-solver route, and the "field is crease-aligned, phase is off" premise is false (field runs ~21° off fandisk's creases vs ~22.5° random). The gap is upstream — crease polylines shatter in the isotropic pre-remesh. <span class="mstag partial">lever refuted</span></span>
+          </div>
+        </div>
+        <div class="exit">Exit: hard-surface robustness <b>✓</b> · corpus validity <b>✓ (0 on 5/5)</b> ·
+          feature alignment <b>✗ (0/5, cause now upstream)</b></div>
       </div>
-      <div class="pill partial">Mixed</div>
+      <div class="pill partial">Validity won · feature-gated</div>
     </div>
     <div class="phase partial">
       <div class="idx">4</div>
@@ -324,11 +327,16 @@
     <span><b>ours = quad-cover via the vendored Geogram solve</b> (1–4%, the parity path). The
       dependency-free <b>native</b> solver (§6·J, the stock default) is 1–2 pts behind:
       spot 4 · fandisk 3 · rocker 5 · cheb 5 · bunny 5 — still well below field-aligned (9–17%).</span>
+    <span><b>Now count-matched</b> (2026-07-23): both arms are driven to a matched <i>achieved</i>
+      quad count, not a matched request — QuadriFlow ran 11–16% denser at a fixed request, and
+      <span class="mono">feature_error</span> ~ count<sup>−½</sup>. This softens the median wins
+      (rocker 83 v 84, cheb 80 v 81) and shows <b>topological defects 0 on 5/5</b> (bunny fixed),
+      vs QuadriFlow 32 on bunny — not shown in the columns above.</span>
   </div>
 
   <h2><span class="n">§3</span> Adaptivity validated — beats our own uniform sizing, 4/5</h2>
   <div class="qpp" id="qpp"></div>
-  <div class="qpp-key">Surface deviation (% of bbox diagonal) at the <b>same output quad count</b>, <b>ours adaptive vs ours uniform</b> — isolates the sizing benefit from the mesh-quality gap. Lower bar = better fidelity per polygon. <span style="color:var(--accent-soft);font-weight:700">■ adaptive</span> &nbsp; <span style="color:var(--ref);font-weight:700">■ uniform</span>. Beating QuadriFlow's <i>absolute</i> fidelity is Phase-4-gated.
+  <div class="qpp-key">Surface deviation (% of bbox diagonal) at the <b>same output quad count</b>, <b>ours adaptive vs ours uniform</b> — isolates the sizing benefit from the mesh-quality gap. Lower bar = better fidelity per polygon. <span style="color:var(--accent-soft);font-weight:700">■ adaptive</span> &nbsp; <span style="color:var(--ref);font-weight:700">■ uniform</span>. Beating QuadriFlow's <i>absolute</i> fidelity is Phase-4-gated.</div>
 
   <h2><span class="n">§4</span> Three-way, by scenario — where each engine wins</h2>
   <p class="lede" style="font-size:14px;margin-bottom:14px">The visual examples split into four
@@ -470,16 +478,20 @@
   </div>
 
   <footer>
-    Snapshot: 2026-07-22 · corpus = spot · fandisk · rocker-arm · cheburashka · stanford-bunny ·
-    target ~3000 quads · references = QuadriFlow (headless, boost-free) + AutoRemesher/QuadCover ·
-    numbers from <code>examples/11_benchmark.py</code>. Roadmap detail in <code>docs/ROADMAP.md</code>,
-    QuadCover milestones in <code>docs/quadcover-plan.md</code>, native solver in
-    <code>docs/native-miq-plan.md</code>.
+    Snapshot: 2026-07-23 · corpus = spot · fandisk · rocker-arm · cheburashka · stanford-bunny ·
+    target ~3000 quads, <b>count-matched</b> · references = QuadriFlow (headless, boost-free) +
+    AutoRemesher/QuadCover · numbers from <code>examples/11_benchmark.py</code>. Roadmap detail in
+    <code>docs/ROADMAP.md</code>, QuadCover milestones in <code>docs/quadcover-plan.md</code>, native
+    solver in <code>docs/native-miq-plan.md</code>.
     <br>
-    <span style="opacity:.75">Dashboard content as of 2026-07-22: quad-cover <b>beats QuadriFlow by
-    default</b> (in-process Geogram field, <code>cpu-headless</code>) on organic median+irregular, with
-    <b>CAD crease-routing</b> (fandisk 83.4) and an <b>automatic UV atlas</b> (§7). Specs synced via
-    OpenSpec change <code>quadcover-default-and-auto-uv-atlas</code>. A manual artifact; it does not
+    <span style="opacity:.75">Update 2026-07-23 (PR #1): <b>topological validity now 0 on 5/5</b> —
+    stanford-bunny's residual defects were a hole-filler <b>double-close bug</b> (40→0), not scan
+    geometry. The benchmark is now <b>count-matched</b> on achieved quads, which softens the median
+    wins. The roadmap's headline feature lever — <b>per-feature-edge integer constraints</b> — was
+    built and <b>refuted</b> (1/5 route reach; the crease-alignment premise is false), so
+    feature-following stays 0/5 with the cause relocated upstream (crease-polyline fragmentation).
+    Prior content (2026-07-22): quad-cover <b>beats QuadriFlow by default</b> on organic
+    median+irregular, plus an <b>automatic UV atlas</b> (§7). A manual artifact; it does not
     auto-track the repo, so a later commit may have moved past this.</span>
   </footer>
 </div>
