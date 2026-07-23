@@ -75,8 +75,14 @@ cyber_set_warnings(cyber_tests)
 
 add_test(NAME unit COMMAND cyber_tests)
 
-if(CYBER_BUILD_CLI OR TARGET cyberbridge-server OR TARGET cyber_capi_shared)
-    find_package(Python3 COMPONENTS Interpreter)
+find_package(Python3 COMPONENTS Interpreter)
+
+# Single version identity (build-and-packaging spec). Pure file parsing, so it
+# needs no built target and runs in every configuration that has an interpreter.
+if(Python3_FOUND)
+    add_test(NAME version_identity
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/packaging/test_version_identity.py)
 endif()
 
 if(CYBER_BUILD_CLI AND Python3_FOUND)
