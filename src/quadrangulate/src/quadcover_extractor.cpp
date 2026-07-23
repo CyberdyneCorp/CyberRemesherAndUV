@@ -787,6 +787,12 @@ public:
     // open surface get the cleanup's quality without losing its rim.
     void setPreserveInputBoundary(bool on) { m_preserveInputBoundary = on; }
 
+    // Run's hole-fill policy (remeshing-parameters spec, "holeFillMaxBoundary"):
+    // fill boundary loops of at most this many edges, leave longer ones open, and
+    // fill nothing below 3. Replaces a hard-coded 65 — the same magic constant
+    // AutoRemesher used, which the spec calls out by name.
+    void setHoleFillMaxBoundary(int maxEdges) { m_holeFillMaxBoundary = maxEdges; }
+
     const std::vector<DVec3>& remeshedVertices() const { return m_remeshedVertices; }
     const std::vector<std::vector<std::size_t>>& remeshedQuads() const {
         return m_remeshedPolygons;
@@ -807,6 +813,8 @@ private:
     bool m_preserveInputBoundary = false;
     std::vector<std::pair<DVec3, DVec3>> m_inputBoundary;
     double m_boundaryTol = 0.0;
+    // Hole-fill policy; the RemeshParams default, overridden per run by the caller.
+    int m_holeFillMaxBoundary = 64;
 
     void buildInputBoundary();
     bool tracesInputBoundary(const std::vector<std::size_t>& loop) const;
@@ -1602,13 +1610,19 @@ bool IsolineExtractor::tracesInputBoundary(const std::vector<std::size_t>& loop)
 }
 
 void IsolineExtractor::fixHoles() {
+    // Policy check first: below 3 the caller has disabled filling outright, so
+    // there is nothing to do and no reason to build the boundary index.
+    if (m_holeFillMaxBoundary < 3) {
+        return;
+    }
     if (m_preserveInputBoundary && m_inputBoundary.empty()) {
         buildInputBoundary();
     }
     std::vector<std::vector<std::size_t>> loops;
     searchBoundaries(m_halfEdges, loops);
     for (auto& loop : loops) {
-        if (loop.size() > 65) {
+        // Longer than the configured limit -> left open, as the spec requires.
+        if (loop.size() > static_cast<std::size_t>(m_holeFillMaxBoundary)) {
             continue;
         }
         // The surface's own rim is not a hole — filling it would close the mesh.
@@ -2247,7 +2261,8 @@ double boundaryEdgeFraction(const std::vector<std::array<Index, 3>>& triangles) 
     return static_cast<double>(boundary) / static_cast<double>(edgeCount.size());
 }
 
-IsolineQuadMesh extractIsolineQuads(const Mesh& /*mesh*/, const SeamlessUv& uv) {
+IsolineQuadMesh extractIsolineQuads(const Mesh& /*mesh*/, const SeamlessUv& uv,
+                                    int holeFillMaxBoundary) {
     if (!uv.valid || uv.triangles.empty()) {
         return IsolineQuadMesh{};
     }
@@ -2306,6 +2321,7 @@ IsolineQuadMesh extractIsolineQuads(const Mesh& /*mesh*/, const SeamlessUv& uv) 
     IsolineExtractor extractor(std::move(vertices), std::move(triangles), std::move(triangleUvs));
     extractor.setRunClosedSurfaceCleanup(closed || openCleanup);
     extractor.setPreserveInputBoundary(!closed);
+    extractor.setHoleFillMaxBoundary(holeFillMaxBoundary);
     extractor.extract();
     if (std::getenv("CYBER_QC_DEBUG") != nullptr) {
         std::map<std::size_t, std::size_t> hist;
@@ -2372,8 +2388,10 @@ double meshTargetQuads(const Mesh& mesh, float targetEdgeLength) {
 // a reason without corrupting the input triangle island).
 class QuadCoverQuadrangulator final : public IQuadrangulator {
 public:
-    QuadCoverQuadrangulator(int fieldIterations, float adaptivity)
-        : m_fieldIterations(fieldIterations), m_adaptivity(adaptivity) {}
+    QuadCoverQuadrangulator(int fieldIterations, float adaptivity, int holeFillMaxBoundary)
+        : m_fieldIterations(fieldIterations),
+          m_adaptivity(adaptivity),
+          m_holeFillMaxBoundary(holeFillMaxBoundary) {}
 
     Outcome quadrangulate(Mesh& mesh, float targetEdgeLength, ProgressSink* progress,
                           const CancelToken* cancel) override {
@@ -2405,7 +2423,7 @@ public:
             if (cancel != nullptr && cancel->isCancelled()) {
                 return {.success = false, .cancelled = true, .failureReason = {}};
             }
-            out = extractIsolineQuads(mesh, uv);
+            out = extractIsolineQuads(mesh, uv, m_holeFillMaxBoundary);
             const double got = static_cast<double>(out.quads.size());
             if (std::getenv("CYBER_QC_SCALING") != nullptr || targetQuads <= 0.0 || got <= 0.0) {
                 break;  // fixed scaling (experiment) or nothing to calibrate against
@@ -2471,13 +2489,16 @@ public:
 private:
     int m_fieldIterations;
     float m_adaptivity;
+    int m_holeFillMaxBoundary;
 };
 
 }  // namespace
 
 std::unique_ptr<IQuadrangulator> makeQuadCoverQuadrangulator(int fieldIterations,
-                                                             float adaptivity) {
-    return std::make_unique<QuadCoverQuadrangulator>(fieldIterations, adaptivity);
+                                                             float adaptivity,
+                                                             int holeFillMaxBoundary) {
+    return std::make_unique<QuadCoverQuadrangulator>(fieldIterations, adaptivity,
+                                                     holeFillMaxBoundary);
 }
 
 bool quadCoverAvailable() {

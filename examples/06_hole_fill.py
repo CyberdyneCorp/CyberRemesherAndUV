@@ -29,36 +29,30 @@ def main() -> None:
         # fills the small interior hole but leaves the large outer perimeter
         # open — set it huge and the outer border would close too.
         #
-        # The parameter is applied as a post-pass over whatever the
-        # quadrangulator produced (src/core/src/pipeline.cpp), so it can only
-        # fill holes that survive extraction. `field-aligned` preserves them
-        # and therefore honours the setting; the DEFAULT `quad-cover` closes
-        # holes during extraction, so the knob has no effect there. That is a
-        # known gap against the "Explicit cleanup policies" requirement —
-        # pinned by python/cyberremesh/tests/test_hole_fill_policy.py. Demo the
-        # parameter on the method that respects it, and show the default's
-        # behaviour honestly beside it rather than mislabelling it.
+        # The limit is enforced in two places, because the two extractors reach
+        # holes differently: `field-aligned` leaves them for the pipeline's
+        # post-pass (src/core/src/pipeline.cpp), while the default `quad-cover`
+        # closes them during extraction and so takes the policy directly
+        # (IsolineExtractor::setHoleFillMaxBoundary). Both honour it, and a loop
+        # LONGER than the limit stays open either way — which is why the outer
+        # border survives here even at limit=64.
         def run(method: str, limit: int):
             mesh, _ = c.remesh_obj(src_path, c.RemeshParams(
                 target_quad_count=800, quad_method=method, hole_fill_max_boundary=limit))
             return mesh
 
-        no_fill = run("field-aligned", 0)
-        filled = run("field-aligned", 64)
-        default_fills = run("quad-cover", 0)
+        no_fill = run("quad-cover", 0)
+        filled = run("quad-cover", 64)
 
-        print(f"field-aligned, limit=0 : {open_edges(no_fill)} boundary edges "
+        print(f"quad-cover, limit=0 : {open_edges(no_fill)} boundary edges "
               "(hole + outer border — hole preserved)")
-        print(f"field-aligned, limit=64: {open_edges(filled)} boundary edges "
-              "(outer border only — hole filled)")
-        print(f"quad-cover,    limit=0 : {open_edges(default_fills)} boundary edges "
-              "(outer border only — DEFAULT fills regardless; known gap)")
+        print(f"quad-cover, limit=64: {open_edges(filled)} boundary edges "
+              "(outer border only — hole filled, border too long to fill)")
 
-        panels = [src, no_fill, filled, default_fills]
+        panels = [src, no_fill, filled]
         titles = ["input · square hole",
-                  "field-aligned · limit=0 · hole left open",
-                  "field-aligned · limit=64 · hole filled",
-                  "quad-cover (default) · limit=0\nfills anyway — known gap"]
+                  "quad-cover · limit=0 · hole left open",
+                  "quad-cover · limit=64 · hole filled"]
         # QuadriFlow has no targeted hole-fill pass — the contrast panel.
         for panel in c.reference_panels(src_path, c.face_counts(filled)[0]):
             panels.append(panel[0])

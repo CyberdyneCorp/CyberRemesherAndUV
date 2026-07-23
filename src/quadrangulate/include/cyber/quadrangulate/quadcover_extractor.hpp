@@ -129,7 +129,14 @@ struct IsolineQuadMesh {
     std::vector<Vec3> vertices;
     std::vector<std::vector<std::size_t>> quads;  // CCW corner indices per face
 };
-[[nodiscard]] IsolineQuadMesh extractIsolineQuads(const Mesh& mesh, const SeamlessUv& uv);
+// `holeFillMaxBoundary` is the run's hole-fill policy (remeshing-parameters spec):
+// boundary loops with at most this many edges are closed with quads during
+// extraction, longer ones are left open, and a value below 3 disables filling
+// entirely. It must be threaded in here rather than applied downstream: the
+// pipeline's post-pass can only fill loops that SURVIVE extraction, so a
+// hard-coded limit here silently overrides whatever the caller asked for.
+[[nodiscard]] IsolineQuadMesh extractIsolineQuads(const Mesh& mesh, const SeamlessUv& uv,
+                                                  int holeFillMaxBoundary = 64);
 
 // Post-extraction cap elimination. The isoline tracer leaves a few percent of non-quad
 // "cap" faces (triangles / pentagons / hexagons) at cone and boundary regions; under the
@@ -151,8 +158,12 @@ void eliminateNonQuadCaps(std::vector<Vec3>& vertices,
 // `adaptivity` (0.0 = uniform, the cleanest topology; up to 1.0 = fully
 // curvature-adaptive sizing) is forwarded to the seamless-UV solve as the frame-field
 // gradient adaptivity. The pipeline passes the run's adaptivity through here.
+// `holeFillMaxBoundary` forwards the run's hole-fill policy to extraction (see
+// extractIsolineQuads above); the default matches RemeshParams so a caller that
+// does not care keeps the documented behaviour.
 std::unique_ptr<IQuadrangulator> makeQuadCoverQuadrangulator(int fieldIterations = 40,
-                                                             float adaptivity = 0.0f);
+                                                             float adaptivity = 0.0f,
+                                                             int holeFillMaxBoundary = 64);
 
 // Whether a seamless-UV solver is available for the quad-cover method: true when the
 // in-process solver is linked (built with -DCYBER_WITH_QUADCOVER=ON) or the

@@ -5,27 +5,26 @@ The spec requires hole filling to be governed by a user-visible parameter
 rather than a hard-coded constant, and that a boundary loop longer than the
 configured limit "SHALL be left open".
 
-Only `field-aligned` honours that. The default `quad-cover` and the opt-in
-`instant-meshes` extractors decide during extraction, before
-`holeFillMaxBoundary` is consulted as a post-pass (src/core/src/pipeline.cpp),
-so the parameter cannot influence the result:
+`holeFillMaxBoundary` is applied as a post-pass over the quadrangulator's
+output (src/core/src/pipeline.cpp), so it can only fill loops that SURVIVE
+extraction. The default `quad-cover` closes holes *during* extraction, so it
+used to ignore the parameter entirely — it had its own hard-coded limit of 65,
+the same magic constant the spec criticises AutoRemesher for. The run's policy
+is now threaded into the extractor (`extractIsolineQuads` ->
+`IsolineExtractor::setHoleFillMaxBoundary`), so:
 
-    method          limit=0                 limit=64
-    quad-cover      hole FILLED (wrong)     hole filled
-    field-aligned   hole left open  (ok)    hole filled  (ok)
-    instant-meshes  hole left open          hole NOT filled (wrong)
+    method          limit=0             limit=64
+    quad-cover      hole left open ok   hole filled ok
+    field-aligned   hole left open ok   hole filled ok
+    instant-meshes  hole left open      hole NOT filled (still ignores it)
 
-This test locks in the behaviour that is correct and *characterises* the
-behaviour that is not, so the violation is visible in the suite rather than
-being discovered from a misleading example (examples/06_hole_fill.py printed
-"hole left open" for a mesh whose hole it had just filled).
+This test is the regression guard. It covers both directions of the parameter
+and the over-limit case — a hole LONGER than the limit must stay open even
+when filling is enabled, which is the spec's actual wording and what a plain
+on/off flag would miss.
 
-The quad-cover expectation below deliberately asserts the buggy result: when
-the extractor learns to respect the limit, this test fails and must be updated.
-That is the intent — a tripwire, not an endorsement.
-
-Verified pre-existing: reproduces on a build predating the M3 open-surface work
-and on both the Geogram and dependency-free native backends.
+`instant-meshes` is a retired opt-in extractor and still ignores the parameter;
+it is deliberately not asserted here.
 
 Runnable as a plain script; exits 77 (CTest SKIP) if the library is absent.
 """
@@ -52,16 +51,17 @@ def check(name: str, condition: bool, detail: str = "") -> None:
         print(f"FAIL: {name} {detail}")
 
 
-def write_plane_with_hole(path: str, n: int = 12) -> None:
-    """Flat (n+1)^2 triangle grid with the centre quad removed."""
+def write_plane_with_hole_of(path: str, n: int = 12, cells: int = 1) -> None:
+    """Flat (n+1)^2 triangle grid with a centred `cells` x `cells` hole."""
     lines = []
     for j in range(n + 1):
         for i in range(n + 1):
             lines.append(f"v {i / n - 0.5:.6f} 0.0 {j / n - 0.5:.6f}")
-    mid = n // 2
+    lo = (n - cells) // 2
+    hi = lo + cells
     for j in range(n):
         for i in range(n):
-            if i == mid and j == mid:
+            if lo <= i < hi and lo <= j < hi:
                 continue  # the hole
             a = j * (n + 1) + i + 1  # OBJ indices are 1-based
             b, c, d = a + 1, a + n + 1, a + n + 2
@@ -69,6 +69,10 @@ def write_plane_with_hole(path: str, n: int = 12) -> None:
             lines.append(f"f {b} {c} {d}")
     with open(path, "w", encoding="utf-8") as fh:
         fh.write("\n".join(lines) + "\n")
+
+
+def write_plane_with_hole(path: str, n: int = 12) -> None:
+    write_plane_with_hole_of(path, n, cells=1)
 
 
 def read_faces(path: str) -> "list":
@@ -138,12 +142,22 @@ def main() -> int:
         check("field-aligned fills the hole at limit=64",
               loops_after_remesh(tmp, src, "field-aligned", 64) == 1)
 
-        # quad-cover is the DEFAULT and fills regardless of the limit.
-        check("quad-cover fills at limit=64",
+        # quad-cover is the DEFAULT. It closes holes during extraction, so the
+        # limit is threaded into the extractor itself rather than applied as a
+        # post-pass; this is the regression guard for that.
+        check("quad-cover leaves the hole open at limit=0",
+              loops_after_remesh(tmp, src, "quad-cover", 0) == 2)
+        check("quad-cover fills the hole at limit=64",
               loops_after_remesh(tmp, src, "quad-cover", 64) == 1)
-        check("KNOWN GAP: quad-cover ignores limit=0 and still fills",
-              loops_after_remesh(tmp, src, "quad-cover", 0) == 1,
-              "hole now left open -> the bug is FIXED; update this assertion")
+
+        # A hole longer than the limit must be left open even when filling is on
+        # — the spec's actual wording, and what a single on/off flag would miss.
+        big = os.path.join(tmp, "big_hole.obj")
+        write_plane_with_hole_of(big, n=24, cells=8)
+        check("input with the large hole has two loops",
+              boundary_loop_count(read_faces(big)) == 2)
+        check("quad-cover leaves an over-limit hole open (limit=8)",
+              loops_after_remesh(tmp, big, "quad-cover", 8) == 2)
 
     if FAILURES:
         print(f"\n{len(FAILURES)} failure(s): {', '.join(FAILURES)}")

@@ -18,6 +18,24 @@ those claims, and adds an opt-in experimental path.
   count saturates it escalated to a ~120k-quad request, allocated ~4 GB and
   never returned. Now bounded by a 4x ceiling with a saturation guard;
   regression-tested in `examples/test_count_match.py`.
+- **`holeFillMaxBoundary` was ignored by the default `quad-cover` method.** The
+  parameter is applied as a post-pass over the quadrangulator's output, but
+  quad-cover closes holes *during* extraction against its own hard-coded limit
+  of 65 — the same magic constant the spec criticises AutoRemesher for — so the
+  caller's policy never took effect. The run's limit is now threaded into the
+  extractor itself (`extractIsolineQuads` ->
+  `IsolineExtractor::setHoleFillMaxBoundary`). Loops longer than the limit are
+  left open as the spec requires, and a value below 3 disables filling.
+
+  This also gives open surfaces a supported way to keep their rim: at
+  `hole_fill_max_boundary=0` a sphere with its cap removed retains its
+  boundary instead of being silently closed. The default (64) is unchanged, so
+  damaged input still repairs to a watertight mesh.
+
+  Corpus quality is byte-identical (benchmark unchanged on all five models) and
+  broken-input robustness stays 7/7. Regression-tested in
+  `python/cyberremesh/tests/test_hole_fill_policy.py`, covering both directions
+  of the parameter and the over-limit case.
 
 ### Added
 
@@ -28,8 +46,8 @@ those claims, and adds an opt-in experimental path.
 - `version_identity` test: the four Python version declarations were unlinked
   from `CMakeLists.txt`, so a release bump could miss one and ship a wheel
   disagreeing with the engine inside it.
-- `hole_fill_policy` test: pins a pre-existing gap where the default
-  `quad-cover` extractor ignores `holeFillMaxBoundary` (see Known issues).
+- `hole_fill_policy` test: covers the hole-fill policy across quadrangulators,
+  including that an over-limit loop stays open when filling is enabled.
 
 ### Changed — claims corrected against measurement
 
@@ -50,13 +68,14 @@ those claims, and adds an opt-in experimental path.
 
 ### Known issues
 
-- **`holeFillMaxBoundary` has no effect on the default `quad-cover` method.**
-  It is applied as a post-pass over the quadrangulator's output, and quad-cover
-  closes holes during extraction, so a loop longer than the limit is not left
-  open as the spec requires. `field-aligned` honours the parameter;
-  `instant-meshes` never fills. Tracked with the open-surface work.
-- Open surfaces remain a limitation on the default path: rims are closed rather
-  than preserved.
+- The opt-in `instant-meshes` extractor still ignores `holeFillMaxBoundary` (it
+  never fills). It is a retired alternative, not the default.
+- Open surfaces are still not first-class: `hole_fill_max_boundary=0` now keeps
+  the rim, but the isoline graph cleanup that gives closed surfaces their quad
+  quality remains opt-in on open ones (`CYBER_QC_OPEN_CLEANUP`, partial).
+- Feature-following trails QuadriFlow (fandisk 2.0x, cheburashka 2.0x,
+  rocker-arm 1.5x); the cause is un-pinned integer-grid phase and the fix needs
+  per-feature-edge integer constraints in the parameterization.
 
 ## 0.1.0
 

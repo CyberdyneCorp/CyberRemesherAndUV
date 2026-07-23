@@ -245,7 +245,13 @@ CyberStatus cyber_remesh(const CyberMesh* in, const CyberRemeshParams* params,
         if (quadMethod == CYBER_QUAD_QUADCOVER && !cyber::remesh::quadCoverAvailable()) {
             quadMethod = CYBER_QUAD_FIELD_ALIGNED;
         }
-        const auto makeQuad = [](int method) -> std::unique_ptr<cyber::remesh::IQuadrangulator> {
+        // quad-cover closes holes DURING extraction, so the pipeline's post-pass
+        // never sees them; the run's hole-fill policy has to reach the extractor
+        // itself or the parameter is silently ignored (remeshing-pipeline spec,
+        // "Explicit cleanup policies").
+        const int holeFillMaxBoundary = params->holeFillMaxBoundary;
+        const auto makeQuad =
+            [holeFillMaxBoundary](int method) -> std::unique_ptr<cyber::remesh::IQuadrangulator> {
             if (method == CYBER_QUAD_INSTANT_MESHES) {
                 return cyber::remesh::makeInstantMeshesQuadrangulator();
             }
@@ -259,7 +265,7 @@ CyberStatus cyber_remesh(const CyberMesh* in, const CyberRemeshParams* params,
                 // variance (spot irr 2->6%, fandisk 3->15%), so — unlike the field/integer
                 // paths — it stays uniform-only here. The adaptivity knob remains available
                 // for experiments via makeQuadCoverQuadrangulator(iters, a) / CYBER_QC_ADAPT.
-                return cyber::remesh::makeQuadCoverQuadrangulator(40, 0.0f);
+                return cyber::remesh::makeQuadCoverQuadrangulator(40, 0.0f, holeFillMaxBoundary);
             }
             return cyber::remesh::makeFieldAlignedQuadrangulator();
         };
