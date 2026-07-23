@@ -1,11 +1,27 @@
 # Changelog
 
-## 0.1.1
+## 0.2.0
 
-Maintenance release. No engine behaviour change on the default path — the
-headline retopology and UV features all shipped in 0.1.0. This release corrects
-what the project *claims* about them, fixes the benchmark that produced some of
-those claims, and adds an opt-in experimental path.
+Adds the manual-retopology engine layer, and fixes a remeshing parameter that
+never took effect on the default path.
+
+### Added — manual retopology
+
+- **Manual-retopology engine layer behind the C API**, the surface the
+  CyberTopology iOS app is built on: 31 new entry points covering the editing
+  verbs (create face, tweak, move with geodesic falloff, relax, erase, delete),
+  topology operators (insert loop, dissolve edges, merge vertices, rotate edge,
+  create grid, subdivide, triangulate), build tools (build face, grow boundary
+  edge, distribute path, surface cut, patch clone, extend boundary grid/fan,
+  draw strip), symmetry (snap plane, apply, resymmetrize), Target snapping,
+  per-element annotation state, and the stroke interpreter. `cyber_capi` now
+  links `cyber_retopo`.
+- New retopo headers: `loops.hpp` (quad-ring and edge-loop walks),
+  `boundary.hpp` (boundary-loop walks), `picking.hpp`, `paths.hpp`,
+  `dissolve.hpp`, `loop_metrics.hpp`, `stroke_interpreter.hpp`.
+- Portability fixes for iOS: a Metal pipeline-state typo, a `~len` integer
+  promotion in the PNG writer, and compiling out the out-of-process QuadCover
+  CLI path (no `std::system` on iOS).
 
 ### Fixed
 
