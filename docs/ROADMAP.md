@@ -215,14 +215,34 @@ Honest finding — **not a clean win**:
   extractor's 110 (cheburashka) and 30 (fandisk), which is what the old
   "hole-fill doesn't close them — a real extractor bug" note referred to. It does
   not describe what ships.
-- ❌ **Feature-following — NOT met. 3 real losses, and not CAD-only.** fandisk
-  0.82 vs 0.41% (2.0x), cheburashka 1.15 vs 0.57% (2.0x), rocker-arm 0.61 vs
-  0.40% (1.5x); **spot is a tie** (0.46 vs 0.44, only 73 crease edges) and
-  **bunny is confounded** (1.32 vs 0.58, but 29% of its "features" are the scan
-  hole's open boundary, which the metric counts as a feature). The new datum vs
-  the earlier CAD-only scoping: **cheburashka is an organic character with 316
-  genuine dihedral creases and a full 2x gap**, so this is broader than the
-  "fandisk CAD residual" framing at the top of this doc.
+  - ✅ **Now 0 on 5/5 (2026-07-23) — bunny's residual 8 was a bug, not its scan
+    geometry.** `IsolineExtractor::fixHoleWithQuads` closed a boundary loop
+    **twice**: `fixHoles` calls it once score-checked and once not, relying on the
+    first pass to consume `hole` (an in/out parameter), and the terminal 4-gon
+    branch returned with `hole` still full. Two coincident quads are
+    edge-count-manifold on their own, so nothing downstream rejected them; the
+    pure-quad subdivision then gave each its own face point and turned the shared
+    rim into a genuine non-manifold edge. Measured on the shipped default over
+    5 models × 5 densities (2600/3000/3400/3800/4200): **stanford-bunny 40 → 0**
+    non-manifold edges (8/8/0/16/8 before), the other four 0 → 0 with 20 of 25
+    cells bit-identical (rocker-arm @2600 keeps an identical face list, vertices
+    move ≤1.1e-5). This is the mechanism behind bunny's long-recorded "defect
+    lottery" — it was never density noise, it was whether the trace happened to
+    leave a 4-edge loop. **Quote defect counts with the density they were measured
+    at**; before the fix a single-density reading was not a floor.
+- ❌ **Feature-following — NOT met, 0/5.** ⚠️ **Restated 2026-07-23 at matched
+  achieved quad count** — the figures below the strikethrough were measured at a
+  matched *request*, where QuadriFlow landed 11–16% denser, and `feature_error`
+  falls roughly as `count^-0.5`. Count-matched: fandisk **0.75 vs 0.41** (1.83x),
+  cheburashka **1.00 vs 0.56** (1.79x), rocker-arm **0.48 vs 0.42** (1.14x), spot
+  **0.41 vs 0.35** (1.17x), stanford-bunny **1.36 vs 0.48** (confounded — 29% of
+  its "features" are the scan hole's open boundary, which the metric counts as a
+  feature). ~~fandisk 0.82/0.41 (2.0x), cheburashka 1.15/0.57 (2.0x), rocker-arm
+  0.61/0.40 (1.5x), spot a tie 0.46/0.44.~~ **rocker-arm was never a 1.5x loss and
+  spot was never a tie**; the two real gaps are fandisk and cheburashka. The datum
+  that survives the restatement: **cheburashka is an organic character with 316
+  genuine dihedral creases and a ~1.8x gap**, so this is broader than the "fandisk
+  CAD residual" framing at the top of this doc.
 - 🔴 **Cheap levers are exhausted — three measured and reverted.** Root cause is
   known (M1: the cross-field IS crease-aligned, but the integer grid **phase** is
   un-pinned, so loops sit ~half a cell off the creases — a grid-phase problem, not
@@ -234,12 +254,29 @@ Honest finding — **not a clean win**:
   1.15→1.06% (~8%, still 1.9x QF) but **rocker-arm regresses −7° median**, irr
   1→5% — net-negative, threshold stays 2%. See `cad-feature-robustness` memory.
 **Follow-ups:** ~~(a) fix the extractor's scattered validity defects~~ *(done —
-retired-extractor issue; the default is clean)*; **(b) per-feature-edge integer
+retired-extractor issue; the default is clean)*; ~~**(b) per-feature-edge integer
 constraints in the parameterization** (QuadriFlow's `ComputeIndexMap` sharp-edge
-path — constrain each feature edge's UV difference to a pure integer along the
-crease). This is the only remaining lever, and it is a **multi-week solver
-project**, not a tweak. Highest-value open quality item; cost unchanged by the
-2026-07-22 re-measurement, but the payoff is broader than previously scoped.
+path)~~ — **BUILT AND MEASURED INERT (2026-07-23), do not re-attempt as scoped.**
+Two independent reasons, both measured:
+  1. **Reach is 1/5 by routing.** `computeSeamlessUv` sends a mesh to the native
+     solver only above a 2% interior-crease fraction. Measured: fandisk 0.0364,
+     cheburashka 0.0142, rocker-arm 0.0074, spot 0.0051, bunny 0.0036. **Only
+     fandisk clears it** — the other four never execute a line of the constraint
+     code, so a native-solver lever cannot move them at all. Lowering the
+     threshold is M2c, already dead.
+  2. **The premise is false.** M1's "the cross field IS crease-aligned, only the
+     grid phase is off" does not hold: fandisk's median 4-RoSy deviation from its
+     crease directions measures ~21°, where a *random* field gives ~22.5°. There
+     is nothing running along the creases to pin a grid to. The constraint
+     mechanism was driven to exactness (crease level sets landing bit-exactly on
+     the integer lattice) and still moved feature error by less than a sixth of
+     the run-to-run noise, while costing median angle on the one model it reaches.
+  **Open follow-up (c): preserve crease polylines through the isotropic stage.**
+  fandisk's ~205 crease edges reach the solver as ~83 fragments with ~118 dangling
+  ends — no constraint can span a polyline chopped into ~2.5-edge pieces. This is
+  upstream of the parameterization and is where the next attempt belongs. **Settle
+  the routing threshold first**, or any native-solver investment stays capped at
+  1/5 of the corpus.
 **Exit (partial):** robustness win on hard-surface geometry *(met)*; validity on
 the smooth corpus *(**met** — 5/5 vs QuadriFlow)*; feature alignment *(not met —
 0/5, corpus-wide)*.

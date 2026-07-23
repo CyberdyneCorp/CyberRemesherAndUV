@@ -1652,18 +1652,43 @@ void IsolineExtractor::fixHoleWithQuads(std::vector<std::size_t>& hole, bool che
         }
     };
 
+    // Emit the terminal 3-/4-gon that closes a hole, unless one of its directed half-edges is
+    // already taken (the same guard the >4 path applies to every candidate quad).
+    //
+    // CLEARING `hole` IS LOAD-BEARING, not tidiness. `hole` is an in/out parameter and `fixHoles`
+    // calls this twice per loop — once score-checked, once not — relying on the first pass to
+    // consume what it filled. The terminal cases used to `return` with `hole` still full, so a
+    // loop that reduced to exactly 4 edges was closed by the first call and closed AGAIN,
+    // identically, by the second. (The 3-gon terminal cannot double-fill on its own: `fixHoles`
+    // only issues the second call when `loop.size() >= 4`. It is routed through the same helper
+    // so the invariant holds for any future caller.)
+    //
+    // Two coincident faces are edge-count-manifold on their own, so nothing downstream rejected
+    // them; the pure-quad subdivision then gave each its own face point and turned the shared rim
+    // into a genuine non-manifold edge. MEASURED on the corpus at 5 densities (2600-4200):
+    // stanford-bunny carried 40 non-manifold edges across 4 of its 5 densities, and 0 after this.
+    auto closeHole = [&](std::vector<std::size_t> face) {
+        for (std::size_t i = 0; i < face.size(); ++i) {
+            if (m_halfEdges.find({face[i], face[(i + 1) % face.size()]}) != m_halfEdges.end()) {
+                hole.clear();
+                return;
+            }
+        }
+        m_remeshedPolygons.push_back(std::move(face));
+        recordHalfEdgesOfLastPolygon();
+        hole.clear();
+    };
+
     for (;;) {
         if (hole.size() <= 2) {
             return;
         }
         if (3 == hole.size()) {
-            m_remeshedPolygons.push_back({hole[2], hole[1], hole[0]});
-            recordHalfEdgesOfLastPolygon();
+            closeHole({hole[2], hole[1], hole[0]});
             return;
         }
         if (4 == hole.size()) {
-            m_remeshedPolygons.push_back({hole[3], hole[2], hole[1], hole[0]});
-            recordHalfEdgesOfLastPolygon();
+            closeHole({hole[3], hole[2], hole[1], hole[0]});
             return;
         }
 

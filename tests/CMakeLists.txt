@@ -124,3 +124,13 @@ if(TARGET cyber_capi_shared AND Python3_FOUND)
             SKIP_RETURN_CODE 77)
     endforeach()
 endif()
+
+# Benchmark count-matching regression tests. Pure control flow — no engine, no
+# models, no network — so they need only an interpreter, and they guard the search
+# that decides whether a Phase 1/3 comparison is count-matched at all. They lived
+# unregistered (and therefore unrun) since they were written.
+if(Python3_FOUND)
+    add_test(NAME python_test_count_match
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/../examples/test_count_match.py)
+endif()
