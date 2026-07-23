@@ -224,7 +224,8 @@ Mesh makeTorusKnot(int p = 3, int q = 2, int curveSegments = 200, int tubeSegmen
         const float d = prev.x * t.x + prev.y * t.y + prev.z * t.z;
         const Vec3 v{prev.x - t.x * d, prev.y - t.y * d, prev.z - t.z * d};
         const float ln = std::sqrt(v.x * v.x + v.y * v.y + v.z * v.z);
-        normal[static_cast<std::size_t>(i)] = ln > 1e-9f ? Vec3{v.x / ln, v.y / ln, v.z / ln} : prev;
+        normal[static_cast<std::size_t>(i)] =
+            ln > 1e-9f ? Vec3{v.x / ln, v.y / ln, v.z / ln} : prev;
     }
 
     std::vector<Vec3> pos;
@@ -409,7 +410,6 @@ remesh::SeamlessUv assembleUv(const Mesh& mesh, const remesh::Parameterization& 
     uv.valid = !uv.triangles.empty();
     return uv;
 }
-
 
 // Topological soundness of a traced quad mesh, in the two ways a doubly-emitted face shows up:
 // an edge carried by more than two faces, and two faces built on the same vertex set. The second

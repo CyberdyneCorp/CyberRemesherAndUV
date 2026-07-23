@@ -22,10 +22,15 @@ import argparse
 import os
 import sys
 
-import matplotlib.pyplot as plt
-import numpy as np
-
-import common as c
+# `common` drags in matplotlib + numpy (its plotting/mesh helpers). The
+# count-match regression test loads this module only for its pure-control-flow
+# helpers (search_matched_count, _count_skew, the constants), so guard the import
+# to keep the module loadable on a bare interpreter — CI runners have no plotting
+# stack. An actual benchmark run needs `common` and will fail loudly if it is None.
+try:
+    import common as c
+except ImportError:
+    c = None
 
 DEFAULT_MODELS = ["spot", "fandisk", "rocker-arm", "cheburashka", "stanford-bunny"]
 
@@ -425,6 +430,8 @@ def _render(rows: list, adaptive_rows: list, target: int) -> None:
     if not rows:
         print("no results to render")
         return
+    import matplotlib.pyplot as plt
+    import numpy as np
     models = sorted({r[0] for r in rows}, key=lambda m: m)
     engines = ["ours position-field", "ours integer", "ours quad-cover", "QuadriFlow", "AutoRemesher"]
     colors = {"ours field-aligned": "#5b9bd5", "ours position-field": "#2e8b57",
