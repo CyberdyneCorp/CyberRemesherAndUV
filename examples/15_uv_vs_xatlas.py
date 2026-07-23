@@ -218,10 +218,15 @@ def main():
     print("-" * len(hdr))
     print("conformal (angle) distortion: lower is better, 0 = angle-preserving. "
           "cov = geometry / UV bbox.")
+    # Derive the coverage gap from the measured rows. It used to be a hardcoded
+    # "~7 pts", which understated xatlas by more than half once the numbers moved.
+    cov_deltas = [(x[5] - o[5]) * 100.0 for _, o, x in rows]
+    mean_gap = sum(cov_deltas) / len(cov_deltas)
+    worst_gap = max(cov_deltas)
     print("Takeaway: CyberRemesher's tight normal-coherent charts win distortion "
           "(~2x lower); xatlas merges harder,")
-    print("so it uses fewer charts (fewer seams) and packs tighter (~7 pts more "
-          "coverage).")
+    print(f"so it uses fewer charts (fewer seams) and packs tighter "
+          f"({mean_gap:+.0f} pts coverage on average, up to {worst_gap:+.0f} pts).")
 
     n = len(rows)
     fig = plt.figure(figsize=(9.0, 4.3 * n), dpi=120)

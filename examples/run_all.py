@@ -32,7 +32,7 @@ def main() -> None:
     # shell to use the vendored Geogram solver instead. (The AutoRemesher reference panels
     # build/call their binary directly, independent of this.)
     print(f"CyberRemesher engine {cyberremesh.version()} — via the Python (ctypes) binding")
-    print("quad-cover: native seamless-UV solver (dependency-free default)\n")
+    print("quad-cover: default method (Geogram field when built -DCYBER_WITH_QUADCOVER)\n")
 
     produced = []
     for module_name, png in EXAMPLES:

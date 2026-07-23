@@ -115,7 +115,8 @@ if(TARGET cyber_capi_shared AND Python3_FOUND)
     if(EXISTS "${_toolchain_libstdcxx}")
         list(APPEND _py_test_env "LD_PRELOAD=${_toolchain_libstdcxx}")
     endif()
-    foreach(_pyt test_api test_golden test_document_invariants test_bake test_uv_atlas)
+    foreach(_pyt test_api test_golden test_document_invariants test_bake test_uv_atlas
+                 test_hole_fill_policy)
         add_test(NAME python_${_pyt}
             COMMAND ${Python3_EXECUTABLE} ${_pydir}/${_pyt}.py)
         set_tests_properties(python_${_pyt} PROPERTIES

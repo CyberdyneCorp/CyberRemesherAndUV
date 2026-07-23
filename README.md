@@ -14,8 +14,10 @@ capability specs, task plan).
 Triangle→quad remeshing via `RemeshParams.quad_method`, clean-room and permissively
 licensed. The default **`quad-cover`** — a QuadCover seamless-UV isoline extractor —
 **beats [QuadriFlow](https://github.com/hjwdzh/QuadriFlow) on both median quad angle
-and irregular-vertex count** across the organic corpus (spot, rocker-arm,
-stanford-bunny), and routes crease-heavy CAD parts to a feature-aware solver. Other
+and irregular-vertex count** on 3 of the 5 corpus models (spot, rocker-arm,
+stanford-bunny), losing fandisk and cheburashka, and routes crease-heavy CAD parts
+to a feature-aware solver. It is at least as topologically valid as QuadriFlow on
+all 5, and stays manifold on flat CAD input where QuadriFlow tears. Other
 strategies: **`field-aligned`** (max-matching over a smoothed cross field, ~95%+
 quad-dominance, strongest on box/CAD geometry), **`instant-meshes`** (Instant-Meshes-style
 position-field extractor), and **`integer`** (experimental integer parametrization).
@@ -27,8 +29,8 @@ position-field extractor), and **`integer`** (experimental integer parametrizati
 Every strategy feeds a pure-quad path (subdivision + surface-projected relaxation)
 for a 100%-quad result. `examples/10_vs_reference.py` and `examples/11_benchmark.py`
 score the output side-by-side against QuadriFlow and AutoRemesher — e.g. the
-stanford-bunny at median **83° / 3% irregular** vs QuadriFlow's 80° / 6% and
-AutoRemesher's 75° / 14%. GPL sources (AutoRemesher, its QuadCover/CoMISo path) were
+stanford-bunny at ~3000 quads: median **83° / 3% irregular** vs QuadriFlow's
+82° / 4% and AutoRemesher's 74° / 13%. GPL sources (AutoRemesher, its QuadCover/CoMISo path) were
 idea references only, never copied — see [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
 
 ### Automatic UV atlas

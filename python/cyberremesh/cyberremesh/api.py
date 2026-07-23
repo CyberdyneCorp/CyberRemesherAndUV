@@ -132,7 +132,8 @@ class RemeshParams:
     # (~4% irregular, median angle a few degrees below QuadriFlow). Building the
     # engine with -DCYBER_WITH_QUADCOVER=ON links a vendored in-process Geogram
     # solver that beats QuadriFlow on median angle *and* irregular-vertex count
-    # on organic meshes (spot/rocker/bunny); the optional CYBER_QUADCOVER_CLI is
+    # on 3 of the 5 corpus models (spot, rocker-arm, stanford-bunny), losing
+    # fandisk and cheburashka; the optional CYBER_QUADCOVER_CLI is
     # only a faster external reference path. (Earlier docs claimed the CLI was
     # required and the run "fails cleanly" without it — that was never true for
     # the shipped native solver.)

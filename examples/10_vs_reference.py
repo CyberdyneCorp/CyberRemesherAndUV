@@ -44,7 +44,7 @@ def main() -> None:
     print(f"  AutoRemesher: {'ready' if ar else 'UNAVAILABLE'}")
     # ours quad-cover uses the NATIVE (dependency-free) seamless-UV solver by default; do not
     # set CYBER_QUADCOVER_CLI (set it in the shell to compare the vendored Geogram path).
-    print("  ours quad-cover: native seamless-UV solver (dependency-free default)\n")
+    print("  ours quad-cover: default method (Geogram field when built -DCYBER_WITH_QUADCOVER)\n")
 
     # Every CyberRemesher quadrangulator, so the visual comparison shows them all.
     OUR_METHODS = [
