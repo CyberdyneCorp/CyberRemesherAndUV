@@ -44,6 +44,7 @@ jobs:
     outputs:
       version: ${{ steps.v.outputs.version }}
       tag: ${{ steps.v.outputs.tag }}
+      matrix: ${{ steps.m.outputs.matrix }}
     steps:
       - uses: actions/checkout@v4
       - id: v
@@ -57,39 +58,38 @@ jobs:
             packaging/version.sh --verify-tag "${GITHUB_REF_NAME}"
           fi
 
+      # The package matrix is built here rather than filtered with a job-level
+      # `if`, because the `matrix` context is not available in one — attempting
+      # that makes the whole workflow file invalid, which is how this lane
+      # failed at 0s with no jobs.
+      - id: m
+        name: Select package targets
+        env:
+          INCLUDE_APPS: ${{ inputs.include_app_packages }}
+        run: |
+          base='[
+            {"target":"macos","os":"macos-latest","script":"packaging/macos/build_dmg.sh"},
+            {"target":"linux","os":"ubuntu-latest","script":"packaging/linux/appimage.sh"},
+            {"target":"windows-zip","os":"windows-latest","script":"packaging/windows/build_zip.ps1"}
+          ]'
+          apps='[
+            {"target":"windows-installer","os":"windows-latest","script":"packaging/windows/build_installer.ps1"},
+            {"target":"ios","os":"macos-latest","script":"packaging/ios/build_archive.sh"},
+            {"target":"android","os":"ubuntu-latest","script":"packaging/android/build_aab.sh"}
+          ]'
+          if [ "${INCLUDE_APPS}" = "true" ]; then
+            include=$(jq -cn --argjson a "$base" --argjson b "$apps" '$a + $b')
+          else
+            include=$(jq -cn --argjson a "$base" '$a')
+          fi
+          echo "matrix={\"include\":${include}}" >> "$GITHUB_OUTPUT" 
+
   package:
     needs: version
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - target: macos
-            os: macos-latest
-            script: packaging/macos/build_dmg.sh
-            on_tag: true
-          - target: linux
-            os: ubuntu-latest
-            script: packaging/linux/appimage.sh
-            on_tag: true
-          - target: windows-zip
-            os: windows-latest
-            script: packaging/windows/build_zip.ps1
-            on_tag: true
-          # Manual-only until the thing each one packages exists (see header).
-          - target: windows-installer
-            os: windows-latest
-            script: packaging/windows/build_installer.ps1
-            on_tag: false
-          - target: ios
-            os: macos-latest
-            script: packaging/ios/build_archive.sh
-            on_tag: false
-          - target: android
-            os: ubuntu-latest
-            script: packaging/android/build_aab.sh
-            on_tag: false
+      matrix: ${{ fromJSON(needs.version.outputs.matrix) }}
     runs-on: ${{ matrix.os }}
-    if: ${{ matrix.on_tag || inputs.include_app_packages }}
     env:
       CYBER_VERSION_OVERRIDE: ${{ needs.version.outputs.version }}
     steps:
