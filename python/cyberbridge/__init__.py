@@ -7,4 +7,4 @@ speaking raw sockets. See :class:`cyberbridge.client.Client`.
 from .client import BridgeError, Client, PROTOCOL_VERSION, load_obj, save_obj
 
 __all__ = ["Client", "BridgeError", "PROTOCOL_VERSION", "load_obj", "save_obj"]
-__version__ = "0.2.1"
+__version__ = "0.2.2"

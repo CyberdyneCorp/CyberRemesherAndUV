@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.2.2
+
+### Fixed
+
+- **The release workflow never published anything.** Every tag from v0.1.0 on
+  failed: five of six package targets could not build what they were written to
+  package, and the publish job needs all of them. A tag push looked like it
+  released and silently did not.
+  - `ios` / `android` / `windows-installer` are gated to an explicit
+    `workflow_dispatch` input — they package an iOS/Android app that does not
+    exist (`apps/mobile` is a placeholder) and need a WiX toolset that is not
+    installed.
+  - `windows-zip` configured the `windows-cuda` preset, which requires nvcc that
+    the GitHub windows runner does not have; it now uses `cpu-headless` with
+    Ninja's single-config output paths.
+  - `macos` copied `apps/desktop/CyberRemesher` unconditionally; that shell is a
+    placeholder on every build, so it now falls back to a CLI-only bundle.
+- **Every AppImage produced so far was unrunnable.** `AppRun` exec'd
+  `CyberRemesher`, which the CLI-only AppDir never contains. It now falls back
+  to the CLI.
+- The publish step generates release notes from the commit range instead of
+  publishing an empty body, and no longer fails when a gated package is absent.
+
 ## 0.2.1
 
 ### Fixed
