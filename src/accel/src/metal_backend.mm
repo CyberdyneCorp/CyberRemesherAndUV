@@ -73,7 +73,7 @@ public:
         const std::size_t bytes = n * sizeof(float);
         id<MTLBuffer> bx = [m_device newBufferWithBytes:x length:bytes options:0];
         id<MTLBuffer> by = [m_device newBufferWithBytes:y length:bytes options:0];
-        id<MTLComputefPipelineState> pipeline = pipelineFor(@"axpy");
+        id<MTLComputePipelineState> pipeline = pipelineFor(@"axpy");
         id<MTLCommandBuffer> cmd = [m_queue commandBuffer];
         id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
         [enc setComputePipelineState:pipeline];

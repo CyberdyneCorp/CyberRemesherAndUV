@@ -67,6 +67,10 @@ public:
     // Nearest Target vertex within `radius`; nullopt if none is close enough.
     [[nodiscard]] std::optional<VertexHit> snapToVertex(Vec3 query, float radius) const;
 
+    // The underlying Target BVH, for callers that also need raycast picking
+    // (viewport tap→surface queries) without building a second hierarchy.
+    [[nodiscard]] const Bvh& bvh() const { return m_bvh; }
+
 private:
     struct VertexRecord {
         VertexId id;

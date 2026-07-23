@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstddef>
@@ -233,11 +234,163 @@ struct GridPatch {
     return faces;
 }
 
+namespace detail {
+
+// True when the single face on the live edge a-b traverses a -> b in its
+// stored ring order (cyclically). New faces welded onto that edge must then
+// traverse b -> a to keep normals coherent. False when no such edge/face
+// exists or the edge is interior (2 faces: orientation is ambiguous, keep
+// the caller's order).
+inline bool faceTraverses(const Mesh& mesh, VertexId a, VertexId b) {
+    const EdgeId e = mesh.edgeBetween(a, b);
+    if (!e.valid()) {
+        return false;
+    }
+    const std::vector<FaceId> faces = mesh.edgeFaces(e);
+    if (faces.size() != 1) {
+        return false;
+    }
+    const std::vector<VertexId> ring = mesh.faceVertices(faces.front());
+    for (std::size_t i = 0; i < ring.size(); ++i) {
+        if (ring[i].value == a.value) {
+            return ring[(i + 1) % ring.size()].value == b.value;
+        }
+    }
+    return false;
+}
+
+}  // namespace detail
+
+// ExtendBoundary rings (task 4.2): like extendBoundaryGrid, but supporting
+// CLOSED chains (a wrap-around quad joins the last and first columns each
+// ring), correcting the quad winding against the existing face on the
+// chain's first edge (coherent normals), and reporting the OUTERMOST ring's
+// vertex chain so camera-driven sessions can stack per-step calls with
+// different offsets (automatic mode journals ONCE with sequential rings).
+// Each ring offsets from the PREVIOUS ring's (possibly snapped) positions.
+struct BoundaryExtension {
+    std::vector<FaceId> faces;
+    std::vector<VertexId> outerChain;
+};
+
+[[nodiscard]] inline BoundaryExtension extendBoundaryRings(Mesh& mesh,
+                                                           std::span<const VertexId> chain,
+                                                           bool closed, Vec3 offset, int rings,
+                                                           const SurfaceSnapper* snap = nullptr) {
+    BoundaryExtension out;
+    out.outerChain.assign(chain.begin(), chain.end());
+    if (chain.size() < 2 || rings < 1) {
+        return out;
+    }
+    // New quads traverse prev[i] -> prev[i+1]; flip when the existing face
+    // already traverses the chain in that direction.
+    const bool flip = detail::faceTraverses(mesh, chain[0], chain[1]);
+    std::vector<VertexId> prev = out.outerChain;
+    for (int r = 1; r <= rings; ++r) {
+        std::vector<VertexId> cur;
+        cur.reserve(prev.size());
+        for (const VertexId v : prev) {
+            cur.push_back(detail::snapAdd(mesh, mesh.position(v) + offset, snap));
+        }
+        const auto emit = [&](std::size_t i, std::size_t j) {
+            const std::array<VertexId, 4> quad =
+                flip ? std::array<VertexId, 4>{prev[j], prev[i], cur[i], cur[j]}
+                     : std::array<VertexId, 4>{prev[i], prev[j], cur[j], cur[i]};
+            const FaceId f = mesh.addFace(quad);
+            if (f.valid()) {
+                out.faces.push_back(f);
+            }
+        };
+        for (std::size_t i = 0; i + 1 < prev.size(); ++i) {
+            emit(i, i + 1);
+        }
+        if (closed && prev.size() >= 3) {
+            emit(prev.size() - 1, 0);
+        }
+        prev = std::move(cur);
+    }
+    out.outerChain = std::move(prev);
+    return out;
+}
+
+// DrawStrip along a stroke path (task 4.2): a quad strip welded onto the
+// boundary edge startA-startB, whose stations follow `path` (world-space
+// stroke samples, typically resampled at quad-size arc length). Unlike the
+// constant-side drawStrip above, each station's rail pair spans the strip
+// width along cross(viewDir, tangent) — the screen-perpendicular direction
+// the stroke was drawn with — with sign continuity so curved strokes never
+// flip rails. Rail vertices snap to the Target when `snap` is given; quad
+// winding is corrected against the start edge's existing face.
+struct StripResult {
+    std::vector<FaceId> faces;
+    std::vector<VertexId> newVertices;
+};
+
+[[nodiscard]] inline StripResult drawStripPath(Mesh& mesh, std::span<const Vec3> path,
+                                               float width, Vec3 viewDir, VertexId startA,
+                                               VertexId startB,
+                                               const SurfaceSnapper* snap = nullptr) {
+    StripResult out;
+    if (path.empty() || !(width > 0.0f) || !mesh.isAlive(startA) || !mesh.isAlive(startB)) {
+        return out;
+    }
+    const Vec3 a = mesh.position(startA);
+    const Vec3 b = mesh.position(startB);
+    Vec3 sideRef = b - a;
+    if (lengthSquared(sideRef) <= 0.0f || lengthSquared(viewDir) <= 0.0f) {
+        return out;
+    }
+    sideRef = normalized(sideRef);
+    const bool flip = detail::faceTraverses(mesh, startA, startB);
+
+    std::vector<VertexId> left{startA};
+    std::vector<VertexId> right{startB};
+    const Vec3 start = (a + b) * 0.5f;
+    for (std::size_t i = 0; i < path.size(); ++i) {
+        const Vec3 previous = i == 0 ? start : path[i - 1];
+        const Vec3 next = i + 1 < path.size() ? path[i + 1] : path[i];
+        Vec3 tangent = next - previous;
+        if (lengthSquared(tangent) <= 1e-20f) {
+            tangent = path[i] - start;
+        }
+        Vec3 side = cross(viewDir, tangent);
+        if (lengthSquared(side) <= 1e-20f) {
+            side = sideRef;  // stroke along the view axis: keep the last rail
+        }
+        side = normalized(side);
+        if (dot(side, sideRef) < 0.0f) {
+            side = side * -1.0f;
+        }
+        sideRef = side;
+        const Vec3 half = side * (width * 0.5f);
+        const VertexId l = detail::snapAdd(mesh, path[i] - half, snap);
+        const VertexId r = detail::snapAdd(mesh, path[i] + half, snap);
+        out.newVertices.push_back(l);
+        out.newVertices.push_back(r);
+        left.push_back(l);
+        right.push_back(r);
+    }
+    for (std::size_t i = 0; i + 1 < left.size(); ++i) {
+        const std::array<VertexId, 4> quad =
+            flip ? std::array<VertexId, 4>{right[i], left[i], left[i + 1], right[i + 1]}
+                 : std::array<VertexId, 4>{left[i], right[i], right[i + 1], left[i + 1]};
+        const FaceId f = mesh.addFace(quad);
+        if (f.valid()) {
+            out.faces.push_back(f);
+        }
+    }
+    return out;
+}
+
 // PatchClone: duplicate a set of faces (shared vertices cloned once) transformed
 // by `xf`. The clone is a fresh disconnected copy. Returns the new faces.
+// `reverseWinding` reverses every cloned face's ring (the Patch Clone FLIP
+// option, task 4.2: a mirroring transform inverts orientation — reversing the
+// winding keeps the pasted patch's normals coherent).
 [[nodiscard]] inline std::vector<FaceId> patchClone(Mesh& mesh, std::span<const FaceId> faces,
                                                     const Affine& xf,
-                                                    const SurfaceSnapper* snap = nullptr) {
+                                                    const SurfaceSnapper* snap = nullptr,
+                                                    bool reverseWinding = false) {
     std::vector<FaceId> out;
     std::unordered_map<Index, VertexId> clone;
     const auto cloneVertex = [&](VertexId v) {
@@ -258,6 +411,9 @@ struct GridPatch {
         mapped.reserve(verts.size());
         for (const VertexId v : verts) {
             mapped.push_back(cloneVertex(v));
+        }
+        if (reverseWinding) {
+            std::reverse(mapped.begin(), mapped.end());
         }
         const FaceId nf = mesh.addFace(mapped);
         if (nf.valid()) {
@@ -391,6 +547,134 @@ inline std::size_t surfaceCut(Mesh& mesh, const Plane& plane, float eps = 1e-6f)
         }
     }
     return splits;
+}
+
+// SurfaceCut (knife segment): cut counts for one knife segment.
+struct SurfaceCutResult {
+    std::size_t splitEdges = 0;
+    std::size_t splitFaces = 0;
+    std::size_t triangulatedFaces = 0;
+};
+
+// SurfaceCut restricted to one knife SEGMENT (the app's straight knife
+// stroke, task 4.1): the cut plane spans the segment a->b and the view
+// direction, and only edges whose plane crossing lies within the segment's
+// extent (between the two planes perpendicular to a->b at its endpoints) are
+// split — a global plane cut would slice topology far outside the stroke.
+// After the split pass every face that carries two non-adjacent cut vertices
+// is split between them, and with `triangulateNGons` every touched face left
+// with more than four sides is fan-triangulated (the spec's auto-triangulated
+// n-gons). New vertices snap to the Target when `snap` is supplied.
+inline SurfaceCutResult surfaceCutSegment(Mesh& mesh, Vec3 a, Vec3 b, Vec3 viewDir,
+                                          bool triangulateNGons,
+                                          const SurfaceSnapper* snap = nullptr,
+                                          float eps = 1e-6f) {
+    SurfaceCutResult result;
+    const Vec3 ab = b - a;
+    const Vec3 normal = cross(ab, viewDir);
+    if (lengthSquared(ab) <= eps * eps || lengthSquared(normal) <= 1e-20f) {
+        return result;
+    }
+    const Plane plane{a, normalized(normal)};
+    const float abLen2 = lengthSquared(ab);
+
+    // Pass 1: split edges crossing the plane within the segment slab.
+    std::vector<EdgeId> crossing;
+    for (Index i = 0; i < mesh.edgeCapacity(); ++i) {
+        const EdgeId e{i};
+        if (!mesh.isAlive(e)) {
+            continue;
+        }
+        const auto [v0, v1] = mesh.edgeVertices(e);
+        const float d0 = signedDistance(plane, mesh.position(v0));
+        const float d1 = signedDistance(plane, mesh.position(v1));
+        if (!((d0 > eps && d1 < -eps) || (d0 < -eps && d1 > eps))) {
+            continue;
+        }
+        const Vec3 q = lerp(mesh.position(v0), mesh.position(v1), d0 / (d0 - d1));
+        const float s = dot(q - a, ab) / abLen2;
+        if (s < 0.0f || s > 1.0f) {
+            continue;  // crossing outside the knife segment's extent
+        }
+        crossing.push_back(e);
+    }
+    std::unordered_set<Index> cutVerts;
+    std::unordered_set<Index> touched;
+    for (const EdgeId e : crossing) {
+        if (!mesh.isAlive(e)) {
+            continue;
+        }
+        const auto [v0, v1] = mesh.edgeVertices(e);
+        const float d0 = signedDistance(plane, mesh.position(v0));
+        const float d1 = signedDistance(plane, mesh.position(v1));
+        for (const FaceId f : mesh.edgeFaces(e)) {
+            touched.insert(f.value);
+        }
+        const VertexId nv = mesh.splitEdge(e, d0 / (d0 - d1));
+        if (nv.valid()) {
+            if (snap != nullptr && !snap->empty()) {
+                mesh.setPosition(nv, snap->snapToSurface(mesh.position(nv)).point);
+            }
+            cutVerts.insert(nv.value);
+            ++result.splitEdges;
+        }
+    }
+    if (cutVerts.empty()) {
+        return result;
+    }
+
+    // Pass 2: split every touched face carrying two non-adjacent cut
+    // vertices between them (the new edge along the knife line).
+    std::vector<FaceId> faces;
+    faces.reserve(touched.size());
+    for (const Index i : touched) {
+        const FaceId f{i};
+        if (mesh.isAlive(f)) {
+            faces.push_back(f);
+        }
+    }
+    std::vector<FaceId> halves;
+    for (const FaceId f : faces) {
+        if (!mesh.isAlive(f)) {
+            continue;
+        }
+        const std::vector<VertexId> vs = mesh.faceVertices(f);
+        std::vector<std::size_t> hits;
+        for (std::size_t k = 0; k < vs.size(); ++k) {
+            if (cutVerts.count(vs[k].value) != 0) {
+                hits.push_back(k);
+            }
+        }
+        if (hits.size() != 2) {
+            continue;
+        }
+        const std::size_t gap = hits[1] - hits[0];
+        if (gap <= 1 || gap + 1 >= vs.size()) {
+            continue;  // adjacent corners: nothing to split between
+        }
+        const FaceId half = mesh.splitFace(f, vs[hits[0]], vs[hits[1]]);
+        if (half.valid()) {
+            halves.push_back(half);
+            ++result.splitFaces;
+        }
+    }
+    for (const FaceId f : halves) {
+        touched.insert(f.value);
+    }
+
+    // Pass 3: auto-triangulate every touched face left with > 4 sides (a
+    // quad with one split edge is a pentagon even when it was never split
+    // between two cut vertices).
+    if (triangulateNGons) {
+        for (const Index i : touched) {
+            const FaceId f{i};
+            if (mesh.isAlive(f) && mesh.faceVertices(f).size() > 4) {
+                mesh.triangulateFace(f);
+                ++result.triangulatedFaces;
+            }
+        }
+    }
+    return result;
 }
 
 // LoopInfo: measure an ordered edge loop given as a vertex list. `closed` is set
