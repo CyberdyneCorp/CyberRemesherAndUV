@@ -22,10 +22,15 @@ import argparse
 import os
 import sys
 
-import matplotlib.pyplot as plt
-import numpy as np
-
-import common as c
+# `common` drags in matplotlib + numpy (its plotting/mesh helpers). The
+# count-match regression test loads this module only for its pure-control-flow
+# helpers (search_matched_count, _count_skew, the constants), so guard the import
+# to keep the module loadable on a bare interpreter — CI runners have no plotting
+# stack. An actual benchmark run needs `common` and will fail loudly if it is None.
+try:
+    import common as c
+except ImportError:
+    c = None
 
 DEFAULT_MODELS = ["spot", "fandisk", "rocker-arm", "cheburashka", "stanford-bunny"]
 
@@ -136,6 +141,45 @@ def ours_at_count(path: str, desired: int, method: str, adaptivity: float,
     return search_matched_count(probe, desired, tol, iters)
 
 
+def quadriflow_at_count(qf: "str | None", path: str, desired: int,
+                        tol: float = 0.04, iters: int = 4) -> "c.MeshData | None":
+    """QuadriFlow driven so its ACHIEVED quad count lands near `desired`.
+
+    `-f` is a request there too, and QuadriFlow historically overshot ours by
+    11-16% at the same request (fandisk 2989 vs 2580, rocker-arm 2824 vs 2510).
+    That matters more than it looks: feature-following error falls roughly as
+    count^-1/2 — measured on fandisk, about -0.02 percentage points per +100 quads
+    — so a 400-quad density advantage is worth ~0.08 of the very metric Phase 3
+    scores, for free.
+
+    `desired` must be OUR ACHIEVED count, not the benchmark request. Driving both
+    sides independently at the request does not match them: each stops as soon as
+    it is within its own tolerance, so two arms can settle on opposite sides of it
+    and end up further apart than if neither had searched (measured: spot 3228 vs
+    2840, 14% apart, when both aimed at 3000). The tolerance here is therefore
+    tighter than `ours_at_count`'s, since this arm is chasing a fixed number rather
+    than defining one."""
+    def probe(target: int):
+        mesh = c.quadriflow_try(qf, path, target)
+        return (None, 0) if mesh is None else (mesh, c.face_counts(mesh)[0])
+
+    return search_matched_count(probe, desired, tol, iters)
+
+
+# Largest relative count difference at which two arms may still be compared on a
+# count-sensitive metric. Matches `search_matched_count`'s own tolerance: if the
+# bounded search could not close the gap, the pair is reported as a miss rather
+# than scored. Phase 2 has carried this guard for a while; Phase 3 did not, which
+# is how a density advantage could read as a quality result.
+_COUNT_SKEW_LIMIT = 0.08
+
+
+def _count_skew(a: dict, b: dict) -> float:
+    """Relative quad-count difference between two evaluated arms."""
+    lo = min(a["quads"], b["quads"])
+    return abs(a["quads"] - b["quads"]) / lo if lo > 0 else float("inf")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="CyberRemesher vs QuadriFlow benchmark")
     parser.add_argument("--models", nargs="+", default=DEFAULT_MODELS,
@@ -180,12 +224,27 @@ def main() -> None:
             print(f"{name:<15} SKIP ({exc})")
             continue
 
-        # --- Phase 1: uniform, matched count — apples-to-apples on every metric.
+        # --- Phase 1: uniform, matched ACHIEVED count — apples-to-apples on every metric.
+        #
+        # Every arm is driven through the same bounded count search, rather than
+        # merely handed the same REQUEST. The request is not a guarantee and the
+        # engines miss it by different amounts, so the old "matched count" label was
+        # aspirational: QuadriFlow came out 11-16% denser than our default on four of
+        # five models, which flatters it on every density-sensitive metric (feature
+        # error above all — see `quadriflow_at_count`).
+        #
+        # The shipped default (quad-cover) is the ANCHOR: our arms aim at
+        # --target-quads, then QuadriFlow is driven to whatever quad-cover ACHIEVED.
+        # Pointing both sides at the request instead does not match them — each stops
+        # inside its own tolerance and they can settle on opposite sides of it.
+        # AutoRemesher stays on a plain request: it is nondeterministic run-to-run,
+        # so iterating on its achieved count would chase noise, and it is printed for
+        # context rather than scored.
         engines = {}
-        fa = ours(path, args.target_quads, "field-aligned", 0.0)
-        im = ours(path, args.target_quads, "instant-meshes", 0.0)
-        intg = ours(path, args.target_quads, "integer", 0.0)
-        qc = ours(path, args.target_quads, "quad-cover", 0.0)
+        fa = ours_at_count(path, args.target_quads, "field-aligned", 0.0)
+        im = ours_at_count(path, args.target_quads, "instant-meshes", 0.0)
+        intg = ours_at_count(path, args.target_quads, "integer", 0.0)
+        qc = ours_at_count(path, args.target_quads, "quad-cover", 0.0)
         if fa:
             engines["ours field-aligned"] = evaluate(fa, src)
         if im:
@@ -194,7 +253,8 @@ def main() -> None:
             engines["ours integer"] = evaluate(intg, src)
         if qc:
             engines["ours quad-cover"] = evaluate(qc, src)
-        ref = c.quadriflow_try(qf, path, args.target_quads)
+        anchor = c.face_counts(qc)[0] if qc else args.target_quads
+        ref = quadriflow_at_count(qf, path, anchor)
         if ref:
             engines["QuadriFlow"] = evaluate(ref, src)
         aref = c.autoremesher_try(ar, path, args.target_quads)
@@ -206,13 +266,33 @@ def main() -> None:
                   f"{mtr['rms']:>6.2f} {mtr['normal_err']:>6.1f} {mtr['irregular']:>6.0f} {mtr['cv']:>5.2f}")
             rows.append((name, engine, mtr))
 
-        # Best-of-ours vs QuadriFlow, per metric.
-        if ref and (fa or im):
+        # Best-of-ours vs QuadriFlow, per metric — over the arms that are actually
+        # COMPARABLE at this density. Surface deviation, normal error and
+        # irregular-vertex share all improve with density, so "best of ours" taken
+        # across arms of wildly different counts is not a like-for-like maximum: an
+        # arm that overshot to 4278 quads against QuadriFlow's 2929 would win on
+        # deviation for the density alone. QuadriFlow is matched to the shipped
+        # default's achieved count, so arms within `_COUNT_SKEW_LIMIT` of it are
+        # scorable and the rest are reported and dropped. If none qualifies the
+        # model contributes nothing, rather than contributing a density artifact.
+        if ref:
+            comparable = {e: m for e, m in engines.items()
+                          if e.startswith("ours")
+                          and _count_skew(m, engines["QuadriFlow"]) <= _COUNT_SKEW_LIMIT}
+            dropped = [e for e in engines
+                       if e.startswith("ours") and e not in comparable]
+            if dropped:
+                print(f"{name:<15} not count-comparable to QuadriFlow "
+                      f"({engines['QuadriFlow']['quads']}q): "
+                      + ", ".join(f"{e.removeprefix('ours ')} {engines[e]['quads']}q"
+                                  for e in dropped))
             for key, _, lower in METRICS:
-                ours_vals = [engines[e][key] for e in engines if e.startswith("ours")]
-                best = min(ours_vals) if lower else max(ours_vals)
-                better = best < engines["QuadriFlow"][key] if lower else best > engines["QuadriFlow"][key]
-                wins[key][0] += int(better)
+                vals = [m[key] for m in comparable.values()]
+                if not vals:
+                    continue
+                best = min(vals) if lower else max(vals)
+                qfv = engines["QuadriFlow"][key]
+                wins[key][0] += int(best < qfv if lower else best > qfv)
                 wins[key][1] += 1
 
         # --- Phase 2: does curvature-adaptive sizing improve fidelity per polygon?
@@ -262,7 +342,16 @@ def _phase3(rows: list) -> None:
     Scored on the default. The retired position-field extractor is printed beside it
     for continuity with the historical numbers in docs/ROADMAP.md — its defect counts
     (cheburashka 110, bunny 92) are what the roadmap's open "real extractor bug"
-    follow-up refers to, and they say nothing about what ships today."""
+    follow-up refers to, and they say nothing about what ships today.
+
+    COUNT SENSITIVITY. feature-follow error is a distance from source crease samples
+    to the nearest output edge, so it improves mechanically with output edge density
+    — measured on fandisk at roughly -0.02 points per +100 quads, against a
+    within-arm residual spread of ~0.04. A pair whose achieved counts differ by more
+    than `_COUNT_SKEW_LIMIT` therefore cannot be scored on it, and is printed as SKEW
+    instead of counted as a win or a loss. Both arms come out of Phase 1's bounded
+    achieved-count search, so this should normally be a no-op; when it fires the
+    honest reading is "no comparison", not "we lost"."""
     import math as _m
 
     def _fmt(mtr: dict) -> str:
@@ -271,24 +360,34 @@ def _phase3(rows: list) -> None:
     models = sorted({r[0] for r in rows})
     print("\nPHASE 3 — features & robustness (quad-cover DEFAULT vs QuadriFlow):")
     print("  feature-follow % (edges on source creases, lower better) · topo defects (count, lower better)")
+    print(f"  feature scored only where the two arms' quad counts agree to {_COUNT_SKEW_LIMIT:.0%}")
     def pick(model: str, engine: str) -> "dict | None":
         return next((r[2] for r in rows if r[0] == model and r[1] == engine), None)
 
-    feat_wins = def_wins = total = 0
+    feat_wins = feat_total = def_wins = total = 0
     for name in models:
         o, q = pick(name, "ours quad-cover"), pick(name, "QuadriFlow")
         legacy = pick(name, "ours position-field")
         if not o or not q:
             continue
         total += 1
-        feat_wins += (not _m.isnan(o["feature"]) and not _m.isnan(q["feature"])
-                      and o["feature"] <= q["feature"])
+        # Topological defects count broken elements, not a density-scaled average,
+        # so they stay scored whatever the skew.
         def_wins += o["defects"] <= q["defects"]
+        skew = _count_skew(o, q)
+        scorable = (skew <= _COUNT_SKEW_LIMIT and not _m.isnan(o["feature"])
+                    and not _m.isnan(q["feature"]))
+        if scorable:
+            feat_total += 1
+            feat_wins += o["feature"] <= q["feature"]
+        note = f"  [SKEW {skew:.0%}: feature not scored]" if not scorable else ""
         legacy_txt = f"  (retired position-field: {_fmt(legacy)}/{legacy['defects']})" if legacy else ""
-        print(f"  {name:<15} feature ours={_fmt(o):<7} QF={_fmt(q):<7} | "
-              f"defects ours={o['defects']:<4} QF={q['defects']}{legacy_txt}")
+        print(f"  {name:<15} feature ours={_fmt(o):<7} QF={_fmt(q):<7} "
+              f"({o['quads']}q vs {q['quads']}q) | "
+              f"defects ours={o['defects']:<4} QF={q['defects']}{note}{legacy_txt}")
     if total:
-        print(f"  default ≥ QuadriFlow: feature-follow {feat_wins}/{total} · "
+        feat_txt = f"{feat_wins}/{feat_total}" if feat_total else "not scored (every pair skewed)"
+        print(f"  default ≥ QuadriFlow: feature-follow {feat_txt} · "
               f"topo defects {def_wins}/{total}")
 
 
@@ -331,6 +430,8 @@ def _render(rows: list, adaptive_rows: list, target: int) -> None:
     if not rows:
         print("no results to render")
         return
+    import matplotlib.pyplot as plt
+    import numpy as np
     models = sorted({r[0] for r in rows}, key=lambda m: m)
     engines = ["ours position-field", "ours integer", "ours quad-cover", "QuadriFlow", "AutoRemesher"]
     colors = {"ours field-aligned": "#5b9bd5", "ours position-field": "#2e8b57",

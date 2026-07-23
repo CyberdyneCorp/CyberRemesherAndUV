@@ -1,5 +1,6 @@
 #include <doctest.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <map>
@@ -180,6 +181,80 @@ Mesh makeCube(int n = 6) {
     return Mesh::fromIndexed(p, f);
 }
 
+// A triangulated (p, q) torus-knot tube, parallel-transported so the frame stays untwisted.
+// Unlike the cube/sphere/torus family this one traces into a genuinely irregular connection
+// graph, which is what leaves the short (3-/4-edge) boundary loops the hole filler closes —
+// the configuration that exposed the double-fill bug. Mirrors `examples/common.py`'s
+// `torus_knot_obj` so the C++ and engine-level guards cover the same geometry.
+Mesh makeTorusKnot(int p = 3, int q = 2, int curveSegments = 200, int tubeSegments = 16,
+                   float tubeRadius = 0.22f) {
+    const float kPi = 3.14159265358979f;
+    const auto norm = [](Vec3 v) {
+        const float n = std::sqrt(v.x * v.x + v.y * v.y + v.z * v.z);
+        return n > 1e-12f ? Vec3{v.x / n, v.y / n, v.z / n} : v;
+    };
+    const auto cross = [](Vec3 a, Vec3 b) {
+        return Vec3{a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x};
+    };
+
+    std::vector<Vec3> curve(static_cast<std::size_t>(curveSegments));
+    for (int i = 0; i < curveSegments; ++i) {
+        const float t = 2.0f * kPi * static_cast<float>(i) / static_cast<float>(curveSegments);
+        const float r = 2.0f + std::cos(static_cast<float>(q) * t);
+        curve[static_cast<std::size_t>(i)] = {r * std::cos(static_cast<float>(p) * t),
+                                              r * std::sin(static_cast<float>(p) * t),
+                                              -std::sin(static_cast<float>(q) * t)};
+    }
+    std::vector<Vec3> tangent(static_cast<std::size_t>(curveSegments));
+    for (int i = 0; i < curveSegments; ++i) {
+        const Vec3 a = curve[static_cast<std::size_t>((i + 1) % curveSegments)];
+        const Vec3 b = curve[static_cast<std::size_t>((i - 1 + curveSegments) % curveSegments)];
+        tangent[static_cast<std::size_t>(i)] = norm({a.x - b.x, a.y - b.y, a.z - b.z});
+    }
+    // Parallel transport the normal so the tube does not spin as it follows the knot.
+    std::vector<Vec3> normal(static_cast<std::size_t>(curveSegments));
+    Vec3 seed = cross(tangent[0], {0.0f, 0.0f, 1.0f});
+    if (std::sqrt(seed.x * seed.x + seed.y * seed.y + seed.z * seed.z) < 1e-6f) {
+        seed = cross(tangent[0], {0.0f, 1.0f, 0.0f});
+    }
+    normal[0] = norm(seed);
+    for (int i = 1; i < curveSegments; ++i) {
+        const Vec3 prev = normal[static_cast<std::size_t>(i - 1)];
+        const Vec3 t = tangent[static_cast<std::size_t>(i)];
+        const float d = prev.x * t.x + prev.y * t.y + prev.z * t.z;
+        const Vec3 v{prev.x - t.x * d, prev.y - t.y * d, prev.z - t.z * d};
+        const float ln = std::sqrt(v.x * v.x + v.y * v.y + v.z * v.z);
+        normal[static_cast<std::size_t>(i)] =
+            ln > 1e-9f ? Vec3{v.x / ln, v.y / ln, v.z / ln} : prev;
+    }
+
+    std::vector<Vec3> pos;
+    pos.reserve(static_cast<std::size_t>(curveSegments * tubeSegments));
+    for (int i = 0; i < curveSegments; ++i) {
+        const Vec3 n = normal[static_cast<std::size_t>(i)];
+        const Vec3 b = cross(tangent[static_cast<std::size_t>(i)], n);
+        const Vec3 c = curve[static_cast<std::size_t>(i)];
+        for (int j = 0; j < tubeSegments; ++j) {
+            const float a = 2.0f * kPi * static_cast<float>(j) / static_cast<float>(tubeSegments);
+            const float ca = std::cos(a), sa = std::sin(a);
+            pos.push_back({c.x + (n.x * ca + b.x * sa) * tubeRadius,
+                           c.y + (n.y * ca + b.y * sa) * tubeRadius,
+                           c.z + (n.z * ca + b.z * sa) * tubeRadius});
+        }
+    }
+    const auto id = [&](int i, int j) {
+        return static_cast<Index>((i % curveSegments) * tubeSegments + (j % tubeSegments));
+    };
+    std::vector<std::vector<Index>> f;
+    for (int i = 0; i < curveSegments; ++i) {
+        for (int j = 0; j < tubeSegments; ++j) {
+            f.push_back({id(i, j), id(i + 1, j), id(i + 1, j + 1)});
+            f.push_back({id(i, j), id(i + 1, j + 1), id(i, j + 1)});
+        }
+    }
+    return Mesh::fromIndexed(pos, f);
+}
+
 Mesh makeTorus(int major = 40, int minor = 20) {
     std::vector<Vec3> p;
     const float R0 = 1.0f, r0 = 0.35f;
@@ -336,6 +411,43 @@ remesh::SeamlessUv assembleUv(const Mesh& mesh, const remesh::Parameterization& 
     return uv;
 }
 
+// Topological soundness of a traced quad mesh, in the two ways a doubly-emitted face shows up:
+// an edge carried by more than two faces, and two faces built on the same vertex set. The second
+// matters on its own — two coincident faces are edge-count-manifold by themselves, so nothing
+// downstream rejects them, and the pure-quad subdivision then gives each its own face point and
+// turns the pair into a genuine non-manifold rim.
+struct ExtractionSoundness {
+    std::size_t nonManifoldEdges = 0;
+    std::size_t duplicateFaces = 0;
+};
+ExtractionSoundness checkExtraction(const remesh::IsolineQuadMesh& mesh) {
+    ExtractionSoundness out;
+    std::map<std::pair<std::size_t, std::size_t>, int> edgeUse;
+    std::map<std::vector<std::size_t>, int> faceUse;
+    for (const std::vector<std::size_t>& f : mesh.quads) {
+        for (std::size_t i = 0; i < f.size(); ++i) {
+            const std::size_t a = f[i];
+            const std::size_t b = f[(i + 1) % f.size()];
+            ++edgeUse[{std::min(a, b), std::max(a, b)}];
+        }
+        std::vector<std::size_t> key = f;
+        std::sort(key.begin(), key.end());
+        ++faceUse[key];
+    }
+    for (const auto& [edge, uses] : edgeUse) {
+        (void)edge;
+        if (uses > 2) {
+            ++out.nonManifoldEdges;
+        }
+    }
+    for (const auto& [face, uses] : faceUse) {
+        (void)face;
+        if (uses > 1) {
+            out.duplicateFaces += static_cast<std::size_t>(uses - 1);
+        }
+    }
+    return out;
+}
 }  // namespace
 
 // Milestone 2b/c (integer-seamless): the constrained solve makes the seam a rigid integer
@@ -505,4 +617,58 @@ TEST_CASE("seamless cancel: pre-cancelled token aborts the solve with an invalid
     const remesh::Parameterization param =
         remesh::solveParameterization(sphere, setup, 0.12f, *backend, &cancel);
     CHECK_FALSE(param.valid);
+}
+
+// Regression: a hole must be closed ONCE.
+// -----------------------------------------------------------------------------
+// `IsolineExtractor::fixHoles` runs `fixHoleWithQuads` twice per boundary loop — once
+// score-checked, once not — and relies on the first pass to CONSUME what it filled, since `hole`
+// is an in/out parameter. The terminal 4-gon branch used to emit its quad and `return` with
+// `hole` still full, so a loop that reduced to exactly 4 edges was closed by the first call and
+// closed AGAIN, identically, by the second. (The 3-gon terminal cannot double-fill: `fixHoles`
+// only issues the second call when `loop.size() >= 4`.)
+//
+// Two coincident quads are edge-count-manifold on their own, so nothing downstream rejected
+// them; the pure-quad Catmull-Clark pass then gave each its own face point and turned the shared
+// rim into a genuine non-manifold edge. That is why this asserts `duplicateFaces` directly and
+// not just `nonManifoldEdges` — the duplicate is the cause, the non-manifold rim is one symptom
+// and only appears after subdivision.
+//
+// The cube/sphere/cube-sphere/torus fixtures do NOT reproduce it (swept, and they stay clean
+// against the pre-fix code); their traces are too regular to leave a 4-edge loop. The torus knot
+// does, which is why the fixture exists.
+//
+// VERIFIED DISCRIMINATING, not assumed: with `closeHole` restored to its pre-fix form (emit the
+// terminal 3-/4-gon and `return` with `hole` still populated) this case fails on EVERY ONE of
+// the six spacings below, reporting both duplicate faces and non-manifold edges. A wider sweep
+// of the same fixture failed 10 of 12 spacings from 0.02 to 0.09 (only 0.04 and 0.08 happened to
+// stay clean); the six kept here are the cheapest that all discriminate, at 223-932 quads.
+//
+// This runs on the dependency-free native solver, so it guards both build configurations —
+// the Geogram-less CI build reaches it exactly as the local one does.
+TEST_CASE("isoline extraction: a boundary loop is closed once, never twice") {
+    auto backend = cyber::accel::defaultBackend();
+    const Mesh knot = makeTorusKnot();
+    const remesh::SeamlessSetup setup = remesh::buildSeamlessSetup(knot, 50, *backend);
+    REQUIRE(setup.valid);
+
+    std::size_t checked = 0;
+    for (const float spacing : {0.045f, 0.05f, 0.055f, 0.06f, 0.07f, 0.09f}) {
+        const remesh::Parameterization param =
+            remesh::solveParameterization(knot, setup, spacing, *backend);
+        REQUIRE(param.valid);
+        const remesh::SeamlessUv uv = assembleUv(knot, param);
+        REQUIRE(uv.valid);
+
+        const remesh::IsolineQuadMesh quads = remesh::extractIsolineQuads(knot, uv);
+        REQUIRE(quads.quads.size() > 0);
+        CAPTURE(spacing);
+        CAPTURE(quads.quads.size());
+        const ExtractionSoundness snd = checkExtraction(quads);
+        CHECK(snd.duplicateFaces == 0);
+        CHECK(snd.nonManifoldEdges == 0);
+        ++checked;
+    }
+    // The sweep must actually have run; an empty loop would assert nothing.
+    REQUIRE(checked == 6);
 }

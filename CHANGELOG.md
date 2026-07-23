@@ -1,5 +1,34 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **The isoline extractor closed a boundary loop twice, producing non-manifold
+  output.** `IsolineExtractor::fixHoles` calls `fixHoleWithQuads` once
+  score-checked and once not, relying on the first pass to consume `hole` — an
+  in/out parameter. The terminal 4-gon branch returned with `hole` still
+  populated, so a loop that reduced to exactly four edges was closed by the first
+  call and closed again, identically, by the second. Two coincident quads are
+  edge-count-manifold on their own, so nothing downstream rejected them; the
+  pure-quad subdivision then gave each its own face point and turned the shared
+  rim into a genuine non-manifold edge. Measured on the default `quad-cover` path
+  over 5 models × 5 densities (2600–4200 quads): **stanford-bunny 40 → 0
+  non-manifold edges**, with the other four models unaffected (20 of 25 cells
+  bit-identical). This was the cause of bunny's long-recorded non-monotone defect
+  count — it was never density noise.
+
+### Changed
+
+- **The benchmark now matches on achieved quad count, not on the request.**
+  `target_quad_count` is a request the extractors undershoot and QuadriFlow
+  overshoots, so a comparison at equal *request* was scoring densities 11–16%
+  apart. Since `feature_error` falls roughly as `count^-0.5`, that density gap was
+  worth a large fraction of the reported Phase 3 feature-following gaps. Phase 1
+  and Phase 3 now drive both arms through a bounded count-match search, and a miss
+  is reported rather than silently scored. `examples/test_count_match.py` guards
+  the search and is now registered with ctest (it had lived unrun).
+
 ## 0.2.3
 
 ### Fixed

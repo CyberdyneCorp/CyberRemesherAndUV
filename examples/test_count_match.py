@@ -94,6 +94,47 @@ def test_ceiling_constant_stays_affordable():
         f"ceiling {bench._COUNT_MATCH_CEILING}x risks pathological remesh cost")
 
 
+def test_count_skew_is_symmetric_and_relative_to_the_smaller_arm():
+    """`_count_skew` gates every count-sensitive comparison in Phases 1 and 3, so
+    it must not depend on which arm is passed first, and it must measure the gap
+    against the SMALLER count — otherwise a dense arm's advantage is understated
+    exactly when it matters most."""
+    a, b = {"quads": 2500}, {"quads": 3000}
+    assert bench._count_skew(a, b) == bench._count_skew(b, a)
+    assert bench._count_skew(a, b) == 0.2  # 500/2500, not 500/3000
+    assert bench._count_skew(a, a) == 0.0
+    assert bench._count_skew({"quads": 0}, b) == float("inf")
+
+
+def test_skew_limit_rejects_the_density_gaps_that_faked_phase_3():
+    """The artifact this guard exists to stop: at a fixed REQUEST of 3000,
+    QuadriFlow came out 11-16% denser than the shipped default on four of five
+    models (fandisk 2989 vs 2580, rocker-arm 2824 vs 2510, spot 2840 vs 2560,
+    cheburashka 3052 vs 2686). `feature_error` falls roughly as count^-1/2, so
+    those gaps are worth a large share of the very metric Phase 3 scored. Every
+    one of them must land outside the limit, and a genuinely matched pair inside
+    it."""
+    historic = [(2580, 2989), (2510, 2824), (2560, 2840), (2686, 3052)]
+    for ours, qf in historic:
+        skew = bench._count_skew({"quads": ours}, {"quads": qf})
+        assert skew > bench._COUNT_SKEW_LIMIT, (
+            f"{ours}q vs {qf}q (skew {skew:.1%}) would still be scored")
+    assert bench._count_skew({"quads": 3006}, {"quads": 2929}) <= bench._COUNT_SKEW_LIMIT
+
+
+def test_quadriflow_tolerance_is_tighter_than_ours():
+    """Both sides searching independently at the same REQUEST does not match them
+    — each stops inside its own tolerance and they can settle on opposite sides
+    (measured: spot 3228 vs 2840, 14% apart, both aiming at 3000). The reference
+    arm therefore chases OUR achieved count with a tolerance tight enough that the
+    result lands inside `_COUNT_SKEW_LIMIT`."""
+    import inspect
+    qf_tol = inspect.signature(bench.quadriflow_at_count).parameters["tol"].default
+    ours_tol = inspect.signature(bench.ours_at_count).parameters["tol"].default
+    assert qf_tol < ours_tol
+    assert qf_tol <= bench._COUNT_SKEW_LIMIT
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):
