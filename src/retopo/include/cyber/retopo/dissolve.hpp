@@ -26,8 +26,7 @@ namespace dissolve_detail {
 // endpoint: face A's cycle from b around to a (skipping the dissolved
 // edge), then face B's cycle from a around to b. Empty when the merged
 // ring would be degenerate (shared vertices beyond the edge endpoints).
-inline std::vector<VertexId> mergedRing(const Mesh& mesh, EdgeId edge, FaceId fa,
-                                        FaceId fb) {
+inline std::vector<VertexId> mergedRing(const Mesh& mesh, EdgeId edge, FaceId fa, FaceId fb) {
     const auto [a, b] = mesh.edgeVertices(edge);
     const auto cycleFrom = [&](FaceId f, VertexId from, VertexId to) {
         // Face cycle rotated to start at `from`, truncated before `to`.
@@ -86,8 +85,7 @@ inline std::vector<VertexId> mergedRing(const Mesh& mesh, EdgeId edge, FaceId fa
         return FaceId{};
     }
     const std::vector<FaceId> faces = mesh.edgeFaces(edge);
-    const std::vector<VertexId> ring =
-        dissolve_detail::mergedRing(mesh, edge, faces[0], faces[1]);
+    const std::vector<VertexId> ring = dissolve_detail::mergedRing(mesh, edge, faces[0], faces[1]);
     if (ring.size() < 3) {
         return FaceId{};
     }
@@ -115,8 +113,7 @@ inline std::vector<VertexId> mergedRing(const Mesh& mesh, EdgeId edge, FaceId fa
     // Quad pair: hexagon ring starts at edge endpoint b (mergedRing
     // contract), with the old edge spanning ring[0] -> ring[3]. Rotating
     // one corner over splits between ring[1] and ring[4].
-    const std::vector<VertexId> ring =
-        dissolve_detail::mergedRing(mesh, edge, faces[0], faces[1]);
+    const std::vector<VertexId> ring = dissolve_detail::mergedRing(mesh, edge, faces[0], faces[1]);
     if (ring.size() != 6) {
         return false;
     }

@@ -1591,9 +1591,8 @@ void IsolineExtractor::buildInputBoundary() {
     // "On the boundary" means within a quarter of a mean boundary edge. The
     // crossing points start exactly on those edges; the quarter-edge slack absorbs
     // the drift collapseShortEdges introduces by averaging merged samples.
-    m_boundaryTol = m_inputBoundary.empty()
-                        ? 0.0
-                        : 0.25 * lenSum / static_cast<double>(m_inputBoundary.size());
+    m_boundaryTol =
+        m_inputBoundary.empty() ? 0.0 : 0.25 * lenSum / static_cast<double>(m_inputBoundary.size());
 }
 
 // True if most of `loop` sits on the input boundary. A majority vote (not "all")
@@ -2502,8 +2501,7 @@ private:
 
 }  // namespace
 
-std::unique_ptr<IQuadrangulator> makeQuadCoverQuadrangulator(int fieldIterations,
-                                                             float adaptivity,
+std::unique_ptr<IQuadrangulator> makeQuadCoverQuadrangulator(int fieldIterations, float adaptivity,
                                                              int holeFillMaxBoundary) {
     return std::make_unique<QuadCoverQuadrangulator>(fieldIterations, adaptivity,
                                                      holeFillMaxBoundary);

@@ -132,9 +132,9 @@ struct ResymmetrizeReport {
     // population count, not a change signal. `maxCorrection` is the change
     // signal, and it includes the weld displacement.
     std::size_t snapped = 0;
-    std::size_t matched = 0;    // off-side vertices moved onto their mirror image
-    std::size_t unmatched = 0;  // off-side vertices with no counterpart in range
-    float maxCorrection = 0.0f; // largest displacement actually applied
+    std::size_t matched = 0;     // off-side vertices moved onto their mirror image
+    std::size_t unmatched = 0;   // off-side vertices with no counterpart in range
+    float maxCorrection = 0.0f;  // largest displacement actually applied
 };
 
 namespace detail {

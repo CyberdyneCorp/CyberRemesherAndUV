@@ -59,7 +59,7 @@ inline constexpr float kLoopSnapToleranceFraction = 0.02F;
 // loaded): then the snapping fields stay unmeasured. A dead seed edge
 // yields a zeroed result (edgeCount 0), which callers read as "no loop".
 [[nodiscard]] inline EdgeLoopMetrics measureEdgeLoop(const Mesh& mesh, EdgeId seed,
-                                                 const SurfaceSnapper* snapper) {
+                                                     const SurfaceSnapper* snapper) {
     EdgeLoopMetrics metrics;
     const std::vector<EdgeId> loop = edgeLoopFrom(mesh, seed);
     if (loop.empty()) {
@@ -98,8 +98,7 @@ inline constexpr float kLoopSnapToleranceFraction = 0.02F;
 
     if (snapper != nullptr && !ordered.empty()) {
         metrics.snapMeasured = true;
-        const float meanEdge =
-            metrics.length / static_cast<float>(loop.size());
+        const float meanEdge = metrics.length / static_cast<float>(loop.size());
         const float tolerance = meanEdge * kLoopSnapToleranceFraction;
         for (const VertexId v : ordered) {
             const SurfaceHit hit = snapper->snapToSurface(mesh.position(v));

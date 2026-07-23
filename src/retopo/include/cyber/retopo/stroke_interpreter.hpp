@@ -55,23 +55,23 @@ enum class StrokeShape {
 };
 
 struct ShapeParams {
-    int resampleCount = 64;         // arc-length resampling density
-    float aspect = 1.0f;            // viewport width/height; x is multiplied
-                                    // by it so angles/circles are measured in
-                                    // square units, not stretched ones
-    float holdMaxRadius = 0.015f;   // bounding radius below this => HoldPoint
-    float holdMinDuration = 0.30f;  // seconds; full-confidence hold
-    float closedFraction = 0.22f;   // endpoint gap < f * pathLength => closed
-    float cornerRadians = 0.90f;    // per-window turn sharper than this is a corner
-    float straightRatio = 0.90f;    // endpointDist/pathLength above this => straight
+    int resampleCount = 64;            // arc-length resampling density
+    float aspect = 1.0f;               // viewport width/height; x is multiplied
+                                       // by it so angles/circles are measured in
+                                       // square units, not stretched ones
+    float holdMaxRadius = 0.015f;      // bounding radius below this => HoldPoint
+    float holdMinDuration = 0.30f;     // seconds; full-confidence hold
+    float closedFraction = 0.22f;      // endpoint gap < f * pathLength => closed
+    float cornerRadians = 0.90f;       // per-window turn sharper than this is a corner
+    float straightRatio = 0.90f;       // endpointDist/pathLength above this => straight
     float circleMaxDeviation = 0.18f;  // radius stddev / mean below this => round
     int scribbleMinCorners = 4;
     int scribbleMinIntersections = 2;
-    int gridMinCorners = 3;         // square-wave corners for a grid stroke
-    float gridPerpMaxDot = 0.55f;   // consecutive grid segments: |cos| below
-                                    // this counts as perpendicular
-    float gridRailMinDot = 0.80f;   // grid rails: |cos| above this counts as
-                                    // mutually parallel
+    int gridMinCorners = 3;        // square-wave corners for a grid stroke
+    float gridPerpMaxDot = 0.55f;  // consecutive grid segments: |cos| below
+                                   // this counts as perpendicular
+    float gridRailMinDot = 0.80f;  // grid rails: |cos| above this counts as
+                                   // mutually parallel
 };
 
 // Geometric features of the resampled stroke (kept in the record so the
@@ -79,9 +79,9 @@ struct ShapeParams {
 struct ShapeFeatures {
     float pathLength = 0.0f;
     float endpointDistance = 0.0f;
-    float boundingRadius = 0.0f;  // max distance from centroid
-    float duration = 0.0f;        // seconds, last sample time - first
-    float straightness = 0.0f;    // endpointDistance / pathLength
+    float boundingRadius = 0.0f;   // max distance from centroid
+    float duration = 0.0f;         // seconds, last sample time - first
+    float straightness = 0.0f;     // endpointDistance / pathLength
     float radiusDeviation = 0.0f;  // stddev of centroid distance / mean
     int corners = 0;
     int selfIntersections = 0;
@@ -255,8 +255,7 @@ inline int countSelfIntersections(const std::vector<Vec2>& p) {
 // sharply within one window; after a detected corner the scan skips a
 // window so one corner never double-counts. Returns the corner sample
 // indices in stroke order.
-inline std::vector<int> cornerIndices(const std::vector<Vec2>& p, int window,
-                                      float cornerRadians) {
+inline std::vector<int> cornerIndices(const std::vector<Vec2>& p, int window, float cornerRadians) {
     std::vector<int> indices;
     const int n = static_cast<int>(p.size());
     if (n < 2 * window + 1) {
@@ -372,8 +371,7 @@ struct GridDetection {
     int cols = 0;
 };
 
-inline GridDetection detectGrid(const std::vector<Vec2>& p, int window,
-                                const ShapeParams& params) {
+inline GridDetection detectGrid(const std::vector<Vec2>& p, int window, const ShapeParams& params) {
     GridDetection out;
     const std::vector<int> cornerIdx = cornerIndices(p, window, params.cornerRadians);
     if (static_cast<int>(cornerIdx.size()) < params.gridMinCorners) {
@@ -404,8 +402,7 @@ inline GridDetection detectGrid(const std::vector<Vec2>& p, int window,
         return out;
     }
     for (std::size_t i = 0; i + 1 < segments.size(); ++i) {
-        if (std::fabs(dot2(segments[i].dir, segments[i + 1].dir)) >
-            params.gridPerpMaxDot) {
+        if (std::fabs(dot2(segments[i].dir, segments[i + 1].dir)) > params.gridPerpMaxDot) {
             return out;  // not a square wave
         }
     }
@@ -513,8 +510,7 @@ inline bool pointInPolygon(const std::vector<Vec2>& poly, Vec2 p) {
     // duration (a quick tap is still most plausibly a point gesture).
     if (boundingRadius <= params.holdMaxRadius || raw.size() < 3) {
         result.shape = StrokeShape::HoldPoint;
-        result.confidence =
-            result.features.duration >= params.holdMinDuration ? 0.9f : 0.6f;
+        result.confidence = result.features.duration >= params.holdMinDuration ? 0.9f : 0.6f;
         result.resampled = {centroid};
         return result;
     }
@@ -548,8 +544,7 @@ inline bool pointInPolygon(const std::vector<Vec2>& poly, Vec2 p) {
     result.features.selfIntersections = countSelfIntersections(pts);
     result.features.straightness =
         pathLength > 0.0f ? result.features.endpointDistance / pathLength : 0.0f;
-    result.features.closed =
-        result.features.endpointDistance < params.closedFraction * pathLength;
+    result.features.closed = result.features.endpointDistance < params.closedFraction * pathLength;
 
     const ShapeFeatures& f = result.features;
     if (f.closed) {
@@ -645,8 +640,7 @@ public:
             }
             // NDC -> normalized viewport (origin top-left), then the same
             // aspect correction applied to the stroke.
-            m_screen[i] = {(cx / cw * 0.5f + 0.5f) * aspect,
-                           1.0f - (cy / cw * 0.5f + 0.5f)};
+            m_screen[i] = {(cx / cw * 0.5f + 0.5f) * aspect, 1.0f - (cy / cw * 0.5f + 0.5f)};
             m_valid[i] = true;
         }
     }
@@ -794,8 +788,7 @@ public:
     }
 
     // Fraction of stroke samples within `radius` of some edge.
-    [[nodiscard]] float fractionAlongEdges(const std::vector<Vec2>& stroke,
-                                           float radius) const {
+    [[nodiscard]] float fractionAlongEdges(const std::vector<Vec2>& stroke, float radius) const {
         if (stroke.empty()) {
             return 0.0f;
         }
@@ -812,9 +805,8 @@ public:
                 if (!m_valid[v0.value] || !m_valid[v1.value]) {
                     continue;
                 }
-                near = length2(closestOnSegment2(m_screen[v0.value],
-                                                 m_screen[v1.value], s) -
-                               s) <= r2;
+                near =
+                    length2(closestOnSegment2(m_screen[v0.value], m_screen[v1.value], s) - s) <= r2;
             }
             if (near) {
                 ++hits;
@@ -845,8 +837,7 @@ private:
             acc = acc + m_screen[v.value];
             ++n;
         }
-        return n > 0 ? std::optional<Vec2>(acc * (1.0f / static_cast<float>(n)))
-                     : std::nullopt;
+        return n > 0 ? std::optional<Vec2>(acc * (1.0f / static_cast<float>(n))) : std::nullopt;
     }
 
     const Mesh& m_mesh;
@@ -855,8 +846,8 @@ private:
     mutable std::vector<Vec2> m_poly;
 };
 
-inline void addCandidate(StrokeInterpretation& out, InterpretedAction action,
-                         float confidence, std::vector<ElementRef> elements = {}) {
+inline void addCandidate(StrokeInterpretation& out, InterpretedAction action, float confidence,
+                         std::vector<ElementRef> elements = {}) {
     out.candidates.push_back({action, confidence, std::move(elements)});
 }
 
@@ -884,9 +875,10 @@ inline std::vector<ElementRef> faceRefs(const std::vector<FaceId>& faces) {
 // stage 1 still runs and every context-dependent rule sees an empty scene
 // (the caller has no EditMesh yet — e.g. the very first quad of a retopo).
 // `viewProj` is column-major (matches simd_float4x4 memory order).
-[[nodiscard]] inline StrokeInterpretation interpretStroke(
-    std::span<const ScreenSample> samples, const Mesh* mesh, const float* viewProj,
-    const ShapeParams& shapeParams = {}, const ContextParams& contextParams = {}) {
+[[nodiscard]] inline StrokeInterpretation interpretStroke(std::span<const ScreenSample> samples,
+                                                          const Mesh* mesh, const float* viewProj,
+                                                          const ShapeParams& shapeParams = {},
+                                                          const ContextParams& contextParams = {}) {
     using namespace interp_detail;
 
     StrokeInterpretation out;
@@ -904,10 +896,10 @@ inline std::vector<ElementRef> faceRefs(const std::vector<FaceId>& faces) {
     }
 
     const std::vector<Vec2>& stroke = out.shape.resampled;
-    const Vec2 probe = out.shape.shape == StrokeShape::Line ||
-                               out.shape.shape == StrokeShape::Scribble
-                           ? stroke[stroke.size() / 2]
-                           : out.shape.centroid;
+    const Vec2 probe =
+        out.shape.shape == StrokeShape::Line || out.shape.shape == StrokeShape::Scribble
+            ? stroke[stroke.size() / 2]
+            : out.shape.centroid;
 
     // Resolve the under-stroke context at the probe point.
     std::optional<VertexId> probeVertex;
@@ -921,9 +913,8 @@ inline std::vector<ElementRef> faceRefs(const std::vector<FaceId>& faces) {
     if (probeVertex) {
         out.context = UnderStroke::Vertex;
     } else if (probeEdge) {
-        out.context = proj->mesh().isBoundaryEdge(*probeEdge)
-                          ? UnderStroke::BoundaryEdge
-                          : UnderStroke::Edge;
+        out.context =
+            proj->mesh().isBoundaryEdge(*probeEdge) ? UnderStroke::BoundaryEdge : UnderStroke::Edge;
     } else if (probeFace) {
         out.context = UnderStroke::Face;
     } else {
@@ -958,23 +949,20 @@ inline std::vector<ElementRef> faceRefs(const std::vector<FaceId>& faces) {
                 // edge loop for a tag, the whole ring for an insert (the
                 // first ring edge seeds cyber_retopo_insert_loop).
                 const std::vector<EdgeId> crossed = proj->edgesCrossing(stroke);
-                const float along =
-                    proj->fractionAlongEdges(stroke, contextParams.edgeRadius);
+                const float along = proj->fractionAlongEdges(stroke, contextParams.edgeRadius);
                 const std::vector<EdgeId> loop =
-                    probeEdge ? edgeLoopFrom(proj->mesh(), *probeEdge)
-                              : std::vector<EdgeId>{};
+                    probeEdge ? edgeLoopFrom(proj->mesh(), *probeEdge) : std::vector<EdgeId>{};
                 if (along >= 0.6f && probeEdge) {
-                    addCandidate(out, InterpretedAction::TagLoop,
-                                 0.8f * along * shapeConf, edgeRefs(loop));
+                    addCandidate(out, InterpretedAction::TagLoop, 0.8f * along * shapeConf,
+                                 edgeRefs(loop));
                     if (!crossed.empty()) {
                         addCandidate(
                             out, InterpretedAction::InsertLoop, 0.4f * shapeConf,
                             edgeRefs(quadRingFromEdge(proj->mesh(), crossed.front()).edges));
                     }
                 } else if (!crossed.empty()) {
-                    addCandidate(
-                        out, InterpretedAction::InsertLoop, 0.75f * shapeConf,
-                        edgeRefs(quadRingFromEdge(proj->mesh(), crossed.front()).edges));
+                    addCandidate(out, InterpretedAction::InsertLoop, 0.75f * shapeConf,
+                                 edgeRefs(quadRingFromEdge(proj->mesh(), crossed.front()).edges));
                     if (probeEdge) {
                         addCandidate(out, InterpretedAction::TagLoop, 0.35f * shapeConf,
                                      edgeRefs(loop));
@@ -1033,8 +1021,7 @@ inline std::vector<ElementRef> faceRefs(const std::vector<FaceId>& faces) {
         }
         case StrokeShape::Scribble: {
             if (proj != nullptr) {
-                const std::vector<EdgeId> near =
-                    proj->edgesNear(stroke, contextParams.edgeRadius);
+                const std::vector<EdgeId> near = proj->edgesNear(stroke, contextParams.edgeRadius);
                 if (!near.empty()) {
                     addCandidate(out, InterpretedAction::DissolveEdge, 0.8f * shapeConf,
                                  edgeRefs(near));
@@ -1078,15 +1065,13 @@ inline std::vector<ElementRef> faceRefs(const std::vector<FaceId>& faces) {
             // on the mesh still offers hide, at lower confidence.
             bool startsEmpty = true;
             if (proj != nullptr) {
-                startsEmpty =
-                    !proj->nearestVertex(stroke.front(), contextParams.vertexRadius) &&
-                    !proj->nearestEdge(stroke.front(), contextParams.edgeRadius) &&
-                    !proj->faceContaining(stroke.front());
+                startsEmpty = !proj->nearestVertex(stroke.front(), contextParams.vertexRadius) &&
+                              !proj->nearestEdge(stroke.front(), contextParams.edgeRadius) &&
+                              !proj->faceContaining(stroke.front());
             }
             if (!enclosed.empty()) {
                 addCandidate(out, InterpretedAction::HideRegion,
-                             (startsEmpty ? 0.85f : 0.5f) * shapeConf,
-                             faceRefs(enclosed));
+                             (startsEmpty ? 0.85f : 0.5f) * shapeConf, faceRefs(enclosed));
             } else {
                 addCandidate(out, InterpretedAction::HideRegion, 0.6f * shapeConf);
             }
@@ -1095,9 +1080,8 @@ inline std::vector<ElementRef> faceRefs(const std::vector<FaceId>& faces) {
         case StrokeShape::Grid: {
             // One-stroke grid → block of quads. Strongest over empty
             // surface; still offered over existing topology, weaker.
-            addCandidate(
-                out, InterpretedAction::CreateGrid,
-                (out.context == UnderStroke::EmptySurface ? 0.9f : 0.5f) * shapeConf);
+            addCandidate(out, InterpretedAction::CreateGrid,
+                         (out.context == UnderStroke::EmptySurface ? 0.9f : 0.5f) * shapeConf);
             break;
         }
         case StrokeShape::Unknown:

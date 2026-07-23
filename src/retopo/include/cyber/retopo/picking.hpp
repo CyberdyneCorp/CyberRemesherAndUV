@@ -74,8 +74,7 @@ struct EdgePick {
             continue;
         }
         const auto [v0, v1] = mesh.edgeVertices(e);
-        const Vec3 point =
-            closestPointOnSegment(mesh.position(v0), mesh.position(v1), query);
+        const Vec3 point = closestPointOnSegment(mesh.position(v0), mesh.position(v1), query);
         const float d2 = lengthSquared(point - query);
         if (d2 <= limit && (!best || d2 < best->distanceSquared)) {
             best = EdgePick{e, point, d2};

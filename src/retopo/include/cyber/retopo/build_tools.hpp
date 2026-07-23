@@ -326,9 +326,8 @@ struct StripResult {
     std::vector<VertexId> newVertices;
 };
 
-[[nodiscard]] inline StripResult drawStripPath(Mesh& mesh, std::span<const Vec3> path,
-                                               float width, Vec3 viewDir, VertexId startA,
-                                               VertexId startB,
+[[nodiscard]] inline StripResult drawStripPath(Mesh& mesh, std::span<const Vec3> path, float width,
+                                               Vec3 viewDir, VertexId startA, VertexId startB,
                                                const SurfaceSnapper* snap = nullptr) {
     StripResult out;
     if (path.empty() || !(width > 0.0f) || !mesh.isAlive(startA) || !mesh.isAlive(startB)) {
@@ -567,8 +566,7 @@ struct SurfaceCutResult {
 // n-gons). New vertices snap to the Target when `snap` is supplied.
 inline SurfaceCutResult surfaceCutSegment(Mesh& mesh, Vec3 a, Vec3 b, Vec3 viewDir,
                                           bool triangulateNGons,
-                                          const SurfaceSnapper* snap = nullptr,
-                                          float eps = 1e-6f) {
+                                          const SurfaceSnapper* snap = nullptr, float eps = 1e-6f) {
     SurfaceCutResult result;
     const Vec3 ab = b - a;
     const Vec3 normal = cross(ab, viewDir);
