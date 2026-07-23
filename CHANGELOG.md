@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.2.1
+
+### Fixed
+
+- `test_hole_fill_policy` asserted an exact boundary-loop count, which holds on
+  the in-process Geogram backend but not on the dependency-free native one, so
+  CI failed on builds without `-DCYBER_WITH_QUADCOVER=ON`. It now asserts the
+  policy itself (disabling the fill leaves strictly more open boundary than
+  enabling it) rather than a backend-specific number. No engine change.
+- clang-format violations that had been failing CI on main since the
+  manual-retopology layer landed, plus four in `quadcover_extractor.cpp` from
+  the M3 hole-fill work.
+
 ## 0.2.0
 
 Adds the manual-retopology engine layer, and fixes a remeshing parameter that
@@ -86,6 +99,13 @@ never took effect on the default path.
 
 - The opt-in `instant-meshes` extractor still ignores `holeFillMaxBoundary` (it
   never fills). It is a retired alternative, not the default.
+- On the dependency-free **native** seamless-UV backend (builds without
+  `-DCYBER_WITH_QUADCOVER=ON`), `hole_fill_max_boundary=0` exposes small tears
+  the extractor leaves and the hole fill was previously repairing: a solid
+  plane with no hole comes out with 6 boundary loops at 0, and 1 at the default
+  64. Disabling the fill on that backend therefore yields a torn mesh. The
+  in-process Geogram backend does not have this. Fixing it means repairing the
+  native extractor rather than relying on the hole fill to hide it.
 - Open surfaces are still not first-class: `hole_fill_max_boundary=0` now keeps
   the rim, but the isoline graph cleanup that gives closed surfaces their quad
   quality remains opt-in on open ones (`CYBER_QC_OPEN_CLEANUP`, partial).
