@@ -495,10 +495,24 @@ Anything already measured dead is listed at the end — check it before proposin
 
 **Tier 3 — narrower, concrete**
 
-- ◻ **(c8) Finish the M3 open-surface cleanup** — the `simplifyGraph` turn-angle
-  guard is explicitly not done, which is why `CYBER_QC_OPEN_CLEANUP` stays opt-in.
-  Measured prize on an open paraboloid: **median 50° → 80°**. Best
-  value-per-effort item here.
+- 🔬 **(c8) Finish the M3 open-surface cleanup — MIS-DIAGNOSED (2026-07-24). The
+  prize is real; the named blocker is not the blocker.**
+  - **Prize confirmed.** Open paraboloid at 1200 quads, `CYBER_QC_OPEN_CLEANUP`
+    off vs on: faces **136 → 954**, median **52.8° → 78.7°**. The cleanup is what
+    lets an open surface trace properly at all.
+  - ❌ **The `simplifyGraph` turn-angle guard is NOT what blocks it.** Built it —
+    dissolve a valence-2 node only when near-collinear (the two directions out of
+    it at least 150° apart), so genuine rim corners survive. Measured: faces
+    954 → 1066, median 78.7 → **75.6**, edge CV 1.696 → **1.890**. It makes both
+    metrics slightly WORSE, and the flat-grid corner symptom the old TODO names
+    ("interior 25→20, 7 triangles") did not reproduce. Reverted.
+  - 🔴 **The real blocker is the edge-CV blowup: 0.442 → 1.696** when cleanup is
+    enabled — all-quad output whose edge lengths vary enormously. Cause unknown
+    and undiagnosed; it is NOT corner deletion. Whoever picks this up should start
+    by finding where the size variance comes from (likely rim-adjacent cells),
+    **not** by writing another graph guard.
+  - Still worth doing: a +26° median swing on open surfaces is the largest
+    single-metric prize left anywhere in this list.
 - ◻ **(c9) Tube-aware coarsening** for the multiresolution cross field — named as
   "the real fix" after multires was found to help smooth models but bridge thin
   tubes (the bunny-ears case). Identified, never built.
