@@ -1,6 +1,9 @@
 #include <doctest.h>
 
 #include <cmath>
+#include <map>
+#include <set>
+#include <utility>
 #include <vector>
 
 #include "cyber/core/isotropic.hpp"
@@ -244,4 +247,92 @@ TEST_CASE("isotropic remesh is deterministic") {
     for (std::size_t i = 0; i < p1.size(); ++i) {
         REQUIRE(p1[i] == p2[i]);
     }
+}
+
+// Crease preservation through the isotropic stage (docs/ROADMAP.md Phase 3, lever c1).
+//
+// `isotropicRemesh` already refuses to collapse feature vertices, flip feature edges or smooth
+// them — but only for edges `tagFeatureEdges` actually marked. That call takes an INCLUDED angle,
+// so the quad-cover default of 40 means "face-normal angle >= 140", i.e. knife-edge folds only:
+// a 90-degree box edge is NOT tagged, and the remesher then freely remeshes straight across it.
+// MEASURED on fandisk at ~3000 quads before this was fixed: the crease network fell from 706 edges
+// in ONE connected component to 449 edges in 55 components with 136 dangling ends.
+//
+// This pins the mechanism the fix relies on: tagged at a crease-appropriate threshold, the crease
+// network survives the remesh intact — same edge count, still a single connected component.
+TEST_CASE("isotropic remesh preserves a tagged crease network") {
+    const auto creaseGraph = [](const Mesh& m) {
+        // Interior edges whose face-normal angle exceeds 45 degrees, as adjacency.
+        std::map<Index, std::vector<Index>> adj;
+        std::size_t count = 0;
+        for (Index i = 0; i < m.edgeCapacity(); ++i) {
+            const EdgeId e{i};
+            if (!m.isAlive(e) || m.edgeFaceCount(e) != 2) {
+                continue;
+            }
+            const std::vector<FaceId> f = m.edgeFaces(e);
+            const Vec3 n0 = normalized(m.faceNormal(f[0]));
+            const Vec3 n1 = normalized(m.faceNormal(f[1]));
+            if (dot(n0, n1) >= std::cos(45.0f * cyber::kPi / 180.0f)) {
+                continue;
+            }
+            ++count;
+            const auto [a, b] = m.edgeVertices(e);
+            adj[a.value].push_back(b.value);
+            adj[b.value].push_back(a.value);
+        }
+        // Connected components of that graph.
+        std::set<Index> seen;
+        std::size_t comps = 0;
+        for (const auto& [v0, _] : adj) {
+            if (seen.count(v0) != 0) {
+                continue;
+            }
+            ++comps;
+            std::vector<Index> stack{v0};
+            seen.insert(v0);
+            while (!stack.empty()) {
+                const Index v = stack.back();
+                stack.pop_back();
+                for (const Index w : adj.at(v)) {
+                    if (seen.insert(w).second) {
+                        stack.push_back(w);
+                    }
+                }
+            }
+        }
+        return std::pair{count, comps};
+    };
+
+    // `protect` selects the threshold passed to tagFeatureEdges before remeshing. 135 (included
+    // angle) == "protect anything with a face-normal angle above 45", which is what the quad-cover
+    // native path now tags with; 40 is the old shipped value, which marks nothing on a 90-degree
+    // box edge and therefore protects nothing.
+    const auto remeshWith = [&creaseGraph](float protect) {
+        Mesh cube = makeTriangulatedCube();
+        cube.tagFeatureEdges(protect);
+        const remesh::ReferenceSurface reference(cube, 0.0f);
+        remesh::IsotropicOptions options;
+        options.targetEdgeLength = 0.35f;
+        REQUIRE(remesh::isotropicRemesh(cube, reference, options) ==
+                remesh::IsotropicStatus::Success);
+        return creaseGraph(cube);
+    };
+
+    const auto [beforeEdges, beforeComps] = creaseGraph(makeTriangulatedCube());
+    REQUIRE(beforeEdges > 0);
+    REQUIRE(beforeComps == 1);  // a cube's box edges form one closed network
+
+    // Protected: the network survives. Edge COUNT may rise, because the remesher splits a long
+    // crease into collinear sub-edges to reach the target length — that preserves the crease
+    // exactly. What must not happen is losing crease edges or shattering the network.
+    const auto [keptEdges, keptComps] = remeshWith(135.0f);
+    CHECK(keptEdges >= beforeEdges);
+    CHECK(keptComps == 1);
+
+    // Discriminating half: at the old threshold nothing is tagged, so the remesher cuts straight
+    // across the creases and the network degrades. Without this the test would pass even if the
+    // protection did nothing.
+    const auto [lostEdges, lostComps] = remeshWith(40.0f);
+    CHECK(lostComps > keptComps);
 }
