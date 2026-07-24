@@ -495,10 +495,44 @@ Anything already measured dead is listed at the end — check it before proposin
 
 **Tier 3 — narrower, concrete**
 
-- ◻ **(c8) Finish the M3 open-surface cleanup** — the `simplifyGraph` turn-angle
-  guard is explicitly not done, which is why `CYBER_QC_OPEN_CLEANUP` stays opt-in.
-  Measured prize on an open paraboloid: **median 50° → 80°**. Best
-  value-per-effort item here.
+- 🔬 **(c8) Finish the M3 open-surface cleanup — MIS-DIAGNOSED (2026-07-24). The
+  prize is real; the named blocker is not the blocker.**
+  - **Prize confirmed.** Open paraboloid at 1200 quads, `CYBER_QC_OPEN_CLEANUP`
+    off vs on: faces **136 → 954**, median **52.8° → 78.7°**. The cleanup is what
+    lets an open surface trace properly at all.
+  - ❌ **The `simplifyGraph` turn-angle guard is NOT what blocks it.** Built it —
+    dissolve a valence-2 node only when near-collinear (the two directions out of
+    it at least 150° apart), so genuine rim corners survive. Measured: faces
+    954 → 1066, median 78.7 → **75.6**, edge CV 1.696 → **1.890**. It makes both
+    metrics slightly WORSE, and the flat-grid corner symptom the old TODO names
+    ("interior 25→20, 7 triangles") did not reproduce. Reverted.
+  - 🟢 **The blocker is DIAGNOSED (2026-07-24): `simplifyGraph` over-dissolves
+    valence-2 isoline samples on open surfaces.** Bisected the whole cleanup
+    pipeline by env-gating each step on the open paraboloid at request 1200
+    (all-quad, 0 defects throughout):
+    | config | faces | median | edge CV |
+    |---|---|---|---|
+    | cleanup off (default) | 136 | 52.8 | 0.442 |
+    | cleanup on (shipped opt-in) | 954 | 78.7 | **1.696** |
+    | **fixHoles only, `simplifyGraph` removed** | 1920 | 68.7 | **0.312** |
+    `fixHoles` is what makes the open trace work (it fills the under-traced gaps,
+    136 → ~2000 faces). `simplifyGraph` is what wrecks uniformity: it dissolves
+    every valence-2 node, and on a properly traced open surface most isoline
+    samples are legitimately valence-2, so it merges cells into long uneven quads —
+    roughly halving the face count (1920 → 954) and taking edge CV from **0.312 to
+    1.696** on the SAME request. The collapse steps (`collapseShortEdges`,
+    `collapseTriangles`, `removeSingleEndpoints`) are near-no-ops here; they only
+    matter because they re-trigger `simplifyGraph`. This is a controlled toggle,
+    not a count artifact: `simplifyGraph` is itself what changes the count.
+  - **The candidate fix is therefore "run the open-surface cleanup WITHOUT
+    `simplifyGraph`", not a turn-angle guard.** `simplifyGraph` is needed/harmless
+    on the CLOSED corpus (which runs it today with good CV), so the fix is to skip
+    it specifically on open islands. NOT YET SHIPPED: the fixHoles-only arm lands
+    at 1920 quads on a 1200 request (~1.6x over), so before defaulting it the
+    median/CV wins must be re-confirmed **count-matched** (request fewer quads so
+    it lands on target), and it must be checked byte-neutral on the closed corpus.
+  - Worth it: on open surfaces this is a +16° median swing with edge CV *below*
+    today's baseline — the largest untapped single-metric prize in this list.
 - ◻ **(c9) Tube-aware coarsening** for the multiresolution cross field — named as
   "the real fix" after multires was found to help smooth models but bridge thin
   tubes (the bunny-ears case). Identified, never built.
