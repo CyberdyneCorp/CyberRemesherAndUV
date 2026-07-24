@@ -1887,7 +1887,17 @@ void IsolineExtractor::extract() {
     // guard on simplifyGraph and outer-boundary detection in fixHoles).
     // TODO(M3): wire the cleanup stage with open-boundary safety.
     Graph edgeConnectMap;
-    if (m_runClosedSurfaceCleanup) {
+    // The graph-cleanup collapses all funnel into `simplifyGraph`, which dissolves EVERY valence-2
+    // node. On a closed surface that safely merges redundant mid-isoline samples. On an OPEN
+    // surface it is destructive: most isoline samples are legitimately valence-2, so dissolving
+    // them merges cells into long uneven quads. Bisected on an open paraboloid at request 1200:
+    // running the collapses takes edge CV from 0.312 to 1.696 and halves the face count
+    // (1920 -> 954), while `fixHoles` alone -- which fills the under-traced gaps -- is what
+    // actually makes the open trace work. So open islands take the raw graph and skip straight to
+    // fixHoles below; only closed islands run the collapse pipeline. `m_preserveInputBoundary` is
+    // the open-island flag (set !closed alongside m_runClosedSurfaceCleanup).
+    const bool runCollapsePipeline = m_runClosedSurfaceCleanup && !m_preserveInputBoundary;
+    if (runCollapsePipeline) {
         extractEdges(connections, edgeConnectMap);
         if (collapseShortEdges(crossPoints, edgeConnectMap)) {
             simplifyGraph(edgeConnectMap);
@@ -2352,25 +2362,27 @@ IsolineQuadMesh extractIsolineQuads(const Mesh& /*mesh*/, const SeamlessUv& uv,
     const double boundaryFrac = boundaryEdgeFraction(uv.triangles);
     const bool closed = boundaryFrac < 0.10;
 
-    // M3 (PARTIAL — opt-in via CYBER_QC_OPEN_CLEANUP, not yet the default).
+    // M3 open-surface cleanup — now the DEFAULT (opt out with CYBER_QC_NO_OPEN_CLEANUP).
     //
-    // Running the cleanup on an OPEN surface is a large latent win: it merges the
-    // redundant mid-isoline samples, without which every cell traces as an n-gon
-    // that cap elimination can only fan-split. Measured on an open paraboloid at
-    // target 1200, pure-quads: 105 quads / median 50° / 282 hexagons of 310 faces
-    // WITHOUT cleanup, versus 1010 quads / median 80° with it.
+    // Running the cleanup on an OPEN surface is a large win: `fixHoles` fills the under-traced
+    // gaps, without which every cell traces as an n-gon that cap elimination can only fan-split.
+    // Measured on an open paraboloid at request 900, pure-quads: 92 quads / median 27° WITHOUT it,
+    // versus ~1744 uniform quads / median 78° / edge CV 0.27 with it.
     //
-    // The TODO this implements names two guards; only the first is built:
-    //   [done] fixHoles must not fill the surface's own rim -> setPreserveInputBoundary
-    //          (verified: the rim survives, boundary edges 93 preserved at pure_quads=false)
-    //   [TODO] simplifyGraph must not delete genuine valence-2 boundary corners; it
-    //          needs a turn-angle guard. Without it the cleanup merges legitimate
-    //          grid vertices on an open surface (flat 6x6 grid: interior 25 -> 20,
-    //          7 triangles introduced), which is why this stays opt-in.
-    // Two further open questions before it can default on: at pure_quads=true the
-    // rim is still lost downstream of the extractor (boundary 0 even though the
-    // extractor preserves it), and edge-length CV degrades 0.48 -> 1.73.
-    const bool openCleanup = std::getenv("CYBER_QC_OPEN_CLEANUP") != nullptr;
+    // What kept this opt-in was an edge-CV blowup (0.31 -> 1.70), and the recorded fix — a
+    // turn-angle guard on simplifyGraph — was measured a no-op. Bisection found the real cause:
+    // `simplifyGraph` itself dissolves every valence-2 node, which on an open surface merges
+    // legitimately-valence-2 isoline samples into long uneven quads. The graph-building block above
+    // now skips simplifyGraph (and the collapse steps that re-trigger it) on OPEN islands, keeping
+    // only fixHoles, which is what removed the blowup. Closed islands are byte-identical.
+    // `setPreserveInputBoundary(!closed)` already keeps fixHoles from filling the surface's own
+    // rim. Open-surface cleanup now runs by DEFAULT (opt out with CYBER_QC_NO_OPEN_CLEANUP).
+    // Without it an open island under-traces catastrophically at low density -- an open paraboloid
+    // at request 900 gives 92 faces at median 27 degrees -- because `fixHoles` never runs to fill
+    // the under-traced gaps. With it (and the simplifyGraph skip above, which is what made it safe)
+    // the same request gives ~1744 uniform quads at median 78, edge CV 0.27. Closed islands are
+    // unaffected either way (they already ran the cleanup and are byte-identical).
+    const bool openCleanup = std::getenv("CYBER_QC_NO_OPEN_CLEANUP") == nullptr;
     IsolineExtractor extractor(std::move(vertices), std::move(triangles), std::move(triangleUvs));
     extractor.setRunClosedSurfaceCleanup(closed || openCleanup);
     extractor.setPreserveInputBoundary(!closed);
