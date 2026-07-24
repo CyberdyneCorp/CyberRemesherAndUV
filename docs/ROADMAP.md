@@ -199,7 +199,7 @@ design (capi hardcodes adaptivity 0; the isotropic stage that consumes
 `params.adaptivity` is bypassed for it), so this phase measures a lever the
 default cannot use, and the lever does not win where it can be used.
 
-## Phase 3 — Win on features & robustness — 🟡 measured; MIXED (win on hard geometry)
+## Phase 3 — Win on features & robustness — 🟦 CLOSED 2026-07-24 (validity won outright; feature-following a known limitation)
 
 Metrics built (`feature_error`, `mesh_validity`) and wired into the benchmark.
 Honest finding — **not a clean win**:
@@ -272,9 +272,60 @@ Two independent reasons, both measured:
      the integer lattice) and still moved feature error by less than a sixth of
      the run-to-run noise, while costing median angle on the one model it reaches.
   **Open follow-ups: see the untried-lever list below.**
-**Exit (partial):** robustness win on hard-surface geometry *(met)*; validity on
-the smooth corpus *(**met** — 5/5 vs QuadriFlow)*; feature alignment *(not met —
-0/5, corpus-wide)*.
+### Phase 3 close-out (2026-07-24)
+
+**Two of three exit criteria are MET and one is closed as a known limitation.**
+
+| criterion | verdict |
+|---|---|
+| Robustness on hard-surface geometry | ✅ **met** |
+| Topological validity on the corpus | ✅ **met, and we beat QuadriFlow outright — 6/6** |
+| Feature alignment | ⛔ **not met, closed as a known limitation — 1/6** |
+
+**What we win, and it is the strongest claim in the project.** Topological
+validity is **0 defects on all six corpus models**, at every density measured
+(2600–4200), against QuadriFlow's **680 on the cube** and **32 on stanford-bunny**.
+Nothing else in the roadmap is a clean corpus-wide win over the reference. It also
+survived a real bug this cycle: bunny's long-recorded "defect lottery" turned out
+to be a hole-filler closing a 4-edge loop twice (**40 → 0**), shipped in v0.2.4.
+
+**What we do not win.** Feature-following is **1/6** — and read that honestly: the
+single win is the **cube**, which was *added* to the corpus this cycle because we
+already won it. We did not start beating QuadriFlow on any model we previously
+lost. fandisk improved materially (**0.75 → 0.62**, gap 1.83x → 1.48x) and **still
+loses**. cheburashka is untouched at 1.00 vs 0.56.
+
+**Why it is being closed rather than continued — nine measured levers:**
+
+| lever | layer | verdict |
+|---|---|---|
+| M2a vertex snap | post-extraction | dead |
+| M2b gauge pin | solver gauge | dead, +8 defects |
+| M2c routing threshold | routing | dead, rocker −7° |
+| M2d per-edge integer constraints | parameterization | **refuted** (1/5 reach; premise false) |
+| feature-degree widening | shared threshold | dead, median −5.9° |
+| field alignment, ungated | field | regressed flat CAD |
+| consistency gate | field | no-op |
+| edge-ring planarity gate | field | under-applies |
+| **(c1) crease preservation** | **pre-remesh** | ✅ **shipped** |
+| **(c2) planarity-gated alignment** | **field** | ✅ **shipped** |
+| (c1b) vendored crease visibility | vendored pre-remesh | **refuted** (count artifact) |
+
+Two wins out of eleven attempts, both confined to the single model that clears the
+2% native-routing gate. **The structural cap is the reason to stop:** 4 of 6 models
+run on the vendored Geogram backend, and the one lever that reaches them (c1b) is a
+count artifact that cannot be decoupled without patching vendored source. Any
+further feature-following work must first answer *how it reaches the vendored path
+at all* — not propose another constraint.
+
+**If it is ever reopened**, the honest entry points are (c4) cone placement at
+crease corners, (c6) crease-preserving surface projection, and (c7) a
+globally-optimal direction field — all Tier 2, none cheap, and all still capped at
+1/6 until the routing question is answered.
+
+**Superseded exit note:** *robustness win on hard-surface geometry (met); validity
+on the smooth corpus (met — now 6/6, was recorded 5/5 before the cube joined the
+corpus); feature alignment (not met — was recorded 0/5).*
 
 ### Untried levers for retopology quality (2026-07-24)
 
