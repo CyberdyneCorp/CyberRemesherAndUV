@@ -414,11 +414,27 @@ def irregular_pct(mesh: MeshData) -> float:
     return 100.0 * sum(1 for c in val.values() if c != 4) / len(val)
 
 
+# Models we GENERATE rather than download. The community corpus is entirely organic or
+# smooth-CAD, so it covers no flat panel bounded by sharp creases -- a distinct failure class:
+# a planar face has a DEGENERATE cross field (every orientation is equally smooth), so anything
+# that pins its border imposes arbitrary structure. That blind spot is what let a crease
+# field-alignment change regress edge CV 0.201 -> 0.397 unnoticed by the whole benchmark.
+SYNTHETIC_MODELS = {"cube": lambda path: cube_obj(path, subdiv=12)}
+
+
 def download_model(name: str, models_dir: str = MODELS_DIR) -> str:
     """Return a local path to a common-3d-test-model, downloading it (once) on
-    demand. Raises KeyError for an unknown name."""
+    demand, or generating it for the synthetic entries. Raises KeyError otherwise."""
+    if name in SYNTHETIC_MODELS:
+        os.makedirs(models_dir, exist_ok=True)
+        path = os.path.join(models_dir, f"{name}.obj")
+        if not os.path.exists(path):
+            print(f"  generating {name} -> {os.path.relpath(path, _REPO)}")
+            SYNTHETIC_MODELS[name](path)
+        return path
     if name not in COMMON_3D_MODELS:
-        raise KeyError(f"unknown model {name!r}; known: {sorted(COMMON_3D_MODELS)}")
+        raise KeyError(f"unknown model {name!r}; known: "
+                       f"{sorted(list(COMMON_3D_MODELS) + list(SYNTHETIC_MODELS))}")
     os.makedirs(models_dir, exist_ok=True)
     path = os.path.join(models_dir, COMMON_3D_MODELS[name])
     if not os.path.exists(path):

@@ -1,6 +1,7 @@
 #include "cyber/quadrangulate/crossfield.hpp"
 
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <utility>
 #include <vector>
@@ -109,6 +110,23 @@ CrossField computeCrossField(const Mesh& mesh, int iterations, accel::IBackend& 
             constrained[c] = 1;
             break;
         }
+    }
+
+    // CYBER_QC_FIELD_STATS: what fraction of the field the constraints freeze. This is what
+    // diagnosed why crease alignment (lever c2) helps curved CAD but hurts flat CAD -- it is NOT
+    // over-constraining. fandisk freezes 52% of its faces and improves; a subdivided cube freezes
+    // only 14.7% and degrades (edge CV 0.201 -> 0.397). A flat panel's field is degenerate (every
+    // orientation is equally smooth), so pinning a border band imposes arbitrary structure the
+    // interior cannot reconcile, while a curved surface has a curvature-driven preference that
+    // crease pins reinforce. See docs/ROADMAP.md Phase 3 lever c2.
+    if (std::getenv("CYBER_QC_FIELD_STATS") != nullptr) {
+        std::size_t nPinned = 0;
+        for (std::size_t c = 0; c < nf; ++c) {
+            nPinned += constrained[c] != 0 ? std::size_t{1} : std::size_t{0};
+        }
+        std::fprintf(stderr, "[field] faces=%zu constrained=%zu (%.1f%%) alignDeg=%.0f\n", nf,
+                     nPinned, 100.0 * static_cast<double>(nPinned) / static_cast<double>(nf),
+                     static_cast<double>(alignDeg));
     }
 
     // Build the 2F x 2F transport-averaging operator as CSR: row 2c/2c+1 hold

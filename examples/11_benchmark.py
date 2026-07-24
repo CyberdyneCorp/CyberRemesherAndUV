@@ -32,7 +32,10 @@ try:
 except ImportError:
     c = None
 
-DEFAULT_MODELS = ["spot", "fandisk", "rocker-arm", "cheburashka", "stanford-bunny"]
+# `cube` is synthesised (see common.SYNTHETIC_MODELS), not downloaded: the community models are
+# all organic or smooth-CAD, so without it the corpus has no flat panel bounded by sharp creases
+# and cannot see that failure class at all.
+DEFAULT_MODELS = ["spot", "fandisk", "rocker-arm", "cheburashka", "stanford-bunny", "cube"]
 
 # Metrics and whether lower is better. These are the benchmark's North Star.
 METRICS = [
