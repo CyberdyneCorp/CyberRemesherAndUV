@@ -36,8 +36,14 @@ public:
 // toward those constraints over `iterations` smoothing steps. `backend`
 // carries every spmv (default backend = CPU reference; a GPU backend
 // accelerates it transparently).
+//
+// `creaseAlignDegrees` widens the set of edges the field aligns to WITHOUT widening the set that
+// becomes a hard seam: any interior edge whose face-normal angle exceeds it pins its faces to the
+// crease direction, while `Mesh::isFeatureEdge` (and so the seam set, period jumps and cut graph)
+// is untouched. 0 disables it, restoring feature/boundary-only alignment.
 [[nodiscard]] CrossField computeCrossField(const Mesh& mesh, int iterations,
-                                           accel::IBackend& backend);
+                                           accel::IBackend& backend,
+                                           float creaseAlignDegrees = 45.0f);
 
 // Alternative cross field derived from the multiresolution per-vertex 4-RoSy
 // orientation field (computePositionField): the coarse-to-fine hierarchy places
