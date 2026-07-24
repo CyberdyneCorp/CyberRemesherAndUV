@@ -40,15 +40,14 @@ public:
 // `creaseAlignDegrees` widens the set of edges the field aligns to WITHOUT widening the set that
 // becomes a hard seam: any interior edge whose face-normal angle exceeds it pins its faces to the
 // crease direction, while `Mesh::isFeatureEdge` (and so the seam set, period jumps and cut graph)
-// is untouched. **Defaults to 0 (disabled).** It is a measured win on curved CAD (fandisk: feature
-// -5.8%, edge CV -9.1%, irregular -8.8% over 7 densities) but a measured REGRESSION on flat CAD
-// bounded by creases (a subdivided cube: edge CV 0.201 -> 0.397, slivers 0.1% -> 1.2%), where
-// pinning every face of a flat panel to its four differently-oriented boundary creases
-// over-constrains a field that should stay smooth. It needs a flatness gate before it can default
-// on; until then callers opt in explicitly. See docs/ROADMAP.md Phase 3 lever c2.
+// is untouched. 0 disables it. Pins are applied only where the face's own-side neighbourhood is
+// genuinely curved: a planar panel's cross field is degenerate, so pinning its border imposes
+// arbitrary structure (ungated, that took a subdivided cube's edge CV 0.201 -> 0.397). With the
+// planarity gate, fandisk improves (feature -2.9%, median +0.25, edge CV -0.008 over 7 densities)
+// and flat CAD is left bit-identical. See docs/ROADMAP.md Phase 3 lever c2.
 [[nodiscard]] CrossField computeCrossField(const Mesh& mesh, int iterations,
                                            accel::IBackend& backend,
-                                           float creaseAlignDegrees = 0.0f);
+                                           float creaseAlignDegrees = 45.0f);
 
 // Alternative cross field derived from the multiresolution per-vertex 4-RoSy
 // orientation field (computePositionField): the coarse-to-fine hierarchy places

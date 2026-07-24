@@ -311,8 +311,8 @@ Anything already measured dead is listed at the end — check it before proposin
   byte-identical** (only fandisk routes native). One regression: fandisk@3000 edge
   CV 0.159 → 0.179. Costs ~15% more triangles in the working mesh, since creases
   can no longer be collapsed across.
-- 🟡 **(c2) Actually crease-align the cross field — BUILT, measured both ways,
-  now OPT-IN (default 0) pending a flatness gate.** `computeCrossField` gained a
+- ✅ **(c2) Actually crease-align the cross field — DONE (2026-07-24), default on
+  behind a planarity gate.** `computeCrossField` gained a
   `creaseAlignDegrees` parameter (`CYBER_QC_FIELD_CREASE_DEG` overrides,
   `CYBER_QC_FIELD_CREASE_DEG` overrides): any interior edge whose face-normal
   angle exceeds it pins its faces to the crease direction, while
@@ -352,7 +352,7 @@ Anything already measured dead is listed at the end — check it before proposin
        quadrangulator that is the universal fallback and the flat-CAD route.
        Defaulting the parameter changed both. The harness only ever exercises
        `quad_method="quad-cover"`, so it was structurally blind to the second.
-    **Follow-up attempts, both measured (2026-07-24):**
+    **Three gate attempts, all measured (2026-07-24). The third works:**
     - ❌ **Consistency gate — measured NO-OP, do not retry.** Hypothesis: a face
       touching several creases (every triangle round a cube corner touches two
       perpendicular ones) pins to whichever comes first in vertex order, so
@@ -369,7 +369,25 @@ Anything already measured dead is listed at the end — check it before proposin
       structure the interior cannot reconcile, whereas a curved surface has a
       curvature-driven preference that crease pins reinforce. A gate must therefore
       test the *surface*, not the constraint set: skip alignment where the
-      neighbourhood is planar. Untried.
+      neighbourhood is planar.
+    - ❌ **Planarity gate v1, EDGE ring — under-applies, do not use.** Skipped the pin
+      when every neighbour across the face's non-crease *edges* was coplanar. It
+      protected the cube, but it also gated off a genuinely curved fixture: a
+      crease-adjacent triangle's edge-neighbours can all sit in the same row of the
+      fold, and a developable surface is exactly coplanar along that row, so the
+      test never sees the direction the surface actually bends in.
+    - ✅ **Planarity gate v2, VERTEX ring — SHIPPED.** Same idea over the vertex
+      ring, which reaches past that row, with faces more than 45° from the face
+      excluded so the fold itself is not counted as its own evidence. Discriminates
+      exactly: on a curved fixture 24 of 24 crease edges are pinned, on a flat one
+      24 of 24 are gated off and the solve is bit-identical. Measured on fandisk
+      over 7 densities vs c1 alone: **feature −4.6% (better 7/7)**, **edge CV
+      0.1656 → 0.1472 (the best of every arm tried, better even than ungated)**,
+      irregular 3.63 → 3.38, median −0.30 ± 0.31 (not distinguishable from zero).
+      Flat CAD is **bit-identical**, and the corpus is **15/18 cells byte-identical**.
+      Residual: fandisk@2600 alone regresses (median −1.79, CV +0.017, irregular
+      +0.70) — one point inside the sd-0.90 density jitter, against a 7/7 feature
+      win.
     - ✅ **The corpus blind spot is CLOSED.** `cube` is now a synthesised member of
       the benchmark corpus (`common.SYNTHETIC_MODELS`, `11_benchmark.DEFAULT_MODELS`).
       It immediately earned its place twice over: it reproduces the regression that
