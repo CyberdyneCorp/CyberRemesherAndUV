@@ -311,8 +311,9 @@ Anything already measured dead is listed at the end — check it before proposin
   byte-identical** (only fandisk routes native). One regression: fandisk@3000 edge
   CV 0.159 → 0.179. Costs ~15% more triangles in the working mesh, since creases
   can no longer be collapsed across.
-- ✅ **(c2) Actually crease-align the cross field — DONE (2026-07-24), default
-  on.** `computeCrossField` gained a `creaseAlignDegrees` parameter (default 45,
+- 🟡 **(c2) Actually crease-align the cross field — BUILT, measured both ways,
+  now OPT-IN (default 0) pending a flatness gate.** `computeCrossField` gained a
+  `creaseAlignDegrees` parameter (`CYBER_QC_FIELD_CREASE_DEG` overrides,
   `CYBER_QC_FIELD_CREASE_DEG` overrides): any interior edge whose face-normal
   angle exceeds it pins its faces to the crease direction, while
   `Mesh::isFeatureEdge` — and therefore the seam set, period jumps and cut graph —
@@ -335,6 +336,25 @@ Anything already measured dead is listed at the end — check it before proposin
     under-sampling class that produced the retracted Phase 2 result.
   - Corpus regression: **12 of 15 cells byte-identical** (only fandisk routes
     native), 0 defects everywhere.
+  - 🔴 **REGRESSION found by visual inspection of the examples, after it had
+    already been merged — it is now default OFF.** Two separate mistakes, both
+    invisible to the corpus harness:
+    1. **Flat CAD gets worse.** On the `04_sharp_edges` subdivided cube, c2 takes
+       edge CV **0.201 → 0.397** and slivers **0.1% → 1.2%** (median 84.0 → 82.3).
+       Pinning every face of a flat panel to its four differently-oriented
+       boundary creases over-constrains a field that should stay smooth. c1 alone
+       is strictly better on that model than both the pre-session baseline AND
+       c1+c2. The corpus (spot/fandisk/rocker/cheburashka/bunny) contains **no
+       flat-CAD model**, so it could not see this.
+    2. **Blast radius was wider than measured.** `computeCrossField`
+       has two callers — `seamless_solver.cpp:181` (native quad-cover, the one
+       measured) and `field_quadrangulator.cpp:464`, the **field-aligned**
+       quadrangulator that is the universal fallback and the flat-CAD route.
+       Defaulting the parameter changed both. The harness only ever exercises
+       `quad_method="quad-cover"`, so it was structurally blind to the second.
+    **To default it on, c2 needs a flatness gate** — skip the constraint on faces
+    whose neighbourhood is planar, or where a face's crease constraints disagree —
+    and the corpus needs a flat-CAD model so the harness can see this class at all.
 - ◻ **(c3) Give the ARAP polish a restoring force toward the field.** A *clamp* was
   tried (every face saturates whatever cap it is given: 5/10/20/30/45 → 5/10/20/30/44)
   and a 4-RoSy fundamental-domain wrap was tried (worse — map-vs-target 5°→17°). A
