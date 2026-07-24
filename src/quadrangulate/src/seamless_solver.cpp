@@ -175,7 +175,10 @@ SeamlessSetup buildSeamlessSetup(const Mesh& mesh, int iterations, accel::IBacke
     // Experimental: derive the cross field from the multiresolution per-vertex
     // orientation (coarse-to-fine singularity placement) instead of single-level
     // face smoothing. Gated so the stock seamless path is unchanged.
-    if (std::getenv("CYBER_QC_CROSSFIELD_MULTIRES") != nullptr) {
+    if (std::getenv("CYBER_QC_KC_FIELD") != nullptr) {
+        // Lever c7: Knoppel-Crane globally-optimal field via inverse iteration (crossfield.cpp).
+        setup.field = computeCrossFieldKnoppelCrane(mesh, iterations, backend);
+    } else if (std::getenv("CYBER_QC_CROSSFIELD_MULTIRES") != nullptr) {
         setup.field = computeCrossFieldFromOrientation(mesh, iterations);
     } else {
         setup.field = computeCrossField(mesh, iterations, backend);

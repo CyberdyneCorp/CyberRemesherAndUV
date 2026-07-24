@@ -59,4 +59,16 @@ public:
 // so the stock seamless path (and the field-aligned engine) are unchanged.
 [[nodiscard]] CrossField computeCrossFieldFromOrientation(const Mesh& mesh, int iterations);
 
+// Knoppel-Crane globally-optimal 4-RoSy field (Globally Optimal Direction Fields, SIGGRAPH
+// 2013) on the PER-FACE (dual) connection Laplacian. The smoothest field is the eigenvector of
+// the smallest generalized eigenvalue of the connection Laplacian (A, B); this finds it by
+// inverse power iteration on the existing spmv+CG, reusing computeCrossField's frames, transport
+// phases and feature/crease pins verbatim (c1/c2 unchanged). A globally-optimal field places
+// fewer, better-located singularity cones than local relaxation, which is the measured native-vs-
+// Geogram gap this targets. Gated behind CYBER_QC_KC_FIELD; falls back to computeCrossField if the
+// eigensolver diverges, so it can only help or no-op. See docs/ROADMAP.md Phase 3 lever c7.
+[[nodiscard]] CrossField computeCrossFieldKnoppelCrane(const Mesh& mesh, int iterations,
+                                                       accel::IBackend& backend,
+                                                       float creaseAlignDegrees = 45.0f);
+
 }  // namespace cyber::remesh

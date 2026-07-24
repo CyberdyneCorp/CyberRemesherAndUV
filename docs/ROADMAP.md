@@ -488,10 +488,44 @@ Anything already measured dead is listed at the end — check it before proposin
   almost no detectable feature edges because *projection smooths creases* (only 17
   tagged on fandisk). The relax path pins feature vertices and the projection then
   undoes it. Helps feature error *and* median.
-- ◻ **(c7) Knöppel–Crane globally-optimal direction field** (native eigensolver).
+- 🔬 **(c7) Knöppel–Crane globally-optimal direction field** (native eigensolver)
+  — **BUILT and measured 2026-07-24; a partial win, kept behind `CYBER_QC_KC_FIELD`.**
   Recorded as deferred "only if the Geogram dependency is ever forbidden" — i.e.
   deferred as a *dependency* play, never evaluated as a *quality* play. Given (c2),
   a better field is now on the critical path.
+  - **What shipped (flag-gated).** `computeCrossFieldKnoppelCrane`
+    (`src/quadrangulate/src/crossfield.cpp`) builds the true PER-FACE (dual)
+    connection Laplacian `L = D − W(transport)` over the *same* per-face frames,
+    transport phases and feature/crease pins as the iterative field (c1/c2 reused
+    verbatim via the extracted `buildFrameAndConstraints` prologue), then takes its
+    smallest generalized eigenvector by inverse power iteration on the existing
+    spmv + CG — dependency-free, no SciPP. `M = L + εB` (Tikhonov shift → SPD),
+    penalty Dirichlet pins (`P=1e6`), diagonal lumped-mass `B`. Warm-started from
+    `computeCrossField`; **falls back to it on any CG divergence**, so KC can only
+    help or no-op. Gated behind `CYBER_QC_KC_FIELD`; off ⇒ byte-identical (goldens
+    pass, both backends).
+  - **Result — reduces native spurious singularities and irregular %, moving toward
+    Geogram (env `CYBER_QC_ROUTE_CREASE=0.0001` forces organics native; counts
+    matched <5%):**
+    | model | metric | current native | KC native | vendored (Geogram) |
+    |---|---|---|---|---|
+    | spot | irregular % | 4.63 | **3.81** | 1.99 |
+    | spot | median | 79.93 | **82.23** | 84.24 |
+    | spot | field singular= | 77 | **73** | — |
+    | cheburashka | irregular % | 5.71 | **4.62** | 3.68 |
+    | cheburashka | median | 79.72 | **81.59** | 80.38 |
+
+    KC closes ~⅓–½ of the field gap on both organics and *recovers median* (spot
+    +2.3, cheburashka +1.9) — the global field does place fewer, better cones, as
+    the thesis predicted. It does **not** reach Geogram's 2.0% on spot, so it is a
+    partial win, not a full close; not yet enough on its own to route organics
+    native by default.
+  - **Next untested lever (documented, not a dead end).** The per-face *dual*
+    discretization with *uniform* weights is the cheapest cut, not the paper's
+    per-vertex cotan connection Laplacian. Two levers remain to push KC to Geogram
+    parity: (i) dual-cotan edge weights (`w = shared-edge-length / dual-edge-dist`),
+    and (ii) the paper-faithful per-VERTEX cotan build (crib `position_field.cpp`
+    frames). Either could close the residual spot 3.81 → ~2.0 gap.
 
 **Tier 3 — narrower, concrete**
 
