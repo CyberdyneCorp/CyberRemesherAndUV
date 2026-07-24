@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.2.5
+
+### Added
+
+- **Open / non-watertight surfaces now remesh usefully by default.** An open
+  island (a surface with a genuine boundary rim) previously under-traced badly at
+  low target density — an open paraboloid at a ~900-quad request came out as ~92
+  huge faces at ~27° median angle. The `fixHoles` cleanup that fills the
+  under-traced gaps is now on by default (opt out with `CYBER_QC_NO_OPEN_CLEANUP`);
+  the same request now produces ~1744 uniform quads at ~78° median, edge-length
+  CV ~0.27. What had kept it opt-in was an edge-CV blowup traced to `simplifyGraph`
+  over-dissolving legitimately-valence-2 isoline samples on open surfaces; the
+  cleanup now skips that step on open islands. Closed meshes are byte-identical.
+
+### Changed
+
+- **Sharper feature fidelity on crease-heavy CAD.** The native seamless-UV path
+  now preserves crease networks through the isotropic pre-remesh (they were being
+  shredded from one connected network into dozens of fragments) and aligns the
+  cross field to creases where the surface is genuinely curved (a planarity gate
+  keeps flat panels untouched, where alignment would degrade them). Measured on
+  fandisk at matched quad count, feature-following error improves 0.75 → 0.62.
+  Smooth organic models are byte-identical.
+
 ## 0.2.4
 
 ### Fixed
