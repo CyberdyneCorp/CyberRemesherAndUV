@@ -403,6 +403,25 @@ Anything already measured dead is listed at the end — check it before proposin
   mechanism and was never built. Without it, (c2) cannot reach the map: the map
   runs ~24° off the field even with the polish disabled.
 
+- ❌ **(c1b) Vendored-path crease visibility — REFUTED (2026-07-24). Do not retry.**
+  The vendored solver never calls `setSharpEdgeDegrees`, so it runs at AutoRemesher's
+  default 90° where Geogram's is 45, and at 90 the corpus sees almost none of its
+  creases (constrained edges at 45 vs 90: fandisk 706/299, cheburashka 283/163,
+  rocker-arm 223/10, bunny 379/20, spot 45/0). It looked like the exact analogue of
+  (c1) applied where **4 of 6 models actually route** — the only visible path to
+  cheburashka's 1.8x gap. **It is a COUNT ARTIFACT, exactly as an earlier workflow
+  round claimed.** Lowering it inflates the mesh instead of aligning it: at 45°,
+  quad counts go stanford-bunny 2644 → **15105 (+471%)**, rocker-arm +48%,
+  cheburashka +31%. Since `feature_error` falls as `count^-0.5`, the apparent
+  feature gains (cheburashka 1.15 → 0.80) are bought entirely with polygons. Where
+  counts stay comparable the quality collapses: median rocker-arm −11.3°,
+  cheburashka −8.9°, stanford-bunny −27°. 60° is milder and still fails (bunny
+  +157% count, median −19°). Root cause it cannot escape: the value feeds BOTH the
+  vendored pre-remesh (`autoremesher.cpp:291`) AND the quad_cover parameterizer's
+  hard-edge constraints (`:534`), and unlike the native path those cannot be
+  decoupled without patching vendored source — so it behaves like the shared-threshold
+  widening that was already measured net-negative natively.
+
 **Tier 2 — structural**
 
 - ◻ **(c4) Force cones at crease corners / junctions.** Singularity *placement* is
