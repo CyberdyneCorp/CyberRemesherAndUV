@@ -169,9 +169,30 @@ SeamlessUv computeSeamlessUvNative(const Mesh& mesh, float targetEdgeLength, flo
     const float kFeatureDihedralDegrees =
         featEnv != nullptr ? static_cast<float>(std::atof(featEnv)) : 40.0f;
     constexpr int kFieldIterations = 40;
+    // CYBER_QC_PRESERVE_CREASE_DEG (docs/ROADMAP.md Phase 3, lever c1): the threshold used to
+    // PROTECT crease geometry through the isotropic pre-remesh, decoupled from the (narrower)
+    // threshold that decides hard seams after it.
+    //
+    // isotropicRemesh already refuses to collapse feature vertices, flip feature edges or smooth
+    // them (isotropic.cpp:210/254/318) — but it only sees what `tagFeatureEdges` marked, and this
+    // tag takes an INCLUDED angle, so the shipped 40 means "face-normal angle >= 140", i.e. only
+    // knife-edge folds. fandisk has ZERO such edges, so the remesher is told the part has no
+    // features and freely remeshes across every crease. MEASURED on fandisk at ~3000 quads: the
+    // crease network goes from 706 edges in ONE connected component (2 dangling ends) to 449 edges
+    // in 55 components with 136 dangling ends — 36% of the creases destroyed outright and the rest
+    // shattered. That is upstream of every constraint-layer lever tried so far (M2a-M2d), and it
+    // is why pinning the field to creases injected singularities rather than removing them.
+    //
+    // 135 here means "protect anything with a face-normal angle above 45", matching
+    // creaseEdgeFraction's routing test and examples/common.py's feature_error. It deliberately
+    // does NOT change the post-remesh tag below: widening THAT turns every crease into a hard seam,
+    // measured at deg 135 as feature 0.82 -> 0.77 but median 83.4 -> 77.5 and irregular 3.3 -> 7.1.
+    const char* preserveEnv = std::getenv("CYBER_QC_PRESERVE_CREASE_DEG");
+    const float kPreserveDihedralDegrees =
+        preserveEnv != nullptr ? static_cast<float>(std::atof(preserveEnv)) : 135.0f;
     Mesh work = mesh;
     work.triangulate();  // feature tagging + the solve both need a pure-triangle mesh
-    work.tagFeatureEdges(kFeatureDihedralDegrees);
+    work.tagFeatureEdges(kPreserveDihedralDegrees);
 
     if (cancel != nullptr && cancel->isCancelled()) {
         logNative(false, "cancelled");

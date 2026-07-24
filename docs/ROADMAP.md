@@ -292,19 +292,35 @@ Anything already measured dead is listed at the end — check it before proposin
 
 **Tier 1 — opened by the refutation**
 
-- ◻ **(c1) Preserve crease polylines through the isotropic pre-remesh.** ⭐ Highest
-  value. fandisk's ~205 crease edges reach the solver as ~83 fragments with ~118
-  dangling ends, longest path 7; no constraint can span a polyline chopped into
-  ~2.5-edge pieces. Upstream of everything M2a–M2d attacked, which is *why* they
-  all failed. **Prove it:** re-run the M2d `creaseCensus` telemetry afterwards —
-  admitted-crease coverage must rise from 1–3.5% to most of the crease set. If it
-  does not move, the crease-alignment thesis itself needs re-examining rather than
-  another lever.
-- ◻ **(c2) Actually crease-align the cross field.** Hard directional constraints on
-  crease edges in the 4-RoSy solve, not just cutting them as seams. Universally
-  assumed already true; measured false. (`CYBER_QC_FIELD_CREASE_DEG` was added on
-  the discarded M2d branch but never cleanly measured in isolation — treat as
-  untried and A/B it on its own.)
+- ✅ **(c1) Preserve crease polylines through the isotropic pre-remesh — DONE
+  (2026-07-24), the first lever that works.** Diagnosis confirmed and quantified
+  directly: on fandisk at ~3000 quads the crease network went from **706 edges in
+  ONE connected component** (2 dangling ends, 22 junctions) to **449 edges in 55
+  components with 136 dangling ends** — 36% of the creases destroyed outright and
+  the rest shattered. Root cause: `isotropicRemesh` *does* protect features
+  (never collapses feature vertices, flips feature edges or smooths them —
+  `isotropic.cpp:210/254/318`) but only sees what `tagFeatureEdges` marked, and
+  that call takes an **included** angle, so the shipped 40 means "face-normal
+  angle ≥ 140" — fandisk has **zero** such edges, so the remesher was told the
+  part has no features. Fix: tag **wide before** the remesh (protect) and keep the
+  **narrow tag after** it (seams unchanged), via `CYBER_QC_PRESERVE_CREASE_DEG`,
+  default 135. Crease network now survives **exactly** (706 edges, 1 component, 2
+  dangling — identical to the source). Measured: feature error −11.3% / −6.9% /
+  −5.1% at 2600 / 3000 / 3400 quads, **median flat** (−0.02 / −0.45 / +0.72),
+  normal error −1.3° / −0.6°, 0 defects, and **12 of 15 corpus cells
+  byte-identical** (only fandisk routes native). One regression: fandisk@3000 edge
+  CV 0.159 → 0.179. Costs ~15% more triangles in the working mesh, since creases
+  can no longer be collapsed across.
+- 🟡 **(c2) Actually crease-align the cross field — MEASURED, promising, NOT
+  shipped.** Hard directional constraints on crease edges in the 4-RoSy solve,
+  without widening the hard-seam set (`isFeatureEdge`, period jumps and the cut
+  graph untouched). **Alone it is net-negative** — feature −4% but median
+  83.4 → 79.8, irregular 3.3 → 5.0 — because pinning the field to 55 fragments
+  with 136 dangling ends injects conflicting directions. **On top of (c1) it
+  roughly doubles c1's gain**: feature −18.9% / −12.4% / −12.8% vs baseline, with
+  median and irregular *improving* at 2600 and 3400. Blocker: **median −2.3° at
+  3000 specifically**. Worth finishing — understand why 3000 behaves differently
+  before shipping. This ordering (c1 then c2) is now evidence, not a guess.
 - ◻ **(c3) Give the ARAP polish a restoring force toward the field.** A *clamp* was
   tried (every face saturates whatever cap it is given: 5/10/20/30/45 → 5/10/20/30/44)
   and a 4-RoSy fundamental-domain wrap was tried (worse — map-vs-target 5°→17°). A
@@ -351,7 +367,7 @@ Anything already measured dead is listed at the end — check it before proposin
 multi-resolution coarse extraction (proven byte-identical no-op) · T-junction
 cleanup / `FixFlipSat` · QuadriFlow flip-repair order · adaptive sizing for
 quad-cover (irregular/CV explode) · equiareal MIQ term · min-cost-flow port ·
-feature-degree sweep · curvature-weighted seam routing · ARAP clamp · ARAP RoSy wrap.
+feature-degree sweep (re-measured 2026-07-24: widening the SHARED threshold moves feature 0.82 → 0.77 but costs median 83.4 → 77.5, CV 0.159 → 0.252 and irregular 3.3 → 7.1, because every extra tagged edge becomes another hard seam — this is what motivated splitting the preserve/seam thresholds in c1) · curvature-weighted seam routing · ARAP clamp · ARAP RoSy wrap.
 
 ⚠️ (c2) and (c3) are inferences from the ~21° / ~24° measurements, not themselves
 measured hypotheses — A/B them like anything else.
