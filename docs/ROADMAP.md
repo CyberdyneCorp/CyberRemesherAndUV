@@ -271,15 +271,90 @@ Two independent reasons, both measured:
      mechanism was driven to exactness (crease level sets landing bit-exactly on
      the integer lattice) and still moved feature error by less than a sixth of
      the run-to-run noise, while costing median angle on the one model it reaches.
-  **Open follow-up (c): preserve crease polylines through the isotropic stage.**
-  fandisk's ~205 crease edges reach the solver as ~83 fragments with ~118 dangling
-  ends — no constraint can span a polyline chopped into ~2.5-edge pieces. This is
-  upstream of the parameterization and is where the next attempt belongs. **Settle
-  the routing threshold first**, or any native-solver investment stays capped at
-  1/5 of the corpus.
+  **Open follow-ups: see the untried-lever list below.**
 **Exit (partial):** robustness win on hard-surface geometry *(met)*; validity on
 the smooth corpus *(**met** — 5/5 vs QuadriFlow)*; feature alignment *(not met —
 0/5, corpus-wide)*.
+
+### Untried levers for retopology quality (2026-07-24)
+
+Everything M1–M2d attacked lives in the **grid / constraint** layer. The 2026-07-23
+refutation showed two problems *upstream* of that layer which nobody has touched:
+
+- the cross field is **not** crease-aligned (fandisk ~21° median deviation from its
+  crease directions; a *random* field gives ~22.5°), and
+- the ARAP polish has **no restoring force toward the field at all** — median
+  |rotation| climbs monotonically to ~43°, the maximum a 4-RoSy target can be off
+  by, on both fandisk (CAD) and spot (organic).
+
+So the levers below are ranked by that reframing, not by the old grid-phase story.
+Anything already measured dead is listed at the end — check it before proposing.
+
+**Tier 1 — opened by the refutation**
+
+- ◻ **(c1) Preserve crease polylines through the isotropic pre-remesh.** ⭐ Highest
+  value. fandisk's ~205 crease edges reach the solver as ~83 fragments with ~118
+  dangling ends, longest path 7; no constraint can span a polyline chopped into
+  ~2.5-edge pieces. Upstream of everything M2a–M2d attacked, which is *why* they
+  all failed. **Prove it:** re-run the M2d `creaseCensus` telemetry afterwards —
+  admitted-crease coverage must rise from 1–3.5% to most of the crease set. If it
+  does not move, the crease-alignment thesis itself needs re-examining rather than
+  another lever.
+- ◻ **(c2) Actually crease-align the cross field.** Hard directional constraints on
+  crease edges in the 4-RoSy solve, not just cutting them as seams. Universally
+  assumed already true; measured false. (`CYBER_QC_FIELD_CREASE_DEG` was added on
+  the discarded M2d branch but never cleanly measured in isolation — treat as
+  untried and A/B it on its own.)
+- ◻ **(c3) Give the ARAP polish a restoring force toward the field.** A *clamp* was
+  tried (every face saturates whatever cap it is given: 5/10/20/30/45 → 5/10/20/30/44)
+  and a 4-RoSy fundamental-domain wrap was tried (worse — map-vs-target 5°→17°). A
+  **penalty term pulling the Jacobian back toward the field** is a different
+  mechanism and was never built. Without it, (c2) cannot reach the map: the map
+  runs ~24° off the field even with the polish disabled.
+
+**Tier 2 — structural**
+
+- ◻ **(c4) Force cones at crease corners / junctions.** Singularity *placement* is
+  unconstrained today; part of QuadriFlow's crease behaviour comes from where its
+  cones land.
+- ◻ **(c5) Replace the 2% routing threshold with a measured best-of-both.** Today
+  `creaseEdgeFraction ≥ 0.02` is a proxy reaching only 1/5 of the corpus, and M2c
+  proved tuning the number is net-negative. Running *both* backends and scoring
+  them (median / irregular / CV / defects) gives best-of on every model. Costs a
+  second solve; must be kill-switchable. Also unblocks any native-solver work from
+  being capped at 1/5.
+- ◻ **(c6) Crease-preserving surface projection.** M2a found the output carries
+  almost no detectable feature edges because *projection smooths creases* (only 17
+  tagged on fandisk). The relax path pins feature vertices and the projection then
+  undoes it. Helps feature error *and* median.
+- ◻ **(c7) Knöppel–Crane globally-optimal direction field** (native eigensolver).
+  Recorded as deferred "only if the Geogram dependency is ever forbidden" — i.e.
+  deferred as a *dependency* play, never evaluated as a *quality* play. Given (c2),
+  a better field is now on the critical path.
+
+**Tier 3 — narrower, concrete**
+
+- ◻ **(c8) Finish the M3 open-surface cleanup** — the `simplifyGraph` turn-angle
+  guard is explicitly not done, which is why `CYBER_QC_OPEN_CLEANUP` stays opt-in.
+  Measured prize on an open paraboloid: **median 50° → 80°**. Best
+  value-per-effort item here.
+- ◻ **(c9) Tube-aware coarsening** for the multiresolution cross field — named as
+  "the real fix" after multires was found to help smooth models but bridge thin
+  tubes (the bunny-ears case). Identified, never built.
+- ◻ **(c10) cheburashka edge-CV** (0.22 vs QuadriFlow 0.15, the corpus's widest CV
+  gap). Shape-match bought ~20% corpus-wide; nothing model-specific has been tried
+  for the outlier.
+
+**Measured dead — do not re-try** (each has a numbered entry above or in
+`cad-feature-robustness`): M2a vertex snap · M2b gauge-pin · M2c routing-threshold ·
+**M2d per-feature-edge integer constraints** · (4a) local valence optimization ·
+multi-resolution coarse extraction (proven byte-identical no-op) · T-junction
+cleanup / `FixFlipSat` · QuadriFlow flip-repair order · adaptive sizing for
+quad-cover (irregular/CV explode) · equiareal MIQ term · min-cost-flow port ·
+feature-degree sweep · curvature-weighted seam routing · ARAP clamp · ARAP RoSy wrap.
+
+⚠️ (c2) and (c3) are inferences from the ~21° / ~24° measurements, not themselves
+measured hypotheses — A/B them like anything else.
 
 ## Phase 4 — Close the median-angle gap — ✅ largely closed by the quad-cover default
 
