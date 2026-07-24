@@ -506,7 +506,8 @@ Anything already measured dead is listed at the end — check it before proposin
     954 → 1066, median 78.7 → **75.6**, edge CV 1.696 → **1.890**. It makes both
     metrics slightly WORSE, and the flat-grid corner symptom the old TODO names
     ("interior 25→20, 7 triangles") did not reproduce. Reverted.
-  - 🟢 **The blocker is DIAGNOSED (2026-07-24): `simplifyGraph` over-dissolves
+  - ✅ **SHIPPED (2026-07-24) — default on, opt out with `CYBER_QC_NO_OPEN_CLEANUP`.**
+    Blocker was `simplifyGraph` over-dissolving
     valence-2 isoline samples on open surfaces.** Bisected the whole cleanup
     pipeline by env-gating each step on the open paraboloid at request 1200
     (all-quad, 0 defects throughout):
@@ -524,15 +525,18 @@ Anything already measured dead is listed at the end — check it before proposin
     `collapseTriangles`, `removeSingleEndpoints`) are near-no-ops here; they only
     matter because they re-trigger `simplifyGraph`. This is a controlled toggle,
     not a count artifact: `simplifyGraph` is itself what changes the count.
-  - **The candidate fix is therefore "run the open-surface cleanup WITHOUT
-    `simplifyGraph`", not a turn-angle guard.** `simplifyGraph` is needed/harmless
-    on the CLOSED corpus (which runs it today with good CV), so the fix is to skip
-    it specifically on open islands. NOT YET SHIPPED: the fixHoles-only arm lands
-    at 1920 quads on a 1200 request (~1.6x over), so before defaulting it the
-    median/CV wins must be re-confirmed **count-matched** (request fewer quads so
-    it lands on target), and it must be checked byte-neutral on the closed corpus.
-  - Worth it: on open surfaces this is a +16° median swing with edge CV *below*
-    today's baseline — the largest untapped single-metric prize in this list.
+  - **The fix: run the open cleanup WITHOUT `simplifyGraph` on open islands, and
+    default it on.** Open islands now take the raw graph and skip straight to
+    `fixHoles`; only closed islands run the collapse pipeline. Gated on the
+    existing `m_preserveInputBoundary` (= `!closed`), so **the closed corpus is
+    byte-identical** — verified 18/18 corpus cells and all 7 broken-robustness
+    cases (2 open) still manifold. Regression guard:
+    `python/cyberremesh/tests/test_open_surface_cleanup.py`, verified discriminating
+    (fails on the 92-face under-trace and CV 0.93 with `CYBER_QC_NO_OPEN_CLEANUP`).
+  - Effect where the paraboloid classifies open (low density): request 900 goes
+    from **92 faces / median 27° / CV 0.93** to **~1744 quads / median 78° / CV
+    0.27**. This was the largest untapped single-metric prize in the list; it is
+    now the default.
 - ◻ **(c9) Tube-aware coarsening** for the multiresolution cross field — named as
   "the real fix" after multires was found to help smooth models but bridge thin
   tubes (the bunny-ears case). Identified, never built.
