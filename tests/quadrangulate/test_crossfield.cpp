@@ -115,19 +115,20 @@ TEST_CASE("cross field on an empty mesh is empty") {
     REQUIRE(field.size() == 0);
 }
 
-// Crease alignment of the field (docs/ROADMAP.md Phase 3, lever c2).
+// Crease alignment of the field, and its planarity gate (docs/ROADMAP.md Phase 3, lever c2).
 //
-// The field is constrained to run along feature edges, but `isFeatureEdge` also decides the hard
-// seams, so widening it to catch ordinary creases shreds the surface into seam-bounded patches
-// (measured: median 83.4 -> 77.5). CYBER_QC_FIELD_CREASE_DEG instead widens ONLY the alignment
-// set, leaving the seam set alone.
-//
-// This pins the property that motivated the knob: the assumption that our field was already
-// crease-aligned was measured FALSE on real CAD input (fandisk's median 4-RoSy deviation from its
-// creases was ~21 degrees, against ~22.5 for a random field). Here a creased fixture must come out
-// measurably better aligned with the knob on than with it off.
-TEST_CASE("cross field aligns to creases when the alignment set is widened") {
-    // Two planes meeting at 90 degrees: a single straight crease down the middle.
+// `creaseAlignDegrees` widens the set of edges the field aligns to WITHOUT widening the hard-seam
+// set. It must apply on a CURVED surface and be suppressed on a FLAT one: a planar panel's cross
+// field is degenerate (every orientation is equally smooth), so pinning its border imposes
+// arbitrary structure the interior cannot reconcile — measured ungated, that took a subdivided
+// cube's edge CV from 0.201 to 0.397.
+namespace {
+
+// A sheet folded 90 degrees along a straight crease at s = 0. Each panel is a cylinder section of
+// radius `radius` (<= 0 gives a flat panel), so the curvature is CONSTANT — including right at the
+// crease, which is where the planarity gate looks. A quadratic bend would be flat exactly there
+// and would read as planar however large its coefficient.
+Mesh makeFoldedSheet(float radius, float shear = 0.0f) {
     std::vector<Vec3> p;
     std::vector<std::vector<cyber::Index>> f;
     const int n = 12;
@@ -135,8 +136,18 @@ TEST_CASE("cross field aligns to creases when the alignment set is widened") {
         const float t = static_cast<float>(i) / static_cast<float>(n);
         for (int j = 0; j <= n; ++j) {
             const float s = static_cast<float>(j) / static_cast<float>(n) * 2.0f - 1.0f;
-            // s < 0 lies in the z=0 plane, s > 0 folds up into the y=0 plane.
-            p.push_back(s <= 0.0f ? Vec3{t, -s, 0.0f} : Vec3{t, 0.0f, s});
+            const float u = std::abs(s);  // arc length away from the crease
+            float a = u, b = 0.0f;        // flat: runs straight out, no rise
+            if (radius > 0.0f) {
+                a = radius * std::sin(u / radius);
+                b = radius * (1.0f - std::cos(u / radius));
+            }
+            // s <= 0 runs out in +y rising in +z; s > 0 runs up in +z rising in +y.
+            // `shear` slews the parametrisation across the crease so the relaxed field is NOT
+            // already crease-aligned; without it this fixture cannot discriminate, because the
+            // smooth solution lands on the crease direction anyway and pinning changes nothing.
+            const float ts = t + shear * s;
+            p.push_back(s <= 0.0f ? Vec3{ts, a, b} : Vec3{ts, b, a});
         }
     }
     const auto id = [&](int i, int j) { return static_cast<cyber::Index>(i * (n + 1) + j); };
@@ -146,43 +157,71 @@ TEST_CASE("cross field aligns to creases when the alignment set is widened") {
             f.push_back({id(i, j), id(i + 1, j + 1), id(i, j + 1)});
         }
     }
-    const Mesh mesh = Mesh::fromIndexed(p, f);
+    return Mesh::fromIndexed(p, f);
+}
+
+// Median angle between the field's cross and the crease direction (+x), over faces touching the
+// crease. A 4-RoSy cross is invariant under quarter turns, so the deviation folds into [0, 45].
+float creaseDeviationDeg(const Mesh& mesh, const remesh::CrossField& field) {
+    std::vector<float> devs;
+    for (cyber::Index i = 0; i < mesh.edgeCapacity(); ++i) {
+        const cyber::EdgeId e{i};
+        if (!mesh.isAlive(e) || mesh.edgeFaceCount(e) != 2) {
+            continue;
+        }
+        const std::vector<cyber::FaceId> ef = mesh.edgeFaces(e);
+        const Vec3 n0 = normalized(mesh.faceNormal(ef[0]));
+        const Vec3 n1 = normalized(mesh.faceNormal(ef[1]));
+        if (dot(n0, n1) >= std::cos(45.0f * cyber::kPi / 180.0f)) {
+            continue;  // not a crease
+        }
+        for (const cyber::FaceId face : ef) {
+            const Vec3 d = normalized(field.direction(face));
+            float a = std::acos(std::clamp(std::abs(d.x), 0.0f, 1.0f)) * 180.0f / cyber::kPi;
+            a = std::fmod(a, 90.0f);
+            devs.push_back(std::min(a, 90.0f - a));
+        }
+    }
+    REQUIRE(!devs.empty());
+    std::sort(devs.begin(), devs.end());
+    return devs[devs.size() / 2];
+}
+
+}  // namespace
+
+// Count faces whose cross actually moved between two solves.
+std::size_t differingFaces(const Mesh& mesh, const remesh::CrossField& a,
+                           const remesh::CrossField& b) {
+    std::size_t diff = 0;
+    for (std::size_t i = 0; i < a.real.size(); ++i) {
+        if (!mesh.isAlive(cyber::FaceId{static_cast<cyber::Index>(i)})) {
+            continue;
+        }
+        if (std::abs(a.real[i] - b.real[i]) > 1e-5f || std::abs(a.imag[i] - b.imag[i]) > 1e-5f) {
+            ++diff;
+        }
+    }
+    return diff;
+}
+
+TEST_CASE("crease alignment applies on a curved surface and is gated off on a planar one") {
     auto backend = cyber::accel::defaultBackend();
 
-    // Median angle between the field's cross and the crease direction, over faces touching the
-    // crease. The crease runs along +x, and a 4-RoSy cross is invariant under 90-degree turns, so
-    // the deviation folds into [0, 45].
-    const auto creaseDeviationDeg = [&](const remesh::CrossField& field) {
-        std::vector<float> devs;
-        for (cyber::Index i = 0; i < mesh.edgeCapacity(); ++i) {
-            const cyber::EdgeId e{i};
-            if (!mesh.isAlive(e) || mesh.edgeFaceCount(e) != 2) {
-                continue;
-            }
-            const std::vector<cyber::FaceId> ef = mesh.edgeFaces(e);
-            const Vec3 n0 = normalized(mesh.faceNormal(ef[0]));
-            const Vec3 n1 = normalized(mesh.faceNormal(ef[1]));
-            if (dot(n0, n1) >= std::cos(45.0f * cyber::kPi / 180.0f)) {
-                continue;  // not a crease
-            }
-            for (const cyber::FaceId face : ef) {
-                const Vec3 d = normalized(field.direction(face));
-                float a = std::acos(std::clamp(std::abs(d.x), 0.0f, 1.0f)) * 180.0f / cyber::kPi;
-                a = std::fmod(a, 90.0f);
-                devs.push_back(std::min(a, 90.0f - a));
-            }
-        }
-        REQUIRE(!devs.empty());
-        std::sort(devs.begin(), devs.end());
-        return devs[devs.size() / 2];
-    };
+    // Curved: cylinder-section panels, so there is real curvature AT the crease (a quadratic bend
+    // would be flat exactly there and read as planar however large its coefficient).
+    const Mesh curved = makeFoldedSheet(0.8f, 0.6f);
+    const remesh::CrossField cOff = remesh::computeCrossField(curved, 120, *backend, 0.0f);
+    const remesh::CrossField cOn = remesh::computeCrossField(curved, 120, *backend, 45.0f);
+    const std::size_t curvedDiff = differingFaces(curved, cOff, cOn);
+    CAPTURE(curvedDiff);
+    CHECK(curvedDiff > 0);                          // the gate admits the pins here
+    CHECK(creaseDeviationDeg(curved, cOn) < 5.0f);  // and the result stays crease-aligned
 
-    // Driven by parameter, not the environment: env-driven tests are order-dependent global state.
-    const float off = creaseDeviationDeg(remesh::computeCrossField(mesh, 120, *backend, 0.0f));
-    const float on = creaseDeviationDeg(remesh::computeCrossField(mesh, 120, *backend, 45.0f));
-
-    CAPTURE(off);
-    CAPTURE(on);
-    CHECK(on < off);   // widening the alignment set must actually align the field to the crease
-    CHECK(on < 5.0f);  // and on a single straight crease it should be nearly exact
+    // Planar: a flat panel's field is degenerate, so a crease pin would impose arbitrary
+    // structure. Ungated, exactly this case regressed flat CAD (cube edge CV 0.201 -> 0.397).
+    // The gate must suppress it and leave the solve untouched.
+    const Mesh flatSheet = makeFoldedSheet(0.0f, 0.6f);
+    const remesh::CrossField fOff = remesh::computeCrossField(flatSheet, 120, *backend, 0.0f);
+    const remesh::CrossField fOn = remesh::computeCrossField(flatSheet, 120, *backend, 45.0f);
+    CHECK(differingFaces(flatSheet, fOff, fOn) == 0);
 }

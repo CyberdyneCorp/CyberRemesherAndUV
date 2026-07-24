@@ -13,6 +13,11 @@ namespace cyber::remesh {
 
 namespace {
 
+// How far a neighbouring face's normal may tilt before the neighbourhood counts as curved rather
+// than a flat panel. Deliberately tiny: a cube's same-panel neighbours are exactly coplanar, so
+// anything with real curvature is excluded by a fraction of a degree.
+constexpr float kPlanarNeighbourDegrees = 1.0f;
+
 // Unit reference tangent of a face: its first edge, projected into the face
 // plane and orthonormalised against the face normal.
 Vec3 faceTangent(const Mesh& mesh, FaceId f, Vec3 normal) {
@@ -91,6 +96,50 @@ CrossField computeCrossField(const Mesh& mesh, int iterations, accel::IBackend& 
                alignCos;
     };
 
+    // PLANARITY GATE for crease alignment. Crease pins help a CURVED surface and hurt a FLAT one:
+    // measured, they freeze 52.0% of fandisk's faces and improve it, but only 14.7% of a
+    // subdivided cube's and take its edge CV 0.201 -> 0.397. The reason is not the amount of
+    // constraint (fandisk freezes 3.5x more) — it is that a planar panel's cross field is
+    // DEGENERATE. Every orientation is equally smooth there, so pinning a border band imposes
+    // arbitrary structure that the free interior cannot reconcile, and the cells go uneven. On a
+    // curved surface the field already has a curvature-driven preference that the pins reinforce.
+    //
+    // So ask about the SURFACE, not the constraint: look across this face's non-crease edges only
+    // — deliberately not across the crease, whose whole point is to be a fold — and skip the pin
+    // when every own-side neighbour is coplanar. The separation is clean rather than delicate: a
+    // cube's same-panel neighbours are EXACTLY coplanar (0 degrees), while any curvature at all
+    // puts fandisk past a fraction of a degree.
+    const float planarCos = std::cos(degreesToRadians(kPlanarNeighbourDegrees));
+    const float sameSideCos = std::cos(degreesToRadians(45.0f));
+    const auto planarNeighbourhood = [&](const FaceId f, const std::vector<VertexId>& fv) {
+        const Vec3 n = normalized(mesh.faceNormal(f));
+        // Use the VERTEX ring, not the edge ring. A crease-adjacent triangle's edge-neighbours can
+        // all lie in the same row of the fold, and a developable surface is exactly coplanar along
+        // that row — so an edge-only test reads a curved cylinder section as planar and gates the
+        // pin off wherever it is actually wanted. The vertex ring reaches the faces on the other
+        // side of that row, which is where the curvature shows up.
+        //
+        // Faces past `sameSideCos` are on the far side of the fold; the fold is the crease itself,
+        // not evidence about this face's own panel, so they are excluded rather than counted as
+        // curvature.
+        for (const VertexId v : fv) {
+            for (const FaceId g : mesh.vertexFaces(v)) {
+                if (g.value == f.value || !mesh.isAlive(g) || mesh.faceSize(g) != 3) {
+                    continue;
+                }
+                const float d = dot(n, normalized(mesh.faceNormal(g)));
+                if (d < sameSideCos) {
+                    continue;  // across the fold: not own-side evidence
+                }
+                if (d < planarCos) {
+                    return false;  // an own-side neighbour bends away: genuinely curved
+                }
+            }
+        }
+        return true;
+    };
+
+    std::size_t dbgCrease = 0, dbgGated = 0, dbgPinned = 0;
     // Constrain faces touching a feature or boundary edge to align with it.
     std::vector<char> constrained(nf, 0);
     for (std::size_t c = 0; c < nf; ++c) {
@@ -98,9 +147,18 @@ CrossField computeCrossField(const Mesh& mesh, int iterations, accel::IBackend& 
         const std::vector<VertexId> fv = mesh.faceVertices(f);
         for (std::size_t k = 0; k < fv.size(); ++k) {
             const EdgeId e = mesh.edgeBetween(fv[k], fv[(k + 1) % fv.size()]);
-            if (!e.valid() ||
-                (!mesh.isFeatureEdge(e) && mesh.edgeFaceCount(e) == 2 && !creaseAligned(e))) {
+            const bool isCrease = e.valid() && !mesh.isFeatureEdge(e) &&
+                                  mesh.edgeFaceCount(e) == 2 && creaseAligned(e);
+            if (!e.valid() || (!mesh.isFeatureEdge(e) && mesh.edgeFaceCount(e) == 2 && !isCrease)) {
                 continue;  // interior non-feature, non-crease edge imposes no constraint
+            }
+            if (isCrease) {
+                ++dbgCrease;
+                if (planarNeighbourhood(f, fv)) {
+                    ++dbgGated;
+                    continue;  // flat panel: field degenerate here, a pin would be arbitrary
+                }
+                ++dbgPinned;
             }
             const auto [a, b] = mesh.edgeVertices(e);
             const Vec3 d = normalized(mesh.position(b) - mesh.position(a));
@@ -124,8 +182,11 @@ CrossField computeCrossField(const Mesh& mesh, int iterations, accel::IBackend& 
         for (std::size_t c = 0; c < nf; ++c) {
             nPinned += constrained[c] != 0 ? std::size_t{1} : std::size_t{0};
         }
-        std::fprintf(stderr, "[field] faces=%zu constrained=%zu (%.1f%%) alignDeg=%.0f\n", nf,
-                     nPinned, 100.0 * static_cast<double>(nPinned) / static_cast<double>(nf),
+        std::fprintf(stderr,
+                     "[field] creaseEdgesSeen=%zu gatedOff=%zu creasePinned=%zu | "
+                     "faces=%zu constrained=%zu (%.1f%%) alignDeg=%.0f\n",
+                     dbgCrease, dbgGated, dbgPinned, nf, nPinned,
+                     100.0 * static_cast<double>(nPinned) / static_cast<double>(nf),
                      static_cast<double>(alignDeg));
     }
 
