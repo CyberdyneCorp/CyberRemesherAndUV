@@ -352,9 +352,32 @@ Anything already measured dead is listed at the end — check it before proposin
        quadrangulator that is the universal fallback and the flat-CAD route.
        Defaulting the parameter changed both. The harness only ever exercises
        `quad_method="quad-cover"`, so it was structurally blind to the second.
-    **To default it on, c2 needs a flatness gate** — skip the constraint on faces
-    whose neighbourhood is planar, or where a face's crease constraints disagree —
-    and the corpus needs a flat-CAD model so the harness can see this class at all.
+    **Follow-up attempts, both measured (2026-07-24):**
+    - ❌ **Consistency gate — measured NO-OP, do not retry.** Hypothesis: a face
+      touching several creases (every triangle round a cube corner touches two
+      perpendicular ones) pins to whichever comes first in vertex order, so
+      neighbours resolve it differently. Gated on the mean-resultant length of the
+      face's crease directions in 4-RoSy. It changed nothing on the cube
+      (CV still 0.397 at 900 quads) because a crease-adjacent triangle almost
+      always touches exactly ONE crease, so the gate never fires.
+    - 🔬 **The mechanism is now measured, and it is NOT over-constraining.**
+      `CYBER_QC_FIELD_STATS` reports the frozen fraction: crease alignment freezes
+      **52.0% of fandisk's faces and improves it**, but only **14.7% of the cube's
+      and degrades it**. fandisk freezes 3.5x more and gets better. The real
+      distinction is that **a flat panel's cross field is degenerate** — every
+      orientation is equally smooth — so pinning a border band imposes arbitrary
+      structure the interior cannot reconcile, whereas a curved surface has a
+      curvature-driven preference that crease pins reinforce. A gate must therefore
+      test the *surface*, not the constraint set: skip alignment where the
+      neighbourhood is planar. Untried.
+    - ✅ **The corpus blind spot is CLOSED.** `cube` is now a synthesised member of
+      the benchmark corpus (`common.SYNTHETIC_MODELS`, `11_benchmark.DEFAULT_MODELS`).
+      It immediately earned its place twice over: it reproduces the regression that
+      slipped through (cube@900 edge CV 0.201 → 0.397), **and** it surfaced a win the
+      scored benchmark could not previously see — on flat CAD we BEAT QuadriFlow on
+      feature-following (**0.98% vs 2.69%**) with **0 defects against its 680**.
+      Corpus-wide the headline moves from feature 0/5 to **1/6** and defects to
+      **6/6**.
 - ◻ **(c3) Give the ARAP polish a restoring force toward the field.** A *clamp* was
   tried (every face saturates whatever cap it is given: 5/10/20/30/45 → 5/10/20/30/44)
   and a 4-RoSy fundamental-domain wrap was tried (worse — map-vs-target 5°→17°). A
