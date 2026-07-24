@@ -311,16 +311,30 @@ Anything already measured dead is listed at the end — check it before proposin
   byte-identical** (only fandisk routes native). One regression: fandisk@3000 edge
   CV 0.159 → 0.179. Costs ~15% more triangles in the working mesh, since creases
   can no longer be collapsed across.
-- 🟡 **(c2) Actually crease-align the cross field — MEASURED, promising, NOT
-  shipped.** Hard directional constraints on crease edges in the 4-RoSy solve,
-  without widening the hard-seam set (`isFeatureEdge`, period jumps and the cut
-  graph untouched). **Alone it is net-negative** — feature −4% but median
-  83.4 → 79.8, irregular 3.3 → 5.0 — because pinning the field to 55 fragments
-  with 136 dangling ends injects conflicting directions. **On top of (c1) it
-  roughly doubles c1's gain**: feature −18.9% / −12.4% / −12.8% vs baseline, with
-  median and irregular *improving* at 2600 and 3400. Blocker: **median −2.3° at
-  3000 specifically**. Worth finishing — understand why 3000 behaves differently
-  before shipping. This ordering (c1 then c2) is now evidence, not a guess.
+- ✅ **(c2) Actually crease-align the cross field — DONE (2026-07-24), default
+  on.** `computeCrossField` gained a `creaseAlignDegrees` parameter (default 45,
+  `CYBER_QC_FIELD_CREASE_DEG` overrides): any interior edge whose face-normal
+  angle exceeds it pins its faces to the crease direction, while
+  `Mesh::isFeatureEdge` — and therefore the seam set, period jumps and cut graph —
+  is untouched. That split matters: widening the *shared* threshold instead costs
+  median 83.4 → 77.5 (see the dead-lever list).
+  - **Order is load-bearing, and it is now evidence rather than a guess.** Applied
+    BEFORE (c1) it is net-negative — feature −4% but median 83.4 → 79.8 and
+    irregular 3.3 → 5.0 — because pinning the field to 55 crease fragments with
+    136 dangling ends injects conflicting directions. Applied AFTER (c1), with the
+    crease network intact, it is a win.
+  - ⚠️ **A 3-density sample said "blocked on a −2.3° median at 3000". That was
+    under-sampling, not a defect.** Median-vs-density on fandisk jitters with
+    sd 0.90° on *identical code* (81.10 / 81.95 / 82.97 / 83.40 / 82.61 / 81.16 /
+    83.32 across 2600–3800). Re-measured over **7 densities**: feature
+    0.7271 → 0.6846 (**−5.8%, better at 6/7**), edge CV 0.1656 → 0.1505 (**−9.1%,
+    6/7**), irregular 3.63 → 3.31 (**−8.8%, 6/7**), median 82.36 → 81.94
+    (**−0.42 ± 0.35, paired t ≈ 1.2, p ≈ 0.28 — not distinguishable from zero**).
+    Three metrics improve; the fourth does not measurably move. **Lesson: sample
+    density before calling a per-density delta a regression** — this is the same
+    under-sampling class that produced the retracted Phase 2 result.
+  - Corpus regression: **12 of 15 cells byte-identical** (only fandisk routes
+    native), 0 defects everywhere.
 - ◻ **(c3) Give the ARAP polish a restoring force toward the field.** A *clamp* was
   tried (every face saturates whatever cap it is given: 5/10/20/30/45 → 5/10/20/30/44)
   and a 4-RoSy fundamental-domain wrap was tried (worse — map-vs-target 5°→17°). A

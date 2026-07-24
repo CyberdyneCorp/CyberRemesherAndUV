@@ -40,7 +40,8 @@ float CrossField::angle(FaceId f) const {
     return theta;
 }
 
-CrossField computeCrossField(const Mesh& mesh, int iterations, accel::IBackend& backend) {
+CrossField computeCrossField(const Mesh& mesh, int iterations, accel::IBackend& backend,
+                             float creaseAlignDegrees) {
     const std::size_t cap = mesh.faceCapacity();
     CrossField field;
     field.tangent.assign(cap, Vec3{1, 0, 0});
@@ -72,6 +73,23 @@ CrossField computeCrossField(const Mesh& mesh, int iterations, accel::IBackend& 
         compact[faces[c].value] = static_cast<Index>(c);
     }
 
+    // CYBER_QC_FIELD_CREASE_DEG (lever c2): widen the set of edges the field ALIGNS to without
+    // widening the set that becomes a hard seam.
+    // CYBER_QC_FIELD_CREASE_DEG overrides the caller's value for A/B runs.
+    float alignDeg = creaseAlignDegrees;
+    if (const char* fc = std::getenv("CYBER_QC_FIELD_CREASE_DEG"); fc != nullptr) {
+        alignDeg = static_cast<float>(std::atof(fc));
+    }
+    const float alignCos = alignDeg > 0.0f ? std::cos(degreesToRadians(alignDeg)) : 2.0f;
+    const auto creaseAligned = [&](const EdgeId e) {
+        if (alignCos > 1.0f || mesh.edgeFaceCount(e) != 2) {
+            return false;
+        }
+        const auto ef = mesh.edgeFaces(e);
+        return dot(normalized(mesh.faceNormal(ef[0])), normalized(mesh.faceNormal(ef[1]))) <
+               alignCos;
+    };
+
     // Constrain faces touching a feature or boundary edge to align with it.
     std::vector<char> constrained(nf, 0);
     for (std::size_t c = 0; c < nf; ++c) {
@@ -79,8 +97,9 @@ CrossField computeCrossField(const Mesh& mesh, int iterations, accel::IBackend& 
         const std::vector<VertexId> fv = mesh.faceVertices(f);
         for (std::size_t k = 0; k < fv.size(); ++k) {
             const EdgeId e = mesh.edgeBetween(fv[k], fv[(k + 1) % fv.size()]);
-            if (!e.valid() || (!mesh.isFeatureEdge(e) && mesh.edgeFaceCount(e) == 2)) {
-                continue;  // interior non-feature edge imposes no constraint
+            if (!e.valid() ||
+                (!mesh.isFeatureEdge(e) && mesh.edgeFaceCount(e) == 2 && !creaseAligned(e))) {
+                continue;  // interior non-feature, non-crease edge imposes no constraint
             }
             const auto [a, b] = mesh.edgeVertices(e);
             const Vec3 d = normalized(mesh.position(b) - mesh.position(a));
