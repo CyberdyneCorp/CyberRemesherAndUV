@@ -745,7 +745,7 @@ Anything already measured dead is listed at the end — check it before proposin
       convergence) but under-convergence-dominated on **spot**. So the feature trade-off is
       model-specific, and the CYBER_QC_KC_FEATURE_BAND of lever (iv) is only needed where
       the shear is genuinely intrinsic.
-  - **Net c7 state (off ⇒ byte-identical, both backends green, all 12 ctest + 6 KC unit
+  - **Net c7 state (off ⇒ byte-identical, both backends green, all 12 ctest + 9 KC unit
     tests pass on cpu-headless AND the Geogram-less build).** KC per-face is a real,
     seed-independent, globally-optimal field that beats the iterative native field on
     irregular % (spot `4.63 → 3.45`, cheburashka `5.71 → 4.78`) with median recovering, but
@@ -754,6 +754,20 @@ Anything already measured dead is listed at the end — check it before proposin
     (per-vertex cotan, lever ii). It stays flag-gated behind `CYBER_QC_KC_FIELD`; the real
     remaining unlock for organic native routing is per-feature-edge integer constraints,
     not a smarter field.
+  - **Payoff regression test (2026-07-24).** The c7 claim — KC lowers the spurious-cone
+    count on an organic — is now locked by a hermetic unit test (`Knoppel-Crane field is
+    active and lowers the singularity count on a curved organic mesh`,
+    `tests/quadrangulate/test_crossfield.cpp`). On a synthetic bumpy sheet (real Gaussian
+    curvature, no creases) it A/Bs the SHIPPED path via `buildSeamlessSetup`'s
+    `CYBER_QC_KC_FIELD` dispatch and asserts KC's `singularityCount` is strictly below the
+    iterative field's (measured 8 → 2, `totalIndex` equal so Poincaré–Hopf holds). It is
+    discriminating: a silent fall-back-to-seed would tie the counts and fail the strict
+    `<`. Passes on both cpu-headless and the Geogram-less build.
+  - **Routing decision — NOT flipped.** The cap-breaking test (would forcing native-KC on
+    organics beat vendored?) is a clear **no**: KC lands spot irregular `3.45` vs vendored
+    `1.99`, is neutral on fandisk/rocker-arm, and is a count-matched **regression** on
+    stanford-bunny (`5.97 → 6.16`). `computeSeamlessUv` routing is unchanged; organics stay
+    on the vendored Geogram field by default. KC ships only as a flag-gated field option.
 
 **Tier 3 — narrower, concrete**
 

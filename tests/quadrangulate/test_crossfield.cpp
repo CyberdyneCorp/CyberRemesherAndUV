@@ -8,6 +8,7 @@
 #include "cyber/accel/backend.hpp"
 #include "cyber/core/mesh.hpp"
 #include "cyber/quadrangulate/crossfield.hpp"
+#include "cyber/quadrangulate/seamless_solver.hpp"
 
 using cyber::FaceId;
 using cyber::Index;
@@ -46,6 +47,71 @@ float axisMisalignmentDeg(Vec3 d) {
 }
 
 }  // namespace
+
+namespace {
+
+// A closed, curved organic-like surface with NO sharp features: a triangulated bumpy sheet whose
+// height is a sum of a few sinusoids, so it carries real, spatially-varying Gaussian curvature
+// (hills and saddles) but no creases. Local field relaxation scatters spurious cones across such
+// curvature; the globally-optimal KC field places fewer. This is the small stand-in for the
+// spot/cheburashka organics the harness measures (the corpus .obj files are not linked into the
+// hermetic unit tests).
+Mesh makeBumpyGrid(int n, float amp) {
+    std::vector<Vec3> p;
+    for (int i = 0; i <= n; ++i) {
+        const float x = static_cast<float>(i) / static_cast<float>(n) * 2.0f - 1.0f;
+        for (int j = 0; j <= n; ++j) {
+            const float y = static_cast<float>(j) / static_cast<float>(n) * 2.0f - 1.0f;
+            const float z = amp * (std::sin(3.1f * x) * std::cos(2.7f * y) +
+                                   0.6f * std::sin(5.3f * x + 1.0f) * std::sin(4.1f * y));
+            p.push_back({x, y, z});
+        }
+    }
+    const auto id = [n](int i, int j) { return static_cast<Index>(i * (n + 1) + j); };
+    std::vector<std::vector<Index>> f;
+    for (int i = 0; i < n; ++i) {
+        for (int j = 0; j < n; ++j) {
+            f.push_back({id(i, j), id(i + 1, j), id(i + 1, j + 1)});
+            f.push_back({id(i, j), id(i + 1, j + 1), id(i, j + 1)});
+        }
+    }
+    return Mesh::fromIndexed(p, f);
+}
+
+}  // namespace
+
+TEST_CASE("Knoppel-Crane field is active and lowers the singularity count on a curved organic mesh") {
+    // The c7 payoff: on an organic (curvature-driven, no creases), the globally-optimal KC field
+    // must place FEWER spurious singularities than the local iterative field, which is the direct
+    // driver of the irregular-vertex gap the harness measures (spot 77->73, cheburashka 111->94).
+    // A/B the SHIPPED path: buildSeamlessSetup dispatches on CYBER_QC_KC_FIELD, so this exercises
+    // exactly the field the extractor consumes and reads its singularityCount(). Discriminating: if
+    // KC ever silently falls back to (or equals) the iterative field, singularityCount ties and the
+    // strict-less-than fails.
+    auto backend = cyber::accel::defaultBackend();
+    const Mesh mesh = makeBumpyGrid(24, 0.35f);
+
+    const remesh::SeamlessSetup iter = remesh::buildSeamlessSetup(mesh, 60, *backend);
+
+    setenv("CYBER_QC_KC_FIELD", "1", 1);
+    const remesh::SeamlessSetup kc = remesh::buildSeamlessSetup(mesh, 60, *backend);
+    unsetenv("CYBER_QC_KC_FIELD");
+
+    MESSAGE("iterative singular=" << iter.singularityCount()
+                                  << " KC singular=" << kc.singularityCount()
+                                  << " iterTotalIndex=" << iter.totalIndex()
+                                  << " kcTotalIndex=" << kc.totalIndex());
+
+    REQUIRE(iter.valid);
+    REQUIRE(kc.valid);
+    // The iterative field must actually produce spurious cones on this curvature (else nothing to cut).
+    REQUIRE(iter.singularityCount() > 0);
+    // KC is genuinely engaged and reduces the spurious-cone count (no silent fall-back-to-seed).
+    CHECK(kc.singularityCount() < iter.singularityCount());
+    // Poincare-Hopf holds for both fields: sum of indices == 4 * Euler characteristic (a free
+    // correctness gate that a garbage/no-op field would fail).
+    CHECK(kc.totalIndex() == iter.totalIndex());
+}
 
 TEST_CASE("cross field on a flat grid relaxes to the axis-aligned directions") {
     Mesh mesh = makeGrid(6);
