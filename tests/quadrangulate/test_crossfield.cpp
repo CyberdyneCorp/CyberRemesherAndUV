@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <vector>
 
 #include "cyber/accel/backend.hpp"
@@ -317,4 +318,33 @@ TEST_CASE("per-face Knoppel-Crane holds crease pins exactly and differs from the
     // And the globally-optimal interior is a genuinely different field than local relaxation
     // (guards against a silent fall-back-to-seed that would make KC a no-op).
     CHECK(differingFaces(curved, iter, kc) > 0);
+}
+
+TEST_CASE("KC feature-alignment band keeps crease pins, stays unit, and shifts the interior") {
+    // The opt-in feature-band (CYBER_QC_KC_FEATURE_BAND, lever c7 (iv)) softly pulls the free faces
+    // within a few dual-rings of a crease pin back toward the feature-following iterative seed. It
+    // must (a) still hold the hard crease pins, (b) stay a unit 4-RoSy field, and (c) actually change
+    // the near-crease interior vs the no-band KC field (proving the band is active, not a no-op).
+    auto backend = cyber::accel::defaultBackend();
+    const Mesh curved = makeFoldedSheet(0.8f, 0.6f);
+
+    const remesh::CrossField kcNoBand = remesh::computeCrossFieldKnoppelCrane(curved, 120, *backend, 45.0f);
+
+    setenv("CYBER_QC_KC_FEATURE_BAND", "1", 1);
+    const remesh::CrossField kcBand = remesh::computeCrossFieldKnoppelCrane(curved, 120, *backend, 45.0f);
+    unsetenv("CYBER_QC_KC_FEATURE_BAND");
+
+    // (a) hard crease pins still hold, and (b) the field is still unit-normalised.
+    CHECK(creaseDeviationDeg(curved, kcBand) < 5.0f);
+    for (Index i = 0; i < curved.faceCapacity(); ++i) {
+        const FaceId f{i};
+        if (!curved.isAlive(f)) {
+            continue;
+        }
+        const float len =
+            std::sqrt(kcBand.real[i] * kcBand.real[i] + kcBand.imag[i] * kcBand.imag[i]);
+        CHECK(len == doctest::Approx(1.0f).epsilon(0.02));
+    }
+    // (c) the band moved the interior relative to the no-band KC field.
+    CHECK(differingFaces(curved, kcNoBand, kcBand) > 0);
 }

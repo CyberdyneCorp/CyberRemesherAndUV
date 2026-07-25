@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <limits>
+#include <queue>
 #include <utility>
 #include <vector>
 
@@ -534,6 +535,86 @@ struct KcFaceSystem {
     std::vector<KcEdge> edges;        // dual edges for the penalty-free Dirichlet-energy monitor
 };
 
+// BFS the dual graph (interior non-feature edges only, so it never crosses a crease) outward from
+// every crease-pinned face up to `rings` rings, returning a per-compact-face soft-pull weight that
+// decays geometrically with ring distance (lever c7 (iv) feature-alignment band). Empty when the
+// band is disabled or there are no crease pins. Tunables: CYBER_QC_KC_BAND_RINGS (default 2),
+// CYBER_QC_KC_BAND_LAMBDA (ring-1 strength, default 0.5), CYBER_QC_KC_BAND_DECAY (default 0.5).
+std::vector<float> computeFeatureBand(const Mesh& mesh, const FieldSetup& setup, bool enabled) {
+    std::vector<float> bandW;
+    if (!enabled) {
+        return bandW;
+    }
+    const std::size_t nf = setup.nf;
+    const std::vector<Index>& compact = setup.compact;
+    const std::vector<char>& constrained = setup.constrained;
+    const auto envInt = [](const char* k, int d) {
+        const char* v = std::getenv(k);
+        return v != nullptr ? std::max(1, std::atoi(v)) : d;
+    };
+    const auto envF = [](const char* k, float d) {
+        const char* v = std::getenv(k);
+        return v != nullptr ? static_cast<float>(std::atof(v)) : d;
+    };
+    const int rings = envInt("CYBER_QC_KC_BAND_RINGS", 2);
+    const float lambda0 = envF("CYBER_QC_KC_BAND_LAMBDA", 0.5f);
+    const float decay = envF("CYBER_QC_KC_BAND_DECAY", 0.5f);
+
+    // Dual adjacency over interior, non-feature edges (staying on one side of each crease).
+    std::vector<std::vector<Index>> adj(nf);
+    for (Index ei = 0; ei < mesh.edgeCapacity(); ++ei) {
+        const EdgeId e{ei};
+        if (!mesh.isAlive(e) || mesh.isFeatureEdge(e) || mesh.edgeFaceCount(e) != 2) {
+            continue;
+        }
+        const auto ef = mesh.edgeFaces(e);
+        const Index cf = compact[ef[0].value];
+        const Index cg = compact[ef[1].value];
+        if (cf == kInvalidIndex || cg == kInvalidIndex) {
+            continue;
+        }
+        adj[cf].push_back(cg);
+        adj[cg].push_back(cf);
+    }
+
+    std::vector<int> dist(nf, -1);
+    std::queue<Index> q;
+    for (std::size_t c = 0; c < nf; ++c) {
+        if (constrained[c]) {
+            dist[c] = 0;
+            q.push(static_cast<Index>(c));
+        }
+    }
+    if (q.empty()) {
+        return {};  // no crease pins -> no band, KC runs unchanged
+    }
+    bandW.assign(nf, 0.0f);
+    std::size_t bandFaces = 0;
+    while (!q.empty()) {
+        const Index c = q.front();
+        q.pop();
+        if (dist[c] >= rings) {
+            continue;
+        }
+        for (const Index g : adj[c]) {
+            if (dist[g] != -1) {
+                continue;
+            }
+            dist[g] = dist[c] + 1;
+            if (constrained[g] == 0) {
+                bandW[g] = lambda0 * std::pow(decay, static_cast<float>(dist[g] - 1));
+                ++bandFaces;
+            }
+            q.push(g);
+        }
+    }
+    if (std::getenv("CYBER_QC_FIELD_STATS") != nullptr) {
+        std::fprintf(stderr, "[kc] feature-band rings=%d lambda=%.3g decay=%.3g bandFaces=%zu\n",
+                     rings, lambda0, decay, bandFaces);
+    }
+    return bandW;
+}
+
 // Assemble the per-face connection Laplacian L = D - W(transport): off-diagonal block (c,g) =
 // -w * R(4(af-ag)), degree diagonal D_c = sum_g w. The 2x2 interleaved block form IS the real-
 // symmetric [[Re,-Im],[Im,Re]] embedding, so M is genuinely symmetric (block(g,c) = block(c,g)^T)
@@ -547,9 +628,18 @@ struct KcFaceSystem {
 // via EXACT reduced elimination — their rows become identity, their coupling to free faces is moved
 // to `rhsConst`, and they are held at their exact pin (c1/c2 hard to ~float precision, no P=1e6
 // penalty in M). `exactPins=false` restores the earlier soft penalty pins (P=1e6 diagonal).
+//
+// Feature-alignment band (lever c7 (iv), `bandW` non-empty in exact-pins mode): for each FREE face
+// c with bandW[c] > 0 (a face within a few dual-rings of a crease pin) a soft Tikhonov term
+// bandW[c]*deg[c]*||u_c - seed_c||^2 is added -- diagonal += bandW*deg, RHS += bandW*deg*seed --
+// pulling the near-crease field back toward the feature-following iterative `seed` while leaving the
+// far interior globally smooth. Suppresses the interior-shear feature regression the pure global
+// field makes; bandW scales by deg[c] so the pull competes directly with the local smoothing.
 KcFaceSystem assembleFaceKcSystem(const Mesh& mesh, const FieldSetup& setup, const CrossField& field,
                                   const std::vector<double>& Bmass, double meanB,
-                                  const std::vector<Vec3>& centroid, bool uniformW, bool exactPins) {
+                                  const std::vector<Vec3>& centroid, bool uniformW, bool exactPins,
+                                  const std::vector<float>& bandW, const CrossField& seed) {
+    const bool hasBand = exactPins && !bandW.empty();
     const std::size_t nf = setup.nf;
     const std::vector<FaceId>& faces = setup.faces;
     const std::vector<Index>& compact = setup.compact;
@@ -646,6 +736,8 @@ KcFaceSystem assembleFaceKcSystem(const Mesh& mesh, const FieldSetup& setup, con
         double diag = deg[c] + eps * Bmass[c];
         if (constrained[c]) {
             diag = exactPins ? 1.0 : diag + penalty;
+        } else if (hasBand && bandW[c] > 0.0f) {
+            diag += static_cast<double>(bandW[c]) * deg[c];  // Tikhonov pull toward seed near creases
         }
         rows[2 * c].emplace_back(2 * c, static_cast<float>(diag));
         rows[2 * c + 1].emplace_back(2 * c + 1, static_cast<float>(diag));
@@ -679,6 +771,11 @@ KcFaceSystem assembleFaceKcSystem(const Mesh& mesh, const FieldSetup& setup, con
         } else if (exactPins) {
             sys.rhsConst[2 * c] = fixedRhs[2 * c];  // constant elimination forcing on free rows
             sys.rhsConst[2 * c + 1] = fixedRhs[2 * c + 1];
+            if (hasBand && bandW[c] > 0.0f) {  // + soft feature-band pull toward the seed direction
+                const double bt = static_cast<double>(bandW[c]) * deg[c];
+                sys.rhsConst[2 * c] += static_cast<float>(bt * seed.real[faces[c].value]);
+                sys.rhsConst[2 * c + 1] += static_cast<float>(bt * seed.imag[faces[c].value]);
+            }
         } else if (constrained[c]) {
             sys.rhsConst[2 * c] = static_cast<float>(penalty * field.real[faces[c].value]);
             sys.rhsConst[2 * c + 1] = static_cast<float>(penalty * field.imag[faces[c].value]);
@@ -734,8 +831,15 @@ CrossField computeCrossFieldKnoppelCrane(const Mesh& mesh, int iterations, accel
     // reduced elimination (CYBER_QC_KC_PENALTY -> soft penalty pins for A/B).
     const bool uniformW = std::getenv("CYBER_QC_KC_DUAL_COTAN") == nullptr;
     const bool exactPins = std::getenv("CYBER_QC_KC_PENALTY") == nullptr;
-    KcFaceSystem sys =
-        assembleFaceKcSystem(mesh, setup, field, Bmass, meanB, centroid, uniformW, exactPins);
+
+    // Feature-alignment band (lever c7 (iv), CYBER_QC_KC_FEATURE_BAND): a few dual-rings of free
+    // faces around each crease pin are softly pulled back toward the feature-following iterative
+    // seed, countering the interior shear the pure global field makes near creases. Exact-pins only.
+    std::vector<float> bandW =
+        computeFeatureBand(mesh, setup, exactPins && std::getenv("CYBER_QC_KC_FEATURE_BAND"));
+
+    KcFaceSystem sys = assembleFaceKcSystem(mesh, setup, field, Bmass, meanB, centroid, uniformW,
+                                            exactPins, bandW, seed);
 
     // Warm-start the eigenvector from the iterative field; exact pins start at the pin value.
     std::vector<float> u(2 * nf);
@@ -753,6 +857,11 @@ CrossField computeCrossFieldKnoppelCrane(const Mesh& mesh, int iterations, accel
     const int outerIters = outerEnv != nullptr ? std::max(1, std::atoi(outerEnv)) : 20;
     if (!solveSmallestField(backend, sys.mat, sys.Bmass2, sys.rhsConst, sys.fixedMask, sys.edges, u,
                             outerIters, 1e-6f)) {
+        // Stats-independent telemetry so a silent fallback can never masquerade as a KC measurement
+        // on some untested model (CYBER_QC_FIELD_STATS logs the reason; this always flags the swap).
+        if (std::getenv("CYBER_QC_DEBUG") != nullptr) {
+            std::fprintf(stderr, "[kc] eigensolver diverged -> FELL BACK to iterative field\n");
+        }
         return seed;  // divergence guard: never regress below the iterative field
     }
 

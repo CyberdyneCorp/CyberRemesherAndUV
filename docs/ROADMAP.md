@@ -634,6 +634,59 @@ Anything already measured dead is listed at the end — check it before proposin
     remaining untested lever toward feature parity is a feature-neighbourhood alignment
     band (propagate the crease direction one–two rings into the interior to fight the
     smoothing shear), not a change to the connection Laplacian.
+  - **Lever (iv) feature-alignment band + FULL-CORPUS validation — BUILT and MEASURED
+    2026-07-24. The band is a real tradeoff knob, not a free fix; and the corpus check
+    shows the KC irregular win is model-specific, not general.** Two things shipped
+    (both flag-gated, off ⇒ byte-identical):
+    - **Feature-band (`CYBER_QC_KC_FEATURE_BAND`, `computeFeatureBand` in
+      `crossfield.cpp`).** BFS the dual graph outward from every crease pin (never
+      crossing a feature edge) up to `CYBER_QC_KC_BAND_RINGS` rings (default 2), and add
+      a soft Tikhonov term `bandW·deg·‖u − seed‖²` on each free band face — pulling the
+      near-crease interior back toward the feature-following iterative `seed`, competing
+      directly with the local smoothing (scaled by `deg`). Ring-1 strength
+      `CYBER_QC_KC_BAND_LAMBDA` (default 0.5), geometric `CYBER_QC_KC_BAND_DECAY` (0.5).
+      Exact-pins only. **It does not cleanly fix the feature regression** — on the
+      count-matched spot row, recovering feature toward baseline costs the irregular
+      win roughly 1:1 (band λ=0.1/rings=2: spot irregular 2.96 → 3.74, feature
+      0.6648 → 0.583, still above baseline 0.5035; cheburashka irregular 4.74 → 4.73,
+      feature 1.038 → 0.832 ≈ baseline). The field-level singularity count is unchanged
+      (spot 73 with or without band), so the band only *relocates* cones toward the
+      creases — trading output irregular for crease adherence. This **confirms lever
+      (iii)'s diagnosis**: the irregular win and the feature regression are the same
+      interior-smoothness coin; a soft interior pull cannot separate them. Kept opt-in
+      as a documented tradeoff knob; the KC default stays **no band**.
+    - **Stats-independent divergence telemetry.** The eigensolver fallback (return the
+      iterative field on CG divergence) previously logged only under
+      `CYBER_QC_FIELD_STATS`; it now also prints `[kc] eigensolver diverged → FELL BACK`
+      under `CYBER_QC_DEBUG`, so a silent no-op cannot masquerade as a KC measurement.
+      **This immediately caught a real case:** on the synthesised `cube` (flat CAD, all
+      576 crease edges *gated off* by the c2 planarity gate ⇒ **0 pins**), the pinless
+      eigen-system is gauge-degenerate, CG diverges, and KC falls back — its
+      "byte-identical to KC-off" output was a *fallback*, not a genuine no-change. KC
+      provides nothing on fully-planar, pin-free CAD.
+    - **Full-corpus generalization (the open question from lever (iii)), forced native,
+      KC-off vs KC-on (no band), `--dens 3000`:**
+
+      | model | irregular % | median | feature (↓) | note |
+      |---|---|---|---|---|
+      | spot | 4.63 → **2.96** | 79.93 → **82.64** | 0.50 → 0.66 | irr WIN, feat regress |
+      | cheburashka | 5.71 → **4.74** | 79.72 → **81.97** | 0.83 → 1.04 | irr WIN, feat regress |
+      | fandisk | 2.90 → 2.94 | 82.67 → 81.87 | 0.70 → **0.69** | neutral |
+      | rocker-arm | 5.79 → 5.71 | 74.90 → **79.45** | 0.58 → 0.72 | irr neutral, feat regress |
+      | stanford-bunny | 5.97 → **6.16** | 77.12 → 78.55 | 0.86 → **1.34** | irr + feat REGRESS (count-matched) |
+      | cube | 9.63 → 9.63 | — | — | KC diverges → falls back (no change) |
+
+      **The KC irregular win is model-specific: real on spot + cheburashka, neutral on
+      fandisk + rocker-arm, and a clean count-matched REGRESSION on stanford-bunny
+      (irregular 5.97 → 6.16, feature 0.86 → 1.34, 3114 quads both arms); cube falls
+      back.** Feature-following regresses on 4 of 5 organics (only CAD fandisk improves).
+      So KC **cannot be promoted to route organics native**: it would help two models,
+      do nothing on two, and regress bunny plus crease adherence broadly. This is the
+      corpus validation the earlier spot+cheburashka-only "partial win" framing lacked —
+      the honest verdict is a *qualified, model-specific* improvement, kept behind
+      `CYBER_QC_KC_FIELD` with no default routing change. Regression tests added for the
+      per-face KC field and the band (`tests/quadrangulate/test_crossfield.cpp`); off ⇒
+      byte-identical, goldens green on both the Geogram and Geogram-less builds.
 
 **Tier 3 — narrower, concrete**
 
