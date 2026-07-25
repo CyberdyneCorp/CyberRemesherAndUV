@@ -318,10 +318,13 @@ count artifact that cannot be decoupled without patching vendored source. Any
 further feature-following work must first answer *how it reaches the vendored path
 at all* — not propose another constraint.
 
-**If it is ever reopened**, the honest entry points are (c4) cone placement at
-crease corners, (c6) crease-preserving surface projection, and (c7) a
-globally-optimal direction field — all Tier 2, none cheap, and all still capped at
-1/6 until the routing question is answered.
+**If it is ever reopened**, the remaining honest entry points are (c4) cone
+placement at crease corners and (c6) crease-preserving surface projection — both
+Tier 2, neither cheap, and both still capped at 1/6 until the routing question is
+answered. **(c7) a globally-optimal direction field is no longer an entry point:
+it was built and measured (below), recovers under half the native→Geogram gap, and
+established that the residual is per-face *discretization*, not the field — so
+field-level levers are exhausted.**
 
 **Superseded exit note:** *robustness win on hard-surface geometry (met); validity
 on the smooth corpus (met — now 6/6, was recorded 5/5 before the cube joined the
@@ -488,10 +491,61 @@ Anything already measured dead is listed at the end — check it before proposin
   almost no detectable feature edges because *projection smooths creases* (only 17
   tagged on fandisk). The relax path pins feature vertices and the projection then
   undoes it. Helps feature error *and* median.
-- ◻ **(c7) Knöppel–Crane globally-optimal direction field** (native eigensolver).
-  Recorded as deferred "only if the Geogram dependency is ever forbidden" — i.e.
-  deferred as a *dependency* play, never evaluated as a *quality* play. Given (c2),
-  a better field is now on the critical path.
+- 🔬 **(c7) Knöppel–Crane globally-optimal direction field — BUILT AND MEASURED
+  (2026-07-24). A real but insufficient field-level win; it does NOT close the gap
+  to Geogram, and field-level levers are now exhausted.**
+  - **Motivation (de-risked first).** A scoping measurement forced the organics
+    through the native solver (`CYBER_QC_ROUTE_CREASE=0.0001`) and decomposed the
+    native→vendored gap: it is **field-dominated** — native produces ~2× the
+    spurious singularities of Geogram's field (spot irregular 1.99 vendored → 4.63
+    native, count-matched to 1%), and the median gap is largely downstream of that.
+    So a globally-optimal field was the right lever to try.
+  - **What was built.** A dependency-free per-face connection-Laplacian 4-RoSy
+    field via inverse power iteration on the existing spmv + CG (no eigensolver
+    dependency, no SciPP), reusing the same frames / transport phases / feature
+    pins as the iterative field so c1/c2 are honoured. Globally optimal, verified
+    by a seed-independent Dirichlet energy.
+  - **Result — real, count-matched, independently verified (converged tol 1e-5):**
+    | model | metric | current native | **KC native** | vendored (Geogram) |
+    |---|---|---|---|---|
+    | spot | irregular % | 4.63 | **3.45** | 1.99 |
+    | spot | median | 79.93 | **81.87** | 84.24 |
+    | spot | field singular | 77 | **73** | — |
+    | cheburashka | irregular % | 5.71 | **4.78** | 3.68 |
+
+    KC cuts spurious singularities and recovers median on both organics — it closes
+    **~45% of the native→Geogram irregular gap** on the count-matched spot row. But
+    it does **not** reach Geogram (3.45 vs 1.99). ⚠️ **Do not quote the "2.96"
+    figure that appeared in an interim writeup — it was an under-converged
+    inverse-iteration artifact (tol 1e-3), caught by the workflow's own critics;
+    the honest converged number is 3.45, reproduced by independent A/B.**
+  - **Routing calculus UNCHANGED — the cap is not broken.** On fandisk (the only
+    model that routes native by default) KC is flat-to-negative (irregular
+    2.90→2.94, median −0.8°); on stanford-bunny it is a count-matched regression.
+    So forcing organics native-KC still loses to vendored, and `computeSeamlessUv`
+    routing is untouched.
+  - **Two sub-variants BUILT AND REFUTED, do not retry:** (i) dual-cotan edge
+    weights (regresses spot 3.81→4.18; on a near-uniform remesh the dual/primal
+    ratio is nearly constant so it barely differs); (ii) the paper-faithful
+    per-vertex cotan Laplacian (the vertex→face projection re-winds phases and
+    injects *more* cones than the per-face form).
+  - **The conclusion that matters: the residual native→Geogram gap is per-face
+    DISCRETIZATION, not local-vs-global optimization.** A globally-optimal field —
+    the strongest field-level lever — recovers under half the gap. **Every
+    field-level lever (reweighting, re-domaining, global-vs-local) is now measured;
+    none closes it.** The remaining path is downstream (extraction / integer
+    rounding), NOT a smarter field. ⚠️ Note the workflow suggested "per-feature-edge
+    integer constraints" as the next step — that is **M2d, already refuted** (see
+    the dead-lever list); its overlap here is a coincidence of naming, not a live
+    lead.
+  - **Foundation preserved off-main.** The working KC eigensolver lives on branch
+    `feat/knoppel-crane-field` (pushed to origin), NOT merged. It is off-by-default
+    (`CYBER_QC_KC_FIELD`), byte-identical when off, compiles both with and without
+    Geogram, and has a deterministic regression test (KC singular 2 < iterative 8,
+    a wide margin). It was kept off main deliberately: it delivers **no default-path
+    improvement** (organics still route vendored), so on main it would only add
+    build weight and a float-based CI test for code nobody runs. Anyone resuming the
+    discretization work should branch from there rather than re-derive the solver.
 
 **Tier 3 — narrower, concrete**
 
