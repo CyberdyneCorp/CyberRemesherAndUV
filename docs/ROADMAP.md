@@ -500,29 +500,31 @@ Anything already measured dead is listed at the end — check it before proposin
     verbatim via the extracted `buildFrameAndConstraints` prologue), then takes its
     smallest generalized eigenvector by inverse power iteration on the existing
     spmv + CG — dependency-free, no SciPP. `M = L + εB` (Tikhonov shift → SPD),
-    penalty Dirichlet pins (`P=1e6`), diagonal lumped-mass `B`. Warm-started from
-    `computeCrossField`; **falls back to it on any CG divergence**, so KC can only
-    help or no-op. Gated behind `CYBER_QC_KC_FIELD`; off ⇒ byte-identical (goldens
-    pass, both backends).
+    diagonal lumped-mass `B`, and feature/crease pins imposed by **exact reduced
+    elimination** (constrained faces removed from the eigen-solve and held at their
+    exact pin; `CYBER_QC_KC_PENALTY` restores the earlier `P=1e6` soft penalty pins —
+    see lever (iii)). Warm-started from `computeCrossField`; **falls back to it on any
+    CG divergence**, so KC can only help or no-op. Gated behind `CYBER_QC_KC_FIELD`;
+    off ⇒ byte-identical (goldens pass, both backends).
   - **Result — reduces native spurious singularities and irregular %, moving toward
     Geogram (env `CYBER_QC_ROUTE_CREASE=0.0001` forces organics native; counts
     matched <5%):**
-    | model | metric | current native | KC native | vendored (Geogram) |
+    | model | metric | current native | KC native (exact pins) | vendored (Geogram) |
     |---|---|---|---|---|
-    | spot | irregular % | 4.63 | **3.81** | 1.99 |
-    | spot | median | 79.93 | **82.23** | 84.24 |
+    | spot | irregular % | 4.63 | **2.96** | 1.99 |
+    | spot | median | 79.93 | **82.64** | 84.24 |
     | spot | field singular= | 77 | **73** | — |
-    | cheburashka | irregular % | 5.71 | **4.28** | 3.68 |
-    | cheburashka | median | 79.72 | **81.48** | 80.38 |
+    | cheburashka | irregular % | 5.71 | **4.74** | 3.68 |
+    | cheburashka | median | 79.72 | **81.97** | 80.38 |
 
-    (cheburashka figures updated 2026-07-24 with the hardened field-change
-    convergence monitor, which stops the inverse iteration on the eigenvector's
-    B-norm change rather than the penalty-dominated Rayleigh quotient: irregular
-    4.62 → 4.28.) KC closes ~⅓–½ of the field gap on both organics and *recovers
-    median* (spot +2.3, cheburashka +1.8) — the global field does place fewer, better cones, as
-    the thesis predicted. It does **not** reach Geogram's 2.0% on spot, so it is a
-    partial win, not a full close; not yet enough on its own to route organics
-    native by default.
+    On the count-matched spot row KC now closes **~63%** of the native→Geogram
+    irregular gap (4.63 → 2.96, landing **inside the 2–3% exit band**) and recovers
+    median (+2.7 toward vendored). On cheburashka it still beats current native
+    (5.71 → 4.74) though by less than the penalty variant (4.28 — see lever (iii)).
+    The global field places fewer, better cones (spot 77 → 73, cheburashka 111 → 94),
+    as the thesis predicted. It does **not** reach Geogram's 2.0% on spot, so it is a
+    partial win, not a full close; not yet enough on its own to route organics native
+    by default — held back chiefly by the feature-following trade-off (lever (iii)).
   - **Lever (i) dual-cotan edge weights — BUILT and REFUTED 2026-07-24.** Added the
     DEC-consistent dual-graph finite-volume weight `w = |shared edge| /
     dist(centroid_f, centroid_g)` (the Hodge star `⋆1` on the *dual* mesh — the
@@ -586,9 +588,52 @@ Anything already measured dead is listed at the end — check it before proposin
     paper-faithful vertex build — is the KC that helps. Per-face uniform-weight KC
     stays the KC default; the per-vertex build is kept opt-in for reproducibility.
     Both levers (i) dual-cotan and (ii) per-vertex cotan refuted, the residual spot
-    3.81 → ~2.0 gap to Geogram is **not** a field-discretization gap reachable by
-    reweighting or re-domaining the connection Laplacian; it is now attributable to
-    Geogram's specific cone *placement*/rounding downstream, not to a smoother field.
+    3.81 → ~2.0 gap to Geogram is **not** a field-*discretization* gap reachable by
+    reweighting or re-domaining the connection Laplacian — but see lever (iii), where
+    the pin *formulation* (not the discretization) closes much of it.
+  - **Lever (iii) exact reduced-elimination feature pins — BUILT 2026-07-24, now the
+    KC default; a further irregular-% win on spot that TRADES OFF feature-following.**
+    The `P=1e6` penalty pins are a *soft* Dirichlet BC (they distort `M`'s
+    conditioning and hold the pin only to ~1e-6). Replaced them with **exact reduced
+    elimination**: constrained faces are dropped from the eigen-solve (their rows made
+    identity, their coupling to free faces moved to a constant RHS `−M_FC u_C`) and
+    held at their exact pin, so `M = [M_FF, I]` is a clean SPD block system with the
+    interior solved against the *exact* feature directions. Isolated in
+    `assembleFaceKcSystem` + a `fixedMask` path in `solveSmallestField` (which
+    B-normalises only the free block; the pinned block is a fixed inhomogeneity, not
+    part of the `|u|=1` eigen-constraint). Default on; `CYBER_QC_KC_PENALTY` restores
+    the soft pins. A/B at the same forced-native routing (counts matched <5%):
+
+    | model | metric | current native | KC penalty pins | KC exact pins (default) |
+    |---|---|---|---|---|
+    | spot | irregular % | 4.63 | 3.81 | **2.96** |
+    | spot | median | 79.93 | 82.23 | **82.64** |
+    | spot | feature (↓) | 0.5035 | **0.4778** | 0.6648 |
+    | spot | field singular= | 77 | 73 | 73 |
+    | cheburashka | irregular % | 5.71 | **4.28** | 4.74 |
+    | cheburashka | median | 79.72 | 81.48 | **81.97** |
+    | cheburashka | feature (↓) | 0.8266 | 0.9791 | 1.038 |
+    | cheburashka | field singular= | 111 | 94 | 94 |
+
+    **Nuanced, and informative about the feature regression.** Exact pins give the best
+    irregular % yet on spot (2.96, into the exit band) and the best median, but
+    (a) on cheburashka they are *worse* on irregular than the penalty variant
+    (4.74 vs 4.28), and (b) **feature-following gets *worse* on both organics**
+    (spot 0.4778 → 0.6648, cheburashka 0.9791 → 1.038) — even though the pins are now
+    held *exactly*. The field singularity count is identical to the penalty variant
+    (73 / 94), so the irregular/feature deltas are entirely downstream cone *placement*,
+    not cone *count*. This **refutes the "penalty-leak causes the feature regression"
+    hypothesis**: hardening the pins to float precision does not recover crease
+    adherence — it makes it slightly worse, because the cleaner (un-penalty-distorted)
+    interior is *smoother* and so shears quad rows off the creases a little more. The
+    feature regression is therefore an **interior global-smoothing** effect intrinsic to
+    a globally-optimal field, not a boundary-condition artifact. Net: exact pins are the
+    correct hard-constraint formulation and the strongest spot result, so they are the
+    KC default, but the residual native→Geogram gap and the feature trade-off keep KC
+    behind `CYBER_QC_KC_FIELD` — organics are **not** routed native by default. The
+    remaining untested lever toward feature parity is a feature-neighbourhood alignment
+    band (propagate the crease direction one–two rings into the interior to fight the
+    smoothing shear), not a change to the connection Laplacian.
 
 **Tier 3 — narrower, concrete**
 

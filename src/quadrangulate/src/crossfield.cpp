@@ -416,17 +416,27 @@ double dirichletEnergy(const std::vector<KcEdge>& edges, const std::vector<float
 // Inverse power iteration for the smallest generalized eigenpair of (M, B): the smoothest
 // 4-RoSy field is the eigenvector of the smallest generalized eigenvalue of the connection
 // Laplacian, and inverse iteration finds it by repeatedly solving M x = B u then B-normalising.
-// M is the shifted connection Laplacian (SPD via the eps*B shift + penalty pins); B is the
-// diagonal lumped mass (per DOF in `Bmass2`); `pinRhs` carries the penalty RHS for pinned DOFs;
-// `edges` re-evaluates the penalty-free Dirichlet energy for the convergence monitor.
+// M is the shifted connection Laplacian (SPD via the eps*B shift); B is the diagonal lumped mass
+// (per DOF in `Bmass2`); `edges` re-evaluates the penalty-free Dirichlet energy for the monitor.
 // `u` is seeded (warm start) and overwritten with the converged eigenvector (un-renormalised
 // per face). Returns false on divergence (non-finite / indefinite CG) so the caller can fall
 // back to the iterative field -- KC can only help or no-op, never regress.
+//
+// Two pin regimes, selected by `fixedMask`:
+//   * EMPTY mask (penalty pins): `rhsConst` is the P=1e6 penalty RHS baked into M's diagonal and
+//     added to every row; every DOF is B-normalised; the eigenvector's global sign may flip.
+//   * NON-EMPTY mask (exact reduced-elimination pins): constrained DOFs are held EXACTLY fixed --
+//     their rows are identity, `rhsConst[i]` is the fixed pin value for masked DOFs and the constant
+//     -M_FC u_C forcing for free DOFs. Only FREE DOFs are B-normalised (the pinned block is a fixed
+//     inhomogeneity, not part of the |u|=1 eigen-constraint), and the pins break the sign symmetry
+//     so no sign flip is tried. Makes feature/crease pins HARD (~float precision) instead of
+//     penalty-soft and drops the 1e6 penalty from M's conditioning. See computeCrossFieldKnoppelCrane.
 bool solveSmallestField(accel::IBackend& backend, const accel::SparseMatrix& M,
-                        const std::vector<double>& Bmass2, const std::vector<float>& pinRhs,
-                        const std::vector<KcEdge>& edges, std::vector<float>& u, int outerIters,
-                        float cgTol) {
+                        const std::vector<double>& Bmass2, const std::vector<float>& rhsConst,
+                        const std::vector<char>& fixedMask, const std::vector<KcEdge>& edges,
+                        std::vector<float>& u, int outerIters, float cgTol) {
     const std::size_t n = M.rows;
+    const bool hasFixed = !fixedMask.empty();
     std::vector<float> x(u.begin(), u.end());
     std::vector<float> uPrev(u.begin(), u.end());
     std::vector<float> rhs(n);
@@ -437,7 +447,11 @@ bool solveSmallestField(accel::IBackend& backend, const accel::SparseMatrix& M,
     int outerDone = 0;
     for (int k = 0; k < outerIters; ++k) {
         for (std::size_t i = 0; i < n; ++i) {
-            rhs[i] = static_cast<float>(Bmass2[i] * static_cast<double>(u[i])) + pinRhs[i];
+            // Fixed (constrained) rows are identity with a constant RHS -> the pin holds exactly;
+            // free rows carry B*u plus the constant elimination/penalty forcing.
+            rhs[i] = (hasFixed && fixedMask[i])
+                         ? rhsConst[i]
+                         : static_cast<float>(Bmass2[i] * static_cast<double>(u[i])) + rhsConst[i];
         }
         // Loosen the CG tolerance on early outer steps (the eigenvector is still coarse) so
         // inner iteration counts collapse; tighten as the outer iteration settles.
@@ -453,8 +467,13 @@ bool solveSmallestField(accel::IBackend& backend, const accel::SparseMatrix& M,
             }
             return false;
         }
+        // B-normalise the eigenvector, over the FREE DOFs only when pins are exact (the pinned
+        // block is a fixed inhomogeneity, not part of the |u|=1 eigen-constraint).
         double s2 = 0.0;
         for (std::size_t i = 0; i < n; ++i) {
+            if (hasFixed && fixedMask[i]) {
+                continue;
+            }
             s2 += Bmass2[i] * static_cast<double>(x[i]) * static_cast<double>(x[i]);
         }
         if (!(s2 > 0.0) || !std::isfinite(s2)) {
@@ -466,20 +485,25 @@ bool solveSmallestField(accel::IBackend& backend, const accel::SparseMatrix& M,
         const double s = std::sqrt(s2);
         uPrev.assign(u.begin(), u.end());
         for (std::size_t i = 0; i < n; ++i) {
-            u[i] = static_cast<float>(static_cast<double>(x[i]) / s);
+            u[i] = (hasFixed && fixedMask[i]) ? x[i]
+                                              : static_cast<float>(static_cast<double>(x[i]) / s);
         }
         // Converge on the CHANGE IN THE FIELD, not the raw Rayleigh quotient of M (whose value is
-        // dominated by the P=1e6 penalty and so never certifies the interior). deltaU is the
-        // B-norm distance between successive normalised iterates, sign-disambiguated (inverse
-        // iteration can flip the eigenvector's sign). energy is the honest smoothness KC minimises.
+        // dominated by the penalty/shift terms and so never certifies the interior). deltaU is the
+        // B-norm distance between successive normalised free iterates. With penalty pins the sign
+        // can flip (disambiguate against +/-); exact pins fix the sign, so only + is meaningful.
+        // energy is the honest smoothness KC minimises.
         double dPlus = 0.0, dMinus = 0.0;
         for (std::size_t i = 0; i < n; ++i) {
+            if (hasFixed && fixedMask[i]) {
+                continue;
+            }
             const double a = static_cast<double>(u[i]) - static_cast<double>(uPrev[i]);
             const double b = static_cast<double>(u[i]) + static_cast<double>(uPrev[i]);
             dPlus += Bmass2[i] * a * a;
             dMinus += Bmass2[i] * b * b;
         }
-        deltaU = std::sqrt(std::min(dPlus, dMinus));
+        deltaU = std::sqrt(hasFixed ? dPlus : std::min(dPlus, dMinus));
         energy = dirichletEnergy(edges, u);
         if (!std::isfinite(energy)) {
             return false;
@@ -489,79 +513,53 @@ bool solveSmallestField(accel::IBackend& backend, const accel::SparseMatrix& M,
         }
     }
     if (stats) {
-        std::fprintf(stderr,
-                     "[kc] inverse-iteration outer=%d innerCG=%d dirichletE=%.6g deltaU=%.3g\n",
-                     outerDone, totalInner, energy, deltaU);
+        std::fprintf(
+            stderr,
+            "[kc] inverse-iteration outer=%d innerCG=%d dirichletE=%.6g deltaU=%.3g pins=%s\n",
+            outerDone, totalInner, energy, deltaU, hasFixed ? "exact" : "penalty");
     }
     return true;
 }
 
 }  // namespace
 
-// Knoppel-Crane globally-optimal 4-RoSy field on the PER-FACE (dual) connection Laplacian
-// (docs/ROADMAP.md Phase 3 lever c7). Builds the true connection Laplacian L = D - W(transport)
-// over the same per-face frames, transport phases and feature/crease pins the iterative field
-// uses, then takes its smallest generalized eigenvector via inverse iteration on the existing
-// spmv+CG -- the globally-optimal smoothest field, which is known to place fewer, better-located
-// cones than local relaxation. Gated behind CYBER_QC_KC_FIELD; falls back to computeCrossField if
-// the eigensolver diverges, so it can only help or no-op.
-CrossField computeCrossFieldKnoppelCrane(const Mesh& mesh, int iterations, accel::IBackend& backend,
-                                         float creaseAlignDegrees) {
-    // Seed / warm-start from the iterative field, and reuse it verbatim as the divergence fallback.
-    CrossField seed = computeCrossField(mesh, iterations, backend, creaseAlignDegrees);
+namespace {
 
-    CrossField field;
-    const FieldSetup setup = buildFrameAndConstraints(mesh, creaseAlignDegrees, field);
+// The assembled per-face connection-Laplacian eigen-system handed to solveSmallestField.
+struct KcFaceSystem {
+    accel::SparseMatrix mat;         // shifted connection Laplacian M (2F x 2F)
+    std::vector<double> Bmass2;       // per-DOF lumped mass B
+    std::vector<float> rhsConst;      // constant RHS forcing (pin value / elimination / penalty)
+    std::vector<char> fixedMask;      // per-DOF exactly-fixed flag (empty for penalty pins)
+    std::vector<KcEdge> edges;        // dual edges for the penalty-free Dirichlet-energy monitor
+};
+
+// Assemble the per-face connection Laplacian L = D - W(transport): off-diagonal block (c,g) =
+// -w * R(4(af-ag)), degree diagonal D_c = sum_g w. The 2x2 interleaved block form IS the real-
+// symmetric [[Re,-Im],[Im,Re]] embedding, so M is genuinely symmetric (block(g,c) = block(c,g)^T)
+// and x^T L x = sum_edges w ||u_c - R u_g||^2 >= 0 (PSD); the eps*B Tikhonov shift makes it SPD.
+//
+// Edge weight w: DEFAULT uniform w=1; `uniformW=false` uses the DEC dual-graph finite-volume weight
+// w = |shared edge| / dist(centroid_f, centroid_g) (the Hodge star on the dual mesh, lever c7 (i),
+// REFUTED — barely differs on the near-uniform corpus and regresses spot; kept opt-in).
+//
+// Feature/crease pins: `exactPins=true` (default) removes constrained faces from the eigen-solve
+// via EXACT reduced elimination — their rows become identity, their coupling to free faces is moved
+// to `rhsConst`, and they are held at their exact pin (c1/c2 hard to ~float precision, no P=1e6
+// penalty in M). `exactPins=false` restores the earlier soft penalty pins (P=1e6 diagonal).
+KcFaceSystem assembleFaceKcSystem(const Mesh& mesh, const FieldSetup& setup, const CrossField& field,
+                                  const std::vector<double>& Bmass, double meanB,
+                                  const std::vector<Vec3>& centroid, bool uniformW, bool exactPins) {
     const std::size_t nf = setup.nf;
-    if (nf == 0) {
-        return field;
-    }
     const std::vector<FaceId>& faces = setup.faces;
     const std::vector<Index>& compact = setup.compact;
     const std::vector<char>& constrained = setup.constrained;
 
-    // Per-face lumped mass (triangle area) -> the diagonal generalized-mass B.
-    std::vector<double> Bmass(nf, 0.0);
-    double meanB = 0.0;
-    for (std::size_t c = 0; c < nf; ++c) {
-        const std::vector<VertexId> fv = mesh.faceVertices(faces[c]);
-        const Vec3 e1 = mesh.position(fv[1]) - mesh.position(fv[0]);
-        const Vec3 e2 = mesh.position(fv[2]) - mesh.position(fv[0]);
-        Bmass[c] = 0.5 * static_cast<double>(length(cross(e1, e2)));
-        meanB += Bmass[c];
-    }
-    meanB /= static_cast<double>(nf);
-    if (!(meanB > 0.0)) {
-        return seed;  // degenerate geometry: keep the iterative field
-    }
-
-    // Per-face barycenter, for the dual-graph (finite-volume) edge weights below.
-    std::vector<Vec3> centroid(nf);
-    for (std::size_t c = 0; c < nf; ++c) {
-        const std::vector<VertexId> fv = mesh.faceVertices(faces[c]);
-        centroid[c] = (mesh.position(fv[0]) + mesh.position(fv[1]) + mesh.position(fv[2])) *
-                      (1.0f / 3.0f);
-    }
-
-    // Connection Laplacian L = D - W(transport): off-diagonal block (c,g) = -w * R(4(af-ag)),
-    // degree diagonal D_c = sum_g w. The 2x2 interleaved block form IS the real-symmetric
-    // [[Re,-Im],[Im,Re]] embedding, so M is genuinely symmetric (block(g,c) = block(c,g)^T) and
-    // x^T L x = sum_edges w ||u_c - R u_g||^2 >= 0 (PSD).
-    //
-    // Edge weight w. DEFAULT is uniform w=1. CYBER_QC_KC_DUAL_COTAN opts into the DEC-consistent
-    // dual-graph finite-volume weight w = |shared edge| / dist(centroid_f, centroid_g) -- the
-    // cotan-analogue for a per-FACE field (the Hodge star ⋆1 on the DUAL mesh), which discretizes
-    // the smooth Dirichlet integral rather than counting faces. This is lever (i) of
-    // docs/ROADMAP.md c7. MEASURED: on the near-uniform remeshing corpus the ratio |e|/|dual e| is
-    // nearly constant (~1.8, equilateral triangles give 1.73), so it barely differs from uniform
-    // and on the count-matched spot row it REGRESSES (irregular 3.81 -> 4.18, median 82.23 ->
-    // 80.51, field cones 73 -> 75) -- a documented refutation, kept opt-in for reproducibility. The
-    // ~2x spurious-singularity gap vs Geogram is dominated by the per-FACE discretization, not the
-    // edge weighting; the paper-faithful per-VERTEX cotan build (lever ii) is the remaining lever.
-    const bool uniformW = std::getenv("CYBER_QC_KC_DUAL_COTAN") == nullptr;
     std::vector<std::vector<std::pair<std::size_t, float>>> rows(2 * nf);
     std::vector<double> deg(nf, 0.0);
-    std::vector<KcEdge> edges;
+    std::vector<float> fixedRhs(2 * nf, 0.0f);
+    KcFaceSystem sys;
+    // -w * R(phi) block into row r, column c.
     const auto addBlockNeg = [&rows](Index r, Index c, float phi, float w) {
         const float cphi = std::cos(phi) * w;
         const float sphi = std::sin(phi) * w;
@@ -569,6 +567,28 @@ CrossField computeCrossFieldKnoppelCrane(const Mesh& mesh, int iterations, accel
         rows[2 * r].emplace_back(2 * c + 1, sphi);
         rows[2 * r + 1].emplace_back(2 * c, -sphi);
         rows[2 * r + 1].emplace_back(2 * c + 1, -cphi);
+    };
+    // Exact-elimination forcing: a FREE row r's coupling to a CONSTRAINED neighbour c contributes
+    // -(block)*pin_c to the free row's RHS (moving the fixed column out of the matrix).
+    const auto moveToRhs = [&fixedRhs](Index r, float phi, float w, float pinRe, float pinIm) {
+        const float cphi = std::cos(phi) * w;
+        const float sphi = std::sin(phi) * w;
+        fixedRhs[2 * r] += cphi * pinRe - sphi * pinIm;
+        fixedRhs[2 * r + 1] += sphi * pinRe + cphi * pinIm;
+    };
+    // Row r's coupling to neighbour c goes into the matrix when free, into the RHS when the neighbour
+    // is a fixed pin; a constrained row r is identity (coupling dropped), keeping M block-diagonal.
+    const auto couple = [&](Index r, Index c, float phi, float w) {
+        if (exactPins) {
+            if (constrained[r]) {
+                return;
+            }
+            if (constrained[c]) {
+                moveToRhs(r, phi, w, field.real[faces[c].value], field.imag[faces[c].value]);
+                return;
+            }
+        }
+        addBlockNeg(r, c, phi, w);
     };
     double wSum = 0.0;
     std::size_t wCount = 0;
@@ -600,21 +620,21 @@ CrossField computeCrossFieldKnoppelCrane(const Mesh& mesh, int iterations, accel
         wSum += w;
         ++wCount;
         const float phiFG = 4.0f * (af - ag);
-        addBlockNeg(cf, cg, phiFG, w);
-        addBlockNeg(cg, cf, -phiFG, w);
-        deg[cf] += w;
+        couple(cf, cg, phiFG, w);
+        couple(cg, cf, -phiFG, w);
+        deg[cf] += w;  // full degree (incl. edges to pinned neighbours) is the free-row diagonal
         deg[cg] += w;
-        edges.push_back(KcEdge{static_cast<std::size_t>(cf), static_cast<std::size_t>(cg), phiFG, w});
+        sys.edges.push_back(
+            KcEdge{static_cast<std::size_t>(cf), static_cast<std::size_t>(cg), phiFG, w});
     }
     if (std::getenv("CYBER_QC_FIELD_STATS") != nullptr) {
-        std::fprintf(stderr, "[kc] weighting=%s dualEdges=%zu meanW=%.4g\n",
-                     uniformW ? "uniform" : "dual-cotan", wCount,
+        std::fprintf(stderr, "[kc] weighting=%s pins=%s dualEdges=%zu meanW=%.4g\n",
+                     uniformW ? "uniform" : "dual-cotan", exactPins ? "exact" : "penalty", wCount,
                      wCount > 0 ? wSum / static_cast<double>(wCount) : 0.0);
     }
 
-    // eps*B Tikhonov shift makes M strictly SPD (L alone is singular at the target field so
-    // CG's pAp>0 precondition would fail); penalty pins impose the feature/crease constraints
-    // as hard Dirichlet BCs while keeping M SPD.
+    // Diagonal: free rows carry degree + eps*B shift; constrained rows are identity (exact) or carry
+    // the P=1e6 Dirichlet penalty (penalty mode).
     const double eps = 1e-4 * meanB;
     double meanDiag = 0.0;
     for (std::size_t c = 0; c < nf; ++c) {
@@ -623,45 +643,116 @@ CrossField computeCrossFieldKnoppelCrane(const Mesh& mesh, int iterations, accel
     meanDiag /= static_cast<double>(nf);
     const double penalty = 1e6 * std::max(meanDiag, 1e-12);
     for (std::size_t c = 0; c < nf; ++c) {
-        const double diag = deg[c] + eps * Bmass[c] + (constrained[c] ? penalty : 0.0);
+        double diag = deg[c] + eps * Bmass[c];
+        if (constrained[c]) {
+            diag = exactPins ? 1.0 : diag + penalty;
+        }
         rows[2 * c].emplace_back(2 * c, static_cast<float>(diag));
         rows[2 * c + 1].emplace_back(2 * c + 1, static_cast<float>(diag));
     }
 
-    accel::SparseMatrix mat;
-    mat.rows = 2 * nf;
-    mat.rowStart.reserve(2 * nf + 1);
-    mat.rowStart.push_back(0);
+    sys.mat.rows = 2 * nf;
+    sys.mat.rowStart.reserve(2 * nf + 1);
+    sys.mat.rowStart.push_back(0);
     for (const auto& row : rows) {
         for (const auto& [col, val] : row) {
-            mat.colIndex.push_back(col);
-            mat.value.push_back(val);
+            sys.mat.colIndex.push_back(col);
+            sys.mat.value.push_back(val);
         }
-        mat.rowStart.push_back(mat.colIndex.size());
+        sys.mat.rowStart.push_back(sys.mat.colIndex.size());
     }
 
-    // Per-DOF mass and penalty RHS.
-    std::vector<double> Bmass2(2 * nf);
-    std::vector<float> pinRhs(2 * nf, 0.0f);
+    // Per-DOF mass, RHS forcing, and (exact mode) the fixed-DOF mask.
+    sys.Bmass2.assign(2 * nf, 0.0);
+    sys.rhsConst.assign(2 * nf, 0.0f);
+    if (exactPins) {
+        sys.fixedMask.assign(2 * nf, 0);
+    }
     for (std::size_t c = 0; c < nf; ++c) {
-        Bmass2[2 * c] = Bmass[c];
-        Bmass2[2 * c + 1] = Bmass[c];
-        if (constrained[c]) {
-            pinRhs[2 * c] = static_cast<float>(penalty * field.real[faces[c].value]);
-            pinRhs[2 * c + 1] = static_cast<float>(penalty * field.imag[faces[c].value]);
+        sys.Bmass2[2 * c] = Bmass[c];
+        sys.Bmass2[2 * c + 1] = Bmass[c];
+        if (exactPins && constrained[c]) {
+            sys.fixedMask[2 * c] = 1;
+            sys.fixedMask[2 * c + 1] = 1;
+            sys.rhsConst[2 * c] = field.real[faces[c].value];  // identity row -> exact pin held
+            sys.rhsConst[2 * c + 1] = field.imag[faces[c].value];
+        } else if (exactPins) {
+            sys.rhsConst[2 * c] = fixedRhs[2 * c];  // constant elimination forcing on free rows
+            sys.rhsConst[2 * c + 1] = fixedRhs[2 * c + 1];
+        } else if (constrained[c]) {
+            sys.rhsConst[2 * c] = static_cast<float>(penalty * field.real[faces[c].value]);
+            sys.rhsConst[2 * c + 1] = static_cast<float>(penalty * field.imag[faces[c].value]);
         }
     }
+    return sys;
+}
 
-    // Warm-start the eigenvector from the iterative field.
+}  // namespace
+
+// Knoppel-Crane globally-optimal 4-RoSy field on the PER-FACE (dual) connection Laplacian
+// (docs/ROADMAP.md Phase 3 lever c7). Builds the true connection Laplacian L = D - W(transport)
+// over the same per-face frames, transport phases and feature/crease pins the iterative field
+// uses, then takes its smallest generalized eigenvector via inverse iteration on the existing
+// spmv+CG -- the globally-optimal smoothest field, which is known to place fewer, better-located
+// cones than local relaxation. Feature/crease pins are imposed by EXACT reduced elimination
+// (CYBER_QC_KC_PENALTY restores the earlier soft penalty pins). Gated behind CYBER_QC_KC_FIELD;
+// falls back to computeCrossField if the eigensolver diverges, so it can only help or no-op.
+CrossField computeCrossFieldKnoppelCrane(const Mesh& mesh, int iterations, accel::IBackend& backend,
+                                         float creaseAlignDegrees) {
+    // Seed / warm-start from the iterative field, and reuse it verbatim as the divergence fallback.
+    CrossField seed = computeCrossField(mesh, iterations, backend, creaseAlignDegrees);
+
+    CrossField field;
+    const FieldSetup setup = buildFrameAndConstraints(mesh, creaseAlignDegrees, field);
+    const std::size_t nf = setup.nf;
+    if (nf == 0) {
+        return field;
+    }
+    const std::vector<FaceId>& faces = setup.faces;
+    const std::vector<char>& constrained = setup.constrained;
+
+    // Per-face lumped mass (triangle area) -> the diagonal generalized-mass B, and barycenters for
+    // the (opt-in) dual-graph edge weights.
+    std::vector<double> Bmass(nf, 0.0);
+    std::vector<Vec3> centroid(nf);
+    double meanB = 0.0;
+    for (std::size_t c = 0; c < nf; ++c) {
+        const std::vector<VertexId> fv = mesh.faceVertices(faces[c]);
+        const Vec3 e1 = mesh.position(fv[1]) - mesh.position(fv[0]);
+        const Vec3 e2 = mesh.position(fv[2]) - mesh.position(fv[0]);
+        Bmass[c] = 0.5 * static_cast<double>(length(cross(e1, e2)));
+        meanB += Bmass[c];
+        centroid[c] = (mesh.position(fv[0]) + mesh.position(fv[1]) + mesh.position(fv[2])) *
+                      (1.0f / 3.0f);
+    }
+    meanB /= static_cast<double>(nf);
+    if (!(meanB > 0.0)) {
+        return seed;  // degenerate geometry: keep the iterative field
+    }
+
+    // DEFAULT weighting is uniform w=1 (dual-cotan lever c7 (i) refuted); DEFAULT pins are exact
+    // reduced elimination (CYBER_QC_KC_PENALTY -> soft penalty pins for A/B).
+    const bool uniformW = std::getenv("CYBER_QC_KC_DUAL_COTAN") == nullptr;
+    const bool exactPins = std::getenv("CYBER_QC_KC_PENALTY") == nullptr;
+    KcFaceSystem sys =
+        assembleFaceKcSystem(mesh, setup, field, Bmass, meanB, centroid, uniformW, exactPins);
+
+    // Warm-start the eigenvector from the iterative field; exact pins start at the pin value.
     std::vector<float> u(2 * nf);
     for (std::size_t c = 0; c < nf; ++c) {
-        u[2 * c] = seed.real[faces[c].value];
-        u[2 * c + 1] = seed.imag[faces[c].value];
+        if (exactPins && constrained[c]) {
+            u[2 * c] = field.real[faces[c].value];
+            u[2 * c + 1] = field.imag[faces[c].value];
+        } else {
+            u[2 * c] = seed.real[faces[c].value];
+            u[2 * c + 1] = seed.imag[faces[c].value];
+        }
     }
 
     const char* outerEnv = std::getenv("CYBER_QC_KC_OUTER");
     const int outerIters = outerEnv != nullptr ? std::max(1, std::atoi(outerEnv)) : 20;
-    if (!solveSmallestField(backend, mat, Bmass2, pinRhs, edges, u, outerIters, 1e-6f)) {
+    if (!solveSmallestField(backend, sys.mat, sys.Bmass2, sys.rhsConst, sys.fixedMask, sys.edges, u,
+                            outerIters, 1e-6f)) {
         return seed;  // divergence guard: never regress below the iterative field
     }
 
@@ -1114,7 +1205,8 @@ CrossField computeCrossFieldKnoppelCraneVertex(const Mesh& mesh, int iterations,
 
     const char* outerEnv = std::getenv("CYBER_QC_KC_OUTER");
     const int outerIters = outerEnv != nullptr ? std::max(1, std::atoi(outerEnv)) : 20;
-    if (!solveSmallestField(backend, mat, Bmass2, pinRhs, edges, u, outerIters, 1e-6f)) {
+    if (!solveSmallestField(backend, mat, Bmass2, pinRhs, /*fixedMask=*/{}, edges, u, outerIters,
+                            1e-6f)) {
         return seed;  // divergence guard: never regress below the iterative field
     }
 

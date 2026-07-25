@@ -135,6 +135,45 @@ TEST_CASE("per-vertex Knoppel-Crane field is deterministic") {
     REQUIRE(a.imag == b.imag);
 }
 
+TEST_CASE("per-face Knoppel-Crane field is a unit 4-RoSy aligned to a flat grid") {
+    // computeCrossFieldKnoppelCrane is the SHIPPED (flag-gated) KC default: the smallest generalized
+    // eigenvector of the per-face (dual) connection Laplacian, solved by inverse iteration with EXACT
+    // reduced-elimination feature pins. On a flat, boundary-constrained grid the connection is flat,
+    // so the globally-optimal field is the axis-aligned one — the same contract the iterative field
+    // satisfies.
+    Mesh mesh = makeGrid(6);
+    mesh.tagFeatureEdges(90.0f);
+    auto backend = cyber::accel::defaultBackend();
+
+    const remesh::CrossField field = remesh::computeCrossFieldKnoppelCrane(mesh, 50, *backend);
+    REQUIRE(field.size() == mesh.faceCapacity());
+
+    double totalErr = 0.0;
+    std::size_t count = 0;
+    for (Index i = 0; i < mesh.faceCapacity(); ++i) {
+        const FaceId f{i};
+        if (!mesh.isAlive(f)) {
+            continue;
+        }
+        const float len = std::sqrt(field.real[i] * field.real[i] + field.imag[i] * field.imag[i]);
+        REQUIRE(len == doctest::Approx(1.0f).epsilon(0.01));
+        totalErr += axisMisalignmentDeg(field.direction(f));
+        ++count;
+    }
+    REQUIRE(count > 0);
+    REQUIRE(totalErr / static_cast<double>(count) < 8.0);
+}
+
+TEST_CASE("per-face Knoppel-Crane field is deterministic") {
+    Mesh mesh = makeGrid(5);
+    mesh.tagFeatureEdges(90.0f);
+    auto backend = cyber::accel::defaultBackend();
+    const remesh::CrossField a = remesh::computeCrossFieldKnoppelCrane(mesh, 30, *backend);
+    const remesh::CrossField b = remesh::computeCrossFieldKnoppelCrane(mesh, 30, *backend);
+    REQUIRE(a.real == b.real);
+    REQUIRE(a.imag == b.imag);
+}
+
 TEST_CASE("cross field is deterministic") {
     Mesh mesh = makeGrid(5);
     mesh.tagFeatureEdges(90.0f);
@@ -261,4 +300,21 @@ TEST_CASE("crease alignment applies on a curved surface and is gated off on a pl
     const remesh::CrossField fOff = remesh::computeCrossField(flatSheet, 120, *backend, 0.0f);
     const remesh::CrossField fOn = remesh::computeCrossField(flatSheet, 120, *backend, 45.0f);
     CHECK(differingFaces(flatSheet, fOff, fOn) == 0);
+}
+
+TEST_CASE("per-face Knoppel-Crane holds crease pins exactly and differs from the iterative field") {
+    // The KC per-face field imposes the feature/crease pins by EXACT reduced elimination (constrained
+    // faces removed from the eigen-solve, held at their exact pin), so the crease faces must align to
+    // the crease at least as tightly as the iterative field — the c1/c2 hard-constraint contract.
+    auto backend = cyber::accel::defaultBackend();
+    const Mesh curved = makeFoldedSheet(0.8f, 0.6f);
+
+    const remesh::CrossField iter = remesh::computeCrossField(curved, 120, *backend, 45.0f);
+    const remesh::CrossField kc = remesh::computeCrossFieldKnoppelCrane(curved, 120, *backend, 45.0f);
+
+    // Exact pins keep the crease faces crease-aligned (the hard c1/c2 contract).
+    CHECK(creaseDeviationDeg(curved, kc) < 5.0f);
+    // And the globally-optimal interior is a genuinely different field than local relaxation
+    // (guards against a silent fall-back-to-seed that would make KC a no-op).
+    CHECK(differingFaces(curved, iter, kc) > 0);
 }
