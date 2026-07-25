@@ -372,3 +372,25 @@ TEST_CASE("per-face Knoppel-Crane converges to the same field regardless of seed
     CHECK(differingFaces(curved, kcIter, kcCold) == 0);
     CHECK(differingFaces(curved, kcIter, kcRand) == 0);
 }
+
+TEST_CASE("per-face Knoppel-Crane default tolerance runs to the converged global field") {
+    // Lever c7 (vi): the shipped KC default CYBER_QC_KC_TOL is 1e-5, which runs inverse iteration to
+    // the converged fixed point rather than an under-converged early stop. Lock that the DEFAULT field
+    // is the converged one (bit-identical to an explicit tight tol) and is genuinely tighter than a
+    // deliberately loose stop — so a revert of the default to a loose tolerance is caught here.
+    auto backend = cyber::accel::defaultBackend();
+    const Mesh curved = makeFoldedSheet(0.8f, 0.6f);
+
+    const remesh::CrossField kcDefault = remesh::computeCrossFieldKnoppelCrane(curved, 120, *backend, 45.0f);
+
+    setenv("CYBER_QC_KC_TOL", "1e-7", 1);
+    const remesh::CrossField kcTight = remesh::computeCrossFieldKnoppelCrane(curved, 120, *backend, 45.0f);
+    setenv("CYBER_QC_KC_TOL", "1e-1", 1);
+    const remesh::CrossField kcLoose = remesh::computeCrossFieldKnoppelCrane(curved, 120, *backend, 45.0f);
+    unsetenv("CYBER_QC_KC_TOL");
+
+    // The default field is already converged: tightening the tolerance further does not move it.
+    CHECK(differingFaces(curved, kcDefault, kcTight) == 0);
+    // ...and it is strictly tighter than a loose under-converged stop.
+    CHECK(differingFaces(curved, kcDefault, kcLoose) > 0);
+}

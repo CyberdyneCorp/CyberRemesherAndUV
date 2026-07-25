@@ -875,11 +875,13 @@ CrossField computeCrossFieldKnoppelCrane(const Mesh& mesh, int iterations, accel
 
     const char* outerEnv = std::getenv("CYBER_QC_KC_OUTER");
     const int outerIters = outerEnv != nullptr ? std::max(1, std::atoi(outerEnv)) : 20;
-    // CYBER_QC_KC_TOL tightens/loosens the outer stop (B-norm field change). Default 1e-3 =
-    // byte-identical to the shipped field; a smaller value runs the inverse iteration closer to the
-    // true fixed point to check whether the field is under-converged.
+    // CYBER_QC_KC_TOL tightens/loosens the outer stop (B-norm field change). Default 1e-5 runs the
+    // inverse iteration to the CONVERGED global minimizer: on spot the Dirichlet energy reaches its
+    // fixed-point value 380.774 by outer=8 (vs the under-converged 380.779 at the earlier 1e-3 stop),
+    // seed-independent (lever c7 (v)). Loosening to 1e-3 reproduces the prior under-converged field;
+    // tightening further only spends inner CG iterations (energy already at the fixed point).
     const char* tolEnv = std::getenv("CYBER_QC_KC_TOL");
-    const double breakTol = tolEnv != nullptr ? std::max(1e-9, std::atof(tolEnv)) : 1e-3;
+    const double breakTol = tolEnv != nullptr ? std::max(1e-9, std::atof(tolEnv)) : 1e-5;
     if (!solveSmallestField(backend, sys.mat, sys.Bmass2, sys.rhsConst, sys.fixedMask, sys.edges, u,
                             outerIters, 1e-6f, breakTol)) {
         // Stats-independent telemetry so a silent fallback can never masquerade as a KC measurement

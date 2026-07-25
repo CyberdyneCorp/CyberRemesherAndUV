@@ -696,8 +696,9 @@ Anything already measured dead is listed at the end — check it before proposin
       free-face warm start with a constant `e^{i0}` field or a deterministic random unit
       field (`crossfield.cpp`); crease pins fix the gauge so a genuine global minimizer
       must land on the same field from any seed.
-    - **`CYBER_QC_KC_TOL`** (default `1e-3`) tightens the outer B-norm stop so the
-      inverse iteration runs to the true fixed point instead of the shipped early stop.
+    - **`CYBER_QC_KC_TOL`** (default `1e-5` since lever (vi); was `1e-3`) sets the outer
+      B-norm stop; the default now runs the inverse iteration to the true converged fixed
+      point, and `=1e-3` reproduces the earlier under-converged field for A/B.
     - **Seed-independence CONFIRMED ⇒ the field is genuinely the GLOBAL minimizer.** On
       spot (forced native, `--dens 3000`) at `CYBER_QC_KC_TOL=1e-5` all three seeds
       converge to a **bit-identical** result — Dirichlet energy `380.774`, field
@@ -722,9 +723,37 @@ Anything already measured dead is listed at the end — check it before proposin
       extraction sensitivity to the exact field, which the under-converged default happens
       to over-credit. Reaching the *global minimum of this per-face energy* does **not**
       close the gap to Geogram (`1.99`), confirming the residual gap is the discretization,
-      not local-vs-global optimization. Default tol stays `1e-3` for continuity with the
-      prior rounds (off ⇒ byte-identical, KC-on default unchanged at spot `2.96`); the two
-      knobs reproduce the converged global field and the seed-independence proof.
+      not local-vs-global optimization.
+  - **Lever (vi) — the shipped KC default now IS the converged global optimum
+    (`CYBER_QC_KC_TOL` default `1e-3` → `1e-5`), 2026-07-24.** The prior default stopped
+    the inverse iteration at outer=5 with Dirichlet energy `380.779` (spot), so the
+    reported KC-on field was a fortuitous under-converged intermediate, not the
+    globally-optimal field the paper (and every prior round's framing) promises. The
+    default now runs to the converged fixed point: spot outer=8, energy `380.774`
+    (seed-independent, singular `73`), for `+0.03 s` wall (`1.35 s → 1.38 s`, negligible).
+    This is an **honesty correction, not a headline win** — the fully-converged spot
+    irregular is **`3.45`** (was the under-converged `2.96`), still a real gain over the
+    iterative `4.63` with singular `73 < 77`, but a more modest one. `CYBER_QC_KC_TOL=1e-3`
+    reproduces the old under-converged field for A/B. cheburashka was already converged at
+    the old default (irregular `4.74 → 4.78`, essentially unchanged).
+    - **Bonus: on spot the feature-following regression was largely an under-convergence
+      artifact, not intrinsic shear.** Tightening to the converged field recovers spot
+      `feature 0.6648 → 0.5125` (baseline native-current `0.5035`) — the near-crease
+      interior shear reported in levers (iii)/(iv) collapses to `+1.8 %` once the field is
+      converged. This partially revises the earlier "intrinsic interior global-smoothing"
+      conclusion: it is intrinsic on **cheburashka** (`feat 0.827 → 1.073`, unchanged by
+      convergence) but under-convergence-dominated on **spot**. So the feature trade-off is
+      model-specific, and the CYBER_QC_KC_FEATURE_BAND of lever (iv) is only needed where
+      the shear is genuinely intrinsic.
+  - **Net c7 state (off ⇒ byte-identical, both backends green, all 12 ctest + 6 KC unit
+    tests pass on cpu-headless AND the Geogram-less build).** KC per-face is a real,
+    seed-independent, globally-optimal field that beats the iterative native field on
+    irregular % (spot `4.63 → 3.45`, cheburashka `5.71 → 4.78`) with median recovering, but
+    does **not** reach vendored Geogram (spot `1.99`) — the residual is the per-face
+    discretization, refuted as reweighting (dual-cotan, lever i) or re-domaining
+    (per-vertex cotan, lever ii). It stays flag-gated behind `CYBER_QC_KC_FIELD`; the real
+    remaining unlock for organic native routing is per-feature-edge integer constraints,
+    not a smarter field.
 
 **Tier 3 — narrower, concrete**
 
