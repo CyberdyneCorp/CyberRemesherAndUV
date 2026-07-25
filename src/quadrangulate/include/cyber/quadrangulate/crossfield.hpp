@@ -71,4 +71,17 @@ public:
                                                        accel::IBackend& backend,
                                                        float creaseAlignDegrees = 45.0f);
 
+// Paper-faithful PER-VERTEX Knoppel-Crane field (lever c7 (ii)): the connection Laplacian is built
+// on the primal mesh with the standard cotan edge weights w = (cot a + cot b)/2 and per-vertex
+// (barycentric) mass, exactly the discretization of "Globally Optimal Direction Fields". Its
+// smallest generalized eigenvector is taken by the same inverse iteration as the per-face variant,
+// then projected onto the faces the downstream extractor reads (feature/crease pins reasserted per
+// face so c1/c2 are byte-identical to the per-face field). This is the discretization the refuted
+// per-face dual-cotan result points at as the driver of the residual native-vs-Geogram cone gap.
+// Gated behind CYBER_QC_KC_FIELD + CYBER_QC_KC_VERTEX; falls back to computeCrossField on any
+// eigensolver divergence, so it can only help or no-op. See docs/ROADMAP.md Phase 3 lever c7.
+[[nodiscard]] CrossField computeCrossFieldKnoppelCraneVertex(const Mesh& mesh, int iterations,
+                                                             accel::IBackend& backend,
+                                                             float creaseAlignDegrees = 45.0f);
+
 }  // namespace cyber::remesh

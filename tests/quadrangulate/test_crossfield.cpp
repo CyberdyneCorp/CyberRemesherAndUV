@@ -98,6 +98,43 @@ TEST_CASE("orientation-derived cross field is a unit 4-RoSy aligned to a flat gr
     REQUIRE(totalErr / static_cast<double>(count) < 8.0);
 }
 
+TEST_CASE("per-vertex Knoppel-Crane field is a unit 4-RoSy aligned to a flat grid") {
+    // computeCrossFieldKnoppelCraneVertex (the paper-faithful per-vertex cotan build, gated by
+    // CYBER_QC_KC_FIELD + CYBER_QC_KC_VERTEX) must produce a valid, feature-aligned per-face cross:
+    // the smallest generalized eigenvector of the vertex connection Laplacian, projected to faces.
+    Mesh mesh = makeGrid(6);
+    mesh.tagFeatureEdges(90.0f);
+    auto backend = cyber::accel::defaultBackend();
+
+    const remesh::CrossField field = remesh::computeCrossFieldKnoppelCraneVertex(mesh, 50, *backend);
+    REQUIRE(field.size() == mesh.faceCapacity());
+
+    double totalErr = 0.0;
+    std::size_t count = 0;
+    for (Index i = 0; i < mesh.faceCapacity(); ++i) {
+        const FaceId f{i};
+        if (!mesh.isAlive(f)) {
+            continue;
+        }
+        const float len = std::sqrt(field.real[i] * field.real[i] + field.imag[i] * field.imag[i]);
+        REQUIRE(len == doctest::Approx(1.0f).epsilon(0.01));
+        totalErr += axisMisalignmentDeg(field.direction(f));
+        ++count;
+    }
+    REQUIRE(count > 0);
+    REQUIRE(totalErr / static_cast<double>(count) < 8.0);
+}
+
+TEST_CASE("per-vertex Knoppel-Crane field is deterministic") {
+    Mesh mesh = makeGrid(5);
+    mesh.tagFeatureEdges(90.0f);
+    auto backend = cyber::accel::defaultBackend();
+    const remesh::CrossField a = remesh::computeCrossFieldKnoppelCraneVertex(mesh, 30, *backend);
+    const remesh::CrossField b = remesh::computeCrossFieldKnoppelCraneVertex(mesh, 30, *backend);
+    REQUIRE(a.real == b.real);
+    REQUIRE(a.imag == b.imag);
+}
+
 TEST_CASE("cross field is deterministic") {
     Mesh mesh = makeGrid(5);
     mesh.tagFeatureEdges(90.0f);

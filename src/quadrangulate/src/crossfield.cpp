@@ -785,4 +785,341 @@ CrossField computeCrossFieldFromOrientation(const Mesh& mesh, int iterations) {
     return field;
 }
 
+namespace {
+
+// An arbitrary unit tangent of the plane normal to `n` (matches position_field.cpp's anyTangent).
+Vec3 anyTangentLocal(Vec3 n) {
+    const Vec3 seed = std::fabs(n.x) < 0.9f ? Vec3{1, 0, 0} : Vec3{0, 1, 0};
+    return projectUnitLocal(seed, n);
+}
+
+// Per-vertex frames, lumped mass and feature/boundary pins for the paper-faithful per-VERTEX
+// connection Laplacian. Mirrors buildFrameAndConstraints but on vertices: the field lives at
+// vertices (as the paper prescribes), the mass is the barycentric vertex area, and a vertex on a
+// feature/boundary edge is pinned to that edge's direction so features stay sharp.
+struct VertexSetup {
+    std::vector<VertexId> verts;    // live vertices, in order
+    std::vector<Index> compact;     // vertex.value -> compact index (kInvalidIndex if not live)
+    std::vector<Vec3> tangent;      // per-vertex tangent frame
+    std::vector<Vec3> bitangent;    // normal x tangent
+    std::vector<Vec3> normal;       // area-summed vertex normal
+    std::vector<double> mass;       // barycentric vertex area -> diagonal generalized mass B
+    std::vector<char> constrained;  // pinned to a feature/boundary edge?
+    std::vector<float> pinReal;     // pin value cos(4a)
+    std::vector<float> pinImag;     // pin value sin(4a)
+    std::size_t nv = 0;
+};
+
+VertexSetup buildVertexSetup(const Mesh& mesh) {
+    const std::size_t cap = mesh.vertexCapacity();
+    VertexSetup s;
+    s.compact.assign(cap, kInvalidIndex);
+    for (Index i = 0; i < cap; ++i) {
+        const VertexId v{i};
+        if (!mesh.isAlive(v) || mesh.vertexFaces(v).empty()) {
+            continue;
+        }
+        Vec3 n{0, 0, 0};
+        for (const FaceId f : mesh.vertexFaces(v)) {
+            if (mesh.isAlive(f) && mesh.faceSize(f) == 3) {
+                n += mesh.faceNormal(f);
+            }
+        }
+        n = normalized(n);
+        const Vec3 t = anyTangentLocal(n);
+        s.compact[i] = static_cast<Index>(s.verts.size());
+        s.verts.push_back(v);
+        s.normal.push_back(n);
+        s.tangent.push_back(t);
+        s.bitangent.push_back(cross(n, t));
+    }
+    s.nv = s.verts.size();
+    s.mass.assign(s.nv, 1e-9);
+    s.constrained.assign(s.nv, 0);
+    s.pinReal.assign(s.nv, 1.0f);
+    s.pinImag.assign(s.nv, 0.0f);
+
+    for (std::size_t k = 0; k < s.nv; ++k) {
+        const VertexId v = s.verts[k];
+        double m = 0.0;
+        for (const FaceId f : mesh.vertexFaces(v)) {
+            if (!mesh.isAlive(f) || mesh.faceSize(f) != 3) {
+                continue;
+            }
+            const std::vector<VertexId> fv = mesh.faceVertices(f);
+            const Vec3 e1 = mesh.position(fv[1]) - mesh.position(fv[0]);
+            const Vec3 e2 = mesh.position(fv[2]) - mesh.position(fv[0]);
+            m += static_cast<double>(0.5f * length(cross(e1, e2))) / 3.0;
+        }
+        if (m > 0.0) {
+            s.mass[k] = m;
+        }
+        // Pin a vertex on a feature/boundary edge to that edge's direction (c1: feature keep).
+        for (const EdgeId e : mesh.vertexEdges(v)) {
+            if (!mesh.isAlive(e) || !(mesh.isFeatureEdge(e) || mesh.isBoundaryEdge(e))) {
+                continue;
+            }
+            const auto [a, b] = mesh.edgeVertices(e);
+            const VertexId other = (a == v ? b : a);
+            const Vec3 d = projectUnitLocal(mesh.position(other) - mesh.position(v), s.normal[k]);
+            if (lengthSquared(d) < 1e-12f) {
+                continue;
+            }
+            const float alpha = frameAngle(d, s.tangent[k], s.bitangent[k]);
+            s.pinReal[k] = std::cos(4.0f * alpha);
+            s.pinImag[k] = std::sin(4.0f * alpha);
+            s.constrained[k] = 1;
+            break;
+        }
+    }
+    return s;
+}
+
+// Cotan edge weight (cot a + cot b)/2 over the (up to two) triangles incident to edge (va, vb).
+// Negative weights (obtuse opposite angles) are clamped to 0 so the connection Laplacian stays
+// PSD and CG's pAp>0 precondition holds (a standard cotan-Laplacian robustness fix).
+float cotanEdgeWeight(const Mesh& mesh, EdgeId e, VertexId va, VertexId vb) {
+    double cot = 0.0;
+    for (const FaceId f : mesh.edgeFaces(e)) {
+        if (!mesh.isAlive(f) || mesh.faceSize(f) != 3) {
+            continue;
+        }
+        VertexId vc{kInvalidIndex};
+        for (const VertexId x : mesh.faceVertices(f)) {
+            if (x.value != va.value && x.value != vb.value) {
+                vc = x;
+            }
+        }
+        if (vc.value == kInvalidIndex) {
+            continue;
+        }
+        const Vec3 u1 = mesh.position(va) - mesh.position(vc);
+        const Vec3 u2 = mesh.position(vb) - mesh.position(vc);
+        const float crossLen = length(cross(u1, u2));
+        if (crossLen > 1e-12f) {
+            cot += static_cast<double>(dot(u1, u2)) / static_cast<double>(crossLen);
+        }
+    }
+    float w = static_cast<float>(0.5 * cot);
+    if (!std::isfinite(w) || w < 0.0f) {
+        w = 0.0f;
+    }
+    return w;
+}
+
+// Warm-start the per-vertex eigenvector `u` from the iterative face field: average each vertex's
+// incident-face directions into its tangent frame (constrained vertices seed to their pin).
+void seedVertexField(const Mesh& mesh, const VertexSetup& vs, const CrossField& seed,
+                     std::vector<float>& u) {
+    for (std::size_t k = 0; k < vs.nv; ++k) {
+        if (vs.constrained[k]) {
+            u[2 * k] = vs.pinReal[k];
+            u[2 * k + 1] = vs.pinImag[k];
+            continue;
+        }
+        Vec3 acc{0, 0, 0};
+        Vec3 ref{0, 0, 0};
+        bool have = false;
+        for (const FaceId f : mesh.vertexFaces(vs.verts[k])) {
+            if (!mesh.isAlive(f) || mesh.faceSize(f) != 3) {
+                continue;
+            }
+            const Vec3 dir = projectUnitLocal(seed.direction(f), vs.normal[k]);
+            if (lengthSquared(dir) < 1e-12f) {
+                continue;
+            }
+            if (!have) {
+                ref = dir;
+                acc = dir;
+                have = true;
+            } else {
+                acc += matchRoSyLocal(ref, dir, vs.normal[k]);
+            }
+        }
+        if (have && lengthSquared(acc) > 1e-12f) {
+            const Vec3 dv = projectUnitLocal(acc, vs.normal[k]);
+            const float th = frameAngle(dv, vs.tangent[k], vs.bitangent[k]);
+            u[2 * k] = std::cos(4.0f * th);
+            u[2 * k + 1] = std::sin(4.0f * th);
+        } else {
+            u[2 * k] = 1.0f;
+            u[2 * k + 1] = 0.0f;
+        }
+    }
+}
+
+// Project the converged per-vertex eigenvector `u` onto the faces the extractor reads: for each
+// unconstrained face, average its three vertices' directions (brought into a common 4-RoSy
+// representative) into the face frame; constrained faces keep the per-face pin already in `field`.
+void projectVertexToFaces(const Mesh& mesh, const VertexSetup& vs, const FieldSetup& fsetup,
+                          const std::vector<float>& u, const CrossField& seed, CrossField& field) {
+    for (std::size_t c = 0; c < fsetup.nf; ++c) {
+        const FaceId f = fsetup.faces[c];
+        if (fsetup.constrained[c]) {
+            continue;  // per-face feature/crease pin already written by buildFrameAndConstraints
+        }
+        const Vec3 n = normalized(mesh.faceNormal(f));
+        Vec3 acc{0, 0, 0};
+        Vec3 ref{0, 0, 0};
+        bool have = false;
+        for (const VertexId v : mesh.faceVertices(f)) {
+            const Index vk = vs.compact[v.value];
+            if (vk == kInvalidIndex) {
+                continue;
+            }
+            const float th = std::atan2(u[2 * vk + 1], u[2 * vk]) / 4.0f;
+            const Vec3 wdir = vs.tangent[vk] * std::cos(th) + vs.bitangent[vk] * std::sin(th);
+            const Vec3 dir = projectUnitLocal(wdir, n);
+            if (lengthSquared(dir) < 1e-12f) {
+                continue;
+            }
+            if (!have) {
+                ref = dir;
+                acc = dir;
+                have = true;
+            } else {
+                acc += matchRoSyLocal(ref, dir, n);
+            }
+        }
+        if (!have || lengthSquared(acc) < 1e-12f) {
+            field.real[f.value] = seed.real[f.value];  // guard: keep the iterative seed here
+            field.imag[f.value] = seed.imag[f.value];
+            continue;
+        }
+        const Vec3 df = projectUnitLocal(acc, n);
+        const float th = frameAngle(df, field.tangent[f.value], field.bitangent[f.value]);
+        field.real[f.value] = std::cos(4.0f * th);
+        field.imag[f.value] = std::sin(4.0f * th);
+    }
+}
+
+}  // namespace
+
+CrossField computeCrossFieldKnoppelCraneVertex(const Mesh& mesh, int iterations,
+                                               accel::IBackend& backend, float creaseAlignDegrees) {
+    // Seed / warm-start / fallback = the iterative field (returned unchanged on any divergence).
+    CrossField seed = computeCrossField(mesh, iterations, backend, creaseAlignDegrees);
+
+    // Per-face frames + feature/crease pins for the final projection and output (c1/c2 unchanged).
+    CrossField field;
+    const FieldSetup fsetup = buildFrameAndConstraints(mesh, creaseAlignDegrees, field);
+    if (fsetup.nf == 0) {
+        return field;
+    }
+
+    const VertexSetup vs = buildVertexSetup(mesh);
+    const std::size_t nv = vs.nv;
+    if (nv == 0) {
+        return seed;
+    }
+    double meanB = 0.0;
+    for (const double m : vs.mass) {
+        meanB += m;
+    }
+    meanB /= static_cast<double>(nv);
+    if (!(meanB > 0.0)) {
+        return seed;
+    }
+
+    // Connection Laplacian L = D - W(transport) over the primal mesh with cotan weights.
+    // CYBER_QC_KC_VERTEX_UNIFORM forces w=1 to isolate cotan-weighting bugs from the algorithm.
+    const bool uniformW = std::getenv("CYBER_QC_KC_VERTEX_UNIFORM") != nullptr;
+    std::vector<std::vector<std::pair<std::size_t, float>>> rows(2 * nv);
+    std::vector<double> deg(nv, 0.0);
+    std::vector<KcEdge> edges;
+    const auto addBlockNeg = [&rows](Index r, Index c, float phi, float w) {
+        const float cphi = std::cos(phi) * w;
+        const float sphi = std::sin(phi) * w;
+        rows[2 * r].emplace_back(2 * c, -cphi);
+        rows[2 * r].emplace_back(2 * c + 1, sphi);
+        rows[2 * r + 1].emplace_back(2 * c, -sphi);
+        rows[2 * r + 1].emplace_back(2 * c + 1, -cphi);
+    };
+    for (Index ei = 0; ei < mesh.edgeCapacity(); ++ei) {
+        const EdgeId e{ei};
+        if (!mesh.isAlive(e) || mesh.isFeatureEdge(e)) {
+            continue;  // feature edges are hard seams: no smoothing across them
+        }
+        const auto [va, vb] = mesh.edgeVertices(e);
+        const Index ci = vs.compact[va.value];
+        const Index cj = vs.compact[vb.value];
+        if (ci == kInvalidIndex || cj == kInvalidIndex) {
+            continue;
+        }
+        const float w = uniformW ? 1.0f : cotanEdgeWeight(mesh, e, va, vb);
+        if (w <= 0.0f) {
+            continue;
+        }
+        const Vec3 d = normalized(mesh.position(vb) - mesh.position(va));
+        const float ai =
+            frameAngle(projectUnitLocal(d, vs.normal[ci]), vs.tangent[ci], vs.bitangent[ci]);
+        const float aj =
+            frameAngle(projectUnitLocal(d, vs.normal[cj]), vs.tangent[cj], vs.bitangent[cj]);
+        const float phi = 4.0f * (ai - aj);
+        addBlockNeg(ci, cj, phi, w);
+        addBlockNeg(cj, ci, -phi, w);
+        deg[ci] += w;
+        deg[cj] += w;
+        edges.push_back(KcEdge{static_cast<std::size_t>(ci), static_cast<std::size_t>(cj), phi, w});
+    }
+
+    // eps*B Tikhonov shift (SPD) + penalty Dirichlet pins for the constrained vertices.
+    const double eps = 1e-4 * meanB;
+    double meanDiag = 0.0;
+    for (std::size_t k = 0; k < nv; ++k) {
+        meanDiag += deg[k] + eps * vs.mass[k];
+    }
+    meanDiag /= static_cast<double>(nv);
+    const double penalty = 1e6 * std::max(meanDiag, 1e-12);
+    for (std::size_t k = 0; k < nv; ++k) {
+        const double diag = deg[k] + eps * vs.mass[k] + (vs.constrained[k] ? penalty : 0.0);
+        rows[2 * k].emplace_back(2 * k, static_cast<float>(diag));
+        rows[2 * k + 1].emplace_back(2 * k + 1, static_cast<float>(diag));
+    }
+
+    accel::SparseMatrix mat;
+    mat.rows = 2 * nv;
+    mat.rowStart.reserve(2 * nv + 1);
+    mat.rowStart.push_back(0);
+    for (const auto& row : rows) {
+        for (const auto& [col, val] : row) {
+            mat.colIndex.push_back(col);
+            mat.value.push_back(val);
+        }
+        mat.rowStart.push_back(mat.colIndex.size());
+    }
+
+    std::vector<double> Bmass2(2 * nv);
+    std::vector<float> pinRhs(2 * nv, 0.0f);
+    for (std::size_t k = 0; k < nv; ++k) {
+        Bmass2[2 * k] = vs.mass[k];
+        Bmass2[2 * k + 1] = vs.mass[k];
+        if (vs.constrained[k]) {
+            pinRhs[2 * k] = static_cast<float>(penalty * static_cast<double>(vs.pinReal[k]));
+            pinRhs[2 * k + 1] = static_cast<float>(penalty * static_cast<double>(vs.pinImag[k]));
+        }
+    }
+
+    std::vector<float> u(2 * nv);
+    seedVertexField(mesh, vs, seed, u);
+
+    if (std::getenv("CYBER_QC_FIELD_STATS") != nullptr) {
+        std::size_t nPinned = 0;
+        for (const char c : vs.constrained) {
+            nPinned += c != 0 ? 1u : 0u;
+        }
+        std::fprintf(stderr, "[kc] per-VERTEX build: verts=%zu edges=%zu weighting=%s pinned=%zu\n",
+                     nv, edges.size(), uniformW ? "uniform" : "cotan", nPinned);
+    }
+
+    const char* outerEnv = std::getenv("CYBER_QC_KC_OUTER");
+    const int outerIters = outerEnv != nullptr ? std::max(1, std::atoi(outerEnv)) : 20;
+    if (!solveSmallestField(backend, mat, Bmass2, pinRhs, edges, u, outerIters, 1e-6f)) {
+        return seed;  // divergence guard: never regress below the iterative field
+    }
+
+    projectVertexToFaces(mesh, vs, fsetup, u, seed, field);
+    return field;
+}
+
 }  // namespace cyber::remesh

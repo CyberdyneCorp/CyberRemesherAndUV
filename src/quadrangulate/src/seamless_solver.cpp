@@ -177,7 +177,13 @@ SeamlessSetup buildSeamlessSetup(const Mesh& mesh, int iterations, accel::IBacke
     // face smoothing. Gated so the stock seamless path is unchanged.
     if (std::getenv("CYBER_QC_KC_FIELD") != nullptr) {
         // Lever c7: Knoppel-Crane globally-optimal field via inverse iteration (crossfield.cpp).
-        setup.field = computeCrossFieldKnoppelCrane(mesh, iterations, backend);
+        // CYBER_QC_KC_VERTEX selects the paper-faithful per-VERTEX cotan build (lever ii);
+        // otherwise the per-FACE (dual) build runs.
+        if (std::getenv("CYBER_QC_KC_VERTEX") != nullptr) {
+            setup.field = computeCrossFieldKnoppelCraneVertex(mesh, iterations, backend);
+        } else {
+            setup.field = computeCrossFieldKnoppelCrane(mesh, iterations, backend);
+        }
     } else if (std::getenv("CYBER_QC_CROSSFIELD_MULTIRES") != nullptr) {
         setup.field = computeCrossFieldFromOrientation(mesh, iterations);
     } else {

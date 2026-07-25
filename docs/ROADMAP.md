@@ -550,11 +550,45 @@ Anything already measured dead is listed at the end — check it before proposin
     penalty-free Dirichlet energy `E = Σ w‖u_f − R u_g‖²`, instead of the raw
     Rayleigh quotient of `M` (which `P=1e6` penalty pins dominate); this also
     improved cheburashka KC (irregular 4.62 → 4.28).
-  - **Next untested lever (documented, not a dead end).** With lever (i) refuted,
-    the remaining lever is (ii) the paper-faithful per-VERTEX cotan connection
-    Laplacian (crib `position_field.cpp` frames) — the discretization change the
-    dual-cotan result points at as the real driver of the residual spot 3.81 → ~2.0
-    gap.
+  - **Lever (ii) paper-faithful per-VERTEX cotan connection Laplacian — BUILT and
+    REFUTED 2026-07-24.** Implemented `computeCrossFieldKnoppelCraneVertex`
+    (`src/quadrangulate/src/crossfield.cpp`, gated `CYBER_QC_KC_FIELD` +
+    `CYBER_QC_KC_VERTEX`): the connection Laplacian on the *primal* mesh with the
+    standard cotan weights `w = (cot α + cot β)/2` (negative weights clamped to keep
+    it PSD) and barycentric per-vertex mass `B` — the exact discretization of the
+    paper. The same inverse iteration (reused `solveSmallestField`) takes its
+    smallest generalized eigenvector; feature/boundary vertices are pinned, and the
+    converged per-vertex field is **projected onto the faces** the extractor reads,
+    reasserting the per-face feature/crease pins so c1/c2 are byte-identical to the
+    per-face field. Warm-started from and falling back to the iterative field.
+    **It does not beat the per-FACE build — it is worse on both models, and on
+    cheburashka it does not beat the current iterative field at all** (counts matched
+    <5%, `CYBER_QC_ROUTE_CREASE=0.0001`):
+
+    | model | metric | current native | KC per-FACE | KC per-VERTEX cotan |
+    |---|---|---|---|---|
+    | spot | field singular= | 77 | **73** | 81 |
+    | spot | irregular % | 4.63 | **3.81** | 4.04 |
+    | cheburashka | field singular= | 111 | **94** | 130 |
+    | cheburashka | irregular % | 5.71 | **4.28** | 5.73 |
+
+    Uniform-weight per-vertex (`CYBER_QC_KC_VERTEX_UNIFORM`) is *less bad* than cotan
+    (spot singular 77, cheburashka 124) but still worse than per-face, so the cotan
+    weighting is not the cause — **the vertex→face projection is.** The per-vertex
+    eigenvector is a genuinely smoother *vertex* field (its Dirichlet energy
+    converges), but the singularity metric reads the *per-face* field the extractor
+    consumes, and the projection (averaging three vertex phases into a common 4-RoSy
+    representative) re-winds phases across faces and *injects* cones. This is exactly
+    the inert/regress failure mode flagged during design as the primary risk of any
+    per-vertex build, now measured. The finding **confirms the per-FACE (dual)
+    discretization is the correct domain**: it writes the field on the same domain the
+    metric reads, with no lossy projection, which is why it — and not the
+    paper-faithful vertex build — is the KC that helps. Per-face uniform-weight KC
+    stays the KC default; the per-vertex build is kept opt-in for reproducibility.
+    Both levers (i) dual-cotan and (ii) per-vertex cotan refuted, the residual spot
+    3.81 → ~2.0 gap to Geogram is **not** a field-discretization gap reachable by
+    reweighting or re-domaining the connection Laplacian; it is now attributable to
+    Geogram's specific cone *placement*/rounding downstream, not to a smoother field.
 
 **Tier 3 — narrower, concrete**
 
