@@ -348,3 +348,27 @@ TEST_CASE("KC feature-alignment band keeps crease pins, stays unit, and shifts t
     // (c) the band moved the interior relative to the no-band KC field.
     CHECK(differingFaces(curved, kcNoBand, kcBand) > 0);
 }
+
+TEST_CASE("per-face Knoppel-Crane converges to the same field regardless of seed") {
+    // Global-optimality check (lever c7 (v)): inverse iteration warm-starts from the iterative field
+    // by default, which invites the objection that it only smooths the seed into a nearby LOCAL fixed
+    // point. If instead it reaches the GLOBAL minimizer of the connection-Dirichlet energy, the
+    // converged field must be independent of the starting guess. Run it from the iterative warm start,
+    // from a cold constant field, and from a deterministic random field at a tight tolerance; the
+    // crease pins fix the gauge, so a genuine global minimizer must land on the SAME field each time.
+    auto backend = cyber::accel::defaultBackend();
+    const Mesh curved = makeFoldedSheet(0.8f, 0.6f);
+
+    setenv("CYBER_QC_KC_TOL", "1e-8", 1);
+    const remesh::CrossField kcIter = remesh::computeCrossFieldKnoppelCrane(curved, 120, *backend, 45.0f);
+    setenv("CYBER_QC_KC_SEED", "cold", 1);
+    const remesh::CrossField kcCold = remesh::computeCrossFieldKnoppelCrane(curved, 120, *backend, 45.0f);
+    setenv("CYBER_QC_KC_SEED", "random", 1);
+    const remesh::CrossField kcRand = remesh::computeCrossFieldKnoppelCrane(curved, 120, *backend, 45.0f);
+    unsetenv("CYBER_QC_KC_SEED");
+    unsetenv("CYBER_QC_KC_TOL");
+
+    // Converged field is seed-independent: cold and random reproduce the warm-started field exactly.
+    CHECK(differingFaces(curved, kcIter, kcCold) == 0);
+    CHECK(differingFaces(curved, kcIter, kcRand) == 0);
+}

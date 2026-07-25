@@ -4,7 +4,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <limits>
+#include <cstring>
 #include <queue>
+#include <random>
 #include <utility>
 #include <vector>
 
@@ -435,7 +437,7 @@ double dirichletEnergy(const std::vector<KcEdge>& edges, const std::vector<float
 bool solveSmallestField(accel::IBackend& backend, const accel::SparseMatrix& M,
                         const std::vector<double>& Bmass2, const std::vector<float>& rhsConst,
                         const std::vector<char>& fixedMask, const std::vector<KcEdge>& edges,
-                        std::vector<float>& u, int outerIters, float cgTol) {
+                        std::vector<float>& u, int outerIters, float cgTol, double breakTol) {
     const std::size_t n = M.rows;
     const bool hasFixed = !fixedMask.empty();
     std::vector<float> x(u.begin(), u.end());
@@ -509,7 +511,7 @@ bool solveSmallestField(accel::IBackend& backend, const accel::SparseMatrix& M,
         if (!std::isfinite(energy)) {
             return false;
         }
-        if (k >= 2 && deltaU < 1e-3) {
+        if (k >= 2 && deltaU < breakTol) {
             break;  // field stabilised: the eigenvector stopped moving
         }
     }
@@ -841,12 +843,30 @@ CrossField computeCrossFieldKnoppelCrane(const Mesh& mesh, int iterations, accel
     KcFaceSystem sys = assembleFaceKcSystem(mesh, setup, field, Bmass, meanB, centroid, uniformW,
                                             exactPins, bandW, seed);
 
-    // Warm-start the eigenvector from the iterative field; exact pins start at the pin value.
+    // Warm-start the eigenvector. Exact pins ALWAYS start at the pin value (a boundary condition,
+    // not an initial guess). Free faces default to the iterative field (warm start), but
+    // CYBER_QC_KC_SEED = cold|random replaces it to test seed-INDEPENDENCE: if inverse iteration
+    // converges to the same energy / singularity count regardless of seed, the shipped field is the
+    // GLOBAL minimizer of the connection-Dirichlet energy (lever c7 (v)); if it depends on the seed,
+    // the warm start only found a local fixed point near the iterative field. Random uses a fixed
+    // deterministic RNG so the run stays reproducible; cold is a constant e^{i0} (no prior).
+    const char* seedEnv = std::getenv("CYBER_QC_KC_SEED");
+    const bool coldSeed = seedEnv != nullptr && std::strcmp(seedEnv, "cold") == 0;
+    const bool randSeed = seedEnv != nullptr && std::strcmp(seedEnv, "random") == 0;
+    std::mt19937 rng(12345u);
+    std::uniform_real_distribution<float> ang(-3.14159265f, 3.14159265f);
     std::vector<float> u(2 * nf);
     for (std::size_t c = 0; c < nf; ++c) {
         if (exactPins && constrained[c]) {
             u[2 * c] = field.real[faces[c].value];
             u[2 * c + 1] = field.imag[faces[c].value];
+        } else if (coldSeed) {
+            u[2 * c] = 1.0f;
+            u[2 * c + 1] = 0.0f;
+        } else if (randSeed) {
+            const float a = ang(rng);
+            u[2 * c] = std::cos(a);
+            u[2 * c + 1] = std::sin(a);
         } else {
             u[2 * c] = seed.real[faces[c].value];
             u[2 * c + 1] = seed.imag[faces[c].value];
@@ -855,8 +875,13 @@ CrossField computeCrossFieldKnoppelCrane(const Mesh& mesh, int iterations, accel
 
     const char* outerEnv = std::getenv("CYBER_QC_KC_OUTER");
     const int outerIters = outerEnv != nullptr ? std::max(1, std::atoi(outerEnv)) : 20;
+    // CYBER_QC_KC_TOL tightens/loosens the outer stop (B-norm field change). Default 1e-3 =
+    // byte-identical to the shipped field; a smaller value runs the inverse iteration closer to the
+    // true fixed point to check whether the field is under-converged.
+    const char* tolEnv = std::getenv("CYBER_QC_KC_TOL");
+    const double breakTol = tolEnv != nullptr ? std::max(1e-9, std::atof(tolEnv)) : 1e-3;
     if (!solveSmallestField(backend, sys.mat, sys.Bmass2, sys.rhsConst, sys.fixedMask, sys.edges, u,
-                            outerIters, 1e-6f)) {
+                            outerIters, 1e-6f, breakTol)) {
         // Stats-independent telemetry so a silent fallback can never masquerade as a KC measurement
         // on some untested model (CYBER_QC_FIELD_STATS logs the reason; this always flags the swap).
         if (std::getenv("CYBER_QC_DEBUG") != nullptr) {
@@ -1315,7 +1340,7 @@ CrossField computeCrossFieldKnoppelCraneVertex(const Mesh& mesh, int iterations,
     const char* outerEnv = std::getenv("CYBER_QC_KC_OUTER");
     const int outerIters = outerEnv != nullptr ? std::max(1, std::atoi(outerEnv)) : 20;
     if (!solveSmallestField(backend, mat, Bmass2, pinRhs, /*fixedMask=*/{}, edges, u, outerIters,
-                            1e-6f)) {
+                            1e-6f, /*breakTol=*/1e-3)) {
         return seed;  // divergence guard: never regress below the iterative field
     }
 

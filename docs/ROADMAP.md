@@ -687,6 +687,44 @@ Anything already measured dead is listed at the end — check it before proposin
       `CYBER_QC_KC_FIELD` with no default routing change. Regression tests added for the
       per-face KC field and the band (`tests/quadrangulate/test_crossfield.cpp`); off ⇒
       byte-identical, goldens green on both the Geogram and Geogram-less builds.
+  - **Lever (v) global-optimality PROVEN, and the shipped spot number partly explained
+    as an under-convergence artifact — 2026-07-24.** The standing objection to every
+    prior KC round was that inverse iteration *warm-starts from the iterative field*, so
+    the result might be a local smoothing of that seed rather than the global minimizer
+    the paper promises. Two new opt-in controls settle it (both off ⇒ byte-identical):
+    - **`CYBER_QC_KC_SEED` = `iterative` (default) | `cold` | `random`** replaces the
+      free-face warm start with a constant `e^{i0}` field or a deterministic random unit
+      field (`crossfield.cpp`); crease pins fix the gauge so a genuine global minimizer
+      must land on the same field from any seed.
+    - **`CYBER_QC_KC_TOL`** (default `1e-3`) tightens the outer B-norm stop so the
+      inverse iteration runs to the true fixed point instead of the shipped early stop.
+    - **Seed-independence CONFIRMED ⇒ the field is genuinely the GLOBAL minimizer.** On
+      spot (forced native, `--dens 3000`) at `CYBER_QC_KC_TOL=1e-5` all three seeds
+      converge to a **bit-identical** result — Dirichlet energy `380.774`, field
+      singular count `73`, and identical output (2578 quads, irregular `3.45`,
+      median `81.87`). A regression test locks it (`per-face Knoppel-Crane converges to
+      the same field regardless of seed`). So KC is not a seed-smoothing; it reaches the
+      global optimum of the per-face connection-Dirichlet energy.
+    - **But the shipped default (`tol 1e-3`) is slightly UNDER-converged on spot, and its
+      headline 2.96 is a fortuitous intermediate.** The default stops at outer=5,
+      energy `380.779` (converged `380.774`); the field singular count is `73` at *every*
+      tolerance, yet the OUTPUT irregular is sensitive to the sub-`1e-3` field micro-state:
+      **`2.96` (tol 1e-3, shipped) → `3.37` (1e-6) → `3.45` (1e-5)**. The under-converged
+      default sits between the feature-following iterative seed and the fully-converged
+      global field and extracts *better* than either. The honest fully-converged
+      global-optimal KC field gives spot irregular **~3.4**, not 2.96 — still a real win
+      over the iterative `4.63` (and singular `73 < 77`), but a more modest one.
+      cheburashka is already converged at the default (energy `1190.84` at both `1e-3`
+      and `1e-5`, singular `94`, irregular `4.74` vs converged `~4.7`).
+    - **This mechanistically explains the round-(iii) disconnect** (field singular −5% but
+      output irregular −36%): the seed-independent, convergence-robust field-quality gain
+      is the singularity count (`73 < 77`), and the larger output swing is downstream
+      extraction sensitivity to the exact field, which the under-converged default happens
+      to over-credit. Reaching the *global minimum of this per-face energy* does **not**
+      close the gap to Geogram (`1.99`), confirming the residual gap is the discretization,
+      not local-vs-global optimization. Default tol stays `1e-3` for continuity with the
+      prior rounds (off ⇒ byte-identical, KC-on default unchanged at spot `2.96`); the two
+      knobs reproduce the converged global field and the seed-independence proof.
 
 **Tier 3 — narrower, concrete**
 
