@@ -512,20 +512,49 @@ Anything already measured dead is listed at the end — check it before proposin
     | spot | irregular % | 4.63 | **3.81** | 1.99 |
     | spot | median | 79.93 | **82.23** | 84.24 |
     | spot | field singular= | 77 | **73** | — |
-    | cheburashka | irregular % | 5.71 | **4.62** | 3.68 |
-    | cheburashka | median | 79.72 | **81.59** | 80.38 |
+    | cheburashka | irregular % | 5.71 | **4.28** | 3.68 |
+    | cheburashka | median | 79.72 | **81.48** | 80.38 |
 
-    KC closes ~⅓–½ of the field gap on both organics and *recovers median* (spot
-    +2.3, cheburashka +1.9) — the global field does place fewer, better cones, as
+    (cheburashka figures updated 2026-07-24 with the hardened field-change
+    convergence monitor, which stops the inverse iteration on the eigenvector's
+    B-norm change rather than the penalty-dominated Rayleigh quotient: irregular
+    4.62 → 4.28.) KC closes ~⅓–½ of the field gap on both organics and *recovers
+    median* (spot +2.3, cheburashka +1.8) — the global field does place fewer, better cones, as
     the thesis predicted. It does **not** reach Geogram's 2.0% on spot, so it is a
     partial win, not a full close; not yet enough on its own to route organics
     native by default.
-  - **Next untested lever (documented, not a dead end).** The per-face *dual*
-    discretization with *uniform* weights is the cheapest cut, not the paper's
-    per-vertex cotan connection Laplacian. Two levers remain to push KC to Geogram
-    parity: (i) dual-cotan edge weights (`w = shared-edge-length / dual-edge-dist`),
-    and (ii) the paper-faithful per-VERTEX cotan build (crib `position_field.cpp`
-    frames). Either could close the residual spot 3.81 → ~2.0 gap.
+  - **Lever (i) dual-cotan edge weights — BUILT and REFUTED 2026-07-24.** Added the
+    DEC-consistent dual-graph finite-volume weight `w = |shared edge| /
+    dist(centroid_f, centroid_g)` (the Hodge star `⋆1` on the *dual* mesh — the
+    cotan-analogue for a per-FACE field), opt-in behind `CYBER_QC_KC_DUAL_COTAN`,
+    A/B'd against uniform at the same forced-native routing. **It does not beat
+    uniform.** On the near-uniform remeshing corpus the ratio `|e|/|dual e|` is
+    nearly constant (≈1.8; equilateral triangles give 1.73), so it barely differs
+    from uniform, and on the count-matched spot row it *regresses*:
+
+    | model | metric | KC uniform | KC dual-cotan |
+    |---|---|---|---|
+    | spot | irregular % | **3.81** | 4.18 |
+    | spot | median | **82.23** | 80.51 |
+    | spot | field singular= | **73** | 75 |
+    | cheburashka | irregular % | 4.28 | **4.14** |
+    | cheburashka | field singular= | **94** | 98 |
+
+    Mixed and net-negative (fewer cones on both models under uniform), so uniform
+    stays the KC default; dual-cotan is kept opt-in for reproducibility. The finding
+    is informative: the ~2× spurious-singularity gap vs Geogram is dominated by the
+    **per-FACE discretization**, not the edge weighting — reweighting the same
+    face-based energy does not relocate the geometrically-pinned cones. Also
+    hardened the inverse-iteration convergence monitor: it now stops on the B-norm
+    *change in the field* (`deltaU`, sign-disambiguated) and logs the honest
+    penalty-free Dirichlet energy `E = Σ w‖u_f − R u_g‖²`, instead of the raw
+    Rayleigh quotient of `M` (which `P=1e6` penalty pins dominate); this also
+    improved cheburashka KC (irregular 4.62 → 4.28).
+  - **Next untested lever (documented, not a dead end).** With lever (i) refuted,
+    the remaining lever is (ii) the paper-faithful per-VERTEX cotan connection
+    Laplacian (crib `position_field.cpp` frames) — the discretization change the
+    dual-cotan result points at as the real driver of the residual spot 3.81 → ~2.0
+    gap.
 
 **Tier 3 — narrower, concrete**
 

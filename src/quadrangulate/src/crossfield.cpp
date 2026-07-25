@@ -383,23 +383,56 @@ int conjugateGradientLocal(accel::IBackend& backend, const accel::SparseMatrix& 
     return it;
 }
 
+// One dual-graph edge of the per-face connection Laplacian: transports face `cg`'s cross into
+// face `cf`'s frame by R(phi) and carries weight `w`. Retained (not only baked into the CSR) so
+// the inverse iteration can monitor the TRUE Dirichlet smoothness energy E = sum_e w||u_cf -
+// R(phi) u_cg||^2 -- the quantity KC minimises -- separately from the penalty/shift terms that
+// dominate the raw Rayleigh quotient of M (a rigor fix: "lambda stabilised" on M certifies the
+// penalised solve, not the interior smoothness).
+struct KcEdge {
+    std::size_t cf;
+    std::size_t cg;
+    float phi;
+    float w;
+};
+
+// Dirichlet smoothness energy of the field `u` over the dual connection graph: the sum the
+// globally-optimal field minimises. With u B-normalised (u^T B u = 1) this IS the Dirichlet
+// Rayleigh quotient, uncontaminated by the eps*B shift and P=1e6 penalty pins baked into M.
+double dirichletEnergy(const std::vector<KcEdge>& edges, const std::vector<float>& u) {
+    double e = 0.0;
+    for (const KcEdge& ed : edges) {
+        const float c = std::cos(ed.phi), s = std::sin(ed.phi);
+        const float gr = u[2 * ed.cg], gi = u[2 * ed.cg + 1];
+        const float tr = c * gr - s * gi;  // R(phi) u_cg
+        const float ti = s * gr + c * gi;
+        const float dr = u[2 * ed.cf] - tr;
+        const float di = u[2 * ed.cf + 1] - ti;
+        e += static_cast<double>(ed.w) * (static_cast<double>(dr) * dr + static_cast<double>(di) * di);
+    }
+    return e;
+}
+
 // Inverse power iteration for the smallest generalized eigenpair of (M, B): the smoothest
 // 4-RoSy field is the eigenvector of the smallest generalized eigenvalue of the connection
 // Laplacian, and inverse iteration finds it by repeatedly solving M x = B u then B-normalising.
 // M is the shifted connection Laplacian (SPD via the eps*B shift + penalty pins); B is the
-// diagonal lumped mass (per DOF in `Bmass2`); `pinRhs` carries the penalty RHS for pinned DOFs.
+// diagonal lumped mass (per DOF in `Bmass2`); `pinRhs` carries the penalty RHS for pinned DOFs;
+// `edges` re-evaluates the penalty-free Dirichlet energy for the convergence monitor.
 // `u` is seeded (warm start) and overwritten with the converged eigenvector (un-renormalised
 // per face). Returns false on divergence (non-finite / indefinite CG) so the caller can fall
 // back to the iterative field -- KC can only help or no-op, never regress.
 bool solveSmallestField(accel::IBackend& backend, const accel::SparseMatrix& M,
                         const std::vector<double>& Bmass2, const std::vector<float>& pinRhs,
-                        std::vector<float>& u, int outerIters, float cgTol) {
+                        const std::vector<KcEdge>& edges, std::vector<float>& u, int outerIters,
+                        float cgTol) {
     const std::size_t n = M.rows;
     std::vector<float> x(u.begin(), u.end());
+    std::vector<float> uPrev(u.begin(), u.end());
     std::vector<float> rhs(n);
     const bool stats = std::getenv("CYBER_QC_FIELD_STATS") != nullptr;
-    double prevLambda = std::numeric_limits<double>::infinity();
-    double lambda = 0.0;
+    double energy = 0.0;
+    double deltaU = 0.0;
     int totalInner = 0;
     int outerDone = 0;
     for (int k = 0; k < outerIters; ++k) {
@@ -431,29 +464,34 @@ bool solveSmallestField(accel::IBackend& backend, const accel::SparseMatrix& M,
             return false;
         }
         const double s = std::sqrt(s2);
+        uPrev.assign(u.begin(), u.end());
         for (std::size_t i = 0; i < n; ++i) {
             u[i] = static_cast<float>(static_cast<double>(x[i]) / s);
         }
-        // Rayleigh quotient lambda = u^T M u / u^T B u (== 1 after B-normalisation).
-        accel::Buffer<float> ub(std::vector<float>(u.begin(), u.end())), mub;
-        accel::spmv(backend, M, ub, mub);
-        double num = 0.0;
+        // Converge on the CHANGE IN THE FIELD, not the raw Rayleigh quotient of M (whose value is
+        // dominated by the P=1e6 penalty and so never certifies the interior). deltaU is the
+        // B-norm distance between successive normalised iterates, sign-disambiguated (inverse
+        // iteration can flip the eigenvector's sign). energy is the honest smoothness KC minimises.
+        double dPlus = 0.0, dMinus = 0.0;
         for (std::size_t i = 0; i < n; ++i) {
-            num += static_cast<double>(u[i]) * static_cast<double>(mub[i]);
+            const double a = static_cast<double>(u[i]) - static_cast<double>(uPrev[i]);
+            const double b = static_cast<double>(u[i]) + static_cast<double>(uPrev[i]);
+            dPlus += Bmass2[i] * a * a;
+            dMinus += Bmass2[i] * b * b;
         }
-        lambda = num;  // denominator is 1 after normalisation
-        if (!std::isfinite(lambda)) {
+        deltaU = std::sqrt(std::min(dPlus, dMinus));
+        energy = dirichletEnergy(edges, u);
+        if (!std::isfinite(energy)) {
             return false;
         }
-        if (k >= 2 && std::abs(lambda - prevLambda) < 1e-4 * (1.0 + std::abs(lambda))) {
-            prevLambda = lambda;
-            break;  // Rayleigh quotient stabilised: converged
+        if (k >= 2 && deltaU < 1e-3) {
+            break;  // field stabilised: the eigenvector stopped moving
         }
-        prevLambda = lambda;
     }
     if (stats) {
-        std::fprintf(stderr, "[kc] inverse-iteration outer=%d innerCG=%d lambda=%.6g\n", outerDone,
-                     totalInner, lambda);
+        std::fprintf(stderr,
+                     "[kc] inverse-iteration outer=%d innerCG=%d dirichletE=%.6g deltaU=%.3g\n",
+                     outerDone, totalInner, energy, deltaU);
     }
     return true;
 }
@@ -497,13 +535,33 @@ CrossField computeCrossFieldKnoppelCrane(const Mesh& mesh, int iterations, accel
         return seed;  // degenerate geometry: keep the iterative field
     }
 
+    // Per-face barycenter, for the dual-graph (finite-volume) edge weights below.
+    std::vector<Vec3> centroid(nf);
+    for (std::size_t c = 0; c < nf; ++c) {
+        const std::vector<VertexId> fv = mesh.faceVertices(faces[c]);
+        centroid[c] = (mesh.position(fv[0]) + mesh.position(fv[1]) + mesh.position(fv[2])) *
+                      (1.0f / 3.0f);
+    }
+
     // Connection Laplacian L = D - W(transport): off-diagonal block (c,g) = -w * R(4(af-ag)),
     // degree diagonal D_c = sum_g w. The 2x2 interleaved block form IS the real-symmetric
     // [[Re,-Im],[Im,Re]] embedding, so M is genuinely symmetric (block(g,c) = block(c,g)^T) and
-    // x^T L x = sum_edges w ||u_c - R u_g||^2 >= 0 (PSD). CYBER_QC_KC_UNIFORM_W keeps w=1 to
-    // isolate the algorithm from weighting during bring-up.
+    // x^T L x = sum_edges w ||u_c - R u_g||^2 >= 0 (PSD).
+    //
+    // Edge weight w. DEFAULT is uniform w=1. CYBER_QC_KC_DUAL_COTAN opts into the DEC-consistent
+    // dual-graph finite-volume weight w = |shared edge| / dist(centroid_f, centroid_g) -- the
+    // cotan-analogue for a per-FACE field (the Hodge star ⋆1 on the DUAL mesh), which discretizes
+    // the smooth Dirichlet integral rather than counting faces. This is lever (i) of
+    // docs/ROADMAP.md c7. MEASURED: on the near-uniform remeshing corpus the ratio |e|/|dual e| is
+    // nearly constant (~1.8, equilateral triangles give 1.73), so it barely differs from uniform
+    // and on the count-matched spot row it REGRESSES (irregular 3.81 -> 4.18, median 82.23 ->
+    // 80.51, field cones 73 -> 75) -- a documented refutation, kept opt-in for reproducibility. The
+    // ~2x spurious-singularity gap vs Geogram is dominated by the per-FACE discretization, not the
+    // edge weighting; the paper-faithful per-VERTEX cotan build (lever ii) is the remaining lever.
+    const bool uniformW = std::getenv("CYBER_QC_KC_DUAL_COTAN") == nullptr;
     std::vector<std::vector<std::pair<std::size_t, float>>> rows(2 * nf);
     std::vector<double> deg(nf, 0.0);
+    std::vector<KcEdge> edges;
     const auto addBlockNeg = [&rows](Index r, Index c, float phi, float w) {
         const float cphi = std::cos(phi) * w;
         const float sphi = std::sin(phi) * w;
@@ -512,6 +570,8 @@ CrossField computeCrossFieldKnoppelCrane(const Mesh& mesh, int iterations, accel
         rows[2 * r + 1].emplace_back(2 * c, -sphi);
         rows[2 * r + 1].emplace_back(2 * c + 1, -cphi);
     };
+    double wSum = 0.0;
+    std::size_t wCount = 0;
     for (Index ei = 0; ei < mesh.edgeCapacity(); ++ei) {
         const EdgeId e{ei};
         if (!mesh.isAlive(e) || mesh.isFeatureEdge(e) || mesh.edgeFaceCount(e) != 2) {
@@ -524,14 +584,32 @@ CrossField computeCrossFieldKnoppelCrane(const Mesh& mesh, int iterations, accel
             continue;
         }
         const auto [a, b] = mesh.edgeVertices(e);
-        const Vec3 d = normalized(mesh.position(b) - mesh.position(a));
+        const Vec3 ev = mesh.position(b) - mesh.position(a);
+        const Vec3 d = normalized(ev);
         const float af = frameAngle(d, field.tangent[ef[0].value], field.bitangent[ef[0].value]);
         const float ag = frameAngle(d, field.tangent[ef[1].value], field.bitangent[ef[1].value]);
-        const float w = 1.0f;  // uniform weights (dual-cotan is the documented upgrade)
-        addBlockNeg(cf, cg, 4.0f * (af - ag), w);
-        addBlockNeg(cg, cf, 4.0f * (ag - af), w);
+        float w = 1.0f;
+        if (!uniformW) {
+            const float edgeLen = length(ev);
+            const float dualLen = length(centroid[cf] - centroid[cg]);
+            w = dualLen > 1e-9f ? edgeLen / dualLen : 1.0f;
+            if (!(w > 0.0f) || !std::isfinite(w)) {
+                w = 1.0f;
+            }
+        }
+        wSum += w;
+        ++wCount;
+        const float phiFG = 4.0f * (af - ag);
+        addBlockNeg(cf, cg, phiFG, w);
+        addBlockNeg(cg, cf, -phiFG, w);
         deg[cf] += w;
         deg[cg] += w;
+        edges.push_back(KcEdge{static_cast<std::size_t>(cf), static_cast<std::size_t>(cg), phiFG, w});
+    }
+    if (std::getenv("CYBER_QC_FIELD_STATS") != nullptr) {
+        std::fprintf(stderr, "[kc] weighting=%s dualEdges=%zu meanW=%.4g\n",
+                     uniformW ? "uniform" : "dual-cotan", wCount,
+                     wCount > 0 ? wSum / static_cast<double>(wCount) : 0.0);
     }
 
     // eps*B Tikhonov shift makes M strictly SPD (L alone is singular at the target field so
@@ -583,7 +661,7 @@ CrossField computeCrossFieldKnoppelCrane(const Mesh& mesh, int iterations, accel
 
     const char* outerEnv = std::getenv("CYBER_QC_KC_OUTER");
     const int outerIters = outerEnv != nullptr ? std::max(1, std::atoi(outerEnv)) : 20;
-    if (!solveSmallestField(backend, mat, Bmass2, pinRhs, u, outerIters, 1e-6f)) {
+    if (!solveSmallestField(backend, mat, Bmass2, pinRhs, edges, u, outerIters, 1e-6f)) {
         return seed;  // divergence guard: never regress below the iterative field
     }
 
