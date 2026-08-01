@@ -83,10 +83,16 @@ struct SeamlessUv {
 // adaptivity. 0.0 is a uniform field (fewest singularities, cleanest topology — the
 // default); higher packs quads into high-curvature regions (better surface fidelity
 // per polygon, but more singularities). CYBER_QC_ADAPT overrides it.
+// `featureDegrees` is the dihedral threshold binding sharp edges into the NATIVE
+// solve (hard seams + feature-pinned integer isolines); it never reaches the
+// vendored path (see ROADMAP c1b — vendored thresholds are a count artifact).
+// Default keeps the historical 40 (knife edges only); the CLI forwards its
+// documented --sharp-edge (default 90). CYBER_QC_FEATURE_DEG still overrides.
 [[nodiscard]] SeamlessUv computeSeamlessUv(const Mesh& mesh, float targetEdgeLength,
                                            float harnessScaling = 0.5f,
                                            float harnessAdaptivity = 0.0f,
-                                           const CancelToken* cancel = nullptr);
+                                           const CancelToken* cancel = nullptr,
+                                           float featureDegrees = 40.0f);
 
 // Native seamless integer-grid parameterizer (docs/native-miq-plan.md) — the path to
 // dropping the vendored-Geogram dependency entirely. QuadCover-style: reuse our own
@@ -97,7 +103,8 @@ struct SeamlessUv {
 // CYBER_QC_NATIVE so it never affects the shipped path before it validates.
 [[nodiscard]] SeamlessUv computeSeamlessUvNative(const Mesh& mesh, float targetEdgeLength,
                                                  float adaptivity = 0.0f, float spacingScale = 1.0f,
-                                                 const CancelToken* cancel = nullptr);
+                                                 const CancelToken* cancel = nullptr,
+                                                 float featureDegrees = 40.0f);
 
 // Max integer-jump residual of a seamless UV across its interior edges: for each edge
 // shared by two triangles, the grid symmetry mapping one triangle's shared-vertex UVs
@@ -163,7 +170,8 @@ void eliminateNonQuadCaps(std::vector<Vec3>& vertices,
 // does not care keeps the documented behaviour.
 std::unique_ptr<IQuadrangulator> makeQuadCoverQuadrangulator(int fieldIterations = 40,
                                                              float adaptivity = 0.0f,
-                                                             int holeFillMaxBoundary = 64);
+                                                             int holeFillMaxBoundary = 64,
+                                                             float featureDegrees = 40.0f);
 
 // Whether a seamless-UV solver is available for the quad-cover method: true when the
 // in-process solver is linked (built with -DCYBER_WITH_QUADCOVER=ON) or the

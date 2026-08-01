@@ -449,6 +449,15 @@ std::vector<int> combField(const Mesh& mesh, const SeamlessSetup& setup, int& to
 struct SeamRef {
     std::size_t aA = 0, bA = 0, aB = 0, bB = 0;
     int rho = 0;
+    // Feature (crease) seam: the coordinate `pinAxis` (0=u, 1=v) is constant
+    // along the edge on side A and pinned to the integer lattice, so an
+    // integer isoline runs exactly along the crease and extraction traces it
+    // (its edge-on-isoline case). This is the piece whose absence made
+    // feature tagging alone REGRESS: hard seams without integer pinning give
+    // every feature-bounded patch an independent grid phase, so the patch
+    // grids disagree along the crease and extraction leaves cracks.
+    bool feature = false;
+    int pinAxis = 0;
 };
 
 // Sparse constraint-elimination MIQ (docs/native-miq-plan.md, "M2c-sparse"). The seam
@@ -472,11 +481,31 @@ int solveSeamlessReduced(accel::IBackend& backend, std::size_t nCut,
                          const CancelToken* cancel = nullptr) {
     const std::size_t nSeam = seams.size();
     const std::size_t nUv = 2 * nCut;
-    const std::size_t N = nUv + 2 * nSeam;
+    // Feature-seam integer pinning (docs/ROADMAP.md 2026-08-01 priority 1;
+    // successor to the refuted M2d — the two conditions that made M2d inert
+    // are now satisfied for the meshes this reaches: crease-heavy inputs
+    // route native, and the cross field is hard-pinned along tagged feature
+    // edges so a constant coordinate along the crease exists to pin). Each
+    // feature seam edge gets one extra promoted INTEGER variable c_e and two
+    // homogeneous rows: coord(aA) - coord(bA) = 0 (the crease is a level set
+    // of that coordinate) and coord(aA) - c_e = 0 (the level set lands on the
+    // integer lattice, i.e. ON an isoline). Kill switch: CYBER_QC_NO_FEATURE_PIN.
+    const bool pinFeatures = std::getenv("CYBER_QC_NO_FEATURE_PIN") == nullptr;
+    std::vector<std::size_t> featureSeams;
+    if (pinFeatures) {
+        for (std::size_t e = 0; e < nSeam; ++e) {
+            if (seams[e].feature) {
+                featureSeams.push_back(e);
+            }
+        }
+    }
+    const std::size_t nFeat = featureSeams.size();
+    const std::size_t N = nUv + 2 * nSeam + nFeat;
     const auto uIx = [](std::size_t c) { return c; };
     const auto vIx = [nCut](std::size_t c) { return nCut + c; };
     const auto txIx = [nCut](std::size_t e) { return 2 * nCut + 2 * e; };
     const auto tyIx = [nCut](std::size_t e) { return 2 * nCut + 2 * e + 1; };
+    const auto cIx = [nCut, nSeam](std::size_t k) { return 2 * nCut + 2 * nSeam + k; };
 
     using Row = std::unordered_map<std::size_t, double>;
     const auto addC = [](Row& r, std::size_t c, double w) {
@@ -524,6 +553,23 @@ int solveSeamlessReduced(accel::IBackend& backend, std::size_t nCut,
             }
         }
     }
+    // Feature-seam rows: crease level set + integer pinning (see above).
+    for (std::size_t k = 0; k < nFeat; ++k) {
+        const SeamRef& s = seams[featureSeams[k]];
+        const auto coord = [&](std::size_t c) { return s.pinAxis == 0 ? uIx(c) : vIx(c); };
+        Row level;
+        addC(level, coord(s.aA), 1.0);
+        addC(level, coord(s.bA), -1.0);
+        prune(level);
+        if (!level.empty()) {
+            cons.push_back(std::move(level));
+        }
+        Row lattice;
+        addC(lattice, coord(s.aA), 1.0);
+        addC(lattice, cIx(k), -1.0);
+        cons.push_back(std::move(lattice));
+    }
+
     // Gauge: pin u and v to 0 at ONE vertex PER CONNECTED COMPONENT of the cut-open mesh. The
     // reduced Dirichlet operator inherits the cotan Laplacian's per-component constant nullspace,
     // so each component needs its own translation pin or the CG drifts arbitrarily far along that
@@ -1078,6 +1124,7 @@ Parameterization solveParameterization(const Mesh& mesh, const SeamlessSetup& se
     }
 
     std::vector<float> u(nCut, 0.0f), v(nCut, 0.0f);
+
     const int maxIters = static_cast<int>(nCut) + 500;
     // Solve the relaxed (per-component pinned) Poisson for the current full RHS bu/bv. The
     // pin zeroes the RHS at the pinned/isolated vertices; u,v are warm-started from their
@@ -1136,7 +1183,8 @@ Parameterization solveParameterization(const Mesh& mesh, const SeamlessSetup& se
     constexpr float kMaxRot = kPi / 3.0f;  // ~60 deg cone: light insurance against sliver blow-ups
     constexpr double kBoundaryGate = 0.01;
     std::vector<float> raw(faceData.size(), 0.0f);
-    for (int iter = 0; boundaryFrac < kBoundaryGate && iter < kArapIters; ++iter) {
+    const bool arapEnabled = std::getenv("CYBER_QC_NO_ARAP") == nullptr;
+    for (int iter = 0; arapEnabled && boundaryFrac < kBoundaryGate && iter < kArapIters; ++iter) {
         if (cancel != nullptr && cancel->isCancelled()) {
             return out;
         }
@@ -1198,6 +1246,37 @@ Parameterization solveParameterization(const Mesh& mesh, const SeamlessSetup& se
         // Combed grid symmetry from side A (ef[0]) to side B (ef[1]).
         const int p = setup.periodJump[ei];
         s.rho = (((comb[ef[1].value] - comb[ef[0].value] - p) % 4) + 4) % 4;
+        if (mesh.isFeatureEdge(e)) {
+            s.feature = true;
+            // The coordinate CONSTANT along the crease, in side A's combed
+            // frame: the edge running along e0 means u varies along it, so v
+            // is the constant coordinate (and vice versa). The cross field is
+            // hard-pinned to feature edges, so the edge is near-parallel to
+            // one frame axis and the choice is well-defined.
+            const std::vector<VertexId> vsA = mesh.faceVertices(ef[0]);
+            const Vec3 pa0 = mesh.position(vsA[0]);
+            const Vec3 nrmA = cross(mesh.position(vsA[1]) - pa0, mesh.position(vsA[2]) - pa0);
+            const float lenA = length(nrmA);
+            if (lenA > 1e-20f) {
+                const Vec3 nA = nrmA / lenA;
+                const Vec3 e0 =
+                    normalized(rotQuarter(setup.field.direction(ef[0]), nA, comb[ef[0].value]));
+                const Vec3 e1 = cross(nA, e0);
+                const Vec3 dir = normalized(mesh.position(b) - mesh.position(a));
+                const float a0 = std::fabs(dot(dir, e0));
+                const float a1 = std::fabs(dot(dir, e1));
+                s.pinAxis = a0 >= a1 ? 1 : 0;
+                // Pin only when the field actually runs along the crease
+                // (within 30 degrees). Forcing a coordinate constant along an
+                // edge the field crosses diagonally is M2d's measured false
+                // premise: it buys nothing and costs severe grid distortion.
+                if (std::max(a0, a1) < 0.866f) {
+                    s.feature = false;
+                }
+            } else {
+                s.feature = false;
+            }
+        }
         seams.push_back(s);
     }
     // Gauges: one pin per connected component of the cut-open mesh (the isPin representatives

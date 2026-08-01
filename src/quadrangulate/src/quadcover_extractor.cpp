@@ -143,7 +143,8 @@ void logNative(bool ok, const char* reason) {
 }  // namespace
 
 SeamlessUv computeSeamlessUvNative(const Mesh& mesh, float targetEdgeLength, float adaptivity,
-                                   float spacingScale, const CancelToken* cancel) {
+                                   float spacingScale, const CancelToken* cancel,
+                                   float featureDegrees) {
     // M3 (docs/native-miq-plan.md): the fully native QuadCover-style seamless solve. No
     // Geogram, no subprocess. Pipeline:
     //   (pre) isotropic pre-remesh at `targetEdgeLength` so the solve runs on a clean,
@@ -167,7 +168,7 @@ SeamlessUv computeSeamlessUvNative(const Mesh& mesh, float targetEdgeLength, flo
     // instead of falling back to the field-aligned path.
     const char* featEnv = std::getenv("CYBER_QC_FEATURE_DEG");
     const float kFeatureDihedralDegrees =
-        featEnv != nullptr ? static_cast<float>(std::atof(featEnv)) : 40.0f;
+        featEnv != nullptr ? static_cast<float>(std::atof(featEnv)) : featureDegrees;
     constexpr int kFieldIterations = 40;
     // CYBER_QC_PRESERVE_CREASE_DEG (docs/ROADMAP.md Phase 3, lever c1): the threshold used to
     // PROTECT crease geometry through the isotropic pre-remesh, decoupled from the (narrower)
@@ -229,6 +230,31 @@ SeamlessUv computeSeamlessUvNative(const Mesh& mesh, float targetEdgeLength, flo
 
     auto backend = accel::defaultBackend();
     const SeamlessSetup setup = buildSeamlessSetup(work, kFieldIterations, *backend);
+    if (std::getenv("CYBER_QC_FIELD_STATS") != nullptr) {
+        // Cone census: total cones and how many sit off tagged feature edges
+        // (spurious flat-region cones are a field-quality smell).
+        std::size_t cones = 0, coneFlat = 0;
+        for (Index vi = 0; vi < work.vertexCapacity(); ++vi) {
+            const VertexId vv{vi};
+            if (!work.isAlive(vv) || vi >= setup.singularityIndex.size() ||
+                setup.singularityIndex[vi] == 0) {
+                continue;
+            }
+            ++cones;
+            bool onFeature = false;
+            for (const EdgeId e : work.vertexEdges(vv)) {
+                if (work.isFeatureEdge(e)) {
+                    onFeature = true;
+                    break;
+                }
+            }
+            if (!onFeature) {
+                ++coneFlat;
+            }
+        }
+        std::fprintf(stderr, "[native] work faces=%zu cones=%zu offFeature=%zu\n", work.faceCount(),
+                     cones, coneFlat);
+    }
     if (!setup.valid) {
         logNative(false, "setup invalid");
         return uv;
@@ -284,7 +310,29 @@ SeamlessUv computeSeamlessUvNative(const Mesh& mesh, float targetEdgeLength, flo
         }
         const std::vector<VertexId> vs = work.faceVertices(f);
         uv.triangles.push_back({vs[0].value, vs[1].value, vs[2].value});
-        uv.triangleUv.push_back(param.cornerUv[fi]);
+        // Snap near-integer coordinates exactly onto the lattice. The solve
+        // pins feature-seam level sets to integers, but CG + reconstruction
+        // return them as integer±1e-6 — and the extractor's edge-on-isoline
+        // test (Double::isZero) is machine-epsilon exact, so without the snap
+        // a pinned crease is never recognized as lying ON an isoline. Part of
+        // the in-progress feature-pinning lever: OPT-IN via CYBER_QC_UV_SNAP
+        // until the seam-shear fix ships (the snap alone shifts extraction on
+        // meshes whose UVs coincidentally graze the lattice).
+        static const bool kSnapUv = std::getenv("CYBER_QC_UV_SNAP") != nullptr;
+        std::array<Vec2, 3> corners = param.cornerUv[fi];
+        if (kSnapUv) {
+            for (Vec2& c : corners) {
+                const float ru = std::round(c.x);
+                const float rv = std::round(c.y);
+                if (std::fabs(c.x - ru) < 1e-3f) {
+                    c.x = ru;
+                }
+                if (std::fabs(c.y - rv) < 1e-3f) {
+                    c.y = rv;
+                }
+            }
+        }
+        uv.triangleUv.push_back(corners);
         for (const Vec2& c : param.cornerUv[fi]) {
             uMin = std::min(uMin, c.x);
             uMax = std::max(uMax, c.x);
@@ -506,7 +554,8 @@ float creaseEdgeFraction(const Mesh& mesh, float dihedralDegrees) {
 }
 
 SeamlessUv computeSeamlessUv(const Mesh& mesh, float targetEdgeLength, float harnessScaling,
-                             float harnessAdaptivity, const CancelToken* cancel) {
+                             float harnessAdaptivity, const CancelToken* cancel,
+                             float featureDegrees) {
     if (targetEdgeLength <= 0.0f) {
         return SeamlessUv{};  // no target density -> caller degrades cleanly
     }
@@ -527,7 +576,7 @@ SeamlessUv computeSeamlessUv(const Mesh& mesh, float targetEdgeLength, float har
 
     if (routeNative) {
         SeamlessUv native = computeSeamlessUvNative(mesh, targetEdgeLength, harnessAdaptivity,
-                                                    harnessScaling, cancel);
+                                                    harnessScaling, cancel, featureDegrees);
         if (native.valid) {
             return native;
         }
@@ -547,7 +596,7 @@ SeamlessUv computeSeamlessUv(const Mesh& mesh, float targetEdgeLength, float har
     // (no-Geogram) default: watertight, bounded, cancellable at ~4-5% irregular.
     if (haveNative) {
         SeamlessUv native = computeSeamlessUvNative(mesh, targetEdgeLength, harnessAdaptivity,
-                                                    harnessScaling, cancel);
+                                                    harnessScaling, cancel, featureDegrees);
         if (native.valid) {
             return native;
         }
@@ -2453,10 +2502,12 @@ double meshTargetQuads(const Mesh& mesh, float targetEdgeLength) {
 // a reason without corrupting the input triangle island).
 class QuadCoverQuadrangulator final : public IQuadrangulator {
 public:
-    QuadCoverQuadrangulator(int fieldIterations, float adaptivity, int holeFillMaxBoundary)
+    QuadCoverQuadrangulator(int fieldIterations, float adaptivity, int holeFillMaxBoundary,
+                            float featureDegrees)
         : m_fieldIterations(fieldIterations),
           m_adaptivity(adaptivity),
-          m_holeFillMaxBoundary(holeFillMaxBoundary) {}
+          m_holeFillMaxBoundary(holeFillMaxBoundary),
+          m_featureDegrees(featureDegrees) {}
 
     Outcome quadrangulate(Mesh& mesh, float targetEdgeLength, ProgressSink* progress,
                           const CancelToken* cancel) override {
@@ -2476,8 +2527,8 @@ public:
         IsolineQuadMesh out;
         float scaling = 0.5f;
         for (int attempt = 0; attempt < 2; ++attempt) {
-            const SeamlessUv uv =
-                computeSeamlessUv(mesh, targetEdgeLength, scaling, m_adaptivity, cancel);
+            const SeamlessUv uv = computeSeamlessUv(mesh, targetEdgeLength, scaling, m_adaptivity,
+                                                    cancel, m_featureDegrees);
             if (!uv.valid) {
                 return {.success = false,
                         .cancelled = false,
@@ -2555,14 +2606,16 @@ private:
     int m_fieldIterations;
     float m_adaptivity;
     int m_holeFillMaxBoundary;
+    float m_featureDegrees = 40.0f;
 };
 
 }  // namespace
 
 std::unique_ptr<IQuadrangulator> makeQuadCoverQuadrangulator(int fieldIterations, float adaptivity,
-                                                             int holeFillMaxBoundary) {
+                                                             int holeFillMaxBoundary,
+                                                             float featureDegrees) {
     return std::make_unique<QuadCoverQuadrangulator>(fieldIterations, adaptivity,
-                                                     holeFillMaxBoundary);
+                                                     holeFillMaxBoundary, featureDegrees);
 }
 
 bool quadCoverAvailable() {

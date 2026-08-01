@@ -25,6 +25,39 @@ and robustness — not just competitive on one.
   field made Eulerian (sampled from the `ReferenceSurface`, not carried on
   drifting vertices), and feature tagging given an epsilon so exactly-90°
   dihedrals tag deterministically. Regression test in `test_pipeline.cpp`.
+- **Feature-pinning lever (in progress, OPT-IN):** `CYBER_QC_FEATURE_DEG=90
+  CYBER_QC_PLANAR_FILL=1 CYBER_QC_UV_SNAP=1` lifts box_sharp recall
+  **0.04 → 0.73** (organics neutral: spot 179→168 sing, recall 0.59→0.64) via
+  three pieces: (a) the native solve-binding feature tag honors the caller
+  (was hardcoded 40° — 90° CAD edges were invisible to seams/field pins;
+  plumbed through `makeQuadCoverQuadrangulator(..., featureDegrees)`);
+  (b) NEW feature-seam integer pinning in `solveSeamlessReduced` (per feature
+  seam: level-set row + promoted integer `c_e`; `CYBER_QC_NO_FEATURE_PIN`) —
+  seams WITHOUT pinning regress (patch grids disagree, recall stays 0.04 at
+  angle 32.5°): pin + seam must ship together; (c) planar flood-fill of
+  feature pins across coplanar regions (the missing alternative to lever c2's
+  gate: extend the pin as a constant field over the whole flat patch instead
+  of disabling it — the pinned-ring-vs-diagonal-interior conflict is what
+  regressed the cube in c2's ungated variant).
+  **Blocker before default-on:** with feature seams the solved map SHEARS
+  (box angle 12.5°→36°, sing 48→86, cylinder recall 1.00→0.58). Localized by
+  instrumentation: field 100% axis-aligned, cone census exactly the 8 corner
+  cones, targets exact, relaxed CG converged (120 iters) — yet the relaxed
+  map is diagonal and the reduced phase only partially recovers. Mixed-axis
+  targets (162 x̂/126 ŷ on one flat patch) come from the cone-spanning CUT
+  TREE routing through patch interiors (legitimate seams, but they thread
+  flat panels). Disproven en route: ARAP polish (map-level A/B, exonerated;
+  `CYBER_QC_NO_ARAP` added), angle()/direction() branch mismatch (fix
+  measured WORSE, reverted). Live leads, in order: (1) route the
+  cone-spanning cut tree ALONG feature curves instead of through flat patch
+  interiors (creases are already cuts — the tree between corner cones can
+  follow them; no interior seams ⇒ per-patch solves become exact grids);
+  (2) the greedy rounding order with ~144 pinned `c_e` integers (round crease
+  constants first / merge per crease chain).
+- **quad-quality-push finding (separate lever, unimplemented):** the shipped
+  val-3/5 dipole canceller (`fixValence`) is unreachable from the quad-cover
+  path (sole caller is the integer extractor) — wiring it in post-extraction
+  is the ranked-#1 general singularity reduction (bounded, kill-switchable).
 - **The wall, quantified** (generated corpus, target 600, defaults): quad-cover
   wins singularity structure outright (cylinder 21 vs QuadriFlow 8 at similar
   angle quality; sphere 37 vs 8) but **feature recall collapses on sharp
