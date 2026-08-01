@@ -4,6 +4,35 @@ Goal: make CyberRemesher's automatic quad retopology **better than QuadriFlow**
 across four axes — quality-per-polygon, median quad angle, feature/CAD fidelity,
 and robustness — not just competitive on one.
 
+## Update — 2026-08-01 (CI scoreboard lands; CLI was measuring the wrong solver; isotropic adaptivity explosions fixed)
+
+- **`tools/bench/` benchmark harness** (new): deterministic generated corpus +
+  sha256-pinned real models, recorded-baseline regression gate in ctest
+  (`bench`), external competitor binaries (QuadriFlow, Instant Meshes,
+  **quadwild-bimdf** — the current open-source quality bar, run as a GPL
+  binary only), and **edge-flow loop metrics** (`flow_turning_mean`,
+  `flow_loop_mean_len`) that quantify the wavy-flow/spiral axis the shape
+  metrics miss. Complements `examples/10_vs_reference.py`.
+- **The CLI hardcoded `field-aligned`** — every CLI run (and anything
+  benchmarking through it) measured the retired method, not the documented
+  quad-cover default. Fixed with `--quad-method` (default quad-cover). On
+  spot/3000/adaptivity-0 this alone moves singularities 854 → 179 and mean
+  corner-angle deviation 28.4° → 11.2°.
+- **Isotropic adaptivity explosions fixed** (25k+ quads for a 600-quad capped
+  cylinder, benchmark-caught; affects every method that runs the pipeline
+  isotropic stage): crease angle defect excluded from the curvature source,
+  Laplacian smoothing replaced by a gradation-limited sizing field, the scale
+  field made Eulerian (sampled from the `ReferenceSurface`, not carried on
+  drifting vertices), and feature tagging given an epsilon so exactly-90°
+  dihedrals tag deterministically. Regression test in `test_pipeline.cpp`.
+- **The wall, quantified** (generated corpus, target 600, defaults): quad-cover
+  wins singularity structure outright (cylinder 21 vs QuadriFlow 8 at similar
+  angle quality; sphere 37 vs 8) but **feature recall collapses on sharp
+  geometry — box_sharp 0.04 vs QuadriFlow 1.00** (Phase 3's known
+  feature-following limitation, now a tracked number). Priorities that follow:
+  feature-constrained seamless UVs / extraction snapping first; flow-loop
+  length second (quadwild's Bi-MDF quantization is the reference point).
+
 ## Update — 2026-07-22 (default is now quad-cover; the gap is mostly closed)
 
 The numbers in the rest of this doc describe the older `instant-meshes` extractor
