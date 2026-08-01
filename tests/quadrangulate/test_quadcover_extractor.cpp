@@ -407,3 +407,135 @@ TEST_CASE("quad-cover M3: harness sphere UV extracts a clean closed quad mesh") 
         static_cast<double>(interiorIrregular) / static_cast<double>(interior);
     CHECK(irregularFraction < 0.05);
 }
+
+namespace {
+
+// A CLOSED flat-torus SeamlessUv: an n x n grid of quad cells whose (i, j) vertex
+// sits on a geometric torus and carries UV = (i, j), with the wraparound cells
+// using UV = n (an integer translation of 0, so the grid is exactly seamless).
+// The cells in [holeI, holeI + holeSize) x [holeJ, holeJ + holeSize) are omitted,
+// leaving an extraction-side hole whose rim is NOT input boundary of a "real" open
+// surface: the surface is closed everywhere else, so the boundary-fraction gate
+// routes it through the closed-surface cleanup and fixHoles sees one genuine loop
+// of 4 * holeSize edges.
+remesh::SeamlessUv makeTorusGridUvWithHole(int n, int holeI, int holeJ, int holeSize) {
+    remesh::SeamlessUv uv;
+    const float kPi = 3.14159265358979f;
+    const float R = 2.0f;
+    const float r = 0.5f;
+    const auto vid = [&](int i, int j) {
+        return static_cast<Index>(((j % n + n) % n) * n + ((i % n + n) % n));
+    };
+    for (int j = 0; j < n; ++j) {
+        for (int i = 0; i < n; ++i) {
+            const float u = 2.0f * kPi * static_cast<float>(i) / static_cast<float>(n);
+            const float v = 2.0f * kPi * static_cast<float>(j) / static_cast<float>(n);
+            uv.vertices.push_back(Vec3{(R + r * std::cos(v)) * std::cos(u),
+                                       (R + r * std::cos(v)) * std::sin(u), r * std::sin(v)});
+        }
+    }
+    // Per-corner UVs are the UNWRAPPED integers of the cell, so each triangle's UV
+    // is affine and the wraparound edge differs from column/row 0 by exactly n.
+    const auto addTri = [&](std::array<int, 2> a, std::array<int, 2> b, std::array<int, 2> c) {
+        uv.triangles.push_back({vid(a[0], a[1]), vid(b[0], b[1]), vid(c[0], c[1])});
+        uv.triangleUv.push_back({Vec2{static_cast<float>(a[0]), static_cast<float>(a[1])},
+                                 Vec2{static_cast<float>(b[0]), static_cast<float>(b[1])},
+                                 Vec2{static_cast<float>(c[0]), static_cast<float>(c[1])}});
+    };
+    for (int j = 0; j < n; ++j) {
+        for (int i = 0; i < n; ++i) {
+            if (i >= holeI && i < holeI + holeSize && j >= holeJ && j < holeJ + holeSize) {
+                continue;  // the manufactured hole
+            }
+            addTri({i, j}, {i + 1, j}, {i + 1, j + 1});
+            addTri({i, j}, {i + 1, j + 1}, {i, j + 1});
+        }
+    }
+    uv.valid = true;
+    return uv;
+}
+
+// Rebuild an IsolineQuadMesh as a cyber::Mesh and count its boundary edges.
+Mesh rebuildMesh(const remesh::IsolineQuadMesh& out) {
+    std::vector<std::vector<Index>> faces;
+    faces.reserve(out.quads.size());
+    for (const auto& q : out.quads) {
+        std::vector<Index> f;
+        f.reserve(q.size());
+        for (const std::size_t v : q) {
+            f.push_back(static_cast<Index>(v));
+        }
+        faces.push_back(std::move(f));
+    }
+    return Mesh::fromIndexed(out.vertices, faces);
+}
+
+std::size_t boundaryEdgeCount(const Mesh& mesh) {
+    std::size_t n = 0;
+    for (Index i = 0; i < mesh.edgeCapacity(); ++i) {
+        const EdgeId e{i};
+        if (mesh.isAlive(e) && mesh.isBoundaryEdge(e)) {
+            ++n;
+        }
+    }
+    return n;
+}
+
+}  // namespace
+
+// Hole-fill policy (remeshing-parameters spec, holeFillMaxBoundary): boundary loops
+// with at most `holeFillMaxBoundary` edges are closed with quads during extraction,
+// LONGER loops stay open. A 2x2 block of cells removed from a closed flat torus
+// leaves exactly one 8-edge loop: the default limit (64) must close it, a limit of
+// 4 must leave it open — not a hard-coded 65 as in the AutoRemesher reference.
+TEST_CASE("quad-cover hole-fill policy: loops longer than holeFillMaxBoundary stay open") {
+    const int n = 8;
+    const remesh::SeamlessUv uv = makeTorusGridUvWithHole(n, 3, 3, 2);
+    Mesh dummy = makeTwoTri();  // mesh param is ignored by the extractor
+
+    // Default policy (64): the 8-edge loop is within the limit and gets filled, so
+    // the extracted torus is closed again (zero boundary edges).
+    const remesh::IsolineQuadMesh filled = remesh::extractIsolineQuads(dummy, uv);
+    REQUIRE_FALSE(filled.quads.empty());
+    for (const auto& face : filled.quads) {
+        CHECK(face.size() == 4);
+    }
+    const Mesh filledMesh = rebuildMesh(filled);
+    CHECK(filledMesh.validate().empty());
+    CHECK(boundaryEdgeCount(filledMesh) == 0);
+
+    // Tight policy (4): the 8-edge loop exceeds the limit and must stay open.
+    const remesh::IsolineQuadMesh open = remesh::extractIsolineQuads(dummy, uv, 4);
+    REQUIRE_FALSE(open.quads.empty());
+    const Mesh openMesh = rebuildMesh(open);
+    CHECK(openMesh.validate().empty());
+    CHECK(boundaryEdgeCount(openMesh) == 8);
+    // The skipped fill is the only difference: the open variant has fewer faces.
+    CHECK(open.quads.size() < filled.quads.size());
+
+    // Filling disabled outright (< 3): identical open result.
+    const remesh::IsolineQuadMesh none = remesh::extractIsolineQuads(dummy, uv, 0);
+    CHECK(none.quads.size() == open.quads.size());
+    CHECK(boundaryEdgeCount(rebuildMesh(none)) == 8);
+}
+
+// Cooperative cancellation (remeshing-pipeline spec): a cancelled token makes the
+// quadrangulator return cancelled=true and leave the input mesh untouched, before
+// any solver work runs.
+TEST_CASE("quad-cover quadrangulator: a cancelled token aborts without touching the mesh") {
+    auto q = remesh::makeQuadCoverQuadrangulator();
+    REQUIRE(q != nullptr);
+
+    Mesh mesh = makeTwoTri();
+    const std::size_t facesBefore = aliveFaces(mesh);
+    const std::size_t vertsBefore = mesh.vertexCount();
+
+    cyber::CancelToken cancel;
+    cancel.requestCancel();
+    const auto outcome = q->quadrangulate(mesh, 0.25f, nullptr, &cancel);
+
+    CHECK(outcome.cancelled);
+    CHECK_FALSE(outcome.success);
+    CHECK(aliveFaces(mesh) == facesBefore);
+    CHECK(mesh.vertexCount() == vertsBefore);
+}
