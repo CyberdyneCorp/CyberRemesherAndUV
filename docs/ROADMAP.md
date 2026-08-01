@@ -54,6 +54,60 @@ and robustness — not just competitive on one.
   follow them; no interior seams ⇒ per-patch solves become exact grids);
   (2) the greedy rounding order with ~144 pinned `c_e` integers (round crease
   constants first / merge per crease chain).
+  - **SHEAR BLOCKER SOLVED (2026-08-01, later): three compounding solver bugs,
+    all lever-gated fixes in `seamless_solver.cpp` + one tag filter in
+    `quadcover_extractor.cpp`.** Lever-on now: box_sharp recall **0.73 → 1.00**
+    at angle 36.2° → **0.00002°**, sing 86 → **8** (the corner cones, all-quad);
+    cylinder recall 0.46 → **0.98**, hausdorff p99 0.022 → **0.0052**, sing 10.
+    Organics neutral-to-better vs lever-off: spot sing 64→49 angle 17.1→8.5
+    (improves), nefertiti sing 73→73 angle 28.4→27.5, armadillo sing 149→157
+    (+5.4%) angle 17.3→16.5. Lever-off bit-compatible (ctest 13/13,
+    `bench check` OK, no baseline re-record). Root causes, each measured:
+    1. **Combed-target branch mismatch** (the shear itself): the comb and the
+       period jumps live on `CrossField::angle()` (θ∈[0,90°)), but the per-face
+       target frame `e0` was reconstructed from `direction()` (θ∈(-45°,45°]) —
+       a per-face quarter-turn offset wherever raw θ<0, i.e. mixed x̂/ŷ targets
+       on ONE coplanar patch (box top measured 178/110) whose Poisson
+       compromise is the uniform ~32° diagonal. Fix: `combedDirection()`
+       reconstructs on the comb's own angle() convention. Relaxed-phase grad
+       histogram goes 100% of +z faces in the 30–35° bin → 100% in the 0–5°
+       bin. (The earlier "measured WORSE, reverted" attempt was this fix
+       WITHOUT #2/#3 — consistent targets make the wrong seam rho bite harder;
+       the trio must ship together.)
+    2. **Seam transition rho had the comb difference negated**: combed frame of
+       B = frame of A rotated by Δ = p + comb[B] − comb[A] quarter-turns, and a
+       grid whose frame rotates by +Δ has coordinates rotating by −Δ, so
+       uv_B = R^(−Δ) uv_A + t. The code used comb[B] − comb[A] − p — wrong by a
+       half-turn whenever the comb difference is odd (reverses the along-crease
+       coordinate; the reduced phase then destroys the now-perfect relaxed map:
+       recall 0.08, hausdorff 0.54 with #1 alone).
+    3. **periodJump was never computed for feature edges** (historically fine —
+       the comb never crosses them) — but rho needs the crease's intrinsic
+       field jump p. Without it: box recall 0.10, cylinder 0.51 even with #1+#2.
+    4. **Feature re-tag noise filter** (`resolvableCreaseSegments` +
+       `filterFeatureEdgesToReference`): `CYBER_QC_FEATURE_DEG=90` re-tags the
+       COARSE remesh, and organic scans have plenty of over-threshold dihedrals
+       that are sampling artifacts, not creases (nefertiti lever-on sing 216 at
+       the previous state). Keep a re-tagged edge only if it traces the ORIGINAL
+       mesh's sharp network restricted to chains ≥ 2 output cells long, or still
+       qualifies at the historical lever-off knife-edge threshold — so the
+       lever-on feature set degrades exactly to the lever-off one on organics
+       (nefertiti featureEdges 1518 = lever-off set, sing back to 73).
+    - **NEW DISPROVEN (do not retry): routing the cut tree along creases**
+      (0/1-Dijkstra, feature edges cost 0 — old live lead #1). Unnecessary for
+      CAD once #1–#3 are in (box/cylinder identical with plain BFS) and it
+      REGRESSES organics with knife-edge wrinkle networks (nefertiti sing
+      80 → 205: the tree snakes along wrinkles and shreds the map). Also
+      disproven twice earlier as pre-seeding (cylinder hausdorff 0.41 — breaks
+      the disk-opening invariant). The greedy-rounding lead (#2 above) was
+      never needed: with correct rho the box solve leaves only 3 free integers
+      and the rounding is exact.
+    - Diagnostics that found it now ship behind `CYBER_QC_FIELD_STATS`:
+      per-patch axis-mix census, non-feature cut-edge census, per-phase
+      grad(u) deviation histograms (relaxed vs reduced).
+    - Still OPT-IN: flipping `--sharp-edge` binding / the env trio to default
+      remains a separate decision (organics are neutral-to-better, but the
+      call is the caller's).
 - **quad-quality-push finding (separate lever, unimplemented):** the shipped
   val-3/5 dipole canceller (`fixValence`) is unreachable from the quad-cover
   path (sole caller is the integer extractor) — wiring it in post-extraction

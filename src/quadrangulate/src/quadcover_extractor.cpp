@@ -14,6 +14,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <functional>
 #include <limits>
 #include <map>
 #include <memory>
@@ -28,6 +29,7 @@
 
 #include "cyber/accel/backend.hpp"
 #include "cyber/core/isotropic.hpp"
+#include "cyber/core/math.hpp"
 #include "cyber/core/reference_surface.hpp"
 #include "cyber/quadrangulate/seamless_solver.hpp"
 
@@ -127,6 +129,118 @@ bool writeObjFor(const std::string& path, const Mesh& mesh, double& areaOut) {
 }  // namespace
 
 namespace {
+
+// Distance from point p to segment [a, b].
+float pointSegmentDistance(const Vec3& p, const Vec3& a, const Vec3& b) {
+    const Vec3 ab = b - a;
+    const float len2 = dot(ab, ab);
+    if (len2 <= 1e-20f) {
+        return length(p - a);
+    }
+    const float t = std::clamp(dot(p - a, ab) / len2, 0.0f, 1.0f);
+    return length(p - (a + ab * t));
+}
+
+// Feature-pinning lever: the ORIGINAL mesh's sharp-edge polyline network, restricted to
+// crease chains long enough to be RESOLVABLE at the output grid resolution. A genuine CAD
+// crease (a cube edge, a cylinder rim) is a long chain the output grid should follow; an
+// organic scan's over-threshold dihedrals are sub-resolution wrinkle fragments whose total
+// chain length is far below one output cell — re-tagging them as hard seams after the
+// coarse isotropic remesh is what blew nefertiti's singularities up under the lever (73
+// lever-off -> 216: every coarse wrinkle became a seam + field pin). Chains shorter than
+// `minChainLength` are dropped; what remains is the reference network the post-remesh
+// feature re-tag is filtered against.
+std::vector<std::array<Vec3, 2>> resolvableCreaseSegments(const Mesh& mesh, float minChainLength) {
+    // Union-find over vertices joined by interior feature edges.
+    std::unordered_map<Index, Index> parent;
+    const std::function<Index(Index)> find = [&](Index x) {
+        while (true) {
+            auto it = parent.find(x);
+            if (it == parent.end() || it->second == x) {
+                return x;
+            }
+            x = it->second;
+        }
+    };
+    struct Seg {
+        Vec3 a, b;
+        Index root;
+        float len;
+    };
+    std::vector<Seg> segs;
+    for (Index ei = 0; ei < mesh.edgeCapacity(); ++ei) {
+        const EdgeId e{ei};
+        if (!mesh.isAlive(e) || mesh.edgeFaceCount(e) != 2 || !mesh.isFeatureEdge(e)) {
+            continue;
+        }
+        const auto [a, b] = mesh.edgeVertices(e);
+        const Index ra = find(a.value), rb = find(b.value);
+        parent.emplace(a.value, a.value);
+        parent.emplace(b.value, b.value);
+        parent[ra] = rb;
+        segs.push_back(
+            {mesh.position(a), mesh.position(b), rb, length(mesh.position(b) - mesh.position(a))});
+    }
+    std::unordered_map<Index, float> chainLength;
+    for (Seg& s : segs) {
+        s.root = find(s.root);
+        chainLength[s.root] += s.len;
+    }
+    std::vector<std::array<Vec3, 2>> out;
+    for (const Seg& s : segs) {
+        if (chainLength[s.root] >= minChainLength) {
+            out.push_back({s.a, s.b});
+        }
+    }
+    return out;
+}
+
+// Feature-pinning lever, post-remesh: keep an interior re-tagged feature edge if it either
+// (a) traces the reference crease network (endpoints and midpoint all within `tol` — the
+// isotropic stage keeps crease vertices ON the crease polyline, so genuine crease edges sit
+// at distance ~0 while coarse-remesh dihedral noise does not), or (b) still qualifies at the
+// HISTORICAL lever-off threshold (`fallbackDihedralDegrees`, knife edges) — so on organic
+// meshes the lever-on feature set degrades exactly to the lever-off one instead of inventing
+// (or dropping) seams the lever-off run never had. Boundary/non-manifold edges are never
+// untagged (they are structural, not dihedral evidence).
+void filterFeatureEdgesToReference(Mesh& mesh, const std::vector<std::array<Vec3, 2>>& network,
+                                   float tol, float fallbackDihedralDegrees) {
+    const float fallbackNormalAngle = degreesToRadians(180.0f - fallbackDihedralDegrees) - 1e-3f;
+    for (Index ei = 0; ei < mesh.edgeCapacity(); ++ei) {
+        const EdgeId e{ei};
+        if (!mesh.isAlive(e) || mesh.edgeFaceCount(e) != 2 || !mesh.isFeatureEdge(e)) {
+            continue;
+        }
+        const auto ef = mesh.edgeFaces(e);
+        const float cosAngle =
+            std::clamp(dot(normalized(mesh.faceNormal(ef[0])), normalized(mesh.faceNormal(ef[1]))),
+                       -1.0f, 1.0f);
+        if (std::acos(cosAngle) >= fallbackNormalAngle) {
+            continue;  // knife edge: the lever-off tag would keep it too
+        }
+        const auto [a, b] = mesh.edgeVertices(e);
+        const std::array<Vec3, 3> samples{mesh.position(a), mesh.position(b),
+                                          (mesh.position(a) + mesh.position(b)) * 0.5f};
+        bool onNetwork = !network.empty();
+        for (const Vec3& p : samples) {
+            if (!onNetwork) {
+                break;
+            }
+            bool near = false;
+            for (const std::array<Vec3, 2>& s : network) {
+                if (pointSegmentDistance(p, s[0], s[1]) <= tol) {
+                    near = true;
+                    break;
+                }
+            }
+            onNetwork = near;
+        }
+        if (!onNetwork) {
+            mesh.setFeatureEdge(e, false);
+        }
+    }
+}
+
 // CYBER_QC_DEBUG-gated per-call trace of whether the native seamless solve RAN or DECLINED,
 // so the corpus harness can grep "native OK" / "native DECLINED <reason>" and confirm a model
 // took the native path rather than silently falling back to the vendored / field-aligned path.
@@ -193,6 +307,15 @@ SeamlessUv computeSeamlessUvNative(const Mesh& mesh, float targetEdgeLength, flo
         preserveEnv != nullptr ? static_cast<float>(std::atof(preserveEnv)) : 135.0f;
     Mesh work = mesh;
     work.triangulate();  // feature tagging + the solve both need a pure-triangle mesh
+    // Feature-pinning lever: record the ORIGINAL geometry's resolvable crease network before
+    // the isotropic remesh, so the post-remesh feature re-tag can be filtered against it
+    // (see resolvableCreaseSegments). Only chains at least a couple of output cells long
+    // count as creases the grid should follow.
+    std::vector<std::array<Vec3, 2>> refCreases;
+    if (featEnv != nullptr) {
+        work.tagFeatureEdges(kFeatureDihedralDegrees);
+        refCreases = resolvableCreaseSegments(work, 2.0f * targetEdgeLength);
+    }
     work.tagFeatureEdges(kPreserveDihedralDegrees);
 
     if (cancel != nullptr && cancel->isCancelled()) {
@@ -222,6 +345,14 @@ SeamlessUv computeSeamlessUvNative(const Mesh& mesh, float targetEdgeLength, flo
     // feature flag, so the seam logic in buildSeamlessSetup would see none. Re-detect them by
     // dihedral angle now that the crease geometry is intact.
     work.tagFeatureEdges(kFeatureDihedralDegrees);
+    // Feature-pinning lever: drop re-tagged interior edges that do not trace the original
+    // resolvable crease network — a coarse remesh of an organic surface has plenty of
+    // over-threshold dihedrals that are sampling artifacts, not creases, and every spurious
+    // hard seam costs singularities (nefertiti lever-on: 216 -> ~lever-off level with this
+    // filter). Lever-off is untouched.
+    if (featEnv != nullptr) {
+        filterFeatureEdgesToReference(work, refCreases, 0.25f * targetEdgeLength, featureDegrees);
+    }
 
     if (cancel != nullptr && cancel->isCancelled()) {
         logNative(false, "cancelled");

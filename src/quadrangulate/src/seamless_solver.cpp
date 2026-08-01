@@ -156,6 +156,49 @@ int vertexIndex(const Mesh& mesh, const CrossField& field, VertexId v) {
     return static_cast<int>(std::lround((residual + defect) / kHalfPi));
 }
 
+// One growth step of the cut-tree: find the not-yet-connected singular vertex nearest to the
+// in-tree set (plain BFS) and fill `parentEdge` with the search tree so the caller can walk
+// the path back. Returns the target (invalid if none).
+//
+// MEASURED DEAD END (feature-pinning lever): routing this search as a 0/1 Dijkstra with
+// feature edges cost 0, so tree paths ride creases and flat CAD patches keep no interior
+// cuts, is unnecessary for CAD once the combed-target convention and the seam rho are fixed
+// (box/cylinder are bit-identically perfect with plain BFS) and it REGRESSES organics whose
+// coarse remesh carries many knife-edge feature chains (nefertiti lever-on singularities
+// 80 -> 205: the tree snakes along wrinkle networks and shreds the map). Keep plain BFS.
+VertexId nearestSingularBfs(const Mesh& mesh, const std::vector<char>& inTree,
+                            const std::vector<char>& isSingular, std::vector<Index>& parentEdge) {
+    std::vector<char> visited(mesh.vertexCapacity(), 0);
+    std::queue<VertexId> q;
+    for (Index vi = 0; vi < mesh.vertexCapacity(); ++vi) {
+        if (inTree[vi]) {
+            visited[vi] = 1;
+            q.push(VertexId{vi});
+        }
+    }
+    while (!q.empty()) {
+        const VertexId u = q.front();
+        q.pop();
+        for (const EdgeId e : mesh.vertexEdges(u)) {
+            if (!mesh.isAlive(e)) {
+                continue;
+            }
+            const auto [a, b] = mesh.edgeVertices(e);
+            const VertexId w = (a == u) ? b : a;
+            if (visited[w.value]) {
+                continue;
+            }
+            visited[w.value] = 1;
+            parentEdge[w.value] = e.value;
+            if (isSingular[w.value] && !inTree[w.value]) {
+                return w;
+            }
+            q.push(w);
+        }
+    }
+    return VertexId{kInvalidIndex};
+}
+
 }  // namespace
 
 std::size_t SeamlessSetup::singularityCount() const {
@@ -181,11 +224,18 @@ SeamlessSetup buildSeamlessSetup(const Mesh& mesh, int iterations, accel::IBacke
         setup.field = computeCrossField(mesh, iterations, backend);
     }
 
-    // Per-edge period jumps.
+    // Per-edge period jumps. Historically skipped for feature edges (they are always cut, so
+    // the comb never crosses them) — but the seam transition rho DOES need the intrinsic field
+    // jump across a crease: without it every feature seam's rho is off by the crease's
+    // representative wrap and the reduced integer phase fights the (correct) relaxed targets.
+    // Computed for feature edges too under the feature-pinning lever; lever-off keeps the
+    // historical skip bit-compatible.
+    const bool featureLever = std::getenv("CYBER_QC_FEATURE_DEG") != nullptr;
     setup.periodJump.assign(mesh.edgeCapacity(), 0);
     for (Index ei = 0; ei < mesh.edgeCapacity(); ++ei) {
         const EdgeId e{ei};
-        if (mesh.isAlive(e) && mesh.edgeFaceCount(e) == 2 && !mesh.isFeatureEdge(e)) {
+        if (mesh.isAlive(e) && mesh.edgeFaceCount(e) == 2 &&
+            (featureLever || !mesh.isFeatureEdge(e))) {
             setup.periodJump[ei] = edgeJump(mesh, setup.field, e).first;
         }
     }
@@ -218,38 +268,9 @@ SeamlessSetup buildSeamlessSetup(const Mesh& mesh, int iterations, accel::IBacke
         inTree[singular[0].value] = 1;
         std::size_t connected = 1;
         while (connected < singular.size()) {
-            // BFS from all in-tree vertices to the nearest not-yet-connected singular one.
+            // Search from all in-tree vertices to the nearest not-yet-connected singular one.
             std::vector<Index> parentEdge(mesh.vertexCapacity(), kInvalidIndex);
-            std::vector<char> visited(mesh.vertexCapacity(), 0);
-            std::queue<VertexId> q;
-            for (Index vi = 0; vi < mesh.vertexCapacity(); ++vi) {
-                if (inTree[vi]) {
-                    visited[vi] = 1;
-                    q.push(VertexId{vi});
-                }
-            }
-            VertexId target{kInvalidIndex};
-            while (!q.empty() && target.value == kInvalidIndex) {
-                const VertexId u = q.front();
-                q.pop();
-                for (const EdgeId e : mesh.vertexEdges(u)) {
-                    if (!mesh.isAlive(e)) {
-                        continue;
-                    }
-                    const auto [a, b] = mesh.edgeVertices(e);
-                    const VertexId w = (a == u) ? b : a;
-                    if (visited[w.value]) {
-                        continue;
-                    }
-                    visited[w.value] = 1;
-                    parentEdge[w.value] = e.value;
-                    if (isSingular[w.value] && !inTree[w.value]) {
-                        target = w;
-                        break;
-                    }
-                    q.push(w);
-                }
-            }
+            const VertexId target = nearestSingularBfs(mesh, inTree, isSingular, parentEdge);
             if (target.value == kInvalidIndex) {
                 break;  // disconnected component; stop (still a valid partial cut)
             }
@@ -399,6 +420,25 @@ Vec3 rotQuarter(Vec3 d, const Vec3& n, int r) {
         d = cross(n, d);
     }
     return d;
+}
+
+// Combed representative cross direction of face f. The comb (and the period jumps it is
+// built from) lives on the angle() convention (theta in [0, pi/2)), while direction()
+// returns the raw atan2 branch (theta in (-pi/4, pi/4]) — a per-face quarter-turn offset
+// wherever raw theta < 0. Reconstructing e0 from direction() under an angle()-based comb
+// therefore yields a QUARTER-TURN-MIXED target field on a single coplanar patch (box top:
+// 178 x-like vs 110 y-like faces measured) whose Poisson compromise is the ~32-degree
+// uniform shear of the feature-pinning lever. Under the lever the reconstruction uses the
+// SAME angle() convention the comb was built on; the historical direction() branch is kept
+// for the lever-off path (bit-compatible).
+Vec3 combedDirection(const CrossField& field, FaceId f, const Vec3& n, int comb,
+                     bool angleConvention) {
+    if (!angleConvention) {
+        return rotQuarter(field.direction(f), n, comb);
+    }
+    const float th = field.angle(f);
+    const Vec3 d = field.tangent[f.value] * std::cos(th) + field.bitangent[f.value] * std::sin(th);
+    return rotQuarter(d, n, comb);
 }
 
 // Comb the frame field: BFS over faces across non-cut interior edges, assigning each
@@ -919,6 +959,9 @@ Parameterization solveParameterization(const Mesh& mesh, const SeamlessSetup& se
         return out;
     }
     const float invS = 1.0f / spacing;
+    // Feature-pinning lever: reconstruct combed targets on the comb's own angle() convention
+    // (see combedDirection). Lever-off keeps the historical direction() branch bit-compatible.
+    const bool angleConvention = std::getenv("CYBER_QC_FEATURE_DEG") != nullptr;
 
     // Comb the frame so it is continuous across non-cut edges.
     int touched = 0;
@@ -1004,7 +1047,7 @@ Parameterization solveParameterization(const Mesh& mesh, const SeamlessSetup& se
         const Vec3 n = nrm / area2;
         FaceData fd;
         fd.area = 0.5f * area2;
-        fd.e0 = normalized(rotQuarter(setup.field.direction(f), n, comb[fi]));
+        fd.e0 = normalized(combedDirection(setup.field, f, n, comb[fi], angleConvention));
         fd.e1 = cross(n, fd.e0);
         for (int k = 0; k < 3; ++k) {
             fd.cut[static_cast<std::size_t>(k)] = cutOf(fi, vs[static_cast<std::size_t>(k)].value);
@@ -1125,6 +1168,94 @@ Parameterization solveParameterization(const Mesh& mesh, const SeamlessSetup& se
 
     std::vector<float> u(nCut, 0.0f), v(nCut, 0.0f);
 
+    // CYBER_QC_FIELD_STATS diagnostics on the +z flat region (|n.z| > 0.99): combed-target
+    // axis mix (fd.e0 vs world x̂/ŷ — a quarter-turn mix on ONE coplanar patch is the shear
+    // smoking gun) and a per-phase histogram of grad(u)'s deviation from the nearest grid
+    // axis (5-degree bins of min(ang mod 90, 90 - ang mod 90)).
+    const bool fieldStats = std::getenv("CYBER_QC_FIELD_STATS") != nullptr;
+    const auto statsAxisMix = [&]() {
+        if (!fieldStats) {
+            return;
+        }
+        // Split by side: +z (top) vs -z (bottom) so a per-patch mix is unambiguous.
+        std::size_t topX = 0, topY = 0, botX = 0, botY = 0, nOther = 0;
+        for (const FaceData& fd : faceData) {
+            const Vec3 n = cross(fd.e0, fd.e1);
+            if (std::fabs(n.z) <= 0.99f) {
+                continue;
+            }
+            const bool top = n.z > 0.0f;
+            if (std::fabs(fd.e0.x) > 0.9f) {
+                (top ? topX : botX) += 1;
+            } else if (std::fabs(fd.e0.y) > 0.9f) {
+                (top ? topY : botY) += 1;
+            } else {
+                ++nOther;
+            }
+        }
+        std::fprintf(stderr,
+                     "[qc-stats] axis mix: top e0~x=%zu e0~y=%zu | bot e0~x=%zu e0~y=%zu | "
+                     "other=%zu\n",
+                     topX, topY, botX, botY, nOther);
+        // Interior (non-feature) cut edges whose both faces are on a +-z flat side: any such
+        // edge is a tree cut crossing a coplanar patch.
+        std::size_t interiorCutFlat = 0, interiorCutTotal = 0;
+        for (Index ei = 0; ei < mesh.edgeCapacity(); ++ei) {
+            const EdgeId e{ei};
+            if (!mesh.isAlive(e) || mesh.edgeFaceCount(e) != 2 || !setup.isCutEdge[ei] ||
+                mesh.isFeatureEdge(e)) {
+                continue;
+            }
+            ++interiorCutTotal;
+            const auto ef = mesh.edgeFaces(e);
+            bool flat = true;
+            for (const FaceId f : ef) {
+                const std::vector<VertexId> vs = mesh.faceVertices(f);
+                const Vec3 nn = cross(mesh.position(vs[1]) - mesh.position(vs[0]),
+                                      mesh.position(vs[2]) - mesh.position(vs[0]));
+                const float len = length(nn);
+                if (len < 1e-20f || std::fabs(nn.z / len) <= 0.99f) {
+                    flat = false;
+                }
+            }
+            if (flat) {
+                ++interiorCutFlat;
+            }
+        }
+        std::fprintf(stderr, "[qc-stats] non-feature cut edges: total=%zu on +-z flats=%zu\n",
+                     interiorCutTotal, interiorCutFlat);
+    };
+    const auto statsGradHist = [&](const char* phase) {
+        if (!fieldStats) {
+            return;
+        }
+        std::array<std::size_t, 9> bins{};
+        std::size_t total = 0;
+        for (const FaceData& fd : faceData) {
+            const Vec3 n = cross(fd.e0, fd.e1);
+            if (std::fabs(n.z) <= 0.99f) {
+                continue;
+            }
+            Vec3 gradU{0.0f, 0.0f, 0.0f};
+            for (int k = 0; k < 3; ++k) {
+                gradU = gradU + fd.gradPhi[static_cast<std::size_t>(k)] *
+                                    u[fd.cut[static_cast<std::size_t>(k)]];
+            }
+            const float ang = std::atan2(gradU.y, gradU.x) * 180.0f / kPi;  // in the +z plane
+            float m = std::fmod(std::fmod(ang, 90.0f) + 90.0f, 90.0f);
+            m = std::min(m, 90.0f - m);  // deviation from the nearest grid axis, [0, 45]
+            const std::size_t bin = std::min<std::size_t>(8, static_cast<std::size_t>(m / 5.0f));
+            ++bins[bin];
+            ++total;
+        }
+        std::fprintf(stderr, "[qc-stats] %s grad(u) dev hist (+z faces, 5-deg bins, n=%zu):", phase,
+                     total);
+        for (const std::size_t b : bins) {
+            std::fprintf(stderr, " %zu", b);
+        }
+        std::fprintf(stderr, "\n");
+    };
+
     const int maxIters = static_cast<int>(nCut) + 500;
     // Solve the relaxed (per-component pinned) Poisson for the current full RHS bu/bv. The
     // pin zeroes the RHS at the pinned/isolated vertices; u,v are warm-started from their
@@ -1216,6 +1347,8 @@ Parameterization solveParameterization(const Mesh& mesh, const SeamlessSetup& se
     // the integer-seamless phase.
     assembleRhs(angle);
     const std::vector<float> bu0 = bu, bv0 = bv;
+    statsAxisMix();
+    statsGradHist("relaxed");
     if (cancel != nullptr && cancel->isCancelled()) {
         return out;
     }
@@ -1243,9 +1376,19 @@ Parameterization solveParameterization(const Mesh& mesh, const SeamlessSetup& se
         s.bA = cutOf(ef[0].value, b.value);
         s.aB = cutOf(ef[1].value, a.value);
         s.bB = cutOf(ef[1].value, b.value);
-        // Combed grid symmetry from side A (ef[0]) to side B (ef[1]).
+        // Combed grid symmetry from side A (ef[0]) to side B (ef[1]). The combed frame of B
+        // is the frame of A rotated intrinsically by Delta = p + comb[B] - comb[A] quarter
+        // turns (p from edgeJump, both angles measured against the shared edge). A grid whose
+        // frame rotates by +Delta has coordinates that rotate by -Delta: uv_B = R^{-Delta}
+        // uv_A + t. The historical formula (comb[B] - comb[A] - p) has the comb difference
+        // NEGATED — off by a half-turn whenever the difference is odd, which reverses the
+        // along-crease coordinate on one side and makes the integer phase fight the relaxed
+        // targets. Fixed under the feature-pinning lever; lever-off keeps the historical
+        // formula bit-compatible.
         const int p = setup.periodJump[ei];
-        s.rho = (((comb[ef[1].value] - comb[ef[0].value] - p) % 4) + 4) % 4;
+        const int combDiff = comb[ef[1].value] - comb[ef[0].value];
+        const int rhoRaw = angleConvention ? -(p + combDiff) : (combDiff - p);
+        s.rho = ((rhoRaw % 4) + 4) % 4;
         if (mesh.isFeatureEdge(e)) {
             s.feature = true;
             // The coordinate CONSTANT along the crease, in side A's combed
@@ -1259,8 +1402,8 @@ Parameterization solveParameterization(const Mesh& mesh, const SeamlessSetup& se
             const float lenA = length(nrmA);
             if (lenA > 1e-20f) {
                 const Vec3 nA = nrmA / lenA;
-                const Vec3 e0 =
-                    normalized(rotQuarter(setup.field.direction(ef[0]), nA, comb[ef[0].value]));
+                const Vec3 e0 = normalized(
+                    combedDirection(setup.field, ef[0], nA, comb[ef[0].value], angleConvention));
                 const Vec3 e1 = cross(nA, e0);
                 const Vec3 dir = normalized(mesh.position(b) - mesh.position(a));
                 const float a0 = std::fabs(dot(dir, e0));
@@ -1298,6 +1441,7 @@ Parameterization solveParameterization(const Mesh& mesh, const SeamlessSetup& se
     if (!seams.empty()) {
         solveSeamlessReduced(backend, nCut, rows, bu0, bv0, seams, gauges, u, v, cancel);
     }
+    statsGradHist("reduced");
     if (cancel != nullptr && cancel->isCancelled()) {
         return out;  // out.valid stays false
     }
