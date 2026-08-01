@@ -32,6 +32,8 @@
 #include "cyber/core/progress.hpp"
 #include "cyber/core/version.hpp"
 #include "cyber/quadrangulate/field_quadrangulator.hpp"
+#include "cyber/quadrangulate/position_field.hpp"
+#include "cyber/quadrangulate/quadcover_extractor.hpp"
 
 namespace {
 
@@ -54,6 +56,7 @@ struct CliOptions {
     std::string input;
     std::string output;
     std::string report;
+    std::string quadMethod = "quad-cover";  // roadmap default (2026-07-22)
     remesh::Parameters params;
     bool verbose = false;
     bool quiet = false;
@@ -68,6 +71,9 @@ void printUsage() {
                  "  --smooth-normal <deg>    smooth projection angle (default 0)\n"
                  "  --adaptivity <float>     0..1 curvature adaptivity (default 1)\n"
                  "  --pure-quads             quads-only output\n"
+                 "  --quad-method <m>        quad-cover | field-aligned | instant-meshes |\n"
+                 "                           integer | greedy (default quad-cover; falls\n"
+                 "                           back to field-aligned without a UV solver)\n"
                  "  --hole-fill <int>        max hole boundary to fill (default 64)\n"
                  "  --patch-policy <p>       keep-largest | keep-all | min-faces:<N>\n"
                  "  --report <path.json>     machine-readable run report\n"
@@ -178,6 +184,17 @@ int parseArgs(int argc, char** argv, CliOptions& options, bool& exitEarly) {
             }
         } else if (arg == "--pure-quads") {
             options.params.pureQuads = true;
+        } else if (arg == "--quad-method") {
+            const auto v = next("--quad-method");
+            if (!v) {
+                return kExitArgs;
+            }
+            if (*v != "quad-cover" && *v != "field-aligned" && *v != "instant-meshes" &&
+                *v != "integer" && *v != "greedy") {
+                std::fprintf(stderr, "error: unknown --quad-method '%s'\n", v->c_str());
+                return kExitArgs;
+            }
+            options.quadMethod = *v;
         } else if (arg == "--patch-policy") {
             const auto v = next("--patch-policy");
             if (!v) {
@@ -321,11 +338,39 @@ int main(int argc, char** argv) {
     });
 
     const auto start = std::chrono::steady_clock::now();
-    // The CLI uses the field-aligned quadrangulator (QuadCover-lite) for
-    // better edge flow than the greedy default.
+    // Default method is quad-cover (docs/ROADMAP.md, 2026-07-22) — the CLI
+    // previously hardcoded field-aligned, silently diverging from the
+    // documented default. Falls back to field-aligned when no seamless-UV
+    // solver is available so solver-less builds still produce output.
+    std::string method = options.quadMethod;
+    if (method == "quad-cover" && !remesh::quadCoverAvailable()) {
+        if (!options.quiet) {
+            std::fprintf(stderr,
+                         "warning: no seamless-UV solver in this build; "
+                         "using --quad-method field-aligned\n");
+        }
+        method = "field-aligned";
+    }
+    const float adaptivity = options.params.adaptivity;
+    const int holeFill = options.params.holeFillMaxBoundary;
+    const auto makeQuadrangulator = [&method, adaptivity,
+                                     holeFill]() -> std::unique_ptr<remesh::IQuadrangulator> {
+        if (method == "quad-cover") {
+            return remesh::makeQuadCoverQuadrangulator(40, adaptivity, holeFill);
+        }
+        if (method == "instant-meshes") {
+            return remesh::makeInstantMeshesQuadrangulator();
+        }
+        if (method == "integer") {
+            return remesh::makeIntegerQuadrangulator();
+        }
+        if (method == "greedy") {
+            return remesh::makeGreedyPairingQuadrangulator();
+        }
+        return remesh::makeFieldAlignedQuadrangulator();
+    };
     const remesh::PipelineResult result =
-        remesh::remesh(imported.value().mesh, options.params, &sink, &cancel,
-                       [] { return remesh::makeFieldAlignedQuadrangulator(); });
+        remesh::remesh(imported.value().mesh, options.params, &sink, &cancel, makeQuadrangulator);
     const double elapsed =
         std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
     if (showProgress) {
