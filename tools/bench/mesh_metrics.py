@@ -265,6 +265,8 @@ def _rewind(he: tuple[int, int], table: dict) -> tuple[int, int]:
         prev = _opposite_half_edge(entry)
         if prev == he:  # came back around: closed loop, any start works
             return he
+        if prev not in table:  # neighbor's half-edge dropped (non-manifold)
+            return start
         start = prev
     return start
 
@@ -278,6 +280,8 @@ def _trace_loop(start: tuple[int, int], table: dict, visited: set,
     steps = 0
     closed = False
     for _ in range(len(table)):
+        if he not in table:  # half-edge dropped as non-manifold: loop ends
+            break
         visited.add(he)
         opposite = _opposite_half_edge(table[he])
         visited.add(opposite)  # same crossing traversed in reverse
