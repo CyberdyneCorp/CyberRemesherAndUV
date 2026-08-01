@@ -1,6 +1,7 @@
 build/
 build-scipp/
 .cache/
+.bench-cache/
 compile_commands.json
 .DS_Store
 __pycache__/

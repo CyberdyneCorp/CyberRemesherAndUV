@@ -89,6 +89,23 @@ if(CYBER_BUILD_CLI AND Python3_FOUND)
     add_test(NAME cli
         COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/cli/test_cli.py
                 $<TARGET_FILE:cyberremesh>)
+
+    # Benchmark regression check (tools/bench) — recorded-baseline gate over
+    # the deterministic generated corpus. Needs numpy/scipy; skipped (not
+    # failed) where they are absent so bare CI runners stay green.
+    execute_process(
+        COMMAND ${Python3_EXECUTABLE} -c "import numpy, scipy"
+        RESULT_VARIABLE CYBER_BENCH_DEPS_MISSING
+        OUTPUT_QUIET ERROR_QUIET)
+    if(CYBER_BENCH_DEPS_MISSING EQUAL 0)
+        add_test(NAME bench
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/bench/bench.py
+                    check --cyber-binary $<TARGET_FILE:cyberremesh>
+                    --cache-dir ${CMAKE_BINARY_DIR}/bench-cache)
+        set_tests_properties(bench PROPERTIES TIMEOUT 900)
+    else()
+        message(STATUS "bench test skipped: python3 lacks numpy/scipy")
+    endif()
 endif()
 
 if(TARGET cyberbridge-server AND Python3_FOUND)

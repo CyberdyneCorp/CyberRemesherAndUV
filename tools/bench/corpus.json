@@ -1,0 +1,26 @@
+{
+  "comment": "Downloaded benchmark corpus. Permissive/attribution licenses only \u2014 this file is the license record; tools/license_audit.py does not cover downloaded test data. sha256 null = unpinned; the fetch step prints the hash to pin.",
+  "meshes": [
+    {
+      "name": "spot",
+      "url": "https://raw.githubusercontent.com/alecjacobson/common-3d-test-models/master/data/spot.obj",
+      "license": "CC0 (Keenan Crane)",
+      "sha256": "0738b5e8608fed74e5e8c7aa8dd0af97b4b74f9f6cbf7aac84cd7e40b2e44a75",
+      "target_quads": 3000
+    },
+    {
+      "name": "nefertiti",
+      "url": "https://raw.githubusercontent.com/alecjacobson/common-3d-test-models/master/data/nefertiti.obj",
+      "license": "CC0 (Scan the World / Egyptian Museum of Berlin scan)",
+      "sha256": "19e39748b145092878cc4faafd050505eb5991c5d3e497be2b4575673fa87968",
+      "target_quads": 8000
+    },
+    {
+      "name": "armadillo",
+      "url": "https://raw.githubusercontent.com/alecjacobson/common-3d-test-models/master/data/armadillo.obj",
+      "license": "Stanford 3D Scanning Repository (free use with attribution)",
+      "sha256": "d2fd040334c12b16804fbcb9962391232cc24708244617f931baaa871210563e",
+      "target_quads": 8000
+    }
+  ]
+}
