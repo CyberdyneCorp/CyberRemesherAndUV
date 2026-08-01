@@ -183,7 +183,10 @@ void Mesh::tagFeatureEdges(float dihedralAngleDegrees) {
     // An edge is a feature when its included (dihedral) angle is at most the
     // threshold: equivalently the angle between face normals is at least
     // 180 - threshold. Boundary and non-manifold edges are always features.
-    const float normalAngleThreshold = degreesToRadians(180.0f - dihedralAngleDegrees);
+    // Small tolerance so a dihedral sitting exactly on the threshold (a 90°
+    // rim with the default 90° parameter) tags deterministically instead of
+    // per-edge float coin-flips; over-tagging is the safe direction.
+    const float normalAngleThreshold = degreesToRadians(180.0f - dihedralAngleDegrees) - 1e-3f;
     for (Index i = 0; i < m_edges.size(); ++i) {
         if (!m_edges[i].alive) {
             continue;
