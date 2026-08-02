@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """CAD multi-density sweep: ours (quad-cover default + --pure-quads) vs
 QuadriFlow on box_sharp / cylinder / fandisk, target-quads in
-{400,600,900,1400,2000,3000,4500}.
+{400,600,900,1400,2000,2510,3000,4500} (2510 was the density that reproduced
+the calibration/isotropic crossing failure — kept in the sweep as a guard).
 
 Measurement-only scratch script (docs/ROADMAP.md discipline: count-matched,
 >=7 densities, repeats where cheap). Writes one CSV row per run to
@@ -35,7 +36,7 @@ MESHES = {
     "cylinder": CACHE / "generated" / "cylinder.obj",
     "fandisk": CACHE / "downloaded" / "fandisk.obj",
 }
-DENSITIES = [400, 600, 900, 1400, 2000, 3000, 4500]
+DENSITIES = [400, 600, 900, 1400, 2000, 2510, 3000, 4500]
 REPEATS = 3
 FAST_SECONDS = 5.0  # repeat only when a single run is under this
 TIMEOUT = 900
