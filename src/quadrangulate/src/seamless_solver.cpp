@@ -18,6 +18,7 @@
 #include <utility>
 #include <vector>
 
+#include "bimdf_quantize.hpp"
 #include "cyber/accel/buffer.hpp"
 #include "cyber/accel/primitives.hpp"
 #include "cyber/core/math.hpp"
@@ -1415,7 +1416,8 @@ int solveSeamlessReduced(accel::IBackend& backend, std::size_t nCut,
                          const std::vector<SeamRef>& seams, const std::vector<std::size_t>& gauges,
                          std::vector<float>& u, std::vector<float>& v,
                          const CancelToken* cancel = nullptr,
-                         SeamlessSolveCacheImpl* cache = nullptr) {
+                         SeamlessSolveCacheImpl* cache = nullptr,
+                         bimdf::Charts* bimdfCharts = nullptr) {
     const std::size_t nSeam = seams.size();
     const std::size_t nUv = 2 * nCut;
     // Feature-seam integer pinning (docs/ROADMAP.md 2026-08-01 priority 1;
@@ -1897,15 +1899,53 @@ int solveSeamlessReduced(accel::IBackend& backend, std::size_t nCut,
     // lines the relaxed UV already spans (plus slack). Clamping here keeps seamlessness intact
     // and simply refuses to place a seam translation the geometry never justified.
     double uvSpan = 0.0;
+    std::vector<float> relaxedUv;  // z = Tuv w at the relaxed optimum (Bi-MDF substrate)
     {
         accel::Buffer<float> wProbe(w), zProbe;
         accel::spmv(backend, Tuv, wProbe, zProbe);
         for (std::size_t i = 0; i < zProbe.size(); ++i) {
             uvSpan = std::max(uvSpan, static_cast<double>(std::abs(zProbe[i])));
         }
+        if (bimdfCharts != nullptr) {
+            relaxedUv.assign(zProbe.data(), zProbe.data() + zProbe.size());
+        }
     }
     const double tCap = std::max(uvSpan * 2.0, std::sqrt(static_cast<double>(nCut))) + 8.0;
     const auto clampInt = [tCap](double val) { return std::clamp(std::round(val), -tCap, tCap); };
+
+    // Bi-MDF quantization (CYBER_QC_BIMDF, openspec/changes/bimdf-quantization):
+    // build the motorcycle-graph T-mesh on the relaxed seamless map. Any
+    // failure falls back to the untouched greedy schedule below.
+    if (bimdfCharts != nullptr) {
+        bimdfCharts->u = relaxedUv.data();
+        bimdfCharts->v = relaxedUv.data() + nCut;
+        // Relaxed values of every promoted variable (diagnostics: the symbolic
+        // arc lengths must reproduce the traced numeric lengths).
+        std::vector<double> zRel(N, 0.0);
+        for (std::size_t i = 0; i < nUv; ++i) {
+            zRel[i] = static_cast<double>(relaxedUv[i]);
+        }
+        for (std::size_t e = 0; e < nSeam; ++e) {
+            const SeamRef& s = seams[e];
+            double cxu, cxv, cyu, cyv;
+            rotCoeffs(s.rho, cxu, cxv, cyu, cyv);
+            const double uA = zRel[uIx(s.aA)], vA = zRel[vIx(s.aA)];
+            zRel[txIx(e)] = zRel[uIx(s.aB)] - (cxu * uA + cxv * vA);
+            zRel[tyIx(e)] = zRel[vIx(s.aB)] - (cyu * uA + cyv * vA);
+        }
+        for (std::size_t k = 0; k < nFeat; ++k) {
+            const SeamRef& s = seams[featureSeams[k]];
+            zRel[cIx(k)] = s.pinAxis == 0 ? zRel[uIx(s.aA)] : zRel[vIx(s.aA)];
+        }
+        const bimdf::TMesh tmesh = bimdf::buildTMesh(*bimdfCharts, zRel);
+        std::fprintf(stderr,
+                     "[qc] bimdf tmesh: ok=%d nodes=%zu arcs=%zu patches=%zu cones=%zu "
+                     "tnodes=%zu rays=%zu steps=%zu exprErr=%.2e sideMismatch=%.3f%s%s\n",
+                     tmesh.ok ? 1 : 0, tmesh.nodeCount, tmesh.arcs.size(), tmesh.patches.size(),
+                     tmesh.coneNodes, tmesh.tNodes, tmesh.raysTraced, tmesh.raySteps,
+                     tmesh.maxExprErr, tmesh.maxSideMismatch,
+                     tmesh.reason.empty() ? "" : " reason=", tmesh.reason.c_str());
+    }
 
     std::vector<char> intPinned(intFree.size(), 0);
     constexpr double kConfident = 0.2;
@@ -2079,6 +2119,17 @@ Parameterization solveParameterizationImpl(const Mesh& mesh, const SeamlessSetup
     std::vector<FaceData> faceData;
     faceData.reserve(mesh.faceCapacity());
     std::vector<std::unordered_map<std::size_t, float>> rows(nCut);
+    // Bi-MDF quantization context (CYBER_QC_BIMDF): compact faces, cone flags
+    // and seam-side face indices for the motorcycle-graph tracer. Built only
+    // when the opt-in flag is set; the default path is untouched.
+    std::unique_ptr<bimdf::Charts> bimdfCharts;
+    std::unordered_map<Index, std::size_t> faceToCompact;
+    if (std::getenv("CYBER_QC_BIMDF") != nullptr && probeCellArea == nullptr) {
+        bimdfCharts = std::make_unique<bimdf::Charts>();
+        bimdfCharts->nCut = nCut;
+        bimdfCharts->coneIndex.assign(nCut, 0);
+        bimdfCharts->vertexOfCut.assign(nCut, 0);
+    }
     for (Index fi = 0; fi < mesh.faceCapacity(); ++fi) {
         const FaceId f{fi};
         if (!mesh.isAlive(f) || mesh.faceSize(f) != 3) {
@@ -2113,6 +2164,24 @@ Parameterization solveParameterizationImpl(const Mesh& mesh, const SeamlessSetup
             rows[ib][ia] -= w;
             rows[ia][ia] += w;
             rows[ib][ib] += w;
+        }
+        if (bimdfCharts) {
+            faceToCompact.emplace(fi, faceData.size());
+            for (int k = 0; k < 3; ++k) {
+                const std::size_t cut = fd.cut[static_cast<std::size_t>(k)];
+                const Index vv = vs[static_cast<std::size_t>(k)].value;
+                bimdfCharts->vertexOfCut[cut] = static_cast<std::uint32_t>(vv);
+                bimdfCharts->coneIndex[cut] = setup.singularityIndex[vv];
+                if (bimdfCharts->vertexPos.size() <= vv) {
+                    bimdfCharts->vertexPos.resize(vv + 1, {0.0f, 0.0f, 0.0f});
+                }
+                const Vec3 pp = mesh.position(vs[static_cast<std::size_t>(k)]);
+                bimdfCharts->vertexPos[vv] = {pp.x, pp.y, pp.z};
+            }
+            bimdfCharts->faces.push_back(fd.cut);
+            const Vec3 fn = cross(fd.e0, fd.e1);
+            bimdfCharts->faceE0.push_back({fd.e0.x, fd.e0.y, fd.e0.z});
+            bimdfCharts->faceN.push_back({fn.x, fn.y, fn.z});
         }
         faceData.push_back(fd);
     }
@@ -2574,6 +2643,27 @@ Parameterization solveParameterizationImpl(const Mesh& mesh, const SeamlessSetup
                 s.feature = false;
             }
         }
+        if (bimdfCharts) {
+            const auto ia = faceToCompact.find(ef[0].value);
+            const auto ib = faceToCompact.find(ef[1].value);
+            if (ia == faceToCompact.end() || ib == faceToCompact.end()) {
+                bimdfCharts.reset();  // degenerate seam face: charts incomplete
+            } else {
+                bimdf::SeamEdge se;
+                se.aA = s.aA;
+                se.bA = s.bA;
+                se.aB = s.aB;
+                se.bB = s.bB;
+                se.rho = s.rho;
+                se.feature = s.feature && std::getenv("CYBER_QC_NO_FEATURE_PIN") == nullptr;
+                se.pinAxis = s.pinAxis;
+                se.faceA = ia->second;
+                se.faceB = ib->second;
+                se.tx = 2 * nCut + 2 * bimdfCharts->seams.size();
+                se.ty = se.tx + 1;
+                bimdfCharts->seams.push_back(se);
+            }
+        }
         seams.push_back(s);
     }
     // Gauges: one pin per connected component of the cut-open mesh (the isPin representatives
@@ -2593,7 +2683,8 @@ Parameterization solveParameterizationImpl(const Mesh& mesh, const SeamlessSetup
     // independent DOF and greedily rounds the integer translations. No dense dual, no seam cap —
     // it scales to hundreds of cones (spot: ~350 seam edges), reconciling branch-point holonomy.
     if (!seams.empty()) {
-        solveSeamlessReduced(backend, nCut, rows, bu0, bv0, seams, gauges, u, v, cancel, cacheImpl);
+        solveSeamlessReduced(backend, nCut, rows, bu0, bv0, seams, gauges, u, v, cancel, cacheImpl,
+                             bimdfCharts.get());
     }
     statsGradHist("reduced");
     if (cancel != nullptr && cancel->isCancelled()) {
