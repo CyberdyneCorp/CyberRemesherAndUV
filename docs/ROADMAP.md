@@ -179,6 +179,21 @@ densities, mean paired delta):**
     36.8s → 8.1s, 4.5x); spot@3000 solve 270ms → 49ms. Remaining solve cost on
     nefertiti is the one-time inverse-int-block build (D=11.6s, factor=3.1s) —
     an AMD ordering is the next lever there.
+  - *AMD ordering (2026-08-02):* in-tree approximate-minimum-degree ordering
+    (quotient graph with aggressive absorption, mass elimination, and
+    supervariable merging; still dependency-free) joins RCM in
+    `sparse_cholesky.{hpp,cpp}`; the default measures both symbolically and
+    factors whichever fills less (`CYBER_QC_ORDERING=rcm|amd` forces one).
+    AMD wins corpus-wide — reduced-operator factor fill nefertiti 16.3M →
+    **1.64M** (9.9x), armadillo 15.5M → 1.33M (11.6x), spot 0.50M → 0.10M
+    (4.9x); Poisson factor fill ~2.5x lower. Since the Woodbury D-build's
+    back-substitutions scale with factor nnz, the whole direct reduced phase
+    collapses: nefertiti factor 2.5s → 0.19s, D 6.2s → 0.46s (solve stage
+    11.9s → 3.9s, wall 28.3s → 20.3s); armadillo factor 3.8s → 0.14s, D
+    3.8s → 0.22s (solve 8.8s → 1.4s); spot solve 66ms → 26ms. Gates: ctest
+    green (incl. new `test_sparse_cholesky.cpp` unit tests), `bench.py check`
+    green, license audit clean; outputs stay within the direct solver's
+    tolerance (ordering only permutes the exact factorization).
   - *Gates:* ctest 13/13, `bench.py check` green (box_sharp 8 cones / 0° angle
     / recall 1.00). Full A/B (generated corpus + spot/nefertiti/armadillo,
     direct vs `CYBER_QC_NO_DIRECT`): generated corpus metric-identical; real

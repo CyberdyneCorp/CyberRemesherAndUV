@@ -3,15 +3,17 @@
 #include <cstddef>
 #include <vector>
 
-// In-tree double-precision sparse Cholesky (simplicial LL^T, up-looking, with a
-// reverse Cuthill-McKee fill-reducing ordering) plus an incrementally growable
-// dense Cholesky. Serves the quad-cover seamless solve's direct path
-// (CYBER_QC_DIRECT, docs/ROADMAP.md): the pinned Poisson operator and the
-// reduced Dirichlet operator are FIXED across their many re-solves, so one
-// factorization + cheap back-substitutions replace thousands of CG iterations.
-// Deliberately dependency-free — the quad-cover path must stay license-clean
-// (no Eigen/SuiteSparse); the classic textbook algorithms (etree + ereach
-// up-looking factorization, BFS-based RCM) are small enough to own.
+// In-tree double-precision sparse Cholesky (simplicial LL^T, up-looking, with
+// fill-reducing ordering: approximate minimum degree vs reverse Cuthill-McKee,
+// picked by measured symbolic fill; CYBER_QC_ORDERING=rcm|amd forces one) plus
+// an incrementally growable dense Cholesky. Serves the quad-cover seamless
+// solve's direct path (CYBER_QC_DIRECT, docs/ROADMAP.md): the pinned Poisson
+// operator and the reduced Dirichlet operator are FIXED across their many
+// re-solves, so one factorization + cheap back-substitutions replace thousands
+// of CG iterations. Deliberately dependency-free — the quad-cover path must
+// stay license-clean (no Eigen/SuiteSparse); the classic textbook algorithms
+// (etree + ereach up-looking factorization, BFS-based RCM, quotient-graph AMD)
+// are small enough to own.
 namespace cyber::remesh {
 
 // Sparse symmetric-positive-definite LL^T factorization of an n x n matrix

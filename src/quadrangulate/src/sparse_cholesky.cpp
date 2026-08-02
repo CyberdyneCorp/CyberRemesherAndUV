@@ -3,8 +3,11 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <limits>
 #include <queue>
+#include <string>
 
 namespace cyber::remesh {
 
@@ -103,6 +106,338 @@ std::vector<std::size_t> reverseCuthillMcKee(std::size_t n,
     return order;
 }
 
+// Approximate minimum degree ordering (Amestoy-Davis-Duff style) with
+// aggressive element absorption, mass elimination, and hash-based
+// supervariable merging — implemented from the published algorithm on the same
+// deduplicated off-diagonal adjacency RCM uses (dependency-free). The quotient
+// graph keeps each node's neighbor list in one arena: a live variable stores
+// [adjacent elements | adjacent variables], a live element stores its member
+// variables. Lists only shrink in place; each pivot's element list is appended
+// to the arena, so no garbage collection is needed (total growth is bounded by
+// the factor's row patterns, small next to the factor itself).
+std::vector<std::size_t> approximateMinimumDegree(std::size_t nIn,
+                                                  const std::vector<std::size_t>& adjStart,
+                                                  const std::vector<std::size_t>& adj) {
+    const int n = static_cast<int>(nIn);
+    if (n == 0) {
+        return {};
+    }
+    std::vector<int> mem(adj.begin(), adj.end());
+    std::vector<int> startV(nIn), lenV(nIn);
+    std::vector<int> elenV(nIn, 0);  // >= 0: live variable (element count); -1: element; -2: dead
+    std::vector<int> nvV(nIn, 1);    // supervariable weight (0 once merged/eliminated)
+    std::vector<int> degV(nIn);      // variable: approx external degree; element: |Le| at creation
+    std::vector<std::uint64_t> wV(nIn, 0);    // pass-1 per-element |Le \ Lp| workspace
+    std::vector<int> inLpV(nIn, -1);          // pivot-stamped Lp membership
+    std::vector<std::int64_t> cmpV(nIn, -1);  // stamp for supervariable list comparison
+    std::vector<int> dheadV(nIn, -1), dnextV(nIn, -1), dprevV(nIn, -1);  // degree lists
+    std::vector<int> hheadV(nIn, -1), hnextV(nIn, -1);                   // supervariable hash
+    // Chain of variables merged into a principal, emitted right after it.
+    std::vector<int> chainNextV(nIn, -1), chainTailV(nIn);
+
+    // Signed-index aliases (int subscripts on raw pointers keep -Wsign-conversion
+    // quiet without a cast at every access). `mem` grows, so memp is refreshed
+    // after every append.
+    int* memp = mem.data();
+    int* const start = startV.data();
+    int* const len = lenV.data();
+    int* const elen = elenV.data();
+    int* const nv = nvV.data();
+    int* const deg = degV.data();
+    std::uint64_t* const w = wV.data();
+    int* const inLp = inLpV.data();
+    std::int64_t* const cmp = cmpV.data();
+    int* const dhead = dheadV.data();
+    int* const dnext = dnextV.data();
+    int* const dprev = dprevV.data();
+    int* const hhead = hheadV.data();
+    int* const hnext = hnextV.data();
+    int* const chainNext = chainNextV.data();
+    int* const chainTail = chainTailV.data();
+
+    const auto listInsert = [&](int i, int d) {
+        dprev[i] = -1;
+        dnext[i] = dhead[d];
+        if (dhead[d] >= 0) {
+            dprev[dhead[d]] = i;
+        }
+        dhead[d] = i;
+    };
+    const auto listRemove = [&](int i, int d) {
+        if (dprev[i] >= 0) {
+            dnext[dprev[i]] = dnext[i];
+        } else {
+            dhead[d] = dnext[i];
+        }
+        if (dnext[i] >= 0) {
+            dprev[dnext[i]] = dprev[i];
+        }
+    };
+
+    for (int i = 0; i < n; ++i) {
+        const auto ui = static_cast<std::size_t>(i);
+        start[i] = static_cast<int>(adjStart[ui]);
+        len[i] = static_cast<int>(adjStart[ui + 1]) - start[i];
+        deg[i] = len[i];
+        chainTail[i] = i;
+        listInsert(i, deg[i]);
+    }
+
+    std::vector<int> pivotSeq;
+    pivotSeq.reserve(nIn);
+    std::vector<int> lp, keepElem, keepVar, touched;
+    std::uint64_t wflg = 1;
+    std::int64_t cmpTag = 0;
+    int eliminated = 0;
+    int minDeg = 0;
+    int pivot = 0;
+
+    while (eliminated < n) {
+        while (dhead[minDeg] < 0) {
+            ++minDeg;
+        }
+        const int p = dhead[minDeg];
+        listRemove(p, minDeg);
+        ++pivot;
+
+        // Gather Lp = live variables adjacent to p directly or via p's
+        // elements; those elements are absorbed into the new element p.
+        lp.clear();
+        inLp[p] = pivot;
+        int degme = 0;
+        const auto addVar = [&](int j) {
+            if (elen[j] < 0 || nv[j] <= 0 || inLp[j] == pivot) {
+                return;
+            }
+            inLp[j] = pivot;
+            listRemove(j, deg[j]);
+            degme += nv[j];
+            lp.push_back(j);
+        };
+        for (int q = start[p]; q < start[p] + elen[p]; ++q) {
+            const int e = memp[q];
+            if (elen[e] != -1) {
+                continue;
+            }
+            for (int r = start[e]; r < start[e] + len[e]; ++r) {
+                addVar(memp[r]);
+            }
+            elen[e] = -2;  // absorbed into element p
+        }
+        for (int q = start[p] + elen[p]; q < start[p] + len[p]; ++q) {
+            addVar(memp[q]);
+        }
+        const int nvp = nv[p];
+        start[p] = static_cast<int>(mem.size());
+        mem.insert(mem.end(), lp.begin(), lp.end());
+        memp = mem.data();
+        len[p] = static_cast<int>(lp.size());
+        elen[p] = -1;  // p is now an element
+
+        // Pass 1: w[e] - wflg = |Le \ Lp| (weighted, approximate via deg[e])
+        // for every live element touching Lp.
+        wflg += static_cast<std::uint64_t>(n) + 1;
+        for (const int i : lp) {
+            for (int q = start[i]; q < start[i] + elen[i]; ++q) {
+                const int e = memp[q];
+                if (elen[e] != -1) {
+                    continue;
+                }
+                if (w[e] < wflg) {
+                    w[e] = wflg + static_cast<std::uint64_t>(deg[e]);
+                }
+                w[e] -= static_cast<std::uint64_t>(nv[i]);
+            }
+        }
+
+        // Pass 2: prune each i's lists (drop dead entries, absorbed elements,
+        // and Lp variables now covered by element p), add element p, compute
+        // the approximate external degree, mass-eliminate d == 0 variables,
+        // and hash the pruned list for supervariable detection.
+        touched.clear();
+        for (const int i : lp) {
+            keepElem.clear();
+            keepVar.clear();
+            std::uint64_t hash = 0;
+            std::int64_t d = 0;
+            for (int q = start[i]; q < start[i] + elen[i]; ++q) {
+                const int e = memp[q];
+                if (elen[e] != -1) {
+                    continue;
+                }
+                const std::int64_t dext =
+                    w[e] >= wflg ? static_cast<std::int64_t>(w[e] - wflg) : deg[e];
+                if (dext > 0) {
+                    d += dext;
+                    keepElem.push_back(e);
+                    hash += static_cast<std::uint64_t>(e);
+                } else {
+                    elen[e] = -2;  // aggressive absorption: Le is inside Lp
+                }
+            }
+            for (int q = start[i] + elen[i]; q < start[i] + len[i]; ++q) {
+                const int j = memp[q];
+                if (elen[j] < 0 || nv[j] <= 0 || inLp[j] == pivot) {
+                    continue;
+                }
+                d += nv[j];
+                keepVar.push_back(j);
+                hash += static_cast<std::uint64_t>(j);
+            }
+            if (d == 0) {
+                // Mass elimination: i's neighbors all lie in Lp ∪ {p}, so
+                // eliminating i right after p adds no fill.
+                elen[i] = -2;
+                chainNext[chainTail[p]] = i;
+                chainTail[p] = chainTail[i];
+                eliminated += nv[i];
+                degme -= nv[i];
+                nv[i] = 0;
+                continue;
+            }
+            deg[i] = static_cast<int>(d);  // raw external degree, finalized below
+            // Rewrite in place: [kept elements | p | kept variables]. This
+            // always fits: i was reached through p's variable list (variable p
+            // was dropped) or through an absorbed element (dropped above).
+            int q = start[i];
+            for (const int e : keepElem) {
+                memp[q++] = e;
+            }
+            memp[q++] = p;
+            elen[i] = static_cast<int>(keepElem.size()) + 1;
+            for (const int j : keepVar) {
+                memp[q++] = j;
+            }
+            len[i] = q - start[i];
+            const int bucket = static_cast<int>(hash % static_cast<std::uint64_t>(n));
+            if (hhead[bucket] < 0) {
+                touched.push_back(bucket);
+            }
+            hnext[i] = hhead[bucket];
+            hhead[bucket] = i;
+        }
+
+        // Supervariable detection: merge variables with identical pruned lists
+        // (they will share a factor column pattern) so later degree updates
+        // treat them as one.
+        for (const int bucket : touched) {
+            for (int i = hhead[bucket]; i >= 0; i = hnext[i]) {
+                if (nv[i] <= 0 || hnext[i] < 0) {
+                    continue;
+                }
+                ++cmpTag;
+                for (int q = start[i]; q < start[i] + len[i]; ++q) {
+                    cmp[memp[q]] = cmpTag;
+                }
+                int prev = i;
+                for (int j = hnext[i]; j >= 0; j = hnext[prev]) {
+                    bool same = nv[j] > 0 && len[j] == len[i] && elen[j] == elen[i];
+                    for (int q = start[j]; same && q < start[j] + len[j]; ++q) {
+                        same = cmp[memp[q]] == cmpTag;
+                    }
+                    if (same) {
+                        nv[i] += nv[j];
+                        nv[j] = 0;
+                        elen[j] = -2;
+                        chainNext[chainTail[i]] = j;
+                        chainTail[i] = chainTail[j];
+                        hnext[prev] = hnext[j];
+                    } else {
+                        prev = j;
+                    }
+                }
+            }
+            hhead[bucket] = -1;
+        }
+
+        // Re-list the surviving Lp variables with their new approximate degree
+        // d(external) + |Lp \ i|, capped by the live variable count.
+        for (const int i : lp) {
+            if (elen[i] < 0 || nv[i] <= 0) {
+                continue;
+            }
+            const int cap = n - eliminated - nv[i];
+            const int d = std::min(deg[i] + degme - nv[i], cap);
+            deg[i] = d;
+            listInsert(i, d);
+            minDeg = std::min(minDeg, d);
+        }
+        deg[p] = degme;
+        if (len[p] == 0) {
+            elen[p] = -2;  // empty element: nothing references it
+        }
+        eliminated += nvp;
+        pivotSeq.push_back(p);
+    }
+
+    // Elimination order, each principal followed by everything merged into it.
+    std::vector<std::size_t> order;
+    order.reserve(nIn);
+    for (const int p : pivotSeq) {
+        for (int v = p; v >= 0; v = chainNext[v]) {
+            order.push_back(static_cast<std::size_t>(v));
+        }
+    }
+    return order;
+}
+
+// Strictly-lower nonzero count of the LL^T factor that `order` yields on the
+// adjacency pattern (elimination tree + row-pattern walk, no numerics). Used
+// to pick the cheaper of RCM/AMD before committing to a factorization.
+std::size_t symbolicFill(std::size_t n, const std::vector<std::size_t>& adjStart,
+                         const std::vector<std::size_t>& adj,
+                         const std::vector<std::size_t>& order) {
+    std::vector<std::size_t> rank(n);
+    for (std::size_t k = 0; k < n; ++k) {
+        rank[order[k]] = k;
+    }
+    // Permuted strictly-lower pattern rows.
+    std::vector<std::size_t> bStart(n + 1, 0);
+    for (std::size_t i = 0; i < n; ++i) {
+        for (std::size_t p = adjStart[i]; p < adjStart[i + 1]; ++p) {
+            if (rank[adj[p]] < rank[i]) {
+                ++bStart[rank[i] + 1];
+            }
+        }
+    }
+    for (std::size_t k = 0; k < n; ++k) {
+        bStart[k + 1] += bStart[k];
+    }
+    std::vector<std::size_t> bCol(bStart[n]);
+    {
+        std::vector<std::size_t> next(bStart.begin(), bStart.end() - 1);
+        for (std::size_t i = 0; i < n; ++i) {
+            for (std::size_t p = adjStart[i]; p < adjStart[i + 1]; ++p) {
+                if (rank[adj[p]] < rank[i]) {
+                    bCol[next[rank[i]]++] = rank[adj[p]];
+                }
+            }
+        }
+    }
+    // Elimination tree with path compression, counting row-pattern nodes.
+    std::vector<std::size_t> parent(n, kNone), ancestor(n, kNone), mark(n, kNone);
+    std::size_t fill = 0;
+    for (std::size_t k = 0; k < n; ++k) {
+        mark[k] = k;
+        for (std::size_t p = bStart[k]; p < bStart[k + 1]; ++p) {
+            std::size_t i = bCol[p];
+            while (i != kNone && i < k) {
+                const std::size_t nextI = ancestor[i];
+                ancestor[i] = k;
+                if (nextI == kNone) {
+                    parent[i] = k;
+                }
+                i = nextI;
+            }
+            for (i = bCol[p]; mark[i] != k; i = parent[i]) {
+                mark[i] = k;
+                ++fill;
+            }
+        }
+    }
+    return fill;
+}
+
 }  // namespace
 
 bool SparseCholesky::factor(std::size_t n, const std::vector<std::size_t>& rowStart,
@@ -133,7 +468,28 @@ bool SparseCholesky::factor(std::size_t n, const std::vector<std::size_t>& rowSt
             adjStart[i + 1] = adj.size();
         }
     }
-    m_order = reverseCuthillMcKee(n, adjStart, adj);
+    // Fill-reducing ordering: AMD wins on the solver's operators corpus-wide
+    // (2-4x lower fill than RCM on the reduced operator), but the default
+    // still measures both symbolically and keeps whichever fills less —
+    // ordering quality is graph-dependent and the symbolic count is cheap
+    // next to the numeric factorization. CYBER_QC_ORDERING=rcm|amd forces one.
+    const char* orderingEnv = std::getenv("CYBER_QC_ORDERING");
+    const std::string mode = orderingEnv != nullptr ? orderingEnv : "";
+    if (mode == "rcm") {
+        m_order = reverseCuthillMcKee(n, adjStart, adj);
+    } else if (mode == "amd") {
+        m_order = approximateMinimumDegree(n, adjStart, adj);
+    } else {
+        std::vector<std::size_t> rcm = reverseCuthillMcKee(n, adjStart, adj);
+        std::vector<std::size_t> amd = approximateMinimumDegree(n, adjStart, adj);
+        const std::size_t fillRcm = symbolicFill(n, adjStart, adj, rcm);
+        const std::size_t fillAmd = symbolicFill(n, adjStart, adj, amd);
+        if (std::getenv("CYBER_QC_TIME") != nullptr) {
+            std::fprintf(stderr, "[qc-time] cholesky ordering: n=%zu fill rcm=%zu amd=%zu -> %s\n",
+                         n, fillRcm, fillAmd, fillAmd <= fillRcm ? "amd" : "rcm");
+        }
+        m_order = fillAmd <= fillRcm ? std::move(amd) : std::move(rcm);
+    }
     m_rank.assign(n, 0);
     for (std::size_t k = 0; k < n; ++k) {
         m_rank[m_order[k]] = k;
