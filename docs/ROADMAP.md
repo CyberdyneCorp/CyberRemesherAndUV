@@ -18,6 +18,49 @@ spot flow_loop_mean_len >= 1000 count-matched AND nefertiti cyber-pure
 singularities <= 200 with no recorded-metric regression, multi-density per the
 measurement rules. See openspec/changes/bimdf-quantization/.
 
+### Update — 2026-08-02 (branch `feat/bimdf-quantization`): pipeline landed opt-in; CAD path end-to-end, organics fall back at the T-mesh
+
+What landed (all behind `CYBER_QC_BIMDF`; flag off is byte-exact, ctest 14/14):
+
+- **Quantization scoreboard** (`CYBER_QC_DEBUG`): reduced Dirichlet energy
+  E(w) = ½wᵀ(M+ridge)w − gᵀw printed at the relaxed optimum and after the
+  final solve — greedy baselines at target 4000: box_sharp +1.588,
+  spot +7.060, nefertiti +101.054. A second line reports the realized T-mesh
+  arc-deviation energy whenever a T-mesh was built.
+- **Motorcycle-graph T-mesh tracer** (`bimdf_quantize.cpp`): lockstep
+  (smallest-curve-first) separatrix tracing with per-face contour following
+  (fold-robust), seam transport, exact symbolic arc lengths over the promoted
+  variables z=[u|v|t|c] (box exprErr 0, organics ≤1.2e-3), crease chains with
+  stub pruning, combinatorial quarter-arithmetic rotations, quad-patch
+  extraction with per-corner validation.
+- **Bi-MDF S1 solve** (paper's approximate path, in half-cell units): split-node
+  template, T-join parity adjustment (forest + DFS), Hochbaum double cover on
+  the in-tree SPFA min-cost flow, convex relative-deviation costs as parallel
+  arcs, min-one collapse guard with `raisedToMin` reporting. Unit-tested on
+  synthetic T-meshes (cube classes, T-node consistency vs naive rounding,
+  degenerate-arc guard).
+- **Injection**: arc assignment back-substituted onto the free-integer basis
+  through the run's actual pivot expressions (structural-violation arcs
+  excluded), Gauss-Jordan, one-batch pin (tCap-validated, never clamped) +
+  single `direct.resolve`; greedy finishes the remainder.
+  `CYBER_QC_BIMDF=report` solves and reports without injecting.
+
+Measured state: **box_sharp runs the full path** — textbook T-mesh
+(8 nodes/12 arcs/6 patches, side mismatch 0), solve energy 0.017, zero side
+violation, back-substitution maxFrac 0.0000, 5 integers injected, output
+geometry identical to greedy (the flow agrees where greedy is already
+optimal; recall 1.00 / 8 cones preserved trivially). **Organics fall back**:
+the relaxed map's UV foldovers around index −1 cones corrupt patch corner
+sectors — spot 107/222 patches non-quad, fandisk 71/110, nefertiti hits a
+work-mesh crack; every fallback path reproduces greedy unchanged. The exit
+gates (spot flow loops ≥ 1000, nefertiti ≤ 200 sings) are therefore NOT yet
+reachable: the blocker is T-mesh extraction on folded relaxed maps, not the
+flow solve. Candidate next steps, in value order: (a) locally-injective
+relaxed substrate (or per-cone fold repair) before tracing; (b) per-patch
+even-sum template (paper Fig 10d) so partially-valid T-meshes still quantize;
+(c) the M=2 matching refinement (S2) once S1 bites. Default flip is NOT
+proposed — opt-in only until the gates are met on the full corpus.
+
 ## Update — 2026-08-02 (CAD density robustness: the sweep's 🔴 failures are FIXED; 32/32 gate cells clean)
 
 The two density-dependent robustness bugs the CAD sweep below exposed are fixed
