@@ -49,6 +49,39 @@ and robustness — not just competitive on one.
     (sing 72→63); nefertiti/armadillo drift ≤5% on sing/angle. Vendored route
     untouched (probe is native-only); outputs with `CYBER_QC_NO_PROBE=1`
     byte-match the pre-probe build.
+- **Native-solve perf (2026-08-02): direct sparse-Cholesky solve
+  (`CYBER_QC_DIRECT`, default on; kill switch `CYBER_QC_NO_DIRECT`).** The two
+  solve operators are fixed across all their re-solves, so both are now
+  factored ONCE by an in-tree double-precision simplicial LL^T with RCM
+  ordering (`sparse_cholesky.{hpp,cpp}`, dependency-free — the license audit
+  stays clean) and cached in `NativeSolveContext` across the probe and every
+  calibration attempt (spacing only scales the RHS):
+  - *Phase 1 — pinned Poisson:* every `relaxedSolve` (initial + up to 6 ARAP
+    re-solves, ×2 coordinates) becomes a pair of exact back-substitutions
+    instead of cold-tolerance float CG. The probe's relaxed phase on
+    nefertiti@8000 drops 8.5s → 0.07s.
+  - *Phase 2 — reduced integer phase:* the reduced operator M = Tᵗ·L₂·T is
+    formed explicitly (fill is benign: nefertiti nnz(M)=340k → factor 18.0M,
+    armadillo 328k → 11.4M, spot 35k → 0.39M), factored once, and the ~50-77
+    masked CG re-solves of the greedy rounding collapse into exact bordered
+    (Woodbury/KKT) solves on the ≤2813 pinned integer DOF — same fixed point
+    as `maskedSolve`, greedy pin schedule untouched, `totalCg` 80408 → 0 on
+    nefertiti. `CYBER_QC_FUSED_OPERATOR` keeps the CG loop on the explicit M
+    (one spmv/iter) as the fill-pathology fallback.
+  - *Measured (M2 Max, Release):* nefertiti@8000 wall 118.9s → **36.7s**
+    (solve 95.5s → 21.7s, 4.4x); armadillo@8000 wall 57.8s → **24.6s** (solve
+    36.8s → 8.1s, 4.5x); spot@3000 solve 270ms → 49ms. Remaining solve cost on
+    nefertiti is the one-time inverse-int-block build (D=11.6s, factor=3.1s) —
+    an AMD ordering is the next lever there.
+  - *Gates:* ctest 13/13, `bench.py check` green (box_sharp 8 cones / 0° angle
+    / recall 1.00). Full A/B (generated corpus + spot/nefertiti/armadillo,
+    direct vs `CYBER_QC_NO_DIRECT`): generated corpus metric-identical; real
+    meshes within noise (sing: spot 63→64, nefertiti 659→664, armadillo
+    609→597; angle/hausdorff/recall/flow all ≤±2%, no bench-tolerance
+    violation). Kill-switch output verified content-identical to the
+    pre-change build (armadillo@8000 sha256, modulo the OBJ's self-referential
+    mtllib line). Numerical drift `CYBER_QC_DIRECT_CHECK`: max
+    |uv_direct − uv_cg| = 9.2e-5 on spot (the CG truncation error removed).
 - **Feature-pinning lever (in progress, OPT-IN):** `CYBER_QC_FEATURE_DEG=90
   CYBER_QC_PLANAR_FILL=1 CYBER_QC_UV_SNAP=1` lifts box_sharp recall
   **0.04 → 0.73** (organics neutral: spot 179→168 sing, recall 0.59→0.64) via
