@@ -1346,8 +1346,9 @@ Parameterization solveParameterization(const Mesh& mesh, const SeamlessSetup& se
         }
     }
     // Feed the ARAP-refined targets (field-aligned, unchanged, when the polish was skipped) into
-    // the integer-seamless phase.
-    assembleRhs(angle);
+    // the integer-seamless phase. bu/bv already hold the RHS for the final `angle` on every
+    // path: each ARAP round assembles before it solves, and when the polish is skipped the
+    // initial assembleRhs({}) is the angle==0 assembly — so no re-assembly is needed here.
     const std::vector<float> bu0 = bu, bv0 = bv;
     statsAxisMix();
     statsGradHist("relaxed");

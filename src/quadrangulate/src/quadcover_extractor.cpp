@@ -254,26 +254,17 @@ void logNative(bool ok, const char* reason) {
         std::fprintf(stderr, "[qc] native DECLINED %s\n", reason);
     }
 }
-}  // namespace
 
-SeamlessUv computeSeamlessUvNative(const Mesh& mesh, float targetEdgeLength, float adaptivity,
-                                   float spacingScale, const CancelToken* cancel,
-                                   float featureDegrees) {
-    // M3 (docs/native-miq-plan.md): the fully native QuadCover-style seamless solve. No
-    // Geogram, no subprocess. Pipeline:
-    //   (pre) isotropic pre-remesh at `targetEdgeLength` so the solve runs on a clean,
-    //         uniformly-sized triangulation (the role the harness's internal remesh played);
-    //   (M1)  frame field + period jumps + singularities + cut graph (buildSeamlessSetup);
-    //   (M2)  seamless integer-grid Poisson solve at grid cell == targetEdgeLength
-    //         (solveParameterization) -> per-corner UV;
-    //   assemble a SeamlessUv on the remeshed verts/tris from the per-corner UV.
-    // Any degenerate stage returns an invalid UV so the caller falls through cleanly.
-    SeamlessUv uv;
-    if (targetEdgeLength <= 0.0f || mesh.faceCapacity() == 0) {
-        logNative(false, "empty/degenerate input");
-        return uv;
-    }
-
+// Attempt-invariant native-solve preparation (see NativeSolveContext): isotropic pre-remesh,
+// feature re-tag/filter, the feature-binding decision, and the cross-field/cut setup.
+// Everything here depends only on (mesh, targetEdgeLength, adaptivity, featureDegrees) —
+// never on the calibration scaling (only solveParameterization consumes the spacing) — so
+// the quadrangulator's calibration loop computes it ONCE and re-solves at different
+// spacings. Returns false with `reason` set when a stage declines; on success fills `ctx`
+// and marks it ready. `isoMs`/`setupMs` report the stage timings for the [qc-time] line.
+bool prepareNativeSolve(const Mesh& mesh, float targetEdgeLength, float adaptivity,
+                        float featureDegrees, const CancelToken* cancel, NativeSolveContext& ctx,
+                        const char*& reason, long& isoMs, long& setupMs) {
     // Isotropic pre-remesh. Tag features so sharp edges survive the resample, then project
     // onto a reference built from the raw island (flat projection: smoothNormalDegrees 0).
     // Feature edges are NO LONGER a decline gate: buildSeamlessSetup marks them as hard seams
@@ -305,7 +296,8 @@ SeamlessUv computeSeamlessUvNative(const Mesh& mesh, float targetEdgeLength, flo
     const char* preserveEnv = std::getenv("CYBER_QC_PRESERVE_CREASE_DEG");
     const float kPreserveDihedralDegrees =
         preserveEnv != nullptr ? static_cast<float>(std::atof(preserveEnv)) : 135.0f;
-    Mesh work = mesh;
+    Mesh& work = ctx.work;
+    work = mesh;
     work.triangulate();  // feature tagging + the solve both need a pure-triangle mesh
     // Feature-pinning lever: record the ORIGINAL geometry's resolvable crease network before
     // the isotropic remesh, so the post-remesh feature re-tag can be filtered against it
@@ -319,11 +311,10 @@ SeamlessUv computeSeamlessUvNative(const Mesh& mesh, float targetEdgeLength, flo
     work.tagFeatureEdges(kPreserveDihedralDegrees);
 
     if (cancel != nullptr && cancel->isCancelled()) {
-        logNative(false, "cancelled");
-        return uv;
+        reason = "cancelled";
+        return false;
     }
 
-    const bool timing = std::getenv("CYBER_QC_TIME") != nullptr;
     const auto tick = []() { return std::chrono::steady_clock::now(); };
     const auto ms = [](auto a, auto b) {
         return std::chrono::duration_cast<std::chrono::milliseconds>(b - a).count();
@@ -336,8 +327,8 @@ SeamlessUv computeSeamlessUvNative(const Mesh& mesh, float targetEdgeLength, flo
     iso.adaptivity = adaptivity;
     if (isotropicRemesh(work, reference, iso, nullptr, cancel) != IsotropicStatus::Success ||
         work.faceCount() == 0) {
-        logNative(false, "isotropic remesh failed (or cancelled)");
-        return uv;
+        reason = "isotropic remesh failed (or cancelled)";
+        return false;
     }
     const auto tIso = tick();
     // Re-tag features on the REMESHED mesh: the isotropic stage preserves the sharp geometry
@@ -361,7 +352,7 @@ SeamlessUv computeSeamlessUvNative(const Mesh& mesh, float targetEdgeLength, flo
     // — they cannot run the ARAP polish (same boundary gate) and measured a
     // CV blow-up under feature seams (the open-surface cleanup suite).
     // Binding features on boundaried scans is future work.
-    bool featureBinding = false;
+    ctx.featureBinding = false;
     if (wideBinding) {
         std::size_t nBoundary = 0, nAlive = 0;
         bool anyInteriorFeature = false;
@@ -380,17 +371,17 @@ SeamlessUv computeSeamlessUvNative(const Mesh& mesh, float targetEdgeLength, flo
         }
         const bool closed =
             nAlive > 0 && static_cast<double>(nBoundary) < 0.01 * static_cast<double>(nAlive);
-        featureBinding = anyInteriorFeature && closed;
+        ctx.featureBinding = anyInteriorFeature && closed;
     }
 
     if (cancel != nullptr && cancel->isCancelled()) {
-        logNative(false, "cancelled");
-        return uv;
+        reason = "cancelled";
+        return false;
     }
 
     auto backend = accel::defaultBackend();
-    const SeamlessSetup setup =
-        buildSeamlessSetup(work, kFieldIterations, *backend, featureBinding);
+    ctx.setup = buildSeamlessSetup(work, kFieldIterations, *backend, ctx.featureBinding);
+    const SeamlessSetup& setup = ctx.setup;
     if (std::getenv("CYBER_QC_FIELD_STATS") != nullptr) {
         // Cone census: total cones and how many sit off tagged feature edges
         // (spurious flat-region cones are a field-quality smell).
@@ -417,8 +408,8 @@ SeamlessUv computeSeamlessUvNative(const Mesh& mesh, float targetEdgeLength, flo
                      cones, coneFlat);
     }
     if (!setup.valid) {
-        logNative(false, "setup invalid");
-        return uv;
+        reason = "setup invalid";
+        return false;
     }
     const auto tSetup = tick();
     if (std::getenv("CYBER_QC_DEBUG") != nullptr) {
@@ -433,6 +424,62 @@ SeamlessUv computeSeamlessUvNative(const Mesh& mesh, float targetEdgeLength, flo
                      "[qc] native setup: faces=%zu featureEdges=%zu singular=%zu totalIndex=%d\n",
                      work.faceCount(), featureEdges, setup.singularityCount(), setup.totalIndex());
     }
+    isoMs = static_cast<long>(ms(t0, tIso));
+    setupMs = static_cast<long>(ms(tIso, tSetup));
+    ctx.ready = true;
+    return true;
+}
+}  // namespace
+
+SeamlessUv computeSeamlessUvNative(const Mesh& mesh, float targetEdgeLength, float adaptivity,
+                                   float spacingScale, const CancelToken* cancel,
+                                   float featureDegrees, NativeSolveContext* ctx) {
+    // M3 (docs/native-miq-plan.md): the fully native QuadCover-style seamless solve. No
+    // Geogram, no subprocess. Pipeline:
+    //   (pre) isotropic pre-remesh at `targetEdgeLength` so the solve runs on a clean,
+    //         uniformly-sized triangulation (the role the harness's internal remesh played);
+    //   (M1)  frame field + period jumps + singularities + cut graph (buildSeamlessSetup);
+    //   (M2)  seamless integer-grid Poisson solve at grid cell == targetEdgeLength
+    //         (solveParameterization) -> per-corner UV;
+    //   assemble a SeamlessUv on the remeshed verts/tris from the per-corner UV.
+    // Any degenerate stage returns an invalid UV so the caller falls through cleanly.
+    // The (pre) + (M1) stages are attempt-invariant (prepareNativeSolve): a caller-provided
+    // `ctx` carries them across the calibration loop's re-solves; a null ctx recomputes
+    // them here, byte-identically, on every call.
+    SeamlessUv uv;
+    if (targetEdgeLength <= 0.0f || mesh.faceCapacity() == 0) {
+        logNative(false, "empty/degenerate input");
+        return uv;
+    }
+
+    const bool timing = std::getenv("CYBER_QC_TIME") != nullptr;
+    const auto tick = []() { return std::chrono::steady_clock::now(); };
+    const auto ms = [](auto a, auto b) {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(b - a).count();
+    };
+
+    NativeSolveContext local;
+    NativeSolveContext& prep = ctx != nullptr ? *ctx : local;
+    long isoMs = 0;
+    long setupMs = 0;
+    if (!prep.ready) {
+        const char* reason = "";
+        if (!prepareNativeSolve(mesh, targetEdgeLength, adaptivity, featureDegrees, cancel, prep,
+                                reason, isoMs, setupMs)) {
+            logNative(false, reason);
+            return uv;
+        }
+    }
+    const Mesh& work = prep.work;
+    const SeamlessSetup& setup = prep.setup;
+    const bool featureBinding = prep.featureBinding;
+
+    if (cancel != nullptr && cancel->isCancelled()) {
+        logNative(false, "cancelled");
+        return uv;
+    }
+
+    auto backend = accel::defaultBackend();
     // Grid spacing == targetEdgeLength gives ~1 UV cell per triangle. The isoline extractor
     // then loses a large fraction of cells to short-edge collapse, so the quad count lands well
     // under target. `spacingScale` < 1 traces denser isolines (several per triangle) so the
@@ -440,18 +487,17 @@ SeamlessUv computeSeamlessUvNative(const Mesh& mesh, float targetEdgeLength, flo
     // CYBER_QC_SPACING_MUL overrides for experiments.
     const char* spEnv = std::getenv("CYBER_QC_SPACING_MUL");
     const float spacingMul = spEnv != nullptr ? static_cast<float>(std::atof(spEnv)) : spacingScale;
+    const auto tSolve0 = tick();
     const Parameterization param =
         solveParameterization(work, setup, targetEdgeLength * spacingMul, *backend, cancel);
     if (!param.valid) {
         logNative(false, "parameterization invalid (or cancelled)");
         return uv;
     }
-    const auto tSolve = tick();
     if (timing) {
         std::fprintf(stderr,
                      "[qc-time] faces=%zu | isotropic=%ldms field+setup=%ldms solve=%ldms\n",
-                     work.faceCount(), static_cast<long>(ms(t0, tIso)),
-                     static_cast<long>(ms(tIso, tSetup)), static_cast<long>(ms(tSetup, tSolve)));
+                     work.faceCount(), isoMs, setupMs, static_cast<long>(ms(tSolve0, tick())));
     }
 
     // Assemble the seamless UV on the remeshed triangles from the per-corner parameterization.
@@ -718,7 +764,7 @@ float creaseEdgeFraction(const Mesh& mesh, float dihedralDegrees) {
 
 SeamlessUv computeSeamlessUv(const Mesh& mesh, float targetEdgeLength, float harnessScaling,
                              float harnessAdaptivity, const CancelToken* cancel,
-                             float featureDegrees) {
+                             float featureDegrees, NativeSolveContext* ctx) {
     if (targetEdgeLength <= 0.0f) {
         return SeamlessUv{};  // no target density -> caller degrades cleanly
     }
@@ -739,7 +785,7 @@ SeamlessUv computeSeamlessUv(const Mesh& mesh, float targetEdgeLength, float har
 
     if (routeNative) {
         SeamlessUv native = computeSeamlessUvNative(mesh, targetEdgeLength, harnessAdaptivity,
-                                                    harnessScaling, cancel, featureDegrees);
+                                                    harnessScaling, cancel, featureDegrees, ctx);
         if (native.valid) {
             return native;
         }
@@ -759,7 +805,7 @@ SeamlessUv computeSeamlessUv(const Mesh& mesh, float targetEdgeLength, float har
     // (no-Geogram) default: watertight, bounded, cancellable at ~4-5% irregular.
     if (haveNative) {
         SeamlessUv native = computeSeamlessUvNative(mesh, targetEdgeLength, harnessAdaptivity,
-                                                    harnessScaling, cancel, featureDegrees);
+                                                    harnessScaling, cancel, featureDegrees, ctx);
         if (native.valid) {
             return native;
         }
@@ -2689,9 +2735,14 @@ public:
         const double targetQuads = meshTargetQuads(mesh, targetEdgeLength);
         IsolineQuadMesh out;
         float scaling = 0.5f;
+        // The native solve's isotropic remesh + cross field + cut setup depend only on the
+        // mesh / edge length / adaptivity / feature threshold — never on `scaling` — so the
+        // context computes them once and each attempt re-runs only the (spacing-dependent)
+        // parameterization + extraction.
+        NativeSolveContext nativeCtx;
         for (int attempt = 0; attempt < 2; ++attempt) {
             const SeamlessUv uv = computeSeamlessUv(mesh, targetEdgeLength, scaling, m_adaptivity,
-                                                    cancel, m_featureDegrees);
+                                                    cancel, m_featureDegrees, &nativeCtx);
             if (!uv.valid) {
                 return {.success = false,
                         .cancelled = false,
