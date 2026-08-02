@@ -107,10 +107,12 @@ struct BimdfResult {
     // half-integer lattice under the solver's reduction, so arc lengths are
     // integers in half-cells). arcLenHalf[a] >= 1.
     std::vector<long long> arcLenHalf;
-    double deviationEnergy = 0.0;  // sum_a |x_a/2 - len_a| / max(len_a, 0.5)
-    std::size_t raisedToMin = 0;   // degenerate-assignment guard adjustments
-    std::size_t parityFlips = 0;   // T-join adjustments applied
-    long long coverCost = 0;       // scaled min-cost-flow objective (diagnostic)
+    double deviationEnergy = 0.0;    // sum_a |x_a/2 - len_a| / max(len_a, 0.5)
+    std::size_t raisedToMin = 0;     // degenerate-assignment guard adjustments
+    std::size_t parityFlips = 0;     // T-join adjustments applied
+    std::size_t halfIntegral = 0;    // cover edges whose mapped-back flow was odd
+    long long coverCost = 0;         // scaled min-cost-flow objective (diagnostic)
+    long long maxSideViolation = 0;  // worst |side sum - opposite side sum| (half-cells)
 };
 
 // Bi-MDF S1 solve over the T-mesh (targets from Arc::len, consistency from

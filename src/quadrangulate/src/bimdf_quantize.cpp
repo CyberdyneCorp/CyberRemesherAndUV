@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <functional>
 #include <limits>
 #include <optional>
 #include <string>
@@ -2102,10 +2103,336 @@ double deviationEnergy(const TMesh& tm, const std::vector<double>& arcLenCells) 
     return e;
 }
 
+// ---------------------------------------------------------------------------
+// Bi-MDF S1 solve (Heistermann et al. 2023, approximate path): split-node
+// template per quad patch, deviation reformulation around the rounded guess,
+// T-join parity adjustment (spanning-forest + DFS), Hochbaum double cover to
+// an ordinary min-cost flow (SPFA SSP with convex piecewise-linear deviation
+// costs as parallel arcs). Units are HALF-CELLS: under the solver's reduction
+// cones live on the half-integer lattice, so arc lengths are half-integers.
+// ---------------------------------------------------------------------------
 BimdfResult solveBimdf(const TMesh& tm) {
     BimdfResult r;
-    (void)tm;
-    r.reason = "solver stage lands separately";
+    const std::size_t nArc = tm.arcs.size();
+    const std::size_t nPatch = tm.patches.size();
+    if (nArc == 0 || nPatch == 0) {
+        r.reason = "empty T-mesh";
+        return r;
+    }
+    // Split-node template: one node per patch side (4 per patch); every arc is
+    // a head-head bi-edge between the side nodes of its two incident patch
+    // sides; each opposite side pair gets a tail-tail inner edge whose flow is
+    // the quantized side length.
+    const std::size_t nNode = 4 * nPatch;
+    std::vector<std::array<long long, 2>> arcNode(nArc, {-1, -1});
+    for (std::size_t p = 0; p < nPatch; ++p) {
+        for (int k = 0; k < 4; ++k) {
+            const long long node = static_cast<long long>(4 * p + static_cast<std::size_t>(k));
+            for (const std::size_t a : tm.patches[p].side[static_cast<std::size_t>(k)]) {
+                if (arcNode[a][0] < 0) {
+                    arcNode[a][0] = node;
+                } else if (arcNode[a][1] < 0) {
+                    arcNode[a][1] = node;
+                } else {
+                    r.reason = "arc incident to more than two patch sides";
+                    return r;
+                }
+            }
+        }
+    }
+    for (std::size_t a = 0; a < nArc; ++a) {
+        if (arcNode[a][1] < 0) {
+            r.reason = "arc not incident to two patch sides";
+            return r;
+        }
+    }
+    // Targets (half-cells) and initial rounded guess with the min-one guard.
+    std::vector<double> target(nArc);
+    std::vector<long long> g(nArc);
+    for (std::size_t a = 0; a < nArc; ++a) {
+        target[a] = 2.0 * tm.arcs[a].len;
+        g[a] = std::max<long long>(1, std::llround(target[a]));
+        if (static_cast<double>(g[a]) - target[a] > 0.5001) {
+            ++r.raisedToMin;  // degenerate-assignment guard (short/negative arc)
+        }
+    }
+    // Inner edges: one per opposite side pair; guess = mean of the side sums.
+    const std::size_t nInner = 2 * nPatch;
+    std::vector<long long> gIn(nInner);
+    std::vector<double> tIn(nInner);
+    for (std::size_t p = 0; p < nPatch; ++p) {
+        for (int j = 0; j < 2; ++j) {
+            long long s0 = 0, s1 = 0;
+            double t0 = 0.0;
+            for (const std::size_t a : tm.patches[p].side[static_cast<std::size_t>(j)]) {
+                s0 += g[a];
+                t0 += target[a];
+            }
+            for (const std::size_t a : tm.patches[p].side[static_cast<std::size_t>(j + 2)]) {
+                s1 += g[a];
+                t0 += target[a];
+            }
+            const std::size_t ii = 2 * p + static_cast<std::size_t>(j);
+            gIn[ii] = std::max<long long>(1, (s0 + s1 + 1) / 2);
+            tIn[ii] = t0 * 0.5;
+        }
+    }
+    const auto innerNodes = [&](std::size_t ii) {
+        const std::size_t p = ii / 2;
+        const int j = static_cast<int>(ii % 2);
+        return std::array<long long, 2>{
+            static_cast<long long>(4 * p + static_cast<std::size_t>(j)),
+            static_cast<long long>(4 * p + static_cast<std::size_t>(j + 2))};
+    };
+    // Residual demands b = -(sigma g): arcs inject at both heads, inner edges
+    // drain at both tails.
+    std::vector<long long> b(nNode, 0);
+    const auto recomputeB = [&]() {
+        std::fill(b.begin(), b.end(), 0);
+        for (std::size_t a = 0; a < nArc; ++a) {
+            b[static_cast<std::size_t>(arcNode[a][0])] -= g[a];
+            b[static_cast<std::size_t>(arcNode[a][1])] -= g[a];
+        }
+        for (std::size_t ii = 0; ii < nInner; ++ii) {
+            const auto nn = innerNodes(ii);
+            b[static_cast<std::size_t>(nn[0])] += gIn[ii];
+            b[static_cast<std::size_t>(nn[1])] += gIn[ii];
+        }
+    };
+    recomputeB();
+    // Convex relative-deviation cost, scaled to integers.
+    constexpr double kCostScale = 256.0;
+    const auto cost = [&](std::size_t a, long long x) {
+        return std::abs(static_cast<double>(x) - target[a]) / std::max(target[a], 1.0);
+    };
+    // T-join parity adjustment: flip g by +-1 along a forest so every demand
+    // becomes even (Algorithm 1 of the paper: spanning forest under the flip
+    // costs, DFS post-order sweep).
+    {
+        struct TEdge {
+            long long u, v;
+            double w;
+            std::size_t arc;  // kNone: inner edge index in `inner`
+            std::size_t inner;
+        };
+        std::vector<TEdge> edges;
+        edges.reserve(nArc + nInner);
+        for (std::size_t a = 0; a < nArc; ++a) {
+            const double c0 =
+                std::min(cost(a, g[a] + 1), g[a] > 1 ? cost(a, g[a] - 1) : 1e30) - cost(a, g[a]);
+            edges.push_back({arcNode[a][0], arcNode[a][1], c0, a, kNone});
+        }
+        for (std::size_t ii = 0; ii < nInner; ++ii) {
+            const auto nn = innerNodes(ii);
+            edges.push_back({nn[0], nn[1], 0.0, kNone, ii});
+        }
+        std::sort(edges.begin(), edges.end(), [](const TEdge& a, const TEdge& b) {
+            if (a.w != b.w) {
+                return a.w < b.w;
+            }
+            return std::tie(a.u, a.v, a.arc, a.inner) < std::tie(b.u, b.v, b.arc, b.inner);
+        });
+        std::vector<std::size_t> parent(nNode);
+        for (std::size_t i = 0; i < nNode; ++i) {
+            parent[i] = i;
+        }
+        std::function<std::size_t(std::size_t)> find = [&](std::size_t x) {
+            while (parent[x] != x) {
+                parent[x] = parent[parent[x]];
+                x = parent[x];
+            }
+            return x;
+        };
+        std::vector<std::vector<std::pair<std::size_t, std::size_t>>> tree(nNode);  // (nbr, edge)
+        for (std::size_t e = 0; e < edges.size(); ++e) {
+            const std::size_t ru = find(static_cast<std::size_t>(edges[e].u));
+            const std::size_t rv = find(static_cast<std::size_t>(edges[e].v));
+            if (ru == rv) {
+                continue;
+            }
+            parent[ru] = rv;
+            tree[static_cast<std::size_t>(edges[e].u)].push_back(
+                {static_cast<std::size_t>(edges[e].v), e});
+            tree[static_cast<std::size_t>(edges[e].v)].push_back(
+                {static_cast<std::size_t>(edges[e].u), e});
+        }
+        // DFS post-order: flip the tree edge of every child whose subtree
+        // parity is odd. Flipping a bi-edge toggles BOTH endpoint parities.
+        std::vector<char> visited(nNode, 0);
+        std::vector<char> odd(nNode, 0);
+        for (std::size_t i = 0; i < nNode; ++i) {
+            odd[i] = static_cast<char>(b[i] & 1);
+        }
+        const auto flipEdge = [&](const TEdge& te) {
+            ++r.parityFlips;
+            if (te.arc != kNone) {
+                const std::size_t a = te.arc;
+                const bool canDown = g[a] > 1;
+                if (canDown && cost(a, g[a] - 1) <= cost(a, g[a] + 1)) {
+                    --g[a];
+                } else {
+                    ++g[a];
+                }
+            } else {
+                const std::size_t ii = te.inner;
+                if (gIn[ii] > 1 && std::abs(static_cast<double>(gIn[ii] - 1) - tIn[ii]) <=
+                                       std::abs(static_cast<double>(gIn[ii] + 1) - tIn[ii])) {
+                    --gIn[ii];
+                } else {
+                    ++gIn[ii];
+                }
+            }
+        };
+        for (std::size_t root = 0; root < nNode; ++root) {
+            if (visited[root]) {
+                continue;
+            }
+            // Iterative DFS collecting post-order.
+            std::vector<std::tuple<std::size_t, std::size_t, std::size_t>>
+                stack;  // node,parent,edge
+            std::vector<std::tuple<std::size_t, std::size_t, std::size_t>> post;
+            stack.push_back({root, kNone, kNone});
+            visited[root] = 1;
+            while (!stack.empty()) {
+                const auto [n, par, pe] = stack.back();
+                stack.pop_back();
+                post.push_back({n, par, pe});
+                for (const auto& [nbr, e] : tree[n]) {
+                    if (!visited[nbr]) {
+                        visited[nbr] = 1;
+                        stack.push_back({nbr, n, e});
+                    }
+                }
+            }
+            for (std::size_t i = post.size(); i-- > 1;) {
+                const auto [n, par, pe] = post[i];
+                if (odd[n]) {
+                    flipEdge(edges[pe]);
+                    odd[n] = 0;
+                    odd[par] = static_cast<char>(odd[par] ^ 1);
+                }
+            }
+        }
+        recomputeB();
+        for (std::size_t i = 0; i < nNode; ++i) {
+            if (b[i] & 1) {
+                r.reason = "parity adjustment failed (odd component)";
+                return r;
+            }
+        }
+    }
+    // Double cover: v -> v+ (2v), v- (2v+1); every bi-edge becomes two
+    // directed edges. Head-head (x,y): (x- -> y+), (y- -> x+); tail-tail:
+    // (x+ -> y-), (y+ -> x-). Deviation edges carry convex marginal costs
+    // sampled at even offsets (capacity-2 parallel steps).
+    detail::MinCostFlow flow;
+    const int S = static_cast<int>(2 * nNode);
+    const int T = S + 1;
+    flow.init(T + 1);
+    constexpr int kSteps = 5;
+    struct DevEdges {
+        std::vector<int> upA, upB, dnA, dnB;  // parallel step edge ids per copy
+    };
+    std::vector<DevEdges> arcDev(nArc);
+    const auto vP = [](long long v) { return static_cast<int>(2 * v); };
+    const auto vM = [](long long v) { return static_cast<int>(2 * v + 1); };
+    for (std::size_t a = 0; a < nArc; ++a) {
+        const long long x = arcNode[a][0], y = arcNode[a][1];
+        for (int i = 1; i <= kSteps; ++i) {
+            const double m =
+                std::max(0.0, (cost(a, g[a] + 2 * i) - cost(a, g[a] + 2 * (i - 1))) * 0.5);
+            const int c = static_cast<int>(std::lround(m * kCostScale)) + (i == kSteps ? 1 : 0);
+            const int cap = i == kSteps ? (1 << 20) : 2;
+            arcDev[a].upA.push_back(flow.addEdge(vM(x), vP(y), cap, c));
+            arcDev[a].upB.push_back(flow.addEdge(vM(y), vP(x), cap, c));
+        }
+        long long slack = g[a] - 1;  // keep x >= 1 (min-one / collapse guard)
+        for (int i = 1; i <= kSteps && slack > 0; ++i) {
+            const long long lo = std::max<long long>(g[a] - 2 * i, 1);
+            const double m = std::max(0.0, (cost(a, lo) - cost(a, std::min(g[a], lo + 2))) * 0.5);
+            const int c = static_cast<int>(std::lround(m * kCostScale));
+            const int cap = static_cast<int>(std::min<long long>(2, slack));
+            slack -= cap;
+            arcDev[a].dnA.push_back(flow.addEdge(vP(x), vM(y), cap, c));
+            arcDev[a].dnB.push_back(flow.addEdge(vP(y), vM(x), cap, c));
+        }
+    }
+    std::vector<std::array<int, 2>> innerUp(nInner), innerDn(nInner);
+    for (std::size_t ii = 0; ii < nInner; ++ii) {
+        const auto nn = innerNodes(ii);
+        const long long x = nn[0], y = nn[1];
+        innerUp[ii] = {flow.addEdge(vP(x), vM(y), 1 << 20, 0),
+                       flow.addEdge(vP(y), vM(x), 1 << 20, 0)};
+        const int dnCap = static_cast<int>(std::max<long long>(gIn[ii] - 1, 0));
+        innerDn[ii] = {flow.addEdge(vM(x), vP(y), dnCap, 0), flow.addEdge(vM(y), vP(x), dnCap, 0)};
+    }
+    long long supply = 0;
+    for (std::size_t v = 0; v < nNode; ++v) {
+        // b(v+) = b[v], b(v-) = -b[v].
+        for (const auto& [node, dem] : {std::make_pair(vP(static_cast<long long>(v)), b[v]),
+                                        std::make_pair(vM(static_cast<long long>(v)), -b[v])}) {
+            if (dem > 0) {
+                flow.addEdge(S, node, static_cast<int>(dem), 0);
+                supply += dem;
+            } else if (dem < 0) {
+                flow.addEdge(node, T, static_cast<int>(-dem), 0);
+            }
+        }
+    }
+    const auto [pushed, costTotal] = flow.solve(S, T);
+    r.coverCost = costTotal;
+    if (pushed < supply) {
+        r.reason = "cover flow infeasible (pushed " + std::to_string(pushed) + " of " +
+                   std::to_string(supply) + ")";
+        return r;
+    }
+    // Map back: f = g + (up copies)/2 - (down copies)/2.
+    r.arcLenHalf.assign(nArc, 0);
+    for (std::size_t a = 0; a < nArc; ++a) {
+        long long up = 0, dn = 0;
+        for (const int e : arcDev[a].upA) {
+            up += flow.flow(e);
+        }
+        for (const int e : arcDev[a].upB) {
+            up += flow.flow(e);
+        }
+        for (const int e : arcDev[a].dnA) {
+            dn += flow.flow(e);
+        }
+        for (const int e : arcDev[a].dnB) {
+            dn += flow.flow(e);
+        }
+        long long x = g[a] + (up - dn + (up - dn >= 0 ? 1 : -1)) / 2;  // round half away
+        if ((up - dn) % 2 == 0) {
+            x = g[a] + (up - dn) / 2;
+        } else {
+            ++r.halfIntegral;
+        }
+        if (x < 1) {
+            x = 1;
+            ++r.raisedToMin;
+        }
+        r.arcLenHalf[a] = x;
+    }
+    // Consistency audit: opposite side sums (exact when the mapped-back flow
+    // was integral everywhere).
+    for (std::size_t p = 0; p < nPatch; ++p) {
+        for (int j = 0; j < 2; ++j) {
+            long long s0 = 0, s1 = 0;
+            for (const std::size_t a : tm.patches[p].side[static_cast<std::size_t>(j)]) {
+                s0 += r.arcLenHalf[a];
+            }
+            for (const std::size_t a : tm.patches[p].side[static_cast<std::size_t>(j + 2)]) {
+                s1 += r.arcLenHalf[a];
+            }
+            r.maxSideViolation = std::max(r.maxSideViolation, std::llabs(s0 - s1));
+        }
+    }
+    for (std::size_t a = 0; a < nArc; ++a) {
+        r.deviationEnergy += std::abs(0.5 * static_cast<double>(r.arcLenHalf[a]) - tm.arcs[a].len) /
+                             std::max(tm.arcs[a].len, 0.5);
+    }
+    r.ok = true;
     return r;
 }
 
