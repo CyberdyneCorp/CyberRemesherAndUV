@@ -376,8 +376,17 @@ int main(int argc, char** argv) {
         }
         return remesh::makeFieldAlignedQuadrangulator();
     };
-    const remesh::PipelineResult result =
-        remesh::remesh(imported.value().mesh, options.params, &sink, &cancel, makeQuadrangulator);
+    // Field-aligned fallback for quad-cover (pipeline contract: when quad-cover declines
+    // an island — no usable seamless UV, divergence guard, extraction coverage gate — the
+    // island is recovered via the normal isotropic remesh + field-aligned quadrangulator
+    // instead of failing outright). Only wired for the quad-cover method; other methods
+    // keep their single-quadrangulator behavior.
+    const remesh::QuadrangulatorFactory fallbackFactory =
+        method == "quad-cover" ? remesh::QuadrangulatorFactory(
+                                     []() { return remesh::makeFieldAlignedQuadrangulator(); })
+                               : remesh::QuadrangulatorFactory{};
+    const remesh::PipelineResult result = remesh::remesh(
+        imported.value().mesh, options.params, &sink, &cancel, makeQuadrangulator, fallbackFactory);
     const double elapsed =
         std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
     if (showProgress) {

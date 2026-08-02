@@ -242,6 +242,60 @@ void filterFeatureEdgesToReference(Mesh& mesh, const std::vector<std::array<Vec3
     }
 }
 
+// Fold-tag filter. The isotropic remesh can leave FOLDED triangles in flat regions (a
+// face lying in the plane of its neighbors but wound backwards — the valence-only flip
+// pass has no geometric guard). A folded pair reads as a ~180-degree dihedral, so the
+// post-remesh feature re-tag sees knife edges in the middle of flat CAD patches (the
+// generated cylinder at ~1100 quads: 21 spurious feature seams across the caps,
+// totalIndex 8 -> 5, angle_dev 28 degrees), and filterFeatureEdgesToReference's
+// knife-edge exception deliberately keeps them. A fold is distinguishable from a real
+// knife edge by ORIENTATION: exactly one side disagrees with the surrounding surface.
+// Mark faces whose normal opposes the majority of their edge-neighbors as inverted and
+// untag any feature edge with exactly one inverted side. Meshes without folds are
+// untouched (tag-only, no geometry edits).
+void untagFoldedFeatureEdges(Mesh& mesh) {
+    std::vector<Vec3> normals(mesh.faceCapacity(), Vec3{0.0f, 0.0f, 0.0f});
+    for (Index fi = 0; fi < mesh.faceCapacity(); ++fi) {
+        const FaceId f{fi};
+        if (mesh.isAlive(f)) {
+            normals[fi] = normalized(mesh.faceNormal(f));
+        }
+    }
+    std::vector<char> inverted(mesh.faceCapacity(), 0);
+    for (Index fi = 0; fi < mesh.faceCapacity(); ++fi) {
+        const FaceId f{fi};
+        if (!mesh.isAlive(f)) {
+            continue;
+        }
+        int agree = 0;
+        int disagree = 0;
+        const std::vector<VertexId> verts = mesh.faceVertices(f);
+        for (std::size_t k = 0; k < verts.size(); ++k) {
+            const EdgeId e = mesh.edgeBetween(verts[k], verts[(k + 1) % verts.size()]);
+            if (!e.valid()) {
+                continue;
+            }
+            for (const FaceId nb : mesh.edgeFaces(e)) {
+                if (nb == f || !mesh.isAlive(nb)) {
+                    continue;
+                }
+                (dot(normals[fi], normals[nb.value]) < 0.0f ? disagree : agree) += 1;
+            }
+        }
+        inverted[fi] = disagree >= 2 && disagree > agree ? 1 : 0;
+    }
+    for (Index ei = 0; ei < mesh.edgeCapacity(); ++ei) {
+        const EdgeId e{ei};
+        if (!mesh.isAlive(e) || !mesh.isFeatureEdge(e) || mesh.edgeFaceCount(e) != 2) {
+            continue;
+        }
+        const auto ef = mesh.edgeFaces(e);
+        if (inverted[ef[0].value] != inverted[ef[1].value]) {
+            mesh.setFeatureEdge(e, false);
+        }
+    }
+}
+
 // CYBER_QC_DEBUG-gated per-call trace of whether the native seamless solve RAN or DECLINED,
 // so the corpus harness can grep "native OK" / "native DECLINED <reason>" and confirm a model
 // took the native path rather than silently falling back to the vendored / field-aligned path.
@@ -337,6 +391,10 @@ bool prepareNativeSolve(const Mesh& mesh, float targetEdgeLength, float adaptivi
     // feature flag, so the seam logic in buildSeamlessSetup would see none. Re-detect them by
     // dihedral angle now that the crease geometry is intact.
     work.tagFeatureEdges(kFeatureDihedralDegrees);
+    // Folded (inverted) remesh triangles masquerade as knife edges — untag them before
+    // the reference filter, whose knife-edge exception would keep them (see
+    // untagFoldedFeatureEdges).
+    untagFoldedFeatureEdges(work);
     // Feature-pinning lever: drop re-tagged interior edges that do not trace the original
     // resolvable crease network — a coarse remesh of an organic surface has plenty of
     // over-threshold dihedrals that are sampling artifacts, not creases, and every spurious
@@ -378,6 +436,46 @@ bool prepareNativeSolve(const Mesh& mesh, float targetEdgeLength, float adaptivi
     if (cancel != nullptr && cancel->isCancelled()) {
         reason = "cancelled";
         return false;
+    }
+
+    // Debug dump: the post-isotropic work mesh with its (filtered) feature tags, for
+    // offline analysis of density/tagging pathologies (this is how the sliver cascade and
+    // the fold tags were found). CYBER_QC_DUMP_WORK=<path.obj>; feature edges as trailing
+    // "l" lines.
+    if (const char* dumpPath = std::getenv("CYBER_QC_DUMP_WORK"); dumpPath != nullptr) {
+        std::vector<Vec3> dp;
+        std::vector<std::vector<Index>> df;
+        work.toIndexed(dp, df);
+        // toIndexed compacts vertices; rebuild the compaction map for edge output.
+        std::vector<Index> vmap(work.vertexCapacity(), 0);
+        Index next = 0;
+        for (Index vi = 0; vi < work.vertexCapacity(); ++vi) {
+            if (work.isAlive(VertexId{vi})) {
+                vmap[vi] = next++;
+            }
+        }
+        if (std::FILE* f = std::fopen(dumpPath, "wb"); f != nullptr) {
+            for (const Vec3& p : dp) {
+                std::fprintf(f, "v %.9g %.9g %.9g\n", static_cast<double>(p.x),
+                             static_cast<double>(p.y), static_cast<double>(p.z));
+            }
+            for (const auto& fc : df) {
+                std::fprintf(f, "f");
+                for (const Index v : fc) {
+                    std::fprintf(f, " %u", static_cast<unsigned>(v) + 1U);
+                }
+                std::fprintf(f, "\n");
+            }
+            for (Index ei = 0; ei < work.edgeCapacity(); ++ei) {
+                const EdgeId e{ei};
+                if (work.isAlive(e) && work.isFeatureEdge(e)) {
+                    const auto [a, b] = work.edgeVertices(e);
+                    std::fprintf(f, "l %u %u\n", static_cast<unsigned>(vmap[a.value]) + 1U,
+                                 static_cast<unsigned>(vmap[b.value]) + 1U);
+                }
+            }
+            std::fclose(f);
+        }
     }
 
     auto backend = accel::defaultBackend();
@@ -2972,6 +3070,31 @@ public:
             }
             if (cancel != nullptr && cancel->isCancelled()) {
                 return {.success = false, .cancelled = true, .failureReason = {}};
+            }
+            // Debug dump: the per-attempt seamless UV (positions + per-corner UVs), for
+            // offline seam-integrality checks (this is how the fractional crease offsets
+            // were measured). CYBER_QC_DUMP_UV=<prefix>; writes <prefix><attempt>.txt.
+            if (const char* uvPath = std::getenv("CYBER_QC_DUMP_UV"); uvPath != nullptr) {
+                const std::string path = std::string(uvPath) + std::to_string(attempt) + ".txt";
+                if (std::FILE* f = std::fopen(path.c_str(), "wb"); f != nullptr) {
+                    std::fprintf(f, "V %zu\n", uv.vertices.size());
+                    for (const Vec3& p : uv.vertices) {
+                        std::fprintf(f, "%.9g %.9g %.9g\n", static_cast<double>(p.x),
+                                     static_cast<double>(p.y), static_cast<double>(p.z));
+                    }
+                    std::fprintf(f, "T %zu\n", uv.triangles.size());
+                    for (std::size_t ti = 0; ti < uv.triangles.size(); ++ti) {
+                        const auto& t = uv.triangles[ti];
+                        const auto& tuv = uv.triangleUv[ti];
+                        std::fprintf(f, "%u %u %u %.9g %.9g %.9g %.9g %.9g %.9g\n",
+                                     static_cast<unsigned>(t[0]), static_cast<unsigned>(t[1]),
+                                     static_cast<unsigned>(t[2]), static_cast<double>(tuv[0].x),
+                                     static_cast<double>(tuv[0].y), static_cast<double>(tuv[1].x),
+                                     static_cast<double>(tuv[1].y), static_cast<double>(tuv[2].x),
+                                     static_cast<double>(tuv[2].y));
+                    }
+                    std::fclose(f);
+                }
             }
             out = extractIsolineQuads(mesh, uv, m_holeFillMaxBoundary);
             const double got = static_cast<double>(out.quads.size());
