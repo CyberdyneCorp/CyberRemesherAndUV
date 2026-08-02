@@ -9,9 +9,11 @@
 #include <cstdio>
 #include <cstdlib>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <numeric>
 #include <queue>
+#include <set>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -202,6 +204,622 @@ VertexId nearestSingularBfs(const Mesh& mesh, const std::vector<char>& inTree,
     return VertexId{kInvalidIndex};
 }
 
+// --- Field-level dipole annihilation ---------------------------------------------------------
+//
+// buildSeamlessSetup historically promoted EVERY cross-field defect to a cone. On organics most
+// of them are topologically-null noise: measured on the bunny, 211 singular vertices at
+// totalIndex 59 — at least 72% are opposite-index (+1,-1) pairs clustered on high-curvature
+// tubes, which the plain transport-averaging smoother cannot remove (dipole removal is a
+// topological edit, not a smoothing one). This pass cancels close-by (+1,-1) pairs BEFORE cone
+// promotion, the standard 4-RoSy dipole merge: edit the signed period jumps along a short
+// connecting edge path (a unit jump change shifts the two endpoint indices by -+1 while interior
+// path vertices are crossed twice with cancelling signs), then re-relax the face angles with the
+// jumps FROZEN so the field itself absorbs the 90-degree residual. Poincare-Hopf is preserved by
+// construction (+1 and -1 annihilate) and re-verified from the actual field; feature-pinned
+// faces are never touched and paths never cross feature edges, so the feature binding
+// (combedDirection / rho / periodJump semantics) is intact — everything downstream is recomputed
+// from the modified field. Kill switch: CYBER_QC_NO_CONE_MERGE. Pairing radius (edge hops on the
+// isotropic remesh, i.e. ~targetEdgeLength units): CYBER_QC_CONE_MERGE_RADIUS, default 3.
+//
+// This is NOT a retry of the exhausted single-level field-smoothing levers (ROADMAP c7): those
+// tuned the smoother's energy; this edits the field's singularity topology directly.
+
+// Signed period jump of edge e for the canonical face order (ef[0] -> ef[1]) given per-face
+// unwrapped angles theta: D = (theta[ef1] - phi1) - (theta[ef0] - phi0), q = round(D / 90deg).
+// phi is the edge angle in each face's frame; the edge's a->b direction sign cancels in D.
+float jumpDelta(const Mesh& mesh, const CrossField& field, const std::vector<float>& theta,
+                EdgeId e) {
+    const auto ef = mesh.edgeFaces(e);
+    const auto [a, b] = mesh.edgeVertices(e);
+    const Vec3 d = normalized(mesh.position(b) - mesh.position(a));
+    const float phi0 = frameAngle(d, field.tangent[ef[0].value], field.bitangent[ef[0].value]);
+    const float phi1 = frameAngle(d, field.tangent[ef[1].value], field.bitangent[ef[1].value]);
+    return (theta[ef[1].value] - phi1) - (theta[ef[0].value] - phi0);
+}
+
+// Cross-field index at vertex v computed from frozen integer jumps q instead of per-crossing
+// wrapping: contribution of crossing f -> fNext across a spoke is s*(D - q*90deg) with s = -1
+// when f is the canonical ef[0]. Identical to vertexIndex while q == round(D/90deg) (its
+// initialisation), and responds to jump edits, which per-crossing wrapping cannot. Returns
+// INT_MIN when the ring cannot be walked or a spoke has no jump entry (caller must skip).
+int vertexIndexFromJumps(const Mesh& mesh, const CrossField& field, const std::vector<float>& theta,
+                         const std::vector<int>& jump, const std::vector<char>& hasJump,
+                         VertexId v) {
+    constexpr int kNoIndex = std::numeric_limits<int>::min();
+    const std::size_t valence = mesh.vertexFaces(v).size();
+    if (valence < 3) {
+        return kNoIndex;
+    }
+    const FaceId start = mesh.vertexFaces(v)[0];
+    float residual = 0.0f;
+    float angleSum = 0.0f;
+    FaceId f = start;
+    for (std::size_t step = 0; step < valence; ++step) {
+        angleSum += interiorAngle(mesh, f, v);
+        const VertexId w = ccwNext(mesh, f, v);
+        if (w.value == kInvalidIndex) {
+            return kNoIndex;
+        }
+        const EdgeId spoke = mesh.edgeBetween(v, w);
+        if (!spoke.valid() || mesh.edgeFaceCount(spoke) != 2 || !hasJump[spoke.value]) {
+            return kNoIndex;
+        }
+        const auto ef = mesh.edgeFaces(spoke);
+        const FaceId fNext = (ef[0] == f) ? ef[1] : ef[0];
+        const float d =
+            jumpDelta(mesh, field, theta, spoke) - static_cast<float>(jump[spoke.value]) * kHalfPi;
+        residual += (ef[0] == f) ? -d : d;
+        f = fNext;
+    }
+    if (f != start) {
+        return kNoIndex;
+    }
+    const float defect = 2.0f * kPi - angleSum;
+    return static_cast<int>(std::lround((residual + defect) / kHalfPi));
+}
+
+// Faces the cross-field smoother held constrained: touching a feature or boundary edge, or a
+// crease-aligned interior edge (computeCrossField's pin set, planarity gate dropped — a
+// superset is safe here since pinned faces are merely excluded from editing/relaxation).
+std::vector<char> fieldPinnedFaces(const Mesh& mesh) {
+    float alignDeg = 45.0f;
+    if (const char* fc = std::getenv("CYBER_QC_FIELD_CREASE_DEG"); fc != nullptr) {
+        alignDeg = static_cast<float>(std::atof(fc));
+    }
+    const float alignCos = alignDeg > 0.0f ? std::cos(alignDeg * kPi / 180.0f) : 2.0f;
+    std::vector<char> pinned(mesh.faceCapacity(), 0);
+    for (Index fi = 0; fi < mesh.faceCapacity(); ++fi) {
+        const FaceId f{fi};
+        if (!mesh.isAlive(f) || mesh.faceSize(f) != 3) {
+            continue;
+        }
+        const std::vector<VertexId> fv = mesh.faceVertices(f);
+        for (std::size_t k = 0; k < fv.size() && !pinned[fi]; ++k) {
+            const EdgeId e = mesh.edgeBetween(fv[k], fv[(k + 1) % fv.size()]);
+            if (!e.valid()) {
+                continue;
+            }
+            if (mesh.isFeatureEdge(e) || mesh.edgeFaceCount(e) != 2) {
+                pinned[fi] = 1;
+                continue;
+            }
+            if (alignCos <= 1.0f) {
+                const auto ef = mesh.edgeFaces(e);
+                if (dot(normalized(mesh.faceNormal(ef[0])), normalized(mesh.faceNormal(ef[1]))) <
+                    alignCos) {
+                    pinned[fi] = 1;
+                }
+            }
+        }
+    }
+    return pinned;
+}
+
+// Cancels close-by (+1,-1) cross-field index pairs in place. See the block comment above.
+void annihilateFieldDipoles(const Mesh& mesh, CrossField& field) {
+    if (std::getenv("CYBER_QC_NO_CONE_MERGE") != nullptr) {
+        return;
+    }
+    // Corpus-calibrated pairing radius, in edge hops on the isotropic remesh (~targetEdgeLength
+    // units). 5 beat 3 and 8 on the organic corpus with every guard in place (spot's angle cost
+    // in particular is LOWER at 5 than 3: 6.72 vs 7.22 deg against a 6.43 baseline); nefertiti
+    // saturates at 8 (r12/r16 byte-identical — every remaining pair is pinned-web-blocked or
+    // guard-rejected).
+    int radius = 5;
+    if (const char* r = std::getenv("CYBER_QC_CONE_MERGE_RADIUS"); r != nullptr) {
+        radius = std::clamp(std::atoi(r), 1, 16);
+    }
+    constexpr int kRegionRings = 6;     // relax neighbourhood around an edited path
+    constexpr int kRelaxSweeps = 400;   // frozen-jump Gauss-Seidel cap
+    constexpr float kRelaxTol = 1e-5f;  // radians; max per-sweep angle change
+
+    // Per-vertex field indices; the +1/-1 cone lists.
+    std::vector<int> kOrig(mesh.vertexCapacity(), 0);
+    std::vector<VertexId> plusCones;
+    std::size_t minusCount = 0;
+    for (Index vi = 0; vi < mesh.vertexCapacity(); ++vi) {
+        const VertexId v{vi};
+        if (!mesh.isAlive(v)) {
+            continue;
+        }
+        kOrig[vi] = vertexIndex(mesh, field, v);
+        if (kOrig[vi] == 1) {
+            plusCones.push_back(v);
+        } else if (kOrig[vi] == -1) {
+            ++minusCount;
+        }
+    }
+    if (plusCones.empty() || minusCount == 0) {
+        return;
+    }
+
+    const std::vector<char> pinned = fieldPinnedFaces(mesh);
+
+    // An edge the cancellation path (and the jump system) may use: interior, non-feature, and
+    // not bordering a pinned face — pinned faces cannot relax, so a 90-degree residual injected
+    // next to them cannot diffuse and would concentrate into a shear band.
+    // CURVATURE GUARD (bench-caught on the torus, second failure mode after the topology
+    // guard: sing 64 -> 75, angle 20.4 -> 26.1 from DISK-region cancellations alone): a cone
+    // pair sitting in strongly STRUCTURED curvature is demanded by the geometry — the field
+    // is smoother without it, but the parameterization must then stretch across the curvature
+    // and cell quality collapses (torus: cones ring the inner/outer equators). The measured
+    // discriminator is the 2-ring defect CONSISTENCY ratio |sum|/sum-of-abs: smooth structured
+    // curvature has every vertex curving the same way (torus pairs r ~0.99), while the
+    // cancellable wrinkle-noise dipoles live in alternating-sign curvature (armadillo median
+    // r 0.36; the rule rejects 11/13 torus pairs and only 4% of armadillo's).
+    // Thresholds: |2-ring defect| > 10 degrees at consistency > 0.6 rejects 13/13 torus pairs
+    // (0.8 left two at r0.65/0.68 whose cancellation alone cost the torus +28 sing / +7deg
+    // angle) and 18% of armadillo's.
+    const float curvThreshold = kPi / 18.0f;
+    const float kStructureRatio = 0.6f;
+    // Returns {signed defect sum, absolute defect sum} over v's 2-ring: the ratio |sum|/abs
+    // separates smooth structured curvature (ratio ~1: every vertex curves the same way, the
+    // cone is geometry-demanded) from wrinkle noise (alternating signs, ratio ~0).
+    const auto ringDefect = [&](VertexId v) {
+        float sum = 0.0f;
+        float absSum = 0.0f;
+        std::vector<VertexId> ring{v};
+        std::set<Index> vis{v.value};
+        std::size_t head = 0;
+        for (int depth = 0; depth < 2; ++depth) {
+            const std::size_t tail = ring.size();
+            for (; head < tail; ++head) {
+                for (const EdgeId e : mesh.vertexEdges(ring[head])) {
+                    if (!mesh.isAlive(e)) {
+                        continue;
+                    }
+                    const auto [a, b] = mesh.edgeVertices(e);
+                    const VertexId w = (a == ring[head]) ? b : a;
+                    if (vis.insert(w.value).second) {
+                        ring.push_back(w);
+                    }
+                }
+            }
+        }
+        for (const VertexId u : ring) {
+            float angleSum = 0.0f;
+            bool interior = true;
+            for (const FaceId f : mesh.vertexFaces(u)) {
+                if (!mesh.isAlive(f) || mesh.faceSize(f) != 3) {
+                    interior = false;
+                    break;
+                }
+                angleSum += interiorAngle(mesh, f, u);
+            }
+            for (const EdgeId e : mesh.vertexEdges(u)) {
+                if (mesh.isAlive(e) && mesh.edgeFaceCount(e) != 2) {
+                    interior = false;  // boundary vertex: defect undefined, skip
+                    break;
+                }
+            }
+            if (interior) {
+                const float defect = 2.0f * kPi - angleSum;
+                sum += defect;
+                absSum += std::abs(defect);
+            }
+        }
+        return std::make_pair(sum, absSum);
+    };
+
+    // MEASURED DEAD END: allowing pinned-adjacent path edges (nefertiti r5: pairsTried
+    // 199 -> 866 but cancelled 171 -> 172, rejectedRelax 22 -> 632) — the injected 90-degree
+    // residual cannot diffuse past pinned faces, exactly the shear-band failure the verify
+    // predicts, so nearly every extra pair reverts. Keep paths off pinned borders.
+    const auto usableEdge = [&](EdgeId e) {
+        if (!mesh.isAlive(e) || mesh.edgeFaceCount(e) != 2 || mesh.isFeatureEdge(e)) {
+            return false;
+        }
+        const auto ef = mesh.edgeFaces(e);
+        return pinned[ef[0].value] == 0 && pinned[ef[1].value] == 0;
+    };
+
+    // Reusable full-size scratch (meshes here are the coarse isotropic remesh, ~1e4 faces).
+    std::vector<float> theta(mesh.faceCapacity(), 0.0f);
+    std::vector<int> jump(mesh.edgeCapacity(), 0);
+    std::vector<char> hasJump(mesh.edgeCapacity(), 0);
+    std::vector<int> vertexDepth(mesh.vertexCapacity(), -1);
+    std::vector<char> inRegion(mesh.faceCapacity(), 0);
+    std::vector<char> matched(mesh.vertexCapacity(), 0);
+    std::vector<Index> parent(mesh.vertexCapacity(), kInvalidIndex);
+    std::vector<char> vertexSeen(mesh.vertexCapacity(), 0);
+    std::vector<char> edgeSeen(mesh.edgeCapacity(), 0);
+
+    int pairsTried = 0, cancelled = 0, rejectedEdit = 0, rejectedRelax = 0, rejectedTopo = 0,
+        rejectedCurv = 0;
+
+    // Progressive matching: tight pairs first (they are the least ambiguous field noise), the
+    // pairing radius widening per inner round; failed pairs are retried in later outer rounds
+    // because a neighbouring cancellation changes the local field they were rejected on.
+    constexpr int kMaxRounds = 4;
+    std::set<std::pair<Index, Index>> failedPairs;
+    const auto cancelOnePair = [&](VertexId v0, int depthLimit) {
+        // BFS over usable edges to the nearest unmatched -1 cone within depthLimit hops.
+        std::fill(parent.begin(), parent.end(), kInvalidIndex);
+        std::vector<char> visited(mesh.vertexCapacity(), 0);
+        std::queue<std::pair<VertexId, int>> bfs;
+        bfs.emplace(v0, 0);
+        visited[v0.value] = 1;
+        VertexId vEnd{kInvalidIndex};
+        while (!bfs.empty() && vEnd.value == kInvalidIndex) {
+            const auto [u, depth] = bfs.front();
+            bfs.pop();
+            if (depth >= depthLimit) {
+                continue;
+            }
+            for (const EdgeId e : mesh.vertexEdges(u)) {
+                if (!usableEdge(e)) {
+                    continue;
+                }
+                const auto [a, b] = mesh.edgeVertices(e);
+                const VertexId w = (a == u) ? b : a;
+                if (visited[w.value]) {
+                    continue;
+                }
+                visited[w.value] = 1;
+                parent[w.value] = e.value;
+                if (kOrig[w.value] == -1 && !matched[w.value]) {
+                    vEnd = w;
+                    break;
+                }
+                bfs.emplace(w, depth + 1);
+            }
+        }
+        if (vEnd.value == kInvalidIndex || !failedPairs.emplace(v0.value, vEnd.value).second) {
+            return false;  // no partner in range, or this exact pair already failed
+        }
+        const auto [defectPlus, absPlus] = ringDefect(v0);
+        const auto [defectMinus, absMinus] = ringDefect(vEnd);
+        const float ratioPlus = absPlus > 1e-6f ? std::abs(defectPlus) / absPlus : 0.0f;
+        const float ratioMinus = absMinus > 1e-6f ? std::abs(defectMinus) / absMinus : 0.0f;
+        if (std::getenv("CYBER_QC_DEBUG") != nullptr) {
+            std::fprintf(
+                stderr, "[qc] dipole pair defect: +%.1fdeg(r%.2f) -%.1fdeg(r%.2f)\n",
+                static_cast<double>(defectPlus * 180.0f / kPi), static_cast<double>(ratioPlus),
+                static_cast<double>(defectMinus * 180.0f / kPi), static_cast<double>(ratioMinus));
+        }
+        if ((ratioPlus > kStructureRatio && std::abs(defectPlus) > curvThreshold) ||
+            (ratioMinus > kStructureRatio && std::abs(defectMinus) > curvThreshold)) {
+            ++rejectedCurv;  // curvature-demanded pair (see the guard comment above)
+            return false;
+        }
+        // Path vertices vEnd -> v0, then reversed to run v0 -> vEnd.
+        std::vector<VertexId> path{vEnd};
+        while (path.back() != v0) {
+            const EdgeId e{parent[path.back().value]};
+            const auto [a, b] = mesh.edgeVertices(e);
+            path.push_back((a == path.back()) ? b : a);
+        }
+        std::reverse(path.begin(), path.end());
+        ++pairsTried;
+        bool ok = false;
+
+        // Region: vertices within `rings` of the path (never across a feature edge), and every
+        // alive triangle incident to them. Free faces (relaxed + written back) keep a >=1-face
+        // fixed rim: all their vertices sit at depth <= rings - 1, so every vertex whose ring
+        // can change is inside the visited set and gets re-verified.
+        //
+        // DISK-TOPOLOGY GUARD (bench-caught on the torus: sing 64 -> 140, angle 20.4 -> 30.7
+        // with a FIELD that got cleaner, 32 -> 6 cones): the per-vertex index verification
+        // below is complete exactly when the free faces live in a topological disk — every
+        // closed loop through relaxed faces then has its holonomy fixed by the verified
+        // enclosed indices, so NO holonomy can change anywhere. If the region wraps a handle
+        // or tube (annulus), the wrap generator's rotational holonomy is unchecked and a jump
+        // edit can twist the field ~90 degrees around it with every vertex index intact (and,
+        // on a fat tube, almost no smoothness-energy cost); the parameterization then spirals
+        // and extraction shreds. A global genus gate is NOT the answer: organic work meshes
+        // carry accidental bridge handles (armadillo: 56 non-manifold pinch edges and a
+        // genus-positive excised complex) yet their tube-region cancellations measurably help.
+        // Instead require the region itself to be a disk, retrying with a halved radius when
+        // the full region wraps (a capped-tube wrap often un-wraps at smaller radius).
+        std::vector<VertexId> regionVerts;
+        std::vector<FaceId> regionFaces;
+        int regionRings = 0;
+        for (const int rings : {kRegionRings, kRegionRings / 2}) {
+            std::queue<VertexId> rq;
+            for (const VertexId pv : path) {
+                vertexDepth[pv.value] = 0;
+                rq.push(pv);
+                regionVerts.push_back(pv);
+            }
+            while (!rq.empty()) {
+                const VertexId u = rq.front();
+                rq.pop();
+                if (vertexDepth[u.value] >= rings) {
+                    continue;
+                }
+                // Region growth DOES cross feature edges (the path never may): faces beyond a
+                // crease are pinned and stay frozen, but excluding them punches holes into the
+                // region wherever a feature web encircles it — nefertiti's 1805 feature edges
+                // made 114 of 211 regions spuriously non-disk and the guard rejected them.
+                for (const EdgeId e : mesh.vertexEdges(u)) {
+                    if (!mesh.isAlive(e) || mesh.edgeFaceCount(e) != 2) {
+                        continue;
+                    }
+                    const auto [a, b] = mesh.edgeVertices(e);
+                    const VertexId w = (a == u) ? b : a;
+                    if (vertexDepth[w.value] >= 0) {
+                        continue;
+                    }
+                    vertexDepth[w.value] = vertexDepth[u.value] + 1;
+                    regionVerts.push_back(w);
+                    rq.push(w);
+                }
+            }
+            for (const VertexId u : regionVerts) {
+                for (const FaceId f : mesh.vertexFaces(u)) {
+                    if (mesh.isAlive(f) && mesh.faceSize(f) == 3 && !inRegion[f.value]) {
+                        inRegion[f.value] = 1;
+                        regionFaces.push_back(f);
+                    }
+                }
+            }
+            // Euler characteristic of the region complex: disk chi=1 (chi=2 would be the whole
+            // closed surface, where vertex loops also generate every cycle).
+            long vCount = 0, eCount = 0;
+            for (const FaceId f : regionFaces) {
+                const std::vector<VertexId> fv = mesh.faceVertices(f);
+                for (std::size_t k = 0; k < fv.size(); ++k) {
+                    if (!vertexSeen[fv[k].value]) {
+                        vertexSeen[fv[k].value] = 1;
+                        ++vCount;
+                    }
+                    const EdgeId e = mesh.edgeBetween(fv[k], fv[(k + 1) % fv.size()]);
+                    if (e.valid() && !edgeSeen[e.value]) {
+                        edgeSeen[e.value] = 1;
+                        ++eCount;
+                    }
+                }
+            }
+            for (const FaceId f : regionFaces) {
+                const std::vector<VertexId> fv = mesh.faceVertices(f);
+                for (std::size_t k = 0; k < fv.size(); ++k) {
+                    vertexSeen[fv[k].value] = 0;
+                    const EdgeId e = mesh.edgeBetween(fv[k], fv[(k + 1) % fv.size()]);
+                    if (e.valid()) {
+                        edgeSeen[e.value] = 0;
+                    }
+                }
+            }
+            const long chi = vCount - eCount + static_cast<long>(regionFaces.size());
+            if (chi == 1 || chi == 2) {
+                regionRings = rings;
+                break;
+            }
+            for (const VertexId u : regionVerts) {
+                vertexDepth[u.value] = -1;
+            }
+            for (const FaceId f : regionFaces) {
+                inRegion[f.value] = 0;
+            }
+            regionVerts.clear();
+            regionFaces.clear();
+        }
+        if (regionRings == 0) {
+            ++rejectedTopo;
+            return false;
+        }
+
+        // Local jump system over the region: unwrapped per-face angles seeded from the field's
+        // representative, canonical signed jumps from rounding (so initially the jump-based
+        // index reproduces vertexIndex exactly).
+        for (const FaceId f : regionFaces) {
+            theta[f.value] = field.angle(f);
+        }
+        // Feature edges DO get a jump entry: the index verifier must be able to walk rings whose
+        // spokes include a crease (their adjacent faces are pinned, so the relax never moves
+        // them and the path never uses them — the entry is read-only truth, never edited).
+        std::vector<EdgeId> regionEdges;
+        for (const FaceId f : regionFaces) {
+            const std::vector<VertexId> fv = mesh.faceVertices(f);
+            for (std::size_t k = 0; k < fv.size(); ++k) {
+                const EdgeId e = mesh.edgeBetween(fv[k], fv[(k + 1) % fv.size()]);
+                if (!e.valid() || hasJump[e.value] || !mesh.isAlive(e) ||
+                    mesh.edgeFaceCount(e) != 2) {
+                    continue;
+                }
+                const auto ef = mesh.edgeFaces(e);
+                if (!inRegion[ef[0].value] || !inRegion[ef[1].value]) {
+                    continue;
+                }
+                jump[e.value] =
+                    static_cast<int>(std::lround(jumpDelta(mesh, field, theta, e) / kHalfPi));
+                hasJump[e.value] = 1;
+                regionEdges.push_back(e);
+            }
+        }
+
+        const auto kj = [&](VertexId v) {
+            return vertexIndexFromJumps(mesh, field, theta, jump, hasJump, v);
+        };
+
+        // Edit the signed jumps along the path, one edge at a time; each edge's sign is fixed
+        // by requiring the trailing vertex to land on its target index (0 for the +1 cone,
+        // unchanged for interiors). Any failure reverts the whole path.
+        bool editOk = true;
+        std::vector<std::pair<Index, int>> edits;
+        for (std::size_t i = 0; i + 1 < path.size() && editOk; ++i) {
+            const EdgeId e = mesh.edgeBetween(path[i], path[i + 1]);
+            if (!e.valid() || !hasJump[e.value]) {
+                editOk = false;
+                break;
+            }
+            const int want = (i == 0) ? 0 : kOrig[path[i].value];
+            editOk = false;
+            for (const int dq : {1, -1}) {
+                jump[e.value] += dq;
+                if (kj(path[i]) == want) {
+                    edits.emplace_back(e.value, dq);
+                    editOk = true;
+                    break;
+                }
+                jump[e.value] -= dq;
+            }
+        }
+        if (editOk && kj(path.back()) != 0) {
+            editOk = false;
+        }
+        if (!editOk) {
+            for (const auto& [ei, dq] : edits) {
+                jump[ei] -= dq;
+            }
+            ++rejectedEdit;
+        } else {
+            // Frozen-jump Gauss-Seidel: relax the unwrapped angles so the field absorbs the
+            // edited topology. Free faces keep a fixed rim (see region comment) and are never
+            // pinned; the jumps bind because theta is a real variable, not a wrapped one.
+            std::vector<FaceId> freeFaces;
+            for (const FaceId f : regionFaces) {
+                if (pinned[f.value]) {
+                    continue;
+                }
+                const std::vector<VertexId> fv = mesh.faceVertices(f);
+                bool interior = true;
+                for (const VertexId u : fv) {
+                    if (vertexDepth[u.value] < 0 || vertexDepth[u.value] > regionRings - 1) {
+                        interior = false;
+                        break;
+                    }
+                }
+                if (interior) {
+                    freeFaces.push_back(f);
+                }
+            }
+            for (int sweep = 0; sweep < kRelaxSweeps; ++sweep) {
+                float maxDelta = 0.0f;
+                for (const FaceId f : freeFaces) {
+                    float acc = 0.0f;
+                    int cnt = 0;
+                    const std::vector<VertexId> fv = mesh.faceVertices(f);
+                    for (std::size_t k = 0; k < fv.size(); ++k) {
+                        const EdgeId e = mesh.edgeBetween(fv[k], fv[(k + 1) % fv.size()]);
+                        if (!e.valid() || !hasJump[e.value]) {
+                            continue;
+                        }
+                        const auto ef = mesh.edgeFaces(e);
+                        const FaceId g = (ef[0] == f) ? ef[1] : ef[0];
+                        const auto [a, b] = mesh.edgeVertices(e);
+                        const Vec3 d = normalized(mesh.position(b) - mesh.position(a));
+                        const float phiF =
+                            frameAngle(d, field.tangent[f.value], field.bitangent[f.value]);
+                        const float phiG =
+                            frameAngle(d, field.tangent[g.value], field.bitangent[g.value]);
+                        const float q = static_cast<float>(jump[e.value]) * kHalfPi;
+                        // Constraint (theta_ef1 - phi1) - (theta_ef0 - phi0) = q, solved for f.
+                        acc += (ef[0] == f) ? theta[g.value] - phiG + phiF - q
+                                            : theta[g.value] - phiG + phiF + q;
+                        ++cnt;
+                    }
+                    if (cnt == 0) {
+                        continue;
+                    }
+                    const float target = acc / static_cast<float>(cnt);
+                    const float delta = target - theta[f.value];
+                    theta[f.value] += 0.8f * delta;
+                    maxDelta = std::max(maxDelta, std::abs(delta));
+                }
+                if (maxDelta < kRelaxTol) {
+                    break;
+                }
+            }
+            // Write back and verify against the REAL field-walk index: the pair must be gone
+            // and no other vertex in the region may change. Pin blockage and sign bugs surface
+            // here and revert cleanly. (A strict "region smoothness energy must not increase"
+            // guard was measured too aggressive here: it rejected 72 of armadillo's 169 pairs
+            // whose acceptance had already been shown metric-clean, and it caught neither
+            // torus failure mode — the disk-topology and curvature guards above are the ones
+            // that actually protect the bench.)
+            std::vector<std::pair<Index, std::pair<float, float>>> snapshot;
+            snapshot.reserve(freeFaces.size());
+            for (const FaceId f : freeFaces) {
+                snapshot.emplace_back(f.value,
+                                      std::make_pair(field.real[f.value], field.imag[f.value]));
+                field.real[f.value] = std::cos(4.0f * theta[f.value]);
+                field.imag[f.value] = std::sin(4.0f * theta[f.value]);
+            }
+            bool verifyOk = true;
+            for (const VertexId u : regionVerts) {
+                const int want = (u == v0 || u == vEnd) ? 0 : kOrig[u.value];
+                if (vertexIndex(mesh, field, u) != want) {
+                    verifyOk = false;
+                    break;
+                }
+            }
+            if (!verifyOk) {
+                for (const auto& [fi, ri] : snapshot) {
+                    field.real[fi] = ri.first;
+                    field.imag[fi] = ri.second;
+                }
+                for (const auto& [ei, dq] : edits) {
+                    jump[ei] -= dq;
+                }
+                ++rejectedRelax;
+            } else {
+                kOrig[v0.value] = 0;
+                kOrig[vEnd.value] = 0;
+                matched[v0.value] = 1;
+                matched[vEnd.value] = 1;
+                ++cancelled;
+                ok = true;
+            }
+        }
+
+        // Reset the per-pair scratch.
+        for (const VertexId u : regionVerts) {
+            vertexDepth[u.value] = -1;
+        }
+        for (const FaceId f : regionFaces) {
+            inRegion[f.value] = 0;
+        }
+        for (const EdgeId e : regionEdges) {
+            hasJump[e.value] = 0;
+        }
+        return ok;
+    };
+
+    for (int round = 0; round < kMaxRounds; ++round) {
+        bool progress = false;
+        for (int d = 1; d <= radius; ++d) {
+            for (const VertexId v0 : plusCones) {
+                if (!matched[v0.value] && cancelOnePair(v0, d)) {
+                    progress = true;
+                }
+            }
+        }
+        if (!progress) {
+            break;
+        }
+        failedPairs.clear();  // neighbouring cancellations changed the field: retry rejects
+    }
+
+    if (std::getenv("CYBER_QC_DEBUG") != nullptr) {
+        std::fprintf(stderr,
+                     "[qc] dipole merge: +cones=%zu pairsTried=%d cancelled=%d "
+                     "rejectedEdit=%d rejectedRelax=%d rejectedTopo=%d rejectedCurv=%d\n",
+                     plusCones.size(), pairsTried, cancelled, rejectedEdit, rejectedRelax,
+                     rejectedTopo, rejectedCurv);
+    }
+}
+
 }  // namespace
 
 std::size_t SeamlessSetup::singularityCount() const {
@@ -227,6 +845,10 @@ SeamlessSetup buildSeamlessSetup(const Mesh& mesh, int iterations, accel::IBacke
     } else {
         setup.field = computeCrossField(mesh, iterations, backend);
     }
+
+    // Cancel topologically-null (+1,-1) field cone pairs before they are promoted to cones
+    // below (kill switch CYBER_QC_NO_CONE_MERGE; see annihilateFieldDipoles).
+    annihilateFieldDipoles(mesh, setup.field);
 
     // Per-edge period jumps. Historically skipped for feature edges (they are always cut, so
     // the comb never crosses them) — but the seam transition rho DOES need the intrinsic field
