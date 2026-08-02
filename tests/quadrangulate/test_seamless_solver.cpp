@@ -371,9 +371,10 @@ TEST_CASE("seamless M2: relaxed Poisson solve produces a cut-mesh parameterizati
 
     // The cut duplicated seam vertices: the solve mesh has more vertices than the input.
     CHECK(static_cast<std::size_t>(param.cutVertexCount) > aliveVertices(sphere));
-    // CG converged (well under the iteration cap).
-    CHECK(param.cgIterationsU > 0);
-    CHECK(param.cgIterationsV > 0);
+    // The direct path (CYBER_QC_DIRECT default) back-substitutes instead of
+    // iterating, reporting 0 CG iterations; the CG fallback stays under its cap.
+    CHECK(param.cgIterationsU >= 0);
+    CHECK(param.cgIterationsV >= 0);
     // Per-corner UV was produced for the alive faces.
     CHECK(param.cornerUv.size() == sphere.faceCapacity());
 
@@ -473,6 +474,48 @@ TEST_CASE("seamless M2c: constrained solve is integer-seamless on a sphere (resi
     const remesh::IsolineQuadMesh quads = remesh::extractIsolineQuads(sphere, uv);
     CHECK(quads.quads.size() > 100);
     CHECK(quads.quads.size() < 2000);
+}
+
+// The direct sparse-Cholesky path (CYBER_QC_DIRECT, default) and the masked-CG
+// fallback (CYBER_QC_NO_DIRECT) solve the same linear systems: the direct
+// bordered (Woodbury) rounding solves are exactly maskedSolve's fixed points,
+// so the two parameterizations must agree to solver tolerance (the direct one
+// is exact where CG truncates at ~1e-6 relative) and both must stay
+// integer-seamless. Guards the equivalence the perf path is built on.
+TEST_CASE("seamless direct path: matches the masked-CG fallback to solver tolerance") {
+    auto backend = cyber::accel::defaultBackend();
+    const Mesh sphere = makeSphere();
+    const remesh::SeamlessSetup setup = remesh::buildSeamlessSetup(sphere, 50, *backend);
+    REQUIRE(setup.valid);
+
+    const remesh::Parameterization direct =
+        remesh::solveParameterization(sphere, setup, 0.12f, *backend);
+    REQUIRE(direct.valid);
+
+    setenv("CYBER_QC_NO_DIRECT", "1", 1);
+    const remesh::Parameterization cg =
+        remesh::solveParameterization(sphere, setup, 0.12f, *backend);
+    unsetenv("CYBER_QC_NO_DIRECT");
+    REQUIRE(cg.valid);
+    CHECK(cg.cgIterationsU > 0);       // the fallback really iterated
+    CHECK(direct.cgIterationsU == 0);  // the direct path really back-substituted
+
+    const remesh::SeamlessUv uvDirect = assembleUv(sphere, direct);
+    CHECK(remesh::seamlessUvResidual(uvDirect) < 1e-3);
+
+    // Same integer grid: corner UVs agree far below one grid cell. (A greedy
+    // pin flipping to a DIFFERENT integer would move some corner by >= 1.)
+    float maxDelta = 0.0f;
+    for (Index fi = 0; fi < sphere.faceCapacity(); ++fi) {
+        if (!sphere.isAlive(FaceId{fi}) || sphere.faceSize(FaceId{fi}) != 3) continue;
+        for (int k = 0; k < 3; ++k) {
+            const cyber::Vec2 a = direct.cornerUv[fi][static_cast<std::size_t>(k)];
+            const cyber::Vec2 b = cg.cornerUv[fi][static_cast<std::size_t>(k)];
+            maxDelta = std::max(maxDelta, std::abs(a.x - b.x));
+            maxDelta = std::max(maxDelta, std::abs(a.y - b.y));
+        }
+    }
+    CHECK(maxDelta < 0.05f);
 }
 
 // The ARAP distortion polish is GATED OFF on an open (free-boundary) surface, where a shifted

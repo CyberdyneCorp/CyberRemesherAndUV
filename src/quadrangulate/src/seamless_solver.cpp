@@ -2,12 +2,14 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <functional>
+#include <memory>
 #include <numeric>
 #include <queue>
 #include <unordered_map>
@@ -17,6 +19,7 @@
 #include "cyber/accel/buffer.hpp"
 #include "cyber/accel/primitives.hpp"
 #include "cyber/core/math.hpp"
+#include "sparse_cholesky.hpp"
 
 // Native QuadCover seamless-UV — Milestone 1 (docs/native-miq-plan.md): the frame-field
 // setup a seamless parameterization is solved on. Reuses the per-face CrossField; adds
@@ -308,6 +311,26 @@ SeamlessSetup buildSeamlessSetup(const Mesh& mesh, int iterations, accel::IBacke
     return setup;
 }
 
+// Cache for the CYBER_QC_DIRECT sparse-direct solve path (see the header).
+// Both cached operators are provably attempt-invariant: the pinned Poisson A
+// depends only on the cut Laplacian + pins, and the reduced operator
+// M = Tt*L2*Tuv only on the seam/constraint structure — the calibration
+// spacing enters the RHS alone (assembleRhs scales by 1/spacing).
+class SeamlessSolveCacheImpl {
+public:
+    // Phase 1: pinned Poisson operator (relaxed + ARAP re-solves).
+    bool aReady = false;
+    SparseCholesky cholA;
+
+    // Phase 2: reduced integer-phase operator + the dense integer block of its
+    // inverse (the Woodbury bordered solves of the greedy rounding).
+    bool mReady = false;
+    std::size_t mW = 0;
+    std::vector<std::size_t> mIntFree;  // reuse guard: structure must match exactly
+    SparseCholesky cholM;
+    std::vector<double> mD;  // |intFree|^2 dense block of (M + ridge)^-1
+};
+
 namespace {
 
 // The (up to 3) edges of a triangle face, found from its consecutive vertex pairs.
@@ -383,6 +406,255 @@ int conjugateGradient(accel::IBackend& backend, const accel::SparseMatrix& A,
     }
     return it;
 }
+
+long msSince(std::chrono::steady_clock::time_point t0) {
+    return static_cast<long>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0)
+            .count());
+}
+
+// Ridge added to the reduced operator so it stays SPD (matches the masked CG,
+// which applies the same ridge inside every solve).
+constexpr double kReducedRidge = 1e-8;
+
+// Build the explicit reduced operator M = Tt * blkdiag(L, L) * Tuv in double
+// CSR (sorted columns). `rows` is the cut cotan Laplacian; tuvRows/ttRows are
+// the Gauss-Jordan reduction map and its transpose as (column, weight) lists.
+// Shared by the direct factorization (CYBER_QC_DIRECT) and the fused-operator
+// CG fallback (CYBER_QC_FUSED_OPERATOR).
+void buildReducedOperator(std::size_t nCut,
+                          const std::vector<std::unordered_map<std::size_t, float>>& rows,
+                          const std::vector<std::vector<std::pair<std::size_t, double>>>& tuvRows,
+                          const std::vector<std::vector<std::pair<std::size_t, double>>>& ttRows,
+                          std::size_t W, std::vector<std::size_t>& mStart,
+                          std::vector<std::size_t>& mCol, std::vector<double>& mVal) {
+    mStart.assign(W + 1, 0);
+    mCol.clear();
+    mVal.clear();
+    std::vector<double> acc(W, 0.0);
+    std::vector<std::size_t> markRow(W, kInvalidIndex);
+    std::vector<std::size_t> touched;
+    for (std::size_t r = 0; r < W; ++r) {
+        touched.clear();
+        for (const auto& [iUv, wi] : ttRows[r]) {
+            const std::size_t offset = iUv < nCut ? 0 : nCut;
+            for (const auto& [j, lw] : rows[iUv - offset]) {
+                const double c = wi * static_cast<double>(lw);
+                for (const auto& [cIdx, tw] : tuvRows[offset + j]) {
+                    if (markRow[cIdx] != r) {
+                        markRow[cIdx] = r;
+                        acc[cIdx] = 0.0;
+                        touched.push_back(cIdx);
+                    }
+                    acc[cIdx] += c * tw;
+                }
+            }
+        }
+        std::sort(touched.begin(), touched.end());
+        for (const std::size_t cIdx : touched) {
+            mCol.push_back(cIdx);
+            mVal.push_back(acc[cIdx]);
+        }
+        mStart[r + 1] = mCol.size();
+    }
+}
+
+// Exact direct engine for the reduced integer phase (CYBER_QC_DIRECT). One
+// sparse factorization of M + ridge replaces every masked CG:
+//   relaxed solve       -> x0 = (M+ridge)^-1 g (a back-substitution);
+//   each rounding round -> the bordered KKT system over the pinned set S
+//     (E selects S):  D_SS lambda = x0_S - c,  w = x0 - (M+ridge)^-1 E^T lambda
+//     with D = ((M+ridge)^-1)_{int,int} precomputed once (dense symmetric; the
+//     greedy loop only ever READS w at integer coordinates, so per-round work
+//     is dense and tiny — the pinned set only grows, hence the incremental
+//     dense Cholesky).
+// Every w this exposes is EXACTLY maskedSolve's fixed point
+// ((M+ridge)_FF w_F = g_F - M_FS c, w_S = c), so the greedy pin SCHEDULE runs
+// byte-for-byte the same code; only the linear solver under it changes.
+class DirectRounding {
+public:
+    bool init(accel::IBackend& backend, std::size_t nCut,
+              const std::vector<std::unordered_map<std::size_t, float>>& rows,
+              const std::vector<std::vector<std::pair<std::size_t, double>>>& tuvRows,
+              const std::vector<std::vector<std::pair<std::size_t, double>>>& ttRows,
+              const std::vector<float>& gReduced, const std::vector<std::size_t>& intFree,
+              std::size_t W, SeamlessSolveCacheImpl* cache, const CancelToken* cancel) {
+        m_W = W;
+        m_intFree = &intFree;
+        const std::size_t nInt = intFree.size();
+        if (cache != nullptr && cache->mReady && cache->mW == W && cache->mIntFree == intFree) {
+            m_chol = &cache->cholM;
+            m_D = &cache->mD;
+        } else {
+            if (!factorAndInvertIntBlock(backend, nCut, rows, tuvRows, ttRows, intFree, cache,
+                                         cancel)) {
+                return false;
+            }
+        }
+        // x0 = (M+ridge)^-1 g — the exact relaxed reduced solution.
+        std::vector<double> g(W);
+        for (std::size_t i = 0; i < W; ++i) {
+            g[i] = static_cast<double>(gReduced[i]);
+        }
+        m_chol->solve(g, m_x0);
+        m_inS.assign(nInt, 0);
+        m_S.clear();
+        m_c.clear();
+        m_dchol = DenseCholeskyInc(nInt);
+        return true;
+    }
+
+    // The exact relaxed solution, as the float w the greedy loop reads.
+    void seed(std::vector<float>& w) const {
+        for (std::size_t j = 0; j < m_W; ++j) {
+            w[j] = static_cast<float>(m_x0[j]);
+        }
+    }
+
+    // One rounding round: absorb the newly pinned integers (mask flipped to 0;
+    // w already carries their clamped values) into the bordered factor, then
+    // refresh w on every still-free integer coordinate. Returns false when the
+    // dense factor loses positivity (callers fall back to the masked CG).
+    bool resolve(const std::vector<char>& mask, std::vector<float>& w) {
+        const std::vector<std::size_t>& intFree = *m_intFree;
+        const std::size_t nInt = intFree.size();
+        std::vector<double> col;
+        for (std::size_t k = 0; k < nInt; ++k) {
+            if (m_inS[k] || mask[intFree[k]] != 0) {
+                continue;
+            }
+            col.resize(m_S.size());
+            for (std::size_t i = 0; i < m_S.size(); ++i) {
+                col[i] = (*m_D)[k * nInt + m_S[i]];
+            }
+            if (!m_dchol.add(col, (*m_D)[k * nInt + k])) {
+                return false;
+            }
+            m_S.push_back(k);
+            m_c.push_back(static_cast<double>(w[intFree[k]]));
+            m_inS[k] = 1;
+        }
+        std::vector<double> rhs(m_S.size());
+        for (std::size_t i = 0; i < m_S.size(); ++i) {
+            rhs[i] = m_x0[intFree[m_S[i]]] - m_c[i];
+        }
+        m_dchol.solve(rhs, m_lambda);
+        for (std::size_t k = 0; k < nInt; ++k) {
+            if (m_inS[k]) {
+                continue;
+            }
+            double t = m_x0[intFree[k]];
+            const double* dRow = m_D->data() + k * nInt;
+            for (std::size_t i = 0; i < m_S.size(); ++i) {
+                t -= dRow[m_S[i]] * m_lambda[i];
+            }
+            w[intFree[k]] = static_cast<float>(t);
+        }
+        return true;
+    }
+
+    // Exact full solution for the current pin set: w = x0 - (M+ridge)^-1 E^T
+    // lambda on every free coordinate. Pinned coordinates (mask == 0) keep the
+    // exact integers the schedule already wrote into w.
+    void finalize(const std::vector<char>& mask, std::vector<float>& w) const {
+        std::vector<double> full(m_x0);
+        if (!m_S.empty()) {
+            const std::vector<std::size_t>& intFree = *m_intFree;
+            std::vector<double> rhs(m_W, 0.0);
+            std::vector<double> corr;
+            for (std::size_t i = 0; i < m_S.size(); ++i) {
+                rhs[intFree[m_S[i]]] = m_lambda[i];
+            }
+            m_chol->solve(rhs, corr);
+            for (std::size_t j = 0; j < m_W; ++j) {
+                full[j] -= corr[j];
+            }
+        }
+        for (std::size_t j = 0; j < m_W; ++j) {
+            if (mask[j] != 0) {
+                w[j] = static_cast<float>(full[j]);
+            }
+        }
+    }
+
+private:
+    // Build + factor M and precompute D, storing into the cache when one is
+    // provided (reused across calibration attempts) or locally otherwise.
+    bool factorAndInvertIntBlock(
+        accel::IBackend& backend, std::size_t nCut,
+        const std::vector<std::unordered_map<std::size_t, float>>& rows,
+        const std::vector<std::vector<std::pair<std::size_t, double>>>& tuvRows,
+        const std::vector<std::vector<std::pair<std::size_t, double>>>& ttRows,
+        const std::vector<std::size_t>& intFree, SeamlessSolveCacheImpl* cache,
+        const CancelToken* cancel) {
+        const std::size_t nInt = intFree.size();
+        SparseCholesky* chol = cache != nullptr ? &cache->cholM : &m_ownChol;
+        std::vector<double>* D = cache != nullptr ? &cache->mD : &m_ownD;
+        if (cache != nullptr) {
+            cache->mReady = false;
+        }
+        const auto t0 = std::chrono::steady_clock::now();
+        std::vector<std::size_t> mStart, mCol;
+        std::vector<double> mVal;
+        buildReducedOperator(nCut, rows, tuvRows, ttRows, m_W, mStart, mCol, mVal);
+        const long msM = msSince(t0);
+        if (cancel != nullptr && cancel->isCancelled()) {
+            return false;
+        }
+        const auto t1 = std::chrono::steady_clock::now();
+        if (!chol->factor(m_W, mStart, mCol, mVal, kReducedRidge)) {
+            return false;
+        }
+        const long msFactor = msSince(t1);
+        if (std::getenv("CYBER_QC_DEBUG") != nullptr) {
+            std::size_t nnzL = 0;
+            for (const auto& r : rows) {
+                nnzL += r.size();
+            }
+            std::fprintf(stderr,
+                         "[qc] direct reduced: W=%zu nnzM=%zu cholNnz=%zu (L2 nnz=%zu) "
+                         "intFree=%zu\n",
+                         m_W, mCol.size(), chol->factorNnz(), 2 * nnzL, nInt);
+        }
+        if (cancel != nullptr && cancel->isCancelled()) {
+            return false;
+        }
+        const auto t2 = std::chrono::steady_clock::now();
+        D->assign(nInt * nInt, 0.0);
+        double* dOut = D->data();
+        const SparseCholesky* ch = chol;
+        backend.parallelFor(0, nInt, [ch, &intFree, dOut, nInt](std::size_t lo, std::size_t hi) {
+            for (std::size_t k = lo; k < hi; ++k) {
+                ch->solveUnitGather(intFree[k], intFree, dOut + k * nInt);
+            }
+        });
+        if (std::getenv("CYBER_QC_TIME") != nullptr) {
+            std::fprintf(stderr, "[qc-time] direct reduced: M=%ldms factor=%ldms D=%ldms\n", msM,
+                         msFactor, msSince(t2));
+        }
+        if (cache != nullptr) {
+            cache->mW = m_W;
+            cache->mIntFree = intFree;
+            cache->mReady = true;
+        }
+        m_chol = chol;
+        m_D = D;
+        return true;
+    }
+
+    std::size_t m_W = 0;
+    const std::vector<std::size_t>* m_intFree = nullptr;
+    const SparseCholesky* m_chol = nullptr;
+    const std::vector<double>* m_D = nullptr;
+    SparseCholesky m_ownChol;      // storage when no cache is provided
+    std::vector<double> m_ownD;    // "
+    std::vector<double> m_x0;      // exact relaxed reduced solution
+    std::vector<std::size_t> m_S;  // pinned integers, in pin order
+    std::vector<double> m_c;       // their clamped integer values
+    std::vector<double> m_lambda;  // bordered-system multipliers
+    std::vector<char> m_inS;
+    DenseCholeskyInc m_dchol{0};
+};
 
 // Coefficients of R^rho applied to a (u,v) pair, R = CCW (u,v) -> (-v,u):
 //   (R^rho (u,v))_x = cxu*u + cxv*v ;  (R^rho (u,v))_y = cyu*u + cyv*v.
@@ -520,7 +792,8 @@ int solveSeamlessReduced(accel::IBackend& backend, std::size_t nCut,
                          const std::vector<float>& bu, const std::vector<float>& bv,
                          const std::vector<SeamRef>& seams, const std::vector<std::size_t>& gauges,
                          std::vector<float>& u, std::vector<float>& v,
-                         const CancelToken* cancel = nullptr) {
+                         const CancelToken* cancel = nullptr,
+                         SeamlessSolveCacheImpl* cache = nullptr) {
     const std::size_t nSeam = seams.size();
     const std::size_t nUv = 2 * nCut;
     // Feature-seam integer pinning (docs/ROADMAP.md 2026-08-01 priority 1;
@@ -757,13 +1030,41 @@ int solveSeamlessReduced(accel::IBackend& backend, std::size_t nCut,
     accel::spmv(backend, Tt, gBuf, gRed);
     const std::vector<float> gReduced(gRed.data(), gRed.data() + gRed.size());
 
-    // Reduced operator A(p) = Tt * L2 * Tuv * p, applied via three spmv.
+    // Direct sparse-Cholesky path (CYBER_QC_DIRECT, default on; docs/ROADMAP.md
+    // perf entry): the reduced operator is FIXED across the relaxed solve and
+    // every greedy rounding round, so one factorization + bordered (Woodbury)
+    // pin updates replace the ~50 masked CG solves. CYBER_QC_NO_DIRECT reverts
+    // to the historical masked CG byte-exactly; CYBER_QC_FUSED_OPERATOR keeps
+    // the CG loop but applies the operator as ONE explicit spmv instead of
+    // three chained ones (the fill-pathology fallback; not byte-identical —
+    // float sums re-associate).
+    const bool noDirect = std::getenv("CYBER_QC_NO_DIRECT") != nullptr;
+    const bool fusedForced = !noDirect && std::getenv("CYBER_QC_FUSED_OPERATOR") != nullptr;
+    accel::SparseMatrix fusedM;
+    bool haveFused = false;
+    if (fusedForced) {
+        std::vector<std::size_t> mStart, mCol;
+        std::vector<double> mVal;
+        buildReducedOperator(nCut, rows, tuvRows, ttRows, W, mStart, mCol, mVal);
+        fusedM.rows = W;
+        fusedM.rowStart = std::move(mStart);
+        fusedM.colIndex = std::move(mCol);
+        fusedM.value.assign(mVal.begin(), mVal.end());
+        haveFused = true;
+    }
+
+    // Reduced operator A(p) = Tt * L2 * Tuv * p, applied via three spmv (or the
+    // one fused spmv when CYBER_QC_FUSED_OPERATOR built it explicitly).
     accel::Buffer<float> tmpUv, tmpUv2, outBuf, pBuf;
     const auto applyA = [&](const std::vector<float>& p, std::vector<float>& out) {
         pBuf.upload(p);
-        accel::spmv(backend, Tuv, pBuf, tmpUv);
-        accel::spmv(backend, L2, tmpUv, tmpUv2);
-        accel::spmv(backend, Tt, tmpUv2, outBuf);
+        if (haveFused) {
+            accel::spmv(backend, fusedM, pBuf, outBuf);
+        } else {
+            accel::spmv(backend, Tuv, pBuf, tmpUv);
+            accel::spmv(backend, L2, tmpUv, tmpUv2);
+            accel::spmv(backend, Tt, tmpUv2, outBuf);
+        }
         out.assign(outBuf.data(), outBuf.data() + outBuf.size());
     };
 
@@ -866,8 +1167,19 @@ int solveSeamlessReduced(accel::IBackend& backend, std::size_t nCut,
     // stays small (a few rounds, not one per integer). If a round pins nothing, fall back to the
     // single most-confident so it always terminates. Seamlessness holds for any integer values
     // (the reduction makes the free integers unconstrained); rounding only shapes distortion.
+    // The direct engine, when it initializes, serves the exact same solutions from one
+    // factorization; the schedule below is shared verbatim by both solvers.
     std::vector<char> mask(W, 1);
-    maskedSolve(mask);
+    DirectRounding direct;
+    bool useDirect =
+        !noDirect && !haveFused &&
+        direct.init(backend, nCut, rows, tuvRows, ttRows, gReduced, intFree, W, cache, cancel);
+    if (useDirect) {
+        ++maskedSolveCalls;
+        direct.seed(w);
+    } else {
+        maskedSolve(mask);
+    }
 
     // MAGNITUDE CONTROL. The reduction leaves the independent integer translations
     // UNCONSTRAINED — any integers keep the map seamless — so a huge relaxed value would
@@ -931,7 +1243,22 @@ int solveSeamlessReduced(accel::IBackend& backend, std::size_t nCut,
                 pin(frac[i].second);
             }
         }
-        maskedSolve(mask);
+        if (useDirect) {
+            ++maskedSolveCalls;
+            if (!direct.resolve(mask, w)) {
+                // Bordered factor lost positivity (should not happen on an SPD
+                // reduced operator): recover the exact current solution and
+                // finish on the historical masked CG.
+                direct.finalize(mask, w);
+                useDirect = false;
+                maskedSolve(mask);
+            }
+        } else {
+            maskedSolve(mask);
+        }
+    }
+    if (useDirect) {
+        direct.finalize(mask, w);
     }
 
     // Reconstruct z = T w on the UV block.
@@ -963,7 +1290,8 @@ namespace {
 // runs the full historical solve, unchanged.
 Parameterization solveParameterizationImpl(const Mesh& mesh, const SeamlessSetup& setup,
                                            float spacing, accel::IBackend& backend,
-                                           const CancelToken* cancel, double* probeCellArea) {
+                                           const CancelToken* cancel, double* probeCellArea,
+                                           SeamlessSolveCache* cache) {
     Parameterization out;
     if (!setup.valid || spacing <= 0.0f || mesh.faceCapacity() == 0) {
         return out;
@@ -1176,6 +1504,46 @@ Parameterization solveParameterizationImpl(const Mesh& mesh, const SeamlessSetup
         A.rowStart.push_back(A.colIndex.size());
     }
 
+    // Direct path (CYBER_QC_DIRECT, default on; docs/ROADMAP.md perf entry):
+    // factor the pinned SPD operator ONCE — it is fixed across the initial
+    // relaxed solve, every ARAP re-solve (only the RHS rotates) and every
+    // calibration attempt/probe (spacing only scales the RHS) — and make each
+    // relaxedSolve a pair of back-substitutions instead of two CG solves. The
+    // factorization lands in the caller's cache when one is provided.
+    // CYBER_QC_NO_DIRECT reverts to the historical CG byte-exactly.
+    SeamlessSolveCacheImpl* cacheImpl = nullptr;
+    if (cache != nullptr && std::getenv("CYBER_QC_NO_DIRECT") == nullptr) {
+        if (!cache->impl) {
+            cache->impl = std::make_shared<SeamlessSolveCacheImpl>();
+        }
+        cacheImpl = cache->impl.get();
+    }
+    SparseCholesky ownCholA;
+    const SparseCholesky* cholA = nullptr;
+    if (std::getenv("CYBER_QC_NO_DIRECT") == nullptr) {
+        SparseCholesky* target = cacheImpl != nullptr ? &cacheImpl->cholA : &ownCholA;
+        if (cacheImpl != nullptr && cacheImpl->aReady && cacheImpl->cholA.dim() == nCut) {
+            cholA = target;
+        } else {
+            if (cacheImpl != nullptr) {
+                cacheImpl->aReady = false;
+            }
+            const auto tA = std::chrono::steady_clock::now();
+            const std::vector<double> aVal(A.value.begin(), A.value.end());
+            if (target->factor(nCut, A.rowStart, A.colIndex, aVal)) {
+                cholA = target;
+                if (cacheImpl != nullptr) {
+                    cacheImpl->aReady = true;
+                }
+                if (std::getenv("CYBER_QC_TIME") != nullptr) {
+                    std::fprintf(stderr, "[qc-time] direct poisson: factorA=%ldms cholNnz=%zu\n",
+                                 msSince(tA), target->factorNnz());
+                }
+            }
+            // factor failure (non-SPD assembly) falls through to CG below
+        }
+    }
+
     std::vector<float> u(nCut, 0.0f), v(nCut, 0.0f);
 
     // CYBER_QC_FIELD_STATS diagnostics on the +z flat region (|n.z| > 0.99): combed-target
@@ -1268,8 +1636,11 @@ Parameterization solveParameterizationImpl(const Mesh& mesh, const SeamlessSetup
 
     const int maxIters = static_cast<int>(nCut) + 500;
     // Solve the relaxed (per-component pinned) Poisson for the current full RHS bu/bv. The
-    // pin zeroes the RHS at the pinned/isolated vertices; u,v are warm-started from their
-    // incoming value so each ARAP re-solve (a small RHS perturbation) converges fast.
+    // pin zeroes the RHS at the pinned/isolated vertices. Direct path: two exact
+    // back-substitutions on the one-time factorization above. CG path: u,v are warm-started
+    // from their incoming value so each ARAP re-solve (a small RHS perturbation) converges
+    // fast.
+    bool directCheckDone = false;
     const auto relaxedSolve = [&]() {
         std::vector<float> pbu = bu, pbv = bv;
         for (std::size_t i = 0; i < nCut; ++i) {
@@ -1277,6 +1648,44 @@ Parameterization solveParameterizationImpl(const Mesh& mesh, const SeamlessSetup
                 pbu[i] = 0.0f;
                 pbv[i] = 0.0f;
             }
+        }
+        if (cholA != nullptr) {
+            std::vector<double> rhs(nCut);
+            std::vector<double> sol;
+            for (std::size_t i = 0; i < nCut; ++i) {
+                rhs[i] = static_cast<double>(pbu[i]);
+            }
+            cholA->solve(rhs, sol);
+            for (std::size_t i = 0; i < nCut; ++i) {
+                u[i] = static_cast<float>(sol[i]);
+            }
+            for (std::size_t i = 0; i < nCut; ++i) {
+                rhs[i] = static_cast<double>(pbv[i]);
+            }
+            cholA->solve(rhs, sol);
+            for (std::size_t i = 0; i < nCut; ++i) {
+                v[i] = static_cast<float>(sol[i]);
+            }
+            out.cgIterationsU = 0;
+            out.cgIterationsV = 0;
+            // CYBER_QC_DIRECT_CHECK: numerical drift diagnostic — re-run the
+            // first relaxed solve with the historical cold-started CG and
+            // report max |uv_direct - uv_cg| (both approximate the same linear
+            // system; the direct one is exact to double roundoff).
+            if (!directCheckDone && std::getenv("CYBER_QC_DIRECT_CHECK") != nullptr) {
+                directCheckDone = true;
+                std::vector<float> uc(nCut, 0.0f), vc(nCut, 0.0f);
+                conjugateGradient(backend, A, pbu, uc, maxIters, 1e-8f, cancel);
+                conjugateGradient(backend, A, pbv, vc, maxIters, 1e-8f, cancel);
+                double dmax = 0.0;
+                for (std::size_t i = 0; i < nCut; ++i) {
+                    dmax = std::max(dmax, static_cast<double>(std::fabs(u[i] - uc[i])));
+                    dmax = std::max(dmax, static_cast<double>(std::fabs(v[i] - vc[i])));
+                }
+                std::fprintf(stderr, "[qc] direct check: max|uv_direct-uv_cg|=%.3e nCut=%zu\n",
+                             dmax, nCut);
+            }
+            return;
         }
         out.cgIterationsU = conjugateGradient(backend, A, pbu, u, maxIters, 1e-8f, cancel);
         out.cgIterationsV = conjugateGradient(backend, A, pbv, v, maxIters, 1e-8f, cancel);
@@ -1474,7 +1883,7 @@ Parameterization solveParameterizationImpl(const Mesh& mesh, const SeamlessSetup
     // independent DOF and greedily rounds the integer translations. No dense dual, no seam cap —
     // it scales to hundreds of cones (spot: ~350 seam edges), reconciling branch-point holonomy.
     if (!seams.empty()) {
-        solveSeamlessReduced(backend, nCut, rows, bu0, bv0, seams, gauges, u, v, cancel);
+        solveSeamlessReduced(backend, nCut, rows, bu0, bv0, seams, gauges, u, v, cancel, cacheImpl);
     }
     statsGradHist("reduced");
     if (cancel != nullptr && cancel->isCancelled()) {
@@ -1506,14 +1915,16 @@ Parameterization solveParameterizationImpl(const Mesh& mesh, const SeamlessSetup
 }  // namespace
 
 Parameterization solveParameterization(const Mesh& mesh, const SeamlessSetup& setup, float spacing,
-                                       accel::IBackend& backend, const CancelToken* cancel) {
-    return solveParameterizationImpl(mesh, setup, spacing, backend, cancel, nullptr);
+                                       accel::IBackend& backend, const CancelToken* cancel,
+                                       SeamlessSolveCache* cache) {
+    return solveParameterizationImpl(mesh, setup, spacing, backend, cancel, nullptr, cache);
 }
 
 double relaxedCellArea(const Mesh& mesh, const SeamlessSetup& setup, float spacing,
-                       accel::IBackend& backend, const CancelToken* cancel) {
+                       accel::IBackend& backend, const CancelToken* cancel,
+                       SeamlessSolveCache* cache) {
     double cells = -1.0;
-    (void)solveParameterizationImpl(mesh, setup, spacing, backend, cancel, &cells);
+    (void)solveParameterizationImpl(mesh, setup, spacing, backend, cancel, &cells, cache);
     return cells;
 }
 

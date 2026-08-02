@@ -489,8 +489,8 @@ SeamlessUv computeSeamlessUvNative(const Mesh& mesh, float targetEdgeLength, flo
     const char* spEnv = std::getenv("CYBER_QC_SPACING_MUL");
     const float spacingMul = spEnv != nullptr ? static_cast<float>(std::atof(spEnv)) : spacingScale;
     const auto tSolve0 = tick();
-    const Parameterization param =
-        solveParameterization(work, setup, targetEdgeLength * spacingMul, *backend, cancel);
+    const Parameterization param = solveParameterization(work, setup, targetEdgeLength * spacingMul,
+                                                         *backend, cancel, &prep.solveCache);
     if (!param.valid) {
         logNative(false, "parameterization invalid (or cancelled)");
         return uv;
@@ -605,7 +605,8 @@ double nativeRelaxedCellArea(const Mesh& mesh, float targetEdgeLength, float ada
     }
     auto backend = accel::defaultBackend();
     const auto tRelax0 = tick();
-    const double cells = relaxedCellArea(ctx.work, ctx.setup, targetEdgeLength, *backend, cancel);
+    const double cells =
+        relaxedCellArea(ctx.work, ctx.setup, targetEdgeLength, *backend, cancel, &ctx.solveCache);
     if (std::getenv("CYBER_QC_TIME") != nullptr) {
         std::fprintf(stderr,
                      "[qc-time] probe: isotropic=%ldms field+setup=%ldms relaxed=%ldms "
