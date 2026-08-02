@@ -49,6 +49,19 @@ and robustness — not just competitive on one.
     (sing 72→63); nefertiti/armadillo drift ≤5% on sing/angle. Vendored route
     untouched (probe is native-only); outputs with `CYBER_QC_NO_PROBE=1`
     byte-match the pre-probe build.
+- **Gap #2, flow-loop length (2026-08-02): the loop killers are the residual
+  triangles, then dipoles; quantization is what remains.** Loop-termination
+  census on spot: 47 leftover triangles account for essentially all 118 open
+  loop ends (quad-dominant default, mean loop 41). `--pure-quads` removes
+  them: mean loop 41 → **319** at ratio 1.000 with angle IMPROVING 6.7→6.5
+  (the bench now carries a `cyber-pure` solver row — QuadriFlow/quadwild are
+  pure-quad, so the quad-dominant comparison understated us structurally).
+  With triangles gone the dipole canceller's effect unmasks: spot loops
+  319 → **433** (+36%) at sing 95→93 — the stack is 41 → 433 (10.5×).
+  Corpus cyber-pure: nefertiti sing 441 / recall 0.89, armadillo sing 404 /
+  recall 0.77 (recall dips on armadillo under the pure post-pass — noted).
+  QuadriFlow spot sits at 1811: the remaining ~4× is global grid structure —
+  the Bi-MDF-style quantization lever, unchanged as the endgame for this gap.
 - **Feature-pinning lever (in progress, OPT-IN):** `CYBER_QC_FEATURE_DEG=90
   CYBER_QC_PLANAR_FILL=1 CYBER_QC_UV_SNAP=1` lifts box_sharp recall
   **0.04 → 0.73** (organics neutral: spot 179→168 sing, recall 0.59→0.64) via
