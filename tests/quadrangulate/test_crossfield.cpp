@@ -79,7 +79,8 @@ TEST_CASE("orientation-derived cross field is a unit 4-RoSy aligned to a flat gr
     Mesh mesh = makeGrid(6);
     mesh.tagFeatureEdges(90.0f);
 
-    const remesh::CrossField field = remesh::computeCrossFieldFromOrientation(mesh, 30);
+    auto backend = cyber::accel::defaultBackend();
+    const remesh::CrossField field = remesh::computeCrossFieldFromOrientation(mesh, 30, *backend);
     REQUIRE(field.size() == mesh.faceCapacity());
 
     double totalErr = 0.0;

@@ -30,6 +30,45 @@ Vec3 faceTangent(const Mesh& mesh, FaceId f, Vec3 normal) {
 // Angle of world direction `d` in the (t, b) tangent frame.
 float frameAngle(Vec3 d, Vec3 t, Vec3 b) { return std::atan2(dot(d, b), dot(d, t)); }
 
+// Per-face tangent frames for the live triangles; returns the live faces and fills `compact`
+// with each face's dense index.
+std::vector<FaceId> initFrames(const Mesh& mesh, CrossField& field, std::vector<Index>& compact) {
+    const std::size_t cap = mesh.faceCapacity();
+    std::vector<FaceId> faces;
+    compact.assign(cap, kInvalidIndex);
+    for (Index i = 0; i < cap; ++i) {
+        const FaceId f{i};
+        if (!mesh.isAlive(f) || mesh.faceSize(f) != 3) {
+            continue;
+        }
+        const Vec3 n = mesh.faceNormal(f);
+        const Vec3 t = faceTangent(mesh, f, n);
+        field.tangent[i] = t;
+        field.bitangent[i] = cross(n, t);
+        compact[f.value] = static_cast<Index>(faces.size());
+        faces.push_back(f);
+    }
+    return faces;
+}
+
+// Constrains faces touching a feature/boundary edge (and, with the planarity gate, a crease-
+// aligned interior edge) to align exactly with it, then flood-fills crease pins across flat
+// panels. Overwrites the pinned faces' cross values and returns the constrained flags (dense,
+// per `faces` index). Shared verbatim by computeCrossField (its historical body) and by the
+// multires hand-off so both paths pin identically.
+std::vector<char> applyPins(const Mesh& mesh, const std::vector<FaceId>& faces,
+                            const std::vector<Index>& compact, CrossField& field,
+                            float creaseAlignDegrees);
+
+// The converged damped transport-averaging solve shared by computeCrossField (its historical
+// sweep loop, byte-identical) and the multires hand-off relax: builds the 2F x 2F CSR
+// neighbour-averaging operator from the CURRENT field frames and iterates from the field's
+// current real/imag until maxDelta < 1e-6 (min 9 sweeps, cap `sweepCap`), re-pinning the
+// constrained faces every sweep. CYBER_QC_FIELD_ITERS overrides the cap for calibration.
+void transportSmooth(const Mesh& mesh, const std::vector<FaceId>& faces,
+                     const std::vector<Index>& compact, const std::vector<char>& constrained,
+                     CrossField& field, int sweepCap, accel::IBackend& backend);
+
 }  // namespace
 
 Vec3 CrossField::direction(FaceId f) const {
@@ -55,29 +94,23 @@ CrossField computeCrossField(const Mesh& mesh, int iterations, accel::IBackend& 
     field.real.assign(cap, 1.0f);
     field.imag.assign(cap, 0.0f);
 
-    // Per-face frame; collect the live faces.
-    std::vector<FaceId> faces;
-    for (Index i = 0; i < cap; ++i) {
-        const FaceId f{i};
-        if (!mesh.isAlive(f) || mesh.faceSize(f) != 3) {
-            continue;
-        }
-        const Vec3 n = mesh.faceNormal(f);
-        const Vec3 t = faceTangent(mesh, f, n);
-        field.tangent[i] = t;
-        field.bitangent[i] = cross(n, t);
-        faces.push_back(f);
-    }
-    const std::size_t nf = faces.size();
-    if (nf == 0) {
+    std::vector<Index> compact;
+    const std::vector<FaceId> faces = initFrames(mesh, field, compact);
+    if (faces.empty()) {
         return field;
     }
+    const std::vector<char> constrained =
+        applyPins(mesh, faces, compact, field, creaseAlignDegrees);
+    transportSmooth(mesh, faces, compact, constrained, field, std::max(iterations, 120), backend);
+    return field;
+}
 
-    // Compact index per live face.
-    std::vector<Index> compact(cap, kInvalidIndex);
-    for (std::size_t c = 0; c < nf; ++c) {
-        compact[faces[c].value] = static_cast<Index>(c);
-    }
+namespace {
+
+std::vector<char> applyPins(const Mesh& mesh, const std::vector<FaceId>& faces,
+                            const std::vector<Index>& compact, CrossField& field,
+                            float creaseAlignDegrees) {
+    const std::size_t nf = faces.size();
 
     // CYBER_QC_FIELD_CREASE_DEG (lever c2): widen the set of edges the field ALIGNS to without
     // widening the set that becomes a hard seam.
@@ -259,6 +292,13 @@ CrossField computeCrossField(const Mesh& mesh, int iterations, accel::IBackend& 
                          100.0 * static_cast<double>(nPinned) / static_cast<double>(nf));
         }
     }
+    return constrained;
+}
+
+void transportSmooth(const Mesh& mesh, const std::vector<FaceId>& faces,
+                     const std::vector<Index>& compact, const std::vector<char>& constrained,
+                     CrossField& field, int sweepCap, accel::IBackend& backend) {
+    const std::size_t nf = faces.size();
 
     // Build the 2F x 2F transport-averaging operator as CSR: row 2c/2c+1 hold
     // the real/imag equations for face c. The diagonal is a small self-damping
@@ -321,7 +361,7 @@ CrossField computeCrossField(const Mesh& mesh, int iterations, accel::IBackend& 
         u[2 * c + 1] = field.imag[faces[c].value];
     }
     const char* itersEnv = std::getenv("CYBER_QC_FIELD_ITERS");
-    const int sweeps = itersEnv != nullptr ? std::atoi(itersEnv) : std::max(iterations, 120);
+    const int sweeps = itersEnv != nullptr ? std::atoi(itersEnv) : sweepCap;
     for (int it = 0; it < sweeps; ++it) {
         accel::spmv(backend, mat, u, y);
         float maxDelta = 0.0f;
@@ -350,10 +390,7 @@ CrossField computeCrossField(const Mesh& mesh, int iterations, accel::IBackend& 
         field.real[faces[c].value] = u[2 * c];
         field.imag[faces[c].value] = u[2 * c + 1];
     }
-    return field;
 }
-
-namespace {
 
 // Project v onto the plane with unit normal n and renormalise.
 Vec3 projectUnitLocal(Vec3 v, Vec3 n) { return normalized(v - n * dot(n, v)); }
@@ -378,7 +415,8 @@ Vec3 matchRoSyLocal(Vec3 ref, Vec3 d, Vec3 n) {
 
 }  // namespace
 
-CrossField computeCrossFieldFromOrientation(const Mesh& mesh, int iterations) {
+CrossField computeCrossFieldFromOrientation(const Mesh& mesh, int iterations,
+                                            accel::IBackend& backend, float creaseAlignDegrees) {
     const std::size_t cap = mesh.faceCapacity();
     CrossField field;
     field.tangent.assign(cap, Vec3{1, 0, 0});
@@ -386,19 +424,19 @@ CrossField computeCrossFieldFromOrientation(const Mesh& mesh, int iterations) {
     field.real.assign(cap, 1.0f);
     field.imag.assign(cap, 0.0f);
 
+    std::vector<Index> compact;
+    const std::vector<FaceId> faces = initFrames(mesh, field, compact);
+    if (faces.empty()) {
+        return field;
+    }
+
     // The multiresolution per-vertex 4-RoSy orientation. spacing only drives the
     // position field, which we do not consume here, so pass a unit spacing.
     const PositionField pf = computePositionField(mesh, 1.0f, iterations);
 
-    for (Index i = 0; i < cap; ++i) {
-        const FaceId f{i};
-        if (!mesh.isAlive(f) || mesh.faceSize(f) != 3) {
-            continue;
-        }
+    for (const FaceId f : faces) {
+        const Index i = f.value;
         const Vec3 n = mesh.faceNormal(f);
-        const Vec3 t = faceTangent(mesh, f, n);
-        field.tangent[i] = t;
-        field.bitangent[i] = cross(n, t);
 
         // Average the three vertex orientations, projected into the face plane and
         // brought into a common 4-RoSy representative, then encode e^{i4theta}.
@@ -426,32 +464,22 @@ CrossField computeCrossFieldFromOrientation(const Mesh& mesh, int iterations) {
             continue;  // no usable orientation -> leave the identity cross (theta 0)
         }
         const Vec3 dFace = projectUnitLocal(acc, n);
-        const float theta = frameAngle(dFace, t, field.bitangent[i]);
+        const float theta = frameAngle(dFace, field.tangent[i], field.bitangent[i]);
         field.real[i] = std::cos(4.0f * theta);
         field.imag[i] = std::sin(4.0f * theta);
     }
 
-    // Re-pin faces touching a feature/boundary edge exactly to it, matching
-    // computeCrossField so feature meshes stay feature-aligned and well-conditioned.
-    for (Index i = 0; i < cap; ++i) {
-        const FaceId f{i};
-        if (!mesh.isAlive(f) || mesh.faceSize(f) != 3) {
-            continue;
-        }
-        const std::vector<VertexId> fv = mesh.faceVertices(f);
-        for (std::size_t k = 0; k < fv.size(); ++k) {
-            const EdgeId e = mesh.edgeBetween(fv[k], fv[(k + 1) % fv.size()]);
-            if (!e.valid() || (!mesh.isFeatureEdge(e) && mesh.edgeFaceCount(e) == 2)) {
-                continue;
-            }
-            const auto [a, b] = mesh.edgeVertices(e);
-            const Vec3 d = normalized(mesh.position(b) - mesh.position(a));
-            const float alpha = frameAngle(d, field.tangent[i], field.bitangent[i]);
-            field.real[i] = std::cos(4.0f * alpha);
-            field.imag[i] = std::sin(4.0f * alpha);
-            break;
-        }
-    }
+    // Pin exactly as computeCrossField does (feature/boundary alignment, crease pins, planar
+    // flood fill), then RELAX the vertex-to-face hand-off with the same converged transport
+    // smoothing the stock path runs — seeded from the hierarchy instead of theta=0. The
+    // hierarchy places the singularities globally (coarse levels annihilate stranded cone
+    // pairs); the naive per-face vertex average it used to return, however, is unconverged at
+    // the fine scale and measurably regressed edge CV / normal error (bunny: CV 0.29 -> 0.39,
+    // Nerr 12.8 -> 16.5). Local averaging is a contraction, so the converged result inherits
+    // the seed's cone placement while restoring stock-level fine-scale smoothness.
+    const std::vector<char> constrained =
+        applyPins(mesh, faces, compact, field, creaseAlignDegrees);
+    transportSmooth(mesh, faces, compact, constrained, field, std::max(iterations, 120), backend);
     return field;
 }
 
