@@ -25,6 +25,30 @@ and robustness — not just competitive on one.
   field made Eulerian (sampled from the `ReferenceSurface`, not carried on
   drifting vertices), and feature tagging given an epsilon so exactly-90°
   dihedrals tag deterministically. Regression test in `test_pipeline.cpp`.
+- **Native-solve perf (2026-08-01, later): calibration loop de-duplicated +
+  probe-predicted initial scaling.** Two commits on the quad-cover path:
+  - *Byte-identical hoist:* the isotropic pre-remesh, cross field and
+    `buildSeamlessSetup` depend only on (mesh, edge length, adaptivity, feature
+    threshold) — never on the calibration `scaling` — so they now compute once
+    (`NativeSolveContext`) and each calibration attempt re-runs only the
+    spacing-dependent solve + extraction. sha256 of the output OBJ verified
+    unchanged on all 7 corpus meshes. nefertiti@8000 220s → 203s,
+    armadillo@8000 98s → 82s.
+  - *Calibration probe (default-on, kill switch `CYBER_QC_NO_PROBE`):* the
+    hardcoded 0.5 initial scaling overshoots the extracted count 1.5-3x on
+    every corpus mesh, forcing a second full solve. A relaxed-Poisson-only
+    probe (`relaxedCellArea`, ~3-9% of a full solve) predicts the mesh-specific
+    scaling `s0 = sqrt(eta·cells/target)`; eta defaults to the
+    corpus-calibrated 1.0 for the relaxed triangle-area measure
+    (`CYBER_QC_EXTRACT_EFF` overrides), and the 2-attempt loop stays as the
+    safety net. 5/7 corpus meshes (incl. every expensive one) now land in ONE
+    solve: nefertiti 220s → **117s**, armadillo 98s → **52s** (sphere/torus,
+    whose ARAP polish grows UV area ~1.65x, still take 2 — same as before).
+    Counts land 0.87-0.99 of target (window 0.75-1.33); bench check green,
+    box_sharp keeps its perfect grid (8 cones, 0° angle dev), spot improves
+    (sing 72→63); nefertiti/armadillo drift ≤5% on sing/angle. Vendored route
+    untouched (probe is native-only); outputs with `CYBER_QC_NO_PROBE=1`
+    byte-match the pre-probe build.
 - **Feature-pinning lever (in progress, OPT-IN):** `CYBER_QC_FEATURE_DEG=90
   CYBER_QC_PLANAR_FILL=1 CYBER_QC_UV_SNAP=1` lifts box_sharp recall
   **0.04 → 0.73** (organics neutral: spot 179→168 sing, recall 0.59→0.64) via

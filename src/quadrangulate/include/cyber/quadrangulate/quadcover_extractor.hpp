@@ -130,6 +130,17 @@ struct NativeSolveContext {
                                                  float featureDegrees = 40.0f,
                                                  NativeSolveContext* ctx = nullptr);
 
+// Calibration probe for the NATIVE solve: prepares `ctx` (isotropic remesh + field +
+// cut setup) when it is not ready yet, then runs ONLY the relaxed Poisson phase of the
+// seamless solve at grid spacing == targetEdgeLength and returns the UV grid-cell count
+// (sum of |UV triangle areas|; ~1 extracted quad candidate per unit cell, see
+// relaxedCellArea). The quad-cover quadrangulator uses it to predict the initial
+// calibration scaling so most meshes land in the acceptance window in ONE full solve.
+// Returns <= 0 when any stage declines — callers keep the historical hardcoded start.
+[[nodiscard]] double nativeRelaxedCellArea(const Mesh& mesh, float targetEdgeLength,
+                                           float adaptivity, float featureDegrees,
+                                           const CancelToken* cancel, NativeSolveContext& ctx);
+
 // Max integer-jump residual of a seamless UV across its interior edges: for each edge
 // shared by two triangles, the grid symmetry mapping one triangle's shared-vertex UVs
 // to the other's must have an INTEGER translation. 0 == perfectly seamless. A

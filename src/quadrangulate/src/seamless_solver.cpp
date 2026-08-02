@@ -954,8 +954,16 @@ int solveSeamlessReduced(accel::IBackend& backend, std::size_t nCut,
 
 }  // namespace
 
-Parameterization solveParameterization(const Mesh& mesh, const SeamlessSetup& setup, float spacing,
-                                       accel::IBackend& backend, const CancelToken* cancel) {
+namespace {
+
+// Shared implementation of solveParameterization and relaxedCellArea. When
+// `probeCellArea` is non-null the solve stops right after the initial relaxed
+// Poisson solve and reports the UV grid-cell count there (no ARAP polish, no
+// integer phase); the returned Parameterization stays invalid. A null pointer
+// runs the full historical solve, unchanged.
+Parameterization solveParameterizationImpl(const Mesh& mesh, const SeamlessSetup& setup,
+                                           float spacing, accel::IBackend& backend,
+                                           const CancelToken* cancel, double* probeCellArea) {
     Parameterization out;
     if (!setup.valid || spacing <= 0.0f || mesh.faceCapacity() == 0) {
         return out;
@@ -1278,6 +1286,30 @@ Parameterization solveParameterization(const Mesh& mesh, const SeamlessSetup& se
         return out;  // out.valid stays false -> caller degrades cleanly
     }
 
+    // UV grid-cell count at the current u,v: sum of |UV triangle areas| (~1 extracted
+    // quad candidate per unit cell). Serves the relaxed-only calibration probe and the
+    // CYBER_QC_DEBUG probe-vs-full drift line below.
+    const auto uvCellSum = [&]() {
+        double cells = 0.0;
+        for (const FaceData& fd : faceData) {
+            const double ax = u[fd.cut[0]], ay = v[fd.cut[0]];
+            const double bx = u[fd.cut[1]], by = v[fd.cut[1]];
+            const double cx = u[fd.cut[2]], cy = v[fd.cut[2]];
+            cells += 0.5 * std::fabs((bx - ax) * (cy - ay) - (by - ay) * (cx - ax));
+        }
+        return cells;
+    };
+    if (probeCellArea != nullptr) {
+        // Relaxed-only probe: the cell area is already fixed here (ARAP preserves the
+        // target frame norm; integer rounding shifts sub-cell translations), so skip
+        // the polish + integer phase. `out` stays invalid — probe callers only read
+        // the cell count.
+        *probeCellArea = uvCellSum();
+        return out;
+    }
+    const bool debugCells = std::getenv("CYBER_QC_DEBUG") != nullptr;
+    const double relaxedCells = debugCells ? uvCellSum() : 0.0;
+
     // ARAP local-global polish (docs/native-miq-plan.md). The plain field-aligned target has
     // non-zero curl, so the Poisson projection introduces shear / non-uniform scale that makes
     // integer isolines cross the field obliquely and leaves non-quad caps at cones. Each round:
@@ -1462,8 +1494,27 @@ Parameterization solveParameterization(const Mesh& mesh, const SeamlessSetup& se
             out.cornerUv[fi][static_cast<std::size_t>(k)] = Vec2{u[cv], v[cv]};
         }
     }
+    if (debugCells) {
+        // Probe-vs-full drift: how far the relaxed-only cell count (what the calibration
+        // probe measures) sits from the final one (what extraction actually sees).
+        std::fprintf(stderr, "[qc] uv cells: relaxed=%.1f final=%.1f\n", relaxedCells, uvCellSum());
+    }
     out.valid = true;
     return out;
+}
+
+}  // namespace
+
+Parameterization solveParameterization(const Mesh& mesh, const SeamlessSetup& setup, float spacing,
+                                       accel::IBackend& backend, const CancelToken* cancel) {
+    return solveParameterizationImpl(mesh, setup, spacing, backend, cancel, nullptr);
+}
+
+double relaxedCellArea(const Mesh& mesh, const SeamlessSetup& setup, float spacing,
+                       accel::IBackend& backend, const CancelToken* cancel) {
+    double cells = -1.0;
+    (void)solveParameterizationImpl(mesh, setup, spacing, backend, cancel, &cells);
+    return cells;
 }
 
 int cutOpenEulerCharacteristic(const Mesh& mesh, const SeamlessSetup& setup) {

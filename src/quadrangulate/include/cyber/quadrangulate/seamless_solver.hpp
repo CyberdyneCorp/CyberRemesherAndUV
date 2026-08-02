@@ -84,4 +84,16 @@ struct Parameterization {
                                                      float spacing, accel::IBackend& backend,
                                                      const CancelToken* cancel = nullptr);
 
+// Relaxed-only calibration probe: runs solveParameterization's assembly + the initial
+// relaxed Poisson solve at `spacing` (no ARAP polish, no integer phase) and returns the
+// UV grid-cell count — the sum of |UV triangle areas|, ~1 extracted quad candidate per
+// unit cell. The relaxed phase already fixes the cell area (ARAP keeps the target frame
+// norm and integer rounding only shifts sub-cell translations), so this predicts the
+// extraction count at a fraction of the full solve's cost. Returns <= 0 for a
+// degenerate setup/mesh or a cancelled solve. Consumed by the quad-cover
+// quadrangulator's initial-scaling probe (quadcover_extractor.cpp).
+[[nodiscard]] double relaxedCellArea(const Mesh& mesh, const SeamlessSetup& setup, float spacing,
+                                     accel::IBackend& backend,
+                                     const CancelToken* cancel = nullptr);
+
 }  // namespace cyber::remesh

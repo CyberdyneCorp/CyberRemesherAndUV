@@ -582,6 +582,38 @@ SeamlessUv computeSeamlessUvNative(const Mesh& mesh, float targetEdgeLength, flo
     return uv;
 }
 
+double nativeRelaxedCellArea(const Mesh& mesh, float targetEdgeLength, float adaptivity,
+                             float featureDegrees, const CancelToken* cancel,
+                             NativeSolveContext& ctx) {
+    if (targetEdgeLength <= 0.0f || mesh.faceCapacity() == 0) {
+        return -1.0;
+    }
+    const auto tick = []() { return std::chrono::steady_clock::now(); };
+    const auto ms = [](auto a, auto b) {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(b - a).count();
+    };
+    long isoMs = 0;
+    long setupMs = 0;
+    if (!ctx.ready) {
+        const char* reason = "";
+        if (!prepareNativeSolve(mesh, targetEdgeLength, adaptivity, featureDegrees, cancel, ctx,
+                                reason, isoMs, setupMs)) {
+            logNative(false, reason);
+            return -1.0;
+        }
+    }
+    auto backend = accel::defaultBackend();
+    const auto tRelax0 = tick();
+    const double cells = relaxedCellArea(ctx.work, ctx.setup, targetEdgeLength, *backend, cancel);
+    if (std::getenv("CYBER_QC_TIME") != nullptr) {
+        std::fprintf(stderr,
+                     "[qc-time] probe: isotropic=%ldms field+setup=%ldms relaxed=%ldms "
+                     "cells=%.1f\n",
+                     isoMs, setupMs, static_cast<long>(ms(tRelax0, tick())), cells);
+    }
+    return cells;
+}
+
 namespace {
 
 // Vendored seamless UV: Geogram quad_cover run in-process (built with CYBER_WITH_QUADCOVER)
@@ -2703,6 +2735,20 @@ double meshTargetQuads(const Mesh& mesh, float targetEdgeLength) {
     return area / cell;
 }
 
+// Whether the vendored seamless solver (in-process Geogram quad_cover, or the
+// CYBER_QUADCOVER_CLI harness subprocess) is configured. computeSeamlessUv may route
+// to it, and there `scaling` is the harness -s with different semantics than the
+// native spacing multiplier — so the calibration probe below only applies when the
+// native solver is the only one available.
+bool vendoredSeamlessAvailable() {
+#ifdef CYBER_HAVE_QUADCOVER
+    return true;
+#else
+    const char* cli = std::getenv("CYBER_QUADCOVER_CLI");
+    return cli != nullptr && cli[0] != '\0';
+#endif
+}
+
 // IQuadrangulator implementation (Milestone 3). Runs the full QuadCover pipeline:
 // seamless integer-grid UV (M1, out-of-process via CYBER_QUADCOVER_CLI) -> isoline
 // trace + boundary-aware cleanup (M2) -> replace `mesh` in place with the quad mesh.
@@ -2740,6 +2786,46 @@ public:
         // context computes them once and each attempt re-runs only the (spacing-dependent)
         // parameterization + extraction.
         NativeSolveContext nativeCtx;
+        // Probe-predicted initial scaling (native route only). The hardcoded 0.5 start
+        // overshoots the extracted count 1.5-3x on every corpus mesh, so the loop below
+        // always pays a second full solve. The relaxed Poisson phase already fixes the UV
+        // cell area up to a per-mesh-stable factor, so one relaxed-only probe at spacing ==
+        // targetEdgeLength predicts the mesh-specific scaling:
+        //   quads(s) ~ eta * cellsRelaxed(1)/s^2  =>  s0 = sqrt(eta * cellsRelaxed(1)/target)
+        // eta folds two corpus-measured, per-mesh-stable (<2% drift across spacings) ratios:
+        // extraction efficiency quads/cellsFinal (0.95-1.00 on all 7 corpus meshes) and the
+        // ARAP-polish area growth cellsFinal/cellsRelaxed (0.85-1.04 on 5/7 including every
+        // expensive mesh; sphere/torus are ~1.65 outliers that fall back to the correction
+        // attempt, exactly like today's constant start). The corpus-calibrated default is
+        // 1.0: the product sits at 0.92-1.04 on the coherent meshes, and on CAD-flat parts
+        // the relaxed cells EQUAL area/spacing^2, so eta=1 puts the grid cell exactly at
+        // targetEdgeLength and preserves the perfect box grid (8 corner cones, 0-deg angle
+        // dev — eta=0.95 measurably broke it). Note eta is calibrated for THIS measure
+        // (relaxed |UV triangle area| sum); the historical 0.62 figure was quads per
+        // full-solve bbox cell and does not apply. The 2-attempt loop stays unchanged as
+        // the safety net (a probe miss costs one correction solve). Kill switch:
+        // CYBER_QC_NO_PROBE restores the 0.5 start; CYBER_QC_EXTRACT_EFF overrides eta.
+        // Skipped when the vendored solver is configured (there `scaling` is the harness
+        // -s) or when a scaling/spacing experiment env pins the solve.
+        const bool probeEnabled = std::getenv("CYBER_QC_NO_PROBE") == nullptr &&
+                                  std::getenv("CYBER_QC_NO_NATIVE") == nullptr &&
+                                  std::getenv("CYBER_QC_SCALING") == nullptr &&
+                                  std::getenv("CYBER_QC_SPACING_MUL") == nullptr &&
+                                  !vendoredSeamlessAvailable() && targetQuads > 0.0;
+        if (probeEnabled) {
+            const double cells = nativeRelaxedCellArea(mesh, targetEdgeLength, m_adaptivity,
+                                                       m_featureDegrees, cancel, nativeCtx);
+            if (cells > 0.0) {
+                const char* effEnv = std::getenv("CYBER_QC_EXTRACT_EFF");
+                const double kExtractEff = effEnv != nullptr ? std::atof(effEnv) : 1.0;
+                scaling = std::clamp(
+                    static_cast<float>(std::sqrt(kExtractEff * cells / targetQuads)), 0.2f, 1.5f);
+                if (std::getenv("CYBER_QC_DEBUG") != nullptr) {
+                    std::fprintf(stderr, "[qc] probe cells=%.1f eff=%.2f target=%.1f -> s0=%.3f\n",
+                                 cells, kExtractEff, targetQuads, static_cast<double>(scaling));
+                }
+            }
+        }
         for (int attempt = 0; attempt < 2; ++attempt) {
             const SeamlessUv uv = computeSeamlessUv(mesh, targetEdgeLength, scaling, m_adaptivity,
                                                     cancel, m_featureDegrees, &nativeCtx);
@@ -2755,6 +2841,11 @@ public:
             }
             out = extractIsolineQuads(mesh, uv, m_holeFillMaxBoundary);
             const double got = static_cast<double>(out.quads.size());
+            if (std::getenv("CYBER_QC_DEBUG") != nullptr) {
+                std::fprintf(stderr,
+                             "[qc] calibrate attempt=%d scaling=%.4f got=%.0f target=%.1f\n",
+                             attempt, static_cast<double>(scaling), got, targetQuads);
+            }
             if (std::getenv("CYBER_QC_SCALING") != nullptr || targetQuads <= 0.0 || got <= 0.0) {
                 break;  // fixed scaling (experiment) or nothing to calibrate against
             }
