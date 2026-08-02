@@ -61,6 +61,25 @@ even-sum template (paper Fig 10d) so partially-valid T-meshes still quantize;
 (c) the M=2 matching refinement (S2) once S1 bites. Default flip is NOT
 proposed — opt-in only until the gates are met on the full corpus.
 
+A/B table (CYBER_QC_BIMDF on vs off, output OBJ hashes compared with the
+mtllib line stripped; `dE` = reduced-energy delta over the relaxed optimum,
+identical on/off in every cell; `bench.py check` green with the flag on AND
+off, box_sharp recall 1.00 / 8 cones / 0.0° both ways):
+
+| mesh       | quads | T-mesh                          | injected | output |
+|------------|------:|---------------------------------|---------:|--------|
+| box_sharp  |  1000 | ok — 12 arcs / 6 patches        |        5 | SAME   |
+| box_sharp  |  4000 | ok — 12 arcs / 6 patches        |        5 | SAME   |
+| box_sharp  | 16000 | fail (crack in fan)             |        0 | SAME   |
+| cylinder   |  1000 | fail (ray hit crack)            |        0 | SAME   |
+| cylinder   |  4000 | fail (crack in fan)             |        0 | SAME   |
+| sphere     |  4000 | fail (10/12 non-quad patches)   |        0 | SAME   |
+| torus      |  4000 | fail (9/12 non-quad patches)    |        0 | SAME   |
+| fandisk    |  4000 | fail (71/110 non-quad patches)  |        0 | SAME   |
+| spot       |  4000 | fail (107/222 non-quad patches) |        0 | SAME   |
+| nefertiti  |  4000 | fail (ray hit crack)            |        0 | SAME   |
+| armadillo  |  4000 | fail (ray hit crack)            |        0 | SAME   |
+
 ## Update — 2026-08-02 (CAD density robustness: the sweep's 🔴 failures are FIXED; 32/32 gate cells clean)
 
 The two density-dependent robustness bugs the CAD sweep below exposed are fixed
