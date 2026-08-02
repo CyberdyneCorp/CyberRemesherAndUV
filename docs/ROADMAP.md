@@ -212,6 +212,92 @@ and robustness — not just competitive on one.
   NOT move (armadillo 20.2 -> 20.1) — dipole density was not the binding
   constraint on loop length; the remaining flow-loop gap needs a global lever
   (Bi-MDF-style quantization), not local surgery.
+- **Gap #4, dense-organic singularity count (2026-08-02, `feat/field-singularities`):
+  cone dipoles are cancellable at the FIELD level; the multires hierarchy is
+  now shippable but still gated.** Two levers, measured separately and stacked.
+  This is explicitly NOT a retry of the "field levers exhausted" finding (c7):
+  that ruled out *tuning the smoother's energy* on the single-level field —
+  lever B is a topological edit of the field's singularity set (smoothing
+  provably cannot annihilate a dipole), and lever A is the hierarchy c7 left
+  open behind its broken prolongation.
+  - **B — field-level dipole annihilation (`annihilateFieldDipoles`, DEFAULT
+    ON, kill switch `CYBER_QC_NO_CONE_MERGE`, radius
+    `CYBER_QC_CONE_MERGE_RADIUS` default 5 hops).** `buildSeamlessSetup`
+    promoted EVERY cross-field defect to a cone — no merge, prune or
+    relocation anywhere in the solve — and on organics most defects are
+    topologically-null noise (nefertiti: 997 singular vertices at totalIndex
+    122, armadillo 489 at 27). The pass BFSes a short path between a close-by
+    (+1,-1) pair over interior non-feature edges away from pinned faces, edits
+    the signed period jumps along it (standard 4-RoSy merge: a unit change
+    shifts the endpoint indices by ∓1, interiors cancel), then re-relaxes the
+    face angles with jumps frozen so the field absorbs the 90° residual.
+    Everything downstream is recomputed from the modified field, so
+    `periodJump` / `combedDirection` / rho semantics and the feature binding
+    (0e0b554) are untouched.
+  - **A — multires hand-off relax (`CYBER_QC_CROSSFIELD_MULTIRES`, still
+    OPT-IN).** `computeCrossField`'s three phases are now shared helpers
+    (`initFrames` / `applyPins` / `transportSmooth`), and
+    `computeCrossFieldFromOrientation` pins identically then relaxes its
+    vertex-to-face hand-off with the same converged transport solve seeded
+    from the hierarchy. Stock output verified byte-identical. Per the plan's
+    mandatory scope cut, `smoothOrientation`'s convergence is NOT touched (it
+    feeds `computePositionField`, which the InstantMeshes and integer
+    extractors also consume).
+  - **Measured** (cyber-pure = `--pure-quads`, target 8000 / spot 3000):
+
+    | config | nefertiti sing/angle/recall/haus/loops | armadillo | spot |
+    |---|---|---|---|
+    | baseline | 401 / 9.04 / 0.887 / 0.0038 / 2601 | 377 / 9.11 / 0.761 / 0.0071 / 483 | 93 / 6.43 / 0.587 / 0.0059 / 433 |
+    | B (default) | **347** / 9.50 / 0.861 / 0.0040 / 1631 | **299** / 9.02 / 0.806 / 0.0060 / 497 | **79** / 6.72 / 0.541 / 0.0048 / 561 |
+    | A only | 346 / 8.72 / 0.870 / 0.0040 / 1187 | 297 / 8.76 / 0.820 / 0.0059 / 457 | 87 / 7.49 / 0.645 / 0.0046 / 811 |
+    | A+B | **316** / 8.51 / 0.902 / 0.0039 / 1892 | **231** / 8.68 / 0.743 / 0.0062 / 430 | **65** / 7.81 / 0.610 / 0.0067 / 1224 |
+
+    fandisk@3000 (B, default): sing 77 → 68, recall 0.413 → 0.431, hausdorff
+    0.0089 → 0.0080. Generated corpus unchanged, box_sharp keeps 8 cones /
+    0.00° / recall 1.00; ctest 13/13, `bench.py check` green.
+  - **Exit gate NOT met.** The gate was nefertiti ≤ 250 AND armadillo ≤ 250.
+    armadillo reaches 231 with A+B (and 299 on the default); nefertiti bottoms
+    out at 316. Its limiter is measurable and specific: 1805 feature edges on
+    the coarse remesh pin a dense wrinkle web, so 349 of its 521 +cones never
+    find a partner over non-pinned paths at all, and radius 12/16 outputs are
+    byte-identical to radius 8 — the pass is saturated, not under-tuned.
+    Getting nefertiti under 250 needs the pseudo-feature web itself addressed
+    (or a global quantization lever), not more dipole surgery.
+  - **NEW DO-NOT-RETRY:**
+    - *Pinned-adjacent cancellation paths* (`CYBER_QC_CONE_MERGE_LOOSE`,
+      removed): letting paths ride pinned-face borders took nefertiti's
+      attempts 199 → 866 but cancellations only 171 → 172 — 632 reverts. The
+      injected 90° residual cannot diffuse past a pinned face, exactly the
+      shear-band failure predicted; the plan's "skip paths adjacent to pins"
+      is confirmed necessary, not optional.
+    - *A smoothness-energy homotopy guard* (removed): "region residual energy
+      must not increase" rejected 72 of armadillo's 169 pairs whose acceptance
+      was already metric-clean, and it caught NEITHER torus failure mode. Use
+      the region-disk and curvature-structure guards instead.
+    - *A global genus gate* instead of a per-region disk check: organic work
+      meshes carry accidental bridge handles (armadillo: 56 non-manifold pinch
+      edges; the excised complex is genus-positive) so a genus gate disables
+      the pass entirely on exactly the meshes it helps.
+    - *Flipping `CYBER_QC_CROSSFIELD_MULTIRES` to default*: the corpus A/B is
+      NOT clean. box_sharp and cylinder are bit-identical and sphere improves
+      sharply (sing 35 → 24, angle 13.1 → 7.8), fandisk improves (sing 50 → 47,
+      recall 0.772 → 0.730), but the **torus regresses past bench tolerance**
+      (hausdorff 0.0281 → 0.0495, +76% vs a 30% budget; angle 20.4 → 25.6).
+      Keep it env-gated until the handle case is understood.
+  - **Two guards were bench-caught and are load-bearing** — both found by the
+    torus, both invisible to the vertex-index verification:
+    1. *Region disk topology.* Per-vertex index checks span the dual cycle
+       space only when the relaxed faces form a disk. On an annulus region the
+       wrap generator's rotational holonomy is unchecked, so a jump edit can
+       twist the field 90° around a tube with every index intact: torus
+       sing 64 → 140 / angle 20.4 → 30.7 while its FIELD got *cleaner*
+       (32 → 6 cones). Regions that wrap retry at 1/2 then 1/3 radius.
+    2. *Curvature structure.* Geometry-demanded cone pairs are not noise;
+       cancelling them still cost the torus sing 64 → 75 / angle 20.4 → 26.1.
+       The discriminator is the 2-ring defect CONSISTENCY ratio |Σd|/Σ|d|:
+       structured curvature has every vertex curving the same way (torus pairs
+       r≈0.99), wrinkle noise alternates (armadillo median r 0.36). Reject at
+       |defect| > 10° and r > 0.6 — 13/13 torus pairs, 18% of armadillo's.
 - **The wall, quantified** (generated corpus, target 600, defaults): quad-cover
   wins singularity structure outright (cylinder 21 vs QuadriFlow 8 at similar
   angle quality; sphere 37 vs 8) but **feature recall collapses on sharp
