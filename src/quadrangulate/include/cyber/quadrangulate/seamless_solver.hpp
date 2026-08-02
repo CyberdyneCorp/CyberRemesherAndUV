@@ -17,7 +17,14 @@ namespace cyber::remesh {
 
 // The pre-solve topology + field data a seamless parameterization needs.
 struct SeamlessSetup {
-    CrossField field;  // per-face 4-RoSy cross field (the frame the UV aligns to)
+    CrossField field;
+
+    // Feature-binding mode (the shipped feature-pinning lever): feature edges
+    // become hard seams with integer-pinned crease isolines, period jumps are
+    // computed across creases, and the combed targets/rho use the angle()
+    // branch convention. Off reproduces the historical knife-edge-only
+    // behavior bit-exactly.
+    bool featureBinding = false;  // per-face 4-RoSy cross field (the frame the UV aligns to)
 
     // Per-edge integer period jump r in {0,1,2,3}: the 90-degree rotation that aligns
     // edgeFaces[1]'s cross to edgeFaces[0]'s across that edge (0 for boundary/feature/
@@ -43,7 +50,8 @@ struct SeamlessSetup {
 // per-edge period jumps, per-vertex singularity indices, and a cut graph. Returns
 // valid == false only for an empty/degenerate mesh.
 [[nodiscard]] SeamlessSetup buildSeamlessSetup(const Mesh& mesh, int iterations,
-                                               accel::IBackend& backend);
+                                               accel::IBackend& backend,
+                                               bool featureBinding = false);
 
 // Euler characteristic V - E + F of the mesh cut open along `setup.isCutEdge`: each cut
 // edge is split so the two sides no longer share it. A cut graph that opens a closed

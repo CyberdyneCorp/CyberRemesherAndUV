@@ -142,6 +142,11 @@ CrossField computeCrossField(const Mesh& mesh, int iterations, accel::IBackend& 
     std::size_t dbgCrease = 0, dbgGated = 0, dbgPinned = 0;
     // Constrain faces touching a feature or boundary edge to align with it.
     std::vector<char> constrained(nf, 0);
+    // Faces whose pin came from an interior FEATURE edge (a crease): only
+    // these seed the planar flood fill below. Boundary pins stay local —
+    // spreading them across open flat scans measurably regresses the
+    // open-surface cleanup suite (CV blow-up).
+    std::vector<char> fillSeed(nf, 0);
     for (std::size_t c = 0; c < nf; ++c) {
         const FaceId f = faces[c];
         const std::vector<VertexId> fv = mesh.faceVertices(f);
@@ -166,6 +171,9 @@ CrossField computeCrossField(const Mesh& mesh, int iterations, accel::IBackend& 
             field.real[f.value] = std::cos(4.0f * alpha);
             field.imag[f.value] = std::sin(4.0f * alpha);
             constrained[c] = 1;
+            if (mesh.isFeatureEdge(e) && mesh.edgeFaceCount(e) == 2) {
+                fillSeed[c] = 1;
+            }
             break;
         }
     }
@@ -201,10 +209,10 @@ CrossField computeCrossField(const Mesh& mesh, int iterations, accel::IBackend& 
     // patch removes the conflict instead of surrendering the alignment (the
     // planarity gate's answer). Curved regions are untouched: the fill stops
     // at any non-planar edge. Kill switch: CYBER_QC_NO_PLANAR_FILL.
-    if (std::getenv("CYBER_QC_PLANAR_FILL") != nullptr) {
+    if (std::getenv("CYBER_QC_NO_PLANAR_FILL") == nullptr) {
         std::vector<std::size_t> queue;
         for (std::size_t c = 0; c < nf; ++c) {
-            if (constrained[c] != 0) {
+            if (fillSeed[c] != 0) {
                 queue.push_back(c);
             }
         }

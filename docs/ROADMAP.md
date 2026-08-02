@@ -105,9 +105,26 @@ and robustness — not just competitive on one.
     - Diagnostics that found it now ship behind `CYBER_QC_FIELD_STATS`:
       per-patch axis-mix census, non-feature cut-edge census, per-phase
       grad(u) deviation histograms (relaxed vs reduced).
-    - Still OPT-IN: flipping `--sharp-edge` binding / the env trio to default
-      remains a separate decision (organics are neutral-to-better, but the
-      call is the caller's).
+    - **DEFAULT-ON (2026-08-01, final):** the lever now ships as the default.
+      Activation is value+topology-based, not env-based: the CLI binds
+      `--sharp-edge` (default 90) into the native solve, and feature binding
+      engages only when (a) the effective threshold is wider than the
+      historical knife-edge, (b) the filtered remesh actually carries interior
+      feature edges, and (c) the surface is CLOSED (same boundary gate as the
+      ARAP polish — binding features on boundaried scans measurably blew up
+      the open-surface cleanup suite and is future work). Featureless and open
+      meshes take the historical path; the planar flood fill seeds ONLY from
+      crease pins (spreading boundary pins regressed open flat scans). Env
+      trio retired in favor of kill switches: `CYBER_QC_FEATURE_DEG=40`
+      restores knife-edge binding, `CYBER_QC_NO_PLANAR_FILL`,
+      `CYBER_QC_NO_UV_SNAP`, `CYBER_QC_NO_FEATURE_PIN`. Final defaults, target
+      600: box_sharp recall **1.000**, sing **8**, angle **0.00°**, pure quads;
+      cylinder recall **0.945**, sing 9, hausdorff 0.0053. Full suite 13/13,
+      bench gate green; baselines re-recorded to lock the new floor.
+    - Noted en route: the native path is NONDETERMINISTIC run-to-run on the
+      same machine (torus outputs differ bit-wise across identical
+      invocations; parallel CG reduction suspected) — violates the
+      remeshing-pipeline determinism requirement independently of this work.
 - **quad-quality-push finding (separate lever, unimplemented):** the shipped
   val-3/5 dipole canceller (`fixValence`) is unreachable from the quad-cover
   path (sole caller is the integer extractor) — wiring it in post-extraction

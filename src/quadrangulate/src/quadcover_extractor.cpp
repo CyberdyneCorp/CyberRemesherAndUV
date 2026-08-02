@@ -350,8 +350,37 @@ SeamlessUv computeSeamlessUvNative(const Mesh& mesh, float targetEdgeLength, flo
     // over-threshold dihedrals that are sampling artifacts, not creases, and every spurious
     // hard seam costs singularities (nefertiti lever-on: 216 -> ~lever-off level with this
     // filter). Lever-off is untouched.
-    if (featEnv != nullptr) {
+    const bool wideBinding = kFeatureDihedralDegrees > 41.0f;
+    if (wideBinding) {
         filterFeatureEdgesToReference(work, refCreases, 0.25f * targetEdgeLength, featureDegrees);
+    }
+    // Feature binding engages only when the (filtered) mesh actually carries
+    // tagged interior feature edges AND the surface is closed: a featureless
+    // mesh (sphere, torus, organic scans below the threshold) takes the
+    // historical solve path bit-identically, and OPEN surfaces stay on it too
+    // — they cannot run the ARAP polish (same boundary gate) and measured a
+    // CV blow-up under feature seams (the open-surface cleanup suite).
+    // Binding features on boundaried scans is future work.
+    bool featureBinding = false;
+    if (wideBinding) {
+        std::size_t nBoundary = 0, nAlive = 0;
+        bool anyInteriorFeature = false;
+        for (Index ei = 0; ei < work.edgeCapacity(); ++ei) {
+            const EdgeId e{ei};
+            if (!work.isAlive(e)) {
+                continue;
+            }
+            ++nAlive;
+            const std::size_t nf = work.edgeFaceCount(e);
+            if (nf == 1) {
+                ++nBoundary;
+            } else if (nf == 2 && work.isFeatureEdge(e)) {
+                anyInteriorFeature = true;
+            }
+        }
+        const bool closed =
+            nAlive > 0 && static_cast<double>(nBoundary) < 0.01 * static_cast<double>(nAlive);
+        featureBinding = anyInteriorFeature && closed;
     }
 
     if (cancel != nullptr && cancel->isCancelled()) {
@@ -360,7 +389,8 @@ SeamlessUv computeSeamlessUvNative(const Mesh& mesh, float targetEdgeLength, flo
     }
 
     auto backend = accel::defaultBackend();
-    const SeamlessSetup setup = buildSeamlessSetup(work, kFieldIterations, *backend);
+    const SeamlessSetup setup =
+        buildSeamlessSetup(work, kFieldIterations, *backend, featureBinding);
     if (std::getenv("CYBER_QC_FIELD_STATS") != nullptr) {
         // Cone census: total cones and how many sit off tagged feature edges
         // (spurious flat-region cones are a field-quality smell).
@@ -448,8 +478,10 @@ SeamlessUv computeSeamlessUvNative(const Mesh& mesh, float targetEdgeLength, flo
         // a pinned crease is never recognized as lying ON an isoline. Part of
         // the in-progress feature-pinning lever: OPT-IN via CYBER_QC_UV_SNAP
         // until the seam-shear fix ships (the snap alone shifts extraction on
-        // meshes whose UVs coincidentally graze the lattice).
-        static const bool kSnapUv = std::getenv("CYBER_QC_UV_SNAP") != nullptr;
+        // meshes whose UVs coincidentally graze the lattice). Only under
+        // feature binding — without pinned creases the snap merely perturbs
+        // (a measured torus regression). Kill switch: CYBER_QC_NO_UV_SNAP.
+        const bool kSnapUv = featureBinding && std::getenv("CYBER_QC_NO_UV_SNAP") == nullptr;
         std::array<Vec2, 3> corners = param.cornerUv[fi];
         if (kSnapUv) {
             for (Vec2& c : corners) {

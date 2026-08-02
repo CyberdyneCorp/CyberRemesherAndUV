@@ -210,7 +210,8 @@ int SeamlessSetup::totalIndex() const {
     return std::accumulate(singularityIndex.begin(), singularityIndex.end(), 0);
 }
 
-SeamlessSetup buildSeamlessSetup(const Mesh& mesh, int iterations, accel::IBackend& backend) {
+SeamlessSetup buildSeamlessSetup(const Mesh& mesh, int iterations, accel::IBackend& backend,
+                                 bool featureBinding) {
     SeamlessSetup setup;
     if (mesh.faceCapacity() == 0) {
         return setup;
@@ -230,7 +231,8 @@ SeamlessSetup buildSeamlessSetup(const Mesh& mesh, int iterations, accel::IBacke
     // representative wrap and the reduced integer phase fights the (correct) relaxed targets.
     // Computed for feature edges too under the feature-pinning lever; lever-off keeps the
     // historical skip bit-compatible.
-    const bool featureLever = std::getenv("CYBER_QC_FEATURE_DEG") != nullptr;
+    setup.featureBinding = featureBinding;
+    const bool featureLever = featureBinding;
     setup.periodJump.assign(mesh.edgeCapacity(), 0);
     for (Index ei = 0; ei < mesh.edgeCapacity(); ++ei) {
         const EdgeId e{ei};
@@ -961,7 +963,7 @@ Parameterization solveParameterization(const Mesh& mesh, const SeamlessSetup& se
     const float invS = 1.0f / spacing;
     // Feature-pinning lever: reconstruct combed targets on the comb's own angle() convention
     // (see combedDirection). Lever-off keeps the historical direction() branch bit-compatible.
-    const bool angleConvention = std::getenv("CYBER_QC_FEATURE_DEG") != nullptr;
+    const bool angleConvention = setup.featureBinding;
 
     // Comb the frame so it is continuous across non-cut edges.
     int touched = 0;

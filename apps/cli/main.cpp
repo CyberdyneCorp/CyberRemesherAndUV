@@ -357,14 +357,13 @@ int main(int argc, char** argv) {
     const auto makeQuadrangulator = [&method, adaptivity, holeFill,
                                      sharpDegrees]() -> std::unique_ptr<remesh::IQuadrangulator> {
         if (method == "quad-cover") {
-            // featureDegrees stays at the historical 40 (knife edges only) —
-            // binding --sharp-edge (default 90) into the solve is the
-            // in-progress feature-pinning lever (CYBER_QC_FEATURE_DEG=90):
-            // it lifts box_sharp recall 0.04 -> 0.73 but the map still
-            // shears under feature seams (docs/ROADMAP.md 2026-08-01 #2);
-            // flip the default only when the smear fix lands.
-            (void)sharpDegrees;
-            return remesh::makeQuadCoverQuadrangulator(40, adaptivity, holeFill, 40.0f);
+            // --sharp-edge (default 90) binds sharp edges into the native
+            // solve: feature seams + integer-pinned crease isolines
+            // (docs/ROADMAP.md 2026-08-01 — box_sharp recall 0.04 -> 1.00 at
+            // 8 singularities, organics neutral-to-better). Revert to the
+            // historical knife-edge-only binding with --sharp-edge 40 or
+            // CYBER_QC_FEATURE_DEG=40.
+            return remesh::makeQuadCoverQuadrangulator(40, adaptivity, holeFill, sharpDegrees);
         }
         if (method == "instant-meshes") {
             return remesh::makeInstantMeshesQuadrangulator();
