@@ -31,6 +31,7 @@
 #include "cyber/core/isotropic.hpp"
 #include "cyber/core/math.hpp"
 #include "cyber/core/reference_surface.hpp"
+#include "cyber/quadrangulate/position_field.hpp"
 #include "cyber/quadrangulate/seamless_solver.hpp"
 
 #ifdef CYBER_HAVE_QUADCOVER
@@ -2657,6 +2658,138 @@ double meshTargetQuads(const Mesh& mesh, float targetEdgeLength) {
     return area / cell;
 }
 
+// Valence-3/5 dipole cancellation on the extracted quad mesh — the integer
+// extractor's FixValence (quadMeshValenceCleanup, quad_extract.cpp) wired into the
+// quad-cover path. Flow loops break at irregular vertices, so cancelling 3/5 dipoles
+// directly lengthens quad flow loops; the operator is strictly count-monotone (the
+// irregular count never rises). Only the pure-quad subset is edited: every non-quad
+// face is frozen (its vertices pinned, its edges reserved) so the seam between the
+// two subsets stays manifold. Vertices on crease lines — any edge whose face-pair
+// dihedral exceeds `featureDegrees` — are pinned too: a rotation deletes the shared
+// edge, and deleting a crease-tracing edge would rotate quads off the feature line
+// (feature recall is gated). Returns the number of applied operations; on change,
+// `faces` is rewritten and unreferenced (doublet-freed) vertices are compacted out.
+std::size_t cancelValenceDipoles(std::vector<Vec3>& vertices,
+                                 std::vector<std::vector<std::size_t>>& faces,
+                                 float featureDegrees) {
+    // Partition into the editable pure-quad subset and the frozen remainder
+    // (non-destructive: on a no-op `faces` is returned exactly as given).
+    std::vector<std::array<int, 4>> quads;
+    std::vector<char> isQuad(faces.size(), 0);
+    std::vector<char> pinned(vertices.size(), 0);
+    std::set<std::pair<int, int>> reservedEdges;
+    for (std::size_t i = 0; i < faces.size(); ++i) {
+        const auto& f = faces[i];
+        bool pureQuad = f.size() == 4;
+        for (std::size_t a = 0; pureQuad && a < 4; ++a) {
+            for (std::size_t b = a + 1; b < 4; ++b) {
+                if (f[a] == f[b]) {
+                    pureQuad = false;
+                    break;
+                }
+            }
+        }
+        if (pureQuad) {
+            isQuad[i] = 1;
+            quads.push_back({static_cast<int>(f[0]), static_cast<int>(f[1]), static_cast<int>(f[2]),
+                             static_cast<int>(f[3])});
+            continue;
+        }
+        for (std::size_t k = 0; k < f.size(); ++k) {
+            const int a = static_cast<int>(f[k]);
+            const int b = static_cast<int>(f[(k + 1) % f.size()]);
+            pinned[static_cast<std::size_t>(a)] = 1;
+            if (a != b) {
+                reservedEdges.insert(std::minmax(a, b));
+            }
+        }
+    }
+    if (quads.empty()) {
+        return 0;
+    }
+
+    // Crease pinning by face-pair dihedral (Newell normals over ALL faces, so a
+    // crease between a quad and a frozen cap still pins the quad's vertices).
+    const auto faceNormal = [&](const std::vector<std::size_t>& f) {
+        Vec3 n{0.0f, 0.0f, 0.0f};
+        for (std::size_t k = 0; k < f.size(); ++k) {
+            const Vec3& p = vertices[f[k]];
+            const Vec3& q = vertices[f[(k + 1) % f.size()]];
+            n.x += (p.y - q.y) * (p.z + q.z);
+            n.y += (p.z - q.z) * (p.x + q.x);
+            n.z += (p.x - q.x) * (p.y + q.y);
+        }
+        const float len = length(n);
+        return len > 0.0f ? n * (1.0f / len) : n;
+    };
+    const float cosThreshold = std::cos(featureDegrees * 3.14159265358979323846f / 180.0f);
+    std::map<std::pair<int, int>, std::pair<int, Vec3>> edgeFaces;  // count + first normal
+    const auto scanFace = [&](const std::vector<std::size_t>& f) {
+        if (f.size() < 3) {
+            return;
+        }
+        const Vec3 n = faceNormal(f);
+        for (std::size_t k = 0; k < f.size(); ++k) {
+            const int a = static_cast<int>(f[k]);
+            const int b = static_cast<int>(f[(k + 1) % f.size()]);
+            if (a == b) {
+                continue;
+            }
+            auto [it, inserted] = edgeFaces.try_emplace(std::minmax(a, b), 1, n);
+            if (!inserted) {
+                ++it->second.first;
+                if (it->second.first == 2 && dot(it->second.second, n) < cosThreshold) {
+                    pinned[static_cast<std::size_t>(a)] = 1;
+                    pinned[static_cast<std::size_t>(b)] = 1;
+                }
+            }
+        }
+    };
+    for (const auto& f : faces) {
+        scanFace(f);
+    }
+
+    const std::size_t ops =
+        quadMeshValenceCleanup(quads, static_cast<int>(vertices.size()), pinned, reservedEdges);
+    if (ops == 0) {
+        return 0;  // `faces` untouched: the kill-switch A/B stays byte-identical
+    }
+    // Write back: the cleaned quads, then the frozen remainder in original order.
+    std::vector<std::vector<std::size_t>> merged;
+    merged.reserve(quads.size() + faces.size());
+    for (const auto& q : quads) {
+        merged.push_back({static_cast<std::size_t>(q[0]), static_cast<std::size_t>(q[1]),
+                          static_cast<std::size_t>(q[2]), static_cast<std::size_t>(q[3])});
+    }
+    for (std::size_t i = 0; i < faces.size(); ++i) {
+        if (isQuad[i] == 0) {
+            merged.push_back(std::move(faces[i]));
+        }
+    }
+    faces.swap(merged);
+    // Compact out vertices freed by doublet dissolution.
+    std::vector<int> remap(vertices.size(), -1);
+    for (const auto& f : faces) {
+        for (const std::size_t v : f) {
+            remap[v] = 0;
+        }
+    }
+    std::size_t top = 0;
+    for (std::size_t v = 0; v < vertices.size(); ++v) {
+        if (remap[v] == 0) {
+            remap[v] = static_cast<int>(top);
+            vertices[top++] = vertices[v];
+        }
+    }
+    vertices.resize(top);
+    for (auto& f : faces) {
+        for (std::size_t& v : f) {
+            v = static_cast<std::size_t>(remap[v]);
+        }
+    }
+    return ops;
+}
+
 // IQuadrangulator implementation (Milestone 3). Runs the full QuadCover pipeline:
 // seamless integer-grid UV (M1, out-of-process via CYBER_QUADCOVER_CLI) -> isoline
 // trace + boundary-aware cleanup (M2) -> replace `mesh` in place with the quad mesh.
@@ -2737,6 +2870,22 @@ public:
                 }
                 std::fprintf(stderr, "[qc] capfix -> quads=%zu hist{%s}\n", out.quads.size(),
                              h.c_str());
+            }
+        }
+        // Cancel valence-3/5 dipoles on the extracted quads (see cancelValenceDipoles):
+        // strictly count-monotone, so it can only remove irregular vertices — the lever
+        // for longer quad flow loops. Runs AFTER the count calibration and the cap fix
+        // so it never perturbs the scaling feedback and sees the final quad set. Crease
+        // detection reuses the solve's feature threshold (CYBER_QC_FEATURE_DEG override,
+        // as in computeSeamlessUv). Kill switch CYBER_QC_NO_DIPOLE for A/B.
+        if (std::getenv("CYBER_QC_NO_DIPOLE") == nullptr) {
+            const char* featEnv = std::getenv("CYBER_QC_FEATURE_DEG");
+            const float featureDeg =
+                featEnv != nullptr ? static_cast<float>(std::atof(featEnv)) : m_featureDegrees;
+            const std::size_t ops = cancelValenceDipoles(out.vertices, out.quads, featureDeg);
+            if (std::getenv("CYBER_QC_DEBUG") != nullptr) {
+                std::fprintf(stderr, "[qc] dipole cleanup ops=%zu -> faces=%zu verts=%zu\n", ops,
+                             out.quads.size(), out.vertices.size());
             }
         }
 

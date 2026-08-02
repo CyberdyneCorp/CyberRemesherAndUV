@@ -1,7 +1,9 @@
 #include <doctest.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <cstddef>
 #include <tuple>
 #include <vector>
 
@@ -534,6 +536,28 @@ TEST_CASE("valence cleanup: dipole canceller lowers irregular count and stays ma
     CHECK(s.manifoldWith);                         // never breaks the manifold
     CHECK(s.irregularWith <= s.irregularWithout);  // monotone: never worse
     CHECK(s.irregularWith < s.irregularWithout);   // and it helps on a curved mesh
+}
+
+// Regression for the public adapter (quadMeshValenceCleanup): with no constraints it
+// dissolves an interior doublet exactly like fixValence; a pinned doublet vertex is
+// left alone (the quad-cover path pins vertices shared with non-quad caps and crease
+// vertices, which must never be dissolved or rotated).
+TEST_CASE("valence cleanup adapter: dissolves doublets unless pinned") {
+    // Two quads sharing BOTH edges at vertex 0 — vertex 0 is an interior valence-2
+    // doublet; dissolving merges them into the single quad {1,2,3,4}.
+    const std::vector<std::array<int, 4>> doublet{{0, 1, 2, 3}, {0, 3, 4, 1}};
+
+    std::vector<std::array<int, 4>> quads = doublet;
+    const std::size_t ops = remesh::quadMeshValenceCleanup(quads, 5, {}, {});
+    CHECK(ops == 1);
+    REQUIRE(quads.size() == 1);
+    CHECK(quads[0] == std::array<int, 4>{1, 2, 3, 4});
+
+    quads = doublet;
+    std::vector<char> pinned(5, 0);
+    pinned[0] = 1;  // the doublet vertex is pinned -> nothing may change
+    CHECK(remesh::quadMeshValenceCleanup(quads, 5, pinned, {}) == 0);
+    CHECK(quads == doublet);
 }
 
 TEST_CASE("integer solve: extraction is manifold, all-quad and near-watertight") {

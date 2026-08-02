@@ -1,7 +1,10 @@
 #pragma once
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <memory>
+#include <set>
+#include <utility>
 #include <vector>
 
 #include "cyber/core/mesh.hpp"
@@ -196,6 +199,23 @@ struct IntegerExtractStats {
     std::size_t boundaryEdges = 0;
 };
 [[nodiscard]] IntegerExtractStats debugIntegerExtract(const Mesh& mesh, const PositionField& field);
+
+// Valence cleanup on an indexed quad mesh — the integer extractor's FixValence
+// (doublet dissolution + valence-3/5 dipole cancellation by edge rotation, run to a
+// joint fixpoint), exposed so other extraction paths (e.g. quad-cover) can reuse it.
+// Strictly count-monotone: the interior irregular (valence != 4) count never rises.
+// `quads` is edited in place (doublet-merged faces are dropped; freed vertices become
+// unreferenced — compact them at materialisation). `pinned` (empty == none, else size
+// numVertices) marks vertices the cleanup must treat like boundary: never counted as
+// irregular, never dissolved, never a rotation endpoint — pin every vertex shared
+// with faces outside `quads` and every vertex on a feature/crease line. Edges in
+// `reservedEdges` (undirected, minmax-keyed vertex pairs, e.g. the edges of the
+// outside faces) are never introduced as a rotation diagonal, so the quad subset
+// stays manifold against its complement. Returns the number of applied operations
+// (0 == the mesh was already at the fixpoint).
+std::size_t quadMeshValenceCleanup(std::vector<std::array<int, 4>>& quads, int numVertices,
+                                   const std::vector<char>& pinned,
+                                   const std::set<std::pair<int, int>>& reservedEdges);
 
 // Validation hook for the valence cleanup (dipole canceller): the interior-irregular
 // count of the extraction with the edge-rotation pass disabled vs enabled. The pass
