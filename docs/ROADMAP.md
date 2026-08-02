@@ -4,6 +4,99 @@ Goal: make CyberRemesher's automatic quad retopology **better than QuadriFlow**
 across four axes — quality-per-polygon, median quad angle, feature/CAD fidelity,
 and robustness — not just competitive on one.
 
+## Update — 2026-08-02 (CAD multi-density confirmation: the "better than QuadriFlow on CAD" claim does NOT bank)
+
+Measurement-only sweep to bank (or refuse) the CAD claim under this file's own
+discipline: **count-matched, 7 densities, no single-density claims** (fandisk's
+per-density jitter is sd 0.90° on identical code — see 2026-07-24).
+
+- **Protocol.** Meshes: generated `box_sharp` + `cylinder`, plus fandisk
+  (fetched from alecjacobson/common-3d-test-models; ⚠️ **its upstream license is
+  unstated** — measurement-only use, cached in gitignored `.bench-cache/`, not
+  redistributed). Densities: target-quads ∈ {400, 600, 900, 1400, 2000, 3000,
+  4500}. Arms: ours default (quad-cover), ours `--pure-quads`, QuadriFlow
+  (`-i/-o/-f`). Metrics: `tools/bench/mesh_metrics.py compute_all`. 3 repeats
+  per sub-5s cell: **every repeat was byte-identical for every arm** (all sd
+  0.0), so the density axis is the only noise source and 7 densities cover it.
+  Raw data: `tools/bench/cad_sweep_results.csv` (primary, 185 runs),
+  `tools/bench/cad_sweep_matched.csv` (count-matched phase, 42 cells); script
+  `tools/bench/cad_sweep.py`.
+- **Count-matching required a second phase.** At the same request, ours
+  undershoots the target by **5–28%** on these CAD meshes while QuadriFlow
+  lands within −9..+3%, so only 1–2 of 7 same-request pairs agreed within 8% —
+  nothing bankable either way. A supplementary phase re-ran ours with inflated
+  requests (×1.09–1.7, up to 3 calibration iterations) until achieved counts
+  agreed with QF's within 8%. That yielded 7/7 matched cells on box_sharp and
+  fandisk, 6/7 on cylinder for `--pure-quads` (pairs below are those cells; the
+  calibration undershoot is itself a finding — the probe's eta is corpus-tuned,
+  not CAD-tuned).
+
+**ours `--pure-quads` vs QuadriFlow, count-matched (achieved ours/QF; sing,
+angle°, recall, hausdorff-p99):**
+
+| box_sharp | 396/384 | 598/600 | 902/864 | 1408/1350 | 1944/1944 | 3059/2904 | 4416/4454 |
+|---|---|---|---|---|---|---|---|
+| sing | 13/**8** | 10/**8** | 44/**8** | 8/8 | 8/8 | 22/**8** | **0**/8 |
+| angle | 4.38/**0.24** | 2.81/**0.22** | 9.87/**0.14** | 0.52/**0.16** | 0.88/**0.16** | 3.02/**0.16** | **0.47**/0.60 |
+| recall | 0.89/**1.00** | 0.83/**1.00** | 0.25/**1.00** | 1.00/1.00 | 1.00/1.00 | 0.60/**1.00** | 0.11/**0.99** |
+| haus | .0060/**.0054** | .0075/**.0054** | .0294/**.0054** | .0054/.0054 | .0054/.0054 | .0313/**.0054** | .219/**.0054** |
+
+| cylinder | 380/364 | 586/607 | 938/903 | (1400 unmatched) | 1756/1884 | 2880/2873 | 4604/4616 |
+|---|---|---|---|---|---|---|---|
+| sing | 20/**8** | 19/**8** | 16/**8** | — | 22/**8** | 27/**8** | 61/**8** |
+| angle | 8.31/**4.89** | 7.03/**4.34** | 4.83/**4.61** | — | 7.09/**3.82** | 10.2/**3.85** | 17.1/**3.56** |
+| recall | 0.17/**0.60** | 0.29/**0.80** | 0.36/**0.60** | — | 0.45/**0.78** | 0.52/**0.92** | 0.29/**0.80** |
+| haus | .0133/**.0093** | .0099/**.0052** | .0071/**.0065** | — | .0069/**.0050** | .0057/**.0048** | .0059/**.0048** |
+
+| fandisk | 366/365 | 620/611 | 932/885 | 1420/1374 | 1820/1946 | 2608/2724 | 4012/3915 |
+|---|---|---|---|---|---|---|---|
+| sing | **34**/36 | 42/**34** | 55/**32** | 57/**42** | 65/**32** | 59/**40** | 76/**42** |
+| angle | 15.4/**10.8** | **10.2**/10.9 | 11.1/**7.48** | **8.28**/8.72 | **7.84**/8.97 | 11.0/**9.13** | 7.98/**6.43** |
+| recall | 0.19/**0.34** | 0.21/**0.40** | 0.40/**0.54** | 0.41/**0.64** | 0.44/**0.78** | 0.54/**0.70** | 0.61/**0.76** |
+| haus | .0542/**.0192** | .0271/**.0130** | **.0113**/.0179 | .0095/**.0074** | .0091/**.0051** | .0068/.0067 | .0051/**.0047** |
+
+**Verdicts per axis (ours `--pure-quads` vs QF; better-at-k/n over matched
+densities, mean paired delta):**
+
+| axis | box_sharp | cylinder | fandisk |
+|---|---|---|---|
+| singularities | TIE-worse (1/7, +7.0 ± 14.4) | **LOSS** (0/6, +19.5) | **LOSS** (1/7, +18.6) |
+| angle_dev_mean | **LOSS** (1/7, +2.9°) | **LOSS** (0/6, +4.9°) | TIE (3/7, +1.3 ± 2.2°, t ≈ 1.6 — not distinguishable from zero) |
+| feature_recall | **LOSS** (0/7, −0.33) | **LOSS** (0/6, −0.40) | **LOSS** (0/7, −0.20) |
+| hausdorff_p99 | **LOSS** (2/7) | **LOSS** (0/6) | **LOSS** (1/7) |
+| flow_loop_mean_len | TIE (4/7) | **LOSS** (0/6) | **LOSS** (2/7) |
+| quad_ratio | TIE (1.0 both) | TIE (1.0 both) | TIE (1.0 both) |
+
+- **Default arm (quad-cover, quad-dominant), count-matched, for context:** it
+  is the stronger CAD arm but still does not bank the claim. box_sharp: parity
+  with QF at 5/6 matched cells (perfect 8-cone grid, recall 1.0, angle ≤0.9°)
+  — QF holds that same perfect grid at **all 7**. cylinder (4/7 matched only):
+  **feature_recall WIN 4/4 (0.95–0.98 vs 0.60–0.80)** and hausdorff WIN 4/4,
+  but singularities/angle/flow LOSS. fandisk: hausdorff 5/7 better and angle
+  5/7 better (mean −0.52 ± 1.71° — not distinguishable from zero at jitter
+  sd 0.9°), recall TIE (4/7), singularities **LOSS 0/7 (+28 mean, 108 vs 42 at
+  4500)**.
+- 🔴 **Robustness findings (new, default arm on CAD):**
+  - `cylinder` at target ≈2500–3000: **hard failure, exit 4 "remeshing
+    produced no result"** (reproduced standalone at `--target-quads 2510`);
+    at nominal 3000 it returns a defective result (240 sing, 32.6° angle,
+    21s) and at 4500 it takes **657s** (vs QF 1.4s) for 171 sing / 44.7°.
+  - `box_sharp`: intermittent geometry drops as a function of the *request* —
+    nominal 1400/4500 and matched-2000 produce recall 0.08–0.33 with
+    hausdorff-p99 ~0.19–0.22 (the box loses faces), while neighboring requests
+    are perfect. `--pure-quads` shows the same class at matched-4500
+    (haus 0.219, recall 0.11 — a flawless 0-singularity grid on the *wrong*
+    geometry). QuadriFlow: 21/21 cells clean, ≤1.5s.
+- **Bottom line:** count-matched over 7 densities, QuadriFlow wins CAD on
+  singularities, feature recall, and (except fandisk-default) angle; our banked
+  CAD wins are narrow — default-arm feature recall + hausdorff on cylinder,
+  hausdorff on fandisk — and sit behind the robustness failures above. The
+  flat-CAD feature-following win vs QF recorded 2026-07-24 (cube, 0.98% vs
+  2.69%) still stands; this sweep does not extend it to a general CAD claim.
+  Next levers: the exit-4/657s cylinder pathology, the request-dependent
+  geometry drops on box_sharp, CAD count calibration (probe eta), and
+  singularity count on curved CAD.
+
 ## Update — 2026-08-01 (CI scoreboard lands; CLI was measuring the wrong solver; isotropic adaptivity explosions fixed)
 
 - **`tools/bench/` benchmark harness** (new): deterministic generated corpus +
