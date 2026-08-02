@@ -534,7 +534,7 @@ void annihilateFieldDipoles(const Mesh& mesh, CrossField& field) {
         std::vector<VertexId> regionVerts;
         std::vector<FaceId> regionFaces;
         int regionRings = 0;
-        for (const int rings : {kRegionRings, kRegionRings / 2}) {
+        for (const int rings : {kRegionRings, kRegionRings / 2, kRegionRings / 3}) {
             std::queue<VertexId> rq;
             for (const VertexId pv : path) {
                 vertexDepth[pv.value] = 0;
