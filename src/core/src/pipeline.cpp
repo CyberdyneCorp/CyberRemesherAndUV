@@ -6,6 +6,8 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <functional>
+#include <limits>
 #include <map>
 #include <queue>
 #include <thread>
@@ -371,7 +373,8 @@ Vec3 tangentialTarget(const Mesh& mesh, VertexId v, float lambda) {
 // and open borders keep their subdivided positions — sliding them along the
 // faceted crease instead reprojects erratically and creates new slivers.
 void relaxQuadMesh(Mesh& mesh, const ReferenceSurface& reference, float sharpEdgeDegrees,
-                   int iterations, float lambda, bool shapeMatch = false) {
+                   int iterations, float lambda, bool shapeMatch = false,
+                   const std::vector<std::array<Vec3, 2>>& creaseNetwork = {}) {
     mesh.tagFeatureEdges(sharpEdgeDegrees);
     std::vector<bool> constrained(mesh.vertexCapacity(), false);
     for (Index ei = 0; ei < mesh.edgeCapacity(); ++ei) {
@@ -383,10 +386,11 @@ void relaxQuadMesh(Mesh& mesh, const ReferenceSurface& reference, float sharpEdg
         constrained[a.value] = true;
         constrained[b.value] = true;
     }
-
     // Uniform target square half-diagonal for shape matching: the current mean
     // quad edge / sqrt(2). Recomputed each sweep so it tracks the mesh as it
-    // uniformizes and converges to a consistent global cell size.
+    // uniformizes and converges to a consistent global cell size. Also sets the
+    // "sits ON the crease" tolerance below (5% of a cell: crease vertices land at
+    // ~float-epsilon of the polyline, everything else at least half a cell away).
     const auto meanQuadEdge = [&]() {
         double sum = 0.0;
         std::size_t n = 0;
@@ -404,6 +408,37 @@ void relaxQuadMesh(Mesh& mesh, const ReferenceSurface& reference, float sharpEdg
         }
         return n ? static_cast<float>(sum / static_cast<double>(n)) : 0.0f;
     };
+
+    // Curved creases defeat the dihedral tag above: a coarse quad on a curved wall is
+    // bent, its Newell normal tilts toward the wall's centre, and the crease dihedral
+    // reads well under the threshold (a quarter-density cylinder rim reads ~83 degrees
+    // against the 90-degree tag) — so rim vertices were never frozen and the relax
+    // smoothed the sharp feature away (cylinder --pure-quads recall 1.00 -> 0.75).
+    // Freeze any vertex sitting ON the source crease polyline network instead; the
+    // network is empty for feature-free meshes (behavior unchanged).
+    const float creaseTol = 0.05f * meanQuadEdge();
+    if (!creaseNetwork.empty() && creaseTol > 0.0f) {
+        for (Index vi = 0; vi < mesh.vertexCapacity(); ++vi) {
+            const VertexId v{vi};
+            if (!mesh.isAlive(v) || constrained[vi]) {
+                continue;
+            }
+            const Vec3 p = mesh.position(v);
+            float best = std::numeric_limits<float>::max();
+            for (const auto& seg : creaseNetwork) {
+                const Vec3 ab = seg[1] - seg[0];
+                const float len2 = dot(ab, ab);
+                const float t =
+                    len2 > 1e-20f ? std::clamp(dot(p - seg[0], ab) / len2, 0.0f, 1.0f) : 0.0f;
+                const Vec3 q = seg[0] + ab * t;
+                best = std::min(best, dot(p - q, p - q));
+                if (best <= 0.0f) {
+                    break;
+                }
+            }
+            constrained[vi] = best < creaseTol * creaseTol;
+        }
+    }
 
     std::vector<Vec3> newPos(mesh.vertexCapacity());
     std::vector<bool> move(mesh.vertexCapacity(), false);
@@ -519,7 +554,7 @@ PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSi
     // option with honest residual reporting — this construction leaves zero
     // residual non-quads only after subdividing, so triangles at quarter
     // density become 3 quads).
-    const int effectiveQuads =
+    int effectiveQuads =
         params.pureQuads ? std::max(25, params.targetQuadCount / 4) : params.targetQuadCount;
 
     // Stage 1: guarded target edge length.
@@ -528,6 +563,85 @@ PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSi
     work = weldCoincidentVertices(work);   // fuse unwelded coincident patches (seam fix)
     work = orientFacesConsistently(work);  // repair inconsistent face winding (robustness)
     const double area = totalSurfaceArea(work);
+
+    // Feature-resolvability floor for the pure-quad base (spec: no silent geometry
+    // loss). Quarter density can under-resolve a CLOSED sharp crease loop outright: a
+    // ~100-quad base on the generated cylinder gives its rims ~10 cells, the cap cross
+    // field has no room to align with the rim between its cones, and whole arcs of the
+    // feature are unrepresentable no matter what downstream does. Require at least
+    // kMinCellsPerCreaseLoop base cells along every closed crease loop, raising the base
+    // density when the quarter-density default cannot provide them (capped at the full
+    // request — the subdivision then overshoots the count honestly rather than shipping
+    // a feature-less "pure" result). Open crease networks (a cube's corner-joined edges)
+    // and feature-free meshes are unaffected.
+    if (params.pureQuads) {
+        constexpr double kMinCellsPerCreaseLoop = 18.0;
+        work.tagFeatureEdges(params.sharpEdgeDegrees);
+        // Connected components of interior feature edges; a component is a closed loop
+        // when every touched vertex has exactly two incident feature edges.
+        std::map<Index, std::vector<Index>> vertexFeatureEdges;  // vertex -> feature edges
+        for (Index ei = 0; ei < work.edgeCapacity(); ++ei) {
+            const EdgeId e{ei};
+            if (!work.isAlive(e) || work.edgeFaceCount(e) != 2 || !work.isFeatureEdge(e)) {
+                continue;
+            }
+            const auto [a, b] = work.edgeVertices(e);
+            vertexFeatureEdges[a.value].push_back(ei);
+            vertexFeatureEdges[b.value].push_back(ei);
+        }
+        std::map<Index, Index> parent;  // union-find over feature vertices
+        const std::function<Index(Index)> find = [&parent](Index x) {
+            while (parent[x] != x) {
+                x = parent[x] = parent[parent[x]];
+            }
+            return x;
+        };
+        for (const auto& [v, edges] : vertexFeatureEdges) {
+            parent.emplace(v, v);
+        }
+        for (Index ei = 0; ei < work.edgeCapacity(); ++ei) {
+            const EdgeId e{ei};
+            if (!work.isAlive(e) || work.edgeFaceCount(e) != 2 || !work.isFeatureEdge(e)) {
+                continue;
+            }
+            const auto [a, b] = work.edgeVertices(e);
+            parent[find(a.value)] = find(b.value);
+        }
+        std::map<Index, double> componentLength;
+        std::map<Index, bool> componentClosed;
+        for (const auto& [v, edges] : vertexFeatureEdges) {
+            const Index root = find(v);
+            auto [it, inserted] = componentClosed.emplace(root, true);
+            if (edges.size() != 2) {
+                it->second = false;  // junction or chain end: not a simple closed loop
+            }
+        }
+        for (Index ei = 0; ei < work.edgeCapacity(); ++ei) {
+            const EdgeId e{ei};
+            if (!work.isAlive(e) || work.edgeFaceCount(e) != 2 || !work.isFeatureEdge(e)) {
+                continue;
+            }
+            const auto [a, b] = work.edgeVertices(e);
+            componentLength[find(a.value)] +=
+                static_cast<double>(length(work.position(a) - work.position(b)));
+        }
+        // Only loops RESOLVABLE at the quarter-density base count as features here: a
+        // loop must span at least kMinResolvableCells base cells or it is sub-resolution
+        // dihedral noise (an organic scan's wrinkle loops — armadillo's drove the base to
+        // the full request, a 4x count overshoot, before this filter).
+        constexpr double kMinResolvableCells = 8.0;
+        const double baseCell =
+            effectiveQuads > 0 ? std::sqrt(area / static_cast<double>(effectiveQuads)) : 0.0;
+        for (const auto& [root, len] : componentLength) {
+            if (!componentClosed[root] || len <= 0.0 || len < kMinResolvableCells * baseCell) {
+                continue;
+            }
+            const double cellMax = len / kMinCellsPerCreaseLoop;
+            const double floorQuads = area / (cellMax * cellMax);
+            effectiveQuads = std::clamp(static_cast<int>(std::ceil(floorQuads)), effectiveQuads,
+                                        std::max(effectiveQuads, params.targetQuadCount));
+        }
+    }
     const EdgeLengthResult lengthResult = targetEdgeLength(area, effectiveQuads, params.edgeScale);
     if (!lengthResult.ok()) {
         result.status = RunStatus::Error;
@@ -756,6 +870,19 @@ PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSi
                 std::chrono::duration_cast<std::chrono::milliseconds>(b - a).count());
         };
         auto pt = PClk::now();
+        // Sharp-crease polyline network of the source, shared by the base relax, the
+        // post-subdivision projection and the final relax (see the crease comments
+        // below). Empty when the source has no sharp edges — every use degrades to the
+        // historical behavior.
+        work.tagFeatureEdges(params.sharpEdgeDegrees);
+        std::vector<std::array<Vec3, 2>> creaseNetwork;
+        for (Index ei = 0; ei < work.edgeCapacity(); ++ei) {
+            const EdgeId e{ei};
+            if (work.isAlive(e) && work.edgeFaceCount(e) == 2 && work.isFeatureEdge(e)) {
+                const auto [a, b] = work.edgeVertices(e);
+                creaseNetwork.push_back({work.position(a), work.position(b)});
+            }
+        }
         {
             const ReferenceSurface baseSurface(work, params.smoothNormalDegrees);
             if (pipeTime) {
@@ -777,7 +904,7 @@ PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSi
                                                ? std::atoi(briEnv)
                                                : ((integerExtractor || quadCoverMethod) ? 40 : 10);
                 relaxQuadMesh(result.mesh, baseSurface, params.sharpEdgeDegrees, baseRelaxIters,
-                              /*lambda=*/0.5f, shapeMatch);
+                              /*lambda=*/0.5f, shapeMatch, creaseNetwork);
             }
         }
         if (pipeTime) {
@@ -801,14 +928,77 @@ PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSi
             pt = PClk::now();
         }
         if (!sourceSurface.empty()) {
+            // Crease vertices project onto the source CREASE POLYLINE, not the surface.
+            // A closest-surface-point projection is wrong for them on a CURVED crease:
+            // the coarse base samples the crease sparsely (a cylinder rim at quarter
+            // density is roughly an octagon), the subdivided crease midpoints sit at the
+            // chord sagitta INSIDE the surface, and their nearest surface point is on
+            // the adjacent wall/cap — not the crease — so the sharp edge lands off the
+            // true feature line and stays there (relaxQuadMesh freezes crease vertices).
+            // Vertices are classified by DISTANCE to the network (quarter of a cell):
+            // the base extraction traces creases exactly, so base crease vertices sit at
+            // ~0 and subdivided crease midpoints at the (much smaller) chord sagitta,
+            // while everything else is at least one subdivided cell away. A dihedral
+            // re-tag cannot do this job: coarse quads on a curved wall are bent, so a
+            // 90-degree crease reads ~83 degrees and goes untagged (see relaxQuadMesh).
+            // Straight creases are unaffected (midpoints already lie on the line), and
+            // feature-free meshes have an empty network (behavior unchanged).
+            const auto creaseDistanceSq = [&creaseNetwork](const Vec3& p, Vec3* proj) {
+                Vec3 best = p;
+                float bestD2 = std::numeric_limits<float>::max();
+                for (const auto& seg : creaseNetwork) {
+                    const Vec3 ab = seg[1] - seg[0];
+                    const float len2 = dot(ab, ab);
+                    const float t =
+                        len2 > 1e-20f ? std::clamp(dot(p - seg[0], ab) / len2, 0.0f, 1.0f) : 0.0f;
+                    const Vec3 q = seg[0] + ab * t;
+                    const float d2 = dot(p - q, p - q);
+                    if (d2 < bestD2) {
+                        bestD2 = d2;
+                        best = q;
+                    }
+                }
+                if (proj != nullptr) {
+                    *proj = best;
+                }
+                return bestD2;
+            };
+            double meanEdgeSum = 0.0;
+            std::size_t meanEdgeCount = 0;
+            for (Index ei = 0; ei < result.mesh.edgeCapacity(); ++ei) {
+                const EdgeId e{ei};
+                if (result.mesh.isAlive(e)) {
+                    const auto [a, b] = result.mesh.edgeVertices(e);
+                    meanEdgeSum += static_cast<double>(
+                        length(result.mesh.position(a) - result.mesh.position(b)));
+                    ++meanEdgeCount;
+                }
+            }
+            // 0.7 of a (subdivided) cell: wide enough that where the coarse base's grid
+            // crossed the crease DIAGONALLY (an unpinned rim segment near a cap cone
+            // leaves the crease chain gapped), the crossing vertices — which sit up to
+            // ~half a cell off the crease — snap onto it and close the chain; still
+            // below the one-cell distance of legitimate first-ring interior vertices.
+            const float onTol =
+                meanEdgeCount > 0
+                    ? 0.7f * static_cast<float>(meanEdgeSum / static_cast<double>(meanEdgeCount))
+                    : 0.0f;
             for (Index vi = 0; vi < result.mesh.vertexCapacity(); ++vi) {
                 const VertexId v{vi};
-                if (result.mesh.isAlive(v)) {
-                    result.mesh.setPosition(v, sourceSurface.project(result.mesh.position(v)));
+                if (!result.mesh.isAlive(v)) {
+                    continue;
+                }
+                const Vec3 p = result.mesh.position(v);
+                Vec3 creaseProj{};
+                if (!creaseNetwork.empty() && onTol > 0.0f &&
+                    creaseDistanceSq(p, &creaseProj) < onTol * onTol) {
+                    result.mesh.setPosition(v, creaseProj);
+                } else {
+                    result.mesh.setPosition(v, sourceSurface.project(p));
                 }
             }
             relaxQuadMesh(result.mesh, sourceSurface, params.sharpEdgeDegrees, finalRelaxIters,
-                          finalRelaxLambda, shapeMatch);
+                          finalRelaxLambda, shapeMatch, creaseNetwork);
         }
         if (pipeTime) {
             std::fprintf(stderr, "[pipe-time] final project+relax=%lldms\n", pms(pt, PClk::now()));

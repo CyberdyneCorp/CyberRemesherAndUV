@@ -4,6 +4,90 @@ Goal: make CyberRemesher's automatic quad retopology **better than QuadriFlow**
 across four axes — quality-per-polygon, median quad angle, feature/CAD fidelity,
 and robustness — not just competitive on one.
 
+## Update — 2026-08-02 (CAD density robustness: the sweep's 🔴 failures are FIXED; 32/32 gate cells clean)
+
+The two density-dependent robustness bugs the CAD sweep below exposed are fixed
+(branch `feat/cad-robustness`; regression guard
+`python/cyberremesh/tests/test_cad_density_robustness.py`; raw data
+regenerated in `tools/bench/cad_sweep_results.csv`, 216 runs, density 2510
+added to `tools/bench/cad_sweep.py` as a permanent guard).
+
+- **Bug 1 — cylinder exit-4 / 657s: a density-crossing cascade in the isotropic
+  stage.** When the request put `4/3·h < rimSegment < 1.6·h` (targets
+  ~2300–3000 on the generated cylinder), the split pass halved the rim's
+  feature edges into sub-collapse-band halves that NOTHING can remove (feature
+  vertices are never collapsed) and the split/collapse loop left its transient
+  unconverged at 3 iterations (1.2k → 52k → 24.9k faces at 4500, 2.4x
+  over-density, 6 227 sub-1° cap slivers, plus doubled-face flaps). The junk
+  normals re-tagged ~900 spurious "knife edges" across the flat caps
+  (`filterFeatureEdgesToReference`'s knife-edge exception keeps 180° folds),
+  the pinned-Poisson factor went non-SPD, the float CG fallback diverged
+  (UV span ~1e17), the divergence guard declined — and the CLI had never wired
+  the field-aligned fallback the pipeline API provides, so exit 4. Fixes:
+  (a) never split a feature edge into sub-band halves (`isotropic.cpp`);
+  (b) keep iterating while the split pass still grows the mesh >10%
+  (equilibrium meshes run the exact same 3 iterations — byte-identical);
+  (c) untag fold/flap dihedrals by orientation vote (`untagFoldedFeatureEdges`);
+  (d) the CLI now passes the field-aligned fallback factory. cylinder@2510:
+  exit 4 → **exit 0, recall 1.00, haus 0.0048, 0.5s**; @4500: 657s → **1.8s**.
+- **Bug 2 — box_sharp request-dependent geometry drops: fractional seam offsets
+  + silent largest-island keep.** The reduced MIQ's Gauss-Jordan preferred a
+  NON-UNIT continuous pivot over a unit one; the division spread fractional
+  coefficients into integer-only rows, so dependent seam translations landed on
+  the fractional lattice after rounding (96/144 crease seams at offsets up to
+  3/8 of a cell at 1400). Every cube face's grid disagreed along its creases,
+  the caps traced as disconnected islands, and `removeIsolatedFaces` kept only
+  the largest island — shipping a "flawless" 0-singularity open tube with both
+  z faces missing (haus 0.219) as SUCCESS, density-dependent because hole-fill
+  sometimes papered over it. Fixes: (a) run the elimination with both pivot
+  policies and keep the one with fewer structural integrality violations
+  (dependent integers reaching continuous frees / non-integer coefficients) —
+  ties keep the historical reduction byte-exactly (the unit-first policy alone
+  BREAKS the cylinder: 39/96 fractional rim seams vs 10, sing 11→52 at 900 —
+  measured, hence the scoring-by-measurement; kill switches
+  `CYBER_QC_NO_UNIT_PIVOT` / `CYBER_QC_UNIT_PIVOT`); (b) closed surfaces keep
+  every island ≥10% of the largest instead of largest-only; (c) an
+  area-coverage gate (≥85% of the input island, closed inputs only) DECLINES
+  honestly per the remeshing-pipeline spec — the pipeline recovers via the
+  fallback or reports a per-island failure (exit 5), never a successful wrong
+  answer. box_sharp is now sing 8 / recall 1.00 / haus 0.0054 at ALL 8
+  densities (default arm).
+- **Collateral extraction fix:** `collapseTriangles` collapsed EVERY graph
+  3-cycle to its centroid — at coarse density that deletes genuine corner-cone
+  cells (box@100: cube corners chopped up to 0.17 off-surface). It now only
+  collapses clusters smaller than a quarter of the average traced edge (its
+  actual purpose: near-coincident sampling artifacts). Known-good cells moved
+  only monotonically better (cylinder 400/600/900/1400: sing 9/10/11/17 →
+  8/6/10/15, recall/haus equal or better).
+- **`--pure-quads` CAD lift** (was recall 0.02–0.82 on the cylinder): the pure
+  post-pass now (a) projects crease vertices onto the source crease POLYLINE
+  (closest-surface projection leaves a curved crease at its chord sagitta),
+  (b) freezes relax vertices by distance-to-crease-network instead of the
+  dihedral tag (bent coarse wall quads read a 90° rim as ~83° and unfroze it),
+  (c) snaps diagonal-crossing vertices within 0.7 subdivided cells onto the
+  crease, and (d) raises the quarter-density base so every CLOSED crease loop
+  ≥8 base cells long gets ≥18 cells (feature-resolvability floor, capped at
+  the full request; sub-resolution wrinkle loops are filtered so organics keep
+  their count contract — armadillo-pure stays at ~7.0k quads for 8000).
+  Calibration accepts only ±12% for targets <200 (the coarse bases). Honest
+  tradeoff: cylinder-pure at 400 now returns 536 quads (+34%) — resolvability
+  over count.
+
+**Post-fix sweep (box_sharp + cylinder × {400,600,900,1400,2000,2510,3000,4500}
+× default + `--pure-quads`): 32/32 cells exit 0, recall ≥ 0.94, hausdorff-p99
+≤ 0.0078, max 1.8s** (gate was recall ≥0.9, haus ≤0.01, <60s). Per-density
+recall (ours-default / ours-pure / QF): box 1.00/0.96–1.00/0.95–1.00;
+cylinder **0.94–1.00 / 0.97–1.00 / 0.60–0.92 — feature recall now beats
+QuadriFlow on the cylinder at EVERY density**, at equal hausdorff (ours
+0.0048–0.0078 vs QF 0.0048–0.0093). Still open vs QF on CAD: singularity
+count at high density (cylinder@4500: 56 vs 8) and angle on curved walls
+(7–14° vs 3.6–4.9°); cylinder-pure@4500 angle 30.6° (its base at 1125 remains
+a defective-field pocket — cone placement on curved crease loops is the
+remaining deep lever). Gates: ctest 14/14 (new regression suite included),
+`bench.py check` green, organics A/B (spot/armadillo, default + pure) within
+bench tolerances with armadillo-default recall 0.886→0.930 and
+armadillo-pure haus 0.0062→0.0044.
+
 ## Update — 2026-08-02 (CAD multi-density confirmation: the "better than QuadriFlow on CAD" claim does NOT bank)
 
 Measurement-only sweep to bank (or refuse) the CAD claim under this file's own
@@ -76,7 +160,9 @@ densities, mean paired delta):**
   5/7 better (mean −0.52 ± 1.71° — not distinguishable from zero at jitter
   sd 0.9°), recall TIE (4/7), singularities **LOSS 0/7 (+28 mean, 108 vs 42 at
   4500)**.
-- 🔴 **Robustness findings (new, default arm on CAD):**
+- 🔴 **Robustness findings (new, default arm on CAD)** — both FIXED, see the
+  CAD density-robustness update above (the numbers below are the pre-fix
+  evidence):
   - `cylinder` at target ≈2500–3000: **hard failure, exit 4 "remeshing
     produced no result"** (reproduced standalone at `--target-quads 2510`);
     at nominal 3000 it returns a defective result (240 sing, 32.6° angle,

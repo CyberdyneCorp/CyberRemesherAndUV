@@ -309,6 +309,20 @@ public:
             if (len <= target * kLongFactor) {
                 continue;
             }
+            // Feature edges: never split into sub-band halves. The halves inherit the
+            // feature flag and their endpoints become feature vertices, which the
+            // collapse pass refuses to touch — so halves below the collapse band are
+            // PERMANENT over-density pinned to the crease. At target densities where
+            // 4/3*target < len < 2*kShortFactor*target (the input crease segmentation
+            // "crossing" the solve density) this shed sliver cascades over whole flat
+            // patches: measured on the generated cylinder at ~2500 quads, the work mesh
+            // blew up 4.9k -> 13.6k faces with 1295 sub-1-degree cap slivers, whose junk
+            // normals re-tagged ~900 spurious feature seams and made the seamless solve
+            // diverge. Splitting only when both halves stay collapsible-band-or-longer
+            // keeps the crease geometry exact and the density bounded.
+            if (m_mesh.isFeatureEdge(e) && len < 2.0f * target * kShortFactor) {
+                continue;
+            }
             const VertexId midVertex = m_mesh.splitEdge(e, 0.5f);
             if (!midVertex.valid()) {
                 continue;
@@ -555,9 +569,27 @@ IsotropicStatus isotropicRemesh(Mesh& mesh, const ReferenceSurface& reference,
         return status;
     };
 
-    for (int iteration = 0; iteration < options.iterations; ++iteration) {
+    // Convergence-triggered extension: the fixed iteration budget assumes the input is
+    // within a few split levels of the target density. A far-coarser input (the generated
+    // cylinder's 49-gon fan caps at ~4500 quads: 1.2k -> 52k faces in the first split
+    // pass) is still mid-transient after `options.iterations` rounds — the ping-pong
+    // between split and collapse leaves 2-3x over-density and thousands of degenerate
+    // slivers whose junk normals then poison downstream feature tagging. Keep iterating
+    // while the split pass is still growing the mesh materially (> kSplitGrowthConverged),
+    // up to a hard cap. Meshes that converged inside the budget run the exact same
+    // iterations as before (the extension never triggers), so equilibrium outputs are
+    // byte-identical.
+    constexpr float kSplitGrowthConverged = 1.10f;
+    const int maxIterations = options.iterations + 7;
+    bool splitStillGrowing = true;
+    for (int iteration = 0;
+         iteration < maxIterations && (iteration < options.iterations || splitStillGrowing);
+         ++iteration) {
         auto a = Clk::now();
+        const std::size_t facesBeforeSplit = mesh.faceCount();
         SplitPass(mesh, options).run(field, cancel);
+        splitStillGrowing = static_cast<float>(mesh.faceCount()) >
+                            kSplitGrowthConverged * static_cast<float>(facesBeforeSplit);
         if (isoTime) {
             tSplit += ms(a, Clk::now());
             a = Clk::now();
@@ -589,9 +621,9 @@ IsotropicStatus isotropicRemesh(Mesh& mesh, const ReferenceSurface& reference,
             return finish(IsotropicStatus::Cancelled);
         }
         if (progress) {
-            progress->report(
-                static_cast<float>(iteration + 1) / static_cast<float>(options.iterations),
-                "isotropic");
+            progress->report(std::min(1.0f, static_cast<float>(iteration + 1) /
+                                                static_cast<float>(options.iterations)),
+                             "isotropic");
         }
     }
     return finish(IsotropicStatus::Success);

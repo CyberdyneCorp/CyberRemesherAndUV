@@ -1522,66 +1522,133 @@ int solveSeamlessReduced(accel::IBackend& backend, std::size_t nCut,
     }
 
     // Gauss-Jordan elimination. pivotExpr[j] (valid where isPivot[j]) gives dependent variable
-    // j as an affine-free combination of the surviving independent variables. Pivots prefer a
-    // CONTINUOUS variable (so integer translations stay free to be rounded); a unit coefficient
-    // is preferred to keep the elimination integer-exact.
-    std::vector<char> isPivot(N, 0);
-    std::vector<Row> pivotExpr(N);
-    for (Row& raw : cons) {
-        Row cur;
-        for (const auto& [c, w] : raw) {
-            if (isPivot[c]) {
-                for (const auto& [c2, w2] : pivotExpr[c]) {
-                    cur[c2] += w * w2;
+    // j as an affine-free combination of the surviving independent variables.
+    //
+    // Pivot scoring decides whether the rounded map is actually an INTEGER grid: after the
+    // greedy rounding pins the free integers, every DEPENDENT integer (seam translation /
+    // crease lattice offset) must still evaluate to an integer, which requires its pivot
+    // expression to (a) touch no continuous free and (b) carry integer coefficients.
+    // Neither static preference achieves that on every mesh:
+    //   - the historical continuous-first scoring picks NON-UNIT continuous pivots, whose
+    //     fractional expressions spread into integer-only rows (box_sharp: 96/144 crease
+    //     seams landed at offsets up to 3/8 of a cell — the patch grids disagreed along
+    //     every crease, extraction traced the cube caps as disconnected islands, and whole
+    //     faces were silently dropped);
+    //   - a unit-first scoring keeps coefficients integer-exact but pivots integers out of
+    //     rows that still hold continuous frees, leaving translations tied to unrounded
+    //     continuous DOF (the cylinder's closed rim loops: 39/96 fractional rim seams
+    //     vs 10 historical, singularities 11 -> 52 at 900).
+    // So run the elimination BOTH ways and keep the reduction with fewer structural
+    // integrality violations; ties keep the historical one (byte-stable on meshes both
+    // handle, incl. every feature-free organic). CYBER_QC_NO_UNIT_PIVOT pins the
+    // historical scoring, CYBER_QC_UNIT_PIVOT the unit-first one (A/B).
+    struct Reduction {
+        std::vector<char> isPivot;
+        std::vector<Row> pivotExpr;
+    };
+    const auto eliminate = [&](bool unitFirst) {
+        Reduction red;
+        red.isPivot.assign(N, 0);
+        red.pivotExpr.assign(N, Row{});
+        std::vector<char>& isPivot = red.isPivot;
+        std::vector<Row>& pivotExpr = red.pivotExpr;
+        for (const Row& raw : cons) {
+            Row cur;
+            for (const auto& [c, w] : raw) {
+                if (isPivot[c]) {
+                    for (const auto& [c2, w2] : pivotExpr[c]) {
+                        cur[c2] += w * w2;
+                    }
+                } else {
+                    cur[c] += w;
                 }
-            } else {
-                cur[c] += w;
             }
-        }
-        prune(cur);
-        if (cur.empty()) {
-            continue;  // redundant (holonomy already reconciled)
-        }
-        std::size_t pv = N;
-        int bestScore = -1;
-        double bestMag = 0.0;
-        for (const auto& [c, w] : cur) {
-            const bool cont = c < nUv;
-            const bool unit = std::abs(std::abs(w) - 1.0) < 1e-6;
-            const int score = (cont ? 2 : 0) + (unit ? 1 : 0);
-            if (score > bestScore || (score == bestScore && std::abs(w) > bestMag)) {
-                bestScore = score;
-                bestMag = std::abs(w);
-                pv = c;
+            prune(cur);
+            if (cur.empty()) {
+                continue;  // redundant (holonomy already reconciled)
             }
-        }
-        const double cpv = cur[pv];
-        Row expr;
-        for (const auto& [c, w] : cur) {
-            if (c != pv) {
-                expr[c] = -w / cpv;
+            std::size_t pv = N;
+            int bestScore = -1;
+            double bestMag = 0.0;
+            for (const auto& [c, w] : cur) {
+                const bool cont = c < nUv;
+                const bool unit = std::abs(std::abs(w) - 1.0) < 1e-6;
+                const int score =
+                    unitFirst ? (unit ? 2 : 0) + (cont ? 1 : 0) : (cont ? 2 : 0) + (unit ? 1 : 0);
+                if (score > bestScore || (score == bestScore && std::abs(w) > bestMag)) {
+                    bestScore = score;
+                    bestMag = std::abs(w);
+                    pv = c;
+                }
             }
+            const double cpv = cur[pv];
+            Row expr;
+            for (const auto& [c, w] : cur) {
+                if (c != pv) {
+                    expr[c] = -w / cpv;
+                }
+            }
+            // Back-substitute the new pivot into every existing pivot expression
+            // (Gauss-Jordan), so all pivot expressions stay in independent variables only.
+            for (std::size_t k = 0; k < N; ++k) {
+                if (!isPivot[k]) {
+                    continue;
+                }
+                auto it = pivotExpr[k].find(pv);
+                if (it == pivotExpr[k].end()) {
+                    continue;
+                }
+                const double coeff = it->second;
+                pivotExpr[k].erase(it);
+                for (const auto& [c, w] : expr) {
+                    pivotExpr[k][c] += coeff * w;
+                }
+                prune(pivotExpr[k]);
+            }
+            isPivot[pv] = 1;
+            pivotExpr[pv] = std::move(expr);
         }
-        // Back-substitute the new pivot into every existing pivot expression (Gauss-Jordan), so
-        // all pivot expressions stay in independent variables only.
-        for (std::size_t k = 0; k < N; ++k) {
-            if (!isPivot[k]) {
+        return red;
+    };
+    // Structural integrality violations: dependent integers whose expression reaches a
+    // continuous free or carries a non-integer coefficient on an integer free.
+    const auto integralityViolations = [&](const Reduction& red) {
+        std::size_t bad = 0;
+        for (std::size_t j = nUv; j < N; ++j) {
+            if (!red.isPivot[j]) {
                 continue;
             }
-            auto it = pivotExpr[k].find(pv);
-            if (it == pivotExpr[k].end()) {
-                continue;
+            for (const auto& [c, w] : red.pivotExpr[j]) {
+                if (c < nUv || std::abs(w - std::round(w)) > 1e-6) {
+                    ++bad;
+                    break;
+                }
             }
-            const double coeff = it->second;
-            pivotExpr[k].erase(it);
-            for (const auto& [c, w] : expr) {
-                pivotExpr[k][c] += coeff * w;
-            }
-            prune(pivotExpr[k]);
         }
-        isPivot[pv] = 1;
-        pivotExpr[pv] = std::move(expr);
+        return bad;
+    };
+    Reduction red;
+    if (std::getenv("CYBER_QC_NO_UNIT_PIVOT") != nullptr) {
+        red = eliminate(false);
+    } else if (std::getenv("CYBER_QC_UNIT_PIVOT") != nullptr) {
+        red = eliminate(true);
+    } else {
+        Reduction hist = eliminate(false);
+        const std::size_t histBad = integralityViolations(hist);
+        if (histBad == 0) {
+            red = std::move(hist);  // historical reduction already integer-exact
+        } else {
+            Reduction unit = eliminate(true);
+            const std::size_t unitBad = integralityViolations(unit);
+            red = unitBad < histBad ? std::move(unit) : std::move(hist);
+            if (std::getenv("CYBER_QC_DEBUG") != nullptr) {
+                std::fprintf(stderr, "[qc] pivot integrality: hist=%zu unit=%zu -> %s\n", histBad,
+                             unitBad, unitBad < histBad ? "unit" : "hist");
+            }
+        }
     }
+    const std::vector<char>& isPivot = red.isPivot;
+    const std::vector<Row>& pivotExpr = red.pivotExpr;
 
     // Independent variables -> reduced index; classify integer (translation) frees for rounding.
     std::vector<std::size_t> freeIx(N, kInvalidIndex);
