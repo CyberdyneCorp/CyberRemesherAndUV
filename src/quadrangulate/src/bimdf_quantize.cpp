@@ -1000,7 +1000,10 @@ private:
         }
         curGen_.assign(walks.size(), 0);
         dependents_.assign(walks.size(), 0);
-        const std::size_t stepBudget = 80 * ch_.faces.size() + 4096;
+        // Successful traces are cheap (spot: 3.3k steps for 320 rays); the
+        // budget only bounds pathological wanderers, whose per-step cost also
+        // grows with the trail density, so keep it tight.
+        const std::size_t stepBudget = 10 * ch_.faces.size() + 4096;
         std::size_t stepsUsed = 0;
         std::size_t active = walks.size();
         while (active > 0) {
@@ -1068,6 +1071,13 @@ private:
         return true;
     }
 
+    bool segDensityOk(std::size_t face) const {
+        // A face collecting dozens of trail segments is a wandering /
+        // spiralling separatrix (degenerate relaxed map): fail fast instead
+        // of paying quadratic crossing scans until the step budget runs out.
+        return faceSegs_[face].size() < 64;
+    }
+
     void flushSeg(const Walk& wk, double endVar) {
         const WalkState& ws = wk.w;
         Seg s;
@@ -1097,6 +1107,10 @@ private:
         WalkState& w = wk.w;
         Ray& ray = rays_[static_cast<std::size_t>(wk.id)];
         const std::uint32_t startVertex = ch_.vertexOfCut[ray.startCut];
+        if (!segDensityOk(w.face)) {
+            traceFail_ = "trail density blowup (wandering separatrix)";
+            return -1;
+        }
         {
             ++wk.steps;
             const int va = varyAxis(w.q);
