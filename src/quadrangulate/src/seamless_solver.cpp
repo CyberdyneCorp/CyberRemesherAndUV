@@ -1870,6 +1870,25 @@ int solveSeamlessReduced(accel::IBackend& backend, std::size_t nCut,
         maskedSolve(mask);
     }
 
+    // Quantization scoreboard (CYBER_QC_DEBUG): the reduced Dirichlet energy
+    // E(w) = 0.5 w^T (M + ridge) w - gReduced^T w, the exact objective the
+    // integer assignment shapes. Reported at the relaxed optimum and after the
+    // final constrained solve, so alternative quantizers (greedy vs Bi-MDF)
+    // are A/B-comparable on identical reductions (same M, gReduced, x0).
+    const bool dbg = std::getenv("CYBER_QC_DEBUG") != nullptr;
+    const auto reducedEnergy = [&]() {
+        std::vector<float> Aw;
+        applyA(w, Aw);
+        double e = 0.0;
+        for (std::size_t i = 0; i < W; ++i) {
+            const double wi = static_cast<double>(w[i]);
+            e += wi * (0.5 * (static_cast<double>(Aw[i]) + ridge * wi) -
+                       static_cast<double>(gReduced[i]));
+        }
+        return e;
+    };
+    const double eRelaxed = dbg ? reducedEnergy() : 0.0;
+
     // MAGNITUDE CONTROL. The reduction leaves the independent integer translations
     // UNCONSTRAINED — any integers keep the map seamless — so a huge relaxed value would
     // round to a huge integer and blow the map up (the failure the divergence guard used to
@@ -1958,12 +1977,14 @@ int solveSeamlessReduced(accel::IBackend& backend, std::size_t nCut,
         v[i] = zUv[nCut + i];
     }
 
-    const bool dbg = std::getenv("CYBER_QC_DEBUG") != nullptr;
     if (dbg) {
         std::fprintf(stderr,
                      "[qc] reduced: nCut=%zu seams=%zu vars=%zu free=%zu intFree=%zu "
                      "maskedSolves=%d totalCg=%d\n",
                      nCut, nSeam, N, W, intFree.size(), maskedSolveCalls, totalCg);
+        const double eFinal = reducedEnergy();
+        std::fprintf(stderr, "[qc] reduced energy: relaxed=%.6f final=%.6f delta=%.6f\n", eRelaxed,
+                     eFinal, eFinal - eRelaxed);
     }
     return totalCg;
 }
