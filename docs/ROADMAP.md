@@ -149,10 +149,23 @@ and robustness — not just competitive on one.
       same machine (torus outputs differ bit-wise across identical
       invocations; parallel CG reduction suspected) — violates the
       remeshing-pipeline determinism requirement independently of this work.
-- **quad-quality-push finding (separate lever, unimplemented):** the shipped
-  val-3/5 dipole canceller (`fixValence`) is unreachable from the quad-cover
-  path (sole caller is the integer extractor) — wiring it in post-extraction
-  is the ranked-#1 general singularity reduction (bounded, kill-switchable).
+- **quad-quality-push finding — IMPLEMENTED (2026-08-02, `feat/dipole-quadcover`):**
+  the shipped val-3/5 dipole canceller (`fixValence`) was unreachable from the
+  quad-cover path (sole caller was the integer extractor). It is now exposed as
+  `quadMeshValenceCleanup` (position_field.hpp) — the same doublet-dissolution +
+  edge-rotation fixpoint, extended with `pinned` vertices (treated exactly like
+  boundary) and `reservedEdges` — and runs in `QuadCoverQuadrangulator` after cap
+  elimination and the count-calibration loop. Non-quad caps are frozen (vertices
+  pinned, edges reserved) and crease vertices (face-pair dihedral over the run's
+  feature threshold) are pinned so quads never rotate off a feature line. The
+  integer path is byte-identical (empty constraints); kill switch
+  `CYBER_QC_NO_DIPOLE`. Measured (A/B via the switch, cyber only): singularities
+  armadillo 581 -> 550, nefertiti 650 -> 587, torus 68 -> 60, spot 72 -> 70,
+  sphere 37 -> 35; feature recall, hausdorff and angle unchanged (< 0.1 deg / <
+  0.002 recall drift); bunny-ear irregulars 46 -> 41. `flow_loop_mean_len` did
+  NOT move (armadillo 20.2 -> 20.1) — dipole density was not the binding
+  constraint on loop length; the remaining flow-loop gap needs a global lever
+  (Bi-MDF-style quantization), not local surgery.
 - **The wall, quantified** (generated corpus, target 600, defaults): quad-cover
   wins singularity structure outright (cylinder 21 vs QuadriFlow 8 at similar
   angle quality; sphere 37 vs 8) but **feature recall collapses on sharp

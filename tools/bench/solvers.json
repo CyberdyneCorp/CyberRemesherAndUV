@@ -1,28 +1,80 @@
 {
-  "comment": "Solver command templates. {input}/{output}/{faces} are substituted per run. {exe} resolves from the env var named by exe_env, falling back to the 'exe' path if it exists on disk; solvers whose binary is absent are skipped. External GPL tools (quadwild) run as user-provided binaries only — never vendored. 'cyber' resolves its binary from --cyber-binary or the cpu-headless build tree.",
+  "comment": "Solver command templates. {input}/{output}/{faces} are substituted per run. {exe} resolves from the env var named by exe_env, falling back to the 'exe' path if it exists on disk; solvers whose binary is absent are skipped. External GPL tools (quadwild) run as user-provided binaries only \u2014 never vendored. 'cyber' resolves its binary from --cyber-binary or the cpu-headless build tree.",
   "solvers": {
     "cyber": {
-      "cmd": ["{exe}", "--input", "{input}", "--output", "{output}", "--target-quads", "{faces}", "--quiet"]
+      "cmd": [
+        "{exe}",
+        "--input",
+        "{input}",
+        "--output",
+        "{output}",
+        "--target-quads",
+        "{faces}",
+        "--quiet"
+      ]
+    },
+    "cyber-pure": {
+      "cmd": [
+        "{exe}",
+        "--input",
+        "{input}",
+        "--output",
+        "{output}",
+        "--target-quads",
+        "{faces}",
+        "--pure-quads",
+        "--quiet"
+      ]
     },
     "quadriflow": {
       "exe_env": "QUADRIFLOW_EXE",
       "exe": "/Users/leonardoaraujo/work/bench-baselines/quadriflow/build/quadriflow",
-      "cmd": ["{exe}", "-i", "{input}", "-o", "{output}", "-f", "{faces}"]
+      "cmd": [
+        "{exe}",
+        "-i",
+        "{input}",
+        "-o",
+        "{output}",
+        "-f",
+        "{faces}"
+      ]
     },
     "instantmeshes": {
       "exe_env": "INSTANT_MESHES_EXE",
       "exe": "/Users/leonardoaraujo/work/bench-baselines/instant-meshes/build/Instant Meshes.app/Contents/MacOS/Instant Meshes",
-      "cmd": ["{exe}", "{input}", "-o", "{output}", "-f", "{faces}", "-d", "-D"]
+      "cmd": [
+        "{exe}",
+        "{input}",
+        "-o",
+        "{output}",
+        "-f",
+        "{faces}",
+        "-d",
+        "-D"
+      ]
     },
     "autoremesher": {
       "exe_env": "AUTOREMESHER_EXE",
-      "cmd": ["{exe}", "-i", "{input}", "-o", "{output}", "--target-quads", "{faces}"]
+      "cmd": [
+        "{exe}",
+        "-i",
+        "{input}",
+        "-o",
+        "{output}",
+        "--target-quads",
+        "{faces}"
+      ]
     },
     "quadwild": {
       "exe_env": "QUADWILD_EXE",
       "exe": "/Users/leonardoaraujo/work/bench-baselines/quadwild-bimdf/quadwild",
-      "comment": "quadwild-bimdf release binary (GPL-3, external only). No face-count flag: density comes from scaleFact in the prep config, so its counts are NOT comparable to a -f run — read its quality metrics per-density. Writes outputs next to the input; the harness relocates via output_from_input_suffix.",
-      "cmd": ["{exe}", "{input}", "3", "/Users/leonardoaraujo/work/bench-baselines/quadwild-bimdf/config/prep_config/basic_setup.txt"],
+      "comment": "quadwild-bimdf release binary (GPL-3, external only). No face-count flag: density comes from scaleFact in the prep config, so its counts are NOT comparable to a -f run \u2014 read its quality metrics per-density. Writes outputs next to the input; the harness relocates via output_from_input_suffix.",
+      "cmd": [
+        "{exe}",
+        "{input}",
+        "3",
+        "/Users/leonardoaraujo/work/bench-baselines/quadwild-bimdf/config/prep_config/basic_setup.txt"
+      ],
       "output_from_input_suffix": "_rem_quadrangulation_smooth.obj",
       "ignore_exit_code": true
     }

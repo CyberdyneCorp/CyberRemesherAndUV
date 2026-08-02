@@ -50,7 +50,7 @@ def load_solvers(cyber_binary: Path) -> dict:
     config = json.loads((BENCH_DIR / "solvers.json").read_text())["solvers"]
     resolved = {}
     for name, spec in config.items():
-        if name == "cyber":
+        if name in ("cyber", "cyber-pure"):
             exe = cyber_binary
         else:
             import os

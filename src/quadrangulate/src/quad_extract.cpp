@@ -3193,19 +3193,25 @@ int qPrevHe(int de) { return de / 4 * 4 + (de + 3) % 4; }
 
 // One pass of doublet dissolution (QuadriFlow FixValence "Remove Valence 2"):
 // each valence-2 vertex is shared by exactly two quads along two edges; merge
-// those two quads into a single quad and drop the doublet vertex. Returns whether
-// anything changed (the caller loops to a fixpoint).
-bool removeDoubletsPass(std::vector<std::array<int, 4>>& faces, int nV) {
+// those two quads into a single quad and drop the doublet vertex. `pinned`
+// vertices (empty == none) are never dissolved — callers embedding a quad subset
+// in a larger mesh pin the shared vertices. Returns the number of dissolved
+// doublets (the caller loops to a fixpoint).
+std::size_t removeDoubletsPass(std::vector<std::array<int, 4>>& faces, int nV,
+                               const std::vector<char>& pinned) {
     const QuadDedge d = quadDedge(faces, nV);
     std::vector<char> marks(static_cast<std::size_t>(nV), 0);
     std::vector<char> erasedF(faces.size(), 0);
     const auto corner = [&](int de, int off) {
         return faces[static_cast<std::size_t>(de / 4)][static_cast<std::size_t>((de + off) % 4)];
     };
-    bool update = false;
+    std::size_t ops = 0;
     for (int i = 0; i < nV; ++i) {
         const int deid0 = d.v2e[static_cast<std::size_t>(i)];
         if (marks[static_cast<std::size_t>(i)] || deid0 == -1) {
+            continue;
+        }
+        if (!pinned.empty() && pinned[static_cast<std::size_t>(i)] != 0) {
             continue;
         }
         int deid = deid0;
@@ -3237,9 +3243,9 @@ bool removeDoubletsPass(std::vector<std::array<int, 4>>& faces, int nV) {
             faces[static_cast<std::size_t>(dedges[0] / 4)] = {v1, v2, v3, v4};
         }
         erasedF[static_cast<std::size_t>(dedges[1] / 4)] = 1;
-        update = true;
+        ++ops;
     }
-    if (update) {
+    if (ops != 0) {
         std::size_t top = 0;
         for (std::size_t f = 0; f < faces.size(); ++f) {
             if (!erasedF[f]) {
@@ -3248,7 +3254,7 @@ bool removeDoubletsPass(std::vector<std::array<int, 4>>& faces, int nV) {
         }
         faces.resize(top);
     }
-    return update;
+    return ops;
 }
 
 // Per-vertex quad valence (incident-face count) + boundary flag, from a QuadDedge.
@@ -3298,7 +3304,14 @@ bool allDistinct6(const std::array<int, 6>& a) {
 // keep valence >= 3, boundary vertices untouched). No QuadriFlow analogue — QuadriFlow
 // relies on a cleaner grid upstream — but the monotone guard makes it purely additive:
 // it cancels a 3/5 dipole exactly when a neighbour absorbs the moved valence.
-bool rotateValencePass(std::vector<std::array<int, 4>>& faces, int nV) {
+// `pinned` vertices (empty == none) behave exactly like boundary vertices: they
+// never count as irregular and are never rotation endpoints. `reservedEdges`
+// (undirected, minmax-keyed) are edges that must not be duplicated by a rotation
+// — callers embedding a quad subset in a larger mesh reserve the outside edges.
+// Returns the number of accepted rotations.
+std::size_t rotateValencePass(std::vector<std::array<int, 4>>& faces, int nV,
+                              const std::vector<char>& pinned,
+                              const std::set<std::pair<int, int>>& reservedEdges) {
     const QuadDedge d = quadDedge(faces, nV);
     const QuadValence qv = quadValence(d, faces, nV);
     std::set<std::pair<int, int>> edges;
@@ -3312,8 +3325,12 @@ bool rotateValencePass(std::vector<std::array<int, 4>>& faces, int nV) {
         }
     }
     std::vector<char> marks(static_cast<std::size_t>(nV), 0);
+    const auto isPinned = [&](int v) {
+        return !pinned.empty() && pinned[static_cast<std::size_t>(v)] != 0;
+    };
     const auto irr = [&](int v, int valence) {  // 1 if this interior vertex is irregular
-        return qv.bnd[static_cast<std::size_t>(v)] != 0 ? 0 : (valence != 4 ? 1 : 0);
+        return (qv.bnd[static_cast<std::size_t>(v)] != 0 || isPinned(v)) ? 0
+                                                                         : (valence != 4 ? 1 : 0);
     };
     // Delta in interior-irregular count if (u,v) lose a valence and (p,q) gain one,
     // introducing edge p-q. Returns +1 (reject) if the rotation is invalid.
@@ -3321,7 +3338,7 @@ bool rotateValencePass(std::vector<std::array<int, 4>>& faces, int nV) {
         if (marks[static_cast<std::size_t>(p)] != 0 || marks[static_cast<std::size_t>(q)] != 0) {
             return 1;
         }
-        if (edges.count(std::minmax(p, q)) != 0) {
+        if (edges.count(std::minmax(p, q)) != 0 || reservedEdges.count(std::minmax(p, q)) != 0) {
             return 1;  // p-q already an edge: rotation would double it (non-manifold)
         }
         const std::size_t up = static_cast<std::size_t>(p), uq = static_cast<std::size_t>(q);
@@ -3332,7 +3349,7 @@ bool rotateValencePass(std::vector<std::array<int, 4>>& faces, int nV) {
                (irr(p, qv.val[up] + 1) - irr(p, qv.val[up])) +
                (irr(q, qv.val[uq] + 1) - irr(q, qv.val[uq]));
     };
-    bool update = false;
+    std::size_t ops = 0;
     for (std::size_t f = 0; f < faces.size(); ++f) {
         for (int i = 0; i < 4; ++i) {
             const int he = static_cast<int>(f) * 4 + i;
@@ -3348,11 +3365,12 @@ bool rotateValencePass(std::vector<std::array<int, 4>>& faces, int nV) {
             const int j = he2 % 4;
             const int yv = faces[f2][static_cast<std::size_t>((j + 2) % 4)];
             const int zv = faces[f2][static_cast<std::size_t>((j + 3) % 4)];
-            // Both rotations decrement u and v; keep them interior and >= valence 4.
+            // Both rotations decrement u and v; keep them interior (and unpinned —
+            // rotating would delete the pinned edge u-v) and >= valence 4.
             if (qv.val[static_cast<std::size_t>(u)] < 4 ||
                 qv.val[static_cast<std::size_t>(v)] < 4 ||
                 qv.bnd[static_cast<std::size_t>(u)] != 0 ||
-                qv.bnd[static_cast<std::size_t>(v)] != 0) {
+                qv.bnd[static_cast<std::size_t>(v)] != 0 || isPinned(u) || isPinned(v)) {
                 continue;
             }
             const std::array<int, 6> hex{u, v, w, x, yv, zv};
@@ -3374,28 +3392,55 @@ bool rotateValencePass(std::vector<std::array<int, 4>>& faces, int nV) {
             for (const int hv : hex) {
                 marks[static_cast<std::size_t>(hv)] = 1;
             }
-            update = true;
+            ++ops;
         }
     }
-    return update;
+    return ops;
 }
+
+}  // namespace
+
+// Public adapter over the FixValence passes (see quadMeshValenceCleanup in
+// position_field.hpp): dissolve interior valence-2 doublets and cancel
+// valence-3/valence-5 dipoles by edge rotation, to a joint fixpoint, honouring
+// `pinned` vertices and `reservedEdges`. With both constraints empty this is
+// exactly the integer extractor's fixValence(rotate=true).
+std::size_t quadMeshValenceCleanup(std::vector<std::array<int, 4>>& quads, int numVertices,
+                                   const std::vector<char>& pinned,
+                                   const std::set<std::pair<int, int>>& reservedEdges) {
+    std::size_t ops = 0;
+    bool changed = true;
+    for (int guard = 0; changed && guard < 100; ++guard) {
+        changed = false;
+        for (std::size_t n = removeDoubletsPass(quads, numVertices, pinned); n != 0;
+             n = removeDoubletsPass(quads, numVertices, pinned)) {
+            ops += n;
+            changed = true;
+        }
+        const std::size_t n = rotateValencePass(quads, numVertices, pinned, reservedEdges);
+        if (n != 0) {
+            ops += n;
+            changed = true;
+        }
+    }
+    return ops;
+}
+
+namespace {
 
 // Topology cleanup on the extracted quad mesh (QuadriFlow FixValence, "Remove
 // Valence 2", plus our valence-improving edge rotation): dissolve interior valence-2
 // doublets, then cancel valence-3/valence-5 dipoles by edge rotation, to a joint
 // fixpoint. Both operators are strictly monotone (only remove irregulars / never open
 // a boundary), so this can only improve the mesh. Geometry is untouched; freed
-// vertices drop out at materialisation.
+// vertices drop out at materialisation. Thin wrapper over quadMeshValenceCleanup
+// with no pins/reservations (the whole mesh is in play).
 void fixValence(std::vector<std::array<int, 4>>& faces, int nV, bool rotate) {
-    bool changed = true;
-    for (int guard = 0; changed && guard < 100; ++guard) {
-        changed = false;
-        while (removeDoubletsPass(faces, nV)) {
-            changed = true;
-        }
-        if (rotate && rotateValencePass(faces, nV)) {
-            changed = true;
-        }
+    if (rotate) {
+        quadMeshValenceCleanup(faces, nV, {}, {});
+        return;
+    }
+    while (removeDoubletsPass(faces, nV, {}) != 0) {
     }
 }
 
