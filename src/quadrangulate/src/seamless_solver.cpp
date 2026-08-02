@@ -2,12 +2,14 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <functional>
+#include <memory>
 #include <numeric>
 #include <queue>
 #include <unordered_map>
@@ -17,6 +19,7 @@
 #include "cyber/accel/buffer.hpp"
 #include "cyber/accel/primitives.hpp"
 #include "cyber/core/math.hpp"
+#include "sparse_cholesky.hpp"
 
 // Native QuadCover seamless-UV — Milestone 1 (docs/native-miq-plan.md): the frame-field
 // setup a seamless parameterization is solved on. Reuses the per-face CrossField; adds
@@ -308,6 +311,18 @@ SeamlessSetup buildSeamlessSetup(const Mesh& mesh, int iterations, accel::IBacke
     return setup;
 }
 
+// Cache for the CYBER_QC_DIRECT sparse-direct solve path (see the header).
+// Both cached operators are provably attempt-invariant: the pinned Poisson A
+// depends only on the cut Laplacian + pins, and the reduced operator
+// M = Tt*L2*Tuv only on the seam/constraint structure — the calibration
+// spacing enters the RHS alone (assembleRhs scales by 1/spacing).
+class SeamlessSolveCacheImpl {
+public:
+    // Phase 1: pinned Poisson operator (relaxed + ARAP re-solves).
+    bool aReady = false;
+    SparseCholesky cholA;
+};
+
 namespace {
 
 // The (up to 3) edges of a triangle face, found from its consecutive vertex pairs.
@@ -382,6 +397,12 @@ int conjugateGradient(accel::IBackend& backend, const accel::SparseMatrix& A,
         rs = rsNew;
     }
     return it;
+}
+
+long msSince(std::chrono::steady_clock::time_point t0) {
+    return static_cast<long>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0)
+            .count());
 }
 
 // Coefficients of R^rho applied to a (u,v) pair, R = CCW (u,v) -> (-v,u):
@@ -963,7 +984,8 @@ namespace {
 // runs the full historical solve, unchanged.
 Parameterization solveParameterizationImpl(const Mesh& mesh, const SeamlessSetup& setup,
                                            float spacing, accel::IBackend& backend,
-                                           const CancelToken* cancel, double* probeCellArea) {
+                                           const CancelToken* cancel, double* probeCellArea,
+                                           SeamlessSolveCache* cache) {
     Parameterization out;
     if (!setup.valid || spacing <= 0.0f || mesh.faceCapacity() == 0) {
         return out;
@@ -1176,6 +1198,46 @@ Parameterization solveParameterizationImpl(const Mesh& mesh, const SeamlessSetup
         A.rowStart.push_back(A.colIndex.size());
     }
 
+    // Direct path (CYBER_QC_DIRECT, default on; docs/ROADMAP.md perf entry):
+    // factor the pinned SPD operator ONCE — it is fixed across the initial
+    // relaxed solve, every ARAP re-solve (only the RHS rotates) and every
+    // calibration attempt/probe (spacing only scales the RHS) — and make each
+    // relaxedSolve a pair of back-substitutions instead of two CG solves. The
+    // factorization lands in the caller's cache when one is provided.
+    // CYBER_QC_NO_DIRECT reverts to the historical CG byte-exactly.
+    SeamlessSolveCacheImpl* cacheImpl = nullptr;
+    if (cache != nullptr && std::getenv("CYBER_QC_NO_DIRECT") == nullptr) {
+        if (!cache->impl) {
+            cache->impl = std::make_shared<SeamlessSolveCacheImpl>();
+        }
+        cacheImpl = cache->impl.get();
+    }
+    SparseCholesky ownCholA;
+    const SparseCholesky* cholA = nullptr;
+    if (std::getenv("CYBER_QC_NO_DIRECT") == nullptr) {
+        SparseCholesky* target = cacheImpl != nullptr ? &cacheImpl->cholA : &ownCholA;
+        if (cacheImpl != nullptr && cacheImpl->aReady && cacheImpl->cholA.dim() == nCut) {
+            cholA = target;
+        } else {
+            if (cacheImpl != nullptr) {
+                cacheImpl->aReady = false;
+            }
+            const auto tA = std::chrono::steady_clock::now();
+            const std::vector<double> aVal(A.value.begin(), A.value.end());
+            if (target->factor(nCut, A.rowStart, A.colIndex, aVal)) {
+                cholA = target;
+                if (cacheImpl != nullptr) {
+                    cacheImpl->aReady = true;
+                }
+                if (std::getenv("CYBER_QC_TIME") != nullptr) {
+                    std::fprintf(stderr, "[qc-time] direct poisson: factorA=%ldms cholNnz=%zu\n",
+                                 msSince(tA), target->factorNnz());
+                }
+            }
+            // factor failure (non-SPD assembly) falls through to CG below
+        }
+    }
+
     std::vector<float> u(nCut, 0.0f), v(nCut, 0.0f);
 
     // CYBER_QC_FIELD_STATS diagnostics on the +z flat region (|n.z| > 0.99): combed-target
@@ -1268,8 +1330,11 @@ Parameterization solveParameterizationImpl(const Mesh& mesh, const SeamlessSetup
 
     const int maxIters = static_cast<int>(nCut) + 500;
     // Solve the relaxed (per-component pinned) Poisson for the current full RHS bu/bv. The
-    // pin zeroes the RHS at the pinned/isolated vertices; u,v are warm-started from their
-    // incoming value so each ARAP re-solve (a small RHS perturbation) converges fast.
+    // pin zeroes the RHS at the pinned/isolated vertices. Direct path: two exact
+    // back-substitutions on the one-time factorization above. CG path: u,v are warm-started
+    // from their incoming value so each ARAP re-solve (a small RHS perturbation) converges
+    // fast.
+    bool directCheckDone = false;
     const auto relaxedSolve = [&]() {
         std::vector<float> pbu = bu, pbv = bv;
         for (std::size_t i = 0; i < nCut; ++i) {
@@ -1277,6 +1342,44 @@ Parameterization solveParameterizationImpl(const Mesh& mesh, const SeamlessSetup
                 pbu[i] = 0.0f;
                 pbv[i] = 0.0f;
             }
+        }
+        if (cholA != nullptr) {
+            std::vector<double> rhs(nCut);
+            std::vector<double> sol;
+            for (std::size_t i = 0; i < nCut; ++i) {
+                rhs[i] = static_cast<double>(pbu[i]);
+            }
+            cholA->solve(rhs, sol);
+            for (std::size_t i = 0; i < nCut; ++i) {
+                u[i] = static_cast<float>(sol[i]);
+            }
+            for (std::size_t i = 0; i < nCut; ++i) {
+                rhs[i] = static_cast<double>(pbv[i]);
+            }
+            cholA->solve(rhs, sol);
+            for (std::size_t i = 0; i < nCut; ++i) {
+                v[i] = static_cast<float>(sol[i]);
+            }
+            out.cgIterationsU = 0;
+            out.cgIterationsV = 0;
+            // CYBER_QC_DIRECT_CHECK: numerical drift diagnostic — re-run the
+            // first relaxed solve with the historical cold-started CG and
+            // report max |uv_direct - uv_cg| (both approximate the same linear
+            // system; the direct one is exact to double roundoff).
+            if (!directCheckDone && std::getenv("CYBER_QC_DIRECT_CHECK") != nullptr) {
+                directCheckDone = true;
+                std::vector<float> uc(nCut, 0.0f), vc(nCut, 0.0f);
+                conjugateGradient(backend, A, pbu, uc, maxIters, 1e-8f, cancel);
+                conjugateGradient(backend, A, pbv, vc, maxIters, 1e-8f, cancel);
+                double dmax = 0.0;
+                for (std::size_t i = 0; i < nCut; ++i) {
+                    dmax = std::max(dmax, static_cast<double>(std::fabs(u[i] - uc[i])));
+                    dmax = std::max(dmax, static_cast<double>(std::fabs(v[i] - vc[i])));
+                }
+                std::fprintf(stderr, "[qc] direct check: max|uv_direct-uv_cg|=%.3e nCut=%zu\n",
+                             dmax, nCut);
+            }
+            return;
         }
         out.cgIterationsU = conjugateGradient(backend, A, pbu, u, maxIters, 1e-8f, cancel);
         out.cgIterationsV = conjugateGradient(backend, A, pbv, v, maxIters, 1e-8f, cancel);
@@ -1506,14 +1609,16 @@ Parameterization solveParameterizationImpl(const Mesh& mesh, const SeamlessSetup
 }  // namespace
 
 Parameterization solveParameterization(const Mesh& mesh, const SeamlessSetup& setup, float spacing,
-                                       accel::IBackend& backend, const CancelToken* cancel) {
-    return solveParameterizationImpl(mesh, setup, spacing, backend, cancel, nullptr);
+                                       accel::IBackend& backend, const CancelToken* cancel,
+                                       SeamlessSolveCache* cache) {
+    return solveParameterizationImpl(mesh, setup, spacing, backend, cancel, nullptr, cache);
 }
 
 double relaxedCellArea(const Mesh& mesh, const SeamlessSetup& setup, float spacing,
-                       accel::IBackend& backend, const CancelToken* cancel) {
+                       accel::IBackend& backend, const CancelToken* cancel,
+                       SeamlessSolveCache* cache) {
     double cells = -1.0;
-    (void)solveParameterizationImpl(mesh, setup, spacing, backend, cancel, &cells);
+    (void)solveParameterizationImpl(mesh, setup, spacing, backend, cancel, &cells, cache);
     return cells;
 }
 

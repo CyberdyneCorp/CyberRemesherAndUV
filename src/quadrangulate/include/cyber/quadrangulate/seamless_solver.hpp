@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <memory>
 #include <vector>
 
 #include "cyber/accel/backend.hpp"
@@ -80,9 +81,24 @@ struct Parameterization {
     int cgIterationsV = 0;
     bool valid = false;
 };
+
+// Opaque cache for the direct (sparse-Cholesky) solve path, CYBER_QC_DIRECT
+// (docs/ROADMAP.md perf entry). The pinned Poisson operator and the reduced
+// integer-phase operator depend only on (mesh, setup) — never on `spacing` —
+// so their factorizations are computed once and reused by the calibration
+// probe and every calibration attempt (only the RHS re-scales). Callers that
+// re-solve the SAME mesh+setup at different spacings pass the same cache (the
+// quad-cover NativeSolveContext carries one); a null cache just factors per
+// call. Never consulted when the CYBER_QC_NO_DIRECT kill switch is set.
+class SeamlessSolveCacheImpl;
+struct SeamlessSolveCache {
+    std::shared_ptr<SeamlessSolveCacheImpl> impl;
+};
+
 [[nodiscard]] Parameterization solveParameterization(const Mesh& mesh, const SeamlessSetup& setup,
                                                      float spacing, accel::IBackend& backend,
-                                                     const CancelToken* cancel = nullptr);
+                                                     const CancelToken* cancel = nullptr,
+                                                     SeamlessSolveCache* cache = nullptr);
 
 // Relaxed-only calibration probe: runs solveParameterization's assembly + the initial
 // relaxed Poisson solve at `spacing` (no ARAP polish, no integer phase) and returns the
@@ -93,7 +109,7 @@ struct Parameterization {
 // degenerate setup/mesh or a cancelled solve. Consumed by the quad-cover
 // quadrangulator's initial-scaling probe (quadcover_extractor.cpp).
 [[nodiscard]] double relaxedCellArea(const Mesh& mesh, const SeamlessSetup& setup, float spacing,
-                                     accel::IBackend& backend,
-                                     const CancelToken* cancel = nullptr);
+                                     accel::IBackend& backend, const CancelToken* cancel = nullptr,
+                                     SeamlessSolveCache* cache = nullptr);
 
 }  // namespace cyber::remesh

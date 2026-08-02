@@ -83,6 +83,9 @@ struct NativeSolveContext {
     Mesh work;            // isotropic-remeshed, feature-tagged solve mesh
     SeamlessSetup setup;  // cross field + period jumps + cut graph on `work`
     bool featureBinding = false;
+    // Direct-solver factorizations (CYBER_QC_DIRECT): the solve operators are
+    // spacing-invariant, so the probe and every calibration attempt share them.
+    SeamlessSolveCache solveCache;
 };
 
 // Compute a seamless integer-grid UV for `mesh`. Milestone 1 obtains it out-of-process
