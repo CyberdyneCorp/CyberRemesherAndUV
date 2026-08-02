@@ -58,6 +58,42 @@ remesh::Parameters smallRun(int quads) {
     return params;
 }
 
+// Capped cylinder with triangle-fan caps: sharp 90-degree rims (exactly on
+// the default feature threshold) plus a high-valence fan center whose
+// neighbors all sit on the rim — the geometry that exposed the adaptivity
+// explosions.
+Mesh makeCappedCylinder(int segments, int heightDivs, float radius = 0.5f, float height = 1.0f) {
+    std::vector<Vec3> p;
+    for (int h = 0; h <= heightDivs; ++h) {
+        const float z = height * (static_cast<float>(h) / static_cast<float>(heightDivs) - 0.5f);
+        for (int s = 0; s < segments; ++s) {
+            const float t =
+                2.0f * cyber::kPi * static_cast<float>(s) / static_cast<float>(segments);
+            p.push_back({radius * std::cos(t), radius * std::sin(t), z});
+        }
+    }
+    const Index top = static_cast<Index>(p.size());
+    p.push_back({0, 0, height * 0.5f});
+    const Index bottom = static_cast<Index>(p.size());
+    p.push_back({0, 0, -height * 0.5f});
+
+    std::vector<std::vector<Index>> f;
+    auto at = [segments](int h, int s) {
+        return static_cast<Index>(h * segments + (s % segments));
+    };
+    for (int h = 0; h < heightDivs; ++h) {
+        for (int s = 0; s < segments; ++s) {
+            f.push_back({at(h, s), at(h, s + 1), at(h + 1, s + 1)});
+            f.push_back({at(h, s), at(h + 1, s + 1), at(h + 1, s)});
+        }
+    }
+    for (int s = 0; s < segments; ++s) {
+        f.push_back({top, at(heightDivs, s), at(heightDivs, s + 1)});
+        f.push_back({bottom, at(0, s + 1), at(0, s)});
+    }
+    return Mesh::fromIndexed(p, f);
+}
+
 }  // namespace
 
 TEST_CASE("pipeline remeshes a sphere into a quad-dominant mesh") {
@@ -89,6 +125,27 @@ TEST_CASE("adaptive refinement does not compound across iterations (runaway regr
     const std::size_t total = result.stats.quadCount + result.stats.triangleCount;
     REQUIRE(total > 1000);
     REQUIRE(total < 5000);
+}
+
+TEST_CASE("adaptivity is bounded on sharp-rim geometry (cap-fan explosion regression)") {
+    // Regression for two compounding defects caught by the benchmark harness
+    // (25k+ quads for a 600-quad capped cylinder):
+    //  1. crease angle defect fed the adaptive curvature estimate, and one
+    //     Laplacian hop through the fan center blanketed the whole flat cap
+    //     with the floor scale (fixed: feature vertices are excluded from the
+    //     curvature source; scale spreading is gradation-limited; the field
+    //     is sampled Eulerian-ly from the reference instead of riding on
+    //     vertices that tangential smoothing migrates);
+    //  2. the exactly-90-degree rim sat on the default feature threshold, so
+    //     float jitter tagged only some rim edges (fixed: tagging epsilon).
+    const Mesh cylinder = makeCappedCylinder(48, 12);
+    remesh::Parameters params;
+    params.targetQuadCount = 600;  // adaptivity stays at its default 1.0
+    const auto result = remesh::remesh(cylinder, params);
+    REQUIRE(result.status == remesh::RunStatus::Success);
+    const std::size_t total = result.stats.quadCount + result.stats.triangleCount;
+    REQUIRE(total > 300);
+    REQUIRE(total < 2500);
 }
 
 TEST_CASE("default adaptivity stays near-uniform on a uniform-curvature surface") {

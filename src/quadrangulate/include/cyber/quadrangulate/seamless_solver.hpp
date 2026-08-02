@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <memory>
 #include <vector>
 
 #include "cyber/accel/backend.hpp"
@@ -17,7 +18,14 @@ namespace cyber::remesh {
 
 // The pre-solve topology + field data a seamless parameterization needs.
 struct SeamlessSetup {
-    CrossField field;  // per-face 4-RoSy cross field (the frame the UV aligns to)
+    CrossField field;
+
+    // Feature-binding mode (the shipped feature-pinning lever): feature edges
+    // become hard seams with integer-pinned crease isolines, period jumps are
+    // computed across creases, and the combed targets/rho use the angle()
+    // branch convention. Off reproduces the historical knife-edge-only
+    // behavior bit-exactly.
+    bool featureBinding = false;  // per-face 4-RoSy cross field (the frame the UV aligns to)
 
     // Per-edge integer period jump r in {0,1,2,3}: the 90-degree rotation that aligns
     // edgeFaces[1]'s cross to edgeFaces[0]'s across that edge (0 for boundary/feature/
@@ -43,7 +51,8 @@ struct SeamlessSetup {
 // per-edge period jumps, per-vertex singularity indices, and a cut graph. Returns
 // valid == false only for an empty/degenerate mesh.
 [[nodiscard]] SeamlessSetup buildSeamlessSetup(const Mesh& mesh, int iterations,
-                                               accel::IBackend& backend);
+                                               accel::IBackend& backend,
+                                               bool featureBinding = false);
 
 // Euler characteristic V - E + F of the mesh cut open along `setup.isCutEdge`: each cut
 // edge is split so the two sides no longer share it. A cut graph that opens a closed
@@ -72,8 +81,35 @@ struct Parameterization {
     int cgIterationsV = 0;
     bool valid = false;
 };
+
+// Opaque cache for the direct (sparse-Cholesky) solve path, CYBER_QC_DIRECT
+// (docs/ROADMAP.md perf entry). The pinned Poisson operator and the reduced
+// integer-phase operator depend only on (mesh, setup) — never on `spacing` —
+// so their factorizations are computed once and reused by the calibration
+// probe and every calibration attempt (only the RHS re-scales). Callers that
+// re-solve the SAME mesh+setup at different spacings pass the same cache (the
+// quad-cover NativeSolveContext carries one); a null cache just factors per
+// call. Never consulted when the CYBER_QC_NO_DIRECT kill switch is set.
+class SeamlessSolveCacheImpl;
+struct SeamlessSolveCache {
+    std::shared_ptr<SeamlessSolveCacheImpl> impl;
+};
+
 [[nodiscard]] Parameterization solveParameterization(const Mesh& mesh, const SeamlessSetup& setup,
                                                      float spacing, accel::IBackend& backend,
-                                                     const CancelToken* cancel = nullptr);
+                                                     const CancelToken* cancel = nullptr,
+                                                     SeamlessSolveCache* cache = nullptr);
+
+// Relaxed-only calibration probe: runs solveParameterization's assembly + the initial
+// relaxed Poisson solve at `spacing` (no ARAP polish, no integer phase) and returns the
+// UV grid-cell count — the sum of |UV triangle areas|, ~1 extracted quad candidate per
+// unit cell. The relaxed phase already fixes the cell area (ARAP keeps the target frame
+// norm and integer rounding only shifts sub-cell translations), so this predicts the
+// extraction count at a fraction of the full solve's cost. Returns <= 0 for a
+// degenerate setup/mesh or a cancelled solve. Consumed by the quad-cover
+// quadrangulator's initial-scaling probe (quadcover_extractor.cpp).
+[[nodiscard]] double relaxedCellArea(const Mesh& mesh, const SeamlessSetup& setup, float spacing,
+                                     accel::IBackend& backend, const CancelToken* cancel = nullptr,
+                                     SeamlessSolveCache* cache = nullptr);
 
 }  // namespace cyber::remesh

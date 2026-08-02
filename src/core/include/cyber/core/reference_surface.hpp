@@ -34,6 +34,11 @@ public:
     // when smoothing is enabled and the hit face is a triangle.
     [[nodiscard]] Vec3 project(Vec3 query) const;
 
+    // Raw (uncurved) closest-point hit, exposing the hit face so callers can
+    // sample per-face fields of the reference at arbitrary points (the
+    // adaptive scale field does).
+    [[nodiscard]] Bvh::ClosestHit closest(Vec3 query) const { return m_bvh.closestPoint(query); }
+
 private:
     struct Patch {
         std::array<Vec3, 3> corner{};        // triangle corner positions

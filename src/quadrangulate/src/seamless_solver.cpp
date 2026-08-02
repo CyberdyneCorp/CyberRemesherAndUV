@@ -2,12 +2,14 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <functional>
+#include <memory>
 #include <numeric>
 #include <queue>
 #include <unordered_map>
@@ -17,6 +19,7 @@
 #include "cyber/accel/buffer.hpp"
 #include "cyber/accel/primitives.hpp"
 #include "cyber/core/math.hpp"
+#include "sparse_cholesky.hpp"
 
 // Native QuadCover seamless-UV — Milestone 1 (docs/native-miq-plan.md): the frame-field
 // setup a seamless parameterization is solved on. Reuses the per-face CrossField; adds
@@ -156,6 +159,49 @@ int vertexIndex(const Mesh& mesh, const CrossField& field, VertexId v) {
     return static_cast<int>(std::lround((residual + defect) / kHalfPi));
 }
 
+// One growth step of the cut-tree: find the not-yet-connected singular vertex nearest to the
+// in-tree set (plain BFS) and fill `parentEdge` with the search tree so the caller can walk
+// the path back. Returns the target (invalid if none).
+//
+// MEASURED DEAD END (feature-pinning lever): routing this search as a 0/1 Dijkstra with
+// feature edges cost 0, so tree paths ride creases and flat CAD patches keep no interior
+// cuts, is unnecessary for CAD once the combed-target convention and the seam rho are fixed
+// (box/cylinder are bit-identically perfect with plain BFS) and it REGRESSES organics whose
+// coarse remesh carries many knife-edge feature chains (nefertiti lever-on singularities
+// 80 -> 205: the tree snakes along wrinkle networks and shreds the map). Keep plain BFS.
+VertexId nearestSingularBfs(const Mesh& mesh, const std::vector<char>& inTree,
+                            const std::vector<char>& isSingular, std::vector<Index>& parentEdge) {
+    std::vector<char> visited(mesh.vertexCapacity(), 0);
+    std::queue<VertexId> q;
+    for (Index vi = 0; vi < mesh.vertexCapacity(); ++vi) {
+        if (inTree[vi]) {
+            visited[vi] = 1;
+            q.push(VertexId{vi});
+        }
+    }
+    while (!q.empty()) {
+        const VertexId u = q.front();
+        q.pop();
+        for (const EdgeId e : mesh.vertexEdges(u)) {
+            if (!mesh.isAlive(e)) {
+                continue;
+            }
+            const auto [a, b] = mesh.edgeVertices(e);
+            const VertexId w = (a == u) ? b : a;
+            if (visited[w.value]) {
+                continue;
+            }
+            visited[w.value] = 1;
+            parentEdge[w.value] = e.value;
+            if (isSingular[w.value] && !inTree[w.value]) {
+                return w;
+            }
+            q.push(w);
+        }
+    }
+    return VertexId{kInvalidIndex};
+}
+
 }  // namespace
 
 std::size_t SeamlessSetup::singularityCount() const {
@@ -167,7 +213,8 @@ int SeamlessSetup::totalIndex() const {
     return std::accumulate(singularityIndex.begin(), singularityIndex.end(), 0);
 }
 
-SeamlessSetup buildSeamlessSetup(const Mesh& mesh, int iterations, accel::IBackend& backend) {
+SeamlessSetup buildSeamlessSetup(const Mesh& mesh, int iterations, accel::IBackend& backend,
+                                 bool featureBinding) {
     SeamlessSetup setup;
     if (mesh.faceCapacity() == 0) {
         return setup;
@@ -181,11 +228,19 @@ SeamlessSetup buildSeamlessSetup(const Mesh& mesh, int iterations, accel::IBacke
         setup.field = computeCrossField(mesh, iterations, backend);
     }
 
-    // Per-edge period jumps.
+    // Per-edge period jumps. Historically skipped for feature edges (they are always cut, so
+    // the comb never crosses them) — but the seam transition rho DOES need the intrinsic field
+    // jump across a crease: without it every feature seam's rho is off by the crease's
+    // representative wrap and the reduced integer phase fights the (correct) relaxed targets.
+    // Computed for feature edges too under the feature-pinning lever; lever-off keeps the
+    // historical skip bit-compatible.
+    setup.featureBinding = featureBinding;
+    const bool featureLever = featureBinding;
     setup.periodJump.assign(mesh.edgeCapacity(), 0);
     for (Index ei = 0; ei < mesh.edgeCapacity(); ++ei) {
         const EdgeId e{ei};
-        if (mesh.isAlive(e) && mesh.edgeFaceCount(e) == 2 && !mesh.isFeatureEdge(e)) {
+        if (mesh.isAlive(e) && mesh.edgeFaceCount(e) == 2 &&
+            (featureLever || !mesh.isFeatureEdge(e))) {
             setup.periodJump[ei] = edgeJump(mesh, setup.field, e).first;
         }
     }
@@ -218,38 +273,9 @@ SeamlessSetup buildSeamlessSetup(const Mesh& mesh, int iterations, accel::IBacke
         inTree[singular[0].value] = 1;
         std::size_t connected = 1;
         while (connected < singular.size()) {
-            // BFS from all in-tree vertices to the nearest not-yet-connected singular one.
+            // Search from all in-tree vertices to the nearest not-yet-connected singular one.
             std::vector<Index> parentEdge(mesh.vertexCapacity(), kInvalidIndex);
-            std::vector<char> visited(mesh.vertexCapacity(), 0);
-            std::queue<VertexId> q;
-            for (Index vi = 0; vi < mesh.vertexCapacity(); ++vi) {
-                if (inTree[vi]) {
-                    visited[vi] = 1;
-                    q.push(VertexId{vi});
-                }
-            }
-            VertexId target{kInvalidIndex};
-            while (!q.empty() && target.value == kInvalidIndex) {
-                const VertexId u = q.front();
-                q.pop();
-                for (const EdgeId e : mesh.vertexEdges(u)) {
-                    if (!mesh.isAlive(e)) {
-                        continue;
-                    }
-                    const auto [a, b] = mesh.edgeVertices(e);
-                    const VertexId w = (a == u) ? b : a;
-                    if (visited[w.value]) {
-                        continue;
-                    }
-                    visited[w.value] = 1;
-                    parentEdge[w.value] = e.value;
-                    if (isSingular[w.value] && !inTree[w.value]) {
-                        target = w;
-                        break;
-                    }
-                    q.push(w);
-                }
-            }
+            const VertexId target = nearestSingularBfs(mesh, inTree, isSingular, parentEdge);
             if (target.value == kInvalidIndex) {
                 break;  // disconnected component; stop (still a valid partial cut)
             }
@@ -284,6 +310,26 @@ SeamlessSetup buildSeamlessSetup(const Mesh& mesh, int iterations, accel::IBacke
     setup.valid = true;
     return setup;
 }
+
+// Cache for the CYBER_QC_DIRECT sparse-direct solve path (see the header).
+// Both cached operators are provably attempt-invariant: the pinned Poisson A
+// depends only on the cut Laplacian + pins, and the reduced operator
+// M = Tt*L2*Tuv only on the seam/constraint structure — the calibration
+// spacing enters the RHS alone (assembleRhs scales by 1/spacing).
+class SeamlessSolveCacheImpl {
+public:
+    // Phase 1: pinned Poisson operator (relaxed + ARAP re-solves).
+    bool aReady = false;
+    SparseCholesky cholA;
+
+    // Phase 2: reduced integer-phase operator + the dense integer block of its
+    // inverse (the Woodbury bordered solves of the greedy rounding).
+    bool mReady = false;
+    std::size_t mW = 0;
+    std::vector<std::size_t> mIntFree;  // reuse guard: structure must match exactly
+    SparseCholesky cholM;
+    std::vector<double> mD;  // |intFree|^2 dense block of (M + ridge)^-1
+};
 
 namespace {
 
@@ -361,6 +407,255 @@ int conjugateGradient(accel::IBackend& backend, const accel::SparseMatrix& A,
     return it;
 }
 
+long msSince(std::chrono::steady_clock::time_point t0) {
+    return static_cast<long>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0)
+            .count());
+}
+
+// Ridge added to the reduced operator so it stays SPD (matches the masked CG,
+// which applies the same ridge inside every solve).
+constexpr double kReducedRidge = 1e-8;
+
+// Build the explicit reduced operator M = Tt * blkdiag(L, L) * Tuv in double
+// CSR (sorted columns). `rows` is the cut cotan Laplacian; tuvRows/ttRows are
+// the Gauss-Jordan reduction map and its transpose as (column, weight) lists.
+// Shared by the direct factorization (CYBER_QC_DIRECT) and the fused-operator
+// CG fallback (CYBER_QC_FUSED_OPERATOR).
+void buildReducedOperator(std::size_t nCut,
+                          const std::vector<std::unordered_map<std::size_t, float>>& rows,
+                          const std::vector<std::vector<std::pair<std::size_t, double>>>& tuvRows,
+                          const std::vector<std::vector<std::pair<std::size_t, double>>>& ttRows,
+                          std::size_t W, std::vector<std::size_t>& mStart,
+                          std::vector<std::size_t>& mCol, std::vector<double>& mVal) {
+    mStart.assign(W + 1, 0);
+    mCol.clear();
+    mVal.clear();
+    std::vector<double> acc(W, 0.0);
+    std::vector<std::size_t> markRow(W, kInvalidIndex);
+    std::vector<std::size_t> touched;
+    for (std::size_t r = 0; r < W; ++r) {
+        touched.clear();
+        for (const auto& [iUv, wi] : ttRows[r]) {
+            const std::size_t offset = iUv < nCut ? 0 : nCut;
+            for (const auto& [j, lw] : rows[iUv - offset]) {
+                const double c = wi * static_cast<double>(lw);
+                for (const auto& [cIdx, tw] : tuvRows[offset + j]) {
+                    if (markRow[cIdx] != r) {
+                        markRow[cIdx] = r;
+                        acc[cIdx] = 0.0;
+                        touched.push_back(cIdx);
+                    }
+                    acc[cIdx] += c * tw;
+                }
+            }
+        }
+        std::sort(touched.begin(), touched.end());
+        for (const std::size_t cIdx : touched) {
+            mCol.push_back(cIdx);
+            mVal.push_back(acc[cIdx]);
+        }
+        mStart[r + 1] = mCol.size();
+    }
+}
+
+// Exact direct engine for the reduced integer phase (CYBER_QC_DIRECT). One
+// sparse factorization of M + ridge replaces every masked CG:
+//   relaxed solve       -> x0 = (M+ridge)^-1 g (a back-substitution);
+//   each rounding round -> the bordered KKT system over the pinned set S
+//     (E selects S):  D_SS lambda = x0_S - c,  w = x0 - (M+ridge)^-1 E^T lambda
+//     with D = ((M+ridge)^-1)_{int,int} precomputed once (dense symmetric; the
+//     greedy loop only ever READS w at integer coordinates, so per-round work
+//     is dense and tiny — the pinned set only grows, hence the incremental
+//     dense Cholesky).
+// Every w this exposes is EXACTLY maskedSolve's fixed point
+// ((M+ridge)_FF w_F = g_F - M_FS c, w_S = c), so the greedy pin SCHEDULE runs
+// byte-for-byte the same code; only the linear solver under it changes.
+class DirectRounding {
+public:
+    bool init(accel::IBackend& backend, std::size_t nCut,
+              const std::vector<std::unordered_map<std::size_t, float>>& rows,
+              const std::vector<std::vector<std::pair<std::size_t, double>>>& tuvRows,
+              const std::vector<std::vector<std::pair<std::size_t, double>>>& ttRows,
+              const std::vector<float>& gReduced, const std::vector<std::size_t>& intFree,
+              std::size_t W, SeamlessSolveCacheImpl* cache, const CancelToken* cancel) {
+        m_W = W;
+        m_intFree = &intFree;
+        const std::size_t nInt = intFree.size();
+        if (cache != nullptr && cache->mReady && cache->mW == W && cache->mIntFree == intFree) {
+            m_chol = &cache->cholM;
+            m_D = &cache->mD;
+        } else {
+            if (!factorAndInvertIntBlock(backend, nCut, rows, tuvRows, ttRows, intFree, cache,
+                                         cancel)) {
+                return false;
+            }
+        }
+        // x0 = (M+ridge)^-1 g — the exact relaxed reduced solution.
+        std::vector<double> g(W);
+        for (std::size_t i = 0; i < W; ++i) {
+            g[i] = static_cast<double>(gReduced[i]);
+        }
+        m_chol->solve(g, m_x0);
+        m_inS.assign(nInt, 0);
+        m_S.clear();
+        m_c.clear();
+        m_dchol = DenseCholeskyInc(nInt);
+        return true;
+    }
+
+    // The exact relaxed solution, as the float w the greedy loop reads.
+    void seed(std::vector<float>& w) const {
+        for (std::size_t j = 0; j < m_W; ++j) {
+            w[j] = static_cast<float>(m_x0[j]);
+        }
+    }
+
+    // One rounding round: absorb the newly pinned integers (mask flipped to 0;
+    // w already carries their clamped values) into the bordered factor, then
+    // refresh w on every still-free integer coordinate. Returns false when the
+    // dense factor loses positivity (callers fall back to the masked CG).
+    bool resolve(const std::vector<char>& mask, std::vector<float>& w) {
+        const std::vector<std::size_t>& intFree = *m_intFree;
+        const std::size_t nInt = intFree.size();
+        std::vector<double> col;
+        for (std::size_t k = 0; k < nInt; ++k) {
+            if (m_inS[k] || mask[intFree[k]] != 0) {
+                continue;
+            }
+            col.resize(m_S.size());
+            for (std::size_t i = 0; i < m_S.size(); ++i) {
+                col[i] = (*m_D)[k * nInt + m_S[i]];
+            }
+            if (!m_dchol.add(col, (*m_D)[k * nInt + k])) {
+                return false;
+            }
+            m_S.push_back(k);
+            m_c.push_back(static_cast<double>(w[intFree[k]]));
+            m_inS[k] = 1;
+        }
+        std::vector<double> rhs(m_S.size());
+        for (std::size_t i = 0; i < m_S.size(); ++i) {
+            rhs[i] = m_x0[intFree[m_S[i]]] - m_c[i];
+        }
+        m_dchol.solve(rhs, m_lambda);
+        for (std::size_t k = 0; k < nInt; ++k) {
+            if (m_inS[k]) {
+                continue;
+            }
+            double t = m_x0[intFree[k]];
+            const double* dRow = m_D->data() + k * nInt;
+            for (std::size_t i = 0; i < m_S.size(); ++i) {
+                t -= dRow[m_S[i]] * m_lambda[i];
+            }
+            w[intFree[k]] = static_cast<float>(t);
+        }
+        return true;
+    }
+
+    // Exact full solution for the current pin set: w = x0 - (M+ridge)^-1 E^T
+    // lambda on every free coordinate. Pinned coordinates (mask == 0) keep the
+    // exact integers the schedule already wrote into w.
+    void finalize(const std::vector<char>& mask, std::vector<float>& w) const {
+        std::vector<double> full(m_x0);
+        if (!m_S.empty()) {
+            const std::vector<std::size_t>& intFree = *m_intFree;
+            std::vector<double> rhs(m_W, 0.0);
+            std::vector<double> corr;
+            for (std::size_t i = 0; i < m_S.size(); ++i) {
+                rhs[intFree[m_S[i]]] = m_lambda[i];
+            }
+            m_chol->solve(rhs, corr);
+            for (std::size_t j = 0; j < m_W; ++j) {
+                full[j] -= corr[j];
+            }
+        }
+        for (std::size_t j = 0; j < m_W; ++j) {
+            if (mask[j] != 0) {
+                w[j] = static_cast<float>(full[j]);
+            }
+        }
+    }
+
+private:
+    // Build + factor M and precompute D, storing into the cache when one is
+    // provided (reused across calibration attempts) or locally otherwise.
+    bool factorAndInvertIntBlock(
+        accel::IBackend& backend, std::size_t nCut,
+        const std::vector<std::unordered_map<std::size_t, float>>& rows,
+        const std::vector<std::vector<std::pair<std::size_t, double>>>& tuvRows,
+        const std::vector<std::vector<std::pair<std::size_t, double>>>& ttRows,
+        const std::vector<std::size_t>& intFree, SeamlessSolveCacheImpl* cache,
+        const CancelToken* cancel) {
+        const std::size_t nInt = intFree.size();
+        SparseCholesky* chol = cache != nullptr ? &cache->cholM : &m_ownChol;
+        std::vector<double>* D = cache != nullptr ? &cache->mD : &m_ownD;
+        if (cache != nullptr) {
+            cache->mReady = false;
+        }
+        const auto t0 = std::chrono::steady_clock::now();
+        std::vector<std::size_t> mStart, mCol;
+        std::vector<double> mVal;
+        buildReducedOperator(nCut, rows, tuvRows, ttRows, m_W, mStart, mCol, mVal);
+        const long msM = msSince(t0);
+        if (cancel != nullptr && cancel->isCancelled()) {
+            return false;
+        }
+        const auto t1 = std::chrono::steady_clock::now();
+        if (!chol->factor(m_W, mStart, mCol, mVal, kReducedRidge)) {
+            return false;
+        }
+        const long msFactor = msSince(t1);
+        if (std::getenv("CYBER_QC_DEBUG") != nullptr) {
+            std::size_t nnzL = 0;
+            for (const auto& r : rows) {
+                nnzL += r.size();
+            }
+            std::fprintf(stderr,
+                         "[qc] direct reduced: W=%zu nnzM=%zu cholNnz=%zu (L2 nnz=%zu) "
+                         "intFree=%zu\n",
+                         m_W, mCol.size(), chol->factorNnz(), 2 * nnzL, nInt);
+        }
+        if (cancel != nullptr && cancel->isCancelled()) {
+            return false;
+        }
+        const auto t2 = std::chrono::steady_clock::now();
+        D->assign(nInt * nInt, 0.0);
+        double* dOut = D->data();
+        const SparseCholesky* ch = chol;
+        backend.parallelFor(0, nInt, [ch, &intFree, dOut, nInt](std::size_t lo, std::size_t hi) {
+            for (std::size_t k = lo; k < hi; ++k) {
+                ch->solveUnitGather(intFree[k], intFree, dOut + k * nInt);
+            }
+        });
+        if (std::getenv("CYBER_QC_TIME") != nullptr) {
+            std::fprintf(stderr, "[qc-time] direct reduced: M=%ldms factor=%ldms D=%ldms\n", msM,
+                         msFactor, msSince(t2));
+        }
+        if (cache != nullptr) {
+            cache->mW = m_W;
+            cache->mIntFree = intFree;
+            cache->mReady = true;
+        }
+        m_chol = chol;
+        m_D = D;
+        return true;
+    }
+
+    std::size_t m_W = 0;
+    const std::vector<std::size_t>* m_intFree = nullptr;
+    const SparseCholesky* m_chol = nullptr;
+    const std::vector<double>* m_D = nullptr;
+    SparseCholesky m_ownChol;      // storage when no cache is provided
+    std::vector<double> m_ownD;    // "
+    std::vector<double> m_x0;      // exact relaxed reduced solution
+    std::vector<std::size_t> m_S;  // pinned integers, in pin order
+    std::vector<double> m_c;       // their clamped integer values
+    std::vector<double> m_lambda;  // bordered-system multipliers
+    std::vector<char> m_inS;
+    DenseCholeskyInc m_dchol{0};
+};
+
 // Coefficients of R^rho applied to a (u,v) pair, R = CCW (u,v) -> (-v,u):
 //   (R^rho (u,v))_x = cxu*u + cxv*v ;  (R^rho (u,v))_y = cyu*u + cyv*v.
 void rotCoeffs(int rho, double& cxu, double& cxv, double& cyu, double& cyv) {
@@ -399,6 +694,25 @@ Vec3 rotQuarter(Vec3 d, const Vec3& n, int r) {
         d = cross(n, d);
     }
     return d;
+}
+
+// Combed representative cross direction of face f. The comb (and the period jumps it is
+// built from) lives on the angle() convention (theta in [0, pi/2)), while direction()
+// returns the raw atan2 branch (theta in (-pi/4, pi/4]) — a per-face quarter-turn offset
+// wherever raw theta < 0. Reconstructing e0 from direction() under an angle()-based comb
+// therefore yields a QUARTER-TURN-MIXED target field on a single coplanar patch (box top:
+// 178 x-like vs 110 y-like faces measured) whose Poisson compromise is the ~32-degree
+// uniform shear of the feature-pinning lever. Under the lever the reconstruction uses the
+// SAME angle() convention the comb was built on; the historical direction() branch is kept
+// for the lever-off path (bit-compatible).
+Vec3 combedDirection(const CrossField& field, FaceId f, const Vec3& n, int comb,
+                     bool angleConvention) {
+    if (!angleConvention) {
+        return rotQuarter(field.direction(f), n, comb);
+    }
+    const float th = field.angle(f);
+    const Vec3 d = field.tangent[f.value] * std::cos(th) + field.bitangent[f.value] * std::sin(th);
+    return rotQuarter(d, n, comb);
 }
 
 // Comb the frame field: BFS over faces across non-cut interior edges, assigning each
@@ -449,6 +763,15 @@ std::vector<int> combField(const Mesh& mesh, const SeamlessSetup& setup, int& to
 struct SeamRef {
     std::size_t aA = 0, bA = 0, aB = 0, bB = 0;
     int rho = 0;
+    // Feature (crease) seam: the coordinate `pinAxis` (0=u, 1=v) is constant
+    // along the edge on side A and pinned to the integer lattice, so an
+    // integer isoline runs exactly along the crease and extraction traces it
+    // (its edge-on-isoline case). This is the piece whose absence made
+    // feature tagging alone REGRESS: hard seams without integer pinning give
+    // every feature-bounded patch an independent grid phase, so the patch
+    // grids disagree along the crease and extraction leaves cracks.
+    bool feature = false;
+    int pinAxis = 0;
 };
 
 // Sparse constraint-elimination MIQ (docs/native-miq-plan.md, "M2c-sparse"). The seam
@@ -469,14 +792,35 @@ int solveSeamlessReduced(accel::IBackend& backend, std::size_t nCut,
                          const std::vector<float>& bu, const std::vector<float>& bv,
                          const std::vector<SeamRef>& seams, const std::vector<std::size_t>& gauges,
                          std::vector<float>& u, std::vector<float>& v,
-                         const CancelToken* cancel = nullptr) {
+                         const CancelToken* cancel = nullptr,
+                         SeamlessSolveCacheImpl* cache = nullptr) {
     const std::size_t nSeam = seams.size();
     const std::size_t nUv = 2 * nCut;
-    const std::size_t N = nUv + 2 * nSeam;
+    // Feature-seam integer pinning (docs/ROADMAP.md 2026-08-01 priority 1;
+    // successor to the refuted M2d — the two conditions that made M2d inert
+    // are now satisfied for the meshes this reaches: crease-heavy inputs
+    // route native, and the cross field is hard-pinned along tagged feature
+    // edges so a constant coordinate along the crease exists to pin). Each
+    // feature seam edge gets one extra promoted INTEGER variable c_e and two
+    // homogeneous rows: coord(aA) - coord(bA) = 0 (the crease is a level set
+    // of that coordinate) and coord(aA) - c_e = 0 (the level set lands on the
+    // integer lattice, i.e. ON an isoline). Kill switch: CYBER_QC_NO_FEATURE_PIN.
+    const bool pinFeatures = std::getenv("CYBER_QC_NO_FEATURE_PIN") == nullptr;
+    std::vector<std::size_t> featureSeams;
+    if (pinFeatures) {
+        for (std::size_t e = 0; e < nSeam; ++e) {
+            if (seams[e].feature) {
+                featureSeams.push_back(e);
+            }
+        }
+    }
+    const std::size_t nFeat = featureSeams.size();
+    const std::size_t N = nUv + 2 * nSeam + nFeat;
     const auto uIx = [](std::size_t c) { return c; };
     const auto vIx = [nCut](std::size_t c) { return nCut + c; };
     const auto txIx = [nCut](std::size_t e) { return 2 * nCut + 2 * e; };
     const auto tyIx = [nCut](std::size_t e) { return 2 * nCut + 2 * e + 1; };
+    const auto cIx = [nCut, nSeam](std::size_t k) { return 2 * nCut + 2 * nSeam + k; };
 
     using Row = std::unordered_map<std::size_t, double>;
     const auto addC = [](Row& r, std::size_t c, double w) {
@@ -524,6 +868,23 @@ int solveSeamlessReduced(accel::IBackend& backend, std::size_t nCut,
             }
         }
     }
+    // Feature-seam rows: crease level set + integer pinning (see above).
+    for (std::size_t k = 0; k < nFeat; ++k) {
+        const SeamRef& s = seams[featureSeams[k]];
+        const auto coord = [&](std::size_t c) { return s.pinAxis == 0 ? uIx(c) : vIx(c); };
+        Row level;
+        addC(level, coord(s.aA), 1.0);
+        addC(level, coord(s.bA), -1.0);
+        prune(level);
+        if (!level.empty()) {
+            cons.push_back(std::move(level));
+        }
+        Row lattice;
+        addC(lattice, coord(s.aA), 1.0);
+        addC(lattice, cIx(k), -1.0);
+        cons.push_back(std::move(lattice));
+    }
+
     // Gauge: pin u and v to 0 at ONE vertex PER CONNECTED COMPONENT of the cut-open mesh. The
     // reduced Dirichlet operator inherits the cotan Laplacian's per-component constant nullspace,
     // so each component needs its own translation pin or the CG drifts arbitrarily far along that
@@ -669,13 +1030,41 @@ int solveSeamlessReduced(accel::IBackend& backend, std::size_t nCut,
     accel::spmv(backend, Tt, gBuf, gRed);
     const std::vector<float> gReduced(gRed.data(), gRed.data() + gRed.size());
 
-    // Reduced operator A(p) = Tt * L2 * Tuv * p, applied via three spmv.
+    // Direct sparse-Cholesky path (CYBER_QC_DIRECT, default on; docs/ROADMAP.md
+    // perf entry): the reduced operator is FIXED across the relaxed solve and
+    // every greedy rounding round, so one factorization + bordered (Woodbury)
+    // pin updates replace the ~50 masked CG solves. CYBER_QC_NO_DIRECT reverts
+    // to the historical masked CG byte-exactly; CYBER_QC_FUSED_OPERATOR keeps
+    // the CG loop but applies the operator as ONE explicit spmv instead of
+    // three chained ones (the fill-pathology fallback; not byte-identical —
+    // float sums re-associate).
+    const bool noDirect = std::getenv("CYBER_QC_NO_DIRECT") != nullptr;
+    const bool fusedForced = !noDirect && std::getenv("CYBER_QC_FUSED_OPERATOR") != nullptr;
+    accel::SparseMatrix fusedM;
+    bool haveFused = false;
+    if (fusedForced) {
+        std::vector<std::size_t> mStart, mCol;
+        std::vector<double> mVal;
+        buildReducedOperator(nCut, rows, tuvRows, ttRows, W, mStart, mCol, mVal);
+        fusedM.rows = W;
+        fusedM.rowStart = std::move(mStart);
+        fusedM.colIndex = std::move(mCol);
+        fusedM.value.assign(mVal.begin(), mVal.end());
+        haveFused = true;
+    }
+
+    // Reduced operator A(p) = Tt * L2 * Tuv * p, applied via three spmv (or the
+    // one fused spmv when CYBER_QC_FUSED_OPERATOR built it explicitly).
     accel::Buffer<float> tmpUv, tmpUv2, outBuf, pBuf;
     const auto applyA = [&](const std::vector<float>& p, std::vector<float>& out) {
         pBuf.upload(p);
-        accel::spmv(backend, Tuv, pBuf, tmpUv);
-        accel::spmv(backend, L2, tmpUv, tmpUv2);
-        accel::spmv(backend, Tt, tmpUv2, outBuf);
+        if (haveFused) {
+            accel::spmv(backend, fusedM, pBuf, outBuf);
+        } else {
+            accel::spmv(backend, Tuv, pBuf, tmpUv);
+            accel::spmv(backend, L2, tmpUv, tmpUv2);
+            accel::spmv(backend, Tt, tmpUv2, outBuf);
+        }
         out.assign(outBuf.data(), outBuf.data() + outBuf.size());
     };
 
@@ -778,8 +1167,19 @@ int solveSeamlessReduced(accel::IBackend& backend, std::size_t nCut,
     // stays small (a few rounds, not one per integer). If a round pins nothing, fall back to the
     // single most-confident so it always terminates. Seamlessness holds for any integer values
     // (the reduction makes the free integers unconstrained); rounding only shapes distortion.
+    // The direct engine, when it initializes, serves the exact same solutions from one
+    // factorization; the schedule below is shared verbatim by both solvers.
     std::vector<char> mask(W, 1);
-    maskedSolve(mask);
+    DirectRounding direct;
+    bool useDirect =
+        !noDirect && !haveFused &&
+        direct.init(backend, nCut, rows, tuvRows, ttRows, gReduced, intFree, W, cache, cancel);
+    if (useDirect) {
+        ++maskedSolveCalls;
+        direct.seed(w);
+    } else {
+        maskedSolve(mask);
+    }
 
     // MAGNITUDE CONTROL. The reduction leaves the independent integer translations
     // UNCONSTRAINED — any integers keep the map seamless — so a huge relaxed value would
@@ -843,7 +1243,22 @@ int solveSeamlessReduced(accel::IBackend& backend, std::size_t nCut,
                 pin(frac[i].second);
             }
         }
-        maskedSolve(mask);
+        if (useDirect) {
+            ++maskedSolveCalls;
+            if (!direct.resolve(mask, w)) {
+                // Bordered factor lost positivity (should not happen on an SPD
+                // reduced operator): recover the exact current solution and
+                // finish on the historical masked CG.
+                direct.finalize(mask, w);
+                useDirect = false;
+                maskedSolve(mask);
+            }
+        } else {
+            maskedSolve(mask);
+        }
+    }
+    if (useDirect) {
+        direct.finalize(mask, w);
     }
 
     // Reconstruct z = T w on the UV block.
@@ -866,13 +1281,25 @@ int solveSeamlessReduced(accel::IBackend& backend, std::size_t nCut,
 
 }  // namespace
 
-Parameterization solveParameterization(const Mesh& mesh, const SeamlessSetup& setup, float spacing,
-                                       accel::IBackend& backend, const CancelToken* cancel) {
+namespace {
+
+// Shared implementation of solveParameterization and relaxedCellArea. When
+// `probeCellArea` is non-null the solve stops right after the initial relaxed
+// Poisson solve and reports the UV grid-cell count there (no ARAP polish, no
+// integer phase); the returned Parameterization stays invalid. A null pointer
+// runs the full historical solve, unchanged.
+Parameterization solveParameterizationImpl(const Mesh& mesh, const SeamlessSetup& setup,
+                                           float spacing, accel::IBackend& backend,
+                                           const CancelToken* cancel, double* probeCellArea,
+                                           SeamlessSolveCache* cache) {
     Parameterization out;
     if (!setup.valid || spacing <= 0.0f || mesh.faceCapacity() == 0) {
         return out;
     }
     const float invS = 1.0f / spacing;
+    // Feature-pinning lever: reconstruct combed targets on the comb's own angle() convention
+    // (see combedDirection). Lever-off keeps the historical direction() branch bit-compatible.
+    const bool angleConvention = setup.featureBinding;
 
     // Comb the frame so it is continuous across non-cut edges.
     int touched = 0;
@@ -958,7 +1385,7 @@ Parameterization solveParameterization(const Mesh& mesh, const SeamlessSetup& se
         const Vec3 n = nrm / area2;
         FaceData fd;
         fd.area = 0.5f * area2;
-        fd.e0 = normalized(rotQuarter(setup.field.direction(f), n, comb[fi]));
+        fd.e0 = normalized(combedDirection(setup.field, f, n, comb[fi], angleConvention));
         fd.e1 = cross(n, fd.e0);
         for (int k = 0; k < 3; ++k) {
             fd.cut[static_cast<std::size_t>(k)] = cutOf(fi, vs[static_cast<std::size_t>(k)].value);
@@ -1077,11 +1504,143 @@ Parameterization solveParameterization(const Mesh& mesh, const SeamlessSetup& se
         A.rowStart.push_back(A.colIndex.size());
     }
 
+    // Direct path (CYBER_QC_DIRECT, default on; docs/ROADMAP.md perf entry):
+    // factor the pinned SPD operator ONCE — it is fixed across the initial
+    // relaxed solve, every ARAP re-solve (only the RHS rotates) and every
+    // calibration attempt/probe (spacing only scales the RHS) — and make each
+    // relaxedSolve a pair of back-substitutions instead of two CG solves. The
+    // factorization lands in the caller's cache when one is provided.
+    // CYBER_QC_NO_DIRECT reverts to the historical CG byte-exactly.
+    SeamlessSolveCacheImpl* cacheImpl = nullptr;
+    if (cache != nullptr && std::getenv("CYBER_QC_NO_DIRECT") == nullptr) {
+        if (!cache->impl) {
+            cache->impl = std::make_shared<SeamlessSolveCacheImpl>();
+        }
+        cacheImpl = cache->impl.get();
+    }
+    SparseCholesky ownCholA;
+    const SparseCholesky* cholA = nullptr;
+    if (std::getenv("CYBER_QC_NO_DIRECT") == nullptr) {
+        SparseCholesky* target = cacheImpl != nullptr ? &cacheImpl->cholA : &ownCholA;
+        if (cacheImpl != nullptr && cacheImpl->aReady && cacheImpl->cholA.dim() == nCut) {
+            cholA = target;
+        } else {
+            if (cacheImpl != nullptr) {
+                cacheImpl->aReady = false;
+            }
+            const auto tA = std::chrono::steady_clock::now();
+            const std::vector<double> aVal(A.value.begin(), A.value.end());
+            if (target->factor(nCut, A.rowStart, A.colIndex, aVal)) {
+                cholA = target;
+                if (cacheImpl != nullptr) {
+                    cacheImpl->aReady = true;
+                }
+                if (std::getenv("CYBER_QC_TIME") != nullptr) {
+                    std::fprintf(stderr, "[qc-time] direct poisson: factorA=%ldms cholNnz=%zu\n",
+                                 msSince(tA), target->factorNnz());
+                }
+            }
+            // factor failure (non-SPD assembly) falls through to CG below
+        }
+    }
+
     std::vector<float> u(nCut, 0.0f), v(nCut, 0.0f);
+
+    // CYBER_QC_FIELD_STATS diagnostics on the +z flat region (|n.z| > 0.99): combed-target
+    // axis mix (fd.e0 vs world x̂/ŷ — a quarter-turn mix on ONE coplanar patch is the shear
+    // smoking gun) and a per-phase histogram of grad(u)'s deviation from the nearest grid
+    // axis (5-degree bins of min(ang mod 90, 90 - ang mod 90)).
+    const bool fieldStats = std::getenv("CYBER_QC_FIELD_STATS") != nullptr;
+    const auto statsAxisMix = [&]() {
+        if (!fieldStats) {
+            return;
+        }
+        // Split by side: +z (top) vs -z (bottom) so a per-patch mix is unambiguous.
+        std::size_t topX = 0, topY = 0, botX = 0, botY = 0, nOther = 0;
+        for (const FaceData& fd : faceData) {
+            const Vec3 n = cross(fd.e0, fd.e1);
+            if (std::fabs(n.z) <= 0.99f) {
+                continue;
+            }
+            const bool top = n.z > 0.0f;
+            if (std::fabs(fd.e0.x) > 0.9f) {
+                (top ? topX : botX) += 1;
+            } else if (std::fabs(fd.e0.y) > 0.9f) {
+                (top ? topY : botY) += 1;
+            } else {
+                ++nOther;
+            }
+        }
+        std::fprintf(stderr,
+                     "[qc-stats] axis mix: top e0~x=%zu e0~y=%zu | bot e0~x=%zu e0~y=%zu | "
+                     "other=%zu\n",
+                     topX, topY, botX, botY, nOther);
+        // Interior (non-feature) cut edges whose both faces are on a +-z flat side: any such
+        // edge is a tree cut crossing a coplanar patch.
+        std::size_t interiorCutFlat = 0, interiorCutTotal = 0;
+        for (Index ei = 0; ei < mesh.edgeCapacity(); ++ei) {
+            const EdgeId e{ei};
+            if (!mesh.isAlive(e) || mesh.edgeFaceCount(e) != 2 || !setup.isCutEdge[ei] ||
+                mesh.isFeatureEdge(e)) {
+                continue;
+            }
+            ++interiorCutTotal;
+            const auto ef = mesh.edgeFaces(e);
+            bool flat = true;
+            for (const FaceId f : ef) {
+                const std::vector<VertexId> vs = mesh.faceVertices(f);
+                const Vec3 nn = cross(mesh.position(vs[1]) - mesh.position(vs[0]),
+                                      mesh.position(vs[2]) - mesh.position(vs[0]));
+                const float len = length(nn);
+                if (len < 1e-20f || std::fabs(nn.z / len) <= 0.99f) {
+                    flat = false;
+                }
+            }
+            if (flat) {
+                ++interiorCutFlat;
+            }
+        }
+        std::fprintf(stderr, "[qc-stats] non-feature cut edges: total=%zu on +-z flats=%zu\n",
+                     interiorCutTotal, interiorCutFlat);
+    };
+    const auto statsGradHist = [&](const char* phase) {
+        if (!fieldStats) {
+            return;
+        }
+        std::array<std::size_t, 9> bins{};
+        std::size_t total = 0;
+        for (const FaceData& fd : faceData) {
+            const Vec3 n = cross(fd.e0, fd.e1);
+            if (std::fabs(n.z) <= 0.99f) {
+                continue;
+            }
+            Vec3 gradU{0.0f, 0.0f, 0.0f};
+            for (int k = 0; k < 3; ++k) {
+                gradU = gradU + fd.gradPhi[static_cast<std::size_t>(k)] *
+                                    u[fd.cut[static_cast<std::size_t>(k)]];
+            }
+            const float ang = std::atan2(gradU.y, gradU.x) * 180.0f / kPi;  // in the +z plane
+            float m = std::fmod(std::fmod(ang, 90.0f) + 90.0f, 90.0f);
+            m = std::min(m, 90.0f - m);  // deviation from the nearest grid axis, [0, 45]
+            const std::size_t bin = std::min<std::size_t>(8, static_cast<std::size_t>(m / 5.0f));
+            ++bins[bin];
+            ++total;
+        }
+        std::fprintf(stderr, "[qc-stats] %s grad(u) dev hist (+z faces, 5-deg bins, n=%zu):", phase,
+                     total);
+        for (const std::size_t b : bins) {
+            std::fprintf(stderr, " %zu", b);
+        }
+        std::fprintf(stderr, "\n");
+    };
+
     const int maxIters = static_cast<int>(nCut) + 500;
     // Solve the relaxed (per-component pinned) Poisson for the current full RHS bu/bv. The
-    // pin zeroes the RHS at the pinned/isolated vertices; u,v are warm-started from their
-    // incoming value so each ARAP re-solve (a small RHS perturbation) converges fast.
+    // pin zeroes the RHS at the pinned/isolated vertices. Direct path: two exact
+    // back-substitutions on the one-time factorization above. CG path: u,v are warm-started
+    // from their incoming value so each ARAP re-solve (a small RHS perturbation) converges
+    // fast.
+    bool directCheckDone = false;
     const auto relaxedSolve = [&]() {
         std::vector<float> pbu = bu, pbv = bv;
         for (std::size_t i = 0; i < nCut; ++i) {
@@ -1090,6 +1649,44 @@ Parameterization solveParameterization(const Mesh& mesh, const SeamlessSetup& se
                 pbv[i] = 0.0f;
             }
         }
+        if (cholA != nullptr) {
+            std::vector<double> rhs(nCut);
+            std::vector<double> sol;
+            for (std::size_t i = 0; i < nCut; ++i) {
+                rhs[i] = static_cast<double>(pbu[i]);
+            }
+            cholA->solve(rhs, sol);
+            for (std::size_t i = 0; i < nCut; ++i) {
+                u[i] = static_cast<float>(sol[i]);
+            }
+            for (std::size_t i = 0; i < nCut; ++i) {
+                rhs[i] = static_cast<double>(pbv[i]);
+            }
+            cholA->solve(rhs, sol);
+            for (std::size_t i = 0; i < nCut; ++i) {
+                v[i] = static_cast<float>(sol[i]);
+            }
+            out.cgIterationsU = 0;
+            out.cgIterationsV = 0;
+            // CYBER_QC_DIRECT_CHECK: numerical drift diagnostic — re-run the
+            // first relaxed solve with the historical cold-started CG and
+            // report max |uv_direct - uv_cg| (both approximate the same linear
+            // system; the direct one is exact to double roundoff).
+            if (!directCheckDone && std::getenv("CYBER_QC_DIRECT_CHECK") != nullptr) {
+                directCheckDone = true;
+                std::vector<float> uc(nCut, 0.0f), vc(nCut, 0.0f);
+                conjugateGradient(backend, A, pbu, uc, maxIters, 1e-8f, cancel);
+                conjugateGradient(backend, A, pbv, vc, maxIters, 1e-8f, cancel);
+                double dmax = 0.0;
+                for (std::size_t i = 0; i < nCut; ++i) {
+                    dmax = std::max(dmax, static_cast<double>(std::fabs(u[i] - uc[i])));
+                    dmax = std::max(dmax, static_cast<double>(std::fabs(v[i] - vc[i])));
+                }
+                std::fprintf(stderr, "[qc] direct check: max|uv_direct-uv_cg|=%.3e nCut=%zu\n",
+                             dmax, nCut);
+            }
+            return;
+        }
         out.cgIterationsU = conjugateGradient(backend, A, pbu, u, maxIters, 1e-8f, cancel);
         out.cgIterationsV = conjugateGradient(backend, A, pbv, v, maxIters, 1e-8f, cancel);
     };
@@ -1097,6 +1694,30 @@ Parameterization solveParameterization(const Mesh& mesh, const SeamlessSetup& se
     if (cancel != nullptr && cancel->isCancelled()) {
         return out;  // out.valid stays false -> caller degrades cleanly
     }
+
+    // UV grid-cell count at the current u,v: sum of |UV triangle areas| (~1 extracted
+    // quad candidate per unit cell). Serves the relaxed-only calibration probe and the
+    // CYBER_QC_DEBUG probe-vs-full drift line below.
+    const auto uvCellSum = [&]() {
+        double cells = 0.0;
+        for (const FaceData& fd : faceData) {
+            const double ax = u[fd.cut[0]], ay = v[fd.cut[0]];
+            const double bx = u[fd.cut[1]], by = v[fd.cut[1]];
+            const double cx = u[fd.cut[2]], cy = v[fd.cut[2]];
+            cells += 0.5 * std::fabs((bx - ax) * (cy - ay) - (by - ay) * (cx - ax));
+        }
+        return cells;
+    };
+    if (probeCellArea != nullptr) {
+        // Relaxed-only probe: the cell area is already fixed here (ARAP preserves the
+        // target frame norm; integer rounding shifts sub-cell translations), so skip
+        // the polish + integer phase. `out` stays invalid — probe callers only read
+        // the cell count.
+        *probeCellArea = uvCellSum();
+        return out;
+    }
+    const bool debugCells = std::getenv("CYBER_QC_DEBUG") != nullptr;
+    const double relaxedCells = debugCells ? uvCellSum() : 0.0;
 
     // ARAP local-global polish (docs/native-miq-plan.md). The plain field-aligned target has
     // non-zero curl, so the Poisson projection introduces shear / non-uniform scale that makes
@@ -1136,7 +1757,8 @@ Parameterization solveParameterization(const Mesh& mesh, const SeamlessSetup& se
     constexpr float kMaxRot = kPi / 3.0f;  // ~60 deg cone: light insurance against sliver blow-ups
     constexpr double kBoundaryGate = 0.01;
     std::vector<float> raw(faceData.size(), 0.0f);
-    for (int iter = 0; boundaryFrac < kBoundaryGate && iter < kArapIters; ++iter) {
+    const bool arapEnabled = std::getenv("CYBER_QC_NO_ARAP") == nullptr;
+    for (int iter = 0; arapEnabled && boundaryFrac < kBoundaryGate && iter < kArapIters; ++iter) {
         if (cancel != nullptr && cancel->isCancelled()) {
             return out;
         }
@@ -1165,9 +1787,12 @@ Parameterization solveParameterization(const Mesh& mesh, const SeamlessSetup& se
         }
     }
     // Feed the ARAP-refined targets (field-aligned, unchanged, when the polish was skipped) into
-    // the integer-seamless phase.
-    assembleRhs(angle);
+    // the integer-seamless phase. bu/bv already hold the RHS for the final `angle` on every
+    // path: each ARAP round assembles before it solves, and when the polish is skipped the
+    // initial assembleRhs({}) is the angle==0 assembly — so no re-assembly is needed here.
     const std::vector<float> bu0 = bu, bv0 = bv;
+    statsAxisMix();
+    statsGradHist("relaxed");
     if (cancel != nullptr && cancel->isCancelled()) {
         return out;
     }
@@ -1195,9 +1820,50 @@ Parameterization solveParameterization(const Mesh& mesh, const SeamlessSetup& se
         s.bA = cutOf(ef[0].value, b.value);
         s.aB = cutOf(ef[1].value, a.value);
         s.bB = cutOf(ef[1].value, b.value);
-        // Combed grid symmetry from side A (ef[0]) to side B (ef[1]).
+        // Combed grid symmetry from side A (ef[0]) to side B (ef[1]). The combed frame of B
+        // is the frame of A rotated intrinsically by Delta = p + comb[B] - comb[A] quarter
+        // turns (p from edgeJump, both angles measured against the shared edge). A grid whose
+        // frame rotates by +Delta has coordinates that rotate by -Delta: uv_B = R^{-Delta}
+        // uv_A + t. The historical formula (comb[B] - comb[A] - p) has the comb difference
+        // NEGATED — off by a half-turn whenever the difference is odd, which reverses the
+        // along-crease coordinate on one side and makes the integer phase fight the relaxed
+        // targets. Fixed under the feature-pinning lever; lever-off keeps the historical
+        // formula bit-compatible.
         const int p = setup.periodJump[ei];
-        s.rho = (((comb[ef[1].value] - comb[ef[0].value] - p) % 4) + 4) % 4;
+        const int combDiff = comb[ef[1].value] - comb[ef[0].value];
+        const int rhoRaw = angleConvention ? -(p + combDiff) : (combDiff - p);
+        s.rho = ((rhoRaw % 4) + 4) % 4;
+        if (mesh.isFeatureEdge(e)) {
+            s.feature = true;
+            // The coordinate CONSTANT along the crease, in side A's combed
+            // frame: the edge running along e0 means u varies along it, so v
+            // is the constant coordinate (and vice versa). The cross field is
+            // hard-pinned to feature edges, so the edge is near-parallel to
+            // one frame axis and the choice is well-defined.
+            const std::vector<VertexId> vsA = mesh.faceVertices(ef[0]);
+            const Vec3 pa0 = mesh.position(vsA[0]);
+            const Vec3 nrmA = cross(mesh.position(vsA[1]) - pa0, mesh.position(vsA[2]) - pa0);
+            const float lenA = length(nrmA);
+            if (lenA > 1e-20f) {
+                const Vec3 nA = nrmA / lenA;
+                const Vec3 e0 = normalized(
+                    combedDirection(setup.field, ef[0], nA, comb[ef[0].value], angleConvention));
+                const Vec3 e1 = cross(nA, e0);
+                const Vec3 dir = normalized(mesh.position(b) - mesh.position(a));
+                const float a0 = std::fabs(dot(dir, e0));
+                const float a1 = std::fabs(dot(dir, e1));
+                s.pinAxis = a0 >= a1 ? 1 : 0;
+                // Pin only when the field actually runs along the crease
+                // (within 30 degrees). Forcing a coordinate constant along an
+                // edge the field crosses diagonally is M2d's measured false
+                // premise: it buys nothing and costs severe grid distortion.
+                if (std::max(a0, a1) < 0.866f) {
+                    s.feature = false;
+                }
+            } else {
+                s.feature = false;
+            }
+        }
         seams.push_back(s);
     }
     // Gauges: one pin per connected component of the cut-open mesh (the isPin representatives
@@ -1217,8 +1883,9 @@ Parameterization solveParameterization(const Mesh& mesh, const SeamlessSetup& se
     // independent DOF and greedily rounds the integer translations. No dense dual, no seam cap —
     // it scales to hundreds of cones (spot: ~350 seam edges), reconciling branch-point holonomy.
     if (!seams.empty()) {
-        solveSeamlessReduced(backend, nCut, rows, bu0, bv0, seams, gauges, u, v, cancel);
+        solveSeamlessReduced(backend, nCut, rows, bu0, bv0, seams, gauges, u, v, cancel, cacheImpl);
     }
+    statsGradHist("reduced");
     if (cancel != nullptr && cancel->isCancelled()) {
         return out;  // out.valid stays false
     }
@@ -1236,8 +1903,29 @@ Parameterization solveParameterization(const Mesh& mesh, const SeamlessSetup& se
             out.cornerUv[fi][static_cast<std::size_t>(k)] = Vec2{u[cv], v[cv]};
         }
     }
+    if (debugCells) {
+        // Probe-vs-full drift: how far the relaxed-only cell count (what the calibration
+        // probe measures) sits from the final one (what extraction actually sees).
+        std::fprintf(stderr, "[qc] uv cells: relaxed=%.1f final=%.1f\n", relaxedCells, uvCellSum());
+    }
     out.valid = true;
     return out;
+}
+
+}  // namespace
+
+Parameterization solveParameterization(const Mesh& mesh, const SeamlessSetup& setup, float spacing,
+                                       accel::IBackend& backend, const CancelToken* cancel,
+                                       SeamlessSolveCache* cache) {
+    return solveParameterizationImpl(mesh, setup, spacing, backend, cancel, nullptr, cache);
+}
+
+double relaxedCellArea(const Mesh& mesh, const SeamlessSetup& setup, float spacing,
+                       accel::IBackend& backend, const CancelToken* cancel,
+                       SeamlessSolveCache* cache) {
+    double cells = -1.0;
+    (void)solveParameterizationImpl(mesh, setup, spacing, backend, cancel, &cells, cache);
+    return cells;
 }
 
 int cutOpenEulerCharacteristic(const Mesh& mesh, const SeamlessSetup& setup) {

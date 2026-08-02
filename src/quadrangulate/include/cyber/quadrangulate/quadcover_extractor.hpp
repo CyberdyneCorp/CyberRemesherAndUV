@@ -9,6 +9,7 @@
 #include "cyber/core/mesh.hpp"
 #include "cyber/core/progress.hpp"
 #include "cyber/core/quadrangulate.hpp"
+#include "cyber/quadrangulate/seamless_solver.hpp"
 
 // QuadCover-style seamless-UV isoline quad extractor (TASK F scaffold).
 //
@@ -68,6 +69,25 @@ struct SeamlessUv {
     bool valid = false;
 };
 
+// Attempt-invariant work of the NATIVE seamless solve, shareable across the
+// quadrangulator's density-calibration attempts: the isotropic pre-remesh, the
+// cross field + cut graph (SeamlessSetup), and the feature-binding decision.
+// None of it depends on the calibration `scaling` — only solveParameterization
+// consumes the grid spacing — so computing it once and re-solving at different
+// spacings is byte-identical to recomputing it per attempt (it is a
+// deterministic function of the input mesh / target edge length / adaptivity /
+// feature threshold). Pass a context to computeSeamlessUv(Native); a null
+// context (the default) recomputes everything per call, exactly as before.
+struct NativeSolveContext {
+    bool ready = false;   // prepared work/setup below are valid and reusable
+    Mesh work;            // isotropic-remeshed, feature-tagged solve mesh
+    SeamlessSetup setup;  // cross field + period jumps + cut graph on `work`
+    bool featureBinding = false;
+    // Direct-solver factorizations (CYBER_QC_DIRECT): the solve operators are
+    // spacing-invariant, so the probe and every calibration attempt share them.
+    SeamlessSolveCache solveCache;
+};
+
 // Compute a seamless integer-grid UV for `mesh`. Milestone 1 obtains it out-of-process
 // from AutoRemesher's Geogram quad_cover via the benchmark harness: the binary path is
 // read from the CYBER_QUADCOVER_CLI environment variable (built by
@@ -83,10 +103,19 @@ struct SeamlessUv {
 // adaptivity. 0.0 is a uniform field (fewest singularities, cleanest topology — the
 // default); higher packs quads into high-curvature regions (better surface fidelity
 // per polygon, but more singularities). CYBER_QC_ADAPT overrides it.
+// `featureDegrees` is the dihedral threshold binding sharp edges into the NATIVE
+// solve (hard seams + feature-pinned integer isolines); it never reaches the
+// vendored path (see ROADMAP c1b — vendored thresholds are a count artifact).
+// Default keeps the historical 40 (knife edges only); the CLI forwards its
+// documented --sharp-edge (default 90). CYBER_QC_FEATURE_DEG still overrides.
+// `ctx` (optional) shares the attempt-invariant native-solve work across calls —
+// see NativeSolveContext; it is only touched when the native path runs.
 [[nodiscard]] SeamlessUv computeSeamlessUv(const Mesh& mesh, float targetEdgeLength,
                                            float harnessScaling = 0.5f,
                                            float harnessAdaptivity = 0.0f,
-                                           const CancelToken* cancel = nullptr);
+                                           const CancelToken* cancel = nullptr,
+                                           float featureDegrees = 40.0f,
+                                           NativeSolveContext* ctx = nullptr);
 
 // Native seamless integer-grid parameterizer (docs/native-miq-plan.md) — the path to
 // dropping the vendored-Geogram dependency entirely. QuadCover-style: reuse our own
@@ -95,9 +124,25 @@ struct SeamlessUv {
 // M0 SCAFFOLD: returns an INVALID SeamlessUv (valid == false) until the solve (M2)
 // lands, so computeSeamlessUv falls through to the vendored/harness path. Opt-in via
 // CYBER_QC_NATIVE so it never affects the shipped path before it validates.
+// `ctx` (optional): when it is ready, the isotropic remesh + field + setup are
+// reused instead of recomputed; when it is not, they are computed and stored so
+// the next call at a different spacing skips them (byte-identical either way).
 [[nodiscard]] SeamlessUv computeSeamlessUvNative(const Mesh& mesh, float targetEdgeLength,
                                                  float adaptivity = 0.0f, float spacingScale = 1.0f,
-                                                 const CancelToken* cancel = nullptr);
+                                                 const CancelToken* cancel = nullptr,
+                                                 float featureDegrees = 40.0f,
+                                                 NativeSolveContext* ctx = nullptr);
+
+// Calibration probe for the NATIVE solve: prepares `ctx` (isotropic remesh + field +
+// cut setup) when it is not ready yet, then runs ONLY the relaxed Poisson phase of the
+// seamless solve at grid spacing == targetEdgeLength and returns the UV grid-cell count
+// (sum of |UV triangle areas|; ~1 extracted quad candidate per unit cell, see
+// relaxedCellArea). The quad-cover quadrangulator uses it to predict the initial
+// calibration scaling so most meshes land in the acceptance window in ONE full solve.
+// Returns <= 0 when any stage declines — callers keep the historical hardcoded start.
+[[nodiscard]] double nativeRelaxedCellArea(const Mesh& mesh, float targetEdgeLength,
+                                           float adaptivity, float featureDegrees,
+                                           const CancelToken* cancel, NativeSolveContext& ctx);
 
 // Max integer-jump residual of a seamless UV across its interior edges: for each edge
 // shared by two triangles, the grid symmetry mapping one triangle's shared-vertex UVs
@@ -163,7 +208,8 @@ void eliminateNonQuadCaps(std::vector<Vec3>& vertices,
 // does not care keeps the documented behaviour.
 std::unique_ptr<IQuadrangulator> makeQuadCoverQuadrangulator(int fieldIterations = 40,
                                                              float adaptivity = 0.0f,
-                                                             int holeFillMaxBoundary = 64);
+                                                             int holeFillMaxBoundary = 64,
+                                                             float featureDegrees = 40.0f);
 
 // Whether a seamless-UV solver is available for the quad-cover method: true when the
 // in-process solver is linked (built with -DCYBER_WITH_QUADCOVER=ON) or the

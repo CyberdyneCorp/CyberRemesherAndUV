@@ -14,6 +14,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <functional>
 #include <limits>
 #include <map>
 #include <memory>
@@ -28,7 +29,9 @@
 
 #include "cyber/accel/backend.hpp"
 #include "cyber/core/isotropic.hpp"
+#include "cyber/core/math.hpp"
 #include "cyber/core/reference_surface.hpp"
+#include "cyber/quadrangulate/position_field.hpp"
 #include "cyber/quadrangulate/seamless_solver.hpp"
 
 #ifdef CYBER_HAVE_QUADCOVER
@@ -127,6 +130,118 @@ bool writeObjFor(const std::string& path, const Mesh& mesh, double& areaOut) {
 }  // namespace
 
 namespace {
+
+// Distance from point p to segment [a, b].
+float pointSegmentDistance(const Vec3& p, const Vec3& a, const Vec3& b) {
+    const Vec3 ab = b - a;
+    const float len2 = dot(ab, ab);
+    if (len2 <= 1e-20f) {
+        return length(p - a);
+    }
+    const float t = std::clamp(dot(p - a, ab) / len2, 0.0f, 1.0f);
+    return length(p - (a + ab * t));
+}
+
+// Feature-pinning lever: the ORIGINAL mesh's sharp-edge polyline network, restricted to
+// crease chains long enough to be RESOLVABLE at the output grid resolution. A genuine CAD
+// crease (a cube edge, a cylinder rim) is a long chain the output grid should follow; an
+// organic scan's over-threshold dihedrals are sub-resolution wrinkle fragments whose total
+// chain length is far below one output cell — re-tagging them as hard seams after the
+// coarse isotropic remesh is what blew nefertiti's singularities up under the lever (73
+// lever-off -> 216: every coarse wrinkle became a seam + field pin). Chains shorter than
+// `minChainLength` are dropped; what remains is the reference network the post-remesh
+// feature re-tag is filtered against.
+std::vector<std::array<Vec3, 2>> resolvableCreaseSegments(const Mesh& mesh, float minChainLength) {
+    // Union-find over vertices joined by interior feature edges.
+    std::unordered_map<Index, Index> parent;
+    const std::function<Index(Index)> find = [&](Index x) {
+        while (true) {
+            auto it = parent.find(x);
+            if (it == parent.end() || it->second == x) {
+                return x;
+            }
+            x = it->second;
+        }
+    };
+    struct Seg {
+        Vec3 a, b;
+        Index root;
+        float len;
+    };
+    std::vector<Seg> segs;
+    for (Index ei = 0; ei < mesh.edgeCapacity(); ++ei) {
+        const EdgeId e{ei};
+        if (!mesh.isAlive(e) || mesh.edgeFaceCount(e) != 2 || !mesh.isFeatureEdge(e)) {
+            continue;
+        }
+        const auto [a, b] = mesh.edgeVertices(e);
+        const Index ra = find(a.value), rb = find(b.value);
+        parent.emplace(a.value, a.value);
+        parent.emplace(b.value, b.value);
+        parent[ra] = rb;
+        segs.push_back(
+            {mesh.position(a), mesh.position(b), rb, length(mesh.position(b) - mesh.position(a))});
+    }
+    std::unordered_map<Index, float> chainLength;
+    for (Seg& s : segs) {
+        s.root = find(s.root);
+        chainLength[s.root] += s.len;
+    }
+    std::vector<std::array<Vec3, 2>> out;
+    for (const Seg& s : segs) {
+        if (chainLength[s.root] >= minChainLength) {
+            out.push_back({s.a, s.b});
+        }
+    }
+    return out;
+}
+
+// Feature-pinning lever, post-remesh: keep an interior re-tagged feature edge if it either
+// (a) traces the reference crease network (endpoints and midpoint all within `tol` — the
+// isotropic stage keeps crease vertices ON the crease polyline, so genuine crease edges sit
+// at distance ~0 while coarse-remesh dihedral noise does not), or (b) still qualifies at the
+// HISTORICAL lever-off threshold (`fallbackDihedralDegrees`, knife edges) — so on organic
+// meshes the lever-on feature set degrades exactly to the lever-off one instead of inventing
+// (or dropping) seams the lever-off run never had. Boundary/non-manifold edges are never
+// untagged (they are structural, not dihedral evidence).
+void filterFeatureEdgesToReference(Mesh& mesh, const std::vector<std::array<Vec3, 2>>& network,
+                                   float tol, float fallbackDihedralDegrees) {
+    const float fallbackNormalAngle = degreesToRadians(180.0f - fallbackDihedralDegrees) - 1e-3f;
+    for (Index ei = 0; ei < mesh.edgeCapacity(); ++ei) {
+        const EdgeId e{ei};
+        if (!mesh.isAlive(e) || mesh.edgeFaceCount(e) != 2 || !mesh.isFeatureEdge(e)) {
+            continue;
+        }
+        const auto ef = mesh.edgeFaces(e);
+        const float cosAngle =
+            std::clamp(dot(normalized(mesh.faceNormal(ef[0])), normalized(mesh.faceNormal(ef[1]))),
+                       -1.0f, 1.0f);
+        if (std::acos(cosAngle) >= fallbackNormalAngle) {
+            continue;  // knife edge: the lever-off tag would keep it too
+        }
+        const auto [a, b] = mesh.edgeVertices(e);
+        const std::array<Vec3, 3> samples{mesh.position(a), mesh.position(b),
+                                          (mesh.position(a) + mesh.position(b)) * 0.5f};
+        bool onNetwork = !network.empty();
+        for (const Vec3& p : samples) {
+            if (!onNetwork) {
+                break;
+            }
+            bool near = false;
+            for (const std::array<Vec3, 2>& s : network) {
+                if (pointSegmentDistance(p, s[0], s[1]) <= tol) {
+                    near = true;
+                    break;
+                }
+            }
+            onNetwork = near;
+        }
+        if (!onNetwork) {
+            mesh.setFeatureEdge(e, false);
+        }
+    }
+}
+
 // CYBER_QC_DEBUG-gated per-call trace of whether the native seamless solve RAN or DECLINED,
 // so the corpus harness can grep "native OK" / "native DECLINED <reason>" and confirm a model
 // took the native path rather than silently falling back to the vendored / field-aligned path.
@@ -140,25 +255,17 @@ void logNative(bool ok, const char* reason) {
         std::fprintf(stderr, "[qc] native DECLINED %s\n", reason);
     }
 }
-}  // namespace
 
-SeamlessUv computeSeamlessUvNative(const Mesh& mesh, float targetEdgeLength, float adaptivity,
-                                   float spacingScale, const CancelToken* cancel) {
-    // M3 (docs/native-miq-plan.md): the fully native QuadCover-style seamless solve. No
-    // Geogram, no subprocess. Pipeline:
-    //   (pre) isotropic pre-remesh at `targetEdgeLength` so the solve runs on a clean,
-    //         uniformly-sized triangulation (the role the harness's internal remesh played);
-    //   (M1)  frame field + period jumps + singularities + cut graph (buildSeamlessSetup);
-    //   (M2)  seamless integer-grid Poisson solve at grid cell == targetEdgeLength
-    //         (solveParameterization) -> per-corner UV;
-    //   assemble a SeamlessUv on the remeshed verts/tris from the per-corner UV.
-    // Any degenerate stage returns an invalid UV so the caller falls through cleanly.
-    SeamlessUv uv;
-    if (targetEdgeLength <= 0.0f || mesh.faceCapacity() == 0) {
-        logNative(false, "empty/degenerate input");
-        return uv;
-    }
-
+// Attempt-invariant native-solve preparation (see NativeSolveContext): isotropic pre-remesh,
+// feature re-tag/filter, the feature-binding decision, and the cross-field/cut setup.
+// Everything here depends only on (mesh, targetEdgeLength, adaptivity, featureDegrees) —
+// never on the calibration scaling (only solveParameterization consumes the spacing) — so
+// the quadrangulator's calibration loop computes it ONCE and re-solves at different
+// spacings. Returns false with `reason` set when a stage declines; on success fills `ctx`
+// and marks it ready. `isoMs`/`setupMs` report the stage timings for the [qc-time] line.
+bool prepareNativeSolve(const Mesh& mesh, float targetEdgeLength, float adaptivity,
+                        float featureDegrees, const CancelToken* cancel, NativeSolveContext& ctx,
+                        const char*& reason, long& isoMs, long& setupMs) {
     // Isotropic pre-remesh. Tag features so sharp edges survive the resample, then project
     // onto a reference built from the raw island (flat projection: smoothNormalDegrees 0).
     // Feature edges are NO LONGER a decline gate: buildSeamlessSetup marks them as hard seams
@@ -167,7 +274,7 @@ SeamlessUv computeSeamlessUvNative(const Mesh& mesh, float targetEdgeLength, flo
     // instead of falling back to the field-aligned path.
     const char* featEnv = std::getenv("CYBER_QC_FEATURE_DEG");
     const float kFeatureDihedralDegrees =
-        featEnv != nullptr ? static_cast<float>(std::atof(featEnv)) : 40.0f;
+        featEnv != nullptr ? static_cast<float>(std::atof(featEnv)) : featureDegrees;
     constexpr int kFieldIterations = 40;
     // CYBER_QC_PRESERVE_CREASE_DEG (docs/ROADMAP.md Phase 3, lever c1): the threshold used to
     // PROTECT crease geometry through the isotropic pre-remesh, decoupled from the (narrower)
@@ -190,16 +297,25 @@ SeamlessUv computeSeamlessUvNative(const Mesh& mesh, float targetEdgeLength, flo
     const char* preserveEnv = std::getenv("CYBER_QC_PRESERVE_CREASE_DEG");
     const float kPreserveDihedralDegrees =
         preserveEnv != nullptr ? static_cast<float>(std::atof(preserveEnv)) : 135.0f;
-    Mesh work = mesh;
+    Mesh& work = ctx.work;
+    work = mesh;
     work.triangulate();  // feature tagging + the solve both need a pure-triangle mesh
+    // Feature-pinning lever: record the ORIGINAL geometry's resolvable crease network before
+    // the isotropic remesh, so the post-remesh feature re-tag can be filtered against it
+    // (see resolvableCreaseSegments). Only chains at least a couple of output cells long
+    // count as creases the grid should follow.
+    std::vector<std::array<Vec3, 2>> refCreases;
+    if (featEnv != nullptr) {
+        work.tagFeatureEdges(kFeatureDihedralDegrees);
+        refCreases = resolvableCreaseSegments(work, 2.0f * targetEdgeLength);
+    }
     work.tagFeatureEdges(kPreserveDihedralDegrees);
 
     if (cancel != nullptr && cancel->isCancelled()) {
-        logNative(false, "cancelled");
-        return uv;
+        reason = "cancelled";
+        return false;
     }
 
-    const bool timing = std::getenv("CYBER_QC_TIME") != nullptr;
     const auto tick = []() { return std::chrono::steady_clock::now(); };
     const auto ms = [](auto a, auto b) {
         return std::chrono::duration_cast<std::chrono::milliseconds>(b - a).count();
@@ -212,8 +328,8 @@ SeamlessUv computeSeamlessUvNative(const Mesh& mesh, float targetEdgeLength, flo
     iso.adaptivity = adaptivity;
     if (isotropicRemesh(work, reference, iso, nullptr, cancel) != IsotropicStatus::Success ||
         work.faceCount() == 0) {
-        logNative(false, "isotropic remesh failed (or cancelled)");
-        return uv;
+        reason = "isotropic remesh failed (or cancelled)";
+        return false;
     }
     const auto tIso = tick();
     // Re-tag features on the REMESHED mesh: the isotropic stage preserves the sharp geometry
@@ -221,17 +337,80 @@ SeamlessUv computeSeamlessUvNative(const Mesh& mesh, float targetEdgeLength, flo
     // feature flag, so the seam logic in buildSeamlessSetup would see none. Re-detect them by
     // dihedral angle now that the crease geometry is intact.
     work.tagFeatureEdges(kFeatureDihedralDegrees);
+    // Feature-pinning lever: drop re-tagged interior edges that do not trace the original
+    // resolvable crease network — a coarse remesh of an organic surface has plenty of
+    // over-threshold dihedrals that are sampling artifacts, not creases, and every spurious
+    // hard seam costs singularities (nefertiti lever-on: 216 -> ~lever-off level with this
+    // filter). Lever-off is untouched.
+    const bool wideBinding = kFeatureDihedralDegrees > 41.0f;
+    if (wideBinding) {
+        filterFeatureEdgesToReference(work, refCreases, 0.25f * targetEdgeLength, featureDegrees);
+    }
+    // Feature binding engages only when the (filtered) mesh actually carries
+    // tagged interior feature edges AND the surface is closed: a featureless
+    // mesh (sphere, torus, organic scans below the threshold) takes the
+    // historical solve path bit-identically, and OPEN surfaces stay on it too
+    // — they cannot run the ARAP polish (same boundary gate) and measured a
+    // CV blow-up under feature seams (the open-surface cleanup suite).
+    // Binding features on boundaried scans is future work.
+    ctx.featureBinding = false;
+    if (wideBinding) {
+        std::size_t nBoundary = 0, nAlive = 0;
+        bool anyInteriorFeature = false;
+        for (Index ei = 0; ei < work.edgeCapacity(); ++ei) {
+            const EdgeId e{ei};
+            if (!work.isAlive(e)) {
+                continue;
+            }
+            ++nAlive;
+            const std::size_t nf = work.edgeFaceCount(e);
+            if (nf == 1) {
+                ++nBoundary;
+            } else if (nf == 2 && work.isFeatureEdge(e)) {
+                anyInteriorFeature = true;
+            }
+        }
+        const bool closed =
+            nAlive > 0 && static_cast<double>(nBoundary) < 0.01 * static_cast<double>(nAlive);
+        ctx.featureBinding = anyInteriorFeature && closed;
+    }
 
     if (cancel != nullptr && cancel->isCancelled()) {
-        logNative(false, "cancelled");
-        return uv;
+        reason = "cancelled";
+        return false;
     }
 
     auto backend = accel::defaultBackend();
-    const SeamlessSetup setup = buildSeamlessSetup(work, kFieldIterations, *backend);
+    ctx.setup = buildSeamlessSetup(work, kFieldIterations, *backend, ctx.featureBinding);
+    const SeamlessSetup& setup = ctx.setup;
+    if (std::getenv("CYBER_QC_FIELD_STATS") != nullptr) {
+        // Cone census: total cones and how many sit off tagged feature edges
+        // (spurious flat-region cones are a field-quality smell).
+        std::size_t cones = 0, coneFlat = 0;
+        for (Index vi = 0; vi < work.vertexCapacity(); ++vi) {
+            const VertexId vv{vi};
+            if (!work.isAlive(vv) || vi >= setup.singularityIndex.size() ||
+                setup.singularityIndex[vi] == 0) {
+                continue;
+            }
+            ++cones;
+            bool onFeature = false;
+            for (const EdgeId e : work.vertexEdges(vv)) {
+                if (work.isFeatureEdge(e)) {
+                    onFeature = true;
+                    break;
+                }
+            }
+            if (!onFeature) {
+                ++coneFlat;
+            }
+        }
+        std::fprintf(stderr, "[native] work faces=%zu cones=%zu offFeature=%zu\n", work.faceCount(),
+                     cones, coneFlat);
+    }
     if (!setup.valid) {
-        logNative(false, "setup invalid");
-        return uv;
+        reason = "setup invalid";
+        return false;
     }
     const auto tSetup = tick();
     if (std::getenv("CYBER_QC_DEBUG") != nullptr) {
@@ -246,6 +425,62 @@ SeamlessUv computeSeamlessUvNative(const Mesh& mesh, float targetEdgeLength, flo
                      "[qc] native setup: faces=%zu featureEdges=%zu singular=%zu totalIndex=%d\n",
                      work.faceCount(), featureEdges, setup.singularityCount(), setup.totalIndex());
     }
+    isoMs = static_cast<long>(ms(t0, tIso));
+    setupMs = static_cast<long>(ms(tIso, tSetup));
+    ctx.ready = true;
+    return true;
+}
+}  // namespace
+
+SeamlessUv computeSeamlessUvNative(const Mesh& mesh, float targetEdgeLength, float adaptivity,
+                                   float spacingScale, const CancelToken* cancel,
+                                   float featureDegrees, NativeSolveContext* ctx) {
+    // M3 (docs/native-miq-plan.md): the fully native QuadCover-style seamless solve. No
+    // Geogram, no subprocess. Pipeline:
+    //   (pre) isotropic pre-remesh at `targetEdgeLength` so the solve runs on a clean,
+    //         uniformly-sized triangulation (the role the harness's internal remesh played);
+    //   (M1)  frame field + period jumps + singularities + cut graph (buildSeamlessSetup);
+    //   (M2)  seamless integer-grid Poisson solve at grid cell == targetEdgeLength
+    //         (solveParameterization) -> per-corner UV;
+    //   assemble a SeamlessUv on the remeshed verts/tris from the per-corner UV.
+    // Any degenerate stage returns an invalid UV so the caller falls through cleanly.
+    // The (pre) + (M1) stages are attempt-invariant (prepareNativeSolve): a caller-provided
+    // `ctx` carries them across the calibration loop's re-solves; a null ctx recomputes
+    // them here, byte-identically, on every call.
+    SeamlessUv uv;
+    if (targetEdgeLength <= 0.0f || mesh.faceCapacity() == 0) {
+        logNative(false, "empty/degenerate input");
+        return uv;
+    }
+
+    const bool timing = std::getenv("CYBER_QC_TIME") != nullptr;
+    const auto tick = []() { return std::chrono::steady_clock::now(); };
+    const auto ms = [](auto a, auto b) {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(b - a).count();
+    };
+
+    NativeSolveContext local;
+    NativeSolveContext& prep = ctx != nullptr ? *ctx : local;
+    long isoMs = 0;
+    long setupMs = 0;
+    if (!prep.ready) {
+        const char* reason = "";
+        if (!prepareNativeSolve(mesh, targetEdgeLength, adaptivity, featureDegrees, cancel, prep,
+                                reason, isoMs, setupMs)) {
+            logNative(false, reason);
+            return uv;
+        }
+    }
+    const Mesh& work = prep.work;
+    const SeamlessSetup& setup = prep.setup;
+    const bool featureBinding = prep.featureBinding;
+
+    if (cancel != nullptr && cancel->isCancelled()) {
+        logNative(false, "cancelled");
+        return uv;
+    }
+
+    auto backend = accel::defaultBackend();
     // Grid spacing == targetEdgeLength gives ~1 UV cell per triangle. The isoline extractor
     // then loses a large fraction of cells to short-edge collapse, so the quad count lands well
     // under target. `spacingScale` < 1 traces denser isolines (several per triangle) so the
@@ -253,18 +488,17 @@ SeamlessUv computeSeamlessUvNative(const Mesh& mesh, float targetEdgeLength, flo
     // CYBER_QC_SPACING_MUL overrides for experiments.
     const char* spEnv = std::getenv("CYBER_QC_SPACING_MUL");
     const float spacingMul = spEnv != nullptr ? static_cast<float>(std::atof(spEnv)) : spacingScale;
-    const Parameterization param =
-        solveParameterization(work, setup, targetEdgeLength * spacingMul, *backend, cancel);
+    const auto tSolve0 = tick();
+    const Parameterization param = solveParameterization(work, setup, targetEdgeLength * spacingMul,
+                                                         *backend, cancel, &prep.solveCache);
     if (!param.valid) {
         logNative(false, "parameterization invalid (or cancelled)");
         return uv;
     }
-    const auto tSolve = tick();
     if (timing) {
         std::fprintf(stderr,
                      "[qc-time] faces=%zu | isotropic=%ldms field+setup=%ldms solve=%ldms\n",
-                     work.faceCount(), static_cast<long>(ms(t0, tIso)),
-                     static_cast<long>(ms(tIso, tSetup)), static_cast<long>(ms(tSetup, tSolve)));
+                     work.faceCount(), isoMs, setupMs, static_cast<long>(ms(tSolve0, tick())));
     }
 
     // Assemble the seamless UV on the remeshed triangles from the per-corner parameterization.
@@ -284,7 +518,31 @@ SeamlessUv computeSeamlessUvNative(const Mesh& mesh, float targetEdgeLength, flo
         }
         const std::vector<VertexId> vs = work.faceVertices(f);
         uv.triangles.push_back({vs[0].value, vs[1].value, vs[2].value});
-        uv.triangleUv.push_back(param.cornerUv[fi]);
+        // Snap near-integer coordinates exactly onto the lattice. The solve
+        // pins feature-seam level sets to integers, but CG + reconstruction
+        // return them as integer±1e-6 — and the extractor's edge-on-isoline
+        // test (Double::isZero) is machine-epsilon exact, so without the snap
+        // a pinned crease is never recognized as lying ON an isoline. Part of
+        // the in-progress feature-pinning lever: OPT-IN via CYBER_QC_UV_SNAP
+        // until the seam-shear fix ships (the snap alone shifts extraction on
+        // meshes whose UVs coincidentally graze the lattice). Only under
+        // feature binding — without pinned creases the snap merely perturbs
+        // (a measured torus regression). Kill switch: CYBER_QC_NO_UV_SNAP.
+        const bool kSnapUv = featureBinding && std::getenv("CYBER_QC_NO_UV_SNAP") == nullptr;
+        std::array<Vec2, 3> corners = param.cornerUv[fi];
+        if (kSnapUv) {
+            for (Vec2& c : corners) {
+                const float ru = std::round(c.x);
+                const float rv = std::round(c.y);
+                if (std::fabs(c.x - ru) < 1e-3f) {
+                    c.x = ru;
+                }
+                if (std::fabs(c.y - rv) < 1e-3f) {
+                    c.y = rv;
+                }
+            }
+        }
+        uv.triangleUv.push_back(corners);
         for (const Vec2& c : param.cornerUv[fi]) {
             uMin = std::min(uMin, c.x);
             uMax = std::max(uMax, c.x);
@@ -323,6 +581,39 @@ SeamlessUv computeSeamlessUvNative(const Mesh& mesh, float targetEdgeLength, flo
     logNative(true, "");
     uv.valid = true;
     return uv;
+}
+
+double nativeRelaxedCellArea(const Mesh& mesh, float targetEdgeLength, float adaptivity,
+                             float featureDegrees, const CancelToken* cancel,
+                             NativeSolveContext& ctx) {
+    if (targetEdgeLength <= 0.0f || mesh.faceCapacity() == 0) {
+        return -1.0;
+    }
+    const auto tick = []() { return std::chrono::steady_clock::now(); };
+    const auto ms = [](auto a, auto b) {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(b - a).count();
+    };
+    long isoMs = 0;
+    long setupMs = 0;
+    if (!ctx.ready) {
+        const char* reason = "";
+        if (!prepareNativeSolve(mesh, targetEdgeLength, adaptivity, featureDegrees, cancel, ctx,
+                                reason, isoMs, setupMs)) {
+            logNative(false, reason);
+            return -1.0;
+        }
+    }
+    auto backend = accel::defaultBackend();
+    const auto tRelax0 = tick();
+    const double cells =
+        relaxedCellArea(ctx.work, ctx.setup, targetEdgeLength, *backend, cancel, &ctx.solveCache);
+    if (std::getenv("CYBER_QC_TIME") != nullptr) {
+        std::fprintf(stderr,
+                     "[qc-time] probe: isotropic=%ldms field+setup=%ldms relaxed=%ldms "
+                     "cells=%.1f\n",
+                     isoMs, setupMs, static_cast<long>(ms(tRelax0, tick())), cells);
+    }
+    return cells;
 }
 
 namespace {
@@ -506,7 +797,8 @@ float creaseEdgeFraction(const Mesh& mesh, float dihedralDegrees) {
 }
 
 SeamlessUv computeSeamlessUv(const Mesh& mesh, float targetEdgeLength, float harnessScaling,
-                             float harnessAdaptivity, const CancelToken* cancel) {
+                             float harnessAdaptivity, const CancelToken* cancel,
+                             float featureDegrees, NativeSolveContext* ctx) {
     if (targetEdgeLength <= 0.0f) {
         return SeamlessUv{};  // no target density -> caller degrades cleanly
     }
@@ -527,7 +819,7 @@ SeamlessUv computeSeamlessUv(const Mesh& mesh, float targetEdgeLength, float har
 
     if (routeNative) {
         SeamlessUv native = computeSeamlessUvNative(mesh, targetEdgeLength, harnessAdaptivity,
-                                                    harnessScaling, cancel);
+                                                    harnessScaling, cancel, featureDegrees, ctx);
         if (native.valid) {
             return native;
         }
@@ -547,7 +839,7 @@ SeamlessUv computeSeamlessUv(const Mesh& mesh, float targetEdgeLength, float har
     // (no-Geogram) default: watertight, bounded, cancellable at ~4-5% irregular.
     if (haveNative) {
         SeamlessUv native = computeSeamlessUvNative(mesh, targetEdgeLength, harnessAdaptivity,
-                                                    harnessScaling, cancel);
+                                                    harnessScaling, cancel, featureDegrees, ctx);
         if (native.valid) {
             return native;
         }
@@ -2445,6 +2737,152 @@ double meshTargetQuads(const Mesh& mesh, float targetEdgeLength) {
     return area / cell;
 }
 
+// Whether the vendored seamless solver (in-process Geogram quad_cover, or the
+// CYBER_QUADCOVER_CLI harness subprocess) is configured. computeSeamlessUv may route
+// to it, and there `scaling` is the harness -s with different semantics than the
+// native spacing multiplier — so the calibration probe below only applies when the
+// native solver is the only one available.
+bool vendoredSeamlessAvailable() {
+#ifdef CYBER_HAVE_QUADCOVER
+    return true;
+#else
+    const char* cli = std::getenv("CYBER_QUADCOVER_CLI");
+    return cli != nullptr && cli[0] != '\0';
+#endif
+}
+
+// Valence-3/5 dipole cancellation on the extracted quad mesh — the integer
+// extractor's FixValence (quadMeshValenceCleanup, quad_extract.cpp) wired into the
+// quad-cover path. Flow loops break at irregular vertices, so cancelling 3/5 dipoles
+// directly lengthens quad flow loops; the operator is strictly count-monotone (the
+// irregular count never rises). Only the pure-quad subset is edited: every non-quad
+// face is frozen (its vertices pinned, its edges reserved) so the seam between the
+// two subsets stays manifold. Vertices on crease lines — any edge whose face-pair
+// dihedral exceeds `featureDegrees` — are pinned too: a rotation deletes the shared
+// edge, and deleting a crease-tracing edge would rotate quads off the feature line
+// (feature recall is gated). Returns the number of applied operations; on change,
+// `faces` is rewritten and unreferenced (doublet-freed) vertices are compacted out.
+std::size_t cancelValenceDipoles(std::vector<Vec3>& vertices,
+                                 std::vector<std::vector<std::size_t>>& faces,
+                                 float featureDegrees) {
+    // Partition into the editable pure-quad subset and the frozen remainder
+    // (non-destructive: on a no-op `faces` is returned exactly as given).
+    std::vector<std::array<int, 4>> quads;
+    std::vector<char> isQuad(faces.size(), 0);
+    std::vector<char> pinned(vertices.size(), 0);
+    std::set<std::pair<int, int>> reservedEdges;
+    for (std::size_t i = 0; i < faces.size(); ++i) {
+        const auto& f = faces[i];
+        bool pureQuad = f.size() == 4;
+        for (std::size_t a = 0; pureQuad && a < 4; ++a) {
+            for (std::size_t b = a + 1; b < 4; ++b) {
+                if (f[a] == f[b]) {
+                    pureQuad = false;
+                    break;
+                }
+            }
+        }
+        if (pureQuad) {
+            isQuad[i] = 1;
+            quads.push_back({static_cast<int>(f[0]), static_cast<int>(f[1]), static_cast<int>(f[2]),
+                             static_cast<int>(f[3])});
+            continue;
+        }
+        for (std::size_t k = 0; k < f.size(); ++k) {
+            const int a = static_cast<int>(f[k]);
+            const int b = static_cast<int>(f[(k + 1) % f.size()]);
+            pinned[static_cast<std::size_t>(a)] = 1;
+            if (a != b) {
+                reservedEdges.insert(std::minmax(a, b));
+            }
+        }
+    }
+    if (quads.empty()) {
+        return 0;
+    }
+
+    // Crease pinning by face-pair dihedral (Newell normals over ALL faces, so a
+    // crease between a quad and a frozen cap still pins the quad's vertices).
+    const auto faceNormal = [&](const std::vector<std::size_t>& f) {
+        Vec3 n{0.0f, 0.0f, 0.0f};
+        for (std::size_t k = 0; k < f.size(); ++k) {
+            const Vec3& p = vertices[f[k]];
+            const Vec3& q = vertices[f[(k + 1) % f.size()]];
+            n.x += (p.y - q.y) * (p.z + q.z);
+            n.y += (p.z - q.z) * (p.x + q.x);
+            n.z += (p.x - q.x) * (p.y + q.y);
+        }
+        const float len = length(n);
+        return len > 0.0f ? n * (1.0f / len) : n;
+    };
+    const float cosThreshold = std::cos(featureDegrees * 3.14159265358979323846f / 180.0f);
+    std::map<std::pair<int, int>, std::pair<int, Vec3>> edgeFaces;  // count + first normal
+    const auto scanFace = [&](const std::vector<std::size_t>& f) {
+        if (f.size() < 3) {
+            return;
+        }
+        const Vec3 n = faceNormal(f);
+        for (std::size_t k = 0; k < f.size(); ++k) {
+            const int a = static_cast<int>(f[k]);
+            const int b = static_cast<int>(f[(k + 1) % f.size()]);
+            if (a == b) {
+                continue;
+            }
+            auto [it, inserted] = edgeFaces.try_emplace(std::minmax(a, b), 1, n);
+            if (!inserted) {
+                ++it->second.first;
+                if (it->second.first == 2 && dot(it->second.second, n) < cosThreshold) {
+                    pinned[static_cast<std::size_t>(a)] = 1;
+                    pinned[static_cast<std::size_t>(b)] = 1;
+                }
+            }
+        }
+    };
+    for (const auto& f : faces) {
+        scanFace(f);
+    }
+
+    const std::size_t ops =
+        quadMeshValenceCleanup(quads, static_cast<int>(vertices.size()), pinned, reservedEdges);
+    if (ops == 0) {
+        return 0;  // `faces` untouched: the kill-switch A/B stays byte-identical
+    }
+    // Write back: the cleaned quads, then the frozen remainder in original order.
+    std::vector<std::vector<std::size_t>> merged;
+    merged.reserve(quads.size() + faces.size());
+    for (const auto& q : quads) {
+        merged.push_back({static_cast<std::size_t>(q[0]), static_cast<std::size_t>(q[1]),
+                          static_cast<std::size_t>(q[2]), static_cast<std::size_t>(q[3])});
+    }
+    for (std::size_t i = 0; i < faces.size(); ++i) {
+        if (isQuad[i] == 0) {
+            merged.push_back(std::move(faces[i]));
+        }
+    }
+    faces.swap(merged);
+    // Compact out vertices freed by doublet dissolution.
+    std::vector<int> remap(vertices.size(), -1);
+    for (const auto& f : faces) {
+        for (const std::size_t v : f) {
+            remap[v] = 0;
+        }
+    }
+    std::size_t top = 0;
+    for (std::size_t v = 0; v < vertices.size(); ++v) {
+        if (remap[v] == 0) {
+            remap[v] = static_cast<int>(top);
+            vertices[top++] = vertices[v];
+        }
+    }
+    vertices.resize(top);
+    for (auto& f : faces) {
+        for (std::size_t& v : f) {
+            v = static_cast<std::size_t>(remap[v]);
+        }
+    }
+    return ops;
+}
+
 // IQuadrangulator implementation (Milestone 3). Runs the full QuadCover pipeline:
 // seamless integer-grid UV (M1, out-of-process via CYBER_QUADCOVER_CLI) -> isoline
 // trace + boundary-aware cleanup (M2) -> replace `mesh` in place with the quad mesh.
@@ -2453,10 +2891,12 @@ double meshTargetQuads(const Mesh& mesh, float targetEdgeLength) {
 // a reason without corrupting the input triangle island).
 class QuadCoverQuadrangulator final : public IQuadrangulator {
 public:
-    QuadCoverQuadrangulator(int fieldIterations, float adaptivity, int holeFillMaxBoundary)
+    QuadCoverQuadrangulator(int fieldIterations, float adaptivity, int holeFillMaxBoundary,
+                            float featureDegrees)
         : m_fieldIterations(fieldIterations),
           m_adaptivity(adaptivity),
-          m_holeFillMaxBoundary(holeFillMaxBoundary) {}
+          m_holeFillMaxBoundary(holeFillMaxBoundary),
+          m_featureDegrees(featureDegrees) {}
 
     Outcome quadrangulate(Mesh& mesh, float targetEdgeLength, ProgressSink* progress,
                           const CancelToken* cancel) override {
@@ -2475,9 +2915,54 @@ public:
         const double targetQuads = meshTargetQuads(mesh, targetEdgeLength);
         IsolineQuadMesh out;
         float scaling = 0.5f;
+        // The native solve's isotropic remesh + cross field + cut setup depend only on the
+        // mesh / edge length / adaptivity / feature threshold — never on `scaling` — so the
+        // context computes them once and each attempt re-runs only the (spacing-dependent)
+        // parameterization + extraction.
+        NativeSolveContext nativeCtx;
+        // Probe-predicted initial scaling (native route only). The hardcoded 0.5 start
+        // overshoots the extracted count 1.5-3x on every corpus mesh, so the loop below
+        // always pays a second full solve. The relaxed Poisson phase already fixes the UV
+        // cell area up to a per-mesh-stable factor, so one relaxed-only probe at spacing ==
+        // targetEdgeLength predicts the mesh-specific scaling:
+        //   quads(s) ~ eta * cellsRelaxed(1)/s^2  =>  s0 = sqrt(eta * cellsRelaxed(1)/target)
+        // eta folds two corpus-measured, per-mesh-stable (<2% drift across spacings) ratios:
+        // extraction efficiency quads/cellsFinal (0.95-1.00 on all 7 corpus meshes) and the
+        // ARAP-polish area growth cellsFinal/cellsRelaxed (0.85-1.04 on 5/7 including every
+        // expensive mesh; sphere/torus are ~1.65 outliers that fall back to the correction
+        // attempt, exactly like today's constant start). The corpus-calibrated default is
+        // 1.0: the product sits at 0.92-1.04 on the coherent meshes, and on CAD-flat parts
+        // the relaxed cells EQUAL area/spacing^2, so eta=1 puts the grid cell exactly at
+        // targetEdgeLength and preserves the perfect box grid (8 corner cones, 0-deg angle
+        // dev — eta=0.95 measurably broke it). Note eta is calibrated for THIS measure
+        // (relaxed |UV triangle area| sum); the historical 0.62 figure was quads per
+        // full-solve bbox cell and does not apply. The 2-attempt loop stays unchanged as
+        // the safety net (a probe miss costs one correction solve). Kill switch:
+        // CYBER_QC_NO_PROBE restores the 0.5 start; CYBER_QC_EXTRACT_EFF overrides eta.
+        // Skipped when the vendored solver is configured (there `scaling` is the harness
+        // -s) or when a scaling/spacing experiment env pins the solve.
+        const bool probeEnabled = std::getenv("CYBER_QC_NO_PROBE") == nullptr &&
+                                  std::getenv("CYBER_QC_NO_NATIVE") == nullptr &&
+                                  std::getenv("CYBER_QC_SCALING") == nullptr &&
+                                  std::getenv("CYBER_QC_SPACING_MUL") == nullptr &&
+                                  !vendoredSeamlessAvailable() && targetQuads > 0.0;
+        if (probeEnabled) {
+            const double cells = nativeRelaxedCellArea(mesh, targetEdgeLength, m_adaptivity,
+                                                       m_featureDegrees, cancel, nativeCtx);
+            if (cells > 0.0) {
+                const char* effEnv = std::getenv("CYBER_QC_EXTRACT_EFF");
+                const double kExtractEff = effEnv != nullptr ? std::atof(effEnv) : 1.0;
+                scaling = std::clamp(
+                    static_cast<float>(std::sqrt(kExtractEff * cells / targetQuads)), 0.2f, 1.5f);
+                if (std::getenv("CYBER_QC_DEBUG") != nullptr) {
+                    std::fprintf(stderr, "[qc] probe cells=%.1f eff=%.2f target=%.1f -> s0=%.3f\n",
+                                 cells, kExtractEff, targetQuads, static_cast<double>(scaling));
+                }
+            }
+        }
         for (int attempt = 0; attempt < 2; ++attempt) {
-            const SeamlessUv uv =
-                computeSeamlessUv(mesh, targetEdgeLength, scaling, m_adaptivity, cancel);
+            const SeamlessUv uv = computeSeamlessUv(mesh, targetEdgeLength, scaling, m_adaptivity,
+                                                    cancel, m_featureDegrees, &nativeCtx);
             if (!uv.valid) {
                 return {.success = false,
                         .cancelled = false,
@@ -2490,6 +2975,11 @@ public:
             }
             out = extractIsolineQuads(mesh, uv, m_holeFillMaxBoundary);
             const double got = static_cast<double>(out.quads.size());
+            if (std::getenv("CYBER_QC_DEBUG") != nullptr) {
+                std::fprintf(stderr,
+                             "[qc] calibrate attempt=%d scaling=%.4f got=%.0f target=%.1f\n",
+                             attempt, static_cast<double>(scaling), got, targetQuads);
+            }
             if (std::getenv("CYBER_QC_SCALING") != nullptr || targetQuads <= 0.0 || got <= 0.0) {
                 break;  // fixed scaling (experiment) or nothing to calibrate against
             }
@@ -2525,6 +3015,22 @@ public:
                              h.c_str());
             }
         }
+        // Cancel valence-3/5 dipoles on the extracted quads (see cancelValenceDipoles):
+        // strictly count-monotone, so it can only remove irregular vertices — the lever
+        // for longer quad flow loops. Runs AFTER the count calibration and the cap fix
+        // so it never perturbs the scaling feedback and sees the final quad set. Crease
+        // detection reuses the solve's feature threshold (CYBER_QC_FEATURE_DEG override,
+        // as in computeSeamlessUv). Kill switch CYBER_QC_NO_DIPOLE for A/B.
+        if (std::getenv("CYBER_QC_NO_DIPOLE") == nullptr) {
+            const char* featEnv = std::getenv("CYBER_QC_FEATURE_DEG");
+            const float featureDeg =
+                featEnv != nullptr ? static_cast<float>(std::atof(featEnv)) : m_featureDegrees;
+            const std::size_t ops = cancelValenceDipoles(out.vertices, out.quads, featureDeg);
+            if (std::getenv("CYBER_QC_DEBUG") != nullptr) {
+                std::fprintf(stderr, "[qc] dipole cleanup ops=%zu -> faces=%zu verts=%zu\n", ops,
+                             out.quads.size(), out.vertices.size());
+            }
+        }
 
         std::vector<std::vector<Index>> faces;
         faces.reserve(out.quads.size());
@@ -2555,14 +3061,16 @@ private:
     int m_fieldIterations;
     float m_adaptivity;
     int m_holeFillMaxBoundary;
+    float m_featureDegrees = 40.0f;
 };
 
 }  // namespace
 
 std::unique_ptr<IQuadrangulator> makeQuadCoverQuadrangulator(int fieldIterations, float adaptivity,
-                                                             int holeFillMaxBoundary) {
+                                                             int holeFillMaxBoundary,
+                                                             float featureDegrees) {
     return std::make_unique<QuadCoverQuadrangulator>(fieldIterations, adaptivity,
-                                                     holeFillMaxBoundary);
+                                                     holeFillMaxBoundary, featureDegrees);
 }
 
 bool quadCoverAvailable() {

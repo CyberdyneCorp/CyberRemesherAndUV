@@ -142,6 +142,11 @@ CrossField computeCrossField(const Mesh& mesh, int iterations, accel::IBackend& 
     std::size_t dbgCrease = 0, dbgGated = 0, dbgPinned = 0;
     // Constrain faces touching a feature or boundary edge to align with it.
     std::vector<char> constrained(nf, 0);
+    // Faces whose pin came from an interior FEATURE edge (a crease): only
+    // these seed the planar flood fill below. Boundary pins stay local —
+    // spreading them across open flat scans measurably regresses the
+    // open-surface cleanup suite (CV blow-up).
+    std::vector<char> fillSeed(nf, 0);
     for (std::size_t c = 0; c < nf; ++c) {
         const FaceId f = faces[c];
         const std::vector<VertexId> fv = mesh.faceVertices(f);
@@ -166,6 +171,9 @@ CrossField computeCrossField(const Mesh& mesh, int iterations, accel::IBackend& 
             field.real[f.value] = std::cos(4.0f * alpha);
             field.imag[f.value] = std::sin(4.0f * alpha);
             constrained[c] = 1;
+            if (mesh.isFeatureEdge(e) && mesh.edgeFaceCount(e) == 2) {
+                fillSeed[c] = 1;
+            }
             break;
         }
     }
@@ -188,6 +196,68 @@ CrossField computeCrossField(const Mesh& mesh, int iterations, accel::IBackend& 
                      dbgCrease, dbgGated, dbgPinned, nf, nPinned,
                      100.0 * static_cast<double>(nPinned) / static_cast<double>(nf),
                      static_cast<double>(alignDeg));
+    }
+
+    // Planar flood fill: propagate feature/boundary pins across FLAT regions.
+    // On a plane every constant field is equally smooth, so the discrete
+    // smoothing has no geometric preference — on diagonally-triangulated flat
+    // grids the discretization pulls the interior ~27-45 degrees off-axis
+    // (native-miq-plan "still open"), which is also why a pinned border band
+    // alone REGRESSED flat CAD (ROADMAP lever c2: cube CV 0.201->0.397): the
+    // pinned ring and the diagonal interior fight, and the blend shears the
+    // grid. Extending the pin as a CONSTANT field across the whole coplanar
+    // patch removes the conflict instead of surrendering the alignment (the
+    // planarity gate's answer). Curved regions are untouched: the fill stops
+    // at any non-planar edge. Kill switch: CYBER_QC_NO_PLANAR_FILL.
+    if (std::getenv("CYBER_QC_NO_PLANAR_FILL") == nullptr) {
+        std::vector<std::size_t> queue;
+        for (std::size_t c = 0; c < nf; ++c) {
+            if (fillSeed[c] != 0) {
+                queue.push_back(c);
+            }
+        }
+        std::size_t head = 0;
+        while (head < queue.size()) {
+            const std::size_t c = queue[head++];
+            const FaceId f = faces[c];
+            const Vec3 nF = normalized(mesh.faceNormal(f));
+            const float alpha = std::atan2(field.imag[f.value], field.real[f.value]) * 0.25f;
+            const Vec3 dir3d = field.tangent[f.value] * std::cos(alpha) +
+                               field.bitangent[f.value] * std::sin(alpha);
+            const std::vector<VertexId> fv = mesh.faceVertices(f);
+            for (std::size_t k = 0; k < fv.size(); ++k) {
+                const EdgeId e = mesh.edgeBetween(fv[k], fv[(k + 1) % fv.size()]);
+                if (!e.valid() || mesh.isFeatureEdge(e) || mesh.edgeFaceCount(e) != 2) {
+                    continue;  // never spread across a crease or boundary
+                }
+                for (const FaceId g : mesh.edgeFaces(e)) {
+                    if (g == f) {
+                        continue;
+                    }
+                    const Index gc = compact[g.value];
+                    if (gc == kInvalidIndex || constrained[gc] != 0) {
+                        continue;
+                    }
+                    if (dot(nF, normalized(mesh.faceNormal(g))) < planarCos) {
+                        continue;  // genuinely curved: leave to the smoother
+                    }
+                    const float beta =
+                        frameAngle(dir3d, field.tangent[g.value], field.bitangent[g.value]);
+                    field.real[g.value] = std::cos(4.0f * beta);
+                    field.imag[g.value] = std::sin(4.0f * beta);
+                    constrained[gc] = 1;
+                    queue.push_back(gc);
+                }
+            }
+        }
+        if (std::getenv("CYBER_QC_FIELD_STATS") != nullptr) {
+            std::size_t nPinned = 0;
+            for (std::size_t c = 0; c < nf; ++c) {
+                nPinned += constrained[c] != 0 ? std::size_t{1} : std::size_t{0};
+            }
+            std::fprintf(stderr, "[field] planar fill -> constrained=%zu (%.1f%%)\n", nPinned,
+                         100.0 * static_cast<double>(nPinned) / static_cast<double>(nf));
+        }
     }
 
     // Build the 2F x 2F transport-averaging operator as CSR: row 2c/2c+1 hold

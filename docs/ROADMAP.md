@@ -4,6 +4,222 @@ Goal: make CyberRemesher's automatic quad retopology **better than QuadriFlow**
 across four axes — quality-per-polygon, median quad angle, feature/CAD fidelity,
 and robustness — not just competitive on one.
 
+## Update — 2026-08-01 (CI scoreboard lands; CLI was measuring the wrong solver; isotropic adaptivity explosions fixed)
+
+- **`tools/bench/` benchmark harness** (new): deterministic generated corpus +
+  sha256-pinned real models, recorded-baseline regression gate in ctest
+  (`bench`), external competitor binaries (QuadriFlow, Instant Meshes,
+  **quadwild-bimdf** — the current open-source quality bar, run as a GPL
+  binary only), and **edge-flow loop metrics** (`flow_turning_mean`,
+  `flow_loop_mean_len`) that quantify the wavy-flow/spiral axis the shape
+  metrics miss. Complements `examples/10_vs_reference.py`.
+- **The CLI hardcoded `field-aligned`** — every CLI run (and anything
+  benchmarking through it) measured the retired method, not the documented
+  quad-cover default. Fixed with `--quad-method` (default quad-cover). On
+  spot/3000/adaptivity-0 this alone moves singularities 854 → 179 and mean
+  corner-angle deviation 28.4° → 11.2°.
+- **Isotropic adaptivity explosions fixed** (25k+ quads for a 600-quad capped
+  cylinder, benchmark-caught; affects every method that runs the pipeline
+  isotropic stage): crease angle defect excluded from the curvature source,
+  Laplacian smoothing replaced by a gradation-limited sizing field, the scale
+  field made Eulerian (sampled from the `ReferenceSurface`, not carried on
+  drifting vertices), and feature tagging given an epsilon so exactly-90°
+  dihedrals tag deterministically. Regression test in `test_pipeline.cpp`.
+- **Native-solve perf (2026-08-01, later): calibration loop de-duplicated +
+  probe-predicted initial scaling.** Two commits on the quad-cover path:
+  - *Byte-identical hoist:* the isotropic pre-remesh, cross field and
+    `buildSeamlessSetup` depend only on (mesh, edge length, adaptivity, feature
+    threshold) — never on the calibration `scaling` — so they now compute once
+    (`NativeSolveContext`) and each calibration attempt re-runs only the
+    spacing-dependent solve + extraction. sha256 of the output OBJ verified
+    unchanged on all 7 corpus meshes. nefertiti@8000 220s → 203s,
+    armadillo@8000 98s → 82s.
+  - *Calibration probe (default-on, kill switch `CYBER_QC_NO_PROBE`):* the
+    hardcoded 0.5 initial scaling overshoots the extracted count 1.5-3x on
+    every corpus mesh, forcing a second full solve. A relaxed-Poisson-only
+    probe (`relaxedCellArea`, ~3-9% of a full solve) predicts the mesh-specific
+    scaling `s0 = sqrt(eta·cells/target)`; eta defaults to the
+    corpus-calibrated 1.0 for the relaxed triangle-area measure
+    (`CYBER_QC_EXTRACT_EFF` overrides), and the 2-attempt loop stays as the
+    safety net. 5/7 corpus meshes (incl. every expensive one) now land in ONE
+    solve: nefertiti 220s → **117s**, armadillo 98s → **52s** (sphere/torus,
+    whose ARAP polish grows UV area ~1.65x, still take 2 — same as before).
+    Counts land 0.87-0.99 of target (window 0.75-1.33); bench check green,
+    box_sharp keeps its perfect grid (8 cones, 0° angle dev), spot improves
+    (sing 72→63); nefertiti/armadillo drift ≤5% on sing/angle. Vendored route
+    untouched (probe is native-only); outputs with `CYBER_QC_NO_PROBE=1`
+    byte-match the pre-probe build.
+- **Gap #2, flow-loop length (2026-08-02): the loop killers are the residual
+  triangles, then dipoles; quantization is what remains.** Loop-termination
+  census on spot: 47 leftover triangles account for essentially all 118 open
+  loop ends (quad-dominant default, mean loop 41). `--pure-quads` removes
+  them: mean loop 41 → **319** at ratio 1.000 with angle IMPROVING 6.7→6.5
+  (the bench now carries a `cyber-pure` solver row — QuadriFlow/quadwild are
+  pure-quad, so the quad-dominant comparison understated us structurally).
+  With triangles gone the dipole canceller's effect unmasks: spot loops
+  319 → **433** (+36%) at sing 95→93 — the stack is 41 → 433 (10.5×).
+  Corpus cyber-pure: nefertiti sing 441 / recall 0.89, armadillo sing 404 /
+  recall 0.77 (recall dips on armadillo under the pure post-pass — noted).
+  QuadriFlow spot sits at 1811: the remaining ~4× is global grid structure —
+  the Bi-MDF-style quantization lever, unchanged as the endgame for this gap.
+- **Native-solve perf (2026-08-02): direct sparse-Cholesky solve
+  (`CYBER_QC_DIRECT`, default on; kill switch `CYBER_QC_NO_DIRECT`).** The two
+  solve operators are fixed across all their re-solves, so both are now
+  factored ONCE by an in-tree double-precision simplicial LL^T with RCM
+  ordering (`sparse_cholesky.{hpp,cpp}`, dependency-free — the license audit
+  stays clean) and cached in `NativeSolveContext` across the probe and every
+  calibration attempt (spacing only scales the RHS):
+  - *Phase 1 — pinned Poisson:* every `relaxedSolve` (initial + up to 6 ARAP
+    re-solves, ×2 coordinates) becomes a pair of exact back-substitutions
+    instead of cold-tolerance float CG. The probe's relaxed phase on
+    nefertiti@8000 drops 8.5s → 0.07s.
+  - *Phase 2 — reduced integer phase:* the reduced operator M = Tᵗ·L₂·T is
+    formed explicitly (fill is benign: nefertiti nnz(M)=340k → factor 18.0M,
+    armadillo 328k → 11.4M, spot 35k → 0.39M), factored once, and the ~50-77
+    masked CG re-solves of the greedy rounding collapse into exact bordered
+    (Woodbury/KKT) solves on the ≤2813 pinned integer DOF — same fixed point
+    as `maskedSolve`, greedy pin schedule untouched, `totalCg` 80408 → 0 on
+    nefertiti. `CYBER_QC_FUSED_OPERATOR` keeps the CG loop on the explicit M
+    (one spmv/iter) as the fill-pathology fallback.
+  - *Measured (M2 Max, Release):* nefertiti@8000 wall 118.9s → **36.7s**
+    (solve 95.5s → 21.7s, 4.4x); armadillo@8000 wall 57.8s → **24.6s** (solve
+    36.8s → 8.1s, 4.5x); spot@3000 solve 270ms → 49ms. Remaining solve cost on
+    nefertiti is the one-time inverse-int-block build (D=11.6s, factor=3.1s) —
+    an AMD ordering is the next lever there.
+  - *Gates:* ctest 13/13, `bench.py check` green (box_sharp 8 cones / 0° angle
+    / recall 1.00). Full A/B (generated corpus + spot/nefertiti/armadillo,
+    direct vs `CYBER_QC_NO_DIRECT`): generated corpus metric-identical; real
+    meshes within noise (sing: spot 63→64, nefertiti 659→664, armadillo
+    609→597; angle/hausdorff/recall/flow all ≤±2%, no bench-tolerance
+    violation). Kill-switch output verified content-identical to the
+    pre-change build (armadillo@8000 sha256, modulo the OBJ's self-referential
+    mtllib line). Numerical drift `CYBER_QC_DIRECT_CHECK`: max
+    |uv_direct − uv_cg| = 9.2e-5 on spot (the CG truncation error removed).
+- **Feature-pinning lever (in progress, OPT-IN):** `CYBER_QC_FEATURE_DEG=90
+  CYBER_QC_PLANAR_FILL=1 CYBER_QC_UV_SNAP=1` lifts box_sharp recall
+  **0.04 → 0.73** (organics neutral: spot 179→168 sing, recall 0.59→0.64) via
+  three pieces: (a) the native solve-binding feature tag honors the caller
+  (was hardcoded 40° — 90° CAD edges were invisible to seams/field pins;
+  plumbed through `makeQuadCoverQuadrangulator(..., featureDegrees)`);
+  (b) NEW feature-seam integer pinning in `solveSeamlessReduced` (per feature
+  seam: level-set row + promoted integer `c_e`; `CYBER_QC_NO_FEATURE_PIN`) —
+  seams WITHOUT pinning regress (patch grids disagree, recall stays 0.04 at
+  angle 32.5°): pin + seam must ship together; (c) planar flood-fill of
+  feature pins across coplanar regions (the missing alternative to lever c2's
+  gate: extend the pin as a constant field over the whole flat patch instead
+  of disabling it — the pinned-ring-vs-diagonal-interior conflict is what
+  regressed the cube in c2's ungated variant).
+  **Blocker before default-on:** with feature seams the solved map SHEARS
+  (box angle 12.5°→36°, sing 48→86, cylinder recall 1.00→0.58). Localized by
+  instrumentation: field 100% axis-aligned, cone census exactly the 8 corner
+  cones, targets exact, relaxed CG converged (120 iters) — yet the relaxed
+  map is diagonal and the reduced phase only partially recovers. Mixed-axis
+  targets (162 x̂/126 ŷ on one flat patch) come from the cone-spanning CUT
+  TREE routing through patch interiors (legitimate seams, but they thread
+  flat panels). Disproven en route: ARAP polish (map-level A/B, exonerated;
+  `CYBER_QC_NO_ARAP` added), angle()/direction() branch mismatch (fix
+  measured WORSE, reverted). Live leads, in order: (1) route the
+  cone-spanning cut tree ALONG feature curves instead of through flat patch
+  interiors (creases are already cuts — the tree between corner cones can
+  follow them; no interior seams ⇒ per-patch solves become exact grids);
+  (2) the greedy rounding order with ~144 pinned `c_e` integers (round crease
+  constants first / merge per crease chain).
+  - **SHEAR BLOCKER SOLVED (2026-08-01, later): three compounding solver bugs,
+    all lever-gated fixes in `seamless_solver.cpp` + one tag filter in
+    `quadcover_extractor.cpp`.** Lever-on now: box_sharp recall **0.73 → 1.00**
+    at angle 36.2° → **0.00002°**, sing 86 → **8** (the corner cones, all-quad);
+    cylinder recall 0.46 → **0.98**, hausdorff p99 0.022 → **0.0052**, sing 10.
+    Organics neutral-to-better vs lever-off: spot sing 64→49 angle 17.1→8.5
+    (improves), nefertiti sing 73→73 angle 28.4→27.5, armadillo sing 149→157
+    (+5.4%) angle 17.3→16.5. Lever-off bit-compatible (ctest 13/13,
+    `bench check` OK, no baseline re-record). Root causes, each measured:
+    1. **Combed-target branch mismatch** (the shear itself): the comb and the
+       period jumps live on `CrossField::angle()` (θ∈[0,90°)), but the per-face
+       target frame `e0` was reconstructed from `direction()` (θ∈(-45°,45°]) —
+       a per-face quarter-turn offset wherever raw θ<0, i.e. mixed x̂/ŷ targets
+       on ONE coplanar patch (box top measured 178/110) whose Poisson
+       compromise is the uniform ~32° diagonal. Fix: `combedDirection()`
+       reconstructs on the comb's own angle() convention. Relaxed-phase grad
+       histogram goes 100% of +z faces in the 30–35° bin → 100% in the 0–5°
+       bin. (The earlier "measured WORSE, reverted" attempt was this fix
+       WITHOUT #2/#3 — consistent targets make the wrong seam rho bite harder;
+       the trio must ship together.)
+    2. **Seam transition rho had the comb difference negated**: combed frame of
+       B = frame of A rotated by Δ = p + comb[B] − comb[A] quarter-turns, and a
+       grid whose frame rotates by +Δ has coordinates rotating by −Δ, so
+       uv_B = R^(−Δ) uv_A + t. The code used comb[B] − comb[A] − p — wrong by a
+       half-turn whenever the comb difference is odd (reverses the along-crease
+       coordinate; the reduced phase then destroys the now-perfect relaxed map:
+       recall 0.08, hausdorff 0.54 with #1 alone).
+    3. **periodJump was never computed for feature edges** (historically fine —
+       the comb never crosses them) — but rho needs the crease's intrinsic
+       field jump p. Without it: box recall 0.10, cylinder 0.51 even with #1+#2.
+    4. **Feature re-tag noise filter** (`resolvableCreaseSegments` +
+       `filterFeatureEdgesToReference`): `CYBER_QC_FEATURE_DEG=90` re-tags the
+       COARSE remesh, and organic scans have plenty of over-threshold dihedrals
+       that are sampling artifacts, not creases (nefertiti lever-on sing 216 at
+       the previous state). Keep a re-tagged edge only if it traces the ORIGINAL
+       mesh's sharp network restricted to chains ≥ 2 output cells long, or still
+       qualifies at the historical lever-off knife-edge threshold — so the
+       lever-on feature set degrades exactly to the lever-off one on organics
+       (nefertiti featureEdges 1518 = lever-off set, sing back to 73).
+    - **NEW DISPROVEN (do not retry): routing the cut tree along creases**
+      (0/1-Dijkstra, feature edges cost 0 — old live lead #1). Unnecessary for
+      CAD once #1–#3 are in (box/cylinder identical with plain BFS) and it
+      REGRESSES organics with knife-edge wrinkle networks (nefertiti sing
+      80 → 205: the tree snakes along wrinkles and shreds the map). Also
+      disproven twice earlier as pre-seeding (cylinder hausdorff 0.41 — breaks
+      the disk-opening invariant). The greedy-rounding lead (#2 above) was
+      never needed: with correct rho the box solve leaves only 3 free integers
+      and the rounding is exact.
+    - Diagnostics that found it now ship behind `CYBER_QC_FIELD_STATS`:
+      per-patch axis-mix census, non-feature cut-edge census, per-phase
+      grad(u) deviation histograms (relaxed vs reduced).
+    - **DEFAULT-ON (2026-08-01, final):** the lever now ships as the default.
+      Activation is value+topology-based, not env-based: the CLI binds
+      `--sharp-edge` (default 90) into the native solve, and feature binding
+      engages only when (a) the effective threshold is wider than the
+      historical knife-edge, (b) the filtered remesh actually carries interior
+      feature edges, and (c) the surface is CLOSED (same boundary gate as the
+      ARAP polish — binding features on boundaried scans measurably blew up
+      the open-surface cleanup suite and is future work). Featureless and open
+      meshes take the historical path; the planar flood fill seeds ONLY from
+      crease pins (spreading boundary pins regressed open flat scans). Env
+      trio retired in favor of kill switches: `CYBER_QC_FEATURE_DEG=40`
+      restores knife-edge binding, `CYBER_QC_NO_PLANAR_FILL`,
+      `CYBER_QC_NO_UV_SNAP`, `CYBER_QC_NO_FEATURE_PIN`. Final defaults, target
+      600: box_sharp recall **1.000**, sing **8**, angle **0.00°**, pure quads;
+      cylinder recall **0.945**, sing 9, hausdorff 0.0053. Full suite 13/13,
+      bench gate green; baselines re-recorded to lock the new floor.
+    - Noted en route: the native path is NONDETERMINISTIC run-to-run on the
+      same machine (torus outputs differ bit-wise across identical
+      invocations; parallel CG reduction suspected) — violates the
+      remeshing-pipeline determinism requirement independently of this work.
+- **quad-quality-push finding — IMPLEMENTED (2026-08-02, `feat/dipole-quadcover`):**
+  the shipped val-3/5 dipole canceller (`fixValence`) was unreachable from the
+  quad-cover path (sole caller was the integer extractor). It is now exposed as
+  `quadMeshValenceCleanup` (position_field.hpp) — the same doublet-dissolution +
+  edge-rotation fixpoint, extended with `pinned` vertices (treated exactly like
+  boundary) and `reservedEdges` — and runs in `QuadCoverQuadrangulator` after cap
+  elimination and the count-calibration loop. Non-quad caps are frozen (vertices
+  pinned, edges reserved) and crease vertices (face-pair dihedral over the run's
+  feature threshold) are pinned so quads never rotate off a feature line. The
+  integer path is byte-identical (empty constraints); kill switch
+  `CYBER_QC_NO_DIPOLE`. Measured (A/B via the switch, cyber only): singularities
+  armadillo 581 -> 550, nefertiti 650 -> 587, torus 68 -> 60, spot 72 -> 70,
+  sphere 37 -> 35; feature recall, hausdorff and angle unchanged (< 0.1 deg / <
+  0.002 recall drift); bunny-ear irregulars 46 -> 41. `flow_loop_mean_len` did
+  NOT move (armadillo 20.2 -> 20.1) — dipole density was not the binding
+  constraint on loop length; the remaining flow-loop gap needs a global lever
+  (Bi-MDF-style quantization), not local surgery.
+- **The wall, quantified** (generated corpus, target 600, defaults): quad-cover
+  wins singularity structure outright (cylinder 21 vs QuadriFlow 8 at similar
+  angle quality; sphere 37 vs 8) but **feature recall collapses on sharp
+  geometry — box_sharp 0.04 vs QuadriFlow 1.00** (Phase 3's known
+  feature-following limitation, now a tracked number). Priorities that follow:
+  feature-constrained seamless UVs / extraction snapping first; flow-loop
+  length second (quadwild's Bi-MDF quantization is the reference point).
+
 ## Update — 2026-07-22 (default is now quad-cover; the gap is mostly closed)
 
 The numbers in the rest of this doc describe the older `instant-meshes` extractor
