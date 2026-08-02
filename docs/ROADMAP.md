@@ -4,6 +4,20 @@ Goal: make CyberRemesher's automatic quad retopology **better than QuadriFlow**
 across four axes — quality-per-polygon, median quad angle, feature/CAD fidelity,
 and robustness — not just competitive on one.
 
+## Next — Bi-MDF quantization (openspec change `bimdf-quantization`)
+
+Both remaining quality gaps converge on the same lever: flow-loop length
+(41→433 landed; QuadriFlow 1811 — the residual ~4x is global grid structure)
+and dense-organic singularities (dipole annihilation saturates at nefertiti
+316-347 vs QF 80 — the residual cones come from per-seam greedy rounding).
+The quantization-as-global-optimization answer (QuadWild's Bi-MDF, Heistermann
+et al. 2023) replaces greedy integer rounding with a min-deviation-flow solve
+over the T-mesh: papers only (GPL binaries stay external benchmarks), in-tree
+min-cost flow, `CYBER_QC_BIMDF` gated, greedy fallback byte-exact. Exit gate:
+spot flow_loop_mean_len >= 1000 count-matched AND nefertiti cyber-pure
+singularities <= 200 with no recorded-metric regression, multi-density per the
+measurement rules. See openspec/changes/bimdf-quantization/.
+
 ## Update — 2026-08-02 (CAD density robustness: the sweep's 🔴 failures are FIXED; 32/32 gate cells clean)
 
 The two density-dependent robustness bugs the CAD sweep below exposed are fixed
