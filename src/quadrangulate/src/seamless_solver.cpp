@@ -1914,8 +1914,14 @@ int solveSeamlessReduced(accel::IBackend& backend, std::size_t nCut,
     const auto clampInt = [tCap](double val) { return std::clamp(std::round(val), -tCap, tCap); };
 
     // Bi-MDF quantization (CYBER_QC_BIMDF, openspec/changes/bimdf-quantization):
-    // build the motorcycle-graph T-mesh on the relaxed seamless map. Any
-    // failure falls back to the untouched greedy schedule below.
+    // build the motorcycle-graph T-mesh on the relaxed seamless map, assign
+    // integer arc lengths by min-deviation flow, and map the assignment back
+    // onto the free-integer basis. CYBER_QC_BIMDF=report solves and reports
+    // without injecting (A/B mode). Any failure at any stage falls back to
+    // the untouched greedy schedule below.
+    std::unique_ptr<bimdf::TMesh> bimdfTm;
+    std::vector<std::vector<std::pair<std::size_t, double>>> bimdfArcRows;
+    std::vector<std::pair<std::size_t, double>> bimdfPins;  // (intFree ordinal, value)
     if (bimdfCharts != nullptr) {
         bimdfCharts->u = relaxedUv.data();
         bimdfCharts->v = relaxedUv.data() + nCut;
@@ -1937,7 +1943,8 @@ int solveSeamlessReduced(accel::IBackend& backend, std::size_t nCut,
             const SeamRef& s = seams[featureSeams[k]];
             zRel[cIx(k)] = s.pinAxis == 0 ? zRel[uIx(s.aA)] : zRel[vIx(s.aA)];
         }
-        const bimdf::TMesh tmesh = bimdf::buildTMesh(*bimdfCharts, zRel);
+        bimdfTm = std::make_unique<bimdf::TMesh>(bimdf::buildTMesh(*bimdfCharts, zRel));
+        const bimdf::TMesh& tmesh = *bimdfTm;
         std::fprintf(stderr,
                      "[qc] bimdf tmesh: ok=%d nodes=%zu arcs=%zu patches=%zu cones=%zu "
                      "tnodes=%zu rays=%zu steps=%zu exprErr=%.2e sideMismatch=%.3f%s%s\n",
@@ -1945,11 +1952,199 @@ int solveSeamlessReduced(accel::IBackend& backend, std::size_t nCut,
                      tmesh.coneNodes, tmesh.tNodes, tmesh.raysTraced, tmesh.raySteps,
                      tmesh.maxExprErr, tmesh.maxSideMismatch,
                      tmesh.reason.empty() ? "" : " reason=", tmesh.reason.c_str());
+        // Reduce every arc-length expression onto the reduced basis w (used
+        // for the back-substitution and the post-solve deviation report).
+        if (tmesh.ok) {
+            std::vector<std::size_t> ordinalOf(W, kInvalidIndex);
+            for (std::size_t k = 0; k < intFree.size(); ++k) {
+                ordinalOf[intFree[k]] = k;
+            }
+            bimdfArcRows.resize(tmesh.arcs.size());
+            for (std::size_t a = 0; a < tmesh.arcs.size(); ++a) {
+                std::unordered_map<std::size_t, double> row;
+                for (const auto& [zv, cf] : tmesh.arcs[a].expr) {
+                    if (isPivot[zv]) {
+                        for (const auto& [c2, w2] : pivotExpr[zv]) {
+                            row[freeIx[c2]] += cf * w2;
+                        }
+                    } else {
+                        row[freeIx[zv]] += cf;
+                    }
+                }
+                auto& out = bimdfArcRows[a];
+                for (const auto& [ri, cf] : row) {
+                    if (std::abs(cf) > 1e-7) {
+                        out.push_back({ri, cf});
+                    }
+                }
+                std::sort(out.begin(), out.end());
+            }
+            const bimdf::BimdfResult sol = bimdf::solveBimdf(tmesh);
+            std::fprintf(stderr,
+                         "[qc] bimdf solve: ok=%d energy=%.3f raisedToMin=%zu parityFlips=%zu "
+                         "halfIntegral=%zu sideViolation=%lld%s%s\n",
+                         sol.ok ? 1 : 0, sol.deviationEnergy, sol.raisedToMin, sol.parityFlips,
+                         sol.halfIntegral, sol.maxSideViolation,
+                         sol.reason.empty() ? "" : " reason=", sol.reason.c_str());
+            if (sol.ok) {
+                // Back-substitution A y = len over the free integers. Rows
+                // touching a continuous free are the reduction's structural
+                // integrality violations and cannot be enforced.
+                struct SysRow {
+                    std::vector<std::pair<std::size_t, double>> a;  // (ordinal, coeff)
+                    double rhs = 0.0;
+                };
+                std::vector<SysRow> sys;
+                std::size_t badArcs = 0;
+                for (std::size_t a = 0; a < tmesh.arcs.size(); ++a) {
+                    SysRow row;
+                    bool good = true;
+                    for (const auto& [ri, cf] : bimdfArcRows[a]) {
+                        const std::size_t ord = ordinalOf[ri];
+                        if (ord == kInvalidIndex) {
+                            good = false;
+                            break;
+                        }
+                        row.a.push_back({ord, cf});
+                    }
+                    if (!good || row.a.empty()) {
+                        ++badArcs;
+                        continue;
+                    }
+                    row.rhs = 0.5 * static_cast<double>(sol.arcLenHalf[a]);
+                    sys.push_back(std::move(row));
+                }
+                std::vector<std::size_t> cols;
+                {
+                    std::vector<char> seen(intFree.size(), 0);
+                    for (const SysRow& row : sys) {
+                        for (const auto& [ord, cf] : row.a) {
+                            if (!seen[ord]) {
+                                seen[ord] = 1;
+                                cols.push_back(ord);
+                            }
+                        }
+                    }
+                    std::sort(cols.begin(), cols.end());
+                }
+                std::vector<std::size_t> colOf(intFree.size(), kInvalidIndex);
+                for (std::size_t c = 0; c < cols.size(); ++c) {
+                    colOf[cols[c]] = c;
+                }
+                const std::size_t nR = sys.size(), nC = cols.size();
+                std::vector<double> A2(nR * nC, 0.0), rhs2(nR, 0.0);
+                for (std::size_t rI = 0; rI < nR; ++rI) {
+                    for (const auto& [ord, cf] : sys[rI].a) {
+                        A2[rI * nC + colOf[ord]] += cf;
+                    }
+                    rhs2[rI] = sys[rI].rhs;
+                }
+                // Gauss-Jordan with partial pivoting; non-pivot unknowns take
+                // their rounded relaxed values (the greedy default), pivots
+                // follow the flow assignment.
+                std::vector<std::size_t> pivotColOfRow(nR, kInvalidIndex);
+                std::vector<char> colUsed(nC, 0);
+                for (std::size_t rI = 0; rI < nR; ++rI) {
+                    std::size_t pc = kInvalidIndex;
+                    double best = 1e-7;
+                    for (std::size_t c = 0; c < nC; ++c) {
+                        if (!colUsed[c] && std::abs(A2[rI * nC + c]) > best) {
+                            best = std::abs(A2[rI * nC + c]);
+                            pc = c;
+                        }
+                    }
+                    if (pc == kInvalidIndex) {
+                        continue;  // dependent row
+                    }
+                    colUsed[pc] = 1;
+                    pivotColOfRow[rI] = pc;
+                    const double inv = 1.0 / A2[rI * nC + pc];
+                    for (std::size_t c = 0; c < nC; ++c) {
+                        A2[rI * nC + c] *= inv;
+                    }
+                    rhs2[rI] *= inv;
+                    for (std::size_t r2 = 0; r2 < nR; ++r2) {
+                        if (r2 == rI || A2[r2 * nC + pc] == 0.0) {
+                            continue;
+                        }
+                        const double f = A2[r2 * nC + pc];
+                        for (std::size_t c = 0; c < nC; ++c) {
+                            A2[r2 * nC + c] -= f * A2[rI * nC + c];
+                        }
+                        rhs2[r2] -= f * rhs2[rI];
+                    }
+                }
+                std::vector<double> ySol(nC, 0.0);
+                for (std::size_t c = 0; c < nC; ++c) {
+                    if (!colUsed[c]) {
+                        ySol[c] = std::round(static_cast<double>(w[intFree[cols[c]]]));
+                    }
+                }
+                double maxFrac = 0.0;
+                bool rangeOk = true;
+                std::size_t nPivots = 0;
+                for (std::size_t rI = 0; rI < nR; ++rI) {
+                    const std::size_t pc = pivotColOfRow[rI];
+                    if (pc == kInvalidIndex) {
+                        continue;
+                    }
+                    double val = rhs2[rI];
+                    for (std::size_t c = 0; c < nC; ++c) {
+                        if (c != pc && !colUsed[c] && A2[rI * nC + c] != 0.0) {
+                            val -= A2[rI * nC + c] * ySol[c];
+                        }
+                    }
+                    maxFrac = std::max(maxFrac, std::abs(val - std::round(val)));
+                    ySol[pc] = std::round(val);
+                    if (std::abs(ySol[pc]) > tCap) {
+                        rangeOk = false;  // never clamp an injected value
+                    }
+                    ++nPivots;
+                }
+                const char* mode = std::getenv("CYBER_QC_BIMDF");
+                const bool inject = mode == nullptr || std::string(mode) != "report";
+                std::fprintf(stderr,
+                             "[qc] bimdf inject: arcs=%zu badArcs=%zu rows=%zu cols=%zu "
+                             "pivots=%zu maxFrac=%.4f rangeOk=%d mode=%s\n",
+                             tmesh.arcs.size(), badArcs, nR, nC, nPivots, maxFrac, rangeOk ? 1 : 0,
+                             inject ? "inject" : "report");
+                if (inject && rangeOk && maxFrac < 0.25) {
+                    for (std::size_t c = 0; c < nC; ++c) {
+                        bimdfPins.push_back({cols[c], ySol[c]});
+                    }
+                }
+            }
+        }
     }
 
     std::vector<char> intPinned(intFree.size(), 0);
     constexpr double kConfident = 0.2;
     std::size_t remaining = intFree.size();
+    // Bi-MDF injection: pin the flow-determined integers in ONE batch (values
+    // validated against tCap above, deliberately NOT clamped — a clamped
+    // subset would break the flow's conservation) and re-solve once; the
+    // greedy schedule below finishes any remaining free integers.
+    if (!bimdfPins.empty()) {
+        for (const auto& [k, val] : bimdfPins) {
+            if (intPinned[k]) {
+                continue;
+            }
+            w[intFree[k]] = static_cast<float>(val);
+            mask[intFree[k]] = 0;
+            intPinned[k] = 1;
+            --remaining;
+        }
+        if (useDirect) {
+            ++maskedSolveCalls;
+            if (!direct.resolve(mask, w)) {
+                direct.finalize(mask, w);
+                useDirect = false;
+                maskedSolve(mask);
+            }
+        } else {
+            maskedSolve(mask);
+        }
+    }
     while (remaining > 0) {
         if (cancel != nullptr && cancel->isCancelled()) {
             break;
@@ -2025,6 +2220,21 @@ int solveSeamlessReduced(accel::IBackend& backend, std::size_t nCut,
         const double eFinal = reducedEnergy();
         std::fprintf(stderr, "[qc] reduced energy: relaxed=%.6f final=%.6f delta=%.6f\n", eRelaxed,
                      eFinal, eFinal - eRelaxed);
+    }
+    // Realized T-mesh deviation energy of whatever quantizer actually ran
+    // (Bi-MDF injection or the greedy schedule, CYBER_QC_BIMDF=report): the
+    // arc lengths the final integers produce vs the relaxed targets.
+    if (bimdfTm && bimdfTm->ok && !bimdfArcRows.empty()) {
+        std::vector<double> finalLen(bimdfTm->arcs.size(), 0.0);
+        for (std::size_t a = 0; a < bimdfTm->arcs.size(); ++a) {
+            double lenA = 0.0;
+            for (const auto& [ri, cf] : bimdfArcRows[a]) {
+                lenA += cf * static_cast<double>(w[ri]);
+            }
+            finalLen[a] = lenA;
+        }
+        std::fprintf(stderr, "[qc] bimdf realized: arcDeviationEnergy=%.3f injected=%zu\n",
+                     bimdf::deviationEnergy(*bimdfTm, finalLen), bimdfPins.size());
     }
     return totalCg;
 }
