@@ -841,7 +841,7 @@ SeamlessSetup buildSeamlessSetup(const Mesh& mesh, int iterations, accel::IBacke
     // orientation (coarse-to-fine singularity placement) instead of single-level
     // face smoothing. Gated so the stock seamless path is unchanged.
     if (std::getenv("CYBER_QC_CROSSFIELD_MULTIRES") != nullptr) {
-        setup.field = computeCrossFieldFromOrientation(mesh, iterations);
+        setup.field = computeCrossFieldFromOrientation(mesh, iterations, backend);
     } else {
         setup.field = computeCrossField(mesh, iterations, backend);
     }

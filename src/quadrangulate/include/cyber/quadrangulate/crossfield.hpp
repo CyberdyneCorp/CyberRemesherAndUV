@@ -53,10 +53,16 @@ public:
 // orientation field (computePositionField): the coarse-to-fine hierarchy places
 // singularities globally, which a single-level face smoothing gets stuck on —
 // fewer, better-placed cones on thin high-curvature features (e.g. the bunny
-// ears). The smoothed vertex orientation is projected onto each face and encoded
-// as the per-face cross; faces touching a feature/boundary edge are re-pinned to
-// it exactly, matching computeCrossField. Gated behind CYBER_QC_CROSSFIELD_MULTIRES
-// so the stock seamless path (and the field-aligned engine) are unchanged.
-[[nodiscard]] CrossField computeCrossFieldFromOrientation(const Mesh& mesh, int iterations);
+// ears). The smoothed vertex orientation is projected onto each face, pinned
+// exactly as computeCrossField pins (feature/boundary alignment, crease pins,
+// planar flood fill), and then RELAXED with the same converged transport
+// smoothing the stock path runs — seeded from the hierarchy instead of theta=0,
+// so the coarse cone placement is kept while the fine scale is as converged as
+// stock (the raw vertex-to-face hand-off measurably regressed edge CV / normal
+// error). Gated behind CYBER_QC_CROSSFIELD_MULTIRES so the stock seamless path
+// (and the field-aligned engine) are unchanged.
+[[nodiscard]] CrossField computeCrossFieldFromOrientation(const Mesh& mesh, int iterations,
+                                                          accel::IBackend& backend,
+                                                          float creaseAlignDegrees = 45.0f);
 
 }  // namespace cyber::remesh
