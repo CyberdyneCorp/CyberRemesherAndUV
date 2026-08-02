@@ -1395,7 +1395,34 @@ bool IsolineExtractor::collapseTriangles(std::vector<DVec3>& crossPoints, Graph&
         }
     }
 
+    // Size gate: the 3-cycles this pass exists for are SAMPLING artifacts — clusters of
+    // near-coincident crossing samples — so their spatial extent is a tiny fraction of a
+    // grid cell. Genuine small cells also read as 3-cycles (a CAD corner cone's cell,
+    // one grid cell wide) and collapsing those to their centroid deletes real geometry:
+    // at ~100 quads on the generated box the eight cube corners were chopped up to 0.17
+    // (2/3 of a cell) off the surface. Only collapse clusters smaller than a quarter of
+    // the average traced edge; bigger cycles are real cells and stay.
+    double totalLength = 0.0;
+    std::size_t edgeCount = 0;
+    for (const auto& node : edgeConnectMap) {
+        for (const std::size_t neighbor : node.second) {
+            totalLength += dLength(crossPoints[node.first] - crossPoints[neighbor]);
+            ++edgeCount;
+        }
+    }
+    const double artifactExtent =
+        edgeCount > 0 ? 0.25 * totalLength / static_cast<double>(edgeCount) : 0.0;
+
     for (const auto& group : clusters) {
+        double extent = 0.0;
+        for (std::size_t i = 0; i < group.size(); ++i) {
+            for (std::size_t j = i + 1; j < group.size(); ++j) {
+                extent = std::max(extent, dLength(crossPoints[group[i]] - crossPoints[group[j]]));
+            }
+        }
+        if (extent > artifactExtent) {
+            continue;  // a real (cone/corner) cell, not a sampling artifact
+        }
         DVec3 center;
         for (const std::size_t v : group) {
             center += crossPoints[v];
@@ -2212,10 +2239,40 @@ bool IsolineExtractor::removeIsolatedFaces() {
     if (quadsIslands.empty()) {
         return false;
     }
-    m_remeshedPolygons = *std::max_element(
-        quadsIslands.begin(), quadsIslands.end(),
-        [](const std::vector<std::vector<std::size_t>>& a,
-           const std::vector<std::vector<std::size_t>>& b) { return a.size() < b.size(); });
+    // The reference kept ONLY the largest island, silently discarding every other one.
+    // That is correct for its purpose — shedding incoherent junk fragments — but on a
+    // CLOSED surface it is silent geometry loss when a genuine patch traced
+    // disconnected (a feature-bounded CAD face whose seam misaligned): box_sharp
+    // dropped BOTH cube caps this way and still reported success. On closed surfaces
+    // keep every island that is clearly not junk (at least 10% of the largest island,
+    // and at least 4 faces); the quadrangulator's area-coverage gate downstream reports
+    // honestly if significant geometry is still missing. OPEN surfaces keep the
+    // largest-only policy: their raw trace legitimately fragments into many mid-size
+    // patches (the under-trace fixHoles repairs), and retaining those regressed the
+    // open-paraboloid uniformity guard (edge CV 0.31 -> 1.67).
+    if (m_preserveInputBoundary) {
+        m_remeshedPolygons = *std::max_element(
+            quadsIslands.begin(), quadsIslands.end(),
+            [](const std::vector<std::vector<std::size_t>>& a,
+               const std::vector<std::vector<std::size_t>>& b) { return a.size() < b.size(); });
+        return true;
+    }
+    std::size_t largest = 0;
+    for (const auto& island : quadsIslands) {
+        largest = std::max(largest, island.size());
+    }
+    const std::size_t keepThreshold = std::max<std::size_t>(4, largest / 10);
+    std::vector<std::vector<std::size_t>> kept;
+    for (auto& island : quadsIslands) {
+        if (island.size() >= keepThreshold || island.size() == largest) {
+            for (auto& face : island) {
+                kept.push_back(std::move(face));
+            }
+        }
+    }
+    m_remeshedPolygons = std::move(kept);
+    // Historical control flow: the reference returned true whenever any island existed
+    // (the caller then re-runs rebuildHalfEdges + fixHoles); keep that exact behavior.
     return true;
 }
 
@@ -2814,12 +2871,9 @@ void eliminateNonQuadCaps(std::vector<Vec3>& vertices,
 
 namespace {
 
-// Quad count implied by a target edge length: surface area / edge^2. Used to
-// calibrate the harness scaling so the extracted count tracks the request.
-double meshTargetQuads(const Mesh& mesh, float targetEdgeLength) {
-    if (targetEdgeLength <= 0.0f) {
-        return 0.0;
-    }
+// Total surface area (faces fan-triangulated). Serves the scaling calibration and the
+// extraction area-coverage gate.
+double meshSurfaceArea(const Mesh& mesh) {
     std::vector<Vec3> pos;
     std::vector<std::vector<Index>> faces;
     mesh.toIndexed(pos, faces);
@@ -2830,9 +2884,18 @@ double meshTargetQuads(const Mesh& mesh, float targetEdgeLength) {
                               length(cross(pos[fc[k]] - pos[fc[0]], pos[fc[k + 1]] - pos[fc[0]])));
         }
     }
+    return area;
+}
+
+// Quad count implied by a target edge length: surface area / edge^2. Used to
+// calibrate the harness scaling so the extracted count tracks the request.
+double meshTargetQuads(const Mesh& mesh, float targetEdgeLength) {
+    if (targetEdgeLength <= 0.0f) {
+        return 0.0;
+    }
     const double cell =
         static_cast<double>(targetEdgeLength) * static_cast<double>(targetEdgeLength);
-    return area / cell;
+    return meshSurfaceArea(mesh) / cell;
 }
 
 // Whether the vendored seamless solver (in-process Geogram quad_cover, or the
@@ -3107,8 +3170,14 @@ public:
                 break;  // fixed scaling (experiment) or nothing to calibrate against
             }
             const double ratio = got / targetQuads;
-            if (ratio > 0.75 && ratio < 1.33) {
-                break;  // within 25% -> accept
+            // Tiny targets (the --pure-quads quarter-density bases) cannot afford the
+            // regular 25% band: a curved crease needs every cell it can get to stay
+            // within the feature tolerance after subdivision (a 30%-undershot 100-quad
+            // cylinder base leaves its rims 8 segments wide — recall-fatal), so accept
+            // only within 12% there. Larger solves keep the historical band unchanged.
+            const bool small = targetQuads < 200.0;
+            if (ratio > (small ? 0.88 : 0.75) && ratio < (small ? 1.14 : 1.33)) {
+                break;  // within band -> accept
             }
             scaling = std::clamp(scaling * static_cast<float>(std::sqrt(ratio)), 0.2f, 1.5f);
         }
@@ -3170,6 +3239,41 @@ public:
             return {.success = false,
                     .cancelled = false,
                     .failureReason = "quad-cover extraction yielded a degenerate mesh"};
+        }
+        // Area-coverage gate (remeshing-pipeline spec: no silent geometry loss). When
+        // extraction drops or collapses a genuine patch (a disconnected feature-bounded
+        // island, an untraced region), the surviving quads can still form a "clean" mesh
+        // — box_sharp shipped a flawless zero-singularity grid missing BOTH cube caps.
+        // Compare output surface area against the input island: on a CLOSED island a
+        // healthy extraction covers nearly all of it (coarse-density corner rounding
+        // costs a few percent at most), so a shortfall beyond 15% means real geometry
+        // went missing. Decline honestly; the pipeline recovers via the fallback
+        // quadrangulator or reports a per-island failure (exit 5), never a "successful"
+        // wrong answer. OPEN islands are exempt: their traces legitimately stop short of
+        // the boundary rim (the accepted open-surface undershoot contract — see the
+        // open-surface cleanup suite).
+        std::size_t nBoundary = 0;
+        std::size_t nAliveEdges = 0;
+        for (Index ei = 0; ei < mesh.edgeCapacity(); ++ei) {
+            const EdgeId e{ei};
+            if (!mesh.isAlive(e)) {
+                continue;
+            }
+            ++nAliveEdges;
+            if (mesh.edgeFaceCount(e) == 1) {
+                ++nBoundary;
+            }
+        }
+        const bool closedInput = nAliveEdges > 0 && static_cast<double>(nBoundary) <
+                                                        0.01 * static_cast<double>(nAliveEdges);
+        const double inputArea = meshSurfaceArea(mesh);
+        const double outputArea = meshSurfaceArea(quads);
+        if (closedInput && inputArea > 0.0 && outputArea < 0.85 * inputArea) {
+            char reason[128];
+            std::snprintf(reason, sizeof(reason),
+                          "quad-cover extraction dropped geometry (area coverage %.0f%%)",
+                          100.0 * outputArea / inputArea);
+            return {.success = false, .cancelled = false, .failureReason = reason};
         }
         mesh = std::move(quads);
         if (progress != nullptr) {
