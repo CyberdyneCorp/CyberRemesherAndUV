@@ -492,6 +492,110 @@ boundary-region flow quality (make BARC default-viable: why do the
 recovered regions steer the global solution off the greedy optimum);
 (c) crease-aware attraction (unchanged).
 
+### Update — 2026-08-03 (branch `feat/fold-repair`): substrate fold repair landed (Winslow untangler, folds −91%); the nefertiti pure gate stays NOT met — the measured residue is CONE COUNT, not folds
+
+**Fold census (re)landed** as permanent gated instrumentation
+(`CYBER_FOLD_DIAG`): per-phase folded-face counts with cone-distance
+attribution (d0/d1/d2/3+) at poisson / arap / reduced-preint /
+reduced-repaired / final. nefertiti@4000 pure substrate (15 288 faces):
+poisson 28 → arap 15 → reduced-preint **482** (89% d0) → final 1373 —
+the diagnosis reproduced at quarter density: the hard-constrained
+reduced phase introduces the folds, cone-local.
+
+**Lever 1 — QGP §7.1 dynamic re-linearization: BUILT, MEASURED,
+DEFAULTED OFF (`CYBER_QC_FOLD_RELIN`).** Three formulations measured on
+nefertiti@4000 pure:
+- Monotone active set (QGP-faithful equality penalties, λ=1e4): the
+  equality pulls recovered faces back DOWN to the margin and the map
+  cascades — folds 482 → 7211, 14 293/15 288 faces active.
+- Normalized rows + proximal damping: weakly-controlled faces (tiny
+  continuous gradient) become unreachable unit-norm targets whose
+  forcing explodes — 6 400-cell displacements at ANY λ (the reduced
+  operator has near-floppy directions at the 1e-8 ridge; penalty rows
+  were also restricted to continuous frees for the same reason).
+- Raw rows, relative-area weight λ/refA², one-sided per-iteration
+  active set, best-iterate keep: STABLE but weak — 482 → 382 at λ=1,
+  and the margin-slivers it produces break the tracer ("collinear
+  separatrix overlap"). Rewinding a >2π wedge at a negative cone is
+  intrinsically nonlinear; a convexified linear push cannot do it.
+
+**Lever 2 — regularized-Winslow substrate untangling (Garanzha et al.
+2021): LANDED, default `auto`.** Global minimization of the regularized
+Winslow energy over the reduced free basis (z = Tuv·w keeps every
+iterate EXACTLY seamless — the "fixed k-ring boundary" of the plan is
+replaced by the reduction itself, which transports every wedge copy
+consistently; per-cone patches would have been seam-coupled anyway).
+L-BFGS + Armijo, paper eps-schedule, all double. Substrate-only: the
+untangled map feeds ONLY the T-mesh tracer; w is restored so the
+rounding path is untouched. Results: nefertiti pure folds **482 → 45**
+(0.46s), armadillo pure **198 → 9** (0.15s), bunny **41 → 0** — the
+~45 residual folds sit at seam-locked cones (minDet stalls at −0.02;
+stall guard stops the stages). Two supporting changes: `bimdf::Charts`
+u/v became DOUBLE (a float substrate splits twin separatrix levels by
+one ulp, tripping the tracer's collinear-overlap hazard band — measured
+dc=5.96e-8), and `auto` engages only above 1% folded faces (always-on
+cost the bunny flagship ears 19 → 20 / sing 94 → 100 for zero benefit).
+
+**Chain re-measure (the honest part).** T-mesh on the repaired
+substrate: contained regions 371 → 314, sideMismatch 0.731 → 0.627,
+twinMerges 491 → 247, repaired 570 → 278 — but degraded nodes 110 → 125
+and failedRays 64 → 73 (the repair rearranges fans; classification does
+NOT go to ~0). Guided still refuses at the 0.2 health gate; engaged via
+`CYBER_QC_BIMDF_HEALTH` (now a full measurement override — it also
+skips the crease-fraction refusal, which nefertiti's 293 crease arcs
+otherwise trip):
+
+| nefertiti@4000 pure | sing | quads | haus | recall | loops |
+|---|---|---|---|---|---|
+| greedy (=r5) | 419 | 4108 | 0.0072 | 0.738 | 18/456 |
+| guided eng., raw substrate | 439 | 4098 | 0.0059 | 0.784 | 19/431 |
+| guided eng. + untangle | 353 | 3403 | 0.0308 | 0.631 | 96/71 |
+| + steer-consistency filter (0.25) | 333 | 3355 | 0.0267 | 0.613 | 102/66 |
+| multires field, greedy | 385 | 4104 | 0.0054 | 0.796 | 20/410 |
+| multires + guided + untangle | **358** | 3722 | 0.0066 | 0.731 | 19/392 |
+| multires + untangle + filter | 378 | 3888 | 0.0059 | 0.765 | 16/486 |
+
+armadillo@4000 pure: greedy 273; guided+untangle+filter 238 (haus
+0.0172, recall 0.575); multires greedy 303 with the best geometry
+(quads 3916, recall 0.675). The steering-vs-substrate tension is
+structural: the flow's targets are measured on the repaired map while
+the rounding realizes the Dirichlet map, so every sing win below ~390
+is bought with quad-count collapse and haus damage; the per-arc
+consistency filter (`CYBER_QC_BIMDF_STEERTOL`, default 0 — on the
+healthy bunny even ONE skipped arc moved ears 19 → 22) trades along the
+same frontier.
+
+**GATE VERDICT: nefertiti cyber-pure sing ≤ 200 NOT met — best 333
+(geometry-damaged) / 358 (geometry-sane); QuadriFlow 80.** The measured
+residue is the CONE POPULATION, not the folds: 1297 field cones on the
+15k-face substrate, and `CYBER_QC_CROSSFIELD_MULTIRES` (measured on the
+pure arm only; its torus regression keeps it off) removes just 29
+(1297 → 1268). Quantization already collapses ~⅔ of the cones
+(1297 → ~400 output sing); no substrate or steering lever changes the
+cone budget. Fold repair was the last map-level lever; the redirect is
+FIELD-level dipole annihilation at coarse scale (multires un-gating
+alone is measured insufficient).
+
+**Gates**: ctest 14/14; bench check green off/report/guided; bunny
+default guided ears 19 / sing 94 exact (`auto` skips its 0.2% folds);
+box_sharp@1000 pure exact injection (maxFrac 0.0000, injected 6); CAD
+guided spot-check vs main 16/16 metric-SAME (box+cylinder ×
+400/900/1400/4500 × both arms); organics default guided vs main 5/5
+metric-SAME (spot pure/mixed, bunny, nefertiti pure, armadillo pure);
+off-vs-report 18/18 metric-SAME. NOTE: byte-hash gates are retired on
+this machine — the MAIN binary itself is run-to-run non-byte-
+deterministic (two identical flag-off runs hash differently, metrics
+identical to 4 decimals); all identity gates above are metric-level,
+which main passes against itself.
+
+Ranked next: (a) field-level cone-count reduction on coarse organics —
+real dipole annihilation at the substrate scale (larger smoothing
+radius / multires made torus-safe), THE binding constraint at 1297
+cones; (b) close the guided-reach gap (realized deviation ~1.7× the
+flow optimum even when engaged); (c) seam-locked residual folds (~45)
+need integer-free participation or T-mesh-side QEx Alg-8 valence
+recovery.
+
 ## Update — 2026-08-02 (CAD density robustness: the sweep's 🔴 failures are FIXED; 32/32 gate cells clean)
 
 The two density-dependent robustness bugs the CAD sweep below exposed are fixed

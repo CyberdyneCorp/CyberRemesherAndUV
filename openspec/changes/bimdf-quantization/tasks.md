@@ -128,3 +128,31 @@
        unchanged (the 1 = round-3-documented box_sharp@400 pure exact
        injection); bunny ears 19 / sing 94 exactly reproduced;
        deterministic. Default NOT flipped.
+       — ROUND 6 (branch `feat/fold-repair`): SUBSTRATE FOLD REPAIR
+       landed. Fold census re-landed gated (`CYBER_FOLD_DIAG`,
+       per-phase counts with cone-distance attribution; nefertiti@4000
+       pure reduced-preint 482 folds, 89% cone-adjacent — the diagnosis
+       reproduced at quarter density). QGP §7.1 dynamic
+       re-linearization BUILT and MEASURED NEGATIVE (three
+       formulations; best stable variant only 482 → 382 and its
+       margin-slivers break the tracer) — env-gated OFF
+       (`CYBER_QC_FOLD_RELIN`); rewinding >2π wedges is nonlinear.
+       The WORKING lever is Garanzha-2021 regularized-Winslow
+       untangling over the reduced free basis (exactly seamless by
+       construction, double precision, L-BFGS, substrate-only, `auto`
+       above 1% folded faces): folds 482 → 45 / 198 → 9 / 41 → 0 in
+       0.15-0.5s; `bimdf::Charts` went double (float substrates split
+       twin separatrix levels by one ulp → collinear-overlap refusal).
+       Chain re-measure: contained 371 → 314, sideMismatch 0.731 →
+       0.627, but degraded 110 → 125 — classification does NOT clear.
+       GATE STILL NOT MET: best sing 333 (geometry-damaged) / 358
+       (sane, multires+guided+untangle) vs ≤ 200 target, QF 80. The
+       measured residue is CONE COUNT: 1297 field cones, multires
+       removes only 29 (1297 → 1268); quantization already collapses
+       ~⅔; no map-level lever moves the budget → redirect to
+       field-level dipole annihilation. Gates: ctest 14/14, bench
+       check green ×3, bunny ears 19 / sing 94 exact, box exact
+       injection, CAD 16/16 + organics 5/5 + off-vs-report 18/18
+       metric-SAME vs main; byte-hash gates retired (main itself is
+       run-to-run non-byte-deterministic, metrics identical). Default
+       NOT flipped; guided stays opt-in and health-gated.
