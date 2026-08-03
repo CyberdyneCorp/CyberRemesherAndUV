@@ -1948,11 +1948,11 @@ int solveSeamlessReduced(accel::IBackend& backend, std::size_t nCut,
         std::fprintf(stderr,
                      "[qc] bimdf tmesh: ok=%d nodes=%zu arcs=%zu patches=%zu cones=%zu "
                      "tnodes=%zu rays=%zu steps=%zu failedRays=%zu degraded=%zu repaired=%zu "
-                     "exprErr=%.2e sideMismatch=%.3f%s%s\n",
+                     "twinMerges=%zu spurs=%zu exprErr=%.2e sideMismatch=%.3f%s%s\n",
                      tmesh.ok ? 1 : 0, tmesh.nodeCount, tmesh.arcs.size(), tmesh.patches.size(),
                      tmesh.coneNodes, tmesh.tNodes, tmesh.raysTraced, tmesh.raySteps,
-                     tmesh.failedRays, tmesh.degradedNodes, tmesh.repairedNodes, tmesh.maxExprErr,
-                     tmesh.maxSideMismatch,
+                     tmesh.failedRays, tmesh.degradedNodes, tmesh.repairedNodes, tmesh.twinMerges,
+                     tmesh.spurCollapses, tmesh.maxExprErr, tmesh.maxSideMismatch,
                      tmesh.reason.empty() ? "" : " reason=", tmesh.reason.c_str());
         // Reduce every arc-length expression onto the reduced basis w (used
         // for the back-substitution and the post-solve deviation report).

@@ -1804,28 +1804,24 @@ private:
         return best;
     }
 
-    bool buildPatches(TMesh& tm) {
-        std::vector<std::vector<EndRef>> ends(nodes_.size());
-        std::vector<std::vector<int>> sectors(nodes_.size());
-        for (std::size_t a = 0; a < arcs_.size(); ++a) {
-            ends[arcs_[a].end0.node].push_back({a, 0, 0, 0, 0.0});
-            ends[arcs_[a].end1.node].push_back({a, 1, 0, 0, 0.0});
-        }
-        for (std::size_t n = 0; n < nodes_.size(); ++n) {
-            if (ends[n].empty()) {
-                if (nodes_[n].type == 0 && isConeVertex(nodes_[n].meshVertex) &&
-                    failedLaunchVertex_.count(nodes_[n].meshVertex) == 0) {
-                    tm.reason = "cone without incident arcs";
-                    return false;
-                }
-                continue;
-            }
-            if (!buildRotation(n, ends[n], sectors[n], tm)) {
-                return false;
-            }
-        }
+    struct OrbitRec {
+        std::vector<std::pair<std::size_t, int>> runs;  // (arc, sector quarters before it)
+        int corners = 0;
+        std::size_t firstCorner = kNone;
+        bool cleanSectors = true;
+    };
+
+    // Trace every patch orbit of the current live-arc rotation system.
+    bool traceOrbits(const std::vector<std::vector<EndRef>>& ends,
+                     const std::vector<std::vector<int>>& sectors, std::vector<OrbitRec>& orbits,
+                     TMesh& tm) const {
         const std::size_t nHalf = 2 * arcs_.size();
         std::vector<char> used(nHalf, 0);
+        for (std::size_t a = 0; a < arcs_.size(); ++a) {
+            if (arcDead_[a]) {
+                used[2 * a] = used[2 * a + 1] = 1;
+            }
+        }
         const auto headOf = [&](std::size_t h) {
             return h % 2 == 0 ? arcs_[h / 2].end1.node : arcs_[h / 2].end0.node;
         };
@@ -1833,8 +1829,7 @@ private:
             if (used[h0]) {
                 continue;
             }
-            Patch patch;
-            std::vector<std::pair<std::size_t, int>> runs;  // (arc, sector quarters before it)
+            OrbitRec orbit;
             std::size_t h = h0;
             bool bad = false;
             std::size_t guard = 0;
@@ -1864,51 +1859,288 @@ private:
                     quarters = 3;  // poisons the corner count: orbit counted bad
                 }
                 const std::size_t na = lst[j].arc;
-                runs.push_back({na, quarters});
+                orbit.runs.push_back({na, quarters});
                 h = lst[j].which == 0 ? 2 * na : 2 * na + 1;
             } while (h != h0);
             if (bad) {
                 tm.reason = "patch orbit did not close";
                 return false;
             }
-            std::size_t firstCorner = kNone;
-            int corners = 0;
-            bool cleanSectors = true;
-            for (std::size_t i = 0; i < runs.size(); ++i) {
-                if (runs[i].second == 1) {
-                    ++corners;
-                    if (firstCorner == kNone) {
-                        firstCorner = i;
+            for (std::size_t i = 0; i < orbit.runs.size(); ++i) {
+                if (orbit.runs[i].second == 1) {
+                    ++orbit.corners;
+                    if (orbit.firstCorner == kNone) {
+                        orbit.firstCorner = i;
                     }
-                } else if (runs[i].second != 2) {
-                    cleanSectors = false;  // poisoned sector (fold damage)
+                } else if (orbit.runs[i].second != 2) {
+                    orbit.cleanSectors = false;  // poisoned sector (fold damage)
                 }
             }
+            orbits.push_back(std::move(orbit));
+        }
+        return true;
+    }
+
+    // T-mesh surgery on one swept orbit set (QEx-style sanitization, Ebke et
+    // al. 2013 Sec. 5 adapted to the coarse T-mesh). Two degenerate-orbit
+    // classes are combinatorially collapsible without touching geometry:
+    //  * twin-arc bigons — two separatrices of one cone riding the same
+    //    developed line to the same node enclose a zero-area 2-corner
+    //    pocket; the pair merges into ONE arc (the pocket vanishes, the
+    //    patches on its far sides re-join across the merged arc, and the
+    //    cone presents the pocket's quarter as a pass-through sector).
+    //  * spur pockets — an arc traversed out-and-back by a single orbit
+    //    whose far endpoint carries no other arc is a dangling slit; the
+    //    arc and its 1-valent interior endpoint are dropped.
+    // Guards: never touch feature arcs, never merge across a patch that has
+    // measurable relaxed extent (a genuine thin strip quantizes via min-one
+    // instead), and only drop spurs dangling at interior T-nodes.
+    // Re-attach phantom quarters carried by a removed arc onto its
+    // replacement end (which < 0: derive the end from the replacement's
+    // endpoints at the phantom's node).
+    void transferPhantoms(std::size_t removed, std::size_t replacement, int which) {
+        for (auto& [node, lst] : phantomOf_) {
+            for (auto& [pa, pw] : lst) {
+                if (pa == removed) {
+                    pa = replacement;
+                    pw = which >= 0 ? which : (arcs_[replacement].arc.n0 == node ? 0 : 1);
+                }
+            }
+        }
+    }
+
+    std::size_t collapseDegenerateOrbits(const std::vector<std::vector<EndRef>>& ends,
+                                         const std::vector<OrbitRec>& orbits) {
+        constexpr double kZeroAreaLen = 0.5;  // max |relaxed len| of a collapsible pocket side
+        std::size_t changes = 0;
+        // Twin-pair detection is ARC-driven, not orbit-driven: zero-length
+        // twin knots around fold-collapsed cones are usually swallowed by one
+        // large poisoned orbit, never presenting as a clean 2-run bigon. Two
+        // live non-feature arcs with the same endpoints and near-zero relaxed
+        // length bound a provably zero-area pocket (any genuine separatrix
+        // between them would have split one of them with a T-node), so the
+        // pair merges regardless of which orbit swallowed it.
+        std::unordered_map<std::uint64_t, std::vector<std::size_t>> byEnds;
+        for (std::size_t a = 0; a < arcs_.size(); ++a) {
+            const Arc& arc = arcs_[a].arc;
+            if (arcDead_[a] || arc.onFeature || arc.n0 == arc.n1 ||
+                std::abs(arc.len) > kZeroAreaLen) {
+                continue;
+            }
+            byEnds[pairKey(arc.n0, arc.n1)].push_back(a);
+        }
+        for (const auto& [key, group] : byEnds) {
+            if (group.size() < 2) {
+                continue;
+            }
+            const std::size_t a0 = group[0];
+            const std::size_t a1 = group[1];
+            if (arcDead_[a0] || arcDead_[a1]) {
+                continue;
+            }
+            const Arc& A = arcs_[a0].arc;
+            const Arc& B = arcs_[a1].arc;
+            {
+                // Vertex-fan endpoint (usually the launching cone) and its
+                // opposite. When the opposite end is a plain 3-valent
+                // interior T-node — the immediate-crossing pocket, where one
+                // twin terminated on the other's trail — the whole node sits
+                // at zero distance from the fan node: FUSE it away (drop both
+                // pocket sides, retarget the crossing ray's continuation to
+                // the fan node). Anything else keeps the plain pair merge.
+                std::size_t fanNode = kNone, oppNode = kNone;
+                if (nodes_[A.n0].type == 0) {
+                    fanNode = A.n0;
+                    oppNode = A.n1;
+                } else if (nodes_[A.n1].type == 0) {
+                    fanNode = A.n1;
+                    oppNode = A.n0;
+                }
+                const bool fusable = fanNode != kNone && nodes_[oppNode].type == 1 &&
+                                     ends[oppNode].size() == 3 &&
+                                     creaseTNodeAnchor_.count(oppNode) == 0;
+                if (fusable) {
+                    std::size_t third = kNone;
+                    int thirdWhich = -1;
+                    for (const EndRef& e : ends[oppNode]) {
+                        if (e.arc != a0 && e.arc != a1) {
+                            third = e.arc;
+                            thirdWhich = e.which;
+                        }
+                    }
+                    // The retargeted end must be anchorable in the fan-node
+                    // vertex fan: its anchor chart has to touch the vertex.
+                    bool anchorable = third != kNone && !arcs_[third].arc.onFeature;
+                    if (anchorable) {
+                        const ArcEnd& tEnd0 =
+                            thirdWhich == 0 ? arcs_[third].end0 : arcs_[third].end1;
+                        anchorable = false;
+                        for (int k = 0; k < 3; ++k) {
+                            const std::size_t cut =
+                                ch_.faces[tEnd0.face][static_cast<std::size_t>(k)];
+                            if (ch_.vertexOfCut[cut] == nodes_[fanNode].meshVertex) {
+                                anchorable = true;
+                            }
+                        }
+                    }
+                    // A continuation that would close into a self-loop at the
+                    // fan node cannot be retargeted (killing it can orphan
+                    // the cone entirely); leave such pockets alone.
+                    if (anchorable) {
+                        const ArcRec& tr0 = arcs_[third];
+                        const std::size_t farNode = thirdWhich == 0 ? tr0.arc.n1 : tr0.arc.n0;
+                        anchorable = farNode != fanNode;
+                    }
+                    if (anchorable) {
+                        arcDead_[a0] = 1;
+                        arcDead_[a1] = 1;
+                        ArcRec& tr = arcs_[third];
+                        ArcEnd& tEnd = thirdWhich == 0 ? tr.end0 : tr.end1;
+                        tEnd.node = fanNode;
+                        (thirdWhich == 0 ? tr.arc.n0 : tr.arc.n1) = fanNode;
+                        // The continuation keeps its symbolic length (the
+                        // fused pocket had zero relaxed extent).
+                        phantomOf_[fanNode].push_back({third, thirdWhich});
+                        transferPhantoms(a0, third, thirdWhich);
+                        transferPhantoms(a1, third, thirdWhich);
+                        ++twinMerges_;
+                        ++changes;
+                        continue;
+                    }
+                }
+                const std::size_t keep = std::min(a0, a1);
+                const std::size_t drop = std::max(a0, a1);
+                arcs_[keep].arc.len = 0.5 * (A.len + B.len);
+                arcDead_[drop] = 1;
+                // The twins are theta-coincident (they ride one developed
+                // line), so the fan measurement cannot see the bigon's
+                // quarter after the merge: the survivor end carries it as a
+                // PHANTOM quarter at each vertex-fan endpoint (buildRotation
+                // widens the survivor-adjacent sector and lifts the winding
+                // target accordingly). Interior T-node endpoints re-derive
+                // their sectors exactly and need no phantom.
+                for (const int which : {0, 1}) {
+                    const ArcEnd& end = which == 0 ? arcs_[keep].end0 : arcs_[keep].end1;
+                    if (nodes_[end.node].type == 0) {
+                        phantomOf_[end.node].push_back({keep, which});
+                    }
+                }
+                transferPhantoms(drop, keep, -1);
+                ++twinMerges_;
+                ++changes;
+            }
+        }
+        // Spur pockets stay orbit-driven: the same arc on both sides of one
+        // orbit with the far end dangling at a 1-valent interior node.
+        for (const OrbitRec& orbit : orbits) {
+            if (orbit.runs.size() != 2 || orbit.runs[0].first != orbit.runs[1].first) {
+                continue;
+            }
+            const std::size_t a0 = orbit.runs[0].first;
+            const Arc& A = arcs_[a0].arc;
+            if (arcDead_[a0] || A.onFeature || std::abs(A.len) > kZeroAreaLen) {
+                continue;
+            }
+            for (const std::size_t n : {A.n0, A.n1}) {
+                const std::size_t other = n == A.n0 ? A.n1 : A.n0;
+                if (nodes_[n].type == 1 && ends[n].size() == 1 &&
+                    !(nodes_[other].type == 0 && ends[other].size() <= 1)) {
+                    arcDead_[a0] = 1;
+                    ++spurCollapses_;
+                    ++changes;
+                    break;
+                }
+            }
+        }
+        return changes;
+    }
+
+    bool buildPatches(TMesh& tm) {
+        arcDead_.assign(arcs_.size(), 0);
+        std::vector<OrbitRec> orbits;
+        std::vector<std::vector<EndRef>> ends;
+        std::vector<std::vector<int>> sectors;
+        // Surgery loop: rotations + orbits, collapse degenerate pockets,
+        // re-trace (a merge changes neighboring sectors, which can expose or
+        // repair further orbits). Terminates: every pass kills >= 1 arc.
+        for (std::size_t pass = 0;; ++pass) {
+            ends.assign(nodes_.size(), {});
+            sectors.assign(nodes_.size(), {});
+            degradedNodes_ = 0;
+            repairedNodes_ = 0;
+            for (std::size_t a = 0; a < arcs_.size(); ++a) {
+                if (arcDead_[a]) {
+                    continue;
+                }
+                ends[arcs_[a].end0.node].push_back({a, 0, 0, 0, 0.0});
+                ends[arcs_[a].end1.node].push_back({a, 1, 0, 0, 0.0});
+            }
+            for (std::size_t n = 0; n < nodes_.size(); ++n) {
+                if (ends[n].empty()) {
+                    if (nodes_[n].type == 0 && isConeVertex(nodes_[n].meshVertex) &&
+                        failedLaunchVertex_.count(nodes_[n].meshVertex) == 0) {
+                        tm.reason = "cone without incident arcs";
+                        return false;
+                    }
+                    continue;
+                }
+                if (!buildRotation(n, ends[n], sectors[n], tm)) {
+                    return false;
+                }
+            }
+            orbits.clear();
+            if (!traceOrbits(ends, sectors, orbits, tm)) {
+                return false;
+            }
+            if (pass >= arcs_.size() || collapseDegenerateOrbits(ends, orbits) == 0) {
+                break;
+            }
+        }
+        tm.twinMerges = twinMerges_;
+        tm.spurCollapses = spurCollapses_;
+        // Live-arc compaction map (patch sides reference compact ids).
+        std::vector<std::size_t> liveId(arcs_.size(), kNone);
+        {
+            std::size_t next = 0;
+            for (std::size_t a = 0; a < arcs_.size(); ++a) {
+                if (!arcDead_[a]) {
+                    liveId[a] = next++;
+                }
+            }
+        }
+        for (const OrbitRec& orbit : orbits) {
+            const auto& runs = orbit.runs;
+            const int corners = orbit.corners;
             // Quads keep the historical acceptance; polygonal patches with
             // 3-6 corners and clean corner/pass-through sectors go to the
             // even-sum interior-routing template (paper Sec. 4.4).
-            const bool accept = corners == 4 || (cleanSectors && corners >= 3 && corners <= 6);
+            const bool accept =
+                corners == 4 || (orbit.cleanSectors && corners >= 3 && corners <= 6);
             if (!accept) {
                 ++badPatches_;
                 badCorners_.push_back(corners);
-                if (badPatches_ <= 3 && std::getenv("CYBER_QC_BIMDF_DEBUG") != nullptr) {
+                if (std::getenv("CYBER_QC_BIMDF_DEBUG") != nullptr) {
                     std::fprintf(stderr, "[qc] bimdf bad orbit (%d corners):", corners);
                     for (const auto& [arcId, qq] : runs) {
-                        std::fprintf(stderr, " a%zu(s%d,n%zu:%d)", arcId, qq,
-                                     arcs_[arcId].end0.node, nodes_[arcs_[arcId].end0.node].type);
+                        std::fprintf(stderr, " a%zu(s%d,%zu->%zu,t%d%d,l%.2f%s)", arcId, qq,
+                                     arcs_[arcId].arc.n0, arcs_[arcId].arc.n1,
+                                     nodes_[arcs_[arcId].arc.n0].type,
+                                     nodes_[arcs_[arcId].arc.n1].type, arcs_[arcId].arc.len,
+                                     arcs_[arcId].arc.onFeature ? ",F" : "");
                     }
                     std::fprintf(stderr, "\n");
                 }
                 continue;  // aggregate; fail after the sweep with statistics
             }
+            Patch patch;
             patch.side.assign(static_cast<std::size_t>(corners), {});
             int side = -1;
             for (std::size_t k = 0; k < runs.size(); ++k) {
-                const auto& [arcId, q] = runs[(firstCorner + k) % runs.size()];
+                const auto& [arcId, q] = runs[(orbit.firstCorner + k) % runs.size()];
                 if (q == 1) {
                     ++side;
                 }
-                patch.side[static_cast<std::size_t>(side)].push_back(arcId);
+                patch.side[static_cast<std::size_t>(side)].push_back(liveId[arcId]);
             }
             tm.patches.push_back(std::move(patch));
         }
@@ -1927,8 +2159,10 @@ private:
             return false;
         }
         tm.arcs.reserve(arcs_.size());
-        for (ArcRec& rec : arcs_) {
-            tm.arcs.push_back(std::move(rec.arc));
+        for (std::size_t a = 0; a < arcs_.size(); ++a) {
+            if (!arcDead_[a]) {
+                tm.arcs.push_back(std::move(arcs_[a].arc));
+            }
         }
         for (const Patch& p : tm.patches) {
             if (!p.isQuad()) {
@@ -2056,6 +2290,38 @@ private:
         double totalAngle = 0.0;       // raw signed UV angle of the full wedge fan (type-0)
         double totalCorr = 0.0;        // QEx Alg. 8 corrected total (+2pi per negative run)
         std::size_t foldedWedges = 0;  // fan wedges with negative signed UV angle
+        // Phantom quarters from twin-arc merges: each merged bigon collapsed
+        // a sector the fan can no longer measure (the twins were
+        // theta-coincident); the survivor end owes one extra quarter to its
+        // adjacent sector, and the winding lift target grows accordingly.
+        int nPh = 0;
+        std::vector<std::pair<std::size_t, int>> phEnds;  // (arc, which) survivors
+        if (node.type == 0) {
+            const auto itPh = phantomOf_.find(n);
+            if (itPh != phantomOf_.end()) {
+                for (const auto& [pa, pw] : itPh->second) {
+                    if (!arcDead_[pa]) {
+                        phEnds.push_back({pa, pw});
+                        ++nPh;
+                    }
+                }
+            }
+        }
+        const auto phantomBump = [&](std::vector<double>* gq, std::vector<int>* si) {
+            for (const auto& [pa, pw] : phEnds) {
+                for (std::size_t i = 0; i < lst.size(); ++i) {
+                    if (lst[i].arc == pa && lst[i].which == pw) {
+                        if (gq != nullptr) {
+                            (*gq)[i] += 1.0;
+                        }
+                        if (si != nullptr) {
+                            (*si)[i] += 1;
+                        }
+                        break;
+                    }
+                }
+            }
+        };
         if (node.type == 1) {
             // Interior T-node: single chart; crease arc ends anchored on the
             // far seam side are transported by rho. In a fold-flipped face the
@@ -2265,7 +2531,7 @@ private:
                 std::llround(totalAngle / (0.5 * kPiD));  // exact mod-4 residue carrier
             long long turns = 0;
             while (turns < static_cast<long long>(negIdx.size()) &&
-                   rawQ + 4 * turns < static_cast<long long>(lst.size())) {
+                   rawQ + 4 * turns < static_cast<long long>(lst.size()) + nPh) {
                 ++turns;
             }
             std::stable_sort(negIdx.begin(), negIdx.end(), [&](std::size_t a, std::size_t b) {
@@ -2331,7 +2597,7 @@ private:
             const auto itCone = coneOfVertex_.find(v);
             const int recIdx = itCone != coneOfVertex_.end() ? itCone->second : 0;
             expectedTotal = 4 - liftHolonomyIndex(qcum, recIdx);
-            if (foldedWedges == 0 && itCone != coneOfVertex_.end() &&
+            if (foldedWedges == 0 && nPh == 0 && itCone != coneOfVertex_.end() &&
                 lst.size() == static_cast<std::size_t>(expectedTotal) && orderConeBySlots(lst)) {
                 // Cone with its full separatrix complement: exactly one arc
                 // end per grid sector, every sector is one quarter, and the
@@ -2367,8 +2633,12 @@ private:
                 if (std::getenv("CYBER_QC_BIMDF_DEBUG") != nullptr) {
                     std::fprintf(stderr,
                                  "[qc] bimdf rotation mismatch: node=%zu type=%d ends=%zu sum=%d "
-                                 "expected=%d\n",
+                                 "expected=%d",
                                  n, node.type, lst.size(), sum, expectedTotal);
+                    for (const EndRef& e : lst) {
+                        std::fprintf(stderr, " a%zu.%d(q%d)", e.arc, e.which, e.devQ);
+                    }
+                    std::fprintf(stderr, "\n");
                 }
             }
             return true;
@@ -2382,7 +2652,7 @@ private:
         for (std::size_t i = 1; valid && i < lst.size(); ++i) {
             valid = sect[i] >= 1 && sect[i] <= 2;
         }
-        if (valid && foldedWedges == 0) {
+        if (valid && foldedWedges == 0 && nPh == 0) {
             return true;
         }
         // QEx Algorithm 8 (Ebke et al. 2013) signed-angle reclassification:
@@ -2411,12 +2681,15 @@ private:
         for (std::size_t i = 1; i < lst.size(); ++i) {
             gq[0] -= gq[i];
         }
+        phantomBump(&gq, nullptr);
         const std::size_t nE = lst.size();
-        if (measuredTotal == static_cast<int>(nE) && nE > 0) {
-            // Exactly one quarter per end is the ONLY assignment with every
+        if (measuredTotal == static_cast<int>(nE) + nPh && nE > 0) {
+            // One quarter per end (plus the phantom quarters merged twins
+            // left on their survivors) is the ONLY assignment with every
             // sector in the corner/pass-through range: take it directly (the
             // theta sort still fixes the rotation order).
             sect.assign(nE, 1);
+            phantomBump(nullptr, &sect);
             ++repairedNodes_;
             return true;
         }
@@ -2492,8 +2765,13 @@ private:
     std::vector<int> curGen_;      // per-ray trail generation
     std::vector<int> dependents_;  // per-ray count of T-nodes others placed on it
     std::vector<ArcRec> arcs_;
+    std::vector<char> arcDead_;  // arcs removed by degenerate-orbit surgery
+    // Vertex-fan node -> surviving twin ends owed a phantom quarter.
+    std::unordered_map<std::size_t, std::vector<std::pair<std::size_t, int>>> phantomOf_;
     std::string traceFail_;
     std::size_t openEdges_ = 0;
+    std::size_t twinMerges_ = 0;
+    std::size_t spurCollapses_ = 0;
     std::size_t badPatches_ = 0;
     std::size_t degradedNodes_ = 0;
     std::size_t repairedNodes_ = 0;

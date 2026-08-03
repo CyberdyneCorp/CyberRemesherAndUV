@@ -103,6 +103,8 @@ struct TMesh {
     std::size_t failedRays = 0;     // separatrix launches abandoned at folded cones
     std::size_t degradedNodes = 0;  // nodes with fold-damaged sector windings
     std::size_t repairedNodes = 0;  // fold-damaged fans fixed by signed-angle sectors
+    std::size_t twinMerges = 0;     // coincident twin-arc pairs merged (bigon collapse)
+    std::size_t spurCollapses = 0;  // dangling out-and-back arcs removed
 };
 
 // zValue(i) must return the relaxed value of promoted variable i (used only
