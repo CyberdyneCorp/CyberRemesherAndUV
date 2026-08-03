@@ -21,6 +21,11 @@ namespace {
 
 constexpr std::size_t kNone = std::numeric_limits<std::size_t>::max();
 constexpr double kPiD = 3.14159265358979323846;
+// Minimum curve-parameter age (in grid cells) before a ray may T-terminate
+// against its OWN trail. Protects the shared junction point with the segment
+// it just flushed (age ~0) while stopping self-spiralling separatrices, which
+// wander for many cells before re-crossing themselves.
+constexpr double kSelfHitAge = 0.25;
 
 // ---------------------------------------------------------------------------
 // Small numeric helpers. Everything below works in grid-cell UV units.
@@ -708,6 +713,9 @@ private:
 
     bool traceRays(TMesh& tm) {
         faceSegs_.assign(ch_.faces.size(), {});
+        if (const char* capEnv = std::getenv("CYBER_QC_BIMDF_SEGCAP")) {
+            segCap_ = static_cast<std::size_t>(std::atoi(capEnv));
+        }
         // Canonical key for a mesh edge (seam-side pairs collapse onto side A),
         // used to dedupe on-boundary launch claims across seam sides.
         std::unordered_map<std::uint64_t, std::uint64_t> canonEdge;
@@ -1067,6 +1075,23 @@ private:
         }
         curGen_.assign(walks.size(), 0);
         dependents_.assign(walks.size(), 0);
+        const auto dumpDensity = [&](const char* when) {
+            if (std::getenv("CYBER_QC_BIMDF_DEBUG") == nullptr) {
+                return;
+            }
+            std::size_t maxSegs = 0, over32 = 0, over48 = 0, total = 0;
+            for (const auto& segs : faceSegs_) {
+                maxSegs = std::max(maxSegs, segs.size());
+                total += segs.size();
+                over32 += segs.size() >= 32 ? 1 : 0;
+                over48 += segs.size() >= 48 ? 1 : 0;
+            }
+            std::fprintf(stderr,
+                         "[qc] bimdf trail density (%s): faces=%zu rays=%zu cap=%zu maxSegs=%zu "
+                         "over32=%zu over48=%zu totalSegs=%zu\n",
+                         when, ch_.faces.size(), rays_.size(), segCap_, maxSegs, over32, over48,
+                         total);
+        };
         // Successful traces are cheap (spot: 3.3k steps for 320 rays); the
         // budget only bounds pathological wanderers, whose per-step cost also
         // grows with the trail density, so keep it tight.
@@ -1110,6 +1135,11 @@ private:
             if (rc == 1) {
                 next->done = true;
                 --active;
+            } else if (rc == 3) {
+                // Trail-density blowup: a pathological wanderer the self-hit
+                // termination did not stop. Contain it (like a failed launch)
+                // instead of refusing the whole T-mesh.
+                abandonRay();
             } else if (rc == 2) {
                 // Numerical degeneracy: retry with a jittered level, allowed
                 // only while nothing references this ray's trail. After the
@@ -1157,11 +1187,13 @@ private:
                 }
             } else if (rc < 0) {
                 tm.reason = traceFail_;
+                dumpDensity("fail");
                 return false;
             }
         }
         tm.raysTraced = rays_.size();
         tm.raySteps = stepsUsed;
+        dumpDensity("ok");
         return true;
     }
 
@@ -1169,7 +1201,7 @@ private:
         // A face collecting dozens of trail segments is a wandering /
         // spiralling separatrix (degenerate relaxed map): fail fast instead
         // of paying quadratic crossing scans until the step budget runs out.
-        return faceSegs_[face].size() < 64;
+        return faceSegs_[face].size() < segCap_;
     }
 
     void flushSeg(const Walk& wk, double endVar) {
@@ -1196,14 +1228,26 @@ private:
     }
 
     // Advance one face-step. Returns 0 = advanced, 1 = terminated,
-    // 2 = retry with jitter, -1 = hard fail.
+    // 2 = retry with jitter, 3 = abandon this ray (contained), -1 = hard fail.
     int stepOnce(Walk& wk) {
         WalkState& w = wk.w;
         Ray& ray = rays_[static_cast<std::size_t>(wk.id)];
         const std::uint32_t startVertex = ch_.vertexOfCut[ray.startCut];
         if (!segDensityOk(w.face)) {
             traceFail_ = "trail density blowup (wandering separatrix)";
-            return -1;
+            if (std::getenv("CYBER_QC_BIMDF_DEBUG") != nullptr) {
+                std::unordered_map<int, std::size_t> byRay;
+                for (const Seg& s : faceSegs_[w.face]) {
+                    ++byRay[s.ray];
+                }
+                std::size_t own = byRay.count(wk.id) != 0 ? byRay[wk.id] : 0;
+                std::fprintf(stderr,
+                             "[qc] bimdf density trip: face=%zu ray=%d cone-v=%u steps=%zu "
+                             "curve=%.3f segsHere=%zu ownSegs=%zu distinctRays=%zu\n",
+                             w.face, wk.id, ch_.vertexOfCut[ray.startCut], wk.steps, w.curve,
+                             faceSegs_[w.face].size(), own, byRay.size());
+            }
+            return 3;  // abandon this ray, contain its region (T-mesh proceeds)
         }
         {
             ++wk.steps;
@@ -1338,8 +1382,24 @@ private:
                 double bestDist = std::numeric_limits<double>::infinity();
                 const Seg* hit = nullptr;
                 for (const Seg& s : faceSegs_[w.face]) {
-                    if (s.ray == wk.id || s.gen != curGen_[static_cast<std::size_t>(s.ray)]) {
-                        continue;  // own trail / stale generation
+                    if (s.gen != curGen_[static_cast<std::size_t>(s.ray)]) {
+                        continue;  // stale generation
+                    }
+                    if (s.ray == wk.id) {
+                        // Own trail: the motorcycle-graph rule stops a ray at
+                        // ANY trail including its own — this is what terminates
+                        // separatrices that spiral around dense cone clusters
+                        // (pure-arm nefertiti: one ray alone collected 511
+                        // segments in a single face and tripped the density
+                        // guard, refusing the whole T-mesh). Only genuinely
+                        // OLDER trail counts: the shared junction point with
+                        // the segment just flushed sits at zero curve age and
+                        // must keep passing through.
+                        const double myCurveAtHit = w.curve + std::abs(s.c - pv);
+                        const double trailCurveAtHit = s.curveEntry + std::abs(w.c - s.pvSeg);
+                        if (myCurveAtHit - trailCurveAtHit <= kSelfHitAge) {
+                            continue;
+                        }
                     }
                     if (s.lc == lca) {
                         // Exactly equal levels are twins / duplicate launches
@@ -2615,8 +2675,20 @@ private:
                     }
                 }
                 if (ff == nullptr) {
-                    tm.reason = "arc end not anchored in fan";
-                    return false;
+                    // The end's launch/hit wedge is missing from the closed
+                    // fan walk (fold-torn fans can close a shorter cycle than
+                    // the one the arc anchored in). Not a reason to refuse the
+                    // whole T-mesh: contain the node like a boundary fan —
+                    // invalid sectors reject every orbit touching it.
+                    if (std::getenv("CYBER_QC_BIMDF_DEBUG") != nullptr) {
+                        std::fprintf(stderr,
+                                     "[qc] bimdf unanchored arc end: node=%zu v=%u arc=%zu "
+                                     "face=%zu fanFaces=%zu\n",
+                                     n, v, e.arc, end.face, fan.size());
+                    }
+                    ++degradedNodes_;
+                    sect.assign(lst.size(), 0);
+                    return true;
                 }
                 e.devQ = ((quarterOfDir(end.dir) - ff->qcum) % 4 + 4) % 4;
                 e.fanIdx = idx;
@@ -2818,6 +2890,7 @@ private:
         chainPosOfVertex_;
     std::unordered_map<std::size_t, std::tuple<std::size_t, int, bool>> creaseTNodeAnchor_;
     std::vector<std::vector<Seg>> faceSegs_;
+    std::size_t segCap_ = 64;
     std::vector<Ray> rays_;
     std::vector<int> curGen_;      // per-ray trail generation
     std::vector<int> dependents_;  // per-ray count of T-nodes others placed on it

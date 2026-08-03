@@ -2050,11 +2050,49 @@ int solveSeamlessReduced(accel::IBackend& backend, std::size_t nCut,
                 //     still serves CAD. Threshold 1% of arcs: cylinder/box/
                 //     fandisk sit at 7.6-18% crease arcs, the organics at 0
                 //     (stanford-bunny: 1 of 1338).
-                // Refused T-meshes keep the pure greedy schedule.
-                constexpr double kSteerHealthMax = 0.2;
+                // Refused T-meshes keep the pure greedy schedule. Round 5
+                // measured the alternative (per-arc health so damaged meshes
+                // engage on their clean regions): sing regressed on every
+                // fold-damaged cell it opened (nefertiti mixed 396 -> 400,
+                // armadillo mixed 255 -> 281, armadillo pure 273 -> 293,
+                // nefertiti pure 419 -> 411 flat; mu=2 forced it to 310 but
+                // cost haus 0.0072 -> 0.0194 and 14% of the quads) — the
+                // whole-mesh gate stays, with CYBER_QC_BIMDF_HEALTH as the
+                // measurement override. Inside an ENGAGED mesh the per-arc
+                // filter below still drops arcs of inconsistent quads
+                // (no-op on the healthy meshes: bunny unhealthyQuads=0).
+                const char* healthEnv = std::getenv("CYBER_QC_BIMDF_HEALTH");
+                const double kSteerHealthMax = healthEnv != nullptr ? std::atof(healthEnv) : 0.2;
                 std::size_t featureArcs = 0;
                 for (const bimdf::Arc& arc : tmesh.arcs) {
                     featureArcs += arc.onFeature ? 1 : 0;
+                }
+                std::vector<char> arcSteerable(tmesh.arcs.size(), 1);
+                std::size_t unhealthyQuads = 0;
+                for (const bimdf::Patch& p : tmesh.patches) {
+                    if (!p.isQuad()) {
+                        continue;
+                    }
+                    double mm = 0.0;
+                    for (int k = 0; k < 2; ++k) {
+                        double s0 = 0.0, s1 = 0.0;
+                        for (const std::size_t a : p.side[static_cast<std::size_t>(k)]) {
+                            s0 += tmesh.arcs[a].len;
+                        }
+                        for (const std::size_t a : p.side[static_cast<std::size_t>(k + 2)]) {
+                            s1 += tmesh.arcs[a].len;
+                        }
+                        mm = std::max(mm, std::abs(s0 - s1));
+                    }
+                    if (mm <= kSteerHealthMax) {
+                        continue;
+                    }
+                    ++unhealthyQuads;
+                    for (const auto& sideArcs : p.side) {
+                        for (const std::size_t a : sideArcs) {
+                            arcSteerable[a] = 0;
+                        }
+                    }
                 }
                 const char* modeEnv = std::getenv("CYBER_QC_BIMDF");
                 if (modeEnv != nullptr && std::string(modeEnv) == "guided" &&
@@ -2087,7 +2125,7 @@ int solveSeamlessReduced(accel::IBackend& backend, std::size_t nCut,
                         // fixing the fandisk pure regression (117 -> 119).
                         if ((a < tmesh.arcExcluded.size() && tmesh.arcExcluded[a] != 0) ||
                             (a < src.arcOutside.size() && src.arcOutside[a] != 0) ||
-                            bimdfArcRows[a].empty()) {
+                            arcSteerable[a] == 0 || bimdfArcRows[a].empty()) {
                             continue;
                         }
                         SteerRow sr;
@@ -2100,9 +2138,9 @@ int solveSeamlessReduced(accel::IBackend& backend, std::size_t nCut,
                     }
                     std::fprintf(stderr,
                                  "[qc] bimdf guided: steerSolve ok=%d energy=%.3f mu=%.3f "
-                                 "steerRows=%zu of %zu\n",
+                                 "steerRows=%zu of %zu (unhealthyQuads=%zu mm=%.3f)\n",
                                  solS.ok ? 1 : 0, solS.deviationEnergy, muBase, steerRows.size(),
-                                 tmesh.arcs.size());
+                                 tmesh.arcs.size(), unhealthyQuads, tmesh.maxSideMismatch);
                 }
                 // Back-substitution A y = len over the free integers. Rows
                 // touching a continuous free are the reduction's structural
