@@ -247,6 +247,51 @@ TEST_CASE("collapseEdge on a larger patch keeps surrounding faces valid") {
     REQUIRE(tris == 2);
 }
 
+TEST_CASE("collapseEdge refuses link-condition violations (would create fins/fans)") {
+    // Triangular bipyramid: equator (0,1,2), poles 3 (top) and 4 (bottom).
+    // For equator edge (0,1) the endpoints share neighbor 2 beyond the two
+    // incident-face apexes 3 and 4: collapsing it would produce two faces
+    // with the identical vertex set {0,2,3} (a duplicate-triangle fin) and
+    // {0,2,4}, i.e. non-manifold edges with edgeFaceCount == 4.
+    const std::vector<Vec3> p = {
+        {1, 0, 0}, {-0.5f, 0.87f, 0}, {-0.5f, -0.87f, 0}, {0, 0, 1}, {0, 0, -1},
+    };
+    const std::vector<std::vector<Index>> f = {
+        {0, 1, 3}, {1, 2, 3}, {2, 0, 3}, {1, 0, 4}, {2, 1, 4}, {0, 2, 4},
+    };
+    Mesh mesh = Mesh::fromIndexed(p, f);
+    requireValid(mesh);
+
+    const auto equator = mesh.edgeBetween(VertexId{0}, VertexId{1});
+    REQUIRE(equator.valid());
+    REQUIRE(!mesh.collapseEdge(equator));  // refused: link condition fails
+
+    // Mesh untouched and still a closed 2-manifold.
+    requireValid(mesh);
+    REQUIRE(mesh.faceCount() == 6);
+    REQUIRE(mesh.isAlive(equator));
+    for (Index i = 0; i < mesh.edgeCapacity(); ++i) {
+        const cyber::EdgeId e{i};
+        if (mesh.isAlive(e)) {
+            REQUIRE(mesh.edgeFaceCount(e) == 2);
+        }
+    }
+
+    // A pole edge satisfies the link condition (common neighbors are exactly
+    // the apexes of its two incident faces) and must still collapse cleanly.
+    const auto pole = mesh.edgeBetween(VertexId{0}, VertexId{3});
+    REQUIRE(pole.valid());
+    REQUIRE(mesh.collapseEdge(pole));
+    requireValid(mesh);
+    REQUIRE(mesh.faceCount() == 4);  // tetrahedron remains
+    for (Index i = 0; i < mesh.edgeCapacity(); ++i) {
+        const cyber::EdgeId e{i};
+        if (mesh.isAlive(e)) {
+            REQUIRE(mesh.edgeFaceCount(e) == 2);
+        }
+    }
+}
+
 TEST_CASE("vertex colors survive subdivision (spec: mesh-core)") {
     Mesh mesh = makeQuadAndTri();
     auto& colors = mesh.vertexAttributes().create<Vec3>("color");

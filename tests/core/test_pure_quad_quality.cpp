@@ -248,9 +248,13 @@ TEST_CASE("integer extractor pure-quad path lifts the median quad angle") {
     CAPTURE(q.edgeCV);
     CAPTURE(q.sliverFraction);
     CHECK(q.quads > 0);
-    CHECK(q.nonQuads == 0);              // still pure quads
-    CHECK(q.medianMinAngleDeg > 80.0f);  // stronger base relax (~80.7; ~79.1 without)
-    CHECK(q.edgeCV < 0.24f);             // median gain must not cost uniformity (~0.23)
+    CHECK(q.nonQuads == 0);  // still pure quads
+    // Nominals moved with the manifold-preserving collapse (link condition +
+    // obstruction flips) in the isotropic stage: median min angle ~84.2 (was
+    // ~80.7), edgeCV ~0.240 (was ~0.230) — the +0.01 CV buys a fin-free work
+    // mesh and a 3.5 deg median-angle gain at unchanged sliver fraction.
+    CHECK(q.medianMinAngleDeg > 80.0f);  // stronger base relax (~79.1 without)
+    CHECK(q.edgeCV < 0.25f);             // median gain must not cost uniformity
     CHECK(q.sliverFraction < 0.05f);     // and must not shear quads into slivers
     CHECK(res.mesh.validate().empty());
 }

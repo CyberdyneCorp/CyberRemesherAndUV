@@ -35,6 +35,40 @@ bool hasDuplicates(const std::vector<VertexId>& verts) {
     return false;
 }
 
+// Standard edge-collapse link condition: the one-rings of the edge's
+// endpoints may only intersect in the apex vertices of the faces incident to
+// the edge (for a 2-manifold triangle pair: the two opposite vertices). Any
+// further shared neighbor means the collapse would merge two distinct edges
+// into one (a radial fan carrying > 2 faces) or produce two faces with an
+// identical vertex set (a duplicate-triangle fin) — both non-manifold.
+bool linkConditionHolds(const Mesh& mesh, EdgeId edge, VertexId a, VertexId b) {
+    std::vector<Index> apexes;
+    for (const FaceId f : mesh.edgeFaces(edge)) {
+        for (const VertexId v : mesh.faceVertices(f)) {
+            if (!(v == a) && !(v == b)) {
+                apexes.push_back(v.value);
+            }
+        }
+    }
+    std::vector<Index> aNeighbors;
+    for (const EdgeId ea : mesh.vertexEdges(a)) {
+        const auto [x, y] = mesh.edgeVertices(ea);
+        aNeighbors.push_back((x == a ? y : x).value);
+    }
+    std::sort(aNeighbors.begin(), aNeighbors.end());
+    for (const EdgeId eb : mesh.vertexEdges(b)) {
+        const auto [x, y] = mesh.edgeVertices(eb);
+        const Index n = (x == b ? y : x).value;
+        if (n == a.value || !std::binary_search(aNeighbors.begin(), aNeighbors.end(), n)) {
+            continue;  // not a common neighbor
+        }
+        if (std::find(apexes.begin(), apexes.end(), n) == apexes.end()) {
+            return false;  // shared neighbor that is not an incident-face apex
+        }
+    }
+    return true;
+}
+
 }  // namespace
 
 bool Mesh::mergeVertices(VertexId keep, VertexId remove) {
@@ -132,6 +166,9 @@ bool Mesh::collapseEdge(EdgeId edge, bool placeAtMidpoint) {
         return false;
     }
     const auto [a, b] = edgeVertices(edge);
+    if (!linkConditionHolds(*this, edge, a, b)) {
+        return false;
+    }
     const Vec3 midpoint = lerp(position(a), position(b), 0.5f);
     if (!mergeVertices(a, b)) {
         return false;

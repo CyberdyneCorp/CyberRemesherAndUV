@@ -382,11 +382,69 @@ public:
             if (!collapseKeepsBandedLengths(a, b, mid, field)) {
                 continue;
             }
-            m_mesh.collapseEdge(e);
+            if (!m_mesh.collapseEdge(e)) {
+                // The kernel refused: the endpoints share a neighbor beyond
+                // the incident-face apexes (link condition), which previously
+                // produced non-manifold fins/fans here. Flip the obstructing
+                // edges away (manifold-safe) and retry once, so sliver bands
+                // still shrink instead of deadlocking at CAD density
+                // crossings.
+                if (flipAwayLinkObstructions(e, a, b) &&
+                    collapseKeepsBandedLengths(a, b, mid, field)) {
+                    m_mesh.collapseEdge(e);
+                }
+            }
         }
     }
 
 private:
+    // For a collapse of (a, b) refused by the link condition: every common
+    // neighbor n of a and b that is not an apex of the edge's incident faces
+    // closes a hollow (face-less) 3-cycle a-b-n. Removing edge (a, n) or
+    // (b, n) by an ordinary flip clears the obstruction without touching
+    // manifoldness. Returns true when no obstruction remains.
+    bool flipAwayLinkObstructions(EdgeId e, VertexId a, VertexId b) {
+        std::vector<VertexId> apexes;
+        for (const FaceId f : m_mesh.edgeFaces(e)) {
+            for (const VertexId v : m_mesh.faceVertices(f)) {
+                if (!(v == a) && !(v == b)) {
+                    apexes.push_back(v);
+                }
+            }
+        }
+        const auto isApex = [&apexes](VertexId v) {
+            return std::find(apexes.begin(), apexes.end(), v) != apexes.end();
+        };
+        const auto neighborsOf = [this](VertexId v) {
+            std::vector<VertexId> out;
+            for (const EdgeId ve : m_mesh.vertexEdges(v)) {
+                const auto [x, y] = m_mesh.edgeVertices(ve);
+                out.push_back(x == v ? y : x);
+            }
+            return out;
+        };
+        bool clear = true;
+        const std::vector<VertexId> na = neighborsOf(a);
+        for (const VertexId n : neighborsOf(b)) {
+            if (n == a || isApex(n) || std::find(na.begin(), na.end(), n) == na.end()) {
+                continue;
+            }
+            bool resolved = false;
+            for (const VertexId endpoint : {a, b}) {
+                const EdgeId obstruction = m_mesh.edgeBetween(endpoint, n);
+                if (!obstruction.valid() || m_mesh.isFeatureEdge(obstruction)) {
+                    continue;
+                }
+                if (m_mesh.flipEdge(obstruction)) {
+                    resolved = true;
+                    break;
+                }
+            }
+            clear = clear && resolved;
+        }
+        return clear;
+    }
+
     // Classic guard: collapsing to the midpoint must not create edges longer
     // than the allowed band, or collapses fight the split pass forever. Each
     // surviving edge is judged against ITS OWN local target (the field at

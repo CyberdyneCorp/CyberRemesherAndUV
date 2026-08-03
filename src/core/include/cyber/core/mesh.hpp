@@ -68,7 +68,10 @@ public:
     // identical.
     bool mergeVertices(VertexId keep, VertexId remove);
     // Collapses the edge into its first vertex (placed at the midpoint by
-    // default); incident faces degenerate and are removed.
+    // default); incident faces degenerate and are removed. Refuses (returns
+    // false) collapses violating the link condition — the endpoints sharing
+    // a neighbor beyond the incident faces' apex vertices — which would
+    // create non-manifold edges (duplicate-face fins or merged-edge fans).
     bool collapseEdge(EdgeId edge, bool placeAtMidpoint = true);
     // Flips the shared edge of exactly two triangles. Corner attributes of
     // the two rewritten faces reset to defaults (documented policy); vertex,
