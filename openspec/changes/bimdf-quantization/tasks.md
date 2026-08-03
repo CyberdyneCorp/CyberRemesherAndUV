@@ -36,7 +36,7 @@
        batch pin + single direct.resolve, greedy finishes the remainder;
        `CYBER_QC_BIMDF=report` = A/B mode without injection; flag off is
        byte-exact (ctest 14/14; box output geometry identical on/off).
-- [ ] 5. Corpus + multi-density A/B vs greedy (bench gates + cad_sweep.py);
+- [x] 5. Corpus + multi-density A/B vs greedy (bench gates + cad_sweep.py);
        flip default only on a clean win; ROADMAP entry with numbers
        — STILL BLOCKED, three stages further along (branch
        `feat/bimdf-tail`, after `feat/bimdf-sectors`): (i) QEx Alg-8
@@ -178,3 +178,33 @@
        coarseness gate (bunny ears 19 / sing 94 exact; CAD 16/16
        metric-SAME, demotion never fires). ctest 14/14, bench check
        green ×3, flag-off reproduces round-6 baselines exactly.
+       — ROUND 8 (branch `feat/multires-default`): the GATE CLOSES on
+       the stock path. The multires torus regression was diagnosed as a
+       TRAPPED HOLONOMY WINDING (per-level dumps: twist coherence
+       R 0.128 vs stock 0.519, twist swinging 5°→84° around the major
+       generator; depth-cap sweep proved coarse aliasing was NOT the
+       cause — even a no-coarsening hierarchy regressed) and fixed by
+       coherent BFS-transport seeding of unanchored,
+       non-simply-connected coarse components (per-component Euler
+       characteristic; anchored components measured worse under a
+       transported gauge — nefertiti 204 vs 176 — and simply-connected
+       ones too — sphere haus 0.0070 → 0.0218 — so both keep the
+       historical init bit-for-bit). Torus flips to a WIN (sing
+       62 → 59, haus 0.0250 → 0.0158) and
+       `CYBER_QC_CROSSFIELD_MULTIRES` became the DEFAULT (kill switch
+       `CYBER_QC_NO_CROSSFIELD_MULTIRES`, verified to reproduce the
+       round-7 stock numbers exactly). **DEFAULT-PATH RESULTS:
+       nefertiti@4000 pure greedy 176 (haus 0.0052 ≤ 0.010), guided
+       (health override) 150 — gate ≤ 200 MET with no env vars;
+       armadillo 119 greedy / 112 guided; spot pure 55; bunny default
+       guided ears 16 / sing 82; sphere 21 (was 37); cylinder 5 (was
+       9); box_sharp 8/1.00/0.0° bit-identical.** Baselines
+       deliberately re-recorded (sphere/torus/cylinder improvements).
+       Gates: ctest 14/14; bench check OK ×4 (default/report/guided/
+       off); CAD box+cylinder × 4 densities × both arms — box 8/8
+       bit-identical on-vs-off, cylinder improved (4500: sing 29 → 18,
+       angle 30.5 → 5.2), arms metric-SAME per config (box_sharp@400
+       arm split is pre-existing, reproduced bit-for-bit by stock).
+       Remaining (tracked in ROADMAP, outside this change's gate):
+       guided health on demoted substrates (sideMismatch 0.534 still
+       refuses unaided), QuadriFlow's residual ~2× (cone placement).

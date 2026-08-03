@@ -906,10 +906,14 @@ SeamlessSetup buildSeamlessSetup(const Mesh& mesh, int iterations, accel::IBacke
     if (mesh.faceCapacity() == 0) {
         return setup;
     }
-    // Experimental: derive the cross field from the multiresolution per-vertex
-    // orientation (coarse-to-fine singularity placement) instead of single-level
-    // face smoothing. Gated so the stock seamless path is unchanged.
-    if (std::getenv("CYBER_QC_CROSSFIELD_MULTIRES") != nullptr) {
+    // Derive the cross field from the multiresolution per-vertex orientation
+    // (coarse-to-fine singularity placement) instead of single-level face
+    // smoothing. DEFAULT since the torus wound-basin fix (coherent seeding of
+    // unanchored coarse components, position_field.cpp): the hierarchy places
+    // cones globally where single-level smoothing gets stuck (nefertiti
+    // cyber-pure 220 -> 176 cones, sphere 35 -> 21). Kill switch restores the
+    // stock single-level field.
+    if (std::getenv("CYBER_QC_NO_CROSSFIELD_MULTIRES") == nullptr) {
         setup.field =
             computeCrossFieldFromOrientation(mesh, iterations, backend, 45.0f, creaseAlignSupport);
     } else {

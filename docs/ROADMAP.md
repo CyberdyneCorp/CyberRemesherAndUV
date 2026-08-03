@@ -719,6 +719,103 @@ nefertiti 176/150); (b) guided health on demoted substrates
 the crease-fraction refusal is gone); (c) revisit QuadriFlow's
 remaining 2× (150 vs 80) — likely cone PLACEMENT, not count.
 
+### Update — 2026-08-03 (branch `feat/multires-default`): multires cross field is DEFAULT — the torus regression was a trapped holonomy winding, fixed by coherent seeding; nefertiti pure ≤ 200 gate MET on the stock path (176)
+
+**The torus mechanism, measured** (new permanent instrumentation:
+`CYBER_QC_MR_DUMP` per-level hierarchy dumps + `CYBER_QC_FIELD_DUMP`
+per-face field dumps; `CYBER_QC_MR_FLOOR` hierarchy-depth override;
+`CYBER_QC_MR_SEED=legacy` seed-basin isolation). The recorded
+regression reproduced worse at HEAD (haus 0.0250 → 0.0557, +123%;
+sing 62 → 76) — and the mechanism is NOT coarse-level aliasing:
+
+- Depth is not the problem: sweeping `CYBER_QC_MR_FLOOR`
+  16→947 (947 = no coarsening at all) never fixes the haus
+  (0.0557/0.0338/0.0578/0.0556/0.0634/0.0753/0.0670).
+- The multires field has FEWER cones than stock (14 vs 32 on a field
+  whose ideal is 0) yet much worse output — cones are not the damage.
+- The damage is the field's TWIST STRUCTURE: per-face twist against
+  the torus principal directions has global 4-RoSy coherence R = 0.519
+  for stock (a near-constant ~67° twist — a uniformly slanted lattice,
+  harmless) vs **R = 0.128 for multires, with the twist swinging
+  11° → 47° → 5° → 84° → 60° around the major generator**: a trapped
+  holonomy winding. Per-node-random (`anyTangent`) seeds land the
+  coarse solve in a random holonomy basin; on a closed handle with no
+  constraints the basin can wind around a generator, and NO downstream
+  smoothing can unwind it (that would require moving cones across the
+  generator — the hand-off relax is a contraction that inherits the
+  seed's topology by design). The wound field extracts as sheared,
+  incoherent cells: edge CV 0.42 → 0.66, haus doubles.
+
+**The fix — coherent seeding of unanchored, non-simply-connected
+components** (`position_field.cpp`, opt-in parameter
+`coherentSeedUnanchored`, engaged only by
+`computeCrossFieldFromOrientation`; the InstantMeshes/integer
+extractors keep the historical init bit-for-bit). At the coarsest
+level, a connected component gets ONE arbitrary source direction
+BFS-parallel-transported across it — one holonomy basin per component,
+near-zero winding — exactly and only where a winding invariant exists:
+
+- component has constraints → per-node init (gauge already anchored;
+  measured: a transported gauge on top of anchors is WORSE, nefertiti
+  204 vs 176);
+- component is simply connected (per-component Euler characteristic
+  V−E+F = 2 on the base mesh, propagated down the hierarchy) →
+  per-node init (H1 = 0, no winding to trap; measured: the transported
+  hedgehog seed is worse, sphere haus 0.0070 → 0.0218 at an identical
+  8-cone census);
+- else (torus: unanchored, χ = 0) → coherent seed.
+
+Torus flips from regression to WIN: sing 62 → **59**, haus
+0.0250 → **0.0158**, angle 21.7 → 21.4 vs stock. Anchored meshes
+(nefertiti, armadillo, bunny, fandisk) are bit-identical to the
+round-7 multires numbers; sphere keeps its legacy-seed basin.
+
+**The default flip** (`seamless_solver.cpp`): the multires cross field
+is now the stock path; kill switch `CYBER_QC_NO_CROSSFIELD_MULTIRES`
+restores the single-level field (verified: reproduces round-7 stock
+exactly — nefertiti 220/3516/0.0051).
+
+**Full corpus, default-on vs default-off (kill switch)**, pure arm
+@4000 organics / corpus targets, greedy unless noted:
+
+| mesh | default (multires) | off (stock field) |
+|---|---|---|
+| nefertiti pure | **176** / haus 0.0052 / recall 0.779 | 220 / 0.0051 / 0.780 |
+| nefertiti pure guided+health | **150** / 0.0055 | 248 (r7) |
+| armadillo pure | **119** / 0.0156 | 159 / 0.0133 |
+| armadillo pure guided | **112** / 0.0146 | 143 (r7) |
+| spot pure | **55** / 0.0042 | 65 (r7 A+B) |
+| bunny default guided | ears **16** / sing **82** / 0.0069 | ears 19 / sing 94 |
+| sphere | **21** / 0.0070 / angle 8.6 | 37 / 0.0059 / 13.1 |
+| torus | **59** / 0.0158 | 68 / 0.0256 (baseline) |
+| cylinder | **5** / 0.0059 | 9 / 0.0053 |
+| box_sharp | 8 / 1.00 / 0.0° | bit-identical |
+
+**GATE VERDICT — nefertiti cyber-pure ≤ 200 on the DEFAULT path (no
+env vars): MET — greedy 176, haus 0.0052 ≤ 0.010; guided (health
+override) 150. armadillo 119/112 ≤ 200.** Openspec `bimdf-quantization`
+task 5 gate closes. Honest notes: nefertiti guided WITHOUT the health
+override still refuses (sideMismatch 0.534 — unchanged from round 7) so
+the plain-guided arm equals greedy; sphere/cylinder haus baselines move
++0.001/+0.0006 (recorded, inside tolerance) as the price of sing
+21/5 vs 37/9 and angle 13.0° → 8.6° / 9.2° → 6.5°.
+
+**Gates**: ctest 14/14; `bench.py check` OK off/report/guided AND
+`CYBER_QC_BIMDF=off`; baselines deliberately re-recorded (sphere
+37 → 21, torus 68 → 59 + haus 0.0256 → 0.0158, cylinder 9 → 5 — the
+diff is the review artifact); box_sharp default 8/1.00/0.0° exact; CAD
+spot-check box+cylinder × {400,900,1400,4500} × both arms: box_sharp
+8/8 bit-identical on-vs-off, cylinder improves (4500: sing 29 → 18,
+angle 30.5 → 5.2) with arms metric-SAME per config (the box_sharp@400
+greedy-vs-guided difference is pre-existing: stock reproduces it
+bit-for-bit); bunny ears 16 ≤ 20 / sing 82; clang-format clean.
+
+Ranked next: (a) guided health on demoted substrates (nefertiti
+sideMismatch 0.534 still refuses unaided — 150 needs the override);
+(b) QuadriFlow's remaining ~2× (150-176 vs 80) — cone PLACEMENT;
+(c) torus residual: 59 cones vs an ideal 0 — the extraction still
+pays for the ~22° constant twist both fields share.
+
 ## Update — 2026-08-02 (CAD density robustness: the sweep's 🔴 failures are FIXED; 32/32 gate cells clean)
 
 The two density-dependent robustness bugs the CAD sweep below exposed are fixed
