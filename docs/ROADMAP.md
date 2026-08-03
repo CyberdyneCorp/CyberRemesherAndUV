@@ -143,6 +143,75 @@ signed-angle sector classification in `buildRotation` (the launch-side
 equivalent landed here), then the even-sum template as mop-up, then QGP §7.1
 dynamic re-linearization. Default flip NOT proposed.
 
+### Update — 2026-08-02 (branch `feat/bimdf-sectors`): QEx Alg-8 sector classification + even-sum polygonal template landed; blocker is now twin-ray bigons
+
+The two ranked levers landed (`CYBER_QC_BIMDF` only; flag off byte-exact,
+ctest 14/14, bench check green both flag states, CAD spot-check box+cylinder
+32/32 cells match the recorded sweep):
+
+- **QEx Algorithm 8 signed-angle sector classification** in `buildRotation`:
+  signed per-wedge UV angles (folds negative, cancelling their double
+  cover), maximal-sign runs with the mod-4 winding lifted to the smallest
+  total that seats every incident arc end (a negative run is either a
+  full-turn fold-back, +2π, or a small re-covered backtrack, +0 — the raw
+  sum alone cannot tell), largest-remainder gap rounding, all-1 fast path
+  when winding == end count. Along the way the SEAM HOLONOMY became the
+  launch authority: at cones where the recorded field index disagrees with
+  the fan's accumulated seam rotation (sphere 5/10, cylinder 2, fandisk 1;
+  organics 0 — the "73 nefertiti mismatches" first measured were a diag
+  artifact on |i|≥2 cones), the separatrix count now follows the holonomy
+  (the map cannot close a layout around any other winding). Degraded nodes
+  nefertiti@4000 306 → 44 (282 repaired).
+- **Even-sum polygonal patch template** (paper §4.4): 3-6-corner patches
+  with clean corner/pass-through sectors are accepted and quantized via one
+  interior node per patch, a tail-tail routing edge per side and a
+  head-head even-sum loop (σ=+2 ⇒ boundary sum = 2·loop, even by
+  construction); T-join parity reaches interior nodes through the routing
+  edges; `poly=`/`polyOdd=` reported, polyOdd 0 everywhere measured.
+  Unit-tested (hexagon beside quads; odd-boundary pillow).
+
+Rejected-patch counts (report mode, was @48a09cc → after Alg-8 → after
+both; "deg" = degenerate ≤2-corner orbits):
+
+| mesh       | quads | rejects was → Alg-8 → both | deg was → now |
+|------------|------:|-----------------------------|---------------|
+| box_sharp 1k/4k/16k | | ok — byte-identical, energy 0.014 | — |
+| cylinder   |  1000 | 15/32 → 12/32 → **9/32**    | 9 → 8         |
+| cylinder   |  4000 | 7/18 → 9/20 → **6/20**      | 4 → 5         |
+| sphere     |  4000 | 15/18 → 16/22 → **12/22**   | 8 → 5         |
+| torus      |  4000 | 23/24 → 17/20 → **14/22**   | 11 → 6        |
+| fandisk    |  4000 | 39/128 → 37/124 → **31/124**| 20 → 17       |
+| spot       |  4000 | 18/194 → 14/188 → **11/188**| 8 → 5         |
+| nefertiti  |  4000 | 596/2316 → 554/2230 → **377/2230** | 306 → 224 |
+| nefertiti  |  8000 | 463/2015 → 415/1939 → **268/1939** | 215 → 152 |
+| armadillo  |  4000 | 294/1386 → 259/1334 → **174/1334** | 144 → 107 |
+| armadillo  |  8000 | 309/1394 → 289/1352 → **198/1352** | 153 → 119 |
+
+Injection coverage: box_sharp only (all densities; @1000 injects 5
+integers, maxFrac 0.0000; @600 back-substitutes to exact half-integers,
+maxFrac 0.5, pins 0 — output byte-identical to greedy either way). Full A/B
+(on vs off, cyber + cyber-pure, corpus + spot@3000/nefertiti@8000/
+armadillo@8000): every cell's output hash SAME, dE identical (spot mixed
+7.57 / pure 7.89; nefertiti mixed 94.59 / pure 164.69; armadillo mixed
+52.02 / pure 72.05), all metrics unchanged (spot pure flow 762.9;
+nefertiti pure sing 518). Bunny@3000 BIMDF=on: input has open boundaries →
+tracer refuses ("ray reached an open boundary") → fallback; ear irregulars
+37 = recorded greedy (QuadriFlow 20).
+
+**Exit gates NOT met** (spot flow ≥ 1000, nefertiti pure sing ≤ 200): no
+organic reaches injection. The blocker is no longer sector classification:
+the remaining rejects are dominated by TWIN-SEPARATRIX BIGONS and the
+spur/wander orbits they induce (orbit dumps show the same arc traversed on
+both sides and twin arc pairs cone→same-target, e.g. nefertiti a1135/a1136
+from one cone; 2-corner orbits 201 of 377 rejects at @4000), plus
+`failedRays` (nefertiti 31/3338, armadillo 3/1946) which refuses the
+T-mesh outright. Next levers in rank order: (a) QEx Alg-7-style T-mesh
+simplification — merge coincident twin arcs / collapse zero-width bigon
+strips before patch validation; (b) eliminate residual `failedRays` (alt
+launch sites at the handful of exhausted cones); (c) QGP §7.1 dynamic
+re-linearization to reduce fold damage at the source. Default flip NOT
+proposed.
+
 ## Update — 2026-08-02 (CAD density robustness: the sweep's 🔴 failures are FIXED; 32/32 gate cells clean)
 
 The two density-dependent robustness bugs the CAD sweep below exposed are fixed

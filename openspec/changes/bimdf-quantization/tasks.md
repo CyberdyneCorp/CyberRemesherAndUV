@@ -38,16 +38,24 @@
        byte-exact (ctest 14/14; box output geometry identical on/off).
 - [ ] 5. Corpus + multi-density A/B vs greedy (bench gates + cad_sweep.py);
        flip default only on a clean win; ROADMAP entry with numbers
-       — STILL BLOCKED, one stage further along: the crack class is gone and
-       every corpus mesh traces a complete T-mesh, but the fold-corrupted
-       corner sectors (degenerate ≤2-corner orbits: nefertiti@4000 306 of 596
-       rejected, spot 8 of 18) keep organics from patch validation, so the
-       gates (spot flow_loop_mean_len >= 1000, nefertiti cyber-pure
-       sings <= 200) are not yet measurable. Measured corner-valence
-       histograms show the even-sum polygonal template alone would unblock 0
-       meshes (template-coverable 3/5/6 are the minority of rejects). A/B
-       harness green with the flag on AND off (box outputs byte-identical
-       incl. @16000, energy 0.014 = greedy). Ranked next: QEx Alg-8
-       signed-angle sector classification in buildRotation, then the
-       even-sum template as mop-up, then QGP §7.1 re-linearization.
-       Default NOT flipped.
+       — STILL BLOCKED, two stages further along (branch
+       `feat/bimdf-sectors`): QEx Alg-8 signed-angle sector classification
+       landed in buildRotation (signed wedge angles, fold-run winding lift,
+       seam-holonomy launch authority; degraded nodes nefertiti@4000
+       306 → 44, 282 repaired) and the even-sum polygonal template landed in
+       solveBimdf (3-6-corner patches via interior routing node + σ=+2
+       even-sum loop; unit-tested; polyOdd 0 everywhere measured). Rejected
+       patches nefertiti@4000 596 → 377 (deg ≤2: 306 → 224), @8000
+       463 → 268, armadillo@4000 294 → 174, spot 18 → 11, fandisk 39 → 31.
+       Full A/B (on vs off, cyber + cyber-pure, corpus +
+       spot/nefertiti/armadillo): every output hash SAME, dE identical
+       (spot pure 7.89, nefertiti pure 164.69), bench check green both flag
+       states, CAD spot-check 32/32, ctest 14/14, bunny ears 37 = greedy.
+       Gates (spot flow >= 1000, nefertiti cyber-pure sings <= 200) remain
+       unmeasurable: no organic passes patch validation. New blocker,
+       quantified: twin-separatrix bigons + spur orbits (2-corner rejects
+       201 of 377 on nefertiti@4000; orbit dumps show twin arc pairs and
+       both-sides-of-one-arc traversal) and failedRays (nefertiti 31/3338)
+       which refuses the T-mesh. Ranked next: QEx Alg-7-style twin-arc
+       merge / bigon collapse before patch validation, failedRays
+       elimination, QGP §7.1 re-linearization. Default NOT flipped.
