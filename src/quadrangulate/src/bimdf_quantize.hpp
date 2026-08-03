@@ -96,6 +96,7 @@ struct TMesh {
     std::size_t prunedChains = 0;   // stub crease chains dropped (phase-only pins)
     std::size_t failedRays = 0;     // separatrix launches abandoned at folded cones
     std::size_t degradedNodes = 0;  // nodes with fold-damaged sector windings
+    std::size_t repairedNodes = 0;  // fold-damaged fans fixed by signed-angle sectors
 };
 
 // zValue(i) must return the relaxed value of promoted variable i (used only

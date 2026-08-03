@@ -172,6 +172,7 @@ public:
         const bool patchesOk = buildPatches(tm);
         tm.failedRays = failedLaunches_;
         tm.degradedNodes = degradedNodes_;
+        tm.repairedNodes = repairedNodes_;
         if (!patchesOk) {
             return tm;
         }
@@ -754,7 +755,8 @@ private:
         // (combinatorial; drives class-pattern launch selection).
         const auto fanOrder =
             [&](std::uint32_t v, std::size_t f0, std::size_t c0,
-                std::unordered_map<std::size_t, std::pair<std::size_t, int>>& order) {
+                std::unordered_map<std::size_t, std::pair<std::size_t, int>>& order,
+                int* holQcum = nullptr) {
                 std::size_t f = f0, cornerCut = c0;
                 int qcum = 0;
                 std::size_t guard = 0;
@@ -783,6 +785,9 @@ private:
                         qcum += nbr.aToB ? rho : -rho;
                     }
                     if (nbr.face == f0 && nextCorner == c0) {
+                        if (holQcum != nullptr) {
+                            *holQcum = qcum;  // closed fan: seam holonomy known
+                        }
                         return;
                     }
                     f = nbr.face;
@@ -915,13 +920,22 @@ private:
         for (auto& [v, cands] : ordered) {
             const auto itEnds = creaseEndCount_.find(v);
             const int creaseEnds = itEnds == creaseEndCount_.end() ? 0 : itEnds->second;
-            const int want = 4 - coneOfVertex_.at(v) - creaseEnds;
+            std::unordered_map<std::size_t, std::pair<std::size_t, int>> fan;
+            int holQcum = std::numeric_limits<int>::min();
+            if (!cands.empty()) {
+                fanOrder(v, cands.front().face, cands.front().cut, fan, &holQcum);
+            }
+            // Separatrix count from the seam holonomy when it is known (the
+            // map cannot close a layout around any other winding); recorded
+            // index otherwise. Identical on substrates where field index and
+            // holonomy agree.
+            const int recIdx = coneOfVertex_.at(v);
+            const int idx = holQcum == std::numeric_limits<int>::min()
+                                ? recIdx
+                                : liftHolonomyIndex(holQcum, recIdx);
+            const int want = 4 - idx - creaseEnds;
             if (want <= 0) {
                 continue;  // crease chains cover every sector
-            }
-            std::unordered_map<std::size_t, std::pair<std::size_t, int>> fan;
-            if (!cands.empty()) {
-                fanOrder(v, cands.front().face, cands.front().cut, fan);
             }
             // Developed quarter class per candidate; drop crease-aligned ones.
             struct Scored {
@@ -1760,11 +1774,34 @@ private:
         int devQ = 0;  // developed quarter direction around the node
         std::size_t fanIdx = 0;
         double local = 0.0;  // metric tiebreak within a fan wedge
+        double theta = 0.0;  // developed SIGNED angle around the node (QEx Alg. 8)
     };
 
     static int quarterOfDir(const V2& d) {
         const double a = std::atan2(d.y, d.x);
         return ((static_cast<int>(std::lround(a / (0.5 * kPiD))) % 4) + 4) % 4;
+    }
+
+    // The seam-holonomy cone index (mod 4) measured by a closed fan walk is
+    // the authority for tracing: the map cannot close a layout around any
+    // other winding. When it disagrees with the field-recorded index, lift
+    // the mod-4 class to the index nearest the recorded one (ties toward the
+    // smaller magnitude); recorded and measured agree on clean substrates,
+    // where this returns `recorded` unchanged.
+    static int liftHolonomyIndex(int qcum, int recorded) {
+        const int hm = ((qcum % 4) + 4) % 4;
+        if (((recorded % 4) + 4) % 4 == hm) {
+            return recorded;
+        }
+        int best = hm;
+        for (int c = hm - 8; c <= hm + 8; c += 4) {
+            if (std::abs(c - recorded) < std::abs(best - recorded) ||
+                (std::abs(c - recorded) == std::abs(best - recorded) &&
+                 std::abs(c) < std::abs(best))) {
+                best = c;
+            }
+        }
+        return best;
     }
 
     bool buildPatches(TMesh& tm) {
@@ -2005,6 +2042,9 @@ private:
     bool buildRotation(std::size_t n, std::vector<EndRef>& lst, std::vector<int>& sect, TMesh& tm) {
         const Node& node = nodes_[n];
         int expectedTotal = 4;
+        double totalAngle = 0.0;       // raw signed UV angle of the full wedge fan (type-0)
+        double totalCorr = 0.0;        // QEx Alg. 8 corrected total (+2pi per negative run)
+        std::size_t foldedWedges = 0;  // fan wedges with negative signed UV angle
         if (node.type == 1) {
             // Interior T-node: single chart; crease arc ends anchored on the
             // far seam side are transported by rho. In a fold-flipped face the
@@ -2031,15 +2071,56 @@ private:
                 e.fanIdx = 0;
                 e.local = static_cast<double>(e.devQ);
             }
-            if (anchorFace != kNone) {
-                const V2 a = uv(ch_.faces[anchorFace][0]);
-                const V2 b = uv(ch_.faces[anchorFace][1]);
-                const V2 c = uv(ch_.faces[anchorFace][2]);
-                const double area2 = (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
-                if (area2 < 0.0) {
-                    for (EndRef& e : lst) {
-                        e.devQ = (4 - e.devQ) % 4;  // mirror the chart
+            const auto faceSign = [&](std::size_t f2) {
+                const V2 a = uv(ch_.faces[f2][0]);
+                const V2 b = uv(ch_.faces[f2][1]);
+                const V2 c = uv(ch_.faces[f2][2]);
+                return (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x) >= 0.0 ? 1 : -1;
+            };
+            // A T-node on a fold boundary anchors ends in faces of OPPOSITE
+            // UV orientation; a single whole-chart mirror cannot express
+            // that. Normalize minority-orientation ends by reflecting their
+            // quarter about the through-ray axis (a fold is a reflection,
+            // and the shared level line is its axis).
+            int refSign = anchorFace != kNone ? faceSign(anchorFace) : 1;
+            {
+                int pos = 0, neg = 0;
+                std::vector<int> signs(lst.size(), 1);
+                for (std::size_t i = 0; i < lst.size(); ++i) {
+                    const EndRef& e = lst[i];
+                    const ArcEnd& end = e.which == 0 ? arcs_[e.arc].end0 : arcs_[e.arc].end1;
+                    signs[i] = faceSign(end.face);
+                    (signs[i] > 0 ? pos : neg) += 1;
+                }
+                if (pos != 0 && neg != 0) {
+                    refSign = pos >= neg ? 1 : -1;
+                    int axis = -1;
+                    for (std::size_t i = 0; i < lst.size() && axis < 0; ++i) {
+                        for (std::size_t j = i + 1; j < lst.size() && axis < 0; ++j) {
+                            if (signs[i] == refSign && signs[j] == refSign &&
+                                ((lst[i].devQ - lst[j].devQ) % 4 + 4) % 4 == 2) {
+                                axis = lst[i].devQ % 2;  // the through pair's axis
+                            }
+                        }
                     }
+                    if (axis < 0) {
+                        for (std::size_t i = 0; i < lst.size() && axis < 0; ++i) {
+                            if (signs[i] == refSign) {
+                                axis = lst[i].devQ % 2;
+                            }
+                        }
+                    }
+                    for (std::size_t i = 0; i < lst.size(); ++i) {
+                        if (signs[i] != refSign) {
+                            lst[i].devQ =
+                                axis == 0 ? (4 - lst[i].devQ) % 4 : (2 - lst[i].devQ + 4) % 4;
+                        }
+                    }
+                }
+            }
+            if (refSign < 0) {
+                for (EndRef& e : lst) {
+                    e.devQ = (4 - e.devQ) % 4;  // mirror the chart
                 }
             }
             std::sort(lst.begin(), lst.end(),
@@ -2072,6 +2153,8 @@ private:
                 std::size_t cornerCut;
                 int qcum;
                 V2 startEdge;
+                double cum;  // developed signed angle at this wedge's start edge
+                double phi;  // signed inner UV angle of this wedge
             };
             std::vector<FanFace> fan;
             std::size_t f = f0, cornerCut = c0;
@@ -2094,8 +2177,19 @@ private:
                 }
                 const V2 pc = uv(cornerCut);
                 const std::size_t nxt = ch_.faces[f][static_cast<std::size_t>((corner + 1) % 3)];
+                const std::size_t prv = ch_.faces[f][static_cast<std::size_t>((corner + 2) % 3)];
                 const V2 e1{uv(nxt).x - pc.x, uv(nxt).y - pc.y};
-                fan.push_back({f, cornerCut, qcum, e1});
+                const V2 e2{uv(prv).x - pc.x, uv(prv).y - pc.y};
+                // Signed inner UV angle of this wedge (negative when the
+                // triangle is UV-folded): the accumulated sum develops the fan
+                // with folds cancelling their positive double cover (QEx,
+                // Ebke et al. 2013, Algorithm 8).
+                const double phi = std::atan2(e1.x * e2.y - e1.y * e2.x, e1.x * e2.x + e1.y * e2.y);
+                fan.push_back({f, cornerCut, qcum, e1, totalAngle, phi});
+                if (phi < 0.0) {
+                    ++foldedWedges;
+                }
+                totalAngle += phi;
                 const int le = (corner + 2) % 3;  // edge (prv -> corner)
                 const Nb& nbr = nbs_[f][static_cast<std::size_t>(le)];
                 if (nbr.face == kNone) {
@@ -2118,6 +2212,61 @@ private:
                 f = nbr.face;
                 cornerCut = nextCorner;
             }
+            // QEx Algorithm 8 (Ebke et al. 2013): split the wedge fan into
+            // maximal uniform-sign runs. A negative run is a fold-back whose
+            // intended development still advances FORWARD around the vertex by
+            // 2pi + phi_run (the fold covers its angular range the long way
+            // round); positive runs advance by their raw angle. The corrected
+            // accumulation recovers the true sector geometry from a folded fan
+            // (measured: it reproduces the seam-holonomy winding at every
+            // fold-collapsed cone, where the raw signed sum loses full turns).
+            struct FanRun {
+                std::size_t first;  // first fan face of the run
+                double phi;         // raw signed angle of the run
+                double cumCorr;     // corrected developed angle at run start
+                bool fullTurn;      // fold-back covering its range the long way round
+            };
+            std::vector<FanRun> fanRuns;
+            std::vector<std::size_t> runOf(fan.size(), 0);
+            std::vector<double> phiBefore(fan.size(), 0.0);  // raw prefix within the run
+            for (std::size_t i = 0; i < fan.size(); ++i) {
+                const bool neg = fan[i].phi < 0.0;
+                if (fanRuns.empty() || neg != (fanRuns.back().phi < 0.0)) {
+                    fanRuns.push_back({i, 0.0, 0.0, false});
+                }
+                runOf[i] = fanRuns.size() - 1;
+                phiBefore[i] = fanRuns.back().phi;
+                fanRuns.back().phi += fan[i].phi;
+            }
+            // The raw signed sum determines the winding only mod 2pi: each
+            // negative run MAY be a full-turn fold-back (QEx Fig. 2d, +2pi)
+            // or a small re-covered backtrack (+0). Lift the winding to the
+            // smallest total that can seat every incident end with a
+            // corner/pass-through sector, and charge the turns to the
+            // deepest fold-backs.
+            std::vector<std::size_t> negIdx;
+            for (std::size_t r = 0; r < fanRuns.size(); ++r) {
+                if (fanRuns[r].phi < 0.0) {
+                    negIdx.push_back(r);
+                }
+            }
+            const long long rawQ =
+                std::llround(totalAngle / (0.5 * kPiD));  // exact mod-4 residue carrier
+            long long turns = 0;
+            while (turns < static_cast<long long>(negIdx.size()) &&
+                   rawQ + 4 * turns < static_cast<long long>(lst.size())) {
+                ++turns;
+            }
+            std::stable_sort(negIdx.begin(), negIdx.end(), [&](std::size_t a, std::size_t b) {
+                return fanRuns[a].phi < fanRuns[b].phi;
+            });
+            for (long long t = 0; t < turns; ++t) {
+                fanRuns[negIdx[static_cast<std::size_t>(t)]].fullTurn = true;
+            }
+            for (FanRun& r : fanRuns) {
+                r.cumCorr = totalCorr;
+                totalCorr += r.fullTurn ? 2.0 * kPiD + r.phi : r.phi;
+            }
             // Anchor ends and compute developed quarters.
             for (EndRef& e : lst) {
                 const ArcEnd& end = e.which == 0 ? arcs_[e.arc].end0 : arcs_[e.arc].end1;
@@ -2139,6 +2288,19 @@ private:
                 e.fanIdx = idx;
                 e.local = std::atan2(ff->startEdge.x * end.dir.y - ff->startEdge.y * end.dir.x,
                                      ff->startEdge.x * end.dir.x + ff->startEdge.y * end.dir.y);
+                // Corrected developed angle of this end. Inside a full-turn
+                // fold-back the metric order is reversed relative to the
+                // surface order; the proportional map keeps it monotone in
+                // the corrected (forward) development. Small backtracks keep
+                // their raw (physical) placement.
+                const FanRun& run = fanRuns[runOf[idx]];
+                const double off = phiBefore[idx] + e.local;
+                if (run.fullTurn) {
+                    const double frac = std::clamp(off / run.phi, 0.0, 1.0);
+                    e.theta = run.cumCorr + (2.0 * kPiD + run.phi) * frac;
+                } else {
+                    e.theta = run.cumCorr + off;
+                }
             }
             std::sort(lst.begin(), lst.end(), [](const EndRef& a, const EndRef& b) {
                 if (a.fanIdx != b.fanIdx) {
@@ -2156,8 +2318,9 @@ private:
                 }
             }
             const auto itCone = coneOfVertex_.find(v);
-            expectedTotal = itCone != coneOfVertex_.end() ? 4 - itCone->second : 4;
-            if (itCone != coneOfVertex_.end() &&
+            const int recIdx = itCone != coneOfVertex_.end() ? itCone->second : 0;
+            expectedTotal = 4 - liftHolonomyIndex(qcum, recIdx);
+            if (foldedWedges == 0 && itCone != coneOfVertex_.end() &&
                 lst.size() == static_cast<std::size_t>(expectedTotal) && orderConeBySlots(lst)) {
                 // Cone with its full separatrix complement: exactly one arc
                 // end per grid sector, every sector is one quarter, and the
@@ -2181,16 +2344,119 @@ private:
         }
         sect[0] = expectedTotal - sum;
         sum += sect[0];
-        if (sect[0] < 1 || sect[0] > (lst.size() == 1 ? 4 : 2)) {
-            // Winding inconsistency (fold-damaged neighborhood): keep the
-            // rotation as ordered; the orbits touching it are counted as
-            // non-quad patches downstream instead of failing the whole build.
+        const int wrapMax = lst.size() == 1 ? 4 : 2;
+        bool valid = sect[0] >= 1 && sect[0] <= wrapMax;
+        if (node.type == 1) {
+            if (!valid) {
+                // Winding inconsistency (fold-damaged neighborhood): keep the
+                // rotation as ordered; the orbits touching it are counted as
+                // non-quad patches downstream instead of failing the whole
+                // build.
+                ++degradedNodes_;
+                if (std::getenv("CYBER_QC_BIMDF_DEBUG") != nullptr) {
+                    std::fprintf(stderr,
+                                 "[qc] bimdf rotation mismatch: node=%zu type=%d ends=%zu sum=%d "
+                                 "expected=%d\n",
+                                 n, node.type, lst.size(), sum, expectedTotal);
+                }
+            }
+            return true;
+        }
+        // Vertex-fan node: the quarter arithmetic is exact on clean fans, but
+        // a folded wedge corrupts the developed quarters (the chart CCW is the
+        // surface CW inside the fold) WITHOUT necessarily leaving the [1,2]
+        // range, which poisons corner sectors downstream into degenerate
+        // orbits. Accept the exact result only on fold-free fans with every
+        // sector a plausible corner (1) or pass-through (2).
+        for (std::size_t i = 1; valid && i < lst.size(); ++i) {
+            valid = sect[i] >= 1 && sect[i] <= 2;
+        }
+        if (valid && foldedWedges == 0) {
+            return true;
+        }
+        // QEx Algorithm 8 (Ebke et al. 2013) signed-angle reclassification:
+        // order the ends by their corrected developed angle (folded runs
+        // advance forward by 2pi + phi) and re-derive the sector quarters
+        // from the angle gaps. The wrap sector comes from the corrected
+        // total, which is the fan's true winding even when the raw signed
+        // sum lost full turns (QEx Fig. 2d valence collapse) or when the
+        // recorded cone index disagrees with the seam holonomy.
+        std::stable_sort(lst.begin(), lst.end(),
+                         [](const EndRef& a, const EndRef& b) { return a.theta < b.theta; });
+        const int measuredTotal = static_cast<int>(std::llround(totalCorr / (0.5 * kPiD)));
+        constexpr double kQuarterEps = 0.6;  // ambiguity guard, in quarters (the
+                                             // proportional map inside folded runs
+                                             // wobbles ports off the quarter grid;
+                                             // the polytope projection absorbs it)
+        // Real-valued gaps in quarters (index 0 is the wrap gap), rounded to
+        // integers under the constraint that they sum to the measured total
+        // (largest-remainder adjustment instead of dumping all rounding error
+        // into the wrap gap).
+        std::vector<double> gq(lst.size(), 0.0);
+        for (std::size_t i = 1; i < lst.size(); ++i) {
+            gq[i] = (lst[i].theta - lst[i - 1].theta) / (0.5 * kPiD);
+        }
+        gq[0] = totalCorr / (0.5 * kPiD);
+        for (std::size_t i = 1; i < lst.size(); ++i) {
+            gq[0] -= gq[i];
+        }
+        const std::size_t nE = lst.size();
+        if (measuredTotal == static_cast<int>(nE) && nE > 0) {
+            // Exactly one quarter per end is the ONLY assignment with every
+            // sector in the corner/pass-through range: take it directly (the
+            // theta sort still fixes the rotation order).
+            sect.assign(nE, 1);
+            ++repairedNodes_;
+            return true;
+        }
+        // Largest-remainder rounding under the sum constraint: round every
+        // gap to the nearest integer, then walk the remaining deficit or
+        // surplus onto the gaps with the largest rounding error instead of
+        // dumping it all into the wrap gap. The [1,2] corner/pass-through
+        // range stays a VALIDITY CHECK, not a constraint — a measured 0-gap
+        // (coincident ports) or 3-gap is real fold damage and forcing it
+        // into range corrupts neighboring orbits.
+        sect.assign(nE, 0);
+        sum = 0;
+        for (std::size_t i = 0; i < nE; ++i) {
+            sect[i] = static_cast<int>(std::llround(gq[i]));
+            sum += sect[i];
+        }
+        for (int guard2 = 0; sum != measuredTotal && guard2 < 64; ++guard2) {
+            const int dir = sum < measuredTotal ? 1 : -1;
+            std::size_t pick = 0;
+            double bestGain = -1e30;
+            for (std::size_t i = 0; i < nE; ++i) {
+                const double gain =
+                    static_cast<double>(dir) * (gq[i] - static_cast<double>(sect[i]));
+                if (gain > bestGain) {
+                    bestGain = gain;
+                    pick = i;
+                }
+            }
+            sect[pick] += dir;
+            sum += dir;
+        }
+        double maxErr = std::abs(totalCorr / (0.5 * kPiD) - static_cast<double>(measuredTotal));
+        for (std::size_t i = 0; i < nE; ++i) {
+            maxErr = std::max(maxErr, std::abs(gq[i] - static_cast<double>(sect[i])));
+        }
+        bool repaired = maxErr <= kQuarterEps && sect[0] >= 1 && sect[0] <= wrapMax;
+        for (std::size_t i = 1; repaired && i < nE; ++i) {
+            repaired = sect[i] >= 1 && sect[i] <= 2;
+        }
+        if (repaired) {
+            ++repairedNodes_;
+        } else {
+            // Keep the reclassified rotation (it is at least as consistent as
+            // the corrupted quarter arithmetic); orbits touching it are
+            // counted as non-quad patches downstream.
             ++degradedNodes_;
             if (std::getenv("CYBER_QC_BIMDF_DEBUG") != nullptr) {
                 std::fprintf(stderr,
-                             "[qc] bimdf rotation mismatch: node=%zu type=%d ends=%zu sum=%d "
-                             "expected=%d\n",
-                             n, node.type, lst.size(), sum, expectedTotal);
+                             "[qc] bimdf rotation mismatch: node=%zu type=%d ends=%zu "
+                             "measured=%d expected=%d maxErr=%.2f\n",
+                             n, node.type, lst.size(), measuredTotal, expectedTotal, maxErr);
             }
         }
         return true;
@@ -2219,6 +2485,7 @@ private:
     std::size_t openEdges_ = 0;
     std::size_t badPatches_ = 0;
     std::size_t degradedNodes_ = 0;
+    std::size_t repairedNodes_ = 0;
     std::size_t failedLaunches_ = 0;
     std::unordered_set<std::uint32_t> failedLaunchVertex_;
     std::vector<int> badCorners_;
