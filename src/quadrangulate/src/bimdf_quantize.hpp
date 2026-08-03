@@ -74,6 +74,17 @@ struct Arc {
     double len = 0.0;            // relaxed length in grid cells (>= 0)
     ZExpr expr;                  // symbolic length over z; expr(z) == +len at the relaxed z
     bool onFeature = false;      // runs along a pinned crease chain
+    // QGP-style boundary arc: a piece of an open-surface boundary loop between
+    // T-nodes where separatrices land. It enters its single incident patch
+    // side with a min-one floor; in the flow network it is a FIXED constant —
+    // a variable encoding (paired through a balance-free cover hub) was
+    // measured to produce bit-identical assignments while adding the
+    // copy-crossing structure round 3 found half-integral. The free boundary
+    // is not grid-aligned, so no exact symbolic length exists (noExpr):
+    // boundary arcs are rounded by the greedy schedule, never injected or
+    // steered directly.
+    bool onBoundary = false;
+    bool noExpr = false;  // no exact symbolic length (boundary-terminated)
 };
 
 struct Patch {

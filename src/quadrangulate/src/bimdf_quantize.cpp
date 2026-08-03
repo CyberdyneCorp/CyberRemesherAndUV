@@ -166,6 +166,17 @@ public:
             return tm;
         }
         buildCreaseChains(tm);
+        // QGP boundary arcs (CYBER_QC_BIMDF_BARC=1): rays terminate on the
+        // boundary loops instead of abandoning, boundary patches enter the
+        // flow. Measured OFF by default: bunny@3000 mixed coverage rises
+        // 441/471 -> 457/485 (failedRays 12 -> 3) but the recovered regions
+        // reshape the T-mesh and its flow globally, and the guided win
+        // regresses across the whole mu basin (ears 19 -> 37/33/31 at mu
+        // 0.75/1.0/1.25, sing 94 -> 115-129) — round-3's containment of the
+        // boundary neighborhoods is load-bearing for the round-4 result.
+        if (std::getenv("CYBER_QC_BIMDF_BARC") != nullptr) {
+            buildBoundaryChains();
+        }
         if (!traceRays(tm)) {
             tm.failedRays = failedLaunches_;
             return tm;
@@ -544,6 +555,138 @@ private:
         tm.creaseNodes = vertexNode_.size();
     }
 
+    // ---- boundary chains -------------------------------------------------
+    // Open-surface boundary loops as QGP-style boundary arc chains: rays
+    // landing on the boundary terminate at T-nodes that split the loop into
+    // boundary arcs. The free boundary is not grid-aligned, so the along
+    // parameter is the accumulated UV polyline length (seam transitions are
+    // isometries, so it is chart-invariant); no symbolic expression exists.
+    struct BChainEdge {
+        std::size_t face;
+        int e;  // open face edge; runs cut a = faces[f][e] -> b = faces[f][(e+1)%3]
+    };
+    struct BChain {
+        std::vector<BChainEdge> edges;
+        std::vector<double> accum;       // UV length at edge starts (size edges+1)
+        std::vector<std::uint32_t> vAt;  // mesh vertex at each edge start/end
+        std::vector<ChainEvent> events;  // exprs stay empty
+        bool closed = false;
+    };
+
+    void buildBoundaryChains() {
+        // Open edges in boundary orientation (face CCW: each appears once).
+        std::unordered_map<std::uint32_t, std::vector<std::pair<std::size_t, int>>> outAt;
+        std::size_t nOpen = 0;
+        for (std::size_t f = 0; f < ch_.faces.size(); ++f) {
+            for (int e = 0; e < 3; ++e) {
+                if (nbs_[f][static_cast<std::size_t>(e)].face != kNone ||
+                    seamOfFaceEdge_[f][static_cast<std::size_t>(e)] >= 0) {
+                    continue;
+                }
+                const std::size_t a = ch_.faces[f][static_cast<std::size_t>(e)];
+                outAt[ch_.vertexOfCut[a]].push_back({f, e});
+                ++nOpen;
+            }
+        }
+        if (nOpen == 0) {
+            return;
+        }
+        // A chain breaks at junction vertices (non-manifold pinches: more
+        // than one outgoing open edge) and at cone vertices sitting on the
+        // boundary.
+        const auto isBreak = [&](std::uint32_t v) {
+            const auto it = outAt.find(v);
+            return (it != outAt.end() && it->second.size() != 1) || isConeVertex(v);
+        };
+        std::vector<char> used;
+        std::unordered_map<std::uint64_t, std::size_t> edgeSlot;  // f*3+e -> flat id
+        std::vector<std::pair<std::size_t, int>> flat;
+        for (const auto& [v, lst] : outAt) {
+            for (const auto& fe : lst) {
+                edgeSlot.emplace(static_cast<std::uint64_t>(fe.first) * 3 +
+                                     static_cast<std::uint64_t>(fe.second),
+                                 flat.size());
+                flat.push_back(fe);
+            }
+        }
+        used.assign(flat.size(), 0);
+        const auto walkFrom = [&](std::size_t f0, int e0) {
+            BChain c;
+            std::size_t f = f0;
+            int e = e0;
+            const std::uint32_t vStart = ch_.vertexOfCut[ch_.faces[f][static_cast<std::size_t>(e)]];
+            c.vAt.push_back(vStart);
+            c.accum.push_back(0.0);
+            while (true) {
+                used[edgeSlot[static_cast<std::uint64_t>(f) * 3 + static_cast<std::uint64_t>(e)]] =
+                    1;
+                const std::size_t a = ch_.faces[f][static_cast<std::size_t>(e)];
+                const std::size_t b = ch_.faces[f][static_cast<std::size_t>((e + 1) % 3)];
+                c.edges.push_back({f, e});
+                c.accum.push_back(c.accum.back() +
+                                  std::hypot(uv(b).x - uv(a).x, uv(b).y - uv(a).y));
+                const std::uint32_t vb = ch_.vertexOfCut[b];
+                c.vAt.push_back(vb);
+                if (vb == vStart || isBreak(vb)) {
+                    break;
+                }
+                const auto it = outAt.find(vb);
+                if (it == outAt.end()) {
+                    break;  // dangling boundary end (crack)
+                }
+                const auto& nxt = it->second.front();
+                if (used[edgeSlot[static_cast<std::uint64_t>(nxt.first) * 3 +
+                                  static_cast<std::uint64_t>(nxt.second)]] != 0) {
+                    break;
+                }
+                f = nxt.first;
+                e = nxt.second;
+            }
+            c.closed = c.vAt.back() == vStart && !isBreak(vStart);
+            for (std::size_t i = 0; i < c.edges.size(); ++i) {
+                bEdgeIndex_.emplace(static_cast<std::uint64_t>(c.edges[i].face) * 3 +
+                                        static_cast<std::uint64_t>(c.edges[i].e),
+                                    std::make_pair(bchains_.size(), i));
+            }
+            if (!c.closed) {
+                // Open chains (cracks, pinches, cones on the boundary) anchor
+                // their endpoints at vertex nodes; boundary vertex fans cannot
+                // close a winding, so those nodes degrade and their orbits are
+                // contained — exactly the pre-boundary-arc behavior for the
+                // damaged cases.
+                ChainEvent ev0;
+                ev0.node = vertexNode(c.vAt.front());
+                c.events.push_back(ev0);
+                ChainEvent ev1;
+                ev1.along = c.accum.back();
+                ev1.node = vertexNode(c.vAt.back());
+                ev1.edge = c.edges.size() - 1;
+                ev1.frac = 1.0;
+                c.events.push_back(ev1);
+            }
+            // Closed loops are seeded by ray-hit T-nodes only (assembly wraps
+            // the last event to the first); a loop no separatrix reaches has
+            // no arcs and its neighborhood stays contained.
+            bchains_.push_back(std::move(c));
+        };
+        for (const auto& fe : flat) {
+            const std::uint64_t key =
+                static_cast<std::uint64_t>(fe.first) * 3 + static_cast<std::uint64_t>(fe.second);
+            const std::uint32_t va =
+                ch_.vertexOfCut[ch_.faces[fe.first][static_cast<std::size_t>(fe.second)]];
+            if (used[edgeSlot[key]] == 0 && isBreak(va)) {
+                walkFrom(fe.first, fe.second);
+            }
+        }
+        for (const auto& fe : flat) {
+            const std::uint64_t key =
+                static_cast<std::uint64_t>(fe.first) * 3 + static_cast<std::uint64_t>(fe.second);
+            if (used[edgeSlot[key]] == 0) {
+                walkFrom(fe.first, fe.second);
+            }
+        }
+    }
+
     // ---- ray tracing -----------------------------------------------------
     // The walk is contour-following on the piecewise-linear level set
     // {coord == c}: enter a face through one edge, leave through the unique
@@ -580,6 +723,7 @@ private:
         std::size_t face = 0;        // anchor chart
         int q = 0;                   // owner travel quarter at the event, anchor chart
         std::size_t corner = kNone;  // anchor cut vertex for vertex-fan nodes
+        bool exprValid = true;       // false: free-boundary hit, no exact expression
     };
     struct Ray {
         std::size_t startNode = 0;
@@ -1505,11 +1649,13 @@ private:
                 return handleCreaseHit(wk, seamIdx, exitVar) ? 1 : -1;
             }
             if (n.face == kNone) {
-                // Open surface boundary (or crack). Full boundary-arc
-                // support (QGP-style boundary chains with their own length
-                // variables) is not implemented; the ray is abandoned and
-                // its cone's region locally contained, letting the rest of
-                // the T-mesh proceed on open surfaces.
+                // Open surface boundary: terminate at a T-node on the
+                // boundary chain (QGP boundary arcs). Edges no chain claims
+                // (isolated crack slivers) keep the abandon-and-contain
+                // behavior.
+                if (handleBoundaryHit(wk, exitEdge, exitVar)) {
+                    return 1;
+                }
                 traceFail_ = "ray reached an open boundary";
                 return 2;
             }
@@ -1698,6 +1844,59 @@ private:
         return true;
     }
 
+    // Ray reached an open boundary edge owned by a boundary chain: terminate
+    // at a T-node splitting the chain. All three ends (the ray and the two
+    // boundary half-arcs) anchor in the hit face, so the interior-node
+    // rotation orders them without any seam transport. The hit point has no
+    // exact symbolic expression (the free boundary is not grid-aligned):
+    // the terminating ray arc and the boundary arcs are flagged noExpr.
+    bool handleBoundaryHit(Walk& wk, int exitEdge, double exitVar) {
+        WalkState& w = wk.w;
+        Ray& ray = rays_[static_cast<std::size_t>(wk.id)];
+        const auto it = bEdgeIndex_.find(static_cast<std::uint64_t>(w.face) * 3 +
+                                         static_cast<std::uint64_t>(exitEdge));
+        if (it == bEdgeIndex_.end()) {
+            return false;
+        }
+        const auto [chainId, edgeIdx] = it->second;
+        BChain& chain = bchains_[chainId];
+        const std::size_t node = interiorNode();
+        const int va = varyAxis(w.q);
+        Event ev;
+        ev.along = alongOf(w) + alongSlopeOf(w) * (exitVar - comp(w.p, va));
+        ev.curve = w.curve + std::abs(exitVar - comp(w.p, va));
+        ev.node = node;
+        ev.face = w.face;
+        ev.q = w.q;
+        ev.exprValid = false;
+        ray.events.push_back(std::move(ev));
+        flushSeg(wk, exitVar);
+        // Chain split event: the hit position along the boundary edge as a
+        // fraction of its UV length.
+        const BChainEdge& be = chain.edges[edgeIdx];
+        const std::size_t ca = ch_.faces[be.face][static_cast<std::size_t>(be.e)];
+        const std::size_t cb = ch_.faces[be.face][static_cast<std::size_t>((be.e + 1) % 3)];
+        const V2 A = uv(ca);
+        const V2 B = uv(cb);
+        const int lc = constAxis(w.q);
+        const double den = comp(B, lc) - comp(A, lc);
+        double t = 0.0;
+        if (std::abs(den) > 1e-12) {
+            t = (w.c - comp(A, lc)) / den;
+        } else {
+            const double dv = comp(B, va) - comp(A, va);
+            t = std::abs(dv) > 1e-12 ? (exitVar - comp(A, va)) / dv : 0.0;
+        }
+        t = std::clamp(t, 0.0, 1.0);
+        ChainEvent cev;
+        cev.along = chain.accum[edgeIdx] + t * (chain.accum[edgeIdx + 1] - chain.accum[edgeIdx]);
+        cev.node = node;
+        cev.edge = edgeIdx;
+        cev.frac = t;
+        chain.events.push_back(std::move(cev));
+        return true;
+    }
+
     // ---- arc assembly ----------------------------------------------------
     struct ArcEnd {
         std::size_t node = 0;
@@ -1745,7 +1944,11 @@ private:
                 rec.arc.n0 = prevNode;
                 rec.arc.n1 = ev.node;
                 rec.arc.len = ev.along - prevAlong;
-                rec.arc.expr = diffExpr(ev.expr, *prevExpr, s0);
+                if (ev.exprValid) {
+                    rec.arc.expr = diffExpr(ev.expr, *prevExpr, s0);
+                } else {
+                    rec.arc.noExpr = true;  // boundary-terminated piece
+                }
                 rec.end0.node = prevNode;
                 rec.end0.face = prevFace;
                 rec.end0.dir = quarterDir(prevQ);
@@ -1785,14 +1988,49 @@ private:
                 arcs_.push_back(std::move(rec));
             }
         }
+        for (BChain& chain : bchains_) {
+            std::sort(chain.events.begin(), chain.events.end(),
+                      [](const ChainEvent& a, const ChainEvent& b) { return a.along < b.along; });
+            const auto makeArc = [&](const ChainEvent& e0, const ChainEvent& e1, double len) {
+                ArcRec rec;
+                rec.arc.n0 = e0.node;
+                rec.arc.n1 = e1.node;
+                rec.arc.len = len;
+                rec.arc.onBoundary = true;
+                rec.arc.noExpr = true;
+                fillBoundaryEndAnchor(chain, e0, true, rec.end0);
+                fillBoundaryEndAnchor(chain, e1, false, rec.end1);
+                rec.end0.node = e0.node;
+                rec.end1.node = e1.node;
+                arcs_.push_back(std::move(rec));
+            };
+            for (std::size_t i = 0; i + 1 < chain.events.size(); ++i) {
+                const ChainEvent& e0 = chain.events[i];
+                const ChainEvent& e1 = chain.events[i + 1];
+                if (e1.along - e0.along < 1e-9 && e0.node == e1.node) {
+                    continue;
+                }
+                makeArc(e0, e1, e1.along - e0.along);
+            }
+            if (chain.closed && !chain.events.empty()) {
+                // Wrap arc closing the loop through the along origin. A
+                // single-event loop yields one self-loop arc spanning the
+                // whole boundary.
+                const ChainEvent& eL = chain.events.back();
+                const ChainEvent& eF = chain.events.front();
+                makeArc(eL, eF, chain.accum.back() - eL.along + eF.along);
+            }
+        }
         // Negative relaxed lengths are REAL on folded relaxed maps (the map is
         // not injective near high-distortion cones): the parametric span of a
         // separatrix piece can locally reverse. The T-mesh stays consistent
         // (opposite patch sides still sum equal), and the quantizer's min-one
         // bound simply pulls such arcs up with deviation cost. Report only.
         for (const ArcRec& rec : arcs_) {
-            tm.maxExprErr =
-                std::max(tm.maxExprErr, std::abs(evalExpr(rec.arc.expr, z_) - rec.arc.len));
+            if (!rec.arc.noExpr) {
+                tm.maxExprErr =
+                    std::max(tm.maxExprErr, std::abs(evalExpr(rec.arc.expr, z_) - rec.arc.len));
+            }
             tm.minArcLen = std::min(tm.minArcLen, rec.arc.len);
         }
         tm.nodeCount = nodes_.size();
@@ -1816,6 +2054,33 @@ private:
         end.face = se.faceA;
         const std::size_t c0 = ce.forward ? se.aA : se.bA;
         const std::size_t c1 = ce.forward ? se.bA : se.aA;
+        V2 d{uv(c1).x - uv(c0).x, uv(c1).y - uv(c0).y};
+        const double n = std::hypot(d.x, d.y);
+        if (n > 1e-18) {
+            d.x /= n;
+            d.y /= n;
+        }
+        if (!forward) {
+            d.x = -d.x;
+            d.y = -d.y;
+        }
+        end.dir = d;
+        end.corner = forward ? c0 : c1;
+    }
+
+    void fillBoundaryEndAnchor(const BChain& chain, const ChainEvent& ev, bool forward,
+                               ArcEnd& end) {
+        std::size_t edgeIdx = ev.edge;
+        if (!forward && ev.frac == 0.0 && edgeIdx > 0) {
+            edgeIdx -= 1;  // the arc approaches through the previous chain edge
+        }
+        if (edgeIdx >= chain.edges.size()) {
+            edgeIdx = chain.edges.size() - 1;
+        }
+        const BChainEdge& be = chain.edges[edgeIdx];
+        const std::size_t c0 = ch_.faces[be.face][static_cast<std::size_t>(be.e)];
+        const std::size_t c1 = ch_.faces[be.face][static_cast<std::size_t>((be.e + 1) % 3)];
+        end.face = be.face;
         V2 d{uv(c1).x - uv(c0).x, uv(c1).y - uv(c0).y};
         const double n = std::hypot(d.x, d.y);
         if (n > 1e-18) {
@@ -2889,6 +3154,8 @@ private:
     std::unordered_map<std::uint32_t, std::tuple<std::size_t, double, ZExpr, std::size_t>>
         chainPosOfVertex_;
     std::unordered_map<std::size_t, std::tuple<std::size_t, int, bool>> creaseTNodeAnchor_;
+    std::vector<BChain> bchains_;
+    std::unordered_map<std::uint64_t, std::pair<std::size_t, std::size_t>> bEdgeIndex_;
     std::vector<std::vector<Seg>> faceSegs_;
     std::size_t segCap_ = 64;
     std::vector<Ray> rays_;
@@ -3024,6 +3291,18 @@ BimdfResult solveBimdf(const TMesh& tm, const BimdfOptions& opts) {
             if (arcNode[a][0] < 0 && arcNode[a][1] < 0) {
                 outside[a] = 1;
             } else if (arcNode[a][1] < 0) {
+                // One accepted side: enters that side's balance as a fixed
+                // constant. QGP boundary arcs are one-sided BY CONSTRUCTION
+                // (their other side is off-surface) and land here too — a
+                // VARIABLE encoding pairing them with a balance-free hub in
+                // the double cover was built and measured first, and it
+                // produced BIT-IDENTICAL assignments to fixed constants on
+                // bunny@3000 (the deviation optimum keeps boundary arcs at
+                // their rounded lengths) while adding copy-crossing hub
+                // structure of the kind round 3 measured to go
+                // half-integral. Fixed constants keep the round-3 one-sided
+                // semantics; the INTERIOR arcs of boundary patches stay
+                // variables tied to them through patch-side consistency.
                 fixedArc[a] = 1;
             }
         }
@@ -3047,6 +3326,13 @@ BimdfResult solveBimdf(const TMesh& tm, const BimdfOptions& opts) {
                         lowBound[side[0]] = 1;
                     }
                 }
+            }
+        }
+        for (std::size_t a = 0; a < nArc; ++a) {
+            // Boundary arcs keep min-one in BOTH floor modes: a zero-length
+            // boundary arc collapses two boundary T-nodes onto each other.
+            if (tm.arcs[a].onBoundary && !outside[a]) {
+                lowBound[a] = std::max<long long>(lowBound[a], 1);
             }
         }
         // Initial rounded guess with the floor guard.

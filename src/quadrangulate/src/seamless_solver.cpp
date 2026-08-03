@@ -2524,6 +2524,12 @@ int solveSeamlessReduced(accel::IBackend& backend, std::size_t nCut,
     if (bimdfTm && bimdfTm->ok && !bimdfArcRows.empty()) {
         std::vector<double> finalLen(bimdfTm->arcs.size(), 0.0);
         for (std::size_t a = 0; a < bimdfTm->arcs.size(); ++a) {
+            if (bimdfTm->arcs[a].noExpr) {
+                // Boundary-terminated arcs have no symbolic length; report
+                // them neutrally (their realized deviation is unobservable).
+                finalLen[a] = bimdfTm->arcs[a].len;
+                continue;
+            }
             double lenA = 0.0;
             for (const auto& [ri, cf] : bimdfArcRows[a]) {
                 lenA += cf * static_cast<double>(w[ri]);
