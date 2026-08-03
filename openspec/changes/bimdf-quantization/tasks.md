@@ -84,8 +84,12 @@
        mean; loops 7 → 4, quads −4.6% — count-match arguable), sing 66 →
        65. nefertiti pure sing gate UNREACHABLE by any rounding lever: the
        pure-arm T-mesh never builds ("trail density blowup") — tracer
-       wall, promoted to the top of the ranked levers. A/B: off vs
-       report hash-SAME 22/22;
+       wall, promoted to the top of the ranked levers. PARITY-AWARE (a)
+       assessed and dropped with evidence: the classes are a coupled
+       GF(2) system beyond the graphic T-join, and exact flow realization
+       is harmful exactly where injection is blocked (damaged organics
+       regress under force AND attraction) while healthy meshes already
+       bank the win via attraction. A/B: off vs report hash-SAME 22/22;
        guided differs only where engaged; ctest 14/14; bench check green
        both flag states; flag-off byte-exact vs the main-branch binary
        (4 cells, mtllib-normalized). Default NOT flipped (opt-in lever;

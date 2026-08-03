@@ -382,6 +382,20 @@ separatrix)`), so no flow information exists to guide with; the wall is
 the tracer on the pure path, not the quantizer. Bunny ears 19 vs
 QuadriFlow 20 is the round's durable prize.
 
+**Parity-aware quantization (lever a): assessed, NOT implemented —
+payoff measured as capped.** The joint parity classes couple arcs through
+the all-half-integer reduced rows (round-3 census), so enforcing them is
+a coupled GF(2) congruence system on top of the min-cost flow — beyond
+the graphic T-join machinery. This round adds the decisive evidence that
+exact liftability is not the bottleneck: realizing the flow assignment
+exactly is HARMFUL precisely where injection is still blocked
+(fold-damaged organics regress under force pinning AND under attraction),
+and where the T-mesh is healthy the attraction already banks the win
+without lifting (ears 19 vs QF 20). The pure-arm organics fail earlier
+(tracer). Parity constraints would unlock exact injection only on meshes
+where guided already realizes the benefit. Dropped from the ranked
+levers; the tracer's pure-path density blowup takes its slot.
+
 Ranked next: (a) pure-arm T-mesh tracer robustness (the `trail density
 blowup` wall — nefertiti/armadillo/bunny pure never reach the flow); (b)
 boundary arcs for open surfaces; (c) revisit the crease gate with
