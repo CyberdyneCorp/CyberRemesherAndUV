@@ -55,23 +55,52 @@ enum class StrokeShape {
 };
 
 struct ShapeParams {
-    int resampleCount = 64;            // arc-length resampling density
-    float aspect = 1.0f;               // viewport width/height; x is multiplied
-                                       // by it so angles/circles are measured in
-                                       // square units, not stretched ones
-    float holdMaxRadius = 0.015f;      // bounding radius below this => HoldPoint
-    float holdMinDuration = 0.30f;     // seconds; full-confidence hold
-    float closedFraction = 0.22f;      // endpoint gap < f * pathLength => closed
-    float cornerRadians = 0.90f;       // per-window turn sharper than this is a corner
-    float straightRatio = 0.90f;       // endpointDist/pathLength above this => straight
+    int resampleCount = 64;         // arc-length resampling density
+    float aspect = 1.0f;            // viewport width/height; x is multiplied
+                                    // by it so angles/circles are measured in
+                                    // square units, not stretched ones
+    float holdMaxRadius = 0.015f;   // bounding radius below this => HoldPoint
+    float holdMinDuration = 0.30f;  // seconds; full-confidence hold
+    float closedFraction = 0.22f;   // endpoint gap < f * pathLength => closed
+    float cornerRadians = 0.90f;    // per-window turn sharper than this is a corner
+    float straightRatio = 0.90f;    // endpointDist/pathLength above this => straight
     float circleMaxDeviation = 0.18f;  // radius stddev / mean below this => round
     int scribbleMinCorners = 4;
     int scribbleMinIntersections = 2;
-    int gridMinCorners = 3;        // square-wave corners for a grid stroke
-    float gridPerpMaxDot = 0.55f;  // consecutive grid segments: |cos| below
-                                   // this counts as perpendicular
-    float gridRailMinDot = 0.80f;  // grid rails: |cos| above this counts as
-                                   // mutually parallel
+    int gridMinCorners = 3;         // square-wave corners for a grid stroke
+    // Nearly-closed quad rescue (change simplify-gesture-grammar, task 3.2).
+    // An OPEN stroke that matched nothing else is a hand drawing a quad and
+    // stopping short of the seam, or leaving one side open against existing
+    // topology (the adjacent-quad case). The open side can be a quarter of
+    // the perimeter — past closedFraction — so the strict closed test rejects
+    // it and it falls to Unknown. The rescue runs LAST, after every other
+    // shape has claimed its strokes, so it only ever upgrades a would-be
+    // Unknown and can never steal a grid/scribble/cross (the ordering that
+    // broke earlier attempts). It is gated on GEOMETRY, not corner count: a
+    // smoothly drawn U registers no sharp corners at all, so the qualifier is
+    // that quadCorners can recover a non-degenerate ring, not that a
+    // threshold number of bends were detected.
+    // endpoint gap < f * pathLength. Aggressive by design (the proposal): the
+    // rescue only ever sees strokes nothing else claimed, so the ceiling can
+    // sit well above closedFraction. It stays below the straightRatio (0.9)
+    // line gate, so an actual straight line is still a Line, not a quad.
+    // Device corpus spans 0.23–0.52; 0.65 catches the loosest with margin.
+    float nearlyClosedFraction = 0.65f;
+    // A self-crossing stroke is an X (delete) only when it encloses little
+    // area — its diagonal path bounds almost nothing. A messy quad (closed,
+    // a few interior crossings from wobble or overlap) fills most of its
+    // bounding box. Device corpus: quads fill 0.59-0.71, X's 0.01-0.16, so a
+    // 0.35 cut separates them with wide margin.
+    float crossMaxFill = 0.35f;
+    // Corner-estimate collapse: a corner whose interior angle is straighter
+    // than this (cosine below it, i.e. nearer 180 degrees) is redundant, so a
+    // four-corner estimate collapses to a triangle. -0.94 is ~160 degrees; a
+    // real quad corner, even a skewed trapezoid's, stays well above it.
+    float triangleCollapseCos = -0.94f;
+    float gridPerpMaxDot = 0.55f;   // consecutive grid segments: |cos| below
+                                    // this counts as perpendicular
+    float gridRailMinDot = 0.80f;   // grid rails: |cos| above this counts as
+                                    // mutually parallel
 };
 
 // Geometric features of the resampled stroke (kept in the record so the
@@ -79,9 +108,9 @@ struct ShapeParams {
 struct ShapeFeatures {
     float pathLength = 0.0f;
     float endpointDistance = 0.0f;
-    float boundingRadius = 0.0f;   // max distance from centroid
-    float duration = 0.0f;         // seconds, last sample time - first
-    float straightness = 0.0f;     // endpointDistance / pathLength
+    float boundingRadius = 0.0f;  // max distance from centroid
+    float duration = 0.0f;        // seconds, last sample time - first
+    float straightness = 0.0f;    // endpointDistance / pathLength
     float radiusDeviation = 0.0f;  // stddev of centroid distance / mean
     int corners = 0;
     int selfIntersections = 0;
@@ -123,7 +152,13 @@ enum class UnderStroke {
 enum class InterpretedAction {
     None,
     CreateQuad,
+    CreateTriangle,
     InsertLoop,
+    // A near-straight stroke ACROSS A GAP, from a vertex on one open rim to a
+    // vertex on the rim facing it (change add-stroke-rim-bridge): the two
+    // endpoint vertices are ONE corresponding pair, and the tool layer bridges
+    // the corridor between the rims with quads.
+    BridgeRims,
     TagLoop,
     DissolveEdge,
     DeleteFaces,
@@ -234,15 +269,23 @@ inline std::vector<Vec2> resample(std::span<const Vec2> pts, int count) {
 }
 
 // Number of self-crossings, ignoring the seam between first/last segments.
-inline int countSelfIntersections(const std::vector<Vec2>& p) {
+// `seamWindow` > 0 additionally ignores every crossing between a LEADING and
+// a TRAILING segment (task 3.1): closing a hand-drawn quad routinely
+// overshoots the start, and that seam crossing must not disqualify the loop
+// from being a quad. An interior crossing (an X, a scribble) is unaffected.
+inline int countSelfIntersections(const std::vector<Vec2>& p, int seamWindow = 0) {
     int hits = 0;
-    const std::size_t n = p.size();
-    for (std::size_t i = 0; i + 1 < n; ++i) {
-        for (std::size_t j = i + 2; j + 1 < n; ++j) {
+    const int n = static_cast<int>(p.size());
+    for (int i = 0; i + 1 < n; ++i) {
+        for (int j = i + 2; j + 1 < n; ++j) {
             if (i == 0 && j + 2 == n) {
                 continue;
             }
-            if (segmentsCross(p[i], p[i + 1], p[j], p[j + 1])) {
+            if (seamWindow > 0 && i < seamWindow && j >= n - 1 - seamWindow) {
+                continue;
+            }
+            if (segmentsCross(p[static_cast<std::size_t>(i)], p[static_cast<std::size_t>(i + 1)],
+                              p[static_cast<std::size_t>(j)], p[static_cast<std::size_t>(j + 1)])) {
                 ++hits;
             }
         }
@@ -250,12 +293,36 @@ inline int countSelfIntersections(const std::vector<Vec2>& p) {
     return hits;
 }
 
+// Fraction of the stroke's bounding box that its closed path encloses
+// (|shoelace area| / bbox area). A quad's path runs around a filled region
+// (high fill); an X's diagonal path encloses almost nothing (low fill). This
+// separates a messy quad — closed, with a few interior crossings from wobble
+// — from a real X, which self-crosses but bounds no area.
+inline float polygonFillRatio(const std::vector<Vec2>& p) {
+    if (p.size() < 3) {
+        return 0.0f;
+    }
+    float twiceArea = 0.0f;
+    Vec2 lo = p[0];
+    Vec2 hi = p[0];
+    for (std::size_t i = 0; i < p.size(); ++i) {
+        const Vec2 a = p[i];
+        const Vec2 b = p[(i + 1) % p.size()];
+        twiceArea += a.x * b.y - b.x * a.y;
+        lo = {std::fmin(lo.x, a.x), std::fmin(lo.y, a.y)};
+        hi = {std::fmax(hi.x, a.x), std::fmax(hi.y, a.y)};
+    }
+    const float bbox = (hi.x - lo.x) * (hi.y - lo.y);
+    return bbox > 1e-9f ? std::fabs(twiceArea) * 0.5f / bbox : 0.0f;
+}
+
 // Corner detection over a sliding direction window: direction is measured
 // between samples `window` apart so a rounded (sloppy) corner still turns
 // sharply within one window; after a detected corner the scan skips a
 // window so one corner never double-counts. Returns the corner sample
 // indices in stroke order.
-inline std::vector<int> cornerIndices(const std::vector<Vec2>& p, int window, float cornerRadians) {
+inline std::vector<int> cornerIndices(const std::vector<Vec2>& p, int window,
+                                      float cornerRadians) {
     std::vector<int> indices;
     const int n = static_cast<int>(p.size());
     if (n < 2 * window + 1) {
@@ -359,6 +426,141 @@ inline std::vector<Vec2> quadCorners(const std::vector<Vec2>& p, Vec2 centroid, 
     return corners;
 }
 
+// True when the stroke's seam — its start/end point — is itself a sharp
+// corner, i.e. the hand closed the polygon AT a vertex rather than mid-edge.
+// The non-wrapping corner scan never sees the seam, so this is what lets a
+// three-detected-corner stroke tell a triangle closed mid-edge (3 real
+// corners) from a quad closed at a corner (3 + the seam = 4).
+inline bool seamIsCorner(const std::vector<Vec2>& p, int window, float cornerRadians) {
+    const int n = static_cast<int>(p.size());
+    if (n < 2 * window + 1) {
+        return false;
+    }
+    const Vec2 in = p[0] - p[static_cast<std::size_t>(n - window)];
+    const Vec2 out = p[static_cast<std::size_t>(window)] - p[0];
+    const float li = len(in);
+    const float lo = len(out);
+    if (li < 1e-6f || lo < 1e-6f) {
+        return false;
+    }
+    const float cosA = std::clamp(dot2(in, out) / (li * lo), -1.0f, 1.0f);
+    return std::acos(cosA) > cornerRadians;
+}
+
+// Robust corner estimate for a closed-ish stroke — FOUR corners for a quad,
+// THREE for a triangle — resilient to rotation, wobble and interior crossings.
+//
+// Farthest-point method (document-scanner style) locates the four corners: the
+// two most distant points are one diagonal; the two points farthest from that
+// diagonal, one on each side, are the other. But the corners are returned in
+// STROKE ORDER (their position along the drawn polyline), NOT sorted by angle
+// around the centroid. The hand draws a quad by going around its perimeter, so
+// stroke order is the drawn ring and is ALWAYS simple; angle-around-centroid
+// ordering is fragile for a thin quad — two corners subtend nearly the same
+// angle and can swap, turning the face into a self-intersecting bowtie.
+//
+// A corner whose interior angle is nearly straight is redundant — the shape is
+// a triangle — so it is dropped. `collapseCos` is the cosine above which
+// (i.e. angle straighter than) a corner counts as redundant.
+inline std::vector<Vec2> polygonCorners(const std::vector<Vec2>& p, Vec2 centroid,
+                                        float collapseCos) {
+    const int n = static_cast<int>(p.size());
+    if (n < 4) {
+        return {};
+    }
+    const auto farthestIndexFrom = [&](Vec2 q) {
+        int best = 0;
+        float bestD = -1.0f;
+        for (int i = 0; i < n; ++i) {
+            const float d = dot2(p[static_cast<std::size_t>(i)] - q,
+                                 p[static_cast<std::size_t>(i)] - q);
+            if (d > bestD) {
+                bestD = d;
+                best = i;
+            }
+        }
+        return best;
+    };
+    const int i0 = farthestIndexFrom(centroid);
+    const int i2 = farthestIndexFrom(p[static_cast<std::size_t>(i0)]);
+    const Vec2 a0 = p[static_cast<std::size_t>(i0)];
+    const Vec2 dir = p[static_cast<std::size_t>(i2)] - a0;
+    int ip = -1;
+    int in = -1;
+    float bestPos = 1e-6f;
+    float bestNeg = -1e-6f;
+    for (int i = 0; i < n; ++i) {
+        const Vec2 q = p[static_cast<std::size_t>(i)];
+        const float side = dir.x * (q.y - a0.y) - dir.y * (q.x - a0.x);
+        if (side > bestPos) {
+            bestPos = side;
+            ip = i;
+        }
+        if (side < bestNeg) {
+            bestNeg = side;
+            in = i;
+        }
+    }
+    // STROKE ORDER: sort the corner indices, so the ring follows the drawn
+    // perimeter and never self-intersects.
+    std::vector<int> idx = {i0, i2};
+    if (ip >= 0) {
+        idx.push_back(ip);
+    }
+    if (in >= 0) {
+        idx.push_back(in);
+    }
+    std::sort(idx.begin(), idx.end());
+    idx.erase(std::unique(idx.begin(), idx.end()), idx.end());
+    // Dedup near-coincident corners SCALED to the shape (the farthest-point
+    // search finds a triangle's third vertex twice, a hair apart) — a fraction
+    // of the bounding radius folds those into one corner, while a real quad's
+    // corners, always far apart, never merge.
+    float radius = 0.0f;
+    for (const int i : idx) {
+        radius = std::fmax(radius, len(p[static_cast<std::size_t>(i)] - centroid));
+    }
+    const float mergeSq = (radius * 0.2f) * (radius * 0.2f);
+    std::vector<Vec2> ring;
+    for (const int i : idx) {
+        const Vec2 q = p[static_cast<std::size_t>(i)];
+        bool dup = false;
+        for (const Vec2 r : ring) {
+            if (dot2(q - r, q - r) < mergeSq) {
+                dup = true;
+                break;
+            }
+        }
+        if (!dup) {
+            ring.push_back(q);
+        }
+    }
+    if (ring.size() < 3) {
+        return {};
+    }
+    // Drop one near-straight (redundant) corner => a triangle. At most one:
+    // a quad has none, a triangle exactly one.
+    if (ring.size() == 4) {
+        for (std::size_t i = 0; i < 4; ++i) {
+            const Vec2 prev = ring[(i + 3) % 4];
+            const Vec2 cur = ring[i];
+            const Vec2 next = ring[(i + 1) % 4];
+            const Vec2 a = prev - cur;
+            const Vec2 b = next - cur;
+            const float la = len(a);
+            const float lb = len(b);
+            if (la < 1e-6f || lb < 1e-6f) {
+                continue;
+            }
+            if (dot2(a, b) / (la * lb) < collapseCos) {
+                ring.erase(ring.begin() + static_cast<std::ptrdiff_t>(i));
+                break;
+            }
+        }
+    }
+    return ring;
+}
+
 // One-stroke grid detection ("up-across-down…", task 3.4): an open square
 // wave whose corner-delimited segments are pairwise perpendicular, with the
 // longer alternating family (the rails) mutually parallel. The lattice is
@@ -371,7 +573,8 @@ struct GridDetection {
     int cols = 0;
 };
 
-inline GridDetection detectGrid(const std::vector<Vec2>& p, int window, const ShapeParams& params) {
+inline GridDetection detectGrid(const std::vector<Vec2>& p, int window,
+                                const ShapeParams& params) {
     GridDetection out;
     const std::vector<int> cornerIdx = cornerIndices(p, window, params.cornerRadians);
     if (static_cast<int>(cornerIdx.size()) < params.gridMinCorners) {
@@ -402,7 +605,8 @@ inline GridDetection detectGrid(const std::vector<Vec2>& p, int window, const Sh
         return out;
     }
     for (std::size_t i = 0; i + 1 < segments.size(); ++i) {
-        if (std::fabs(dot2(segments[i].dir, segments[i + 1].dir)) > params.gridPerpMaxDot) {
+        if (std::fabs(dot2(segments[i].dir, segments[i + 1].dir)) >
+            params.gridPerpMaxDot) {
             return out;  // not a square wave
         }
     }
@@ -510,7 +714,8 @@ inline bool pointInPolygon(const std::vector<Vec2>& poly, Vec2 p) {
     // duration (a quick tap is still most plausibly a point gesture).
     if (boundingRadius <= params.holdMaxRadius || raw.size() < 3) {
         result.shape = StrokeShape::HoldPoint;
-        result.confidence = result.features.duration >= params.holdMinDuration ? 0.9f : 0.6f;
+        result.confidence =
+            result.features.duration >= params.holdMinDuration ? 0.9f : 0.6f;
         result.resampled = {centroid};
         return result;
     }
@@ -544,28 +749,70 @@ inline bool pointInPolygon(const std::vector<Vec2>& poly, Vec2 p) {
     result.features.selfIntersections = countSelfIntersections(pts);
     result.features.straightness =
         pathLength > 0.0f ? result.features.endpointDistance / pathLength : 0.0f;
-    result.features.closed = result.features.endpointDistance < params.closedFraction * pathLength;
+    result.features.closed =
+        result.features.endpointDistance < params.closedFraction * pathLength;
 
     const ShapeFeatures& f = result.features;
+
+    // A crossing in the INTERIOR of the stroke (not at the seam where a
+    // closed loop's ends meet) is the signature of an X. Seam-tolerant so a
+    // quad closed with a slight overshoot — which crosses only at the seam —
+    // reads as zero and stays a quad, not a delete.
+    const int seamWindow = std::max(2, params.resampleCount / 8);
+    const int interiorCrossings = countSelfIntersections(pts, seamWindow);
+
+    // X BEFORE closed, gated on the INTERIOR crossing count AND on enclosing
+    // little area. A hand-drawn X wobbles into extra corners and sometimes a
+    // second crossing; what defines it is that it crosses itself while
+    // bounding almost no area (its diagonals enclose nothing). A messy quad
+    // also self-crosses — from wobble or overlap near a corner — but its path
+    // runs around a filled region, so the fill ratio tells them apart. This
+    // runs first so an X, open or closed, goes to DeleteFaces; an overshoot
+    // quad (zero interior crossings) and a filled messy quad (high fill) both
+    // fall through to the closed branch and stay quads.
+    if (interiorCrossings >= 1 && f.straightness < params.straightRatio &&
+        polygonFillRatio(pts) < params.crossMaxFill) {
+        result.shape = StrokeShape::Cross;
+        result.confidence = interiorCrossings == 1 ? 0.8f : 0.7f;
+        return result;
+    }
+
     if (f.closed) {
         // Corner estimates for the shell's CreateQuad application (task
         // 3.3), reported in un-aspect-corrected normalized viewport
         // coordinates so they unproject with the stroke's own space.
-        result.corners = quadCorners(pts, rc, window, params.cornerRadians);
+        result.corners = polygonCorners(pts, rc, params.triangleCollapseCos);
         const float invAspect = params.aspect > 0.0f ? 1.0f / params.aspect : 1.0f;
         for (Vec2& c : result.corners) {
             c.x *= invAspect;
         }
-        if (f.radiusDeviation <= params.circleMaxDeviation && f.corners <= 2 &&
-            f.selfIntersections == 0) {
+        // A closed stroke that bounds a recoverable ring IS a face —
+        // triangle for a validated three-corner estimate, quad otherwise —
+        // GATED ON GEOMETRY, not the raw corner count. A quad drawn with
+        // smooth, rounded corners registers fewer than two sharp bends, so a
+        // corner-count threshold dropped it to Lasso -> hideRegion (a quad
+        // that hid faces). polygonCorners recovering three or four distinct
+        // extremes is the real qualifier; Lasso is left only for the
+        // degenerate case where no ring could be recovered at all.
+        const bool isTriangle = result.corners.size() == 3;
+        const bool boundsRing = result.corners.size() >= 3;
+        // A closed stroke that bounds a ring is a face. Interior crossings no
+        // longer demote it: a low-area self-crossing X was already diverted
+        // above (fill gate), so a closed stroke reaching here that still
+        // crosses itself is a MESSY QUAD — wobble or overlap near a corner —
+        // and stays a quad. Circle only needs its crossings clean.
+        if (!isTriangle && f.radiusDeviation <= params.circleMaxDeviation &&
+            f.corners <= 2 && interiorCrossings == 0) {
             result.shape = StrokeShape::Circle;
             result.confidence =
                 0.9f - 0.5f * (f.radiusDeviation / params.circleMaxDeviation) * 0.2f;
-        } else if (f.corners >= 3 && f.corners <= 6 && f.selfIntersections == 0) {
+        } else if (boundsRing) {
             result.shape = StrokeShape::ClosedLoop;
-            // 3-4 detected corners (the seam corner never registers) reads
-            // as a quad; 5-6 is sloppier but still a closed polygon.
-            result.confidence = f.corners <= 4 ? 0.85f : 0.7f;
+            // Sharper corner structure reads as more confidently a polygon;
+            // a smooth or messy closed stroke is still a face, just less
+            // crisply drawn.
+            result.confidence =
+                interiorCrossings == 0 && f.corners >= 3 && f.corners <= 4 ? 0.85f : 0.7f;
         } else {
             result.shape = StrokeShape::Lasso;
             result.confidence = 0.6f;
@@ -591,12 +838,6 @@ inline bool pointInPolygon(const std::vector<Vec2>& poly, Vec2 p) {
         }
     }
 
-    if (f.selfIntersections == 1 && f.corners >= 1 && f.corners <= 3 &&
-        f.straightness < params.straightRatio) {
-        result.shape = StrokeShape::Cross;
-        result.confidence = 0.8f;
-        return result;
-    }
     if (f.selfIntersections >= params.scribbleMinIntersections ||
         f.corners >= params.scribbleMinCorners) {
         result.shape = StrokeShape::Scribble;
@@ -608,6 +849,37 @@ inline bool pointInPolygon(const std::vector<Vec2>& poly, Vec2 p) {
         result.confidence = f.straightness;
         return result;
     }
+
+    // Nearly-closed quad rescue (task 3.2): a would-be Unknown that still
+    // reads as a hand-drawn quad — no self-crossings, not a straight line,
+    // endpoints within a generous fraction of the perimeter, and a
+    // non-degenerate quad ring recoverable from it. Placed LAST on purpose:
+    // grid/scribble/cross/line have already claimed their strokes above, so
+    // this only rescues leftovers and cannot steal from them. Reported as a
+    // slightly-lower-confidence ClosedLoop carrying the same estimated quad
+    // corners a cleanly closed loop would, so the shell's CreateQuad
+    // application is identical. No corner-count gate: a smoothly drawn U
+    // registers no sharp corners, and `quadCorners` recovering four distinct
+    // extremes is the real qualifier that the stroke bounds an area.
+    if (f.selfIntersections == 0 && f.straightness < params.straightRatio &&
+        f.endpointDistance < params.nearlyClosedFraction * pathLength) {
+        // Always a QUAD estimate here, never `polygonCorners`: an open
+        // stroke's two ends are far apart, so the seam-corner test triangle
+        // detection relies on is meaningless and would misread a smooth
+        // adjacent-quad U as a three-corner triangle. Triangles are only
+        // recognized on genuinely closed strokes (the branch above).
+        result.corners = polygonCorners(pts, rc, params.triangleCollapseCos);
+        const float invAspect = params.aspect > 0.0f ? 1.0f / params.aspect : 1.0f;
+        for (Vec2& c : result.corners) {
+            c.x *= invAspect;
+        }
+        if (result.corners.size() >= 3) {
+            result.shape = StrokeShape::ClosedLoop;
+            result.confidence = 0.7f;
+            return result;
+        }
+    }
+
     result.shape = StrokeShape::Unknown;
     result.confidence = 0.3f;
     return result;
@@ -640,7 +912,8 @@ public:
             }
             // NDC -> normalized viewport (origin top-left), then the same
             // aspect correction applied to the stroke.
-            m_screen[i] = {(cx / cw * 0.5f + 0.5f) * aspect, 1.0f - (cy / cw * 0.5f + 0.5f)};
+            m_screen[i] = {(cx / cw * 0.5f + 0.5f) * aspect,
+                           1.0f - (cy / cw * 0.5f + 0.5f)};
             m_valid[i] = true;
         }
     }
@@ -788,7 +1061,8 @@ public:
     }
 
     // Fraction of stroke samples within `radius` of some edge.
-    [[nodiscard]] float fractionAlongEdges(const std::vector<Vec2>& stroke, float radius) const {
+    [[nodiscard]] float fractionAlongEdges(const std::vector<Vec2>& stroke,
+                                           float radius) const {
         if (stroke.empty()) {
             return 0.0f;
         }
@@ -805,8 +1079,9 @@ public:
                 if (!m_valid[v0.value] || !m_valid[v1.value]) {
                     continue;
                 }
-                near =
-                    length2(closestOnSegment2(m_screen[v0.value], m_screen[v1.value], s) - s) <= r2;
+                near = length2(closestOnSegment2(m_screen[v0.value],
+                                                 m_screen[v1.value], s) -
+                               s) <= r2;
             }
             if (near) {
                 ++hits;
@@ -837,7 +1112,8 @@ private:
             acc = acc + m_screen[v.value];
             ++n;
         }
-        return n > 0 ? std::optional<Vec2>(acc * (1.0f / static_cast<float>(n))) : std::nullopt;
+        return n > 0 ? std::optional<Vec2>(acc * (1.0f / static_cast<float>(n)))
+                     : std::nullopt;
     }
 
     const Mesh& m_mesh;
@@ -846,8 +1122,8 @@ private:
     mutable std::vector<Vec2> m_poly;
 };
 
-inline void addCandidate(StrokeInterpretation& out, InterpretedAction action, float confidence,
-                         std::vector<ElementRef> elements = {}) {
+inline void addCandidate(StrokeInterpretation& out, InterpretedAction action,
+                         float confidence, std::vector<ElementRef> elements = {}) {
     out.candidates.push_back({action, confidence, std::move(elements)});
 }
 
@@ -869,16 +1145,330 @@ inline std::vector<ElementRef> faceRefs(const std::vector<FaceId>& faces) {
     return refs;
 }
 
+// Edge-walking quad completion (change add-context-aware-create-face). The
+// existing vertex adjacent to BOTH endpoints (a shared grid corner) that lies on
+// the OPPOSITE side of the A-B chord from the drawn bend C — the vertex that
+// closes a hand-filled quad against the existing topology, guaranteeing a
+// uniform quad rather than a geometric guess. Among candidates it prefers the
+// one nearest the parallelogram estimate. nullopt when the endpoints share no
+// such neighbour (e.g. drawing into empty space), where the caller falls back to
+// the geometric estimate.
+inline std::optional<VertexId> sharedCornerOppositeBend(
+    const ScreenProjection* proj, VertexId a, VertexId b, Vec2 A, Vec2 B, Vec2 C) {
+    const Mesh& mesh = proj->mesh();
+    // Neighbours of A: the verts before/after A in each of A's face rings.
+    std::vector<VertexId> neigh;
+    for (const FaceId f : mesh.vertexFaces(a)) {
+        const std::vector<VertexId> fv = mesh.faceVertices(f);
+        const std::size_t n = fv.size();
+        for (std::size_t i = 0; i < n; ++i) {
+            if (fv[i] == a) {
+                neigh.push_back(fv[(i + n - 1) % n]);
+                neigh.push_back(fv[(i + 1) % n]);
+            }
+        }
+    }
+    const float sideC = cross2(B - A, C - A);
+    const Vec2 estimate = A + B - C;
+    std::optional<VertexId> best;
+    float bestDist = std::numeric_limits<float>::max();
+    for (const VertexId d : neigh) {
+        if (d == a || d == b || !proj->valid(d)) {
+            continue;
+        }
+        if (!mesh.edgeBetween(b, d).valid()) {
+            continue;  // must also be a neighbour of B (a genuine shared corner)
+        }
+        const Vec2 Ds = proj->screen(d);
+        // Must sit on the opposite side of the chord from the bend, so the quad
+        // A-C-B-D opens correctly instead of folding.
+        if ((sideC > 0.0f) == (cross2(B - A, Ds - A) > 0.0f)) {
+            continue;
+        }
+        const float dist = length2(Ds - estimate);
+        if (dist < bestDist) {
+            bestDist = dist;
+            best = d;
+        }
+    }
+    return best;
+}
+
+// Context-aware open-stroke face creation (change add-context-aware-create-face).
+// An OPEN stroke whose two endpoints snap to existing vertices A, B is a hand
+// filling a face against adjacent topology. It is read by the sharpness of its
+// dominant bend C: a sharp (~90 degrees) corner traces two sides of a rectangle
+// -> QUAD [A, C, B, A+B-C] (the 4th corner completes the parallelogram, welding
+// to a vertex there if one exists); a gentle bend traces two sides of a triangle
+// -> TRIANGLE [A, C, B]; near-straight stays an edge/loop gesture -> no face.
+// Never creates over an existing face. On success it sets out.shape.corners to
+// the ring (un-aspect-corrected, like the closed path) and adds the create
+// candidate first. Returns whether it fired.
+inline bool tryOpenStrokeCreateFace(StrokeInterpretation& out, const ScreenProjection* proj,
+                                    const ShapeParams& shapeParams,
+                                    const ContextParams& contextParams) {
+    if (proj == nullptr) {
+        return false;
+    }
+    // Open adjacent-fill strokes: Line / Unknown, and ALSO ClosedLoop — an L
+    // whose two arms bring its endpoints within the nearly-closed fraction is
+    // rescued as a ClosedLoop (and would misread as a 3-corner triangle), but if
+    // its endpoints snap to two DISTINCT vertices it is really an open fill. The
+    // A != B gate below excludes genuine closed loops (whose start ~ end snap to
+    // the same vertex). Grids/scribbles/crosses/circles keep their shapes.
+    const StrokeShape s = out.shape.shape;
+    if (s != StrokeShape::Line && s != StrokeShape::Unknown &&
+        s != StrokeShape::ClosedLoop) {
+        return false;
+    }
+    const std::vector<Vec2>& stroke = out.shape.resampled;
+    if (stroke.size() < 3) {
+        return false;
+    }
+    // Both endpoints must snap to distinct existing vertices.
+    const std::optional<VertexId> a =
+        proj->nearestVertex(stroke.front(), contextParams.vertexRadius);
+    const std::optional<VertexId> b =
+        proj->nearestVertex(stroke.back(), contextParams.vertexRadius);
+    if (!a || !b || *a == *b) {
+        return false;
+    }
+    const Vec2 A = proj->screen(*a);
+    const Vec2 B = proj->screen(*b);
+    const Vec2 chord = B - A;
+    const float chordLen2 = length2(chord);
+    if (chordLen2 < 1e-8f) {
+        return false;
+    }
+    // Snap an inferred corner to a nearby existing vertex so the face conforms
+    // to the existing grid (uniform quads for animation/sculpting) rather than
+    // inventing a skewed corner. More generous than the endpoint pick radius
+    // because a completion is only an estimate. A and B already sit on vertices.
+    const float inferRadius = contextParams.vertexRadius * 1.6f;
+    const auto snapInferred = [&](Vec2 corner) -> Vec2 {
+        if (const std::optional<VertexId> v = proj->nearestVertex(corner, inferRadius)) {
+            return proj->screen(*v);
+        }
+        return corner;
+    };
+
+    std::vector<Vec2> ring;
+    InterpretedAction action;
+    // Count the stroke's REAL corners (windowed turn). Two corners = a U / three-
+    // sided fill whose four quad corners ARE the endpoints plus the two bends, in
+    // stroke order — no inference. (The single dominant-bend guess below fails on
+    // a U: it picks the midpoint of the far side and folds the quad.)
+    const int window = std::max(2, shapeParams.resampleCount / 16);
+    const std::vector<int> corners = cornerIndices(stroke, window, shapeParams.cornerRadians);
+    // ... but ONE ROUNDED BEND is not two corners (change fix-quad-rim-sharing).
+    // `cornerIndices` skips one window after a corner, and a hand-drawn rounded turn
+    // is still turning after that skip, so it reports the same bend twice — measured
+    // on device at 4 samples and 0.08 of the chord apart. Trusted as a U's two bends
+    // that builds a ring with two nearly coincident corners: a face stretched across
+    // everything between the endpoints. Two bends must therefore be separated BOTH
+    // along the stroke and in space; an L falls through to the single-bend read it
+    // should always have had.
+    const bool twoBends =
+        corners.size() >= 2 &&
+        corners.back() - corners.front() >= static_cast<int>(stroke.size()) / 5 &&
+        length2(stroke[static_cast<std::size_t>(corners.back())] -
+                stroke[static_cast<std::size_t>(corners.front())]) > 0.0625f * chordLen2;
+    if (twoBends) {
+        const Vec2 C1 = snapInferred(stroke[static_cast<std::size_t>(corners.front())]);
+        const Vec2 C2 = snapInferred(stroke[static_cast<std::size_t>(corners.back())]);
+        ring = {A, C1, C2, B};
+        action = InterpretedAction::CreateQuad;
+    } else {
+        // Single bend (L): the stroke sample of maximum perpendicular distance
+        // from the A-B chord, classified by its interior angle.
+        Vec2 C = stroke[stroke.size() / 2];
+        float bestPerp = -1.0f;
+        for (const Vec2 p : stroke) {
+            const float t = std::clamp(dot2(p - A, chord) / chordLen2, 0.0f, 1.0f);
+            const float perp = len(p - (A + chord * t));
+            if (perp > bestPerp) {
+                bestPerp = perp;
+                C = p;
+            }
+        }
+        if (bestPerp < 0.12f * std::sqrt(chordLen2)) {
+            return false;  // near-straight: an edge/loop gesture, not a face
+        }
+        const Vec2 ca = A - C;
+        const Vec2 cb = B - C;
+        const float la = len(ca);
+        const float lb = len(cb);
+        if (la < 1e-6f || lb < 1e-6f) {
+            return false;
+        }
+        const float cosC = dot2(ca, cb) / (la * lb);
+        if (cosC > -0.5f) {  // sharp ~60-120 degrees: two sides of a rectangle -> quad
+            const Vec2 Cs = snapInferred(C);
+            // Prefer the edge-walked shared corner (guaranteed on the existing
+            // grid -> uniform); fall back to the snapped parallelogram estimate
+            // when the endpoints share no such neighbour (filling empty space).
+            Vec2 D;
+            if (const std::optional<VertexId> shared =
+                    sharedCornerOppositeBend(proj, *a, *b, A, B, Cs)) {
+                D = proj->screen(*shared);
+            } else {
+                D = snapInferred(A + B - Cs);
+            }
+            ring = {A, Cs, B, D};
+            action = InterpretedAction::CreateQuad;
+        } else if (cosC > -0.94f) {  // gentle ~120-160 degrees: two sides of a triangle
+            ring = {A, snapInferred(C), B};
+            action = InterpretedAction::CreateTriangle;
+        } else {
+            return false;  // near-straight (>160 degrees): no face
+        }
+    }
+    // Reject a self-intersecting (bow-tie / dart) ring: a snapped corner that
+    // still folds the quad would build a malformed face — better to create
+    // nothing than a bad quad.
+    if (ring.size() == 4 &&
+        (segmentsCross(ring[0], ring[1], ring[2], ring[3]) ||
+         segmentsCross(ring[1], ring[2], ring[3], ring[0]))) {
+        return false;
+    }
+    // Corners that collapsed onto the same point after snapping are degenerate.
+    for (std::size_t i = 0; i < ring.size(); ++i) {
+        for (std::size_t j = i + 1; j < ring.size(); ++j) {
+            if (length2(ring[i] - ring[j]) < 1e-8f) {
+                return false;
+            }
+        }
+    }
+    // Never create a face over an existing one.
+    Vec2 centroid{0.0f, 0.0f};
+    for (const Vec2 p : ring) {
+        centroid = centroid + p;
+    }
+    centroid = centroid * (1.0f / static_cast<float>(ring.size()));
+    if (proj->faceContaining(centroid)) {
+        return false;
+    }
+    // Report corners un-aspect-corrected (matching the closed-stroke path).
+    const float invAspect = shapeParams.aspect > 0.0f ? 1.0f / shapeParams.aspect : 1.0f;
+    for (Vec2& c : ring) {
+        c.x *= invAspect;
+    }
+    out.shape.corners = ring;
+    addCandidate(out, action, 0.85f,
+                 {{ElementRef::Kind::Vertex, a->value}, {ElementRef::Kind::Vertex, b->value}});
+    return true;
+}
+
+// Does the stroke actually RUN OVER existing faces (change add-stroke-rim-bridge)?
+//
+// This is the discriminator between the two near-straight gestures, which are
+// otherwise identical in shape: a LoopCut runs over faces, while a stroke across
+// a GAP between two rims touches faces only where it starts and ends. Edge
+// crossing cannot tell them apart — a stroke anchored on two rim vertices
+// necessarily crosses those vertices' rim edges, which is exactly how a
+// gap-crossing stroke came to insert a loop into a ring it merely clipped.
+//
+// The endpoint sixths are deliberately ignored: a stroke that starts ON a rim
+// vertex sits at the corner of that vertex's faces, and a point-in-polygon test
+// exactly at a polygon corner is a coin flip, so the endpoints must not decide
+// this.
+inline bool strokeCoversFace(const ScreenProjection* proj, const std::vector<Vec2>& stroke) {
+    if (proj == nullptr || stroke.empty()) {
+        return false;
+    }
+    const std::size_t skip = stroke.size() / 6;
+    for (std::size_t i = skip; i + skip < stroke.size(); ++i) {
+        if (proj->faceContaining(stroke[i]).has_value()) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// True when `v` sits on an OPEN RIM — it carries at least one boundary edge. A
+// bridge quad is always built on such an edge, which is what makes "never create
+// over an existing face" a topological guarantee for the bridge rather than a
+// geometric test: a boundary edge has one incident face, and the bridge gives it
+// its second.
+inline bool onOpenRim(const Mesh& mesh, VertexId v) {
+    for (const EdgeId e : mesh.vertexEdges(v)) {
+        if (mesh.isAlive(e) && mesh.isBoundaryEdge(e)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Rim bridge (change add-stroke-rim-bridge): a stroke drawn ACROSS AN UNFILLED
+// GAP — from a vertex on one open rim, over bare Target, to a vertex on the rim
+// facing it — fills the corridor between the two rims with quads.
+//
+// The recognizer only names the CORRESPONDING PAIR (the two endpoint vertices);
+// walking the rims outward from that pair and emitting the quads is the tool
+// layer's job, as with every other action here. Confidence sits just under the
+// create actions, so a bent stroke that also reads as a quad keeps the quad and
+// offers the bridge as its one-tap alternative.
+inline bool tryOpenStrokeBridgeRims(StrokeInterpretation& out, const ScreenProjection* proj,
+                                    const ContextParams& contextParams) {
+    if (proj == nullptr) {
+        return false;
+    }
+    const StrokeShape s = out.shape.shape;
+    if (s != StrokeShape::Line && s != StrokeShape::Unknown) {
+        return false;
+    }
+    const std::vector<Vec2>& stroke = out.shape.resampled;
+    if (stroke.size() < 3) {
+        return false;
+    }
+    // Over faces this is the kept LoopCut gesture, not a gap crossing.
+    if (strokeCoversFace(proj, stroke)) {
+        return false;
+    }
+    // The MIDDLE of a gap crossing sits in open space. A stroke tracing a RIM
+    // also passes the no-faces test — a rim lies on the boundary of its faces,
+    // not inside them — but its middle runs along an edge, and bridging two
+    // points of one rim stretch would throw a quad over the topology between
+    // them.
+    //
+    // Measured against the stroke's OWN LENGTH rather than the pick radius,
+    // which would make this depend on camera distance: at tablet zoom a real gap
+    // crossing spans only a few percent of the viewport, so a fixed radius
+    // covers most of it and would refuse the gesture this rule exists to accept.
+    const Vec2 mid = stroke[stroke.size() / 2];
+    const float span = len(stroke.back() - stroke.front());
+    if (proj->nearestEdge(mid, span * 0.15f).has_value()) {
+        return false;
+    }
+    const std::optional<VertexId> a =
+        proj->nearestVertex(stroke.front(), contextParams.vertexRadius);
+    const std::optional<VertexId> b =
+        proj->nearestVertex(stroke.back(), contextParams.vertexRadius);
+    if (!a || !b || *a == *b) {
+        return false;
+    }
+    const Mesh& mesh = proj->mesh();
+    // Already adjacent: there is no gap between them to bridge.
+    if (mesh.edgeBetween(*a, *b).valid()) {
+        return false;
+    }
+    if (!onOpenRim(mesh, *a) || !onOpenRim(mesh, *b)) {
+        return false;
+    }
+    addCandidate(out, InterpretedAction::BridgeRims, 0.8f * out.shape.confidence,
+                 {{ElementRef::Kind::Vertex, a->value}, {ElementRef::Kind::Vertex, b->value}});
+    return true;
+}
+
 }  // namespace interp_detail
 
 // Resolves the stroke against the EditMesh. `mesh`/`viewProj` may be null:
 // stage 1 still runs and every context-dependent rule sees an empty scene
 // (the caller has no EditMesh yet — e.g. the very first quad of a retopo).
 // `viewProj` is column-major (matches simd_float4x4 memory order).
-[[nodiscard]] inline StrokeInterpretation interpretStroke(std::span<const ScreenSample> samples,
-                                                          const Mesh* mesh, const float* viewProj,
-                                                          const ShapeParams& shapeParams = {},
-                                                          const ContextParams& contextParams = {}) {
+[[nodiscard]] inline StrokeInterpretation interpretStroke(
+    std::span<const ScreenSample> samples, const Mesh* mesh, const float* viewProj,
+    const ShapeParams& shapeParams = {}, const ContextParams& contextParams = {}) {
     using namespace interp_detail;
 
     StrokeInterpretation out;
@@ -896,10 +1486,10 @@ inline std::vector<ElementRef> faceRefs(const std::vector<FaceId>& faces) {
     }
 
     const std::vector<Vec2>& stroke = out.shape.resampled;
-    const Vec2 probe =
-        out.shape.shape == StrokeShape::Line || out.shape.shape == StrokeShape::Scribble
-            ? stroke[stroke.size() / 2]
-            : out.shape.centroid;
+    const Vec2 probe = out.shape.shape == StrokeShape::Line ||
+                               out.shape.shape == StrokeShape::Scribble
+                           ? stroke[stroke.size() / 2]
+                           : out.shape.centroid;
 
     // Resolve the under-stroke context at the probe point.
     std::optional<VertexId> probeVertex;
@@ -913,13 +1503,67 @@ inline std::vector<ElementRef> faceRefs(const std::vector<FaceId>& faces) {
     if (probeVertex) {
         out.context = UnderStroke::Vertex;
     } else if (probeEdge) {
-        out.context =
-            proj->mesh().isBoundaryEdge(*probeEdge) ? UnderStroke::BoundaryEdge : UnderStroke::Edge;
+        out.context = proj->mesh().isBoundaryEdge(*probeEdge)
+                          ? UnderStroke::BoundaryEdge
+                          : UnderStroke::Edge;
     } else if (probeFace) {
         out.context = UnderStroke::Face;
     } else {
         out.context = UnderStroke::EmptySurface;
     }
+
+    // A closed stroke drawn ENTIRELY INSIDE one existing face, sharing none of its topology.
+    //
+    // Such a stroke would create a face nested inside another: geometrically contained,
+    // topologically disconnected from it. That is never a valid quad cage — a face may sit beside
+    // another (sharing an edge) or replace it, never float inside it — so the create actions are
+    // withheld rather than merely down-weighted. Down-weighting is what produced the sliver
+    // triangles and quads users were finding stranded inside their cage: a low-confidence create is
+    // still a create.
+    //
+    // Deliberately strict about what counts as "sharing topology": if ANY sample lies within pick
+    // range of an existing edge or vertex, the stroke is NOT interior, and the create proceeds. That
+    // preserves the legitimate case of drawing a quad against existing geometry — the grid
+    // continuation that shares a boundary — which is the whole reason this is a containment test
+    // rather than a blanket "no creating over faces" rule.
+    const auto strokeIsNestedInsideOneFace = [&]() -> bool {
+        if (proj == nullptr) {
+            return false;
+        }
+        // Must be over a face. Deliberately NOT also requiring `facesEnclosed` to be empty: a small
+        // loop near a big face's centre CONTAINS that face's centroid, so the enclosure test reports
+        // the very face the loop is nested inside — which made the first version of this check reject
+        // the exact case it exists to catch. A test caught it.
+        //
+        // The containment below is the real invariant and needs no enclosure test: a loop that
+        // genuinely encloses a face must extend beyond that face's boundary, so its samples leave the
+        // face or pass near an edge, and it is not nested.
+        if (!probeFace.has_value()) {
+            return false;
+        }
+        for (const Vec2 sample : stroke) {
+            if (proj->nearestVertex(sample, contextParams.vertexRadius).has_value() ||
+                proj->nearestEdge(sample, contextParams.edgeRadius).has_value()) {
+                return false;  // touches existing topology, so not nested
+            }
+            // Leaving the face means the stroke spans more than one, so it is not interior to one.
+            const std::optional<FaceId> here = proj->faceContaining(sample);
+            if (!here.has_value() || here->value != probeFace->value) {
+                return false;
+            }
+        }
+        return true;
+    };
+
+    // Context-aware open-stroke face creation (change add-context-aware-create-
+    // face): an open stroke between two vertices makes a welded quad/triangle.
+    // If it fires, its create candidate leads; the switch below still runs so a
+    // Line keeps its insert-loop alternative.
+    tryOpenStrokeCreateFace(out, proj, shapeParams, contextParams);
+    // Rim bridge (change add-stroke-rim-bridge): the same open stroke read as a
+    // gap crossing when it runs between two rim vertices over no face at all.
+    // Ranked below a create, so a stroke that traces a face keeps the face.
+    tryOpenStrokeBridgeRims(out, proj, contextParams);
 
     const float shapeConf = out.shape.confidence;
     switch (out.shape.shape) {
@@ -931,103 +1575,83 @@ inline std::vector<ElementRef> faceRefs(const std::vector<FaceId>& faces) {
             break;
         }
         case StrokeShape::Line: {
-            if (proj != nullptr) {
-                const std::optional<VertexId> v0 =
-                    proj->nearestVertex(stroke.front(), contextParams.vertexRadius);
-                const std::optional<VertexId> v1 =
-                    proj->nearestVertex(stroke.back(), contextParams.vertexRadius);
-                if (v0 && v1 && !(*v0 == *v1)) {
-                    addCandidate(out, InterpretedAction::MergeVertices, 0.9f * shapeConf,
-                                 {{ElementRef::Kind::Vertex, v0->value},
-                                  {ElementRef::Kind::Vertex, v1->value}});
-                }
-                // Loop insert vs loop tag disambiguation (spec scenario): a
-                // stroke running ALONG the loop tags it — even when it
-                // grazes transverse edges near vertices — while a stroke
-                // CROSSING edges inserts a full loop around the quad ring.
-                // Elements carry the complete walks (loops.hpp): the whole
-                // edge loop for a tag, the whole ring for an insert (the
-                // first ring edge seeds cyber_retopo_insert_loop).
+            // A line CROSSING a face ring inserts a loop (the kept LoopCut
+            // gesture); the whole quad ring the line crosses is the target
+            // (loops.hpp), the first ring edge seeding cyber_retopo_insert_loop.
+            // mergeVertices, tagLoop and toggleVisibility are tools now, not
+            // stroke gestures, so a line that merely runs along an edge or
+            // over empty space resolves to nothing.
+            //
+            // The line must RUN OVER FACES (change add-stroke-rim-bridge).
+            // Crossed edges alone are not enough: a line anchored on two rim
+            // vertices crosses those vertices' rim edges without ever running
+            // along a ring, and on device that clipped crossing inserted a loop
+            // nowhere near where the user drew. Such a stroke is a gap crossing
+            // — the rim bridge above — not a loop cut.
+            if (proj != nullptr && strokeCoversFace(proj, stroke)) {
                 const std::vector<EdgeId> crossed = proj->edgesCrossing(stroke);
-                const float along = proj->fractionAlongEdges(stroke, contextParams.edgeRadius);
-                const std::vector<EdgeId> loop =
-                    probeEdge ? edgeLoopFrom(proj->mesh(), *probeEdge) : std::vector<EdgeId>{};
-                if (along >= 0.6f && probeEdge) {
-                    addCandidate(out, InterpretedAction::TagLoop, 0.8f * along * shapeConf,
-                                 edgeRefs(loop));
-                    if (!crossed.empty()) {
-                        addCandidate(
-                            out, InterpretedAction::InsertLoop, 0.4f * shapeConf,
-                            edgeRefs(quadRingFromEdge(proj->mesh(), crossed.front()).edges));
-                    }
-                } else if (!crossed.empty()) {
-                    addCandidate(out, InterpretedAction::InsertLoop, 0.75f * shapeConf,
-                                 edgeRefs(quadRingFromEdge(proj->mesh(), crossed.front()).edges));
-                    if (probeEdge) {
-                        addCandidate(out, InterpretedAction::TagLoop, 0.35f * shapeConf,
-                                     edgeRefs(loop));
-                    }
+                if (!crossed.empty()) {
+                    addCandidate(
+                        out, InterpretedAction::InsertLoop, 0.75f * shapeConf,
+                        edgeRefs(quadRingFromEdge(proj->mesh(), crossed.front()).edges));
                 }
-            }
-            if (out.candidates.empty() && out.context == UnderStroke::EmptySurface) {
-                // A straight line IN EMPTY SPACE touching nothing is the
-                // visibility gesture (invert / show-all, resolved by
-                // direction in the shell). A line over mesh elements that
-                // matched no rule stays None — it must not hide geometry.
-                addCandidate(out, InterpretedAction::ToggleVisibility, 0.5f * shapeConf);
             }
             break;
         }
         case StrokeShape::ClosedLoop: {
             const std::vector<FaceId> enclosed =
                 proj != nullptr ? proj->facesEnclosed(stroke) : std::vector<FaceId>{};
-            if (out.context == UnderStroke::EmptySurface && enclosed.empty()) {
-                addCandidate(out, InterpretedAction::CreateQuad, shapeConf);
-                addCandidate(out, InterpretedAction::HideRegion, 0.3f * shapeConf);
-            } else {
-                addCandidate(out, InterpretedAction::CreateQuad, 0.5f * shapeConf);
-                if (!enclosed.empty()) {
-                    addCandidate(out, InterpretedAction::HideRegion, 0.4f * shapeConf,
-                                 faceRefs(enclosed));
-                }
+            // Three estimated corners = a triangle, four = a quad. The
+            // estimate is conservative (polygonCorners falls back to a quad
+            // on any ambiguity), so a triangle is only offered when the
+            // corner structure is unmistakably three-sided.
+            const InterpretedAction createAction =
+                out.shape.corners.size() == 3 ? InterpretedAction::CreateTriangle
+                                              : InterpretedAction::CreateQuad;
+            // A closed loop always creates a face (hideRegion is no longer a
+            // stroke gesture — it is a tool). Full confidence over empty
+            // surface; a little lower when drawn over existing geometry,
+            // where the intent is marginally less certain.
+            const bool overEmpty =
+                out.context == UnderStroke::EmptySurface && enclosed.empty();
+            // Withheld entirely, not down-weighted: a face nested inside another is never valid.
+            if (!strokeIsNestedInsideOneFace()) {
+                addCandidate(out, createAction, overEmpty ? shapeConf : 0.5f * shapeConf);
             }
             break;
         }
         case StrokeShape::Circle: {
-            // A large round stroke enclosing several faces is a lasso in
-            // circle's clothing — rotate-edge only makes sense for a small
-            // circle scoped to one edge.
-            const std::vector<FaceId> enclosed =
-                proj != nullptr ? proj->facesEnclosed(stroke) : std::vector<FaceId>{};
-            if (enclosed.size() >= 2) {
-                addCandidate(out, InterpretedAction::HideRegion, 0.7f * shapeConf,
-                             faceRefs(enclosed));
-                if (probeEdge) {
-                    addCandidate(out, InterpretedAction::RotateEdge, 0.35f * shapeConf,
-                                 {{ElementRef::Kind::Edge, probeEdge->value}});
-                }
-            } else if (probeEdge) {
-                addCandidate(out, InterpretedAction::RotateEdge, 0.85f * shapeConf,
-                             {{ElementRef::Kind::Edge, probeEdge->value}});
-                addCandidate(out, InterpretedAction::CreateQuad, 0.3f * shapeConf);
-            } else if (out.context == UnderStroke::EmptySurface) {
-                // A round closed stroke over nothing still reads as a
-                // (round-ish) quad draw.
-                addCandidate(out, InterpretedAction::CreateQuad, 0.6f * shapeConf);
-            } else {
-                addCandidate(out, InterpretedAction::CreateQuad, 0.4f * shapeConf);
+            // A round closed stroke is a (round-ish) quad draw. rotateEdge and
+            // hideRegion are tools now, not stroke gestures — a circle only
+            // ever creates a quad.
+            if (!strokeIsNestedInsideOneFace()) {
+                addCandidate(
+                    out, InterpretedAction::CreateQuad,
+                    (out.context == UnderStroke::EmptySurface ? 0.6f : 0.4f) * shapeConf);
             }
             break;
         }
         case StrokeShape::Scribble: {
+            // Scribbling over geometry is a delete gesture (dissolveEdge is a
+            // tool now, not a stroke): whatever faces the scribble covers are
+            // deleted. Most scribbles self-cross and are already caught as an
+            // X above; this remains for a non-crossing zig-zag.
             if (proj != nullptr) {
-                const std::vector<EdgeId> near = proj->edgesNear(stroke, contextParams.edgeRadius);
-                if (!near.empty()) {
-                    addCandidate(out, InterpretedAction::DissolveEdge, 0.8f * shapeConf,
-                                 edgeRefs(near));
-                } else if (probeFace) {
+                Vec2 lo = stroke.front();
+                Vec2 hi = stroke.front();
+                for (const Vec2 s : stroke) {
+                    lo = {std::fmin(lo.x, s.x), std::fmin(lo.y, s.y)};
+                    hi = {std::fmax(hi.x, s.x), std::fmax(hi.y, s.y)};
+                }
+                std::vector<FaceId> hit = proj->facesInBox(lo, hi);
+                if (hit.empty()) {
+                    if (probeFace) {
+                        hit.push_back(*probeFace);
+                    }
+                }
+                if (!hit.empty()) {
                     addCandidate(out, InterpretedAction::DeleteFaces, 0.7f * shapeConf,
-                                 {{ElementRef::Kind::Face, probeFace->value}});
+                                 faceRefs(hit));
                 }
             }
             break;
@@ -1058,32 +1682,17 @@ inline std::vector<ElementRef> faceRefs(const std::vector<FaceId>& faces) {
             break;
         }
         case StrokeShape::Lasso: {
-            const std::vector<FaceId> enclosed =
-                proj != nullptr ? proj->facesEnclosed(stroke) : std::vector<FaceId>{};
-            // The hide gesture is a closed stroke STARTING in empty space
-            // and crossing the mesh (spec grammar table); a lasso started
-            // on the mesh still offers hide, at lower confidence.
-            bool startsEmpty = true;
-            if (proj != nullptr) {
-                startsEmpty = !proj->nearestVertex(stroke.front(), contextParams.vertexRadius) &&
-                              !proj->nearestEdge(stroke.front(), contextParams.edgeRadius) &&
-                              !proj->faceContaining(stroke.front());
-            }
-            if (!enclosed.empty()) {
-                addCandidate(out, InterpretedAction::HideRegion,
-                             (startsEmpty ? 0.85f : 0.5f) * shapeConf, faceRefs(enclosed));
-            } else {
-                addCandidate(out, InterpretedAction::HideRegion, 0.6f * shapeConf);
-            }
+            // Lasso is no longer a stroke gesture: hideRegion moved to the
+            // tool layer, and a closed stroke that bounds a ring is now a
+            // quad (see classifyShape). Only a degenerate closed stroke —
+            // one from which no quad ring could be recovered — still lands
+            // here, and it resolves to nothing rather than hiding faces.
             break;
         }
-        case StrokeShape::Grid: {
-            // One-stroke grid → block of quads. Strongest over empty
-            // surface; still offered over existing topology, weaker.
-            addCandidate(out, InterpretedAction::CreateGrid,
-                         (out.context == UnderStroke::EmptySurface ? 0.9f : 0.5f) * shapeConf);
-            break;
-        }
+        case StrokeShape::Grid:
+            // createGrid is retired from the stroke grammar — a one-stroke
+            // grid is a tool now, not a Pencil gesture. The Grid SHAPE still
+            // classifies (classifyShape is unchanged) but resolves to nothing.
         case StrokeShape::Unknown:
             break;
     }

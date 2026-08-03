@@ -1,6 +1,7 @@
 #pragma once
 
 #include <span>
+#include <utility>
 #include <vector>
 
 #include "cyber/core/math.hpp"
@@ -49,6 +50,28 @@ struct PackResult {
     float usedArea = 0.0f;              // fraction of the unit square covered
     float texelDensity = 0.0f;          // texels per UV unit at `scale`
 };
+
+// Column count of the skyline height map. Exposed because the two run-scanners below are
+// defined over exactly this many columns.
+constexpr int kSkylineColumns = 512;
+
+// Lowest resting height over every run of `span` consecutive columns of `heights`, returning
+// {leftmost column achieving it, that height}.
+//
+// TWO implementations of one function, exposed so a test can assert they agree. `packBoxes`
+// picks between them by `span`, and which is faster is a measured question rather than an
+// asymptotic one:
+//
+//  * Naive: ~kSkylineColumns * span. Cheaper when the strip is wide relative to the islands,
+//    so each island spans only a column or two.
+//  * Monotonic: a queue of column indices whose front is the tallest column in the current
+//    run, ~kSkylineColumns plus bookkeeping. Wins by ~6x once span is large.
+//
+// Both use the same tie-break — ascending column, strictly-less comparison — so they are
+// interchangeable and the packed output does not depend on which one runs.
+[[nodiscard]] std::pair<int, float> lowestRunNaive(std::span<const float> heights, int span);
+[[nodiscard]] std::pair<int, float> lowestRunMonotonic(std::span<const float> heights, int span,
+                                                       std::vector<int>& scratch);
 
 // Packs `boxes` (island bounding boxes) into the unit square with a single
 // uniform scale (relative sizes preserved). Boxes may be empty; the result is

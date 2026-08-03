@@ -31,13 +31,28 @@ public:
     [[nodiscard]] float angle(FaceId f) const;
 };
 
+// An external orientation constraint (add-weave-guide-field-steering): pins
+// face `face`'s cross to align with world-space `direction`, exactly as a
+// feature edge does — the direction is projected into the face's tangent frame
+// and the cross is held there through the smoothing (a hard pin). This is the
+// injection channel a Weave guide stroke / tagged loop uses to steer edge flow;
+// face ids are in the numbering of the mesh passed to `computeCrossField` (the
+// pipeline remaps world guides to per-island faces before calling).
+struct CrossFieldConstraint {
+    FaceId face;
+    Vec3 direction;  // world space; need not be unit or in-plane
+};
+
 // Computes a feature-aligned smoothed cross field. Faces incident to a feature
 // or boundary edge are constrained to align with it; the interior relaxes
 // toward those constraints over `iterations` smoothing steps. `backend`
 // carries every spmv (default backend = CPU reference; a GPU backend
-// accelerates it transparently).
+// accelerates it transparently). `constraints` (may be empty) additionally
+// pins the listed faces to their given world directions — an empty list leaves
+// the field byte-identical to the unconstrained solve.
 [[nodiscard]] CrossField computeCrossField(const Mesh& mesh, int iterations,
-                                           accel::IBackend& backend);
+                                           accel::IBackend& backend,
+                                           const std::vector<CrossFieldConstraint>& constraints = {});
 
 // Alternative cross field derived from the multiresolution per-vertex 4-RoSy
 // orientation field (computePositionField): the coarse-to-fine hierarchy places

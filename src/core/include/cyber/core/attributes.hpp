@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <cstdint>
 #include <map>
 #include <string>
@@ -52,6 +53,21 @@ public:
 
     [[nodiscard]] bool contains(const std::string& name) const {
         return m_columns.count(name) != 0;
+    }
+
+    /// Every column name, SORTED.
+    ///
+    /// Sorted rather than in map order so callers that enumerate columns (UV sets, exporters) are
+    /// deterministic: the backing map's order is an implementation detail and would make a
+    /// serialized set list differ run to run.
+    [[nodiscard]] std::vector<std::string> names() const {
+        std::vector<std::string> out;
+        out.reserve(m_columns.size());
+        for (const auto& [name, column] : m_columns) {
+            out.push_back(name);
+        }
+        std::sort(out.begin(), out.end());
+        return out;
     }
     void remove(const std::string& name) { m_columns.erase(name); }
     [[nodiscard]] std::size_t size() const { return m_size; }

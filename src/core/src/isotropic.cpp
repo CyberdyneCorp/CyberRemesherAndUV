@@ -50,9 +50,34 @@ protected:
 // AutoRemesher-style: scale = clamp(normalizedCurvature^(-adaptivity),
 // 0.3, 3.0) so flat regions get longer edges. adaptivity 0 -> all 1
 // (remeshing-parameters spec, "Adaptivity zero is uniform").
-void computeTargetScales(Mesh& mesh, float adaptivity, std::vector<float>& scales) {
+void computeTargetScales(Mesh& mesh, float adaptivity, const std::vector<float>* authored,
+                         std::vector<float>& scales) {
+    // Applies the authored density brush on top of whatever curvature produced.
+    // MULTIPLY then clamp to the same band — see IsotropicOptions::densityScales for
+    // why, including why override and a wider band were both rejected.
+    const auto applyAuthored = [&]() {
+        if (authored == nullptr || authored->empty()) {
+            return;
+        }
+        for (Index i = 0; i < mesh.vertexCapacity(); ++i) {
+            if (!mesh.isAlive(VertexId{i})) {
+                continue;
+            }
+            // A short array reads as 1.0 past its end, so a caller need not size it to
+            // the full capacity.
+            const float painted = i < authored->size() ? (*authored)[i] : 1.0f;
+            if (painted <= 0.0f) {
+                continue;  // 0 or negative is meaningless as a multiplier; ignore it
+            }
+            scales[i] = std::clamp(scales[i] * painted, 0.3f, 3.0f);
+        }
+    };
+
     std::fill(scales.begin(), scales.end(), 1.0f);
     if (adaptivity <= 0.0f) {
+        // Uniform curvature scaling, but an authored brush still applies: "adaptivity
+        // zero is uniform" is about CURVATURE, not about ignoring the artist.
+        applyAuthored();
         return;
     }
 
@@ -117,6 +142,7 @@ void computeTargetScales(Mesh& mesh, float adaptivity, std::vector<float>& scale
         }
     }
     if (aliveCount == 0 || meanCurvature <= 0.0) {
+        applyAuthored();
         return;
     }
     meanCurvature /= static_cast<double>(aliveCount);
@@ -128,6 +154,7 @@ void computeTargetScales(Mesh& mesh, float adaptivity, std::vector<float>& scale
             std::fmax(curvature[i] / static_cast<float>(meanCurvature), 1e-3f);
         scales[i] = std::clamp(std::pow(normalizedCurvature, -adaptivity), 0.3f, 3.0f);
     }
+    applyAuthored();
 }
 
 class SplitPass : public Pass {
@@ -149,6 +176,18 @@ public:
                 continue;
             }
             const auto [a, b] = m_mesh.edgeVertices(e);
+            // Region solve: never insert a vertex into a prescribed boundary
+            // polyline. This is the ONLY vertex-inserting pass in the engine
+            // without a feature/boundary guard, so without this the interface
+            // vertices survive but the interface EDGE SET does not — and the
+            // boundary still lies geometrically on the prescribed polyline, so
+            // a positional or Hausdorff assertion passes while vertex identity
+            // fails. Keyed on the pin mask rather than on edgeFaceCount == 1 so
+            // it works for an interface interior to the mesh.
+            if (m_options.region != nullptr && m_options.region->pinned(a) &&
+                m_options.region->pinned(b)) {
+                continue;
+            }
             const float target =
                 m_options.targetEdgeLength * 0.5f * (scaleOf(scales, a) + scaleOf(scales, b));
             if (edgeLength(e) <= target * kLongFactor) {
@@ -372,7 +411,7 @@ IsotropicStatus isotropicRemesh(Mesh& mesh, const ReferenceSurface& reference,
     using Clk = std::chrono::steady_clock;
     const auto t0 = Clk::now();
     std::vector<float>& scales = mesh.vertexAttributes().create<float>(kScaleAttribute);
-    computeTargetScales(mesh, options.adaptivity, scales);
+    computeTargetScales(mesh, options.adaptivity, options.densityScales, scales);
     long long tScale = 0, tSplit = 0, tCollapse = 0, tFlip = 0, tSmooth = 0;
     const auto ms = [](Clk::time_point a, Clk::time_point b) {
         return std::chrono::duration_cast<std::chrono::milliseconds>(b - a).count();

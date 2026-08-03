@@ -2,11 +2,27 @@
 #include <algorithm>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "cyber/core/mesh.hpp"
 #include "cyber/core/progress.hpp"
 
 namespace cyber::remesh {
+
+// World-space directional guides (add-weave-guide-field-steering): each sample
+// biases the cross field of the face it lands on toward `dir`, so quad flow
+// follows user guide strokes / tagged loops. Carried as WORLD geometry, not
+// face ids, because the isotropic remesh stage rebuilds island topology before
+// the field solve — input face ids do not survive — so a field-consuming
+// quadrangulator re-projects each sample onto its current mesh's nearest face
+// at solve time. `points[i]` is the anchor of guide sample i; `dirs[i]` its
+// world tangent. Empty = no steering (output identical to the unguided solve).
+struct OrientationGuides {
+    std::vector<Vec3> points;
+    std::vector<Vec3> dirs;
+    [[nodiscard]] bool empty() const { return points.empty(); }
+    [[nodiscard]] std::size_t size() const { return points.size(); }
+};
 
 // Stage seam for turning an isotropically remeshed triangle island into a
 // quad-dominant mesh (design D2: the parameterization solver is swappable).

@@ -19,8 +19,10 @@ built (offline / no Eigen), the reference columns are omitted and ours still run
 """
 
 import argparse
+import hashlib
 import os
 import sys
+import time
 
 # `common` drags in matplotlib + numpy (its plotting/mesh helpers). The
 # count-match regression test loads this module only for its pure-control-flow
@@ -42,6 +44,59 @@ METRICS = [
     ("irregular", "irregular %", True),    # lower better
     ("cv", "edge CV", True),               # lower better
 ]
+
+
+def timed_remesh(path: str, target: int, method: str, adaptivity: float):
+    """One remesh, returning (mesh, wall_seconds). Task 5.7 correction (c): wall-clock
+    was not measured anywhere, so "faster than" had no number behind it at all."""
+    start = time.perf_counter()
+    mesh = ours_at_count(path, target, method, adaptivity)
+    return mesh, time.perf_counter() - start
+
+
+def geometry_digest(mesh: "c.MeshData") -> str:
+    """A stable digest of a mesh's geometry, for determinism checking.
+
+    Task 5.7 correction (c): determinism was claimed in the solver contract but never
+    MEASURED by the benchmark. Rounded to 6 decimals before hashing so the digest
+    reflects the geometry rather than last-bit float noise -- the contract is
+    "same input, same output", not "bitwise across compilers".
+    """
+    digest = hashlib.sha256()
+    for vertex in mesh.vertices:
+        digest.update(f"{vertex[0]:.6f},{vertex[1]:.6f},{vertex[2]:.6f};".encode())
+    for face in mesh.faces:
+        digest.update((",".join(str(i) for i in face) + ";").encode())
+    return digest.hexdigest()[:16]
+
+
+def report_shipped_config_mismatch() -> None:
+    """Task 5.7 correction (b): SAY which backend these numbers describe.
+
+    Numbers taken under CMakePresets.json's CYBER_WITH_QUADCOVER=ON describe a
+    backend the iPad does NOT ship: CMakeLists.txt defaults the option OFF and
+    scripts/build_engine.sh does not set it, so the app runs without QuadCover. On
+    that preset QuadCover is also built from vendored Geogram + AutoRemesher source,
+    so a run there partly measures the competitor while claiming to beat it.
+    Printed rather than silently assumed, because a benchmark that does not name its
+    configuration is not reproducible.
+    """
+    try:
+        has_quadcover = bool(getattr(c, "has_quadcover", lambda: False)())
+    except Exception:
+        has_quadcover = False
+    print(
+        "[config] QuadCover backend: "
+        + ("BUILT (CYBER_WITH_QUADCOVER=ON)" if has_quadcover else "absent (as shipped)")
+    )
+    if has_quadcover:
+        print(
+            "[config] WARNING: the iPad ships WITHOUT QuadCover (CMakeLists default OFF,\n"
+            "[config]          build_engine.sh does not enable it). Numbers including a\n"
+            "[config]          quad-cover arm do not describe the shipped app, and that\n"
+            "[config]          preset builds it from vendored AutoRemesher/Geogram source."
+        )
+    print()
 
 
 def evaluate(mesh: "c.MeshData", source: "c.MeshData") -> dict:
@@ -200,6 +255,11 @@ def main() -> None:
     # solver (a few degrees lower median).
     print("  ours quad-cover: default method (Geogram field under -DCYBER_WITH_QUADCOVER)\n")
 
+    # Task 5.7 corrections: name the configuration these numbers describe, then measure
+    # wall-clock and determinism -- neither of which the harness measured before, so
+    # "faster" and "deterministic" were both unbacked by anything printed here.
+    report_shipped_config_mismatch()
+
     header = f"{'model':<15} {'engine':<20} {'quads':>6} {'med°':>5} {'dev%':>6} {'Nerr°':>6} {'irr%':>6} {'CV':>5}"
     print(header)
     print("-" * len(header))
@@ -241,7 +301,20 @@ def main() -> None:
         # so iterating on its achieved count would chase noise, and it is printed for
         # context rather than scored.
         engines = {}
-        fa = ours_at_count(path, args.target_quads, "field-aligned", 0.0)
+        # Wall-clock and determinism on the field-aligned arm, which is the one the
+        # region/Weave path actually uses. Two runs: same input must give the same
+        # digest, which is the determinism contract being CHECKED rather than asserted
+        # in prose.
+        fa, faSeconds = timed_remesh(path, args.target_quads, "field-aligned", 0.0)
+        if fa:
+            repeat, _ = timed_remesh(path, args.target_quads, "field-aligned", 0.0)
+            first = geometry_digest(fa)
+            second = geometry_digest(repeat) if repeat else "<none>"
+            print(
+                f"[time] {os.path.basename(path):<15} field-aligned {faSeconds:7.3f} s"
+                f"   determinism {'OK' if first == second else 'DIFFERS'}"
+                f"  ({first} vs {second})"
+            )
         im = ours_at_count(path, args.target_quads, "instant-meshes", 0.0)
         intg = ours_at_count(path, args.target_quads, "integer", 0.0)
         qc = ours_at_count(path, args.target_quads, "quad-cover", 0.0)

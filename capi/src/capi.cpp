@@ -23,8 +23,11 @@
 
 #include "cyber/bake/bake.hpp"
 #include "cyber/core/io.hpp"
+#include "cyber/uv/distortion.hpp"
 #include "cyber/core/mesh.hpp"
 #include "cyber/core/pipeline.hpp"
+#include "cyber/core/meshlet.hpp"
+#include "cyber/core/region_solve.hpp"
 #include "cyber/quadrangulate/field_quadrangulator.hpp"
 #include "cyber/quadrangulate/quadcover_extractor.hpp"
 #include "cyber/quadrangulate/position_field.hpp"
@@ -50,6 +53,15 @@
 #include "cyber/retopo/tweak.hpp"
 #ifdef CYBER_CAPI_WITH_UV
 #include "cyber/uv/atlas.hpp"
+#include "cyber/uv/layout.hpp"
+#include "cyber/uv/pack_aids.hpp"
+#include "cyber/uv/reunwrap.hpp"
+#include "cyber/uv/udim.hpp"
+#include "cyber/uv/symmetrize.hpp"
+#include "cyber/uv/uv_sets.hpp"
+#include "cyber/uv/transforms.hpp"
+#include "cyber/uv/uv_clone.hpp"
+#include "cyber/uv/uv_stack.hpp"
 #endif
 
 // Version numbers are injected from the CMake project() version so this file
@@ -77,7 +89,29 @@ struct CyberRenderCache {
     std::vector<float> normals;          // x,y,z per vertex, unit length
     std::vector<float> colors;           // r,g,b per vertex; empty if none
     bool hasColors = false;
+    // Per-TRIANGLE-CORNER UVs (add-uv-stage-foundation): u,v for each corner emitted
+    // by the fan triangulation, so 6 floats per triangle and exactly parallel to
+    // `indices`. Per corner rather than per vertex because UVs are a corner attribute
+    // and a seam gives one vertex several different UVs -- collapsing them to the
+    // vertex would silently weld every seam shut in the 2D view.
+    std::vector<float> uvs;
+    // Per-face distortion, lazily built on first request (only the heatmap wants it) and
+    // cleared with the rest of the cache, since it derives from geometry AND the UVs.
+    std::vector<CyberFaceDistortion> distortion;
+    bool distortionBuilt = false;
+    // Distinguishes "this mesh has never been unwrapped" from "its UVs are all zero".
+    // Returning zeros for both would make an un-unwrapped mesh look like a
+    // catastrophically collapsed layout.
+    bool hasUvs = false;
     bool built = false;
+    // Meshlet clusters over `positions`/`indices` (add-meshlet-target-path).
+    // Built on FIRST REQUEST rather than with the rest of the cache: clustering
+    // costs real time on a multi-million-triangle Target, and the overlay,
+    // picking and export paths never ask for it.
+    std::vector<CyberMeshlet> meshlets;
+    std::vector<std::uint32_t> meshletVertices;
+    std::vector<std::uint8_t> meshletIndices;
+    bool meshletsBuilt = false;
 };
 
 // Opaque handle definition: the mesh plus any statistics captured when the
@@ -89,9 +123,53 @@ struct CyberRenderCache {
 // stable ids, so dead ids are simply skipped at cache-build time.
 struct CyberMesh {
     cyber::Mesh mesh;
+    // Which named UV set is currently the plain `uv` column (add-uv-sets). Kept on the HANDLE
+    // because `AttributeSet` holds numeric columns only — and keeping it here rather than in the
+    // mesh is also what lets the whole UV module stay ignorant of sets: the active set is always
+    // just `uv`.
+    // A literal, not `cyber::uv::kDefaultUvSetName`, because this struct is compiled even when
+    // the UV module is off. A static_assert in the UV-guarded section below pins the two together
+    // so they cannot drift.
+    std::string activeUvSet = "default";
     std::optional<cyber::remesh::Statistics> stats;
     std::unordered_set<std::uint32_t> hiddenFaces;
     std::vector<std::uint32_t> taggedEdges;
+    // World-space orientation guides for the next remesh (add-weave-guide-field-
+    // steering): 3 floats per sample, points and dirs parallel. Unlike
+    // taggedEdges (render-only) these are read by cyber_remesh and steer the
+    // cross field. Do not affect rendering, so they never invalidate the cache.
+    std::vector<float> guidePoints;
+    std::vector<float> guideDirs;
+    // Region solve (add-weave-regional-solve): the face subset the next
+    // cyber_remesh rewrites, optional per-vertex valence prescriptions, and the
+    // report the last region solve produced. Same handle side-channel precedent
+    // as the guides above; none of it affects rendering.
+    std::vector<std::uint32_t> solveRegionFaces;
+    std::unordered_map<std::uint32_t, int> regionValence;
+    std::optional<cyber::remesh::RegionReport> regionReport;
+    // External projection surface for the next region solve
+    // (add-region-external-reference): the Target, so the region's interior follows
+    // real detail rather than the seed band's approximation. Borrowed, not owned —
+    // the caller guarantees the reference outlives the solve, exactly as it already
+    // must for the snapper handles it passes elsewhere.
+    const CyberMesh* regionReference = nullptr;
+    // Authored per-vertex density scales — the density BRUSH
+    // (add-weave-density-radial-symmetry). Indexed by vertex id; multipliers on the
+    // target edge length. Read by cyber_remesh for a REGION solve only: the
+    // whole-mesh path remeshes per island and extractIsland renumbers vertices, so
+    // these indices would not survive it.
+    std::vector<float> densityScales;
+    // Hand-drawn UV seam edges for the next atlas (add-uv-seam-authoring). Handle
+    // side-channel, like solveRegionFaces above; does not affect rendering.
+    std::vector<std::uint32_t> seamEdges;
+    // CACHED reference surface for when THIS handle is used as someone's reference.
+    // Mandatory rather than an optimisation: construction is ~636 us per 1k faces,
+    // so ~3 s at 4.8M, and a Weave Fill solves synchronously on the main actor.
+    // Cleared by invalidateRenderCache, which every mutating op already calls — the
+    // surface is derived from geometry, so anything that changes geometry must drop
+    // it. Keyed on the smoothing angle too, since the surface depends on it.
+    mutable std::unique_ptr<cyber::remesh::ReferenceSurface> referenceSurface;
+    mutable float referenceSurfaceSmoothing = -1.0f;
     mutable CyberRenderCache render;  // lazy; see ensureRenderCache
 };
 
@@ -102,8 +180,77 @@ std::string& errorSlot() {
     return message;
 }
 
+// Forward declaration: cyber_uv_atlas (above the definition) must invalidate the cache
+// after writing UVs, and the definition lives with the other mutating-op helpers.
+void invalidateRenderCache(CyberMesh* mesh);
+
+#ifdef CYBER_CAPI_WITH_UV
+// The handle's authored seams as a SeamSet.
+//
+// Shared by the atlas and the single-island re-unwrap deliberately: the re-unwrap's island
+// partition MUST be the one the atlas produced, and two copies of "authored seams if any,
+// else automatic" would be free to drift into disagreeing about which faces form an island.
+[[nodiscard]] cyber::uv::SeamSet authoredSeamSet(const CyberMesh* mesh) {
+    cyber::uv::SeamSet seams;
+    for (const std::uint32_t id : mesh->seamEdges) {
+        seams.mark(cyber::EdgeId{id});
+    }
+    return seams;
+}
+
+// The island partition matching what the mesh was unwrapped with.
+//
+// Every localized UV operation needs this and they must all agree: if two of them partitioned
+// differently, "the island containing this face" would mean different faces depending on which
+// call you made.
+[[nodiscard]] std::vector<std::vector<cyber::FaceId>> islandPartition(
+    const CyberMesh* mesh, const cyber::uv::AtlasOptions& opts) {
+    const cyber::uv::SeamSet authored = authoredSeamSet(mesh);
+    const cyber::uv::SeamSet partition =
+        authored.empty() ? cyber::uv::autoSeams(mesh->mesh, opts) : authored;
+    return cyber::uv::computeIslands(mesh->mesh, partition);
+}
+
+static_assert(cyber::uv::kDefaultUvSetName == std::string_view("default"),
+              "CyberMesh::activeUvSet's default must match the engine's default set name");
+
+// Atlas options from C params, or the engine defaults when params is NULL.
+[[nodiscard]] cyber::uv::AtlasOptions atlasOptions(const CyberAtlasParams* params) {
+    cyber::uv::AtlasOptions opts;
+    if (params != nullptr) {
+        opts.maxChartAngleDeg = params->maxChartAngleDegrees;
+        opts.pack.margin = params->packMargin;
+        opts.pack.textureSize = params->textureSize;
+        opts.reorientCharts = params->reorientCharts != 0;
+        opts.mergeCharts = params->mergeCharts != 0;
+        opts.maxChartDistortion = params->maxChartDistortion;
+    }
+    return opts;
+}
+#endif
+
 void setError(std::string message) { errorSlot() = std::move(message); }
 void clearError() { errorSlot().clear(); }
+
+/// Builds (once) the reference surface for a handle being used as someone else's
+/// projection target. Same lazy-cache shape as `ensureMeshlets`, and for the same
+/// reason: a BVH over a multi-million-triangle Target is not free, and only the
+/// region path wants one.
+const cyber::remesh::ReferenceSurface* ensureReferenceSurface(const CyberMesh* mesh,
+                                                             float smoothNormalDegrees) {
+    if (mesh == nullptr) {
+        return nullptr;
+    }
+    if (mesh->referenceSurface != nullptr &&
+        mesh->referenceSurfaceSmoothing == smoothNormalDegrees) {
+        return mesh->referenceSurface.get();
+    }
+    mesh->referenceSurface =
+        std::make_unique<cyber::remesh::ReferenceSurface>(mesh->mesh, smoothNormalDegrees);
+    mesh->referenceSurfaceSmoothing = smoothNormalDegrees;
+    return mesh->referenceSurface.get();
+}
+
 
 CyberStatus mapIoError(const cyber::io::Error& error) {
     setError(error.message);
@@ -288,13 +435,39 @@ CyberStatus cyber_remesh(const CyberMesh* in, const CyberRemeshParams* params,
         if (quadMethod == CYBER_QUAD_QUADCOVER && !cyber::remesh::quadCoverAvailable()) {
             quadMethod = CYBER_QUAD_FIELD_ALIGNED;
         }
+        // Orientation guides (add-weave-guide-field-steering) steer the cross
+        // field, which only the field-aligned quadrangulator consumes — so a
+        // guided remesh forces that path.
+        cyber::remesh::OrientationGuides guides;
+        for (std::size_t i = 0; i + 2 < in->guidePoints.size() && i + 2 < in->guideDirs.size();
+             i += 3) {
+            guides.points.push_back({in->guidePoints[i], in->guidePoints[i + 1],
+                                     in->guidePoints[i + 2]});
+            guides.dirs.push_back({in->guideDirs[i], in->guideDirs[i + 1], in->guideDirs[i + 2]});
+        }
+        if (!guides.empty()) {
+            quadMethod = CYBER_QUAD_FIELD_ALIGNED;
+        }
+        // A region solve forces the field-aligned path too: it is the only
+        // vertex-PRESERVING extractor. quad-cover, instant-meshes and integer
+        // all end in `mesh = std::move(quads)`, so no input vertex survives and
+        // the prescribed boundary could not be preserved by construction.
+        std::vector<cyber::FaceId> regionFaces;
+        regionFaces.reserve(in->solveRegionFaces.size());
+        for (const std::uint32_t id : in->solveRegionFaces) {
+            regionFaces.push_back(cyber::FaceId{id});
+        }
+        if (!regionFaces.empty()) {
+            quadMethod = CYBER_QUAD_FIELD_ALIGNED;
+        }
         // quad-cover closes holes DURING extraction, so the pipeline's post-pass
         // never sees them; the run's hole-fill policy has to reach the extractor
         // itself or the parameter is silently ignored (remeshing-pipeline spec,
         // "Explicit cleanup policies").
         const int holeFillMaxBoundary = params->holeFillMaxBoundary;
         const auto makeQuad =
-            [holeFillMaxBoundary](int method) -> std::unique_ptr<cyber::remesh::IQuadrangulator> {
+            [holeFillMaxBoundary,
+             guides](int method) -> std::unique_ptr<cyber::remesh::IQuadrangulator> {
             if (method == CYBER_QUAD_INSTANT_MESHES) {
                 return cyber::remesh::makeInstantMeshesQuadrangulator();
             }
@@ -310,15 +483,28 @@ CyberStatus cyber_remesh(const CyberMesh* in, const CyberRemeshParams* params,
                 // for experiments via makeQuadCoverQuadrangulator(iters, a) / CYBER_QC_ADAPT.
                 return cyber::remesh::makeQuadCoverQuadrangulator(40, 0.0f, holeFillMaxBoundary);
             }
+            // Field-aligned: the only path that consumes the cross field, so the
+            // only one that can honour orientation guides.
+            if (!guides.empty()) {
+                return cyber::remesh::makeFieldAlignedQuadrangulator(30, guides);
+            }
             return cyber::remesh::makeFieldAlignedQuadrangulator();
         };
         cyber::remesh::QuadrangulatorFactory fallback;
         if (quadMethod == CYBER_QUAD_QUADCOVER) {
             fallback = []() { return cyber::remesh::makeFieldAlignedQuadrangulator(); };
         }
+        // The external reference is only meaningful for a region solve; a whole-mesh
+        // solve's input IS the surface, so building one would be pure cost.
+        const cyber::remesh::ReferenceSurface* regionReference =
+            (!regionFaces.empty() && in->regionReference != nullptr)
+                ? ensureReferenceSurface(in->regionReference, cppParams.smoothNormalDegrees)
+                : nullptr;
         cyber::remesh::PipelineResult result = cyber::remesh::remesh(
             in->mesh, cppParams, &sink, &token,
-            [quadMethod, makeQuad]() { return makeQuad(quadMethod); }, fallback);
+            [quadMethod, makeQuad]() { return makeQuad(quadMethod); }, fallback, regionFaces,
+            in->regionValence.empty() ? nullptr : &in->regionValence, regionReference,
+            in->densityScales.empty() ? nullptr : &in->densityScales);
 
         switch (result.status) {
             case cyber::remesh::RunStatus::Success:
@@ -326,6 +512,9 @@ CyberStatus cyber_remesh(const CyberMesh* in, const CyberRemeshParams* params,
                 auto handle = std::make_unique<CyberMesh>();
                 handle->mesh = std::move(result.mesh);
                 handle->stats = result.stats;
+                if (!regionFaces.empty()) {
+                    handle->regionReport = std::move(result.region);
+                }
                 clearError();
                 *out = handle.release();
                 return CYBER_OK;
@@ -430,16 +619,19 @@ CyberStatus cyber_uv_atlas([[maybe_unused]] CyberMesh* mesh,
         return CYBER_ERR_INVALID_ARG;
     }
     try {
-        cyber::uv::AtlasOptions opts;
-        if (params != nullptr) {
-            opts.maxChartAngleDeg = params->maxChartAngleDegrees;
-            opts.pack.margin = params->packMargin;
-            opts.pack.textureSize = params->textureSize;
-            opts.reorientCharts = params->reorientCharts != 0;
-            opts.mergeCharts = params->mergeCharts != 0;
-            opts.maxChartDistortion = params->maxChartDistortion;
+        cyber::uv::AtlasOptions opts = atlasOptions(params);
+        // Hand-drawn seams, when the caller supplied any. Built here rather than stored as
+        // a SeamSet on the handle so the C surface stays plain ids.
+        const cyber::uv::SeamSet authored = authoredSeamSet(mesh);
+        if (!authored.empty()) {
+            opts.seams = &authored;
         }
         const cyber::uv::AtlasResult r = cyber::uv::unwrapAtlas(mesh->mesh, opts);
+        // The atlas WRITES the per-corner UV attribute, so any cache built before it ran
+        // is stale. It previously did not invalidate -- harmless while nothing could read
+        // UVs back, and a silent wrong answer the moment something could: a readback taken
+        // after an unwrap returned the pre-unwrap cache and reported "no UVs".
+        invalidateRenderCache(mesh);
         if (out != nullptr) {
             out->chartCount = r.chartCount;
             out->seamEdges = r.seamEdges;
@@ -461,6 +653,903 @@ CyberStatus cyber_uv_atlas([[maybe_unused]] CyberMesh* mesh,
     }
 #else
     setError("cyber_uv_atlas: engine built without the UV module (CYBER_BUILD_UV=OFF)");
+    return CYBER_ERR_RUNTIME;
+#endif
+}
+
+CyberStatus cyber_uv_reunwrap_island([[maybe_unused]] CyberMesh* mesh,
+                                    [[maybe_unused]] uint32_t face_id,
+                                    [[maybe_unused]] const CyberAtlasParams* params,
+                                    [[maybe_unused]] CyberReunwrapResult* out) {
+#ifdef CYBER_CAPI_WITH_UV
+    if (mesh == nullptr) {
+        setError("cyber_uv_reunwrap_island: null mesh");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    if (out != nullptr) {
+        *out = CyberReunwrapResult{};
+    }
+    try {
+        const cyber::uv::AtlasOptions opts = atlasOptions(params);
+        // The SAME seam source the atlas used, via the shared helper: authored seams when the
+        // caller set any, else the automatic partition. `autoSeams` is deterministic, so
+        // recomputing it here reproduces the partition the on-screen UVs came from.
+        const cyber::uv::SeamSet authored = authoredSeamSet(mesh);
+        const cyber::uv::SeamSet partition =
+            authored.empty() ? cyber::uv::autoSeams(mesh->mesh, opts) : authored;
+        const cyber::uv::ReunwrapResult r =
+            cyber::uv::reunwrapIsland(mesh->mesh, cyber::FaceId{face_id}, partition);
+        if (out != nullptr) {
+            out->faces = r.faces;
+            out->needsWholeMeshUnwrap = r.needsWholeMeshUnwrap ? 1 : 0;
+            out->iterations = r.iterations;
+        }
+        if (!r.ok) {
+            // A refusal for want of UVs is not an argument error — the caller is expected to
+            // fall back to a whole-mesh unwrap — so it reports OK with the flag set and lets
+            // the caller decide, rather than looking like a bad face id.
+            if (r.needsWholeMeshUnwrap) {
+                clearError();
+                return CYBER_OK;
+            }
+            setError("cyber_uv_reunwrap_island: face is dead, in no island, or degenerate");
+            return CYBER_ERR_INVALID_ARG;
+        }
+        // Same reason cyber_uv_atlas must invalidate: UVs were rewritten, so any cache built
+        // before this call would hand back the pre-unwrap layout as if it were current.
+        invalidateRenderCache(mesh);
+        clearError();
+        return CYBER_OK;
+    } catch (const std::exception& e) {
+        setError(std::string("cyber_uv_reunwrap_island: ") + e.what());
+        return CYBER_ERR_RUNTIME;
+    } catch (...) {
+        setError("cyber_uv_reunwrap_island: unknown error");
+        return CYBER_ERR_RUNTIME;
+    }
+#else
+    setError("cyber_uv_reunwrap_island: engine built without the UV module");
+    return CYBER_ERR_RUNTIME;
+#endif
+}
+
+CyberStatus cyber_uv_pack_region([[maybe_unused]] CyberMesh* mesh, [[maybe_unused]] float min_u,
+                                [[maybe_unused]] float min_v, [[maybe_unused]] float max_u,
+                                [[maybe_unused]] float max_v,
+                                [[maybe_unused]] const CyberAtlasParams* params,
+                                [[maybe_unused]] CyberAtlasResult* out) {
+#ifdef CYBER_CAPI_WITH_UV
+    if (mesh == nullptr) {
+        setError("cyber_uv_pack_region: null mesh");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    try {
+        const cyber::uv::AtlasOptions opts = atlasOptions(params);
+        cyber::uv::Bounds2 region;
+        region.expand({min_u, min_v});
+        region.expand({max_u, max_v});
+        cyber::uv::PackParams pack;
+        pack.margin = opts.pack.margin;
+        pack.textureSize = opts.pack.textureSize;
+        pack.strategy = opts.pack.strategy;
+
+        const auto islands = islandPartition(mesh, opts);
+        const cyber::uv::PackResult r =
+            cyber::uv::packIslandsIntoRegion(mesh->mesh, islands, region, pack);
+        if (!r.ok) {
+            setError("cyber_uv_pack_region: no UV layout, or a degenerate region");
+            return CYBER_ERR_INVALID_ARG;
+        }
+        invalidateRenderCache(mesh);
+        if (out != nullptr) {
+            out->chartCount = static_cast<int>(islands.size());
+            out->packedArea = r.usedArea;
+            out->texelDensity = r.texelDensity;
+        }
+        clearError();
+        return CYBER_OK;
+    } catch (const std::exception& e) {
+        setError(std::string("cyber_uv_pack_region: ") + e.what());
+        return CYBER_ERR_RUNTIME;
+    }
+#else
+    setError("cyber_uv_pack_region: engine built without the UV module");
+    return CYBER_ERR_RUNTIME;
+#endif
+}
+
+CyberStatus cyber_uv_distribute_islands([[maybe_unused]] CyberMesh* mesh,
+                                        [[maybe_unused]] const CyberAtlasParams* params) {
+#ifdef CYBER_CAPI_WITH_UV
+    if (mesh == nullptr) {
+        setError("cyber_uv_distribute_islands: null mesh");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    try {
+        if (cyber::uv::uvColumn(mesh->mesh) == nullptr) {
+            setError("cyber_uv_distribute_islands: mesh has no UV layout");
+            return CYBER_ERR_INVALID_ARG;
+        }
+        const cyber::uv::AtlasOptions opts = atlasOptions(params);
+        cyber::uv::distributeIslandsUv(mesh->mesh, islandPartition(mesh, opts),
+                                       opts.pack.margin);
+        invalidateRenderCache(mesh);
+        clearError();
+        return CYBER_OK;
+    } catch (const std::exception& e) {
+        setError(std::string("cyber_uv_distribute_islands: ") + e.what());
+        return CYBER_ERR_RUNTIME;
+    }
+#else
+    setError("cyber_uv_distribute_islands: engine built without the UV module");
+    return CYBER_ERR_RUNTIME;
+#endif
+}
+
+CyberStatus cyber_uv_flipped_islands([[maybe_unused]] const CyberMesh* mesh,
+                                    [[maybe_unused]] const CyberAtlasParams* params,
+                                    [[maybe_unused]] uint32_t* out_face_ids,
+                                    [[maybe_unused]] size_t capacity,
+                                    [[maybe_unused]] size_t* out_count) {
+#ifdef CYBER_CAPI_WITH_UV
+    if (mesh == nullptr || out_count == nullptr) {
+        setError("cyber_uv_flipped_islands: null argument");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    try {
+        *out_count = 0;
+        if (cyber::uv::uvColumn(mesh->mesh) == nullptr) {
+            // No layout means no flipped islands — an empty answer, not an error. Absence and
+            // zero stay distinguishable because the caller asked a set-membership question.
+            clearError();
+            return CYBER_OK;
+        }
+        const cyber::uv::AtlasOptions opts = atlasOptions(params);
+        const auto islands = islandPartition(mesh, opts);
+        std::vector<std::uint32_t> ids;
+        for (const std::size_t index : cyber::uv::flippedIslands(mesh->mesh, islands)) {
+            if (!islands[index].empty()) {
+                // One representative face, so the caller can address the island without
+                // reproducing the partition itself.
+                ids.push_back(islands[index].front().value);
+            }
+        }
+        std::sort(ids.begin(), ids.end());  // deterministic order
+        *out_count = ids.size();
+        if (out_face_ids != nullptr) {
+            const size_t writable = capacity < ids.size() ? capacity : ids.size();
+            for (size_t i = 0; i < writable; ++i) {
+                out_face_ids[i] = ids[i];
+            }
+            *out_count = writable;
+        }
+        clearError();
+        return CYBER_OK;
+    } catch (const std::exception& e) {
+        setError(std::string("cyber_uv_flipped_islands: ") + e.what());
+        return CYBER_ERR_RUNTIME;
+    }
+#else
+    setError("cyber_uv_flipped_islands: engine built without the UV module");
+    return CYBER_ERR_RUNTIME;
+#endif
+}
+
+CyberStatus cyber_uv_flip_island([[maybe_unused]] CyberMesh* mesh,
+                                [[maybe_unused]] uint32_t face_id,
+                                [[maybe_unused]] const CyberAtlasParams* params) {
+#ifdef CYBER_CAPI_WITH_UV
+    if (mesh == nullptr) {
+        setError("cyber_uv_flip_island: null mesh");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    try {
+        if (cyber::uv::uvColumn(mesh->mesh) == nullptr) {
+            setError("cyber_uv_flip_island: mesh has no UV layout");
+            return CYBER_ERR_INVALID_ARG;
+        }
+        const cyber::uv::AtlasOptions opts = atlasOptions(params);
+        const cyber::FaceId target{face_id};
+        if (!mesh->mesh.isAlive(target)) {
+            setError("cyber_uv_flip_island: dead face");
+            return CYBER_ERR_INVALID_ARG;
+        }
+        for (const auto& island : islandPartition(mesh, opts)) {
+            if (std::find(island.begin(), island.end(), target) != island.end()) {
+                cyber::uv::flipIslandUv(mesh->mesh, island);
+                invalidateRenderCache(mesh);
+                clearError();
+                return CYBER_OK;
+            }
+        }
+        setError("cyber_uv_flip_island: face is in no island");
+        return CYBER_ERR_INVALID_ARG;
+    } catch (const std::exception& e) {
+        setError(std::string("cyber_uv_flip_island: ") + e.what());
+        return CYBER_ERR_RUNTIME;
+    }
+#else
+    setError("cyber_uv_flip_island: engine built without the UV module");
+    return CYBER_ERR_RUNTIME;
+#endif
+}
+
+namespace {
+#ifdef CYBER_CAPI_WITH_UV
+// Shared two-call size-then-fill writer for the id readbacks below.
+template <typename T>
+void writeIds(const std::vector<T>& ids, T* out, size_t capacity, size_t* out_count) {
+    *out_count = ids.size();
+    if (out != nullptr) {
+        const size_t writable = capacity < ids.size() ? capacity : ids.size();
+        for (size_t i = 0; i < writable; ++i) {
+            out[i] = ids[i];
+        }
+        *out_count = writable;
+    }
+}
+#endif
+}  // namespace
+
+namespace {
+#ifdef CYBER_CAPI_WITH_UV
+// Runs `op` on the island containing `face`, with the usual preconditions.
+//
+// Every localized island operation needs the same four checks (UVs exist, face alive, face in an
+// island, cache invalidated afterwards). Writing them out per entry point would be five chances
+// to forget the invalidation — the exact bug cyber_uv_atlas shipped with until 6.1.
+template <typename Op>
+CyberStatus withIsland(CyberMesh* mesh, std::uint32_t face, const CyberAtlasParams* params,
+                       const char* what, Op&& op) {
+    if (mesh == nullptr) {
+        setError(std::string(what) + ": null mesh");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    if (cyber::uv::uvColumn(mesh->mesh) == nullptr) {
+        setError(std::string(what) + ": mesh has no UV layout");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    const cyber::FaceId target{face};
+    if (!mesh->mesh.isAlive(target)) {
+        setError(std::string(what) + ": dead face");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    for (const auto& island : islandPartition(mesh, atlasOptions(params))) {
+        if (std::find(island.begin(), island.end(), target) != island.end()) {
+            if (!op(island)) {
+                setError(std::string(what) + ": operation refused");
+                return CYBER_ERR_INVALID_ARG;
+            }
+            invalidateRenderCache(mesh);
+            clearError();
+            return CYBER_OK;
+        }
+    }
+    setError(std::string(what) + ": face is in no island");
+    return CYBER_ERR_INVALID_ARG;
+}
+#endif
+}  // namespace
+
+CyberStatus cyber_uv_transform_island([[maybe_unused]] CyberMesh* mesh,
+                                     [[maybe_unused]] uint32_t face_id,
+                                     [[maybe_unused]] float translate_u,
+                                     [[maybe_unused]] float translate_v,
+                                     [[maybe_unused]] float radians,
+                                     [[maybe_unused]] float scale,
+                                     [[maybe_unused]] const CyberAtlasParams* params) {
+#ifdef CYBER_CAPI_WITH_UV
+    if (!(scale > 0.0f)) {
+        // Zero or negative scale would collapse or mirror the island. Mirroring has its own
+        // entry point (cyber_uv_flip_island) where the winding change is the POINT; smuggling it
+        // in through a negative scale would make a transform silently produce a defect.
+        setError("cyber_uv_transform_island: scale must be positive");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    try {
+        return withIsland(
+            mesh, face_id, params, "cyber_uv_transform_island",
+            [&](std::span<const cyber::FaceId> island) {
+                // Scale, then rotate, then translate — about the island's centroid, recomputed
+                // between steps so each acts on the shape the previous one produced. Rotation and
+                // scale do not commute, so the order is fixed here rather than per caller.
+                if (scale != 1.0f) {
+                    cyber::uv::scaleIslandUv(mesh->mesh, island, scale);
+                }
+                if (radians != 0.0f) {
+                    cyber::uv::rotateIslandUv(mesh->mesh, island, radians);
+                }
+                if (translate_u != 0.0f || translate_v != 0.0f) {
+                    cyber::uv::translateIslandUv(mesh->mesh, island, {translate_u, translate_v});
+                }
+                return true;
+            });
+    } catch (const std::exception& e) {
+        setError(std::string("cyber_uv_transform_island: ") + e.what());
+        return CYBER_ERR_RUNTIME;
+    }
+#else
+    setError("cyber_uv_transform_island: engine built without the UV module");
+    return CYBER_ERR_RUNTIME;
+#endif
+}
+
+CyberStatus cyber_uv_move_island_uv_vertex([[maybe_unused]] CyberMesh* mesh,
+                                          [[maybe_unused]] uint32_t face_id,
+                                          [[maybe_unused]] float at_u, [[maybe_unused]] float at_v,
+                                          [[maybe_unused]] float delta_u,
+                                          [[maybe_unused]] float delta_v,
+                                          [[maybe_unused]] float tolerance,
+                                          [[maybe_unused]] const CyberAtlasParams* params,
+                                          [[maybe_unused]] size_t* out_moved) {
+#ifdef CYBER_CAPI_WITH_UV
+    if (out_moved != nullptr) {
+        *out_moved = 0;
+    }
+    if (tolerance < 0.0f) {
+        setError("cyber_uv_move_island_uv_vertex: negative tolerance");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    try {
+        std::size_t moved = 0;
+        const CyberStatus status = withIsland(
+            mesh, face_id, params, "cyber_uv_move_island_uv_vertex",
+            [&](std::span<const cyber::FaceId> island) {
+                moved = cyber::uv::moveIslandUvVertex(
+                    mesh->mesh, island, {at_u, at_v}, {delta_u, delta_v}, tolerance
+                );
+                // TRUE even when nothing matched: a drag that hit no vertex is not an error, and
+                // reporting one would make a near-miss indistinguishable from an invalid face.
+                return true;
+            });
+        if (out_moved != nullptr) {
+            *out_moved = moved;
+        }
+        return status;
+    } catch (const std::exception& e) {
+        setError(std::string("cyber_uv_move_island_uv_vertex: ") + e.what());
+        return CYBER_ERR_RUNTIME;
+    }
+#else
+    setError("cyber_uv_move_island_uv_vertex: engine built without the UV module");
+    return CYBER_ERR_RUNTIME;
+#endif
+}
+
+CyberStatus cyber_uv_grid_straighten_island([[maybe_unused]] CyberMesh* mesh,
+                                           [[maybe_unused]] uint32_t face_id,
+                                           [[maybe_unused]] float tolerance,
+                                           [[maybe_unused]] const CyberAtlasParams* params) {
+#ifdef CYBER_CAPI_WITH_UV
+    try {
+        return withIsland(mesh, face_id, params, "cyber_uv_grid_straighten_island",
+                          [&](std::span<const cyber::FaceId> island) {
+                              cyber::uv::gridStraightenIslandUv(mesh->mesh, island, tolerance);
+                              return true;
+                          });
+    } catch (const std::exception& e) {
+        setError(std::string("cyber_uv_grid_straighten_island: ") + e.what());
+        return CYBER_ERR_RUNTIME;
+    }
+#else
+    setError("cyber_uv_grid_straighten_island: engine built without the UV module");
+    return CYBER_ERR_RUNTIME;
+#endif
+}
+
+CyberStatus cyber_uv_symmetrize_island([[maybe_unused]] CyberMesh* mesh,
+                                      [[maybe_unused]] uint32_t face_id,
+                                      [[maybe_unused]] float axis_point_u,
+                                      [[maybe_unused]] float axis_point_v,
+                                      [[maybe_unused]] float axis_dir_u,
+                                      [[maybe_unused]] float axis_dir_v,
+                                      [[maybe_unused]] float strength,
+                                      [[maybe_unused]] const CyberAtlasParams* params) {
+#ifdef CYBER_CAPI_WITH_UV
+    if (axis_dir_u == 0.0f && axis_dir_v == 0.0f) {
+        setError("cyber_uv_symmetrize_island: zero axis direction");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    try {
+        return withIsland(mesh, face_id, params, "cyber_uv_symmetrize_island",
+                          [&](std::span<const cyber::FaceId> island) {
+                              cyber::uv::symmetrizeIslandUv(
+                                  mesh->mesh, island, {axis_point_u, axis_point_v},
+                                  {axis_dir_u, axis_dir_v}, strength);
+                              return true;
+                          });
+    } catch (const std::exception& e) {
+        setError(std::string("cyber_uv_symmetrize_island: ") + e.what());
+        return CYBER_ERR_RUNTIME;
+    }
+#else
+    setError("cyber_uv_symmetrize_island: engine built without the UV module");
+    return CYBER_ERR_RUNTIME;
+#endif
+}
+
+CyberStatus cyber_uv_clone_island([[maybe_unused]] CyberMesh* mesh,
+                                 [[maybe_unused]] uint32_t src_face_id,
+                                 [[maybe_unused]] uint32_t dst_face_id,
+                                 [[maybe_unused]] const CyberAtlasParams* params) {
+#ifdef CYBER_CAPI_WITH_UV
+    if (mesh == nullptr) {
+        setError("cyber_uv_clone_island: null mesh");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    try {
+        if (cyber::uv::uvColumn(mesh->mesh) == nullptr) {
+            setError("cyber_uv_clone_island: mesh has no UV layout");
+            return CYBER_ERR_INVALID_ARG;
+        }
+        const cyber::FaceId src{src_face_id};
+        const cyber::FaceId dst{dst_face_id};
+        if (!mesh->mesh.isAlive(src) || !mesh->mesh.isAlive(dst)) {
+            setError("cyber_uv_clone_island: dead face");
+            return CYBER_ERR_INVALID_ARG;
+        }
+        const auto islands = islandPartition(mesh, atlasOptions(params));
+        const std::vector<cyber::FaceId>* source = nullptr;
+        const std::vector<cyber::FaceId>* target = nullptr;
+        for (const auto& island : islands) {
+            if (std::find(island.begin(), island.end(), src) != island.end()) {
+                source = &island;
+            }
+            if (std::find(island.begin(), island.end(), dst) != island.end()) {
+                target = &island;
+            }
+        }
+        if (source == nullptr || target == nullptr) {
+            setError("cyber_uv_clone_island: a face is in no island");
+            return CYBER_ERR_INVALID_ARG;
+        }
+        if (source == target) {
+            // Cloning an island onto itself is a no-op that would report success; refused so a
+            // mis-aimed gesture is visible rather than silently doing nothing.
+            setError("cyber_uv_clone_island: source and destination are the same island");
+            return CYBER_ERR_INVALID_ARG;
+        }
+        if (!cyber::uv::cloneIslandUv(mesh->mesh, *source, *target)) {
+            setError("cyber_uv_clone_island: islands do not have matching topology");
+            return CYBER_ERR_INVALID_ARG;
+        }
+        invalidateRenderCache(mesh);
+        clearError();
+        return CYBER_OK;
+    } catch (const std::exception& e) {
+        setError(std::string("cyber_uv_clone_island: ") + e.what());
+        return CYBER_ERR_RUNTIME;
+    }
+#else
+    setError("cyber_uv_clone_island: engine built without the UV module");
+    return CYBER_ERR_RUNTIME;
+#endif
+}
+
+CyberStatus cyber_uv_stitch_islands([[maybe_unused]] CyberMesh* mesh,
+                                   [[maybe_unused]] const uint32_t* edge_ids,
+                                   [[maybe_unused]] size_t count,
+                                   [[maybe_unused]] const CyberAtlasParams* params) {
+#ifdef CYBER_CAPI_WITH_UV
+    if (mesh == nullptr || (edge_ids == nullptr && count > 0)) {
+        setError("cyber_uv_stitch_islands: null argument");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    try {
+        std::vector<cyber::EdgeId> edges;
+        edges.reserve(count);
+        for (size_t i = 0; i < count; ++i) {
+            const cyber::EdgeId edge{edge_ids[i]};
+            if (!mesh->mesh.isAlive(edge)) {
+                // Validated as a WHOLE before anything is sewn, so a rejected id leaves the mesh
+                // untouched rather than half-stitched.
+                setError("cyber_uv_stitch_islands: dead edge id");
+                return CYBER_ERR_INVALID_ARG;
+            }
+            edges.push_back(edge);
+        }
+        // Operates on the handle's authored seam set, so a later unwrap sees the sewn topology
+        // rather than re-cutting what was just merged.
+        cyber::uv::SeamSet seams = authoredSeamSet(mesh);
+        cyber::uv::stitchAlongSeams(mesh->mesh, seams, edges);
+        std::vector<std::uint32_t> remaining;
+        for (cyber::Index e = 0; e < mesh->mesh.edgeCapacity(); ++e) {
+            const cyber::EdgeId edge{e};
+            if (mesh->mesh.isAlive(edge) && seams.isSeam(edge)) {
+                remaining.push_back(e);
+            }
+        }
+        mesh->seamEdges = remaining;
+        invalidateRenderCache(mesh);
+        clearError();
+        return CYBER_OK;
+    } catch (const std::exception& e) {
+        setError(std::string("cyber_uv_stitch_islands: ") + e.what());
+        return CYBER_ERR_RUNTIME;
+    }
+#else
+    setError("cyber_uv_stitch_islands: engine built without the UV module");
+    return CYBER_ERR_RUNTIME;
+#endif
+}
+
+namespace {
+#ifdef CYBER_CAPI_WITH_UV
+// Size-then-fill writer for the C string readbacks. `out_length` always reports the length
+// INCLUDING the NUL, so a caller can size a buffer from one call and fill it with the next.
+CyberStatus writeString(const std::string& value, char* out, size_t capacity, size_t* out_length,
+                        const char* what) {
+    if (out_length == nullptr) {
+        setError(std::string(what) + ": null out_length");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    *out_length = value.size() + 1;
+    if (out == nullptr) {
+        clearError();
+        return CYBER_OK;  // query mode
+    }
+    if (capacity < value.size() + 1) {
+        setError(std::string(what) + ": buffer too small");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    std::memcpy(out, value.c_str(), value.size() + 1);
+    clearError();
+    return CYBER_OK;
+}
+#endif
+}  // namespace
+
+size_t cyber_mesh_uv_set_count([[maybe_unused]] const CyberMesh* mesh) {
+#ifdef CYBER_CAPI_WITH_UV
+    if (mesh == nullptr) {
+        return 0;
+    }
+    return cyber::uv::uvSetNames(mesh->mesh, mesh->activeUvSet).size();
+#else
+    return 0;
+#endif
+}
+
+CyberStatus cyber_mesh_uv_set_name([[maybe_unused]] const CyberMesh* mesh,
+                                  [[maybe_unused]] size_t index, [[maybe_unused]] char* out,
+                                  [[maybe_unused]] size_t capacity,
+                                  [[maybe_unused]] size_t* out_length) {
+#ifdef CYBER_CAPI_WITH_UV
+    if (mesh == nullptr) {
+        setError("cyber_mesh_uv_set_name: null mesh");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    const auto names = cyber::uv::uvSetNames(mesh->mesh, mesh->activeUvSet);
+    if (index >= names.size()) {
+        setError("cyber_mesh_uv_set_name: index out of range");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    return writeString(names[index], out, capacity, out_length, "cyber_mesh_uv_set_name");
+#else
+    setError("cyber_mesh_uv_set_name: engine built without the UV module");
+    return CYBER_ERR_RUNTIME;
+#endif
+}
+
+CyberStatus cyber_mesh_uv_set_active([[maybe_unused]] const CyberMesh* mesh,
+                                    [[maybe_unused]] char* out, [[maybe_unused]] size_t capacity,
+                                    [[maybe_unused]] size_t* out_length) {
+#ifdef CYBER_CAPI_WITH_UV
+    if (mesh == nullptr) {
+        setError("cyber_mesh_uv_set_active: null mesh");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    return writeString(mesh->activeUvSet, out, capacity, out_length, "cyber_mesh_uv_set_active");
+#else
+    setError("cyber_mesh_uv_set_active: engine built without the UV module");
+    return CYBER_ERR_RUNTIME;
+#endif
+}
+
+CyberStatus cyber_mesh_uv_set_create([[maybe_unused]] CyberMesh* mesh,
+                                    [[maybe_unused]] const char* name) {
+#ifdef CYBER_CAPI_WITH_UV
+    if (mesh == nullptr || name == nullptr) {
+        setError("cyber_mesh_uv_set_create: null argument");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    if (!cyber::uv::createUvSet(mesh->mesh, mesh->activeUvSet, name)) {
+        setError("cyber_mesh_uv_set_create: invalid or duplicate name, or no UV layout to copy");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    clearError();
+    return CYBER_OK;
+#else
+    setError("cyber_mesh_uv_set_create: engine built without the UV module");
+    return CYBER_ERR_RUNTIME;
+#endif
+}
+
+CyberStatus cyber_mesh_uv_set_activate([[maybe_unused]] CyberMesh* mesh,
+                                      [[maybe_unused]] const char* name) {
+#ifdef CYBER_CAPI_WITH_UV
+    if (mesh == nullptr || name == nullptr) {
+        setError("cyber_mesh_uv_set_activate: null argument");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    if (!cyber::uv::activateUvSet(mesh->mesh, mesh->activeUvSet, name)) {
+        setError("cyber_mesh_uv_set_activate: unknown set, or already active");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    mesh->activeUvSet = name;
+    // The `uv` column now holds different data, so any cache built from the old one is stale.
+    invalidateRenderCache(mesh);
+    clearError();
+    return CYBER_OK;
+#else
+    setError("cyber_mesh_uv_set_activate: engine built without the UV module");
+    return CYBER_ERR_RUNTIME;
+#endif
+}
+
+CyberStatus cyber_mesh_uv_set_delete([[maybe_unused]] CyberMesh* mesh,
+                                    [[maybe_unused]] const char* name) {
+#ifdef CYBER_CAPI_WITH_UV
+    if (mesh == nullptr || name == nullptr) {
+        setError("cyber_mesh_uv_set_delete: null argument");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    if (!cyber::uv::deleteUvSet(mesh->mesh, mesh->activeUvSet, name)) {
+        setError("cyber_mesh_uv_set_delete: unknown set, or it is the active one");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    clearError();
+    return CYBER_OK;
+#else
+    setError("cyber_mesh_uv_set_delete: engine built without the UV module");
+    return CYBER_ERR_RUNTIME;
+#endif
+}
+
+CyberStatus cyber_mesh_uv_set_rename([[maybe_unused]] CyberMesh* mesh,
+                                    [[maybe_unused]] const char* from,
+                                    [[maybe_unused]] const char* to) {
+#ifdef CYBER_CAPI_WITH_UV
+    if (mesh == nullptr || from == nullptr || to == nullptr) {
+        setError("cyber_mesh_uv_set_rename: null argument");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    if (!cyber::uv::renameUvSet(mesh->mesh, mesh->activeUvSet, from, to)) {
+        setError("cyber_mesh_uv_set_rename: unknown set, or invalid/duplicate new name");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    // Renaming the ACTIVE set moves no column; the handle is the only place its name lives, so
+    // this is where the rename actually takes effect.
+    if (mesh->activeUvSet == from) {
+        mesh->activeUvSet = to;
+    }
+    clearError();
+    return CYBER_OK;
+#else
+    setError("cyber_mesh_uv_set_rename: engine built without the UV module");
+    return CYBER_ERR_RUNTIME;
+#endif
+}
+
+CyberStatus cyber_mesh_uv_sets_serialize([[maybe_unused]] const CyberMesh* mesh,
+                                        [[maybe_unused]] uint8_t* out,
+                                        [[maybe_unused]] size_t capacity,
+                                        [[maybe_unused]] size_t* out_length) {
+#ifdef CYBER_CAPI_WITH_UV
+    if (mesh == nullptr || out_length == nullptr) {
+        setError("cyber_mesh_uv_sets_serialize: null argument");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    try {
+        const std::vector<std::uint8_t> blob =
+            cyber::uv::serializeUvSets(mesh->mesh, mesh->activeUvSet);
+        *out_length = blob.size();
+        if (out != nullptr) {
+            if (capacity < blob.size()) {
+                setError("cyber_mesh_uv_sets_serialize: buffer too small");
+                return CYBER_ERR_INVALID_ARG;
+            }
+            std::memcpy(out, blob.data(), blob.size());
+        }
+        clearError();
+        return CYBER_OK;
+    } catch (const std::exception& e) {
+        setError(std::string("cyber_mesh_uv_sets_serialize: ") + e.what());
+        return CYBER_ERR_RUNTIME;
+    }
+#else
+    setError("cyber_mesh_uv_sets_serialize: engine built without the UV module");
+    return CYBER_ERR_RUNTIME;
+#endif
+}
+
+CyberStatus cyber_mesh_uv_sets_deserialize([[maybe_unused]] CyberMesh* mesh,
+                                          [[maybe_unused]] const uint8_t* bytes,
+                                          [[maybe_unused]] size_t length) {
+#ifdef CYBER_CAPI_WITH_UV
+    if (mesh == nullptr || (bytes == nullptr && length > 0)) {
+        setError("cyber_mesh_uv_sets_deserialize: null argument");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    try {
+        const std::vector<std::uint8_t> blob(bytes, bytes + length);
+        const std::string active = cyber::uv::deserializeUvSets(mesh->mesh, blob);
+        if (active.empty()) {
+            setError("cyber_mesh_uv_sets_deserialize: corrupt sidecar, or wrong topology");
+            return CYBER_ERR_INVALID_ARG;
+        }
+        mesh->activeUvSet = active;
+        invalidateRenderCache(mesh);
+        clearError();
+        return CYBER_OK;
+    } catch (const std::exception& e) {
+        setError(std::string("cyber_mesh_uv_sets_deserialize: ") + e.what());
+        return CYBER_ERR_RUNTIME;
+    }
+#else
+    setError("cyber_mesh_uv_sets_deserialize: engine built without the UV module");
+    return CYBER_ERR_RUNTIME;
+#endif
+}
+
+CyberStatus cyber_uv_udim_tiles([[maybe_unused]] const CyberMesh* mesh,
+                               [[maybe_unused]] const CyberAtlasParams* params,
+                               [[maybe_unused]] int32_t* out_tiles,
+                               [[maybe_unused]] size_t capacity,
+                               [[maybe_unused]] size_t* out_count) {
+#ifdef CYBER_CAPI_WITH_UV
+    if (mesh == nullptr || out_count == nullptr) {
+        setError("cyber_uv_udim_tiles: null argument");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    try {
+        *out_count = 0;
+        if (cyber::uv::uvColumn(mesh->mesh) == nullptr) {
+            clearError();  // no layout: an empty tile list, not an error
+            return CYBER_OK;
+        }
+        const auto islands = islandPartition(mesh, atlasOptions(params));
+        std::vector<std::int32_t> tiles;
+        for (const int tile : cyber::uv::occupiedUdimTiles(mesh->mesh, islands)) {
+            tiles.push_back(tile);
+        }
+        writeIds(tiles, out_tiles, capacity, out_count);
+        clearError();
+        return CYBER_OK;
+    } catch (const std::exception& e) {
+        setError(std::string("cyber_uv_udim_tiles: ") + e.what());
+        return CYBER_ERR_RUNTIME;
+    }
+#else
+    setError("cyber_uv_udim_tiles: engine built without the UV module");
+    return CYBER_ERR_RUNTIME;
+#endif
+}
+
+CyberStatus cyber_uv_assign_island_tile([[maybe_unused]] CyberMesh* mesh,
+                                       [[maybe_unused]] uint32_t face_id,
+                                       [[maybe_unused]] int32_t tile,
+                                       [[maybe_unused]] const CyberAtlasParams* params) {
+#ifdef CYBER_CAPI_WITH_UV
+    if (mesh == nullptr) {
+        setError("cyber_uv_assign_island_tile: null mesh");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    if (tile < 1001) {
+        setError("cyber_uv_assign_island_tile: tile below 1001 is not representable");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    try {
+        if (cyber::uv::uvColumn(mesh->mesh) == nullptr) {
+            setError("cyber_uv_assign_island_tile: mesh has no UV layout");
+            return CYBER_ERR_INVALID_ARG;
+        }
+        const cyber::FaceId target{face_id};
+        if (!mesh->mesh.isAlive(target)) {
+            setError("cyber_uv_assign_island_tile: dead face");
+            return CYBER_ERR_INVALID_ARG;
+        }
+        for (const auto& island : islandPartition(mesh, atlasOptions(params))) {
+            if (std::find(island.begin(), island.end(), target) != island.end()) {
+                cyber::uv::assignIslandToTile(mesh->mesh, island, cyber::uv::udimCoord(tile));
+                invalidateRenderCache(mesh);
+                clearError();
+                return CYBER_OK;
+            }
+        }
+        setError("cyber_uv_assign_island_tile: face is in no island");
+        return CYBER_ERR_INVALID_ARG;
+    } catch (const std::exception& e) {
+        setError(std::string("cyber_uv_assign_island_tile: ") + e.what());
+        return CYBER_ERR_RUNTIME;
+    }
+#else
+    setError("cyber_uv_assign_island_tile: engine built without the UV module");
+    return CYBER_ERR_RUNTIME;
+#endif
+}
+
+CyberStatus cyber_uv_straddling_islands([[maybe_unused]] const CyberMesh* mesh,
+                                       [[maybe_unused]] const CyberAtlasParams* params,
+                                       [[maybe_unused]] uint32_t* out_face_ids,
+                                       [[maybe_unused]] size_t capacity,
+                                       [[maybe_unused]] size_t* out_count) {
+#ifdef CYBER_CAPI_WITH_UV
+    if (mesh == nullptr || out_count == nullptr) {
+        setError("cyber_uv_straddling_islands: null argument");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    try {
+        *out_count = 0;
+        if (cyber::uv::uvColumn(mesh->mesh) == nullptr) {
+            clearError();
+            return CYBER_OK;
+        }
+        std::vector<std::uint32_t> ids;
+        for (const auto& island : islandPartition(mesh, atlasOptions(params))) {
+            if (!island.empty() && cyber::uv::islandStraddlesTiles(mesh->mesh, island)) {
+                ids.push_back(island.front().value);
+            }
+        }
+        std::sort(ids.begin(), ids.end());
+        writeIds(ids, out_face_ids, capacity, out_count);
+        clearError();
+        return CYBER_OK;
+    } catch (const std::exception& e) {
+        setError(std::string("cyber_uv_straddling_islands: ") + e.what());
+        return CYBER_ERR_RUNTIME;
+    }
+#else
+    setError("cyber_uv_straddling_islands: engine built without the UV module");
+    return CYBER_ERR_RUNTIME;
+#endif
+}
+
+CyberStatus cyber_uv_stack_mirrored_islands(
+    [[maybe_unused]] CyberMesh* mesh, [[maybe_unused]] float plane_point_x,
+    [[maybe_unused]] float plane_point_y, [[maybe_unused]] float plane_point_z,
+    [[maybe_unused]] float plane_normal_x, [[maybe_unused]] float plane_normal_y,
+    [[maybe_unused]] float plane_normal_z, [[maybe_unused]] float tolerance,
+    [[maybe_unused]] const CyberAtlasParams* params, [[maybe_unused]] size_t* out_stacked) {
+#ifdef CYBER_CAPI_WITH_UV
+    if (mesh == nullptr) {
+        setError("cyber_uv_stack_mirrored_islands: null mesh");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    if (out_stacked != nullptr) {
+        *out_stacked = 0;
+    }
+    try {
+        if (cyber::uv::uvColumn(mesh->mesh) == nullptr) {
+            setError("cyber_uv_stack_mirrored_islands: mesh has no UV layout");
+            return CYBER_ERR_INVALID_ARG;
+        }
+        const cyber::Vec3 point{plane_point_x, plane_point_y, plane_point_z};
+        const cyber::Vec3 normal{plane_normal_x, plane_normal_y, plane_normal_z};
+        if (cyber::lengthSquared(normal) <= 0.0f) {
+            setError("cyber_uv_stack_mirrored_islands: zero plane normal");
+            return CYBER_ERR_INVALID_ARG;
+        }
+        const auto islands = islandPartition(mesh, atlasOptions(params));
+        const auto pairs =
+            cyber::uv::findMirrorIslandPairs(mesh->mesh, islands, point, normal, tolerance);
+        const std::size_t stacked = cyber::uv::stackMirroredIslands(mesh->mesh, islands, pairs,
+                                                                   point, normal, tolerance);
+        if (out_stacked != nullptr) {
+            *out_stacked = stacked;
+        }
+        // Only invalidate when something moved: an unchanged mesh should not drop its caches.
+        if (stacked > 0) {
+            invalidateRenderCache(mesh);
+        }
+        clearError();
+        return CYBER_OK;
+    } catch (const std::exception& e) {
+        setError(std::string("cyber_uv_stack_mirrored_islands: ") + e.what());
+        return CYBER_ERR_RUNTIME;
+    }
+#else
+    setError("cyber_uv_stack_mirrored_islands: engine built without the UV module");
     return CYBER_ERR_RUNTIME;
 #endif
 }
@@ -568,16 +1657,35 @@ std::vector<cyber::Index> compactVertices(const CyberMesh& handle, CyberRenderCa
 void fanTriangulate(const CyberMesh& handle, const std::vector<cyber::Index>& remap,
                     CyberRenderCache& cache) {
     const cyber::Mesh& m = handle.mesh;
+    // nullptr when the mesh has never been unwrapped, which is the signal the whole
+    // absent-versus-zero distinction rests on.
+    const auto* uvs = m.cornerAttributes().find<cyber::Vec2>(cyber::io::kUvAttribute);
+    cache.hasUvs = uvs != nullptr;
     for (cyber::Index f = 0; f < m.faceCapacity(); ++f) {
         const cyber::FaceId face{f};
         if (!m.isAlive(face) || isHiddenFace(handle, face)) {
             continue;
         }
         const std::vector<cyber::VertexId> verts = m.faceVertices(face);
+        // Corner ids run parallel to `verts`, which is what lets the fan carry the
+        // right UV to each emitted corner rather than guessing from the vertex.
+        const std::vector<cyber::LoopId> loops = uvs != nullptr ? m.faceLoops(face)
+                                                               : std::vector<cyber::LoopId>{};
+        const bool carryUvs = uvs != nullptr && loops.size() == verts.size();
+        const auto emitUv = [&](std::size_t corner) {
+            const cyber::Vec2 uv = (*uvs)[loops[corner].value];
+            cache.uvs.push_back(uv.x);
+            cache.uvs.push_back(uv.y);
+        };
         for (std::size_t k = 2; k < verts.size(); ++k) {
             cache.indices.push_back(remap[verts[0].value]);
             cache.indices.push_back(remap[verts[k - 1].value]);
             cache.indices.push_back(remap[verts[k].value]);
+            if (carryUvs) {
+                emitUv(0);
+                emitUv(k - 1);
+                emitUv(k);
+            }
         }
     }
 }
@@ -755,6 +1863,124 @@ const T* bufferView(const std::vector<T>* src, size_t* out_count) {
 
 }  // namespace
 
+namespace {
+
+/// Builds the meshlet clusters into the render cache on first request. Separate
+/// from `ensureRenderCache` because clustering a multi-million-triangle Target is
+/// not free and only the mesh-shader render path wants it.
+const CyberRenderCache* ensureMeshlets(const CyberMesh* mesh) {
+    const CyberRenderCache* cache = ensureRenderCache(mesh);
+    if (cache == nullptr) {
+        return nullptr;
+    }
+    if (cache->meshletsBuilt) {
+        return cache;
+    }
+    // The cache is `mutable` on the handle for exactly this lazy-build reason.
+    auto& mutableCache = const_cast<CyberRenderCache&>(*cache);
+    mutableCache.meshletsBuilt = true;
+    const cyber::remesh::MeshletSet set =
+        cyber::remesh::buildMeshlets(cache->positions, cache->indices);
+    mutableCache.meshletVertices = set.vertices;
+    mutableCache.meshletIndices = set.indices;
+    mutableCache.meshlets.reserve(set.meshlets.size());
+    for (const cyber::remesh::Meshlet& source : set.meshlets) {
+        CyberMeshlet out{};
+        out.vertex_offset = source.vertexOffset;
+        out.vertex_count = source.vertexCount;
+        out.triangle_offset = source.triangleOffset;
+        out.triangle_count = source.triangleCount;
+        out.center[0] = source.center.x;
+        out.center[1] = source.center.y;
+        out.center[2] = source.center.z;
+        out.radius = source.radius;
+        out.cone_axis[0] = source.coneAxis.x;
+        out.cone_axis[1] = source.coneAxis.y;
+        out.cone_axis[2] = source.coneAxis.z;
+        out.cone_cutoff = source.coneCutoff;
+        mutableCache.meshlets.push_back(out);
+    }
+    return cache;
+}
+
+}  // namespace
+
+const CyberFaceDistortion* cyber_mesh_uv_distortion_ptr(const CyberMesh* mesh,
+                                                        size_t* out_count) {
+    if (mesh == nullptr) {
+        if (out_count != nullptr) {
+            *out_count = 0;
+        }
+        return nullptr;
+    }
+    // Lazy, cached beside the render streams and dropped by the same invalidation hook:
+    // distortion is derived from geometry AND from the UV attribute, so anything that
+    // changes either must drop it. Built on first request because only the heatmap wants it.
+    const CyberRenderCache* cache = ensureRenderCache(mesh);
+    if (cache == nullptr || !cache->hasUvs) {
+        // No layout means no distortion, which is NOT zero distortion.
+        if (out_count != nullptr) {
+            *out_count = 0;
+        }
+        return nullptr;
+    }
+    auto& mutableCache = const_cast<CyberRenderCache&>(*cache);
+    if (!cache->distortionBuilt) {
+        mutableCache.distortionBuilt = true;
+        // Reuses the engine's own measurement rather than recomputing it here: a second
+        // implementation would let the per-face view and CyberAtlasResult disagree about
+        // the same mesh.
+        std::vector<cyber::FaceId> live;
+        live.reserve(mesh->mesh.faceCapacity());
+        for (cyber::Index i = 0; i < mesh->mesh.faceCapacity(); ++i) {
+            const cyber::FaceId face{i};
+            if (mesh->mesh.isAlive(face)) {
+                live.push_back(face);
+            }
+        }
+        const cyber::uv::IslandDistortion measured =
+            cyber::uv::measureDistortion(mesh->mesh, live);
+        mutableCache.distortion.reserve(measured.faces.size());
+        for (const cyber::uv::FaceDistortion& face : measured.faces) {
+            CyberFaceDistortion out{};
+            out.angle = face.angle;
+            out.area = face.area;
+            out.flipped = face.flipped ? 1 : 0;
+            mutableCache.distortion.push_back(out);
+        }
+    }
+    return bufferView(&cache->distortion, out_count);
+}
+
+const float* cyber_mesh_uvs_ptr(const CyberMesh* mesh, size_t* out_count) {
+    const CyberRenderCache* cache = ensureRenderCache(mesh);
+    // NULL for a mesh that was never unwrapped, and an EMPTY-but-non-null view is
+    // impossible here: `hasUvs` is false exactly when the corner attribute is absent.
+    // A caller therefore distinguishes "no layout" from "a layout at the origin".
+    if (cache == nullptr || !cache->hasUvs) {
+        if (out_count != nullptr) {
+            *out_count = 0;
+        }
+        return nullptr;
+    }
+    return bufferView(&cache->uvs, out_count);
+}
+
+const CyberMeshlet* cyber_mesh_meshlets_ptr(const CyberMesh* mesh, size_t* out_count) {
+    const CyberRenderCache* cache = ensureMeshlets(mesh);
+    return bufferView(cache == nullptr ? nullptr : &cache->meshlets, out_count);
+}
+
+const uint32_t* cyber_mesh_meshlet_vertices_ptr(const CyberMesh* mesh, size_t* out_count) {
+    const CyberRenderCache* cache = ensureMeshlets(mesh);
+    return bufferView(cache == nullptr ? nullptr : &cache->meshletVertices, out_count);
+}
+
+const uint8_t* cyber_mesh_meshlet_indices_ptr(const CyberMesh* mesh, size_t* out_count) {
+    const CyberRenderCache* cache = ensureMeshlets(mesh);
+    return bufferView(cache == nullptr ? nullptr : &cache->meshletIndices, out_count);
+}
+
 size_t cyber_mesh_triangle_count(const CyberMesh* mesh) {
     const CyberRenderCache* cache = ensureRenderCache(mesh);
     return cache == nullptr ? 0 : cache->indices.size() / 3;
@@ -774,6 +2000,14 @@ size_t cyber_mesh_copy_triangle_indices(const CyberMesh* mesh, uint32_t* out,
 size_t cyber_mesh_edge_count(const CyberMesh* mesh) {
     const CyberRenderCache* cache = ensureRenderCache(mesh);
     return cache == nullptr ? 0 : cache->edges.size() / 2;
+}
+
+size_t cyber_mesh_vertex_capacity(const CyberMesh* mesh) {
+    return mesh == nullptr ? 0 : mesh->mesh.vertexCapacity();
+}
+
+size_t cyber_mesh_edge_capacity(const CyberMesh* mesh) {
+    return mesh == nullptr ? 0 : mesh->mesh.edgeCapacity();
 }
 
 size_t cyber_mesh_copy_edge_indices(const CyberMesh* mesh, uint32_t* out, size_t max_indices) {
@@ -849,6 +2083,22 @@ size_t cyber_mesh_live_faces(const CyberMesh* mesh, uint32_t* out_faces,
     return total;
 }
 
+size_t cyber_mesh_face_vertices(const CyberMesh* mesh, uint32_t face,
+                                uint32_t* out_verts, size_t max_verts) {
+    if (mesh == nullptr || !mesh->mesh.isAlive(cyber::FaceId{face})) {
+        return 0;
+    }
+    const std::vector<cyber::VertexId> verts =
+        mesh->mesh.faceVertices(cyber::FaceId{face});
+    if (out_verts != nullptr) {
+        const size_t count = std::min(verts.size(), max_verts);
+        for (size_t i = 0; i < count; ++i) {
+            out_verts[i] = verts[i].value;
+        }
+    }
+    return verts.size();
+}
+
 CyberStatus cyber_mesh_set_hidden_faces(CyberMesh* mesh, const uint32_t* faces,
                                         size_t face_count) {
     if (mesh == nullptr || (faces == nullptr && face_count > 0)) {
@@ -892,6 +2142,325 @@ CyberStatus cyber_mesh_set_tagged_edges(CyberMesh* mesh, const uint32_t* edges,
         return CYBER_OK;
     } catch (...) {
         setError("cyber_mesh_set_tagged_edges: allocation failure");
+        return CYBER_ERR_RUNTIME;
+    }
+}
+
+/* ---- Regional prescribed-boundary solve (add-weave-regional-solve) ------- */
+
+namespace {
+
+// Shared shape for the region readback getters: report the true count always,
+// fill up to `capacity`. Mirrors the id-array contract cyber_retopo_patch_clone
+// established (alive ids, no repeats, handle untouched on failure).
+template <typename Container, typename Project>
+CyberStatus copyIds(const Container& src, Project project, uint32_t* out_ids, size_t capacity,
+                    size_t* out_count, const char* what) {
+    if (out_count == nullptr) {
+        setError(std::string(what) + ": null out_count");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    *out_count = src.size();
+    if (out_ids != nullptr) {
+        size_t n = 0;
+        for (const auto& v : src) {
+            if (n >= capacity) {
+                break;
+            }
+            out_ids[n++] = project(v);
+        }
+    }
+    clearError();
+    return CYBER_OK;
+}
+
+}  // namespace
+
+CyberStatus cyber_mesh_propose_seams(const CyberMesh* mesh, uint32_t* out_ids,
+                                     size_t capacity, size_t* out_count) {
+    if (mesh == nullptr || out_count == nullptr) {
+        setError("cyber_mesh_propose_seams: null argument");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    try {
+        // The artist's own seams act as growth barriers AND are always present in the
+        // result, so an accepted proposal can only ever add.
+        cyber::uv::SeamSet barrier;
+        for (const std::uint32_t id : mesh->seamEdges) {
+            barrier.mark(cyber::EdgeId{id});
+        }
+        const cyber::uv::AtlasOptions options{};
+        const cyber::uv::SeamSet proposed = cyber::uv::autoSeams(
+            mesh->mesh, options, barrier.empty() ? nullptr : &barrier
+        );
+        // Ascending ids, so a proposal is deterministic for the same mesh and the same
+        // authored seams — a set's iteration order is not.
+        std::vector<std::uint32_t> ids;
+        for (cyber::Index e = 0; e < mesh->mesh.edgeCapacity(); ++e) {
+            const cyber::EdgeId edge{e};
+            if (mesh->mesh.isAlive(edge) && proposed.isSeam(edge)) {
+                ids.push_back(e);
+            }
+        }
+        *out_count = ids.size();
+        if (out_ids != nullptr) {
+            const size_t writable = capacity < ids.size() ? capacity : ids.size();
+            for (size_t i = 0; i < writable; ++i) {
+                out_ids[i] = ids[i];
+            }
+            *out_count = writable;
+        }
+        clearError();
+        return CYBER_OK;
+    } catch (const std::exception& e) {
+        setError(std::string("cyber_mesh_propose_seams: ") + e.what());
+        return CYBER_ERR_RUNTIME;
+    }
+}
+
+CyberStatus cyber_mesh_set_seam_edges(CyberMesh* mesh, const uint32_t* edge_ids,
+                                      size_t count) {
+    if (mesh == nullptr || (edge_ids == nullptr && count > 0)) {
+        setError("cyber_mesh_set_seam_edges: null argument");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    try {
+        if (count == 0) {
+            mesh->seamEdges.clear();
+            clearError();
+            return CYBER_OK;
+        }
+        // Validate the WHOLE array before storing any of it, so a rejected call leaves the
+        // handle exactly as it was rather than half-updated.
+        for (size_t i = 0; i < count; ++i) {
+            const cyber::EdgeId edge{edge_ids[i]};
+            if (edge_ids[i] >= mesh->mesh.edgeCapacity() || !mesh->mesh.isAlive(edge)) {
+                setError("cyber_mesh_set_seam_edges: dead or out-of-range edge id");
+                return CYBER_ERR_INVALID_ARG;
+            }
+        }
+        mesh->seamEdges.assign(edge_ids, edge_ids + count);
+        clearError();
+        return CYBER_OK;
+    } catch (const std::exception& e) {
+        setError(e.what());
+        return CYBER_ERR_RUNTIME;
+    }
+}
+
+CyberStatus cyber_mesh_set_density_scales(CyberMesh* mesh, const float* scales, size_t count) {
+    if (mesh == nullptr || (scales == nullptr && count > 0)) {
+        setError("cyber_mesh_set_density_scales: null argument");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    try {
+        if (count == 0) {
+            mesh->densityScales.clear();
+            clearError();
+            return CYBER_OK;
+        }
+        // Validate BEFORE mutating, so a rejected call leaves the handle as it was. A
+        // non-positive or non-finite multiplier is meaningless and would silently
+        // degenerate the target edge length rather than fail visibly.
+        for (size_t i = 0; i < count; ++i) {
+            if (!(scales[i] > 0.0f) || !std::isfinite(scales[i])) {
+                setError("cyber_mesh_set_density_scales: scales must be finite and > 0");
+                return CYBER_ERR_INVALID_ARG;
+            }
+        }
+        mesh->densityScales.assign(scales, scales + count);
+        clearError();
+        return CYBER_OK;
+    } catch (const std::exception& e) {
+        setError(e.what());
+        return CYBER_ERR_RUNTIME;
+    }
+}
+
+CyberStatus cyber_mesh_set_region_reference(CyberMesh* mesh, const CyberMesh* reference) {
+    if (mesh == nullptr) {
+        setError("cyber_mesh_set_region_reference: null mesh");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    // Self-reference would mean "project onto the mesh being rewritten", which is
+    // exactly the default. Refuse it rather than accept a call that reads as doing
+    // something and does nothing.
+    if (reference == mesh) {
+        setError("cyber_mesh_set_region_reference: reference must not be the mesh itself");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    mesh->regionReference = reference;  // nullptr clears
+    clearError();
+    return CYBER_OK;
+}
+
+CyberStatus cyber_mesh_set_solve_region(CyberMesh* mesh, const uint32_t* face_ids, size_t count) {
+    if (mesh == nullptr || (face_ids == nullptr && count > 0)) {
+        setError("cyber_mesh_set_solve_region: null argument");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    try {
+        if (count == 0) {
+            mesh->solveRegionFaces.clear();
+            clearError();
+            return CYBER_OK;
+        }
+        // Validate fully BEFORE mutating, so a rejected call leaves the handle
+        // exactly as it was.
+        std::unordered_set<std::uint32_t> seen;
+        seen.reserve(count * 2);
+        for (size_t i = 0; i < count; ++i) {
+            const cyber::FaceId f{face_ids[i]};
+            if (!mesh->mesh.isAlive(f)) {
+                setError("cyber_mesh_set_solve_region: face id is not alive");
+                return CYBER_ERR_INVALID_ARG;
+            }
+            if (!seen.insert(face_ids[i]).second) {
+                setError("cyber_mesh_set_solve_region: repeated face id");
+                return CYBER_ERR_INVALID_ARG;
+            }
+        }
+        mesh->solveRegionFaces.assign(face_ids, face_ids + count);
+        clearError();
+        return CYBER_OK;
+    } catch (...) {
+        setError("cyber_mesh_set_solve_region: allocation failure");
+        return CYBER_ERR_RUNTIME;
+    }
+}
+
+CyberStatus cyber_mesh_set_region_valence(CyberMesh* mesh, const uint32_t* vertex_ids,
+                                          const int32_t* valences, size_t count) {
+    if (mesh == nullptr || ((vertex_ids == nullptr || valences == nullptr) && count > 0)) {
+        setError("cyber_mesh_set_region_valence: null argument");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    try {
+        mesh->regionValence.clear();
+        for (size_t i = 0; i < count; ++i) {
+            mesh->regionValence[vertex_ids[i]] = valences[i];
+        }
+        clearError();
+        return CYBER_OK;
+    } catch (...) {
+        setError("cyber_mesh_set_region_valence: allocation failure");
+        return CYBER_ERR_RUNTIME;
+    }
+}
+
+CyberStatus cyber_mesh_solved_faces(const CyberMesh* mesh, uint32_t* out_ids, size_t capacity,
+                                    size_t* out_count) {
+    if (mesh == nullptr || !mesh->regionReport.has_value()) {
+        setError("cyber_mesh_solved_faces: handle is not from a region solve");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    return copyIds(
+        mesh->regionReport->solvedFaces, [](cyber::FaceId f) { return f.value; }, out_ids,
+        capacity, out_count, "cyber_mesh_solved_faces");
+}
+
+CyberStatus cyber_mesh_interface_vertices(const CyberMesh* mesh, uint32_t* out_ids,
+                                          size_t capacity, size_t* out_count) {
+    if (mesh == nullptr || !mesh->regionReport.has_value()) {
+        setError("cyber_mesh_interface_vertices: handle is not from a region solve");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    return copyIds(
+        mesh->regionReport->interfaceVertices, [](cyber::VertexId v) { return v.value; }, out_ids,
+        capacity, out_count, "cyber_mesh_interface_vertices");
+}
+
+CyberStatus cyber_mesh_interface_irregular(const CyberMesh* mesh, uint32_t* out_ids,
+                                           size_t capacity, size_t* out_count) {
+    if (mesh == nullptr || !mesh->regionReport.has_value()) {
+        setError("cyber_mesh_interface_irregular: handle is not from a region solve");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    return copyIds(
+        mesh->regionReport->interfaceIrregular, [](cyber::VertexId v) { return v.value; }, out_ids,
+        capacity, out_count, "cyber_mesh_interface_irregular");
+}
+
+CyberStatus cyber_mesh_region_report(const CyberMesh* mesh, CyberRegionReport* out) {
+    if (mesh == nullptr || out == nullptr) {
+        setError("cyber_mesh_region_report: null argument");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    if (!mesh->regionReport.has_value()) {
+        setError("cyber_mesh_region_report: handle is not from a region solve");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    const auto& r = *mesh->regionReport;
+    out->interface_vertex_count = static_cast<uint32_t>(r.interfaceVertices.size());
+    out->interface_irregular_count = static_cast<uint32_t>(r.interfaceIrregular.size());
+    out->interface_triangles = static_cast<uint32_t>(r.interfaceTriangles);
+    out->interior_index_budget = r.interiorIndexBudget;
+    out->index_residual = r.indexResidual;
+    clearError();
+    return CYBER_OK;
+}
+
+CyberStatus cyber_mesh_vertex_face_count(const CyberMesh* mesh, uint32_t vertex_id,
+                                         uint32_t* out_count) {
+    if (mesh == nullptr || out_count == nullptr) {
+        setError("cyber_mesh_vertex_face_count: null argument");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    const cyber::VertexId v{vertex_id};
+    if (!mesh->mesh.isAlive(v)) {
+        setError("cyber_mesh_vertex_face_count: vertex id is not alive");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    *out_count = static_cast<uint32_t>(mesh->mesh.vertexFaces(v).size());
+    clearError();
+    return CYBER_OK;
+}
+
+CyberStatus cyber_mesh_duplicate(const CyberMesh* mesh, CyberMesh** out) {
+    if (mesh == nullptr || out == nullptr) {
+        setError("cyber_mesh_duplicate: null argument");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    *out = nullptr;
+    try {
+        auto handle = std::make_unique<CyberMesh>();
+        handle->mesh = mesh->mesh;  // value copy: every element id is preserved
+        handle->stats = mesh->stats;
+        handle->hiddenFaces = mesh->hiddenFaces;
+        handle->taggedEdges = mesh->taggedEdges;
+        handle->guidePoints = mesh->guidePoints;
+        handle->guideDirs = mesh->guideDirs;
+        handle->solveRegionFaces = mesh->solveRegionFaces;
+        handle->regionValence = mesh->regionValence;
+        handle->regionReport = mesh->regionReport;
+        // render cache is lazy and deliberately not copied
+        clearError();
+        *out = handle.release();
+        return CYBER_OK;
+    } catch (...) {
+        setError("cyber_mesh_duplicate: allocation failure");
+        return CYBER_ERR_RUNTIME;
+    }
+}
+
+CyberStatus cyber_mesh_set_orientation_guides(CyberMesh* mesh, const float* points_xyz,
+                                              const float* dirs_xyz, size_t count) {
+    if (mesh == nullptr || ((points_xyz == nullptr || dirs_xyz == nullptr) && count > 0)) {
+        setError("cyber_mesh_set_orientation_guides: null argument");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    try {
+        if (count == 0) {
+            mesh->guidePoints.clear();
+            mesh->guideDirs.clear();
+        } else {
+            mesh->guidePoints.assign(points_xyz, points_xyz + count * 3);
+            mesh->guideDirs.assign(dirs_xyz, dirs_xyz + count * 3);
+        }
+        clearError();
+        return CYBER_OK;
+    } catch (...) {
+        setError("cyber_mesh_set_orientation_guides: allocation failure");
         return CYBER_ERR_RUNTIME;
     }
 }
@@ -1232,7 +2801,14 @@ namespace {
 // Drops the (possibly built) render cache after a mutation. Assigning a
 // fresh value releases the old vectors, so stale geometry can never leak
 // into a rebuilt cache.
-void invalidateRenderCache(CyberMesh* mesh) { mesh->render = CyberRenderCache{}; }
+void invalidateRenderCache(CyberMesh* mesh) {
+    mesh->render = CyberRenderCache{};
+    // The reference surface is derived from geometry, so it dies with the cache. This
+    // is why it lives here rather than behind its own hook: every mutating op already
+    // calls this, so a new mutating op cannot forget to invalidate it.
+    mesh->referenceSurface.reset();
+    mesh->referenceSurfaceSmoothing = -1.0f;
+}
 
 const cyber::retopo::SurfaceSnapper* snapperOf(const CyberSnapper* snapper) {
     return snapper == nullptr ? nullptr : &snapper->snapper;
@@ -1642,6 +3218,36 @@ CyberStatus cyber_retopo_build_face(CyberMesh* mesh, size_t count,
                 }
                 if (cyber::lengthSquared(positions[i] - positions[j]) < 1e-12f) {
                     setError("cyber_retopo_build_face: degenerate polygon");
+                    return CYBER_ERR_INVALID_ARG;
+                }
+            }
+        }
+        // No stacking a face on an existing one (change add-context-aware-create-
+        // face): when every ring slot reuses an existing vertex, reject if a live
+        // face already bounds exactly that vertex set (order-independent). A ring
+        // with any new vertex cannot duplicate an existing face.
+        bool allExisting = true;
+        for (size_t i = 0; i < count; ++i) {
+            if (vertex_ids[i] == CYBER_BUILD_NEW_VERTEX) {
+                allExisting = false;
+                break;
+            }
+        }
+        if (allExisting) {
+            std::unordered_set<std::uint32_t> want(vertex_ids, vertex_ids + count);
+            for (const cyber::FaceId f :
+                 mesh->mesh.vertexFaces(cyber::VertexId{vertex_ids[0]})) {
+                const std::vector<cyber::VertexId> fv = mesh->mesh.faceVertices(f);
+                if (fv.size() != count) {
+                    continue;
+                }
+                std::unordered_set<std::uint32_t> have;
+                for (const cyber::VertexId v : fv) {
+                    have.insert(v.value);
+                }
+                if (have == want) {
+                    setError(
+                        "cyber_retopo_build_face: a face with these vertices already exists");
                     return CYBER_ERR_INVALID_ARG;
                 }
             }
@@ -2253,6 +3859,35 @@ CyberStatus cyber_retopo_subdivide(CyberMesh* mesh, const CyberSnapper* snapper,
     });
 }
 
+CyberStatus cyber_retopo_subdivide_smooth(CyberMesh* mesh, const CyberSnapper* snapper,
+                                          size_t* out_faces) {
+    return runMeshEdit(mesh, "cyber_retopo_subdivide_smooth", [&] {
+        if (mesh->mesh.faceCount() == 0) {
+            setError("cyber_retopo_subdivide_smooth: mesh has no faces");
+            return CYBER_ERR_EMPTY;
+        }
+        cyber::retopo::smoothSubdivideAll(mesh->mesh);
+        // Smooth already approaches the limit surface; a Target snap then
+        // conforms it exactly onto the reference (smooth-then-conform).
+        const cyber::retopo::SurfaceSnapper* snap = snapperOf(snapper);
+        if (snap != nullptr && !snap->empty()) {
+            for (std::uint32_t i = 0; i < mesh->mesh.vertexCapacity(); ++i) {
+                const cyber::VertexId v{i};
+                if (mesh->mesh.isAlive(v)) {
+                    mesh->mesh.setPosition(v, snap->snapToSurface(mesh->mesh.position(v)).point);
+                }
+            }
+        }
+        // Every id was reassigned (same as the linear variant).
+        mesh->hiddenFaces.clear();
+        mesh->taggedEdges.clear();
+        if (out_faces != nullptr) {
+            *out_faces = mesh->mesh.faceCount();
+        }
+        return CYBER_OK;
+    });
+}
+
 CyberStatus cyber_retopo_triangulate(CyberMesh* mesh, size_t* out_faces) {
     return runMeshEdit(mesh, "cyber_retopo_triangulate", [&] {
         if (mesh->mesh.faceCount() == 0) {
@@ -2328,8 +3963,12 @@ CyberStrokeAction toCAction(cyber::retopo::InterpretedAction action) {
     switch (action) {
         case InterpretedAction::CreateQuad:
             return CYBER_ACTION_CREATE_QUAD;
+        case InterpretedAction::CreateTriangle:
+            return CYBER_ACTION_CREATE_TRIANGLE;
         case InterpretedAction::InsertLoop:
             return CYBER_ACTION_INSERT_LOOP;
+        case InterpretedAction::BridgeRims:
+            return CYBER_ACTION_BRIDGE_RIMS;
         case InterpretedAction::TagLoop:
             return CYBER_ACTION_TAG_LOOP;
         case InterpretedAction::DissolveEdge:

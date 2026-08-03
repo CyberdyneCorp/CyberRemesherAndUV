@@ -39,6 +39,18 @@ struct AtlasOptions {
     bool reorientCharts = true;
     UnwrapOptions unwrap{};
     PackParams pack{};
+    // HAND-DRAWN seams (add-uv-seam-authoring). When non-null, `unwrapAtlas` cuts
+    // along exactly these instead of calling `autoSeams` — everything downstream
+    // (computeIslands, LSCM per island, packing) already honours a seam set, so
+    // this is the only hook the interactive path needed.
+    //
+    // REPLACES the automatic seams rather than adding to them. A union would cut
+    // where the artist did not ask, and "I drew three seams and got eleven" is a
+    // worse failure than an under-cut layout — which the distortion report and the
+    // heatmap already surface, so the artist can add another seam and re-run.
+    //
+    // Null (the default) is the previous behaviour byte-for-byte.
+    const SeamSet* seams = nullptr;
 };
 
 struct AtlasResult {
@@ -62,7 +74,16 @@ struct AtlasResult {
 // between them (mesh boundary edges are already island boundaries and are not
 // marked). Exposed for interactive seam preview and for testing that
 // computeIslands reproduces the same partition.
-[[nodiscard]] SeamSet autoSeams(const Mesh& mesh, const AtlasOptions& options = {});
+// Chart-growth seams. `barrier`, when non-null, is a set of edges growth will NOT cross
+// and which are always present in the result — hand-authored seams, so the answer is
+// "given your cuts, where else would I cut" rather than a fresh opinion on the whole mesh
+// (add-auto-seam-proposals). Null is the previous behaviour byte-for-byte.
+//
+// Caveat worth knowing: the chart-MERGE passes are not barrier-aware, so two charts a
+// barrier separates can still merge. The union of the barrier into the result keeps the
+// output correct; the auto seams near a manual cut may be placed as if it were absent.
+[[nodiscard]] SeamSet autoSeams(const Mesh& mesh, const AtlasOptions& options = {},
+                                const SeamSet* barrier = nullptr);
 
 // Full automatic atlas: autoSeams -> computeIslands -> LSCM per chart (with a
 // planar-projection fallback for degenerate charts) -> pack -> write "uv".

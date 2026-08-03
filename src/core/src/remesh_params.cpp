@@ -39,12 +39,27 @@ void clampFloat(float& value, float lo, float hi, const char* name,
 
 }  // namespace
 
-ValidatedParameters validate(const Parameters& raw) {
+ValidatedParameters validate(const Parameters& raw, bool regionSolve) {
     ValidatedParameters out;
     out.params = raw;
     Parameters& p = out.params;
 
-    clampInt(p.targetQuadCount, 100, 2'000'000, "targetQuadCount", out.issues);
+    if (regionSolve && p.pureQuads) {
+        out.issues.push_back({"pureQuads",
+                              "not supported by a region solve: the pure-quad construction "
+                              "rewrites geometry wholesale and reprojects every vertex, which "
+                              "would move the prescribed boundary",
+                              true});
+    }
+
+    // The 100-quad floor is a WHOLE-MESH assumption: no useful model is four
+    // quads. A REGION legitimately is — a patch grown off a boundary chain may
+    // want six — and clamping it up silently defeats the prescribed-boundary
+    // sizing (the solver samples target edge length from the frozen interface,
+    // which is the spec's "auto-filled regions match manual scale with no
+    // dials"). Measured: a 7-quad prescription came back as 77 faces, 11x too
+    // fine, and the over-fine patch fought the pinned interface.
+    clampInt(p.targetQuadCount, regionSolve ? 4 : 100, 2'000'000, "targetQuadCount", out.issues);
     clampFloat(p.edgeScale, 0.5f, 4.0f, "edgeScale", out.issues);
     clampFloat(p.sharpEdgeDegrees, 30.0f, 180.0f, "sharpEdgeDegrees", out.issues);
     clampFloat(p.smoothNormalDegrees, 0.0f, 180.0f, "smoothNormalDegrees", out.issues);

@@ -530,4 +530,164 @@ Mesh Mesh::linearSubdivide() const {
     return out;
 }
 
+Mesh Mesh::smoothSubdivide() const {
+    Mesh out;
+    out.vertexAttributes().adoptSchema(m_vertexAttrs);
+    out.edgeAttributes().adoptSchema(m_edgeAttrs);
+    out.faceAttributes().adoptSchema(m_faceAttrs);
+    out.cornerAttributes().adoptSchema(m_cornerAttrs);
+
+    // ---- Catmull-Clark point masks on THIS mesh (task 4.6a) ----
+    // Edge points: interior = avg(v0, v1, adjacent two face points);
+    // boundary = midpoint. Face points are centroids (used inline below).
+    std::vector<Vec3> edgePoint(m_edges.size());
+    for (Index i = 0; i < m_edges.size(); ++i) {
+        if (!m_edges[i].alive) {
+            continue;
+        }
+        const Edge& e = m_edges[i];
+        const Vec3 a = position(e.v0);
+        const Vec3 b = position(e.v1);
+        const std::vector<FaceId> faces = edgeFaces(EdgeId{i});
+        if (faces.size() == 2) {
+            edgePoint[i] =
+                (a + b + faceCentroid(faces[0]) + faceCentroid(faces[1])) * 0.25f;
+        } else {
+            edgePoint[i] = (a + b) * 0.5f;
+        }
+    }
+    // Vertex points.
+    std::vector<Vec3> vertexPoint(m_vertices.size());
+    for (Index i = 0; i < m_vertices.size(); ++i) {
+        if (!m_vertices[i].alive) {
+            continue;
+        }
+        const VertexId v{i};
+        const Vec3 P = position(v);
+        const std::span<const EdgeId> incident = vertexEdges(v);
+        // A boundary vertex follows the crease rule using only its two
+        // boundary-edge neighbours, so the boundary curve is independent of
+        // the interior; a corner (not exactly two boundary edges) is held.
+        std::vector<VertexId> boundaryNeighbors;
+        for (const EdgeId e : incident) {
+            if (isBoundaryEdge(e)) {
+                const Edge& ed = m_edges[e.value];
+                boundaryNeighbors.push_back(ed.v0 == v ? ed.v1 : ed.v0);
+            }
+        }
+        if (!boundaryNeighbors.empty()) {
+            if (boundaryNeighbors.size() == 2) {
+                vertexPoint[i] =
+                    P * 0.75f +
+                    (position(boundaryNeighbors[0]) + position(boundaryNeighbors[1])) *
+                        0.125f;
+            } else {
+                vertexPoint[i] = P;
+            }
+            continue;
+        }
+        const std::vector<FaceId> faces = vertexFaces(v);
+        const std::size_t n = incident.size();
+        if (n == 0 || faces.empty()) {
+            vertexPoint[i] = P;
+            continue;
+        }
+        Vec3 faceAvg{0.0f, 0.0f, 0.0f};
+        for (const FaceId f : faces) {
+            faceAvg += faceCentroid(f);
+        }
+        faceAvg = faceAvg / static_cast<float>(faces.size());
+        Vec3 edgeMidAvg{0.0f, 0.0f, 0.0f};
+        for (const EdgeId e : incident) {
+            const Edge& ed = m_edges[e.value];
+            edgeMidAvg += (position(ed.v0) + position(ed.v1)) * 0.5f;
+        }
+        edgeMidAvg = edgeMidAvg / static_cast<float>(n);
+        const float nf = static_cast<float>(n);
+        vertexPoint[i] = (faceAvg + edgeMidAvg * 2.0f + P * (nf - 3.0f)) / nf;
+    }
+
+    // ---- Build (identical topology to linearSubdivide, CC positions) ----
+    std::vector<VertexId> vertexMap(m_vertices.size());
+    for (Index i = 0; i < m_vertices.size(); ++i) {
+        if (!m_vertices[i].alive) {
+            continue;
+        }
+        vertexMap[i] = out.addVertex(vertexPoint[i]);
+        out.vertexAttributes().applyRow(vertexMap[i].value, m_vertexAttrs.extractRow(i));
+    }
+    std::vector<VertexId> midMap(m_edges.size());
+    for (Index i = 0; i < m_edges.size(); ++i) {
+        if (!m_edges[i].alive) {
+            continue;
+        }
+        const Edge& e = m_edges[i];
+        midMap[i] = out.addVertex(edgePoint[i]);
+        out.vertexAttributes().applyRow(
+            midMap[i].value, AttributeSet::averageRows({m_vertexAttrs.extractRow(e.v0.value),
+                                                        m_vertexAttrs.extractRow(e.v1.value)}));
+    }
+
+    for (Index fi = 0; fi < m_faces.size(); ++fi) {
+        if (!m_faces[fi].alive) {
+            continue;
+        }
+        const FaceId f{fi};
+        const std::vector<LoopId> loops = faceLoops(f);
+        const std::size_t n = loops.size();
+
+        const VertexId center = out.addVertex(faceCentroid(f));
+        {
+            std::vector<AttributeSet::Row> rows;
+            rows.reserve(n);
+            for (const LoopId l : loops) {
+                rows.push_back(m_vertexAttrs.extractRow(m_loops[l.value].vertex.value));
+            }
+            out.vertexAttributes().applyRow(center.value, AttributeSet::averageRows(rows));
+        }
+        std::vector<AttributeSet::Row> cornerRows;
+        cornerRows.reserve(n);
+        for (const LoopId l : loops) {
+            cornerRows.push_back(m_cornerAttrs.extractRow(l.value));
+        }
+        AttributeSet::Row centerCorner = AttributeSet::averageRows(cornerRows);
+        const AttributeSet::Row faceRow = m_faceAttrs.extractRow(fi);
+
+        for (std::size_t i = 0; i < n; ++i) {
+            const std::size_t prev = (i + n - 1) % n;
+            const LoopId li = loops[i];
+            const VertexId vi = m_loops[li.value].vertex;
+            const EdgeId eNext = m_loops[li.value].edge;
+            const EdgeId ePrev = m_loops[loops[prev].value].edge;
+
+            const FaceId child = out.addFace(
+                std::array{vertexMap[vi.value], midMap[eNext.value], center, midMap[ePrev.value]});
+            if (!child.valid()) {
+                continue;
+            }
+            out.faceAttributes().applyRow(child.value, faceRow);
+            const std::vector<LoopId> childLoops = out.faceLoops(child);
+            out.cornerAttributes().applyRow(childLoops[0].value, cornerRows[i]);
+            out.cornerAttributes().applyRow(
+                childLoops[1].value,
+                AttributeSet::averageRows({cornerRows[i], cornerRows[(i + 1) % n]}));
+            out.cornerAttributes().applyRow(childLoops[2].value, centerCorner);
+            out.cornerAttributes().applyRow(
+                childLoops[3].value, AttributeSet::averageRows({cornerRows[prev], cornerRows[i]}));
+
+            for (const auto& [parentEdge, x, y] :
+                 {std::tuple{eNext, vertexMap[vi.value], midMap[eNext.value]},
+                  std::tuple{ePrev, midMap[ePrev.value], vertexMap[vi.value]}}) {
+                if (m_edges[parentEdge.value].feature) {
+                    const EdgeId ce = out.edgeBetween(x, y);
+                    if (ce.valid()) {
+                        out.setFeatureEdge(ce, true);
+                    }
+                }
+            }
+        }
+    }
+    return out;
+}
+
 }  // namespace cyber

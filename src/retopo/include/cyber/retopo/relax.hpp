@@ -63,7 +63,23 @@ inline void relax(Mesh& mesh, const RelaxParams& params, const PinSet* pins = nu
                 lengthSquared(pos - params.brushCenter) > radiusSquared) {
                 continue;
             }
-            const Vec3 centroid = neighborCentroid(mesh, v);
+            // Boundary vertices smooth ONLY along the boundary curve (toward the
+            // midpoint of their two boundary neighbours), so the patch silhouette
+            // is preserved and its edge vertices merely even out — interior
+            // vertices smooth toward their full one-ring centroid for uniform
+            // quads. Relaxing a boundary vertex toward the interior centroid
+            // instead pulls it inward and collapses the patch into a star
+            // (change fix-relax-boundary).
+            Vec3 centroid;
+            if (isBoundaryVertex(mesh, v)) {
+                const std::vector<VertexId> bn = boundaryNeighbors(mesh, v);
+                if (bn.size() != 2) {
+                    continue;  // corner / non-manifold boundary: leave it fixed
+                }
+                centroid = (mesh.position(bn[0]) + mesh.position(bn[1])) * 0.5f;
+            } else {
+                centroid = neighborCentroid(mesh, v);
+            }
             Vec3 delta = centroid - pos;
             const Vec3 n = vertexNormal(mesh, v);
             delta = delta - n * dot(delta, n);  // keep the move tangential

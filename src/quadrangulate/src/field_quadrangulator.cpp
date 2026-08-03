@@ -4,6 +4,7 @@
 #include <array>
 #include <cmath>
 #include <functional>
+#include <limits>
 #include <vector>
 
 #include "cyber/accel/backend.hpp"
@@ -456,12 +457,19 @@ void mopUpTriangles(Mesh& mesh) {
 
 class FieldAlignedQuadrangulator final : public IQuadrangulator {
 public:
-    explicit FieldAlignedQuadrangulator(int iterations) : m_iterations(iterations) {}
+    explicit FieldAlignedQuadrangulator(int iterations, OrientationGuides guides = {},
+                                        const RegionSolve* region = nullptr)
+        : m_iterations(iterations), m_guides(std::move(guides)), m_region(region) {}
 
     Outcome quadrangulate(Mesh& mesh, float /*targetEdgeLength*/, ProgressSink* progress,
                           const CancelToken* cancel) override {
         auto backend = accel::defaultBackend();
-        const CrossField field = computeCrossField(mesh, m_iterations, *backend);
+        // Steer the field toward user guides (add-weave-guide-field-steering).
+        // The guides are world-space because the isotropic stage rebuilt this
+        // mesh's topology; project each sample onto its nearest live triangle
+        // HERE, against the current mesh, to get per-face constraints.
+        const std::vector<CrossFieldConstraint> constraints = projectGuides(mesh);
+        const CrossField field = computeCrossField(mesh, m_iterations, *backend, constraints);
         if (cancel && cancel->isCancelled()) {
             return {.success = false, .cancelled = true, .failureReason = "cancelled"};
         }
@@ -506,7 +514,65 @@ public:
     [[nodiscard]] std::string name() const override { return "field-aligned"; }
 
 private:
+    // Projects each world-space guide sample onto the nearest live triangle of
+    // `mesh` (brute force: guide samples are few — tens per stroke — so O(G*F)
+    // is cheap and needs no spatial index). Each sample yields one per-face
+    // direction constraint; multiple samples on one face, last wins. Faces the
+    // guides do not reach are left to the harmonic smoothing.
+    [[nodiscard]] std::vector<CrossFieldConstraint> projectGuides(const Mesh& mesh) const {
+        std::vector<CrossFieldConstraint> out;
+        if (m_guides.empty()) {
+            return out;
+        }
+        const std::size_t cap = mesh.faceCapacity();
+        for (std::size_t i = 0; i < m_guides.size(); ++i) {
+            const Vec3 p = m_guides.points[i];
+            FaceId best;
+            float bestDist = std::numeric_limits<float>::max();
+            for (Index fi = 0; fi < cap; ++fi) {
+                const FaceId f{fi};
+                if (!mesh.isAlive(f) || mesh.faceSize(f) != 3) {
+                    continue;
+                }
+                const std::vector<VertexId> fv = mesh.faceVertices(f);
+                Vec3 centroid{0, 0, 0};
+                for (const VertexId v : fv) {
+                    centroid = centroid + mesh.position(v);
+                }
+                centroid = centroid / static_cast<float>(fv.size());
+                const float d = lengthSquared(centroid - p);
+                if (d < bestDist) {
+                    bestDist = d;
+                    best = f;
+                }
+            }
+            // Region solve: never let a guide overwrite an interface field pin.
+            // The interface is already an exact Dirichlet condition, and the
+            // guide loop in crossfield.cpp runs after the feature loop without
+            // checking `constrained`, so an unfiltered guide landing here would
+            // silently replace the prescription. Two or more pinned corners
+            // means the face straddles the interface, not merely touches it.
+            if (best.valid() && m_region != nullptr) {
+                int pinnedCorners = 0;
+                for (const VertexId v : mesh.faceVertices(best)) {
+                    if (m_region->pinned(v)) {
+                        ++pinnedCorners;
+                    }
+                }
+                if (pinnedCorners >= 2) {
+                    continue;
+                }
+            }
+            if (best.valid()) {
+                out.push_back(CrossFieldConstraint{best, m_guides.dirs[i]});
+            }
+        }
+        return out;
+    }
+
     int m_iterations;
+    OrientationGuides m_guides;
+    const RegionSolve* m_region = nullptr;
 };
 
 }  // namespace
@@ -546,6 +612,18 @@ std::size_t quadValenceCleanup(Mesh& mesh, const CrossField* field, int maxPasse
 
 std::unique_ptr<IQuadrangulator> makeFieldAlignedQuadrangulator(int fieldIterations) {
     return std::make_unique<FieldAlignedQuadrangulator>(fieldIterations);
+}
+
+std::unique_ptr<IQuadrangulator> makeFieldAlignedQuadrangulator(int fieldIterations,
+                                                                OrientationGuides guides) {
+    return std::make_unique<FieldAlignedQuadrangulator>(fieldIterations, std::move(guides));
+}
+
+std::unique_ptr<IQuadrangulator> makeFieldAlignedQuadrangulator(int fieldIterations,
+                                                                OrientationGuides guides,
+                                                                const RegionSolve* region) {
+    return std::make_unique<FieldAlignedQuadrangulator>(fieldIterations, std::move(guides),
+                                                        region);
 }
 
 }  // namespace cyber::remesh

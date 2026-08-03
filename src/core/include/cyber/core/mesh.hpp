@@ -97,6 +97,14 @@ public:
     // Vertex/edge/face/corner attributes propagate per the documented
     // policy. Returns a new mesh.
     [[nodiscard]] Mesh linearSubdivide() const;
+    // Catmull-Clark SMOOTH subdivision: same quad topology as
+    // linearSubdivide, but the original vertices and edge points move to
+    // their Catmull-Clark limit-approaching positions (interior mask
+    // (Q + 2R + (n-3)P)/n; boundary vertices follow the crease rule
+    // 0.75 P + 0.125 (b0 + b1) and boundary edge points stay midpoints, so
+    // the boundary is a cubic B-spline curve independent of the interior).
+    // Attributes propagate exactly as in linearSubdivide.
+    [[nodiscard]] Mesh smoothSubdivide() const;
 
     // ---- adjacency queries --------------------------------------------
     [[nodiscard]] std::size_t vertexCount() const { return m_aliveVertices; }

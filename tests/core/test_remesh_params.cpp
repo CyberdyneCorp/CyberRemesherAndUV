@@ -54,3 +54,26 @@ TEST_CASE("target edge length matches the equilateral derivation") {
     const auto scaled = remesh::targetEdgeLength(1000.0, 1000, 2.0f);
     REQUIRE(scaled.edgeLength == doctest::Approx(2.0f * result.edgeLength));
 }
+
+TEST_CASE("region validation makes pureQuads fatal, and only pureQuads") {
+    cyber::remesh::Parameters params;
+    params.pureQuads = true;
+
+    // Whole-mesh: pureQuads is a supported option.
+    const auto whole = cyber::remesh::validate(params, false);
+    CHECK(whole.ok());
+
+    // Region: fatal, because the pure-quad construction reprojects every vertex
+    // and would move the prescribed boundary.
+    const auto region = cyber::remesh::validate(params, true);
+    CHECK_FALSE(region.ok());
+    CHECK(std::any_of(region.issues.begin(), region.issues.end(),
+                      [](const cyber::remesh::ParameterIssue& i) {
+                          return i.parameter == "pureQuads" && i.fatal;
+                      }));
+
+    // The two INAPPLICABLE defaults must not be fatal — they are the defaults,
+    // so refusing on them would reject every ordinary region call.
+    cyber::remesh::Parameters defaults;
+    CHECK(cyber::remesh::validate(defaults, true).ok());
+}

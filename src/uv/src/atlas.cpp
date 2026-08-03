@@ -19,7 +19,8 @@ namespace {
 // ascending-id seeds: a neighbour joins the seed's chart while its normal stays
 // within `maxChartAngleDeg` of the seed normal. Deterministic (seed order and
 // the DFS stack are both id-ordered by construction).
-std::vector<int> computeCharts(const Mesh& mesh, const AtlasOptions& options) {
+std::vector<int> computeCharts(const Mesh& mesh, const AtlasOptions& options,
+                               const SeamSet* barrier = nullptr) {
     const auto capacity = mesh.faceCapacity();
     std::vector<int> chartOf(capacity, -1);
     const float cosThresh = std::cos(degreesToRadians(options.maxChartAngleDeg));
@@ -44,6 +45,12 @@ std::vector<int> computeCharts(const Mesh& mesh, const AtlasOptions& options) {
             for (std::size_t i = 0; i < n; ++i) {
                 const EdgeId edge = mesh.edgeBetween(verts[i], verts[(i + 1) % n]);
                 if (!edge.valid()) {
+                    continue;
+                }
+                // A barrier edge is one the artist already cut, so growth stops there:
+                // that is what makes a proposal answer "given your cuts, where ELSE"
+                // rather than re-deciding the layout from scratch.
+                if (barrier != nullptr && barrier->isSeam(edge)) {
                     continue;
                 }
                 for (const FaceId nb : mesh.edgeFaces(edge)) {
@@ -443,13 +450,26 @@ std::vector<Vec2> islandUvPoints(const Mesh& mesh, std::span<const FaceId> islan
 
 }  // namespace
 
-SeamSet autoSeams(const Mesh& mesh, const AtlasOptions& options) {
-    std::vector<int> chartOf = computeCharts(mesh, options);
+SeamSet autoSeams(const Mesh& mesh, const AtlasOptions& options, const SeamSet* barrier) {
+    std::vector<int> chartOf = computeCharts(mesh, options, barrier);
     if (options.mergeCharts) {
         mergeCoplanarCharts(mesh, chartOf, options);  // free: no distortion rise
         mergeByDistortion(mesh, chartOf, options);    // spend headroom up to the cap
     }
     SeamSet seams;
+    // The barrier's own edges are always seams in the result. The merge passes above are
+    // NOT barrier-aware and may have merged charts a barrier separates, so unioning here is
+    // what guarantees an accepted proposal can never delete a seam the artist drew. The
+    // chart shapes near a manual cut may still be placed as if it were absent — a stated
+    // limitation, not a silent one.
+    if (barrier != nullptr) {
+        for (Index e = 0; e < mesh.edgeCapacity(); ++e) {
+            const EdgeId edge{e};
+            if (mesh.isAlive(edge) && barrier->isSeam(edge)) {
+                seams.mark(edge);
+            }
+        }
+    }
     const auto capacity = mesh.faceCapacity();
     for (Index f = 0; f < capacity; ++f) {
         const FaceId face{f};
@@ -477,7 +497,10 @@ SeamSet autoSeams(const Mesh& mesh, const AtlasOptions& options) {
 
 AtlasResult unwrapAtlas(Mesh& mesh, const AtlasOptions& options) {
     AtlasResult result;
-    const SeamSet seams = autoSeams(mesh, options);
+    // Hand-drawn seams win outright when supplied; see AtlasOptions::seams for why they
+    // replace the automatic ones rather than being unioned with them.
+    const SeamSet seams =
+        options.seams != nullptr ? *options.seams : autoSeams(mesh, options);
     result.seamEdges = seams.size();
 
     const std::vector<std::vector<FaceId>> islands = computeIslands(mesh, seams);

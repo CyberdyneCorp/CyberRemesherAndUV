@@ -2,6 +2,11 @@ add_library(cyber_uv STATIC
     src/unwrap.cpp
     src/packing.cpp
     src/atlas.cpp
+    src/reunwrap.cpp
+    src/pack_aids.cpp
+    src/udim.cpp
+    src/uv_stack.cpp
+    src/uv_sets.cpp
 )
 add_library(cyber::uv ALIAS cyber_uv)
 

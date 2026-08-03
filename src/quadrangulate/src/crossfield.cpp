@@ -40,7 +40,8 @@ float CrossField::angle(FaceId f) const {
     return theta;
 }
 
-CrossField computeCrossField(const Mesh& mesh, int iterations, accel::IBackend& backend) {
+CrossField computeCrossField(const Mesh& mesh, int iterations, accel::IBackend& backend,
+                             const std::vector<CrossFieldConstraint>& constraints) {
     const std::size_t cap = mesh.faceCapacity();
     CrossField field;
     field.tangent.assign(cap, Vec3{1, 0, 0});
@@ -90,6 +91,31 @@ CrossField computeCrossField(const Mesh& mesh, int iterations, accel::IBackend& 
             constrained[c] = 1;
             break;
         }
+    }
+
+    // External orientation constraints (add-weave-guide-field-steering): pin the
+    // listed faces to their world directions, projected into each face's frame —
+    // the same hard-pin the feature loop above applies, so these faces are held
+    // through the smoothing (skipped by the re-pin loop below). A guide overrides
+    // a feature pin on the same face (the user's intent wins). An empty list
+    // leaves the field identical to the unconstrained solve.
+    for (const CrossFieldConstraint& gc : constraints) {
+        if (!gc.face.valid() || gc.face.value >= cap) {
+            continue;
+        }
+        const Index c = compact[gc.face.value];
+        if (c == kInvalidIndex) {
+            continue;  // not a live triangle in this mesh
+        }
+        const float len = length(gc.direction);
+        if (len < 1e-12f) {
+            continue;  // degenerate direction imposes no constraint
+        }
+        const Vec3 d = gc.direction / len;
+        const float alpha = frameAngle(d, field.tangent[gc.face.value], field.bitangent[gc.face.value]);
+        field.real[gc.face.value] = std::cos(4.0f * alpha);
+        field.imag[gc.face.value] = std::sin(4.0f * alpha);
+        constrained[c] = 1;
     }
 
     // Build the 2F x 2F transport-averaging operator as CSR: row 2c/2c+1 hold

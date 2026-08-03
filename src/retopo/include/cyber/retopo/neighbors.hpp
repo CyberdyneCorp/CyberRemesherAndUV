@@ -30,6 +30,33 @@ namespace cyber::retopo {
     return normalized(n);
 }
 
+// Whether `v` lies on a mesh boundary (some incident edge borders a single
+// face). Relax must move a boundary vertex only ALONG the boundary, never toward
+// the interior, or the silhouette collapses (change fix-relax-boundary).
+[[nodiscard]] inline bool isBoundaryVertex(const Mesh& mesh, VertexId v) {
+    for (const EdgeId e : mesh.vertexEdges(v)) {
+        if (mesh.edgeFaceCount(e) < 2) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// The neighbours of `v` reached by a BOUNDARY edge (an edge bordering a single
+// face) — for a manifold boundary vertex, its two neighbours along the boundary
+// loop. Smoothing a boundary vertex toward the midpoint of these keeps it on the
+// boundary curve while evening its spacing.
+[[nodiscard]] inline std::vector<VertexId> boundaryNeighbors(const Mesh& mesh, VertexId v) {
+    std::vector<VertexId> out;
+    for (const EdgeId e : mesh.vertexEdges(v)) {
+        if (mesh.edgeFaceCount(e) < 2) {
+            const auto [a, b] = mesh.edgeVertices(e);
+            out.push_back(a == v ? b : a);
+        }
+    }
+    return out;
+}
+
 // Centroid of the one-ring neighbours; returns `v`'s own position if isolated.
 [[nodiscard]] inline Vec3 neighborCentroid(const Mesh& mesh, VertexId v) {
     const std::vector<VertexId> ring = oneRing(mesh, v);

@@ -46,7 +46,19 @@ struct ValidatedParameters {
 // value) and flags non-finite values as fatal. Every entry point SHALL call
 // this before the pipeline starts (remeshing-parameters spec, "Validation at
 // every entry point").
-[[nodiscard]] ValidatedParameters validate(const Parameters& raw);
+// `regionSolve` marks a REGION solve (add-weave-regional-solve): a subset of
+// faces rewritten in place against frozen surrounding topology. It makes
+// `pureQuads` a FATAL issue, because the pure-quad construction rewrites
+// geometry wholesale and ends in an unguarded whole-vertex reprojection that
+// would move the prescribed boundary. Validating it here rather than only in
+// the pipeline stops a direct `cyber::remesh::remesh` caller too.
+//
+// Deliberately NOT fatal in region mode: holeFillMaxBoundary and
+// smallPatchPolicy. Both are DEFAULTS (64 and KeepLargest) and both are
+// meaningless for one connected region bounded by frozen topology, so refusing
+// would reject every ordinary call. The pipeline skips them and reports a
+// non-fatal issue where they are ignored.
+[[nodiscard]] ValidatedParameters validate(const Parameters& raw, bool regionSolve = false);
 
 // Derived target edge length from total surface area (guarded: non-positive
 // area or quad count is an error, never a division by zero — the AutoRemesher

@@ -42,6 +42,13 @@ inline void relaxAll(Mesh& mesh, const PinSet* pins = nullptr, int iterations = 
 // quads, replacing the mesh in place.
 inline void subdivideAll(Mesh& mesh) { mesh = mesh.linearSubdivide(); }
 
+// Whole-mesh smooth subdivide-all: Catmull-Clark SMOOTH subdivision (same
+// topology as subdivideAll, limit-approaching positions), replacing the mesh
+// in place (task 4.6a).
+inline void smoothSubdivideAll(Mesh& mesh) {
+    mesh = mesh.smoothSubdivide();
+}
+
 // Whole-mesh mirror-all: bake the symmetry plane into real geometry. Returns
 // the number of faces added.
 inline std::size_t mirrorAll(Mesh& mesh, const Symmetry& sym,

@@ -1,5 +1,6 @@
 add_library(cyber_core STATIC
     src/bvh.cpp
+    src/interface_conformance.cpp
     src/io.cpp
     src/io_gltf.cpp
     src/io_obj.cpp
@@ -7,11 +8,13 @@ add_library(cyber_core STATIC
     src/io_stl.cpp
     src/isotropic.cpp
     src/mesh.cpp
+    src/meshlet.cpp
     src/mesh_diagnostics.cpp
     src/mesh_ops.cpp
     src/pipeline.cpp
     src/quadrangulate.cpp
     src/reference_surface.cpp
+    src/region_solve.cpp
     src/remesh_params.cpp
     src/version.cpp
 )

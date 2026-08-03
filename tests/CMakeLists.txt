@@ -22,10 +22,12 @@ add_executable(cyber_tests
     core/test_isotropic.cpp
     core/test_pipeline.cpp
     core/test_pure_quad_quality.cpp
+    core/test_region_solve.cpp
     core/test_reference_surface.cpp
     core/test_remesh_params.cpp
     core/test_mesh.cpp
     core/test_mesh_property.cpp
+    core/test_meshlet.cpp
     core/test_version.cpp
     accel/test_cpu_backend.cpp
     accel/test_gpu_parity.cpp
