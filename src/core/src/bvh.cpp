@@ -180,14 +180,25 @@ Bvh::ClosestHit Bvh::closestPoint(Vec3 query) const {
     if (m_nodes.empty()) {
         return best;
     }
-    std::array<std::uint32_t, 64> stack{};
+    // Best-first descent: visit the nearer child first and remember the
+    // farther one with its box distance, so a tight bound is established
+    // immediately and far subtrees are pruned wholesale. Same hits as the
+    // naive traversal — pruning only skips subtrees that cannot beat the
+    // current best — but orders of magnitude fewer node visits when the query
+    // is close to the surface (the isotropic passes' common case).
+    struct Entry {
+        std::uint32_t node;
+        float distanceSquared;
+    };
+    std::array<Entry, 64> stack{};
     std::size_t top = 0;
-    stack[top++] = 0;
+    stack[top++] = {0, distanceSquaredToBox(query, m_nodes[0].boundsMin, m_nodes[0].boundsMax)};
     while (top > 0) {
-        const Node& node = m_nodes[stack[--top]];
-        if (distanceSquaredToBox(query, node.boundsMin, node.boundsMax) >= best.distanceSquared) {
+        const Entry entry = stack[--top];
+        if (entry.distanceSquared >= best.distanceSquared) {
             continue;
         }
+        const Node& node = m_nodes[entry.node];
         if (node.isLeaf()) {
             for (std::uint32_t i = 0; i < node.triangleCount; ++i) {
                 const Triangle& tri = m_triangles[node.firstTriangle + i];
@@ -199,9 +210,22 @@ Bvh::ClosestHit Bvh::closestPoint(Vec3 query) const {
             }
             continue;
         }
+        Entry nearChild{node.leftChild,
+                        distanceSquaredToBox(query, m_nodes[node.leftChild].boundsMin,
+                                             m_nodes[node.leftChild].boundsMax)};
+        Entry farChild{node.leftChild + 1,
+                       distanceSquaredToBox(query, m_nodes[node.leftChild + 1].boundsMin,
+                                            m_nodes[node.leftChild + 1].boundsMax)};
+        if (farChild.distanceSquared < nearChild.distanceSquared) {
+            std::swap(nearChild, farChild);
+        }
         if (top + 2 <= stack.size()) {
-            stack[top++] = node.leftChild;
-            stack[top++] = node.leftChild + 1;
+            if (farChild.distanceSquared < best.distanceSquared) {
+                stack[top++] = farChild;
+            }
+            if (nearChild.distanceSquared < best.distanceSquared) {
+                stack[top++] = nearChild;
+            }
         }
     }
     return best;
