@@ -1873,15 +1873,22 @@ private:
             }
             std::size_t firstCorner = kNone;
             int corners = 0;
+            bool cleanSectors = true;
             for (std::size_t i = 0; i < runs.size(); ++i) {
                 if (runs[i].second == 1) {
                     ++corners;
                     if (firstCorner == kNone) {
                         firstCorner = i;
                     }
+                } else if (runs[i].second != 2) {
+                    cleanSectors = false;  // poisoned sector (fold damage)
                 }
             }
-            if (corners != 4) {
+            // Quads keep the historical acceptance; polygonal patches with
+            // 3-6 corners and clean corner/pass-through sectors go to the
+            // even-sum interior-routing template (paper Sec. 4.4).
+            const bool accept = corners == 4 || (cleanSectors && corners >= 3 && corners <= 6);
+            if (!accept) {
                 ++badPatches_;
                 badCorners_.push_back(corners);
                 if (badPatches_ <= 3 && std::getenv("CYBER_QC_BIMDF_DEBUG") != nullptr) {
@@ -1894,6 +1901,7 @@ private:
                 }
                 continue;  // aggregate; fail after the sweep with statistics
             }
+            patch.side.assign(static_cast<std::size_t>(corners), {});
             int side = -1;
             for (std::size_t k = 0; k < runs.size(); ++k) {
                 const auto& [arcId, q] = runs[(firstCorner + k) % runs.size()];
@@ -1923,6 +1931,9 @@ private:
             tm.arcs.push_back(std::move(rec.arc));
         }
         for (const Patch& p : tm.patches) {
+            if (!p.isQuad()) {
+                continue;  // polygonal patches have no opposite-side pairing
+            }
             for (int k = 0; k < 2; ++k) {
                 double s0 = 0.0, s1 = 0.0;
                 for (const std::size_t a : p.side[static_cast<std::size_t>(k)]) {
@@ -2522,16 +2533,32 @@ BimdfResult solveBimdf(const TMesh& tm) {
         r.reason = "empty T-mesh";
         return r;
     }
-    // Split-node template: one node per patch side (4 per patch); every arc is
-    // a head-head bi-edge between the side nodes of its two incident patch
-    // sides; each opposite side pair gets a tail-tail inner edge whose flow is
-    // the quantized side length.
-    const std::size_t nNode = 4 * nPatch;
+    // Split-node template: one node per patch side; every arc is a head-head
+    // bi-edge between the side nodes of its two incident patch sides. Quads
+    // pair opposite sides with a tail-tail inner edge whose flow is the
+    // quantized side length; polygonal patches (3-6 sides) get one interior
+    // node, a tail-tail routing edge per side and a head-head even-sum loop
+    // at the interior node (its sigma of +2 makes the boundary sum
+    // 2 * loopFlow — even by construction; Heistermann et al. 2023 Sec 4.4).
+    std::vector<std::size_t> sideBase(nPatch, 0);
+    std::size_t nNodeCount = 0;
+    for (std::size_t p = 0; p < nPatch; ++p) {
+        sideBase[p] = nNodeCount;
+        nNodeCount += tm.patches[p].side.size();
+    }
+    std::vector<std::size_t> interiorOf(nPatch, kNone);
+    for (std::size_t p = 0; p < nPatch; ++p) {
+        if (!tm.patches[p].isQuad()) {
+            interiorOf[p] = nNodeCount++;
+            ++r.polyPatches;
+        }
+    }
+    const std::size_t nNode = nNodeCount;
     std::vector<std::array<long long, 2>> arcNode(nArc, {-1, -1});
     for (std::size_t p = 0; p < nPatch; ++p) {
-        for (int k = 0; k < 4; ++k) {
-            const long long node = static_cast<long long>(4 * p + static_cast<std::size_t>(k));
-            for (const std::size_t a : tm.patches[p].side[static_cast<std::size_t>(k)]) {
+        for (std::size_t k = 0; k < tm.patches[p].side.size(); ++k) {
+            const long long node = static_cast<long long>(sideBase[p] + k);
+            for (const std::size_t a : tm.patches[p].side[k]) {
                 if (arcNode[a][0] < 0) {
                     arcNode[a][0] = node;
                 } else if (arcNode[a][1] < 0) {
@@ -2559,36 +2586,61 @@ BimdfResult solveBimdf(const TMesh& tm) {
             ++r.raisedToMin;  // degenerate-assignment guard (short/negative arc)
         }
     }
-    // Inner edges: one per opposite side pair; guess = mean of the side sums.
-    const std::size_t nInner = 2 * nPatch;
-    std::vector<long long> gIn(nInner);
-    std::vector<double> tIn(nInner);
+    // Inner edges. Quads: one tail-tail edge per opposite side pair, guess =
+    // mean of the side sums. Polygonal patches: one tail-tail routing edge
+    // per side (guess = the side's arc sum) plus one head-head loop at the
+    // interior node (guess = half the routed boundary; sigma +2).
+    struct InnerEdge {
+        long long n0, n1;  // endpoints (n0 == n1: the interior even-sum loop)
+        long long g;       // guess
+        double t;          // relaxed target
+        bool loop;
+    };
+    std::vector<InnerEdge> inner;
     for (std::size_t p = 0; p < nPatch; ++p) {
-        for (int j = 0; j < 2; ++j) {
-            long long s0 = 0, s1 = 0;
-            double t0 = 0.0;
-            for (const std::size_t a : tm.patches[p].side[static_cast<std::size_t>(j)]) {
-                s0 += g[a];
-                t0 += target[a];
+        const Patch& patch = tm.patches[p];
+        if (patch.isQuad()) {
+            for (int j = 0; j < 2; ++j) {
+                long long s0 = 0, s1 = 0;
+                double t0 = 0.0;
+                for (const std::size_t a : patch.side[static_cast<std::size_t>(j)]) {
+                    s0 += g[a];
+                    t0 += target[a];
+                }
+                for (const std::size_t a : patch.side[static_cast<std::size_t>(j + 2)]) {
+                    s1 += g[a];
+                    t0 += target[a];
+                }
+                inner.push_back(
+                    {static_cast<long long>(sideBase[p] + static_cast<std::size_t>(j)),
+                     static_cast<long long>(sideBase[p] + static_cast<std::size_t>(j) + 2),
+                     std::max<long long>(1, (s0 + s1 + 1) / 2), t0 * 0.5, false});
             }
-            for (const std::size_t a : tm.patches[p].side[static_cast<std::size_t>(j + 2)]) {
-                s1 += g[a];
-                t0 += target[a];
+        } else {
+            long long boundary = 0;
+            double tBoundary = 0.0;
+            for (std::size_t k = 0; k < patch.side.size(); ++k) {
+                long long s0 = 0;
+                double t0 = 0.0;
+                for (const std::size_t a : patch.side[k]) {
+                    s0 += g[a];
+                    t0 += target[a];
+                }
+                inner.push_back({static_cast<long long>(sideBase[p] + k),
+                                 static_cast<long long>(interiorOf[p]), std::max<long long>(1, s0),
+                                 t0, false});
+                boundary += std::max<long long>(1, s0);
+                tBoundary += t0;
             }
-            const std::size_t ii = 2 * p + static_cast<std::size_t>(j);
-            gIn[ii] = std::max<long long>(1, (s0 + s1 + 1) / 2);
-            tIn[ii] = t0 * 0.5;
+            inner.push_back(
+                {static_cast<long long>(interiorOf[p]), static_cast<long long>(interiorOf[p]),
+                 std::max<long long>(1, std::llround(0.5 * static_cast<double>(boundary))),
+                 0.5 * tBoundary, true});
         }
     }
-    const auto innerNodes = [&](std::size_t ii) {
-        const std::size_t p = ii / 2;
-        const int j = static_cast<int>(ii % 2);
-        return std::array<long long, 2>{
-            static_cast<long long>(4 * p + static_cast<std::size_t>(j)),
-            static_cast<long long>(4 * p + static_cast<std::size_t>(j + 2))};
-    };
+    const std::size_t nInner = inner.size();
     // Residual demands b = -(sigma g): arcs inject at both heads, inner edges
-    // drain at both tails.
+    // drain at both tails; the even-sum loop is head-head with sigma +2.
     std::vector<long long> b(nNode, 0);
     const auto recomputeB = [&]() {
         std::fill(b.begin(), b.end(), 0);
@@ -2596,10 +2648,13 @@ BimdfResult solveBimdf(const TMesh& tm) {
             b[static_cast<std::size_t>(arcNode[a][0])] -= g[a];
             b[static_cast<std::size_t>(arcNode[a][1])] -= g[a];
         }
-        for (std::size_t ii = 0; ii < nInner; ++ii) {
-            const auto nn = innerNodes(ii);
-            b[static_cast<std::size_t>(nn[0])] += gIn[ii];
-            b[static_cast<std::size_t>(nn[1])] += gIn[ii];
+        for (const InnerEdge& e : inner) {
+            if (e.loop) {
+                b[static_cast<std::size_t>(e.n0)] -= 2 * e.g;
+            } else {
+                b[static_cast<std::size_t>(e.n0)] += e.g;
+                b[static_cast<std::size_t>(e.n1)] += e.g;
+            }
         }
     };
     recomputeB();
@@ -2626,8 +2681,10 @@ BimdfResult solveBimdf(const TMesh& tm) {
             edges.push_back({arcNode[a][0], arcNode[a][1], c0, a, kNone});
         }
         for (std::size_t ii = 0; ii < nInner; ++ii) {
-            const auto nn = innerNodes(ii);
-            edges.push_back({nn[0], nn[1], 0.0, kNone, ii});
+            if (inner[ii].loop) {
+                continue;  // sigma +-2: flipping never changes any parity
+            }
+            edges.push_back({inner[ii].n0, inner[ii].n1, 0.0, kNone, ii});
         }
         std::sort(edges.begin(), edges.end(), [](const TEdge& a, const TEdge& b) {
             if (a.w != b.w) {
@@ -2677,12 +2734,12 @@ BimdfResult solveBimdf(const TMesh& tm) {
                     ++g[a];
                 }
             } else {
-                const std::size_t ii = te.inner;
-                if (gIn[ii] > 1 && std::abs(static_cast<double>(gIn[ii] - 1) - tIn[ii]) <=
-                                       std::abs(static_cast<double>(gIn[ii] + 1) - tIn[ii])) {
-                    --gIn[ii];
+                InnerEdge& e = inner[te.inner];
+                if (e.g > 1 && std::abs(static_cast<double>(e.g - 1) - e.t) <=
+                                   std::abs(static_cast<double>(e.g + 1) - e.t)) {
+                    --e.g;
                 } else {
-                    ++gIn[ii];
+                    ++e.g;
                 }
             }
         };
@@ -2760,14 +2817,25 @@ BimdfResult solveBimdf(const TMesh& tm) {
             arcDev[a].dnB.push_back(flow.addEdge(vP(y), vM(x), cap, c));
         }
     }
-    std::vector<std::array<int, 2>> innerUp(nInner), innerDn(nInner);
     for (std::size_t ii = 0; ii < nInner; ++ii) {
-        const auto nn = innerNodes(ii);
-        const long long x = nn[0], y = nn[1];
-        innerUp[ii] = {flow.addEdge(vP(x), vM(y), 1 << 20, 0),
-                       flow.addEdge(vP(y), vM(x), 1 << 20, 0)};
-        const int dnCap = static_cast<int>(std::max<long long>(gIn[ii] - 1, 0));
-        innerDn[ii] = {flow.addEdge(vM(x), vP(y), dnCap, 0), flow.addEdge(vM(y), vP(x), dnCap, 0)};
+        const InnerEdge& e = inner[ii];
+        const long long x = e.n0, y = e.n1;
+        if (e.loop) {
+            // Head-head loop at the interior node: up copies raise the loop
+            // flow (I- -> I+), down copies lower it, both free — the loop
+            // only carries the even-sum pairing, never a deviation cost.
+            const int dnCap = static_cast<int>(std::max<long long>(e.g - 1, 0));
+            flow.addEdge(vM(x), vP(x), 1 << 20, 0);
+            flow.addEdge(vM(x), vP(x), 1 << 20, 0);
+            flow.addEdge(vP(x), vM(x), dnCap, 0);
+            flow.addEdge(vP(x), vM(x), dnCap, 0);
+            continue;
+        }
+        flow.addEdge(vP(x), vM(y), 1 << 20, 0);
+        flow.addEdge(vP(y), vM(x), 1 << 20, 0);
+        const int dnCap = static_cast<int>(std::max<long long>(e.g - 1, 0));
+        flow.addEdge(vM(x), vP(y), dnCap, 0);
+        flow.addEdge(vM(y), vP(x), dnCap, 0);
     }
     long long supply = 0;
     for (std::size_t v = 0; v < nNode; ++v) {
@@ -2817,18 +2885,32 @@ BimdfResult solveBimdf(const TMesh& tm) {
         }
         r.arcLenHalf[a] = x;
     }
-    // Consistency audit: opposite side sums (exact when the mapped-back flow
-    // was integral everywhere).
+    // Consistency audit: opposite side sums for quads (exact when the
+    // mapped-back flow was integral everywhere); even boundary sum for
+    // polygonal patches (odd = unquantizable under the template).
     for (std::size_t p = 0; p < nPatch; ++p) {
-        for (int j = 0; j < 2; ++j) {
-            long long s0 = 0, s1 = 0;
-            for (const std::size_t a : tm.patches[p].side[static_cast<std::size_t>(j)]) {
-                s0 += r.arcLenHalf[a];
+        const Patch& patch = tm.patches[p];
+        if (patch.isQuad()) {
+            for (int j = 0; j < 2; ++j) {
+                long long s0 = 0, s1 = 0;
+                for (const std::size_t a : patch.side[static_cast<std::size_t>(j)]) {
+                    s0 += r.arcLenHalf[a];
+                }
+                for (const std::size_t a : patch.side[static_cast<std::size_t>(j + 2)]) {
+                    s1 += r.arcLenHalf[a];
+                }
+                r.maxSideViolation = std::max(r.maxSideViolation, std::llabs(s0 - s1));
             }
-            for (const std::size_t a : tm.patches[p].side[static_cast<std::size_t>(j + 2)]) {
-                s1 += r.arcLenHalf[a];
+        } else {
+            long long boundary = 0;
+            for (const auto& side : patch.side) {
+                for (const std::size_t a : side) {
+                    boundary += r.arcLenHalf[a];
+                }
             }
-            r.maxSideViolation = std::max(r.maxSideViolation, std::llabs(s0 - s1));
+            if (boundary % 2 != 0) {
+                ++r.polyOddSum;
+            }
         }
     }
     for (std::size_t a = 0; a < nArc; ++a) {

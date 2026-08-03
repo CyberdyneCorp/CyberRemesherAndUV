@@ -1984,9 +1984,9 @@ int solveSeamlessReduced(accel::IBackend& backend, std::size_t nCut,
             const bimdf::BimdfResult sol = bimdf::solveBimdf(tmesh);
             std::fprintf(stderr,
                          "[qc] bimdf solve: ok=%d energy=%.3f raisedToMin=%zu parityFlips=%zu "
-                         "halfIntegral=%zu sideViolation=%lld%s%s\n",
+                         "halfIntegral=%zu sideViolation=%lld poly=%zu polyOdd=%zu%s%s\n",
                          sol.ok ? 1 : 0, sol.deviationEnergy, sol.raisedToMin, sol.parityFlips,
-                         sol.halfIntegral, sol.maxSideViolation,
+                         sol.halfIntegral, sol.maxSideViolation, sol.polyPatches, sol.polyOddSum,
                          sol.reason.empty() ? "" : " reason=", sol.reason.c_str());
             if (sol.ok) {
                 // Back-substitution A y = len over the free integers. Rows

@@ -77,8 +77,14 @@ struct Arc {
 };
 
 struct Patch {
-    // Arc ids per side, in boundary order; side 0 is opposite side 2, 1 opposite 3.
-    std::array<std::vector<std::size_t>, 4> side;
+    // Arc ids per side, in boundary order. Quads (4 sides): side 0 is
+    // opposite side 2, 1 opposite 3, quantized with the split-node template.
+    // Polygonal patches (3-6 sides, one interior irregular vertex) are
+    // quantized with the even-sum interior-routing template (Heistermann et
+    // al. 2023, Sec. 4.4).
+    std::vector<std::vector<std::size_t>> side{4};
+
+    [[nodiscard]] bool isQuad() const { return side.size() == 4; }
 };
 
 struct TMesh {
@@ -114,6 +120,9 @@ struct BimdfResult {
     std::size_t raisedToMin = 0;     // degenerate-assignment guard adjustments
     std::size_t parityFlips = 0;     // T-join adjustments applied
     std::size_t halfIntegral = 0;    // cover edges whose mapped-back flow was odd
+    std::size_t polyPatches = 0;     // non-quad patches quantized via even-sum template
+    std::size_t polyOddSum = 0;      // polygonal patches whose boundary sum came out odd
+                                     // (unquantizable under the template; diagnostic)
     long long coverCost = 0;         // scaled min-cost-flow objective (diagnostic)
     long long maxSideViolation = 0;  // worst |side sum - opposite side sum| (half-cells)
 };

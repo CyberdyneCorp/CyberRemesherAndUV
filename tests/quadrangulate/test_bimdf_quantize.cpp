@@ -111,6 +111,105 @@ TEST_CASE("bimdf T-node split side stays consistent with its opposite side") {
     CHECK(r.arcLenHalf[9] == r.arcLenHalf[11]);
 }
 
+TEST_CASE("bimdf even-sum template quantizes a hexagonal patch beside quads") {
+    // Cube with the z=0 and y=0 faces merged into one hexagonal patch (their
+    // shared x-edge removed): 11 arcs, 4 quads, 1 hexagon. The quad
+    // constraints still tie each parallel class to one value; the hexagon
+    // must quantize through the interior-routing template with an even
+    // boundary sum.
+    TMesh tm;
+    tm.ok = true;
+    tm.nodeCount = 8;
+    const auto addArc = [&](std::size_t a, std::size_t b, double len) {
+        Arc arc;
+        arc.n0 = a;
+        arc.n1 = b;
+        arc.len = len;
+        tm.arcs.push_back(arc);
+    };
+    const double tx = 4.2, ty = 3.7, tz = 5.5;
+    addArc(2, 3, tx);  // 0: X1
+    addArc(4, 5, tx);  // 1: X2
+    addArc(6, 7, tx);  // 2: X3
+    addArc(0, 2, ty);  // 3: Y0
+    addArc(1, 3, ty);  // 4: Y1
+    addArc(4, 6, ty);  // 5: Y2
+    addArc(5, 7, ty);  // 6: Y3
+    addArc(0, 4, tz);  // 7: Z0
+    addArc(1, 5, tz);  // 8: Z1
+    addArc(2, 6, tz);  // 9: Z2
+    addArc(3, 7, tz);  // 10: Z3
+    const auto quad = [&](std::size_t s0, std::size_t s1, std::size_t s2, std::size_t s3) {
+        Patch p;
+        p.side[0] = {s0};
+        p.side[1] = {s1};
+        p.side[2] = {s2};
+        p.side[3] = {s3};
+        tm.patches.push_back(p);
+    };
+    quad(1, 6, 2, 5);   // z = 1
+    quad(0, 10, 2, 9);  // y = 1
+    quad(3, 9, 5, 7);   // x = 0
+    quad(4, 10, 6, 8);  // x = 1
+    Patch hex;
+    hex.side = {{4}, {0}, {3}, {7}, {1}, {8}};  // Y1, X1, Y0, Z0, X2, Z1
+    tm.patches.push_back(hex);
+    const BimdfResult r = solveBimdf(tm);
+    REQUIRE(r.ok);
+    CHECK(r.polyPatches == 1);
+    CHECK(r.polyOddSum == 0);
+    CHECK(r.maxSideViolation == 0);
+    // Parallel classes still collapse to one value each.
+    CHECK(r.arcLenHalf[1] == r.arcLenHalf[0]);
+    CHECK(r.arcLenHalf[2] == r.arcLenHalf[0]);
+    for (std::size_t k = 4; k <= 6; ++k) {
+        CHECK(r.arcLenHalf[k] == r.arcLenHalf[3]);
+    }
+    for (std::size_t k = 8; k <= 10; ++k) {
+        CHECK(r.arcLenHalf[k] == r.arcLenHalf[7]);
+    }
+    long long boundary = 0;
+    for (const auto& side : hex.side) {
+        for (const std::size_t a : side) {
+            boundary += r.arcLenHalf[a];
+        }
+    }
+    CHECK(boundary % 2 == 0);
+}
+
+TEST_CASE("bimdf even-sum template fixes an odd polygonal boundary by parity flips") {
+    // Two triangles glued along all three arcs (a pillow): every side sum
+    // rounds to 3, so each patch's boundary guess is 9 — odd. The T-join
+    // parity sweep must adjust some arc so both boundaries come out even,
+    // without violating the min-one guard.
+    TMesh tm;
+    tm.ok = true;
+    tm.nodeCount = 3;
+    for (int k = 0; k < 3; ++k) {
+        Arc arc;
+        arc.n0 = static_cast<std::size_t>(k);
+        arc.n1 = static_cast<std::size_t>((k + 1) % 3);
+        arc.len = 1.6;
+        tm.arcs.push_back(arc);
+    }
+    for (int p = 0; p < 2; ++p) {
+        Patch tri;
+        tri.side = {{0}, {1}, {2}};
+        tm.patches.push_back(tri);
+    }
+    const BimdfResult r = solveBimdf(tm);
+    REQUIRE(r.ok);
+    CHECK(r.polyPatches == 2);
+    CHECK(r.polyOddSum == 0);
+    long long boundary = 0;
+    for (const long long x : r.arcLenHalf) {
+        CHECK(x >= 1);
+        boundary += x;
+    }
+    CHECK(boundary % 2 == 0);
+    CHECK(r.parityFlips > 0);
+}
+
 TEST_CASE("bimdf enforces the min-one collapse guard on degenerate arcs") {
     // A near-zero z class would collapse the cube; the guard must keep every
     // arc at >= 1 half-cell and report the adjustment.
