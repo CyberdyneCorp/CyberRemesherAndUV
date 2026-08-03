@@ -2860,7 +2860,7 @@ double deviationEnergy(const TMesh& tm, const std::vector<double>& arcLenCells) 
 // costs as parallel arcs). Units are HALF-CELLS: under the solver's reduction
 // cones live on the half-integer lattice, so arc lengths are half-integers.
 // ---------------------------------------------------------------------------
-BimdfResult solveBimdf(const TMesh& tm) {
+BimdfResult solveBimdf(const TMesh& tm, const BimdfOptions& opts) {
     BimdfResult r;
     const std::size_t nArc = tm.arcs.size();
     const std::size_t nPatch = tm.patches.size();
@@ -2964,13 +2964,15 @@ BimdfResult solveBimdf(const TMesh& tm) {
         // min-one was measured to inflate nefertiti@4000 by ~2500 half-cells
         // and wreck the injected map.
         lowBound.assign(nArc, 0);
-        for (std::size_t p = 0; p < nPatch; ++p) {
-            if (patchDropped[p]) {
-                continue;
-            }
-            for (const auto& side : tm.patches[p].side) {
-                if (side.size() == 1) {
-                    lowBound[side[0]] = 1;
+        if (opts.sideFloors) {
+            for (std::size_t p = 0; p < nPatch; ++p) {
+                if (patchDropped[p]) {
+                    continue;
+                }
+                for (const auto& side : tm.patches[p].side) {
+                    if (side.size() == 1) {
+                        lowBound[side[0]] = 1;
+                    }
                 }
             }
         }
@@ -3014,7 +3016,8 @@ BimdfResult solveBimdf(const TMesh& tm) {
                         inner.push_back(
                             {static_cast<long long>(sideBase[p] + static_cast<std::size_t>(j)),
                              static_cast<long long>(sideBase[p] + static_cast<std::size_t>(j) + 2),
-                             std::max<long long>(1, (s0 + s1 + 1) / 2), t0 * 0.5, false});
+                             std::max<long long>(opts.sideFloors ? 1 : 0, (s0 + s1 + 1) / 2),
+                             t0 * 0.5, false});
                     }
                 } else {
                     long long boundary = 0;
@@ -3109,8 +3112,12 @@ BimdfResult solveBimdf(const TMesh& tm) {
                     if (outside[a]) {
                         continue;
                     }
+                    // Flip-down guard: the shipped floor semantics never close
+                    // a unit arc through the T-join; the floors-OFF steering
+                    // solve may drop to the true lower bound.
+                    const long long dnFloor = opts.sideFloors ? 1 : lowBound[a];
                     const double c0 =
-                        std::min(cost(a, g[a] + 1), g[a] > 1 ? cost(a, g[a] - 1) : 1e30) -
+                        std::min(cost(a, g[a] + 1), g[a] > dnFloor ? cost(a, g[a] - 1) : 1e30) -
                         cost(a, g[a]);
                     if (fixedArc[a]) {
                         edges.push_back(

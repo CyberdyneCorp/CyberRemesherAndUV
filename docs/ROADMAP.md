@@ -307,6 +307,89 @@ schedule but choose each pinned integer to minimize the residual of the
 Bi-MDF arc targets (captures min-one strip-opening without exact lifting);
 (c) boundary arcs for open surfaces. Default flip NOT proposed.
 
+### Update — 2026-08-03 (branch `feat/bimdf-guided`): guided rounding landed as flow ATTRACTION on the greedy schedule; bunny ears 37 → 19 (beats QuadriFlow's 20); spot pure flow-loop 763 → 1274
+
+`CYBER_QC_BIMDF=guided`: the greedy schedule stays the quantizer (every
+intermediate state integral + seamless by its own invariant — no lifting
+problem), but its re-solves minimize `E(w) + 1/2 Σ_a mu_a (row_a·w −
+len_a)²` over the T-mesh arc rows, pulling the relaxed values toward the
+Bi-MDF assignment so the UNTOUCHED rounding logic commits flow-consistent
+integers; the final solve after the last pin runs unattracted (continuous
+DOF stay pure Dirichlet over the chosen integers). `mu_a =
+mu/max(len_a,0.5)` (the Bi-MDF deviation normalization), default mu 1.0
+(`CYBER_QC_BIMDF_MU`); bunny basin mu 0.75/1.0/1.25/1.5 → sing
+101/94/91/131 — flat around 1. The direct engine hands off to the masked
+CG while the attraction is active. Exact injection is UNCHANGED
+(box_sharp@1000 pure under guided: injected=6, output byte-identical to
+flag-on).
+
+**Two measured design falsifications first** (why attraction, and toward
+WHICH flow):
+- Coordinate-wise steering (floor/ceil per integer scored against the arc
+  targets, three scoring variants incl. min-one shortfall) always lost:
+  nefertiti@4000 sing 396 → 418/399/422 — arcs are functions of many
+  integers, and per-coordinate moves toward the flow wreck the coupled
+  remainder.
+- The SHIPPED side-floor solve has nothing worth steering toward: its
+  deviation energy sits ABOVE the greedy realization (nefertiti@4000
+  2711 vs 1879; bunny 397 vs 355 — `raisedToMin` floor inflation). The
+  steering therefore consults a floors-OFF solve (`BimdfOptions
+  .sideFloors=false`: no side min-one, T-join may close unit arcs to
+  their true lower bound): energy 1289 vs greedy 1879 on nefertiti —
+  the real headroom, matching round-3's 1309.
+
+**Health gates — guided is an ORGANIC lever** (both measured, both
+auto-refuse to pure greedy):
+1. `maxSideMismatch <= 0.2`: fold-damaged flows regress under steering
+   (nefertiti mm 0.435: sing 396 → 422; armadillo mm 0.496: 255 → 285);
+   healthy T-meshes win (spot 0.001, bunny 0.065).
+2. crease arcs <= 1% of arcs: steering fights the pinned crease lattice
+   on CAD — cylinder@4500 pure collapsed (quads 3792 → 1702, haus 0.0048
+   → 0.0499), cylinder@900/@1400 mixed sing 8 → 18 / 2 → 7 (flag-off
+   verified to match the recorded sweep on every one of those cells, so
+   the damage was steering-caused). cylinder/box/fandisk carry 7.6-18%
+   crease arcs, organics ~0 (bunny 1/1338). Forfeits the measured fandisk
+   mixed win (sing 50 → 43) for the guarantee.
+
+**Where guided engages (mu=1), guided vs greedy**:
+| cell | sing | ears(y>0.125) | flow_loop (loops) | angle | haus | recall |
+|---|---|---|---|---|---|---|
+| bunny@3000 mixed | 135 → **94** | 37 → **19** (QF 20, round-3 force best 31) | 37.5 → 31.9 (132 → 150) | 7.89 → 8.18 | 0.0079 → **0.0073** | 0.609 → **0.634** |
+| spot@3000 pure | 66 → **65** | — | 762.9 → **1274.0** (7 → 4) | 7.92 → **7.69** | 0.0053 → **0.0052** | 0.762 → 0.738 |
+| spot@3000 mixed | 39 → 40 | — | 67.8 → **74.6** (74 → 68) | 6.55 → 6.83 | 0.0068 → 0.0070 | 0.698 → 0.674 |
+| sphere pure | 17 → 18 | — | 280.8 → 692.0 (5 → 2) | 8.68 → 8.97 | same | — |
+| torus pure | engaged, output identical (seam-translation gauge shifts only) |||||
+
+Refused cells (nefertiti@4000/@8000 mixed, armadillo both, all creased
+CAD) and never-engaging cells (pure-arm organics whose T-mesh does not
+build — nefertiti/armadillo/bunny pure) are byte-identical to flag off.
+A/B 22 cells off vs report: hash-SAME 22/22. ctest 14/14; bench check
+green BOTH flag states (box_sharp row identical: 8 cones / recall 1.00 /
+0.0°); flag-off byte-exact vs the main-branch binary (spot pure,
+box_sharp@600 pure, nefertiti@4000 mixed, bunny mixed — mtllib-normalized
+hashes SAME); guided deterministic run-to-run. CAD sweep spot-check under
+guided: box_sharp+cylinder × 8 densities × 2 arms vs the recorded sweep —
+**31/32 unchanged** after the crease gate; the single diff is
+box_sharp@400 cyber-pure, the flag-on exact injection round 3 documented,
+with identical numbers (quads 406 → 268, sing 46 → 30).
+
+**Exit gates**: spot@3000 pure flow_loop **1274 ≥ 1000** — MET on the
+mean, with the honest caveat that the loop census shrank (7 → 4 loops,
+quads 2670 → 2548, −4.6%), so "count-matched" is arguable. nefertiti@4000
+pure sing ≤ 200 — **NOT met, and unreachable by ANY rounding lever**: the
+pure-arm T-mesh does not build (`trail density blowup (wandering
+separatrix)`), so no flow information exists to guide with; the wall is
+the tracer on the pure path, not the quantizer. Bunny ears 19 vs
+QuadriFlow 20 is the round's durable prize.
+
+Ranked next: (a) pure-arm T-mesh tracer robustness (the `trail density
+blowup` wall — nefertiti/armadillo/bunny pure never reach the flow); (b)
+boundary arcs for open surfaces; (c) revisit the crease gate with
+crease-aware attraction (recover the forfeited fandisk/cylinder mixed
+wins). Default flip NOT proposed: guided is opt-in, wins are
+organic-scoped, spot mixed recall −0.023 and sphere pure sing +1 are
+real (small) costs.
+
 ## Update — 2026-08-02 (CAD density robustness: the sweep's 🔴 failures are FIXED; 32/32 gate cells clean)
 
 The two density-dependent robustness bugs the CAD sweep below exposed are fixed

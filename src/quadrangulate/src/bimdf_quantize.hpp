@@ -145,7 +145,16 @@ struct BimdfResult {
 
 // Bi-MDF S1 solve over the T-mesh (targets from Arc::len, consistency from
 // the patches). Pure graph computation; no solver state involved.
-BimdfResult solveBimdf(const TMesh& tm);
+struct BimdfOptions {
+    // Anti-collapse floor of one half-cell on single-arc patch sides. ON for
+    // the injection solve (thin CAD strips must not collapse). The guided
+    // rounding consults a floors-OFF solve instead: the floors were measured
+    // to inflate the assignment past the greedy realization (nefertiti@4000
+    // energy 2711 vs greedy 1879), leaving nothing worth steering toward,
+    // while the floor-free flow decides open-vs-closed per strip honestly.
+    bool sideFloors = true;
+};
+BimdfResult solveBimdf(const TMesh& tm, const BimdfOptions& opts = {});
 
 // Deviation energy of an arbitrary half-cell assignment against the relaxed
 // targets — the same functional solveBimdf minimizes, evaluable for the

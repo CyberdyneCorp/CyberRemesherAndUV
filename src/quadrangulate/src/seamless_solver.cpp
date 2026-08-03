@@ -1720,6 +1720,10 @@ int solveSeamlessReduced(accel::IBackend& backend, std::size_t nCut,
     accel::Buffer<float> gBuf(g), gRed;
     accel::spmv(backend, Tt, gBuf, gRed);
     const std::vector<float> gReduced(gRed.data(), gRed.data() + gRed.size());
+    // Effective gradient of the masked solves: gReduced, plus the linear term
+    // of the guided-rounding attraction while it is active (bit-identical
+    // copy otherwise).
+    std::vector<float> gSolve = gReduced;
 
     // Direct sparse-Cholesky path (CYBER_QC_DIRECT, default on; docs/ROADMAP.md
     // perf entry): the reduced operator is FIXED across the relaxed solve and
@@ -1744,8 +1748,30 @@ int solveSeamlessReduced(accel::IBackend& backend, std::size_t nCut,
         haveFused = true;
     }
 
+    // Guided-rounding attraction (CYBER_QC_BIMDF=guided, filled after the
+    // Bi-MDF solve): the rounding schedule's re-solves minimize
+    //   E(w) + 1/2 sum_r mu_r (row_r . w - len_r)^2
+    // over the T-mesh arc rows, pulling the RELAXED values toward the flow's
+    // arc assignment so the untouched greedy schedule rounds toward the
+    // flow's structure — every intermediate state stays integral and
+    // seamless by greedy's own invariant, and coupled integers drift
+    // together instead of being steered one coordinate at a time (measured
+    // to lose: coordinate-wise floor/ceil steering cost nefertiti@4000 sing
+    // 396 -> 418..422 across three scoring variants). Empty rows (the flag's
+    // default state) keep the operator byte-identical; the final solve after
+    // the last pin always runs unattracted so the continuous DOF are pure
+    // Dirichlet over the chosen integers.
+    struct SteerRow {
+        std::vector<std::pair<std::size_t, double>> a;  // (reduced index, coeff)
+        double len = 0.0;                               // flow arc length, cells
+        double mu = 0.0;                                // attraction weight
+    };
+    std::vector<SteerRow> steerRows;
+    bool steering = false;
+
     // Reduced operator A(p) = Tt * L2 * Tuv * p, applied via three spmv (or the
-    // one fused spmv when CYBER_QC_FUSED_OPERATOR built it explicitly).
+    // one fused spmv when CYBER_QC_FUSED_OPERATOR built it explicitly), plus
+    // the guided-rounding attraction rows when active.
     accel::Buffer<float> tmpUv, tmpUv2, outBuf, pBuf;
     const auto applyA = [&](const std::vector<float>& p, std::vector<float>& out) {
         pBuf.upload(p);
@@ -1757,6 +1783,18 @@ int solveSeamlessReduced(accel::IBackend& backend, std::size_t nCut,
             accel::spmv(backend, Tt, tmpUv2, outBuf);
         }
         out.assign(outBuf.data(), outBuf.data() + outBuf.size());
+        if (steering) {
+            for (const SteerRow& sr : steerRows) {
+                double s = 0.0;
+                for (const auto& [ri, cf] : sr.a) {
+                    s += cf * static_cast<double>(p[ri]);
+                }
+                s *= sr.mu;
+                for (const auto& [ri, cf] : sr.a) {
+                    out[ri] += static_cast<float>(cf * s);
+                }
+            }
+        }
     };
 
     // Masked Conjugate Gradient: solve A w = rhs over coordinates with mask==1 (others held at
@@ -1778,7 +1816,7 @@ int solveSeamlessReduced(accel::IBackend& backend, std::size_t nCut,
         applyA(wFixed, Aw);
         std::vector<float> rhs(W);
         for (std::size_t i = 0; i < W; ++i) {
-            rhs[i] = mask[i] ? (gReduced[i] - Aw[i]) : 0.0f;
+            rhs[i] = mask[i] ? (gSolve[i] - Aw[i]) : 0.0f;
         }
         // CG on the masked subspace, warm-started from the current w on mask coords (so each
         // greedy re-solve, which only perturbs one fixed integer, converges in a few iters).
@@ -1992,6 +2030,80 @@ int solveSeamlessReduced(accel::IBackend& backend, std::size_t nCut,
                 sol.halfIntegral, sol.maxSideViolation, sol.polyPatches, sol.polyOddSum,
                 sol.droppedPatches, sol.reason.empty() ? "" : " reason=", sol.reason.c_str());
             if (sol.ok) {
+                // Health gates for the guided attraction — it is an
+                // ORGANIC-mesh lever:
+                // (1) Side consistency: the steering targets are only as
+                //     good as the T-mesh's relaxed side sums. Measured at
+                //     mu=1: spot (mismatch 0.001) and stanford-bunny (0.065)
+                //     improve hard (bunny sing 135 -> 94, ears 37 -> 19;
+                //     spot pure flow-loop 763 -> 1274), while the
+                //     fold-damaged nefertiti (0.435) and armadillo (0.496)
+                //     REGRESS under the same steering (sing 396 -> 422 /
+                //     255 -> 285) — their flow assignments inherit the
+                //     damage.
+                // (2) Crease-dominated T-meshes: on creased CAD the
+                //     attraction fights the pinned crease lattice — the CAD
+                //     sweep measured cylinder@4500 pure collapsing (quads
+                //     3792 -> 1702, haus 0.0048 -> 0.0499) and
+                //     cylinder@900/@1400 mixed sing 8 -> 18 / 2 -> 7 with
+                //     steering on; exact injection (unchanged semantics)
+                //     still serves CAD. Threshold 1% of arcs: cylinder/box/
+                //     fandisk sit at 7.6-18% crease arcs, the organics at 0
+                //     (stanford-bunny: 1 of 1338).
+                // Refused T-meshes keep the pure greedy schedule.
+                constexpr double kSteerHealthMax = 0.2;
+                std::size_t featureArcs = 0;
+                for (const bimdf::Arc& arc : tmesh.arcs) {
+                    featureArcs += arc.onFeature ? 1 : 0;
+                }
+                const char* modeEnv = std::getenv("CYBER_QC_BIMDF");
+                if (modeEnv != nullptr && std::string(modeEnv) == "guided" &&
+                    (tmesh.maxSideMismatch > kSteerHealthMax ||
+                     featureArcs * 100 > tmesh.arcs.size())) {
+                    std::fprintf(stderr,
+                                 "[qc] bimdf guided: refused (sideMismatch %.3f, "
+                                 "featureArcs %zu), pure greedy\n",
+                                 tmesh.maxSideMismatch, featureArcs);
+                    modeEnv = nullptr;
+                }
+                if (modeEnv != nullptr && std::string(modeEnv) == "guided") {
+                    // Steering targets come from a floors-OFF solve: the side
+                    // floors inflate the shipped assignment past the greedy
+                    // realization (nefertiti@4000 energy 2711 vs greedy 1879
+                    // — nothing worth steering toward), while the floor-free
+                    // flow decides open-vs-closed per strip honestly
+                    // (energy 1289 on the same T-mesh).
+                    bimdf::BimdfOptions steerOpts;
+                    steerOpts.sideFloors = false;
+                    const bimdf::BimdfResult solS = bimdf::solveBimdf(tmesh, steerOpts);
+                    const bimdf::BimdfResult& src = solS.ok ? solS : sol;
+                    const char* muEnv = std::getenv("CYBER_QC_BIMDF_MU");
+                    const double muBase = muEnv != nullptr ? std::atof(muEnv) : 1.0;
+                    for (std::size_t a = 0; a < tmesh.arcs.size(); ++a) {
+                        // Contained regions have no flow assignment to steer
+                        // toward; their integers round pure-greedy. Feature
+                        // arcs ARE steered — excluding them was measured to
+                        // cost the fandisk mixed win (sing 43 -> 49) without
+                        // fixing the fandisk pure regression (117 -> 119).
+                        if ((a < tmesh.arcExcluded.size() && tmesh.arcExcluded[a] != 0) ||
+                            (a < src.arcOutside.size() && src.arcOutside[a] != 0) ||
+                            bimdfArcRows[a].empty()) {
+                            continue;
+                        }
+                        SteerRow sr;
+                        sr.a = bimdfArcRows[a];
+                        sr.len = 0.5 * static_cast<double>(src.arcLenHalf[a]);
+                        // Mirror the Bi-MDF deviation normalization: long
+                        // arcs tolerate more absolute deviation.
+                        sr.mu = muBase / std::max(tmesh.arcs[a].len, 0.5);
+                        steerRows.push_back(std::move(sr));
+                    }
+                    std::fprintf(stderr,
+                                 "[qc] bimdf guided: steerSolve ok=%d energy=%.3f mu=%.3f "
+                                 "steerRows=%zu of %zu\n",
+                                 solS.ok ? 1 : 0, solS.deviationEnergy, muBase, steerRows.size(),
+                                 tmesh.arcs.size());
+                }
                 // Back-substitution A y = len over the free integers. Rows
                 // touching a continuous free are the reduction's structural
                 // integrality violations and cannot be enforced.
@@ -2241,6 +2353,24 @@ int solveSeamlessReduced(accel::IBackend& backend, std::size_t nCut,
     std::vector<char> intPinned(intFree.size(), 0);
     constexpr double kConfident = 0.2;
     std::size_t remaining = intFree.size();
+    // Guided rounding: activate the attraction (unless an exact injection
+    // already carries the full flow assignment) and re-solve so the greedy
+    // schedule's first scan sees the attracted relaxed values. The bordered
+    // direct engine factorized the UNATTRACTED operator, so guided rounds
+    // fall back to the masked CG.
+    if (!steerRows.empty() && bimdfPins.empty()) {
+        steering = true;
+        for (const SteerRow& sr : steerRows) {
+            for (const auto& [ri, cf] : sr.a) {
+                gSolve[ri] += static_cast<float>(sr.mu * cf * sr.len);
+            }
+        }
+        if (useDirect) {
+            direct.finalize(mask, w);
+            useDirect = false;
+        }
+        maskedSolve(mask);
+    }
     // Bi-MDF injection: pin the flow-determined integers in ONE batch (values
     // validated against tCap above, deliberately NOT clamped — a clamped
     // subset would break the flow's conservation) and re-solve once; the
@@ -2323,6 +2453,14 @@ int solveSeamlessReduced(accel::IBackend& backend, std::size_t nCut,
     }
     if (useDirect) {
         direct.finalize(mask, w);
+    }
+    // Guided rounding: the integers now carry the flow structure; the final
+    // continuous DOF must be pure Dirichlet, so drop the attraction and
+    // re-solve once over the frozen integer assignment.
+    if (steering) {
+        steering = false;
+        gSolve = gReduced;
+        maskedSolve(mask);
     }
 
     // Reconstruct z = T w on the UV block.

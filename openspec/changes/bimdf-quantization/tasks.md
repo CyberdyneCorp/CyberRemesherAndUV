@@ -64,3 +64,29 @@
        Ranked next: parity-aware quantization (lattice constraints into the
        Bi-MDF), guided rounding (integral-by-construction greedy toward the
        flow targets), boundary arcs. Default NOT flipped.
+       — ROUND 4 (branch `feat/bimdf-guided`): GUIDED ROUNDING landed as
+       `CYBER_QC_BIMDF=guided` — the greedy schedule unchanged, but its
+       re-solves carry a quadratic ATTRACTION of the T-mesh arc rows
+       toward a floors-OFF Bi-MDF solve (the shipped side-floor solve has
+       no headroom: energy 2711 vs greedy-realized 1879 on
+       nefertiti@4000; floors-off 1289 — the round-3 "1309" headroom),
+       final solve unattracted, mu 1.0 (`CYBER_QC_BIMDF_MU`, bunny basin
+       0.75-1.25 flat). Coordinate-wise floor/ceil steering was measured
+       first and always lost (nefertiti sing 396 → 418/399/422 over three
+       scoring variants) — recorded as a falsified design. Health gates
+       auto-refuse to pure greedy: sideMismatch <= 0.2 (nefertiti 0.435 /
+       armadillo 0.496 regress when steered) and crease arcs <= 1%
+       (cylinder@4500 pure collapsed quads 3792 → 1702 / haus 0.05 when
+       steered; CAD keeps exact injection, byte-identical to flag-on at
+       box_sharp@1000 pure, injected=6). RESULTS where engaged: bunny@3000
+       sing 135 → 94, EAR IRREGULARS 37 → 19 — beats QuadriFlow's 20;
+       spot@3000 pure flow_loop 762.9 → 1274 (gate ≥ 1000 met on the
+       mean; loops 7 → 4, quads −4.6% — count-match arguable), sing 66 →
+       65. nefertiti pure sing gate UNREACHABLE by any rounding lever: the
+       pure-arm T-mesh never builds ("trail density blowup") — tracer
+       wall, promoted to the top of the ranked levers. A/B: off vs
+       report hash-SAME 22/22;
+       guided differs only where engaged; ctest 14/14; bench check green
+       both flag states; flag-off byte-exact vs the main-branch binary
+       (4 cells, mtllib-normalized). Default NOT flipped (opt-in lever;
+       organic-scoped wins; spot mixed recall −0.023 is a real cost).
