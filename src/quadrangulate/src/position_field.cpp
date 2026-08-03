@@ -3,7 +3,10 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <numeric>
+#include <string>
 #include <vector>
 
 namespace cyber::remesh {
@@ -308,17 +311,180 @@ void smoothPosition(FieldGraph& g, float s, int iterations) {
     }
 }
 
+// CYBER_QC_MR_DUMP=<prefix>: write each hierarchy level's orientation field after its
+// smoothing pass to <prefix>.lvl<k>.txt (one node per line: pos, normal, q). Diagnosis
+// instrumentation only; the solve is unchanged.
+void dumpLevel(const FieldGraph& g, int lvl) {
+    const char* prefix = std::getenv("CYBER_QC_MR_DUMP");
+    if (prefix == nullptr) {
+        return;
+    }
+    const std::string path = std::string(prefix) + ".lvl" + std::to_string(lvl) + ".txt";
+    std::FILE* f = std::fopen(path.c_str(), "w");
+    if (f == nullptr) {
+        return;
+    }
+    for (std::size_t i = 0; i < g.size(); ++i) {
+        std::fprintf(f, "%g %g %g %g %g %g %g %g %g\n", g.pos[i].x, g.pos[i].y, g.pos[i].z,
+                     g.normal[i].x, g.normal[i].y, g.normal[i].z, g.q[i].x, g.q[i].y, g.q[i].z);
+    }
+    std::fclose(f);
+}
+
+// Historical per-node orientation init: the constraint direction where anchored, an
+// arbitrary tangent elsewhere.
+void initNodeQ(FieldGraph& g, std::size_t i) {
+    g.q[i] = g.constrained[i] ? g.constraintDir[i] : anyTangent(g.normal[i]);
+}
+
+// Labels the graph's connected components by BFS; returns per-node labels and sets `nComp`.
+std::vector<int> labelComponents(const FieldGraph& g, int& nComp) {
+    std::vector<int> comp(g.size(), -1);
+    std::vector<std::size_t> queue;
+    nComp = 0;
+    for (std::size_t s = 0; s < g.size(); ++s) {
+        if (comp[s] >= 0) {
+            continue;
+        }
+        comp[s] = nComp;
+        queue.assign(1, s);
+        std::size_t head = 0;
+        while (head < queue.size()) {
+            const std::size_t i = queue[head++];
+            for (const int jn : g.nbr[i]) {
+                const auto j = static_cast<std::size_t>(jn);
+                if (comp[j] < 0) {
+                    comp[j] = nComp;
+                    queue.push_back(j);
+                }
+            }
+        }
+        ++nComp;
+    }
+    return comp;
+}
+
+// Per-node "a winding invariant exists here" flag for the coherent seed: label the base
+// graph's connected components and compute each component's Euler characteristic on the
+// mesh (V - E + F over the component's live vertices/edges/faces). chi = 2 is a topological
+// sphere — H1 = 0, nothing to trap; chi < 2 carries independent cycles a seed can wind.
+std::vector<char> windingEligibility(const Mesh& mesh, const FieldGraph& base,
+                                     const std::vector<Index>& baseToVertex) {
+    int nComp = 0;
+    const std::vector<int> comp = labelComponents(base, nComp);
+    std::vector<int> vertexToBase(mesh.vertexCapacity(), -1);
+    for (std::size_t bn = 0; bn < baseToVertex.size(); ++bn) {
+        vertexToBase[baseToVertex[bn]] = static_cast<int>(bn);
+    }
+    const auto compOfVertex = [&](Index v) {
+        const int bn = vertexToBase[v];
+        return bn >= 0 ? comp[static_cast<std::size_t>(bn)] : -1;
+    };
+    std::vector<long> chi(static_cast<std::size_t>(nComp), 0);
+    for (std::size_t bn = 0; bn < base.size(); ++bn) {
+        chi[static_cast<std::size_t>(comp[bn])] += 1;  // V
+    }
+    for (Index ei = 0; ei < mesh.edgeCapacity(); ++ei) {
+        const EdgeId e{ei};
+        if (!mesh.isAlive(e)) {
+            continue;
+        }
+        const int c = compOfVertex(mesh.edgeVertices(e).first.value);
+        if (c >= 0) {
+            chi[static_cast<std::size_t>(c)] -= 1;  // E
+        }
+    }
+    for (Index fi = 0; fi < mesh.faceCapacity(); ++fi) {
+        const FaceId f{fi};
+        if (!mesh.isAlive(f)) {
+            continue;
+        }
+        const std::vector<VertexId> fv = mesh.faceVertices(f);
+        const int c = fv.empty() ? -1 : compOfVertex(fv[0].value);
+        if (c >= 0) {
+            chi[static_cast<std::size_t>(c)] += 1;  // F
+        }
+    }
+    std::vector<char> eligible(base.size(), 0);
+    for (std::size_t bn = 0; bn < base.size(); ++bn) {
+        eligible[bn] = chi[static_cast<std::size_t>(comp[bn])] < 2 ? 1 : 0;
+    }
+    return eligible;
+}
+
+// Coherent seeding of the UNANCHORED, NON-SIMPLY-CONNECTED components (per `eligible`).
+// Per-node independent `anyTangent` seeds land the coarse solve in a random holonomy
+// basin; on a closed handle with no constraints (torus) that basin can carry a trapped
+// twist winding around a generator that downstream smoothing provably cannot unwind — it
+// would have to move cones across the generator — and the wound field extracts as
+// sheared, incoherent cells (torus hausdorff +123%). BFS-transporting ONE seed direction
+// across the component picks the near-zero-winding basin instead. The rule engages
+// exactly where a winding invariant exists:
+//  - components WITH constraints keep the per-node init — their gauge is anchored, and
+//    measured, a transported global gauge on top of the anchors is worse (nefertiti
+//    cyber-pure 204 vs 176 cones);
+//  - simply-connected components (Euler characteristic 2) keep it too — with H1 = 0
+//    there is no winding to trap, every basin is smoothing-reachable, and measured, the
+//    transported hedgehog seed is worse (sphere hausdorff 0.0070 -> 0.0218 at an
+//    identical 8-cone census).
+void seedCoherentUnanchored(FieldGraph& g, const std::vector<char>& eligible) {
+    int nComp = 0;
+    const std::vector<int> comp = labelComponents(g, nComp);
+    std::vector<char> anchored(static_cast<std::size_t>(nComp), 0);
+    for (std::size_t i = 0; i < g.size(); ++i) {
+        if (g.constrained[i]) {
+            anchored[static_cast<std::size_t>(comp[i])] = 1;
+        }
+    }
+    std::vector<char> seeded(g.size(), 0);
+    std::vector<std::size_t> queue;
+    for (std::size_t s = 0; s < g.size(); ++s) {
+        if (seeded[s] != 0) {
+            continue;
+        }
+        if (anchored[static_cast<std::size_t>(comp[s])] != 0 ||
+            (s < eligible.size() && eligible[s] == 0)) {
+            initNodeQ(g, s);
+            seeded[s] = 1;
+            continue;
+        }
+        // Unanchored, winding-capable component: one arbitrary source, transported
+        // everywhere.
+        g.q[s] = anyTangent(g.normal[s]);
+        seeded[s] = 1;
+        queue.assign(1, s);
+        std::size_t head = 0;
+        while (head < queue.size()) {
+            const std::size_t i = queue[head++];
+            for (const int jn : g.nbr[i]) {
+                const auto j = static_cast<std::size_t>(jn);
+                if (seeded[j] != 0) {
+                    continue;
+                }
+                seeded[j] = 1;
+                const Vec3 t = g.q[i] - g.normal[j] * dot(g.normal[j], g.q[i]);
+                g.q[j] = lengthSquared(t) > 1e-12f ? normalized(t) : anyTangent(g.normal[j]);
+                queue.push_back(j);
+            }
+        }
+    }
+}
+
 }  // namespace
 
-PositionField computePositionField(const Mesh& mesh, float spacing, int iterations) {
+PositionField computePositionField(const Mesh& mesh, float spacing, int iterations,
+                                   bool coherentSeedUnanchored) {
     std::vector<Index> baseToVertex;
     FieldGraph base = buildBaseGraph(mesh, baseToVertex);
 
     // Build the multiresolution hierarchy (finest first) by greedy coarsening.
+    const char* floorEnv = std::getenv("CYBER_QC_MR_FLOOR");
+    const std::size_t floorN =
+        floorEnv != nullptr ? static_cast<std::size_t>(std::atoi(floorEnv)) : 16;
     std::vector<FieldGraph> levels;
     std::vector<std::vector<int>> parents;
     levels.push_back(std::move(base));
-    while (levels.back().size() > 16) {
+    while (levels.back().size() > floorN) {
         std::vector<int> parent;
         FieldGraph c = coarsen(levels.back(), parent);
         if (c.size() >= levels.back().size()) {
@@ -327,18 +493,55 @@ PositionField computePositionField(const Mesh& mesh, float spacing, int iteratio
         parents.push_back(std::move(parent));
         levels.push_back(std::move(c));
     }
+    if (std::getenv("CYBER_QC_MR_DUMP") != nullptr) {
+        for (std::size_t l = 0; l < levels.size(); ++l) {
+            const FieldGraph& g = levels[l];
+            double dotSum = 0.0;
+            std::size_t dotCount = 0;
+            for (std::size_t i = 0; i < g.size(); ++i) {
+                for (const int j : g.nbr[i]) {
+                    dotSum += dot(g.normal[i], g.normal[static_cast<std::size_t>(j)]);
+                    ++dotCount;
+                }
+            }
+            std::fprintf(stderr, "[mr] lvl%zu nodes=%zu meanNbrNormalDot=%.3f\n", l, g.size(),
+                         dotCount ? dotSum / static_cast<double>(dotCount) : 1.0);
+        }
+    }
 
-    const auto initQ = [](FieldGraph& g, std::size_t i) {
-        g.q[i] = g.constrained[i] ? g.constraintDir[i] : anyTangent(g.normal[i]);
-    };
+    // Winding eligibility for the coherent seed (see seedCoherentUnanchored): chi < 2
+    // flags computed on the base mesh components and pushed down the hierarchy through
+    // `parents` (pairing never crosses components, so a coarse node inherits its
+    // children's component).
+    std::vector<char> eligible;
+    if (coherentSeedUnanchored) {
+        eligible = windingEligibility(mesh, levels.front(), baseToVertex);
+        for (std::size_t lvl = 1; lvl < levels.size(); ++lvl) {
+            std::vector<char> next(levels[lvl].size(), 0);
+            const std::vector<int>& parent = parents[lvl - 1];
+            for (std::size_t i = 0; i < parent.size(); ++i) {
+                next[static_cast<std::size_t>(parent[i])] = eligible[i];
+            }
+            eligible.swap(next);
+        }
+    }
 
     // Orientation: seed + smooth the coarsest level, then prolong + smooth each
     // finer level. The coarse solve fixes the global cross-field topology
     // (singularity placement) that single-resolution smoothing gets stuck on.
-    for (std::size_t i = 0; i < levels.back().size(); ++i) {
-        initQ(levels.back(), i);
+    // CYBER_QC_MR_SEED=legacy: diagnostic override forcing the historical per-node init
+    // even when the caller asked for coherent seeding (A/B isolation of the seed basin).
+    const char* seedEnv = std::getenv("CYBER_QC_MR_SEED");
+    const bool legacySeed = seedEnv != nullptr && std::string(seedEnv) == "legacy";
+    if (coherentSeedUnanchored && !legacySeed) {
+        seedCoherentUnanchored(levels.back(), eligible);
+    } else {
+        for (std::size_t i = 0; i < levels.back().size(); ++i) {
+            initNodeQ(levels.back(), i);
+        }
     }
     smoothOrientation(levels.back(), iterations);
+    dumpLevel(levels.back(), static_cast<int>(levels.size()) - 1);
     for (int lvl = static_cast<int>(levels.size()) - 2; lvl >= 0; --lvl) {
         FieldGraph& fine = levels[static_cast<std::size_t>(lvl)];
         const FieldGraph& coarse = levels[static_cast<std::size_t>(lvl) + 1];
@@ -350,6 +553,7 @@ PositionField computePositionField(const Mesh& mesh, float spacing, int iteratio
                     : projectUnit(coarse.q[static_cast<std::size_t>(parent[i])], fine.normal[i]);
         }
         smoothOrientation(fine, iterations);
+        dumpLevel(fine, lvl);
     }
 
     // Position: same coarse-to-fine schedule, carrying the coarse lattice

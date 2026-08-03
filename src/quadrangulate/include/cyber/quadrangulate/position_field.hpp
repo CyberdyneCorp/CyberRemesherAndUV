@@ -49,7 +49,15 @@ struct PositionField {
 // a naive lattice-collapse over-merges a continuous field. The field-aligned
 // maximum-matching quadrangulator remains the production quadrangulator; this
 // module is the field foundation for a future Instant-Meshes-style extractor.
-[[nodiscard]] PositionField computePositionField(const Mesh& mesh, float spacing, int iterations);
+//
+// `coherentSeedUnanchored` (default off — the position-field extractors keep the
+// historical per-node init): seed each constraint-free component of the coarsest
+// hierarchy level by BFS-transporting one direction instead of independent random
+// tangents, so the coarse solve starts in a near-zero-winding holonomy basin. On a
+// closed handle (torus) the random basin can trap a twist winding that smoothing
+// cannot unwind. Used by the multiresolution cross field (crossfield.cpp).
+[[nodiscard]] PositionField computePositionField(const Mesh& mesh, float spacing, int iterations,
+                                                 bool coherentSeedUnanchored = false);
 
 // Extracts a quad-dominant mesh from the fields (Instant-Meshes mesh
 // extraction: lattice-cell collapse + local face tracing — see quad_extract.cpp

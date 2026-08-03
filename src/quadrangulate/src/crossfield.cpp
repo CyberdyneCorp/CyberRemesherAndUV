@@ -69,6 +69,32 @@ void transportSmooth(const Mesh& mesh, const std::vector<FaceId>& faces,
                      const std::vector<Index>& compact, const std::vector<char>& constrained,
                      CrossField& field, int sweepCap, accel::IBackend& backend);
 
+// CYBER_QC_FIELD_DUMP=<path>: write each live face's centroid, normal and final field
+// direction (one line per face) after the solve. Diagnosis instrumentation only.
+void dumpField(const Mesh& mesh, const std::vector<FaceId>& faces, const CrossField& field) {
+    const char* path = std::getenv("CYBER_QC_FIELD_DUMP");
+    if (path == nullptr) {
+        return;
+    }
+    std::FILE* out = std::fopen(path, "w");
+    if (out == nullptr) {
+        return;
+    }
+    for (const FaceId f : faces) {
+        const std::vector<VertexId> fv = mesh.faceVertices(f);
+        Vec3 c{0, 0, 0};
+        for (const VertexId v : fv) {
+            c += mesh.position(v);
+        }
+        c = c / static_cast<float>(fv.size());
+        const Vec3 n = mesh.faceNormal(f);
+        const Vec3 d = field.direction(f);
+        std::fprintf(out, "%g %g %g %g %g %g %g %g %g\n", c.x, c.y, c.z, n.x, n.y, n.z, d.x, d.y,
+                     d.z);
+    }
+    std::fclose(out);
+}
+
 }  // namespace
 
 Vec3 CrossField::direction(FaceId f) const {
@@ -103,6 +129,7 @@ CrossField computeCrossField(const Mesh& mesh, int iterations, accel::IBackend& 
     const std::vector<char> constrained =
         applyPins(mesh, faces, compact, field, creaseAlignDegrees, creaseAlignSupport);
     transportSmooth(mesh, faces, compact, constrained, field, std::max(iterations, 120), backend);
+    dumpField(mesh, faces, field);
     return field;
 }
 
@@ -440,7 +467,10 @@ CrossField computeCrossFieldFromOrientation(const Mesh& mesh, int iterations,
 
     // The multiresolution per-vertex 4-RoSy orientation. spacing only drives the
     // position field, which we do not consume here, so pass a unit spacing.
-    const PositionField pf = computePositionField(mesh, 1.0f, iterations);
+    // Coherent seeding for unanchored components keeps closed constraint-free
+    // handles (torus) out of wound holonomy basins; see computePositionField.
+    const PositionField pf =
+        computePositionField(mesh, 1.0f, iterations, /*coherentSeedUnanchored=*/true);
 
     for (const FaceId f : faces) {
         const Index i = f.value;
@@ -488,6 +518,7 @@ CrossField computeCrossFieldFromOrientation(const Mesh& mesh, int iterations,
     const std::vector<char> constrained =
         applyPins(mesh, faces, compact, field, creaseAlignDegrees, creaseAlignSupport);
     transportSmooth(mesh, faces, compact, constrained, field, std::max(iterations, 120), backend);
+    dumpField(mesh, faces, field);
     return field;
 }
 
