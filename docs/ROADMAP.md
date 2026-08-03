@@ -428,6 +428,38 @@ densities, mean paired delta):**
     pre-change build (armadillo@8000 sha256, modulo the OBJ's self-referential
     mtllib line). Numerical drift `CYBER_QC_DIRECT_CHECK`: max
     |uv_direct − uv_cg| = 9.2e-5 on spot (the CG truncation error removed).
+- **Isotropic-phase perf (2026-08-02): best-first BVH closest-point
+  traversal.** Profiling the adaptive isotropic passes (nefertiti@8000:
+  scales=28ms split=2.8s collapse=11.1s smooth=1.0s) showed ~895k
+  `ScaleField::at`/project closest-point queries at ~15µs each — the
+  `Bvh::closestPoint` traversal was unordered LIFO, so it explored far
+  subtrees before establishing a bound (the kMaxScale short-circuit fired on
+  only 0.5% of collapse candidates; the banded-lengths guard alone issued
+  531k queries). Fix: ordered descent — visit the nearer child first, carry
+  each deferred child's box distance and prune it against the current best on
+  pop. Exact (pruning only skips subtrees that cannot beat the best), so
+  every BVH consumer (split/collapse midpoint sampling, smooth+project,
+  snapping, baking) speeds up with no semantic change; the Eulerian
+  ScaleField design is untouched.
+  - *Measured (M2 Max, Release), nefertiti@8000 isotropic phase:* collapse
+    **11.2s → 0.51s** (22x), split 2.9s → 0.09s, smooth+project 1.0s → 0.06s;
+    phase total 15.2s → **0.74s** (target was <5s), wall 21.7s → **7.4s** —
+    the <10s roadmap wall target for nefertiti@8000 is met. armadillo@8000:
+    collapse 11.4s → 0.56s, phase 16.5s → 0.83s, wall 21.9s → 6.2s; spot@3000
+    collapse 0.18s → 0.03s, wall 0.58s → 0.34s.
+  - *Gates:* ctest 14/14 (incl. BVH unit tests and GPU/flat-BVH parity),
+    `bench.py check` green. Full-corpus A/B (generated +
+    spot/nefertiti/armadillo, cyber and cyber-pure): 11/14 outputs
+    byte-identical to the pre-change build (modulo the OBJ's self-referential
+    mtllib line); the other 3 (torus/armadillo cyber-pure, cylinder cyber)
+    differ only where two reference triangles are exactly equidistant and the
+    new visit order returns the other one — same face/vertex counts and
+    connectivity, coordinate deltas ≤2e-6 on the generated pair and localized
+    to 262/7018 verts (max 0.12% of bbox diagonal) on armadillo, with the
+    full metric table (quads/sing/haus/angle/flow/recall) identical at
+    reported precision. CAD sweep A/B (box_sharp + cylinder, all 8 densities,
+    both engines): all runs green, quads/singularities/recall identical,
+    angle/hausdorff deltas ≤0.03% (float dust).
 - **Feature-pinning lever (in progress, OPT-IN):** `CYBER_QC_FEATURE_DEG=90
   CYBER_QC_PLANAR_FILL=1 CYBER_QC_UV_SNAP=1` lifts box_sharp recall
   **0.04 → 0.73** (organics neutral: spot 179→168 sing, recall 0.59→0.64) via
