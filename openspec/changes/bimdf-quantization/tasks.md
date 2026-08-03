@@ -156,3 +156,25 @@
        metric-SAME vs main; byte-hash gates retired (main itself is
        run-to-run non-byte-deterministic, metrics identical). Default
        NOT flipped; guided stays opt-in and health-gated.
+       — ROUND 7 (branch `feat/wrinkle-web`): the CONE BUDGET moved for
+       the first time — resolution-aware feature DEMOTION at the field
+       level (quadcover_extractor/crossfield/seamless_solver, default
+       ON, kill switch `CYBER_QC_NO_FEATURE_DEMOTE`). Measured first
+       (`CYBER_QC_FIELD_STATS` web census + dipole-blocking census):
+       nefertiti@4000 pure carries ZERO resolvable feature chains, yet
+       782 tagged knife edges + a 45°-crease align web freezing 43% of
+       the field pin 89% of its 1297 cones and web-block 387 of 464
+       unmatched +cones. Demotion (coarse-substrate gate ≥4 input
+       edges per cell; resolvable = traces the original's ≥2-cell
+       crease network OR bends ≥45° persistently at ±{0.3,0.6,1}h on
+       the ORIGINAL surface with 20° side coherence) opens the field:
+       cones 1297 → 633 (armadillo 651 → 266), web-blocked 387 → 69.
+       Output: nefertiti pure greedy 419 → 220, guided 248, multires
+       176 / multires+guided 150 — WITH better geometry (haus 0.0072 →
+       0.0051, recall 0.738 → 0.780); armadillo greedy 159 / guided
+       143 (gate ≤200 MET on the default path). Nefertiti ≤200 still
+       needs env-gated multires; its torus handle regression is now
+       the binding blocker. Bunny/CAD/spot disengage via the
+       coarseness gate (bunny ears 19 / sing 94 exact; CAD 16/16
+       metric-SAME, demotion never fires). ctest 14/14, bench check
+       green ×3, flag-off reproduces round-6 baselines exactly.

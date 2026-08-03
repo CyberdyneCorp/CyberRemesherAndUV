@@ -596,6 +596,129 @@ flow optimum even when engaged); (c) seam-locked residual folds (~45)
 need integer-free participation or T-mesh-side QEx Alg-8 valence
 recovery.
 
+### Update — 2026-08-03 (branch `feat/wrinkle-web`): the pseudo-feature web MEASURED and DEMOTED — nefertiti cones 1297 → ~635, sing 419 → 220 with BETTER geometry; armadillo gate MET (159/143)
+
+**The web, named and counted** (new permanent instrumentation:
+`CYBER_QC_FIELD_STATS` web/chain census + cones-vs-web + a
+dipole-blocking census in `annihilateFieldDipoles`). nefertiti@4000
+pure substrate (15 288 faces, h = 20.48):
+
+- *Tag level*: 782 feature edges in 373 chains — **0 resolvable**
+  (167 sub-resolution chains / 543 edges, 203 isolated single edges,
+  3 long chains / 36 edges that trace nothing in the original). The
+  original mesh's ≥90° dihedral network tops out at chain length 31.2
+  vs the 2-cell floor of 41: nefertiti has NO sharp network resolvable
+  at this density — every tagged edge is a coarse-remesh alias.
+- *Align level (the bigger web)*: 6 925 work-mesh edges pass the
+  45° crease-ALIGNMENT test and pin 5 583 faces — **43% of the field
+  frozen at wrinkle orientations** (armadillo: 2 568 faces, 29.6%).
+- *Cones vs web*: 1 297 cones, **1 149 (89%) sit on the align web**
+  (443 on tagged edges). armadillo: 651 cones, 571 (88%) on-web.
+- *Dipole blocking*: 464 of 550 +cones unmatched; **387 (83%) are
+  web-blocked** (a −1 partner exists within radius once feature/pin
+  crossings are allowed; 77 guard-rejected, 0 partnerless). armadillo:
+  219 of 256 web-blocked. The gap-4 saturation is the web, quantified.
+
+**The lever — resolution-aware feature demotion (default ON, kill
+switch `CYBER_QC_NO_FEATURE_DEMOTE`).** After the post-remesh re-tag +
+fold/reference filters, an edge keeps FIELD authority (hard seam, field
+pin, planar-fill seed, dipole barrier) only if it is resolvable at the
+output density:
+
+1. *Coarse-substrate gate*: demotion engages only when the output cell
+   spans ≥4 input edges (`CYBER_QC_DEMOTE_MIN_RATIO`) — nefertiti /
+   armadillo pure @4000 sit at 6.87/6.59, while bunny default @3000
+   (3.19), nefertiti default (3.4), spot (0.85) and every CAD cell
+   (0.33–2.78) disengage and keep the historical path bit-for-bit.
+   Density-relative by construction: an edge demoted at pure-4000 is
+   back at 16000.
+2. *Resolvable* = traces the ORIGINAL mesh's crease network restricted
+   to chains ≥2 output cells (0.25h tolerance, the reference-filter
+   test without its knife-edge exception) **OR** bends persistently at
+   output scale on the ORIGINAL surface: probes at ±{0.3, 0.6, 1.0}·h
+   across the edge, per-side normals coherent within 20° and the sides
+   differing by ≥45° (`CYBER_QC_DEMOTE_PERSIST_DEG`, = the align
+   threshold itself). Tag demotion unTAGs (every consumer reads
+   `Mesh::isFeatureEdge`, so seams, pins, fill seeds, barriers and the
+   featureBinding decision all follow); align demotion ships per-edge
+   support flags through `buildSeamlessSetup` → `computeCrossField` /
+   `fieldPinnedFaces`.
+- *Measured dead ends*: (a) network-test-only demotion shreds the bunny
+  ears (19 → 64, sing 94 → 208) — the ears are ridges SMOOTH at
+  original resolution but tighter than an output cell, invisible to any
+  per-edge dihedral network; (b) persistence measured on the WORK mesh
+  cannot work — the coarse remesh aliases sub-cell relief into
+  cell-scale corrugation (kept 3 117/5 214 wrinkle pins, cones
+  589 → 1 071); (c) a single-distance original-surface probe still
+  confuses stripe corrugation of period ≈ h with a crease (kept 2 975,
+  cones 1 021). The shipped criterion (multi-distance + side coherence)
+  keeps 897/5 214 on nefertiti, 57/2 257 on armadillo, 504/545 on the
+  (disengaged-anyway) bunny.
+
+**Results** (shipped defaults unless noted; `CYBER_QC_BIMDF_HEALTH`
+still required to engage guided on these substrates — sideMismatch
+stays 0.60-0.75):
+
+nefertiti@4000 pure — demoted 725/782 tag edges, field constraint
+43% → ~6%, cones **1 297 → 633**, web-blocked +cones **387 → 69**:
+
+| nefertiti@4000 pure    | sing | quads | haus | recall | loops |
+|------------------------|-----:|------:|------|--------|-------|
+| greedy (round-6 base)  | 419  | 4108  | 0.0072 | 0.738 | 18/456 |
+| demote, greedy         | **220** | 3516 | **0.0051** | **0.780** | 8/879 |
+| demote, guided engaged | 248  | 3380  | 0.0053 | 0.770 | 14/483 |
+| demote + multires, greedy | **176** | 3528 | 0.0052 | 0.779 | 8/882 |
+| demote + multires + guided | **150** | 3048 | 0.0055 | 0.748 | 8/762 |
+
+armadillo@4000 pure — cones **651 → 266**, web-blocked 219 → 3:
+greedy **159** (haus 0.0133, recall 0.622; base 273 / 0.0173 / 0.647),
+guided engaged **143** (0.0135), multires greedy 119 (0.0156),
+QuadriFlow ~80.
+
+**GATE VERDICT — nefertiti cyber-pure ≤ 200: MET only with multires
+(176 greedy / 150 multires+guided; both env-gated by multires' torus
+regression), NOT met on the stock single-level field (greedy 220,
+guided 248). armadillo pure: MET on the default path (greedy 159,
+guided 143).** Fidelity guard holds everywhere it was measured:
+nefertiti hausdorff 0.0051–0.0058 vs 0.0072 baseline — for the first
+time a sing win comes with BETTER geometry, angle (19.9° → 12.9°) and
+recall (0.738 → 0.780). Honest costs: armadillo raw recall dips
+0.647 → 0.622 (its demoted web IS the wart texture; resolvable-feature
+recall is not separable — the census shows both organics have ZERO
+resolvable chains at the solve threshold, so raw recall against the
+input's wrinkle network is the only number there is); pure-arm quad
+counts land ~10-14% under the request (3 516/4 000, 3 286/4 000) vs
+~3% before — the wrinkle seams were also inflating the count.
+
+**Where the remaining cones live (step-3 answer):** of nefertiti's 633
+post-demotion cones, 561 sit on the RETAINED web — the persistent,
+resolvable-at-scale crease bands (headdress borders, eyes, lips) — and
+the blocking census says the annihilation pass is no longer
+web-saturated: 166 unmatched = 90 guard-rejected (curvature-demanded
+per the 2-ring consistency guard), 69 blocked by the retained
+(legitimate) web, 7 partnerless. Radius 8 now changes the output
+(saturation broken) but measures WORSE (242 vs 220) — the residue is
+curvature/structure-demanded, not under-tuned pairing. Getting the
+stock field under 200 needs the multires hierarchy made default-safe
+(its torus handle regression), not more demotion.
+
+**Gates**: ctest 14/14; `bench.py check` OK off/report/guided; bunny
+default guided ears **19** / sing **94** exact (gate disengaged at
+3.19); box_sharp@1000 pure guided exact injection (maxFrac 0.0000,
+injected 6); box_sharp default sing 8 / recall 1.00 / angle 0.0°; CAD
+spot-check box+cylinder × {400,900,1400,4500} × both arms: demotion
+disengaged 16/16 (coarseness ≤2.78) and on-vs-off **16/16
+metric-SAME**; flag-off reproduces the round-6 baselines exactly
+(nefertiti 419, armadillo 273, bunny 19/94). Identity gates are
+metric-level per the round-6 determinism finding.
+
+Ranked next: (a) make the multires cross-field default-safe (the torus
+handle regression is the only blocker between the shipped path and
+nefertiti 176/150); (b) guided health on demoted substrates
+(sideMismatch 0.60-0.75 still refuses unaided; featureArcs are now 0 so
+the crease-fraction refusal is gone); (c) revisit QuadriFlow's
+remaining 2× (150 vs 80) — likely cone PLACEMENT, not count.
+
 ## Update — 2026-08-02 (CAD density robustness: the sweep's 🔴 failures are FIXED; 32/32 gate cells clean)
 
 The two density-dependent robustness bugs the CAD sweep below exposed are fixed
