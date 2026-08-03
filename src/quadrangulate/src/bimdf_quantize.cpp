@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <functional>
 #include <limits>
+#include <map>
 #include <optional>
 #include <string>
 #include <tuple>
@@ -161,13 +162,24 @@ public:
         }
         buildCreaseChains(tm);
         if (!traceRays(tm)) {
+            tm.failedRays = failedLaunches_;
             return tm;
         }
         assembleArcs(tm);
         if (!tm.reason.empty()) {
             return tm;
         }
-        if (!buildPatches(tm)) {
+        const bool patchesOk = buildPatches(tm);
+        tm.failedRays = failedLaunches_;
+        tm.degradedNodes = degradedNodes_;
+        if (!patchesOk) {
+            return tm;
+        }
+        if (failedLaunches_ != 0) {
+            // Arcs and quad patches around the abandoned launches are
+            // structurally suspect even when every orbit closed with 4
+            // corners; be honest and refuse the T-mesh.
+            tm.reason = "abandoned separatrix launches: " + std::to_string(failedLaunches_);
             return tm;
         }
         tm.ok = true;
@@ -573,6 +585,7 @@ private:
         double startAlong = 0.0;
         ZExpr startExpr;
         std::vector<Event> events;  // T-nodes on this ray + termination
+        bool failed = false;        // launch exhausted at a folded cone; no arcs
     };
 
     struct WalkState {
@@ -716,6 +729,7 @@ private:
             int q;
             double margin;
             std::uint64_t edgeKey;  // dedupe key for on-boundary claims (0: none)
+            bool uvOk;              // launch level exits this face's UV wedge
         };
         // The wedge-inside test runs in 3D (mesh positions + combed frame):
         // the relaxed UV can fold near high-distortion cones, but the
@@ -794,6 +808,22 @@ private:
                 if (n1 < 1e-18 || n2 < 1e-18) {
                     continue;  // degenerate wedge
                 }
+                // UV wedge of this corner: on a folded relaxed map the
+                // triangle can be UV-inverted (or the direction can fall
+                // outside its UV wedge even though the intrinsic 3D test
+                // accepts it) — launching there finds no level exit. The
+                // signed UV test below marks candidates whose launch level
+                // provably exits the face, and the pool ranks those first
+                // (QEx-style: trust signed wedge geometry, not the folded
+                // fan).
+                const V2 uvA = uv(cut);
+                const V2 uvB = uv(nxt);
+                const V2 uvC = uv(prv);
+                const V2 ue1{uvB.x - uvA.x, uvB.y - uvA.y};
+                const V2 ue2{uvC.x - uvA.x, uvC.y - uvA.y};
+                const double un1 = std::sqrt(ue1.x * ue1.x + ue1.y * ue1.y);
+                const double un2 = std::sqrt(ue2.x * ue2.x + ue2.y * ue2.y);
+                const double uvArea2 = ue1.x * ue2.y - ue1.y * ue2.x;
                 for (int q = 0; q < 4; ++q) {
                     // d = R_n(q * 90deg) e0 in 3D: e0, n x e0, -e0, -(n x e0).
                     std::array<double, 3> d = ax0;
@@ -806,11 +836,23 @@ private:
                     const double c1 = dot3(nrm, cross3(e1, d)) / n1;
                     const double c2 = dot3(nrm, cross3(d, e2)) / n2;
                     const double margin = std::min(c1, c2);
+                    // Chart quarter directions: (1,0),(0,1),(-1,0),(0,-1).
+                    const double dqx = q == 0 ? 1.0 : (q == 2 ? -1.0 : 0.0);
+                    const double dqy = q == 1 ? 1.0 : (q == 3 ? -1.0 : 0.0);
+                    const double uc1 = (ue1.x * dqy - ue1.y * dqx) / std::max(un1, 1e-300);
+                    const double uc2 = (dqx * ue2.y - dqy * ue2.x) / std::max(un2, 1e-300);
+                    const bool uvOk =
+                        uvArea2 > 0.0 && un1 > 1e-18 && un2 > 1e-18 && std::min(uc1, uc2) > -1e-6;
                     // Accept up to ~20deg outside the wedge: near singular
                     // vertices the frame jump across an edge can be large, and
                     // a separatrix direction may fall in the crack between two
                     // adjacent wedge tests. Ranking + dedupe keep the best.
-                    if (margin <= -0.35) {
+                    // UV-launchable sites are kept regardless (fold rescue): on
+                    // a folded fan the intrinsically-correct wedge can be
+                    // UV-blocked while the developed line exits a neighboring
+                    // wedge of the same quarter class; on clean fans the UV and
+                    // 3D wedges agree, so no such extra candidate exists.
+                    if (margin <= -0.35 && !uvOk) {
                         continue;
                     }
                     Cand cd;
@@ -822,6 +864,7 @@ private:
                     if (margin < 0.05) {
                         cd.edgeKey = c1 <= c2 ? canon(cut, nxt) : canon(cut, prv);
                     }
+                    cd.uvOk = uvOk;
                     byCone[ch_.vertexOfCut[cut]].push_back(cd);
                 }
             }
@@ -898,6 +941,13 @@ private:
                 pool.push_back({&cd, ((cd.q - itF->second.second) % 4 + 4) % 4, itF->second.first});
             }
             std::sort(pool.begin(), pool.end(), [](const Scored& a, const Scored& b) {
+                // UV-launchable candidates outrank fold-blocked ones: a
+                // candidate whose launch level cannot exit its own face in UV
+                // burns retries and can exhaust the launch ("no level exit at
+                // step=1" on folded cone fans).
+                if (a.cd->uvOk != b.cd->uvOk) {
+                    return a.cd->uvOk;
+                }
                 if (a.cd->margin != b.cd->margin) {
                     return a.cd->margin > b.cd->margin;
                 }
@@ -951,7 +1001,12 @@ private:
                         }
                         pick.push_back(sc.cd);
                         chosen.push_back({sc.fanIdx, sc.cd->margin});
-                        score += sc.cd->margin;
+                        // UV-launchable picks dominate the pattern choice (the
+                        // bonus is constant when every pick is UV-valid, so
+                        // clean fans keep the pure-margin ordering): a pattern
+                        // forced through a fold-blocked wedge exhausts its
+                        // launch downstream.
+                        score += sc.cd->margin + (sc.cd->uvOk ? 1.0 : 0.0);
                         --cnt;
                     }
                     ok = cnt == 0;
@@ -1019,6 +1074,27 @@ private:
                 }
             }
             const int rc = stepOnce(*next);
+            // Abandon a separatrix whose degeneracy cannot be retried away:
+            // its ray contributes no arcs, the cone's rotation degrades and
+            // the orbits touching it are counted as non-quad patches
+            // downstream (the T-mesh is refused with statistics instead of
+            // aborting on the first fold).
+            const auto abandonRay = [&] {
+                Ray& ray = rays_[static_cast<std::size_t>(next->id)];
+                ray.failed = true;
+                ++failedLaunches_;
+                failedLaunchVertex_.insert(ch_.vertexOfCut[next->launchCut]);
+                if (std::getenv("CYBER_QC_BIMDF_DEBUG") != nullptr) {
+                    std::fprintf(stderr,
+                                 "[qc] bimdf abandoned launch: cone-v=%u q=%d face=%zu (%s)\n",
+                                 ch_.vertexOfCut[next->launchCut], next->launchQ, next->launchFace,
+                                 traceFail_.c_str());
+                }
+                ray.events.clear();
+                ++curGen_[static_cast<std::size_t>(next->id)];  // stale trail
+                next->done = true;
+                --active;
+            };
             if (rc == 1) {
                 next->done = true;
                 --active;
@@ -1029,8 +1105,11 @@ private:
                 // same separatrix class (UV-degenerate launch faces happen on
                 // folded relaxed maps).
                 if (dependents_[static_cast<std::size_t>(next->id)] > 0) {
-                    tm.reason = "ray retry blocked: " + traceFail_;
-                    return false;
+                    // Restarting would orphan the T-nodes other rays placed
+                    // on this trail; abandon instead (the placed nodes stay
+                    // as spurs on their rays' arcs).
+                    abandonRay();
+                    continue;
                 }
                 if (next->attempt >= 3) {
                     if (next->altIdx + 1 < next->alts.size()) {
@@ -1046,8 +1125,11 @@ private:
                         ray.startFace = o.face;
                         ray.q0 = o.q;
                     } else {
-                        tm.reason = "ray launch exhausted: " + traceFail_;
-                        return false;
+                        // Every launch site of this separatrix is fold-blocked
+                        // (typically a high-|index| cone whose developed line
+                        // rides a seam).
+                        abandonRay();
+                        continue;
                     }
                 } else {
                     ++next->attempt;
@@ -1205,6 +1287,28 @@ private:
                     }
                 }
             }
+            if (exitEdge < 0 && w.enteredEdge >= 0) {
+                // Folded triangle: the level enters and leaves through the
+                // SAME edge (the face lies on one side of the level except a
+                // sliver at the entry). Take the second crossing of the entry
+                // edge; the sign logic below flips the travel direction.
+                const V2 A = uv(ch_.faces[w.face][static_cast<std::size_t>(w.enteredEdge)]);
+                const V2 B =
+                    uv(ch_.faces[w.face][static_cast<std::size_t>((w.enteredEdge + 1) % 3)]);
+                const double da = comp(A, lca) - w.c;
+                const double db = comp(B, lca) - w.c;
+                if (!((da > 0.0 && db > 0.0) || (da < 0.0 && db < 0.0)) &&
+                    std::abs(da - db) >= 1e-18) {
+                    const double t = da / (da - db);
+                    if (t >= -1e-9 && t <= 1.0 + 1e-9) {
+                        const double xv = comp(A, va) + t * (comp(B, va) - comp(A, va));
+                        if (std::abs(xv - pv) > 1e-9) {
+                            exitEdge = w.enteredEdge;
+                            exitVar = xv;
+                        }
+                    }
+                }
+            }
             if (exitEdge < 0) {
                 traceFail_ = "no level exit (face=" + std::to_string(w.face) +
                              " q=" + std::to_string(w.q) + " step=" + std::to_string(wk.steps) +
@@ -1304,7 +1408,10 @@ private:
 
             const std::size_t eA = ch_.faces[w.face][static_cast<std::size_t>(exitEdge)];
             const std::size_t eB = ch_.faces[w.face][static_cast<std::size_t>((exitEdge + 1) % 3)];
-            // Exact vertex hit at the exit?
+            // Exact vertex hit at the exit? Only cone and crease-chain
+            // vertices are events; a near-hit on a plain regular vertex is a
+            // numerical coincidence and the walk passes through (jitter
+            // retries are unavailable once other rays reference this trail).
             for (const std::size_t cv : {eA, eB}) {
                 const V2 pV = uv(cv);
                 if (std::abs(comp(pV, lca) - w.c) < 1e-6 &&
@@ -1313,7 +1420,11 @@ private:
                         traceFail_ = "ray returned to its source cone";
                         return 2;
                     }
-                    return handleVertex(wk, cv) ? 1 : 2;
+                    if (isConeVertex(ch_.vertexOfCut[cv]) ||
+                        chainPosOfVertex_.count(ch_.vertexOfCut[cv]) != 0) {
+                        return handleVertex(wk, cv) ? 1 : 2;
+                    }
+                    break;  // regular vertex: continue as a plain edge crossing
                 }
             }
             const Nb& n = nbs_[w.face][static_cast<std::size_t>(exitEdge)];
@@ -1529,6 +1640,9 @@ private:
     void assembleArcs(TMesh& tm) {
         for (std::size_t r = 0; r < rays_.size(); ++r) {
             Ray& ray = rays_[r];
+            if (ray.failed) {
+                continue;  // abandoned launch: contributes no arcs
+            }
             if (ray.events.empty()) {
                 tm.reason = "ray without termination event";
                 return;
@@ -1662,7 +1776,8 @@ private:
         }
         for (std::size_t n = 0; n < nodes_.size(); ++n) {
             if (ends[n].empty()) {
-                if (nodes_[n].type == 0 && isConeVertex(nodes_[n].meshVertex)) {
+                if (nodes_[n].type == 0 && isConeVertex(nodes_[n].meshVertex) &&
+                    failedLaunchVertex_.count(nodes_[n].meshVertex) == 0) {
                     tm.reason = "cone without incident arcs";
                     return false;
                 }
@@ -1753,9 +1868,14 @@ private:
             tm.patches.push_back(std::move(patch));
         }
         if (badPatches_ != 0) {
+            // Corner-valence histogram of the rejected orbits ("v:count").
+            std::map<int, int> hist;
+            for (const int c : badCorners_) {
+                ++hist[c];
+            }
             std::string cs;
-            for (std::size_t i = 0; i < badCorners_.size() && i < 12; ++i) {
-                cs += (i != 0 ? "," : "") + std::to_string(badCorners_[i]);
+            for (const auto& [val, cnt] : hist) {
+                cs += (cs.empty() ? "" : ",") + std::to_string(val) + ":" + std::to_string(cnt);
             }
             tm.reason = "non-quad patches: " + std::to_string(badPatches_) + " of " +
                         std::to_string(tm.patches.size() + badPatches_) + " (corners " + cs + ")";
@@ -2099,6 +2219,8 @@ private:
     std::size_t openEdges_ = 0;
     std::size_t badPatches_ = 0;
     std::size_t degradedNodes_ = 0;
+    std::size_t failedLaunches_ = 0;
+    std::unordered_set<std::uint32_t> failedLaunchVertex_;
     std::vector<int> badCorners_;
 };
 

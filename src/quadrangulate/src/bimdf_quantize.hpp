@@ -90,10 +90,12 @@ struct TMesh {
     // Diagnostics.
     std::size_t coneNodes = 0, creaseNodes = 0, tNodes = 0;
     std::size_t raysTraced = 0, raySteps = 0;
-    double maxExprErr = 0.0;       // max |expr(z_relaxed) - len| over arcs
-    double maxSideMismatch = 0.0;  // max |sum(side k) - sum(side k+2)| relaxed
-    double minArcLen = 0.0;        // most negative relaxed arc length (fold diagnostic)
-    std::size_t prunedChains = 0;  // stub crease chains dropped (phase-only pins)
+    double maxExprErr = 0.0;        // max |expr(z_relaxed) - len| over arcs
+    double maxSideMismatch = 0.0;   // max |sum(side k) - sum(side k+2)| relaxed
+    double minArcLen = 0.0;         // most negative relaxed arc length (fold diagnostic)
+    std::size_t prunedChains = 0;   // stub crease chains dropped (phase-only pins)
+    std::size_t failedRays = 0;     // separatrix launches abandoned at folded cones
+    std::size_t degradedNodes = 0;  // nodes with fold-damaged sector windings
 };
 
 // zValue(i) must return the relaxed value of promoted variable i (used only
