@@ -105,6 +105,14 @@ struct TMesh {
     std::size_t repairedNodes = 0;  // fold-damaged fans fixed by signed-angle sectors
     std::size_t twinMerges = 0;     // coincident twin-arc pairs merged (bigon collapse)
     std::size_t spurCollapses = 0;  // dangling out-and-back arcs removed
+    // Local containment: an orbit that fails validation (or touches a cone
+    // with abandoned launches) no longer refuses the whole T-mesh. Its
+    // region is EXCLUDED: arcs bounded only by rejected orbits are barred
+    // from injection and fall back to the greedy rounding locally, while the
+    // valid remainder of the T-mesh proceeds.
+    std::size_t excludedPatches = 0;  // rejected orbits (locally contained)
+    std::string rejectSummary;        // corner histogram of rejected orbits
+    std::vector<char> arcExcluded;    // per (compact) arc: no accepted orbit covers it
 };
 
 // zValue(i) must return the relaxed value of promoted variable i (used only
@@ -116,7 +124,8 @@ struct BimdfResult {
     std::string reason;
     // Assigned quantized arc lengths, in HALF-CELL units (cones live on the
     // half-integer lattice under the solver's reduction, so arc lengths are
-    // integers in half-cells). arcLenHalf[a] >= 1.
+    // integers in half-cells). arcLenHalf[a] >= 0; the anti-collapse floor
+    // of one half-cell lives on the patch SIDES, not on individual arcs.
     std::vector<long long> arcLenHalf;
     double deviationEnergy = 0.0;    // sum_a |x_a/2 - len_a| / max(len_a, 0.5)
     std::size_t raisedToMin = 0;     // degenerate-assignment guard adjustments
@@ -127,6 +136,11 @@ struct BimdfResult {
                                      // (unquantizable under the template; diagnostic)
     long long coverCost = 0;         // scaled min-cost-flow objective (diagnostic)
     long long maxSideViolation = 0;  // worst |side sum - opposite side sum| (half-cells)
+    // Local-infeasibility safety valve: patches whose cover demand could not
+    // be satisfied (fixed boundary sides pinched between excluded regions)
+    // are dropped and the solve retried without them.
+    std::size_t droppedPatches = 0;
+    std::vector<char> arcOutside;  // per arc: outside the final network (never inject)
 };
 
 // Bi-MDF S1 solve over the T-mesh (targets from Arc::len, consistency from

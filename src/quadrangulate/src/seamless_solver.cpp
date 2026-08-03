@@ -1945,15 +1945,17 @@ int solveSeamlessReduced(accel::IBackend& backend, std::size_t nCut,
         }
         bimdfTm = std::make_unique<bimdf::TMesh>(bimdf::buildTMesh(*bimdfCharts, zRel));
         const bimdf::TMesh& tmesh = *bimdfTm;
-        std::fprintf(stderr,
-                     "[qc] bimdf tmesh: ok=%d nodes=%zu arcs=%zu patches=%zu cones=%zu "
-                     "tnodes=%zu rays=%zu steps=%zu failedRays=%zu degraded=%zu repaired=%zu "
-                     "twinMerges=%zu spurs=%zu exprErr=%.2e sideMismatch=%.3f%s%s\n",
-                     tmesh.ok ? 1 : 0, tmesh.nodeCount, tmesh.arcs.size(), tmesh.patches.size(),
-                     tmesh.coneNodes, tmesh.tNodes, tmesh.raysTraced, tmesh.raySteps,
-                     tmesh.failedRays, tmesh.degradedNodes, tmesh.repairedNodes, tmesh.twinMerges,
-                     tmesh.spurCollapses, tmesh.maxExprErr, tmesh.maxSideMismatch,
-                     tmesh.reason.empty() ? "" : " reason=", tmesh.reason.c_str());
+        std::fprintf(
+            stderr,
+            "[qc] bimdf tmesh: ok=%d nodes=%zu arcs=%zu patches=%zu cones=%zu "
+            "tnodes=%zu rays=%zu steps=%zu failedRays=%zu degraded=%zu repaired=%zu "
+            "twinMerges=%zu spurs=%zu excluded=%zu exprErr=%.2e sideMismatch=%.3f%s%s%s%s\n",
+            tmesh.ok ? 1 : 0, tmesh.nodeCount, tmesh.arcs.size(), tmesh.patches.size(),
+            tmesh.coneNodes, tmesh.tNodes, tmesh.raysTraced, tmesh.raySteps, tmesh.failedRays,
+            tmesh.degradedNodes, tmesh.repairedNodes, tmesh.twinMerges, tmesh.spurCollapses,
+            tmesh.excludedPatches, tmesh.maxExprErr, tmesh.maxSideMismatch,
+            tmesh.reason.empty() ? "" : " reason=", tmesh.reason.c_str(),
+            tmesh.rejectSummary.empty() ? "" : " ", tmesh.rejectSummary.c_str());
         // Reduce every arc-length expression onto the reduced basis w (used
         // for the back-substitution and the post-solve deviation report).
         if (tmesh.ok) {
@@ -1982,12 +1984,13 @@ int solveSeamlessReduced(accel::IBackend& backend, std::size_t nCut,
                 std::sort(out.begin(), out.end());
             }
             const bimdf::BimdfResult sol = bimdf::solveBimdf(tmesh);
-            std::fprintf(stderr,
-                         "[qc] bimdf solve: ok=%d energy=%.3f raisedToMin=%zu parityFlips=%zu "
-                         "halfIntegral=%zu sideViolation=%lld poly=%zu polyOdd=%zu%s%s\n",
-                         sol.ok ? 1 : 0, sol.deviationEnergy, sol.raisedToMin, sol.parityFlips,
-                         sol.halfIntegral, sol.maxSideViolation, sol.polyPatches, sol.polyOddSum,
-                         sol.reason.empty() ? "" : " reason=", sol.reason.c_str());
+            std::fprintf(
+                stderr,
+                "[qc] bimdf solve: ok=%d energy=%.3f raisedToMin=%zu parityFlips=%zu "
+                "halfIntegral=%zu sideViolation=%lld poly=%zu polyOdd=%zu dropped=%zu%s%s\n",
+                sol.ok ? 1 : 0, sol.deviationEnergy, sol.raisedToMin, sol.parityFlips,
+                sol.halfIntegral, sol.maxSideViolation, sol.polyPatches, sol.polyOddSum,
+                sol.droppedPatches, sol.reason.empty() ? "" : " reason=", sol.reason.c_str());
             if (sol.ok) {
                 // Back-substitution A y = len over the free integers. Rows
                 // touching a continuous free are the reduction's structural
@@ -1995,125 +1998,236 @@ int solveSeamlessReduced(accel::IBackend& backend, std::size_t nCut,
                 struct SysRow {
                     std::vector<std::pair<std::size_t, double>> a;  // (ordinal, coeff)
                     double rhs = 0.0;
+                    std::size_t arc = 0;  // source arc (for containment drops)
                 };
-                std::vector<SysRow> sys;
-                std::size_t badArcs = 0;
-                for (std::size_t a = 0; a < tmesh.arcs.size(); ++a) {
-                    SysRow row;
-                    bool good = true;
-                    for (const auto& [ri, cf] : bimdfArcRows[a]) {
-                        const std::size_t ord = ordinalOf[ri];
-                        if (ord == kInvalidIndex) {
-                            good = false;
-                            break;
+                // Injection-layer containment: an inconsistent equation
+                // (fractional pivot residue) marks its arc as excluded and
+                // the elimination reruns without it — the greedy rounding
+                // absorbs the dropped region, the consistent remainder is
+                // still injected.
+                std::vector<char> injDrop(tmesh.arcs.size(), 0);
+                std::size_t injDropped = 0;
+                if (std::getenv("CYBER_QC_BIMDF_DEBUG") != nullptr) {
+                    // Lattice-parity census: a row whose reduced coefficients
+                    // are all integers can only realize EVEN half-cell arc
+                    // lengths over integer y; an odd assignment there is
+                    // structurally uninjectable.
+                    std::size_t intRows = 0, halfRows = 0, oddOnInt = 0, otherRows = 0;
+                    for (std::size_t a = 0; a < tmesh.arcs.size(); ++a) {
+                        if (bimdfArcRows[a].empty()) {
+                            continue;
                         }
-                        row.a.push_back({ord, cf});
+                        bool allInt = true, allHalf = true;
+                        for (const auto& [ri, cf] : bimdfArcRows[a]) {
+                            if (std::abs(cf - std::round(cf)) > 1e-6) {
+                                allInt = false;
+                            }
+                            if (std::abs(2.0 * cf - std::round(2.0 * cf)) > 1e-6) {
+                                allHalf = false;
+                            }
+                        }
+                        if (allInt) {
+                            ++intRows;
+                            if (sol.arcLenHalf[a] % 2 != 0) {
+                                ++oddOnInt;
+                            }
+                        } else if (allHalf) {
+                            ++halfRows;
+                        } else {
+                            ++otherRows;
+                        }
                     }
-                    if (!good || row.a.empty()) {
-                        ++badArcs;
-                        continue;
-                    }
-                    row.rhs = 0.5 * static_cast<double>(sol.arcLenHalf[a]);
-                    sys.push_back(std::move(row));
+                    std::fprintf(stderr,
+                                 "[qc] bimdf parity census: intRows=%zu (oddAssigned=%zu) "
+                                 "halfRows=%zu otherRows=%zu\n",
+                                 intRows, oddOnInt, halfRows, otherRows);
                 }
-                std::vector<std::size_t> cols;
-                {
-                    std::vector<char> seen(intFree.size(), 0);
-                    for (const SysRow& row : sys) {
-                        for (const auto& [ord, cf] : row.a) {
-                            if (!seen[ord]) {
-                                seen[ord] = 1;
-                                cols.push_back(ord);
+                std::size_t badArcs = 0;
+                std::size_t exclArcs = 0;
+                constexpr int kInjectRounds = 6;
+                for (int round = 0; round < kInjectRounds; ++round) {
+                    std::vector<SysRow> sys;
+                    badArcs = 0;
+                    exclArcs = 0;
+                    for (std::size_t a = 0; a < tmesh.arcs.size(); ++a) {
+                        // Locally contained regions (rejected orbits,
+                        // abandoned launches, patches dropped by the solve's
+                        // infeasibility valve, inconsistent rows from earlier
+                        // rounds): their arcs' integers stay with the greedy
+                        // rounding below.
+                        if ((a < tmesh.arcExcluded.size() && tmesh.arcExcluded[a] != 0) ||
+                            (a < sol.arcOutside.size() && sol.arcOutside[a] != 0) ||
+                            injDrop[a] != 0) {
+                            ++exclArcs;
+                            continue;
+                        }
+                        SysRow row;
+                        row.arc = a;
+                        bool good = true;
+                        for (const auto& [ri, cf] : bimdfArcRows[a]) {
+                            const std::size_t ord = ordinalOf[ri];
+                            if (ord == kInvalidIndex) {
+                                good = false;
+                                break;
+                            }
+                            row.a.push_back({ord, cf});
+                        }
+                        if (!good || row.a.empty()) {
+                            ++badArcs;
+                            continue;
+                        }
+                        row.rhs = 0.5 * static_cast<double>(sol.arcLenHalf[a]);
+                        sys.push_back(std::move(row));
+                    }
+                    std::vector<std::size_t> cols;
+                    {
+                        std::vector<char> seen(intFree.size(), 0);
+                        for (const SysRow& row : sys) {
+                            for (const auto& [ord, cf] : row.a) {
+                                if (!seen[ord]) {
+                                    seen[ord] = 1;
+                                    cols.push_back(ord);
+                                }
+                            }
+                        }
+                        std::sort(cols.begin(), cols.end());
+                    }
+                    std::vector<std::size_t> colOf(intFree.size(), kInvalidIndex);
+                    for (std::size_t c = 0; c < cols.size(); ++c) {
+                        colOf[cols[c]] = c;
+                    }
+                    const std::size_t nR = sys.size(), nC = cols.size();
+                    std::vector<double> A2(nR * nC, 0.0), rhs2(nR, 0.0);
+                    for (std::size_t rI = 0; rI < nR; ++rI) {
+                        for (const auto& [ord, cf] : sys[rI].a) {
+                            A2[rI * nC + colOf[ord]] += cf;
+                        }
+                        rhs2[rI] = sys[rI].rhs;
+                    }
+                    // Gauss-Jordan with partial pivoting; non-pivot unknowns
+                    // take their rounded relaxed values (the greedy default),
+                    // pivots follow the flow assignment.
+                    std::vector<std::size_t> pivotColOfRow(nR, kInvalidIndex);
+                    std::vector<char> colUsed(nC, 0);
+                    for (std::size_t rI = 0; rI < nR; ++rI) {
+                        std::size_t pc = kInvalidIndex;
+                        double best = 1e-7;
+                        for (std::size_t c = 0; c < nC; ++c) {
+                            if (!colUsed[c] && std::abs(A2[rI * nC + c]) > best) {
+                                best = std::abs(A2[rI * nC + c]);
+                                pc = c;
+                            }
+                        }
+                        if (pc == kInvalidIndex) {
+                            continue;  // dependent row
+                        }
+                        colUsed[pc] = 1;
+                        pivotColOfRow[rI] = pc;
+                        const double inv = 1.0 / A2[rI * nC + pc];
+                        for (std::size_t c = 0; c < nC; ++c) {
+                            A2[rI * nC + c] *= inv;
+                        }
+                        rhs2[rI] *= inv;
+                        for (std::size_t r2 = 0; r2 < nR; ++r2) {
+                            if (r2 == rI || A2[r2 * nC + pc] == 0.0) {
+                                continue;
+                            }
+                            const double f = A2[r2 * nC + pc];
+                            for (std::size_t c = 0; c < nC; ++c) {
+                                A2[r2 * nC + c] -= f * A2[rI * nC + c];
+                            }
+                            rhs2[r2] -= f * rhs2[rI];
+                        }
+                    }
+                    std::vector<double> ySol(nC, 0.0);
+                    for (std::size_t c = 0; c < nC; ++c) {
+                        if (!colUsed[c]) {
+                            ySol[c] = std::round(static_cast<double>(w[intFree[cols[c]]]));
+                        }
+                    }
+                    double maxFrac = 0.0;
+                    std::size_t nPivots = 0;
+                    std::vector<std::size_t> fracRows;
+                    std::vector<char> pivotClean(nC, 0);
+                    for (std::size_t rI = 0; rI < nR; ++rI) {
+                        const std::size_t pc = pivotColOfRow[rI];
+                        if (pc == kInvalidIndex) {
+                            continue;
+                        }
+                        double val = rhs2[rI];
+                        for (std::size_t c = 0; c < nC; ++c) {
+                            if (c != pc && !colUsed[c] && A2[rI * nC + c] != 0.0) {
+                                val -= A2[rI * nC + c] * ySol[c];
+                            }
+                        }
+                        const double frac = std::abs(val - std::round(val));
+                        maxFrac = std::max(maxFrac, frac);
+                        if (frac >= 0.25) {
+                            fracRows.push_back(rI);
+                        }
+                        ySol[pc] = std::round(val);
+                        // A cleanly-determined, in-range pivot is injectable
+                        // even when OTHER pivots came out fractional
+                        // (variable-level partial pinning; the greedy
+                        // schedule completes the rest).
+                        pivotClean[pc] = frac < 0.25 && std::abs(ySol[pc]) <= tCap ? 1 : 0;
+                        ++nPivots;
+                    }
+                    // A small number of fractional rows is local damage:
+                    // drop those arcs and re-eliminate (their inconsistency
+                    // smears across the whole component otherwise). A large
+                    // number is the structural lattice residue — take the
+                    // partial pinning as-is.
+                    if (!fracRows.empty() && fracRows.size() <= std::max<std::size_t>(4, nR / 50) &&
+                        round + 1 < kInjectRounds) {
+                        for (const std::size_t rI : fracRows) {
+                            if (injDrop[sys[rI].arc] == 0) {
+                                injDrop[sys[rI].arc] = 1;
+                                ++injDropped;
+                            }
+                        }
+                        continue;  // rebuild without the inconsistent rows
+                    }
+                    std::size_t cleanPivots = 0;
+                    for (std::size_t c = 0; c < nC; ++c) {
+                        if (pivotClean[c]) {
+                            ++cleanPivots;
+                        }
+                    }
+                    const char* mode = std::getenv("CYBER_QC_BIMDF");
+                    const bool inject = mode == nullptr || std::string(mode) != "report";
+                    // Default injection requires FULL consistency (every
+                    // pivot cleanly determined): the joint half-integer
+                    // lattice leaves ~half the pivots at frac 0.5 on organic
+                    // T-meshes, and pinning only the clean subset was
+                    // measured to cost quality (nefertiti@4000 sing 396 ->
+                    // 431: the pinned values assume flow values for the
+                    // unpinned rest, greedy gives them something else).
+                    // CYBER_QC_BIMDF=force enables the partial pinning for
+                    // experiments.
+                    const bool force = mode != nullptr && std::string(mode) == "force";
+                    const bool exact = nPivots > 0 && cleanPivots == nPivots && maxFrac < 0.25;
+                    std::fprintf(stderr,
+                                 "[qc] bimdf inject: arcs=%zu badArcs=%zu exclArcs=%zu "
+                                 "injDropped=%zu rows=%zu cols=%zu pivots=%zu cleanPivots=%zu "
+                                 "maxFrac=%.4f mode=%s\n",
+                                 tmesh.arcs.size(), badArcs, exclArcs, injDropped, nR, nC, nPivots,
+                                 cleanPivots, maxFrac,
+                                 !inject ? "report"
+                                 : force ? "force"
+                                         : "inject");
+                    if (inject && cleanPivots > 0 && (exact || force)) {
+                        for (std::size_t c = 0; c < nC; ++c) {
+                            // Pivots only when cleanly solved; non-pivot
+                            // columns carry their greedy-default rounding.
+                            const bool pin =
+                                colUsed[c] ? pivotClean[c] != 0 : std::abs(ySol[c]) <= tCap;
+                            if (pin) {
+                                bimdfPins.push_back({cols[c], ySol[c]});
                             }
                         }
                     }
-                    std::sort(cols.begin(), cols.end());
-                }
-                std::vector<std::size_t> colOf(intFree.size(), kInvalidIndex);
-                for (std::size_t c = 0; c < cols.size(); ++c) {
-                    colOf[cols[c]] = c;
-                }
-                const std::size_t nR = sys.size(), nC = cols.size();
-                std::vector<double> A2(nR * nC, 0.0), rhs2(nR, 0.0);
-                for (std::size_t rI = 0; rI < nR; ++rI) {
-                    for (const auto& [ord, cf] : sys[rI].a) {
-                        A2[rI * nC + colOf[ord]] += cf;
-                    }
-                    rhs2[rI] = sys[rI].rhs;
-                }
-                // Gauss-Jordan with partial pivoting; non-pivot unknowns take
-                // their rounded relaxed values (the greedy default), pivots
-                // follow the flow assignment.
-                std::vector<std::size_t> pivotColOfRow(nR, kInvalidIndex);
-                std::vector<char> colUsed(nC, 0);
-                for (std::size_t rI = 0; rI < nR; ++rI) {
-                    std::size_t pc = kInvalidIndex;
-                    double best = 1e-7;
-                    for (std::size_t c = 0; c < nC; ++c) {
-                        if (!colUsed[c] && std::abs(A2[rI * nC + c]) > best) {
-                            best = std::abs(A2[rI * nC + c]);
-                            pc = c;
-                        }
-                    }
-                    if (pc == kInvalidIndex) {
-                        continue;  // dependent row
-                    }
-                    colUsed[pc] = 1;
-                    pivotColOfRow[rI] = pc;
-                    const double inv = 1.0 / A2[rI * nC + pc];
-                    for (std::size_t c = 0; c < nC; ++c) {
-                        A2[rI * nC + c] *= inv;
-                    }
-                    rhs2[rI] *= inv;
-                    for (std::size_t r2 = 0; r2 < nR; ++r2) {
-                        if (r2 == rI || A2[r2 * nC + pc] == 0.0) {
-                            continue;
-                        }
-                        const double f = A2[r2 * nC + pc];
-                        for (std::size_t c = 0; c < nC; ++c) {
-                            A2[r2 * nC + c] -= f * A2[rI * nC + c];
-                        }
-                        rhs2[r2] -= f * rhs2[rI];
-                    }
-                }
-                std::vector<double> ySol(nC, 0.0);
-                for (std::size_t c = 0; c < nC; ++c) {
-                    if (!colUsed[c]) {
-                        ySol[c] = std::round(static_cast<double>(w[intFree[cols[c]]]));
-                    }
-                }
-                double maxFrac = 0.0;
-                bool rangeOk = true;
-                std::size_t nPivots = 0;
-                for (std::size_t rI = 0; rI < nR; ++rI) {
-                    const std::size_t pc = pivotColOfRow[rI];
-                    if (pc == kInvalidIndex) {
-                        continue;
-                    }
-                    double val = rhs2[rI];
-                    for (std::size_t c = 0; c < nC; ++c) {
-                        if (c != pc && !colUsed[c] && A2[rI * nC + c] != 0.0) {
-                            val -= A2[rI * nC + c] * ySol[c];
-                        }
-                    }
-                    maxFrac = std::max(maxFrac, std::abs(val - std::round(val)));
-                    ySol[pc] = std::round(val);
-                    if (std::abs(ySol[pc]) > tCap) {
-                        rangeOk = false;  // never clamp an injected value
-                    }
-                    ++nPivots;
-                }
-                const char* mode = std::getenv("CYBER_QC_BIMDF");
-                const bool inject = mode == nullptr || std::string(mode) != "report";
-                std::fprintf(stderr,
-                             "[qc] bimdf inject: arcs=%zu badArcs=%zu rows=%zu cols=%zu "
-                             "pivots=%zu maxFrac=%.4f rangeOk=%d mode=%s\n",
-                             tmesh.arcs.size(), badArcs, nR, nC, nPivots, maxFrac, rangeOk ? 1 : 0,
-                             inject ? "inject" : "report");
-                if (inject && rangeOk && maxFrac < 0.25) {
-                    for (std::size_t c = 0; c < nC; ++c) {
-                        bimdfPins.push_back({cols[c], ySol[c]});
-                    }
+                    break;
                 }
             }
         }

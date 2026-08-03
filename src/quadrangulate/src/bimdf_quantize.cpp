@@ -176,14 +176,12 @@ public:
         if (!patchesOk) {
             return tm;
         }
-        if (failedLaunches_ != 0) {
-            // Arcs and quad patches around the abandoned launches are
-            // structurally suspect even when every orbit closed with 4
-            // corners; be honest and refuse the T-mesh.
-            tm.reason = "abandoned separatrix launches: " + std::to_string(failedLaunches_);
-            return tm;
+        // Rejected orbits and abandoned launches are locally contained (their
+        // regions excluded from injection), not grounds for refusal.
+        tm.ok = !tm.patches.empty();
+        if (tm.patches.empty()) {
+            tm.reason = "no valid patches";
         }
-        tm.ok = true;
         return tm;
     }
 
@@ -1447,8 +1445,13 @@ private:
                 return handleCreaseHit(wk, seamIdx, exitVar) ? 1 : -1;
             }
             if (n.face == kNone) {
+                // Open surface boundary (or crack). Full boundary-arc
+                // support (QGP-style boundary chains with their own length
+                // variables) is not implemented; the ray is abandoned and
+                // its cone's region locally contained, letting the rest of
+                // the T-mesh proceed on open surfaces.
                 traceFail_ = "ray reached an open boundary";
-                return -1;
+                return 2;
             }
             // Advance into the neighbor.
             flushSeg(wk, exitVar);
@@ -2108,14 +2111,56 @@ private:
                 }
             }
         }
+        // Cone nodes with abandoned launches: their fans are missing
+        // separatrices, so every orbit touching them is structurally suspect
+        // even when it closes with 4 corners — contain those regions too.
+        std::unordered_set<std::size_t> failedNodes;
+        for (const std::uint32_t v : failedLaunchVertex_) {
+            const auto it = vertexNode_.find(v);
+            if (it != vertexNode_.end()) {
+                failedNodes.insert(it->second);
+            }
+        }
+        std::vector<char> covered(arcs_.size(), 0);  // live arc has an accepted orbit
         for (const OrbitRec& orbit : orbits) {
             const auto& runs = orbit.runs;
             const int corners = orbit.corners;
-            // Quads keep the historical acceptance; polygonal patches with
-            // 3-6 corners and clean corner/pass-through sectors go to the
-            // even-sum interior-routing template (paper Sec. 4.4).
-            const bool accept =
-                corners == 4 || (orbit.cleanSectors && corners >= 3 && corners <= 6);
+            // Quads via the split-node template; polygonal patches with 3-6
+            // corners via the even-sum interior-routing template (paper
+            // Sec. 4.4). Every accepted orbit must have clean
+            // corner/pass-through sectors: under local containment a
+            // 4-corner orbit with a poisoned 270-degree sector would be
+            // quantized as a quad with a kinked side instead of failing the
+            // build, so it is contained like any other fold-damaged region.
+            bool accept = orbit.cleanSectors && corners >= 3 && corners <= 6;
+            if (accept && corners == 4) {
+                // Relaxed-consistency guard: a 4-corner orbit whose relaxed
+                // opposite side sums disagree is not a geometric quad (it
+                // closes around fold damage); quantizing it as one is
+                // infeasible. The seamless map certifies real quads to
+                // machine precision, so the tolerance is generous.
+                std::array<double, 4> sideSum{0.0, 0.0, 0.0, 0.0};
+                int side = -1;
+                for (std::size_t k = 0; k < runs.size(); ++k) {
+                    const auto& [arcId, q] = runs[(orbit.firstCorner + k) % runs.size()];
+                    if (q == 1) {
+                        ++side;
+                    }
+                    sideSum[static_cast<std::size_t>(side)] += arcs_[arcId].arc.len;
+                }
+                constexpr double kSideTol = 0.75;
+                accept = std::abs(sideSum[0] - sideSum[2]) <= kSideTol &&
+                         std::abs(sideSum[1] - sideSum[3]) <= kSideTol;
+            }
+            if (accept && !failedNodes.empty()) {
+                for (const auto& [arcId, qq] : runs) {
+                    if (failedNodes.count(arcs_[arcId].arc.n0) != 0 ||
+                        failedNodes.count(arcs_[arcId].arc.n1) != 0) {
+                        accept = false;
+                        break;
+                    }
+                }
+            }
             if (!accept) {
                 ++badPatches_;
                 badCorners_.push_back(corners);
@@ -2130,7 +2175,10 @@ private:
                     }
                     std::fprintf(stderr, "\n");
                 }
-                continue;  // aggregate; fail after the sweep with statistics
+                continue;  // locally contained; aggregate statistics
+            }
+            for (const auto& [arcId, qq] : runs) {
+                covered[arcId] = 1;
             }
             Patch patch;
             patch.side.assign(static_cast<std::size_t>(corners), {});
@@ -2144,6 +2192,7 @@ private:
             }
             tm.patches.push_back(std::move(patch));
         }
+        tm.excludedPatches = badPatches_;
         if (badPatches_ != 0) {
             // Corner-valence histogram of the rejected orbits ("v:count").
             std::map<int, int> hist;
@@ -2154,14 +2203,17 @@ private:
             for (const auto& [val, cnt] : hist) {
                 cs += (cs.empty() ? "" : ",") + std::to_string(val) + ":" + std::to_string(cnt);
             }
-            tm.reason = "non-quad patches: " + std::to_string(badPatches_) + " of " +
-                        std::to_string(tm.patches.size() + badPatches_) + " (corners " + cs + ")";
-            return false;
+            tm.rejectSummary = "rejected orbits: " + std::to_string(badPatches_) + " of " +
+                               std::to_string(tm.patches.size() + badPatches_) + " (corners " + cs +
+                               ")";
         }
         tm.arcs.reserve(arcs_.size());
         for (std::size_t a = 0; a < arcs_.size(); ++a) {
             if (!arcDead_[a]) {
                 tm.arcs.push_back(std::move(arcs_[a].arc));
+                // An arc no accepted orbit covers lies inside an excluded
+                // region: its integer stays with the greedy rounding.
+                tm.arcExcluded.push_back(covered[a] ? 0 : 1);
             }
         }
         for (const Patch& p : tm.patches) {
@@ -2470,8 +2522,13 @@ private:
                 const int le = (corner + 2) % 3;  // edge (prv -> corner)
                 const Nb& nbr = nbs_[f][static_cast<std::size_t>(le)];
                 if (nbr.face == kNone) {
-                    tm.reason = "fan hit boundary";
-                    return false;
+                    // Boundary vertex fan (open surface): no closed winding
+                    // to classify against. Contain the node — its sectors
+                    // stay invalid, the orbits touching it are rejected and
+                    // excluded downstream.
+                    ++degradedNodes_;
+                    sect.assign(lst.size(), 0);
+                    return true;
                 }
                 std::size_t nextCorner = cornerCut;
                 if (nbr.seam >= 0) {
@@ -2811,362 +2868,647 @@ BimdfResult solveBimdf(const TMesh& tm) {
         r.reason = "empty T-mesh";
         return r;
     }
-    // Split-node template: one node per patch side; every arc is a head-head
-    // bi-edge between the side nodes of its two incident patch sides. Quads
-    // pair opposite sides with a tail-tail inner edge whose flow is the
-    // quantized side length; polygonal patches (3-6 sides) get one interior
-    // node, a tail-tail routing edge per side and a head-head even-sum loop
-    // at the interior node (its sigma of +2 makes the boundary sum
-    // 2 * loopFlow — even by construction; Heistermann et al. 2023 Sec 4.4).
-    std::vector<std::size_t> sideBase(nPatch, 0);
-    std::size_t nNodeCount = 0;
-    for (std::size_t p = 0; p < nPatch; ++p) {
-        sideBase[p] = nNodeCount;
-        nNodeCount += tm.patches[p].side.size();
-    }
-    std::vector<std::size_t> interiorOf(nPatch, kNone);
-    for (std::size_t p = 0; p < nPatch; ++p) {
-        if (!tm.patches[p].isQuad()) {
-            interiorOf[p] = nNodeCount++;
-            ++r.polyPatches;
-        }
-    }
-    const std::size_t nNode = nNodeCount;
-    std::vector<std::array<long long, 2>> arcNode(nArc, {-1, -1});
-    for (std::size_t p = 0; p < nPatch; ++p) {
-        for (std::size_t k = 0; k < tm.patches[p].side.size(); ++k) {
-            const long long node = static_cast<long long>(sideBase[p] + k);
-            for (const std::size_t a : tm.patches[p].side[k]) {
-                if (arcNode[a][0] < 0) {
-                    arcNode[a][0] = node;
-                } else if (arcNode[a][1] < 0) {
-                    arcNode[a][1] = node;
-                } else {
-                    r.reason = "arc incident to more than two patch sides";
-                    return r;
-                }
-            }
-        }
-    }
-    for (std::size_t a = 0; a < nArc; ++a) {
-        if (arcNode[a][1] < 0) {
-            r.reason = "arc not incident to two patch sides";
-            return r;
-        }
-    }
-    // Targets (half-cells) and initial rounded guess with the min-one guard.
+    // Targets in half-cells (fixed across all retry rounds).
     std::vector<double> target(nArc);
-    std::vector<long long> g(nArc);
     for (std::size_t a = 0; a < nArc; ++a) {
         target[a] = 2.0 * tm.arcs[a].len;
-        g[a] = std::max<long long>(1, std::llround(target[a]));
-        if (static_cast<double>(g[a]) - target[a] > 0.5001) {
-            ++r.raisedToMin;  // degenerate-assignment guard (short/negative arc)
-        }
     }
-    // Inner edges. Quads: one tail-tail edge per opposite side pair, guess =
-    // mean of the side sums. Polygonal patches: one tail-tail routing edge
-    // per side (guess = the side's arc sum) plus one head-head loop at the
-    // interior node (guess = half the routed boundary; sigma +2).
-    struct InnerEdge {
-        long long n0, n1;  // endpoints (n0 == n1: the interior even-sum loop)
-        long long g;       // guess
-        double t;          // relaxed target
-        bool loop;
-    };
-    std::vector<InnerEdge> inner;
-    for (std::size_t p = 0; p < nPatch; ++p) {
-        const Patch& patch = tm.patches[p];
-        if (patch.isQuad()) {
-            for (int j = 0; j < 2; ++j) {
-                long long s0 = 0, s1 = 0;
-                double t0 = 0.0;
-                for (const std::size_t a : patch.side[static_cast<std::size_t>(j)]) {
-                    s0 += g[a];
-                    t0 += target[a];
-                }
-                for (const std::size_t a : patch.side[static_cast<std::size_t>(j + 2)]) {
-                    s1 += g[a];
-                    t0 += target[a];
-                }
-                inner.push_back(
-                    {static_cast<long long>(sideBase[p] + static_cast<std::size_t>(j)),
-                     static_cast<long long>(sideBase[p] + static_cast<std::size_t>(j) + 2),
-                     std::max<long long>(1, (s0 + s1 + 1) / 2), t0 * 0.5, false});
-            }
-        } else {
-            long long boundary = 0;
-            double tBoundary = 0.0;
-            for (std::size_t k = 0; k < patch.side.size(); ++k) {
-                long long s0 = 0;
-                double t0 = 0.0;
-                for (const std::size_t a : patch.side[k]) {
-                    s0 += g[a];
-                    t0 += target[a];
-                }
-                inner.push_back({static_cast<long long>(sideBase[p] + k),
-                                 static_cast<long long>(interiorOf[p]), std::max<long long>(1, s0),
-                                 t0, false});
-                boundary += std::max<long long>(1, s0);
-                tBoundary += t0;
-            }
-            inner.push_back(
-                {static_cast<long long>(interiorOf[p]), static_cast<long long>(interiorOf[p]),
-                 std::max<long long>(1, std::llround(0.5 * static_cast<double>(boundary))),
-                 0.5 * tBoundary, true});
-        }
-    }
-    const std::size_t nInner = inner.size();
-    // Residual demands b = -(sigma g): arcs inject at both heads, inner edges
-    // drain at both tails; the even-sum loop is head-head with sigma +2.
-    std::vector<long long> b(nNode, 0);
-    const auto recomputeB = [&]() {
-        std::fill(b.begin(), b.end(), 0);
-        for (std::size_t a = 0; a < nArc; ++a) {
-            b[static_cast<std::size_t>(arcNode[a][0])] -= g[a];
-            b[static_cast<std::size_t>(arcNode[a][1])] -= g[a];
-        }
-        for (const InnerEdge& e : inner) {
-            if (e.loop) {
-                b[static_cast<std::size_t>(e.n0)] -= 2 * e.g;
-            } else {
-                b[static_cast<std::size_t>(e.n0)] += e.g;
-                b[static_cast<std::size_t>(e.n1)] += e.g;
-            }
-        }
-    };
-    recomputeB();
-    // Convex relative-deviation cost, scaled to integers.
-    constexpr double kCostScale = 256.0;
-    const auto cost = [&](std::size_t a, long long x) {
-        return std::abs(static_cast<double>(x) - target[a]) / std::max(target[a], 1.0);
-    };
-    // T-join parity adjustment: flip g by +-1 along a forest so every demand
-    // becomes even (Algorithm 1 of the paper: spanning forest under the flip
-    // costs, DFS post-order sweep).
-    {
-        struct TEdge {
-            long long u, v;
-            double w;
-            std::size_t arc;  // kNone: inner edge index in `inner`
-            std::size_t inner;
-        };
-        std::vector<TEdge> edges;
-        edges.reserve(nArc + nInner);
-        for (std::size_t a = 0; a < nArc; ++a) {
-            const double c0 =
-                std::min(cost(a, g[a] + 1), g[a] > 1 ? cost(a, g[a] - 1) : 1e30) - cost(a, g[a]);
-            edges.push_back({arcNode[a][0], arcNode[a][1], c0, a, kNone});
-        }
-        for (std::size_t ii = 0; ii < nInner; ++ii) {
-            if (inner[ii].loop) {
-                continue;  // sigma +-2: flipping never changes any parity
-            }
-            edges.push_back({inner[ii].n0, inner[ii].n1, 0.0, kNone, ii});
-        }
-        std::sort(edges.begin(), edges.end(), [](const TEdge& a, const TEdge& b) {
-            if (a.w != b.w) {
-                return a.w < b.w;
-            }
-            return std::tie(a.u, a.v, a.arc, a.inner) < std::tie(b.u, b.v, b.arc, b.inner);
-        });
-        std::vector<std::size_t> parent(nNode);
-        for (std::size_t i = 0; i < nNode; ++i) {
-            parent[i] = i;
-        }
-        std::function<std::size_t(std::size_t)> find = [&](std::size_t x) {
-            while (parent[x] != x) {
-                parent[x] = parent[parent[x]];
-                x = parent[x];
-            }
-            return x;
-        };
-        std::vector<std::vector<std::pair<std::size_t, std::size_t>>> tree(nNode);  // (nbr, edge)
-        for (std::size_t e = 0; e < edges.size(); ++e) {
-            const std::size_t ru = find(static_cast<std::size_t>(edges[e].u));
-            const std::size_t rv = find(static_cast<std::size_t>(edges[e].v));
-            if (ru == rv) {
+    // Local-infeasibility safety valve: when the cover flow cannot satisfy
+    // every demand (a patch pinched between excluded regions whose fixed
+    // boundary sides disagree), the deficit patches are DROPPED — contained
+    // like build-time rejects — and the solve retries without them.
+    std::vector<char> patchDropped(nPatch, 0);
+    std::vector<char> outside(nArc, 0);        // no accepted side: not in the network
+    std::vector<char> fixedArc(nArc, 0);       // one accepted side: constant in it
+    std::vector<long long> lowBound(nArc, 0);  // per-arc anti-collapse floor
+    std::vector<long long> g(nArc, 1);
+    bool solved = false;
+    constexpr int kDropRounds = 6;
+    for (int outer = 0; outer < kDropRounds && !solved; ++outer) {
+        r.polyPatches = 0;
+        r.raisedToMin = 0;
+        r.parityFlips = 0;
+        // Split-node template: one node per patch side; every arc is a head-head
+        // bi-edge between the side nodes of its two incident patch sides. Quads
+        // pair opposite sides with a tail-tail inner edge whose flow is the
+        // quantized side length; polygonal patches (3-6 sides) get one interior
+        // node, a tail-tail routing edge per side and a head-head even-sum loop
+        // at the interior node (its sigma of +2 makes the boundary sum
+        // 2 * loopFlow — even by construction; Heistermann et al. 2023 Sec 4.4).
+        std::vector<std::size_t> sideBase(nPatch, 0);
+        std::size_t nNodeCount = 0;
+        std::vector<std::size_t> nodePatch;  // network node -> owning patch
+        for (std::size_t p = 0; p < nPatch; ++p) {
+            if (patchDropped[p]) {
                 continue;
             }
-            parent[ru] = rv;
-            tree[static_cast<std::size_t>(edges[e].u)].push_back(
-                {static_cast<std::size_t>(edges[e].v), e});
-            tree[static_cast<std::size_t>(edges[e].v)].push_back(
-                {static_cast<std::size_t>(edges[e].u), e});
+            sideBase[p] = nNodeCount;
+            nNodeCount += tm.patches[p].side.size();
+            nodePatch.resize(nNodeCount, p);
         }
-        // DFS post-order: flip the tree edge of every child whose subtree
-        // parity is odd. Flipping a bi-edge toggles BOTH endpoint parities.
-        std::vector<char> visited(nNode, 0);
-        std::vector<char> odd(nNode, 0);
-        for (std::size_t i = 0; i < nNode; ++i) {
-            odd[i] = static_cast<char>(b[i] & 1);
-        }
-        const auto flipEdge = [&](const TEdge& te) {
-            ++r.parityFlips;
-            if (te.arc != kNone) {
-                const std::size_t a = te.arc;
-                const bool canDown = g[a] > 1;
-                if (canDown && cost(a, g[a] - 1) <= cost(a, g[a] + 1)) {
-                    --g[a];
-                } else {
-                    ++g[a];
-                }
-            } else {
-                InnerEdge& e = inner[te.inner];
-                if (e.g > 1 && std::abs(static_cast<double>(e.g - 1) - e.t) <=
-                                   std::abs(static_cast<double>(e.g + 1) - e.t)) {
-                    --e.g;
-                } else {
-                    ++e.g;
-                }
-            }
-        };
-        for (std::size_t root = 0; root < nNode; ++root) {
-            if (visited[root]) {
+        std::vector<std::size_t> interiorOf(nPatch, kNone);
+        for (std::size_t p = 0; p < nPatch; ++p) {
+            if (patchDropped[p]) {
                 continue;
             }
-            // Iterative DFS collecting post-order.
-            std::vector<std::tuple<std::size_t, std::size_t, std::size_t>>
-                stack;  // node,parent,edge
-            std::vector<std::tuple<std::size_t, std::size_t, std::size_t>> post;
-            stack.push_back({root, kNone, kNone});
-            visited[root] = 1;
-            while (!stack.empty()) {
-                const auto [n, par, pe] = stack.back();
-                stack.pop_back();
-                post.push_back({n, par, pe});
-                for (const auto& [nbr, e] : tree[n]) {
-                    if (!visited[nbr]) {
-                        visited[nbr] = 1;
-                        stack.push_back({nbr, n, e});
+            if (!tm.patches[p].isQuad()) {
+                interiorOf[p] = nNodeCount++;
+                nodePatch.resize(nNodeCount, p);
+                ++r.polyPatches;
+            }
+        }
+        std::vector<std::array<long long, 2>> arcNode(nArc, {-1, -1});
+        for (std::size_t p = 0; p < nPatch; ++p) {
+            if (patchDropped[p]) {
+                continue;
+            }
+            for (std::size_t k = 0; k < tm.patches[p].side.size(); ++k) {
+                const long long node = static_cast<long long>(sideBase[p] + k);
+                for (const std::size_t a : tm.patches[p].side[k]) {
+                    if (arcNode[a][0] < 0) {
+                        arcNode[a][0] = node;
+                    } else if (arcNode[a][1] < 0) {
+                        arcNode[a][1] = node;
+                    } else {
+                        r.reason = "arc incident to more than two patch sides";
+                        return r;
                     }
                 }
             }
-            for (std::size_t i = post.size(); i-- > 1;) {
-                const auto [n, par, pe] = post[i];
-                if (odd[n]) {
-                    flipEdge(edges[pe]);
-                    odd[n] = 0;
-                    odd[par] = static_cast<char>(odd[par] ^ 1);
+        }
+        // Local containment support. Arcs inside excluded regions (no accepted
+        // patch side) leave the network entirely: they take the rounded relaxed
+        // length under min-one and are never injected. Arcs BORDERING an
+        // excluded region (one accepted side) are FIXED at their rounded relaxed
+        // length and enter their side's balance as constants — a dangling
+        // variable side would need a free absorption loop in the double cover,
+        // and such loops connect the two cover copies, creating the odd cycles
+        // that make the relaxation half-integral (measured: halfIntegral tracked
+        // the boundary-arc count until fixing them).
+        std::fill(outside.begin(), outside.end(), 0);
+        std::fill(fixedArc.begin(), fixedArc.end(), 0);
+        for (std::size_t a = 0; a < nArc; ++a) {
+            if (arcNode[a][0] < 0 && arcNode[a][1] < 0) {
+                outside[a] = 1;
+            } else if (arcNode[a][1] < 0) {
+                fixedArc[a] = 1;
+            }
+        }
+        const std::size_t nNode = nNodeCount;
+        // Anti-collapse floors. The min-one guarantee lives on the patch
+        // SIDES: an arc that IS a whole side keeps the classic one-half-cell
+        // floor (thin CAD strips must not collapse), while arcs subdividing
+        // a side may drop to ZERO — a collapsed arc merely slides a T-node
+        // onto a corner. Dense organic T-meshes are finer than the target
+        // grid (most arcs are sub-half-cell there); a blanket per-arc
+        // min-one was measured to inflate nefertiti@4000 by ~2500 half-cells
+        // and wreck the injected map.
+        lowBound.assign(nArc, 0);
+        for (std::size_t p = 0; p < nPatch; ++p) {
+            if (patchDropped[p]) {
+                continue;
+            }
+            for (const auto& side : tm.patches[p].side) {
+                if (side.size() == 1) {
+                    lowBound[side[0]] = 1;
                 }
             }
         }
+        // Initial rounded guess with the floor guard.
+        for (std::size_t a = 0; a < nArc; ++a) {
+            g[a] = std::max<long long>(lowBound[a], std::llround(target[a]));
+            if (static_cast<double>(g[a]) - target[a] > 0.5001) {
+                ++r.raisedToMin;  // degenerate-assignment guard (short/negative arc)
+            }
+        }
+        // Inner edges. Quads: one tail-tail edge per opposite side pair, guess =
+        // mean of the side sums. Polygonal patches: one tail-tail routing edge
+        // per side (guess = the side's arc sum) plus one head-head loop at the
+        // interior node (guess = half the routed boundary; sigma +2).
+        struct InnerEdge {
+            long long n0, n1;  // endpoints (n0 == n1: the interior even-sum loop)
+            long long g;       // guess
+            double t;          // relaxed target
+            bool loop;
+        };
+        std::vector<InnerEdge> inner;
+        const auto rebuildInner = [&]() {
+            inner.clear();
+            for (std::size_t p = 0; p < nPatch; ++p) {
+                if (patchDropped[p]) {
+                    continue;
+                }
+                const Patch& patch = tm.patches[p];
+                if (patch.isQuad()) {
+                    for (int j = 0; j < 2; ++j) {
+                        long long s0 = 0, s1 = 0;
+                        double t0 = 0.0;
+                        for (const std::size_t a : patch.side[static_cast<std::size_t>(j)]) {
+                            s0 += g[a];
+                            t0 += target[a];
+                        }
+                        for (const std::size_t a : patch.side[static_cast<std::size_t>(j + 2)]) {
+                            s1 += g[a];
+                            t0 += target[a];
+                        }
+                        inner.push_back(
+                            {static_cast<long long>(sideBase[p] + static_cast<std::size_t>(j)),
+                             static_cast<long long>(sideBase[p] + static_cast<std::size_t>(j) + 2),
+                             std::max<long long>(1, (s0 + s1 + 1) / 2), t0 * 0.5, false});
+                    }
+                } else {
+                    long long boundary = 0;
+                    double tBoundary = 0.0;
+                    for (std::size_t k = 0; k < patch.side.size(); ++k) {
+                        long long s0 = 0;
+                        double t0 = 0.0;
+                        for (const std::size_t a : patch.side[k]) {
+                            s0 += g[a];
+                            t0 += target[a];
+                        }
+                        inner.push_back({static_cast<long long>(sideBase[p] + k),
+                                         static_cast<long long>(interiorOf[p]),
+                                         std::max<long long>(1, s0), t0, false});
+                        boundary += std::max<long long>(1, s0);
+                        tBoundary += t0;
+                    }
+                    inner.push_back(
+                        {static_cast<long long>(interiorOf[p]),
+                         static_cast<long long>(interiorOf[p]),
+                         std::max<long long>(1, std::llround(0.5 * static_cast<double>(boundary))),
+                         0.5 * tBoundary, true});
+                }
+            }
+        };
+        rebuildInner();
+        const std::size_t nInner = inner.size();
+        // Residual demands b = -(sigma g): arcs inject at both heads, inner edges
+        // drain at both tails; the even-sum loop is head-head with sigma +2.
+        std::vector<long long> b(nNode, 0);
+        const auto recomputeB = [&]() {
+            std::fill(b.begin(), b.end(), 0);
+            for (std::size_t a = 0; a < nArc; ++a) {
+                if (outside[a]) {
+                    continue;
+                }
+                if (fixedArc[a]) {
+                    b[static_cast<std::size_t>(arcNode[a][0])] -= g[a];
+                    continue;
+                }
+                b[static_cast<std::size_t>(arcNode[a][0])] -= g[a];
+                b[static_cast<std::size_t>(arcNode[a][1])] -= g[a];
+            }
+            for (const InnerEdge& e : inner) {
+                if (e.loop) {
+                    b[static_cast<std::size_t>(e.n0)] -= 2 * e.g;
+                } else {
+                    b[static_cast<std::size_t>(e.n0)] += e.g;
+                    b[static_cast<std::size_t>(e.n1)] += e.g;
+                }
+            }
+        };
         recomputeB();
-        for (std::size_t i = 0; i < nNode; ++i) {
-            if (b[i] & 1) {
-                r.reason = "parity adjustment failed (odd component)";
-                return r;
+        // Convex relative-deviation cost, scaled to integers.
+        constexpr double kCostScale = 256.0;
+        const auto cost = [&](std::size_t a, long long x) {
+            return std::abs(static_cast<double>(x) - target[a]) / std::max(target[a], 1.0);
+        };
+        // The double-cover relaxation can return half-integral solutions (odd
+        // up-down imbalance between the two copies on some arcs); they are
+        // rounded here and the audit reports the residue. Re-seeding the
+        // guess with the rounded result and re-running the cover was
+        // measured to be an inflation ratchet (deviation moves up freely but
+        // down only within the min-one slack): energy 4620 -> 7122 -> 12336
+        // -> 22910 over four re-seeds on nefertiti@4000. One pass only.
+        constexpr int kCoverIters = 1;
+        bool infeasible = false;
+        for (int iter = 0; iter < kCoverIters; ++iter) {
+            const std::size_t raisedBase = r.raisedToMin;
+            r.halfIntegral = 0;
+            recomputeB();
+            // T-join parity adjustment: flip g by +-1 along a forest so every demand
+            // becomes even (Algorithm 1 of the paper: spanning forest under the flip
+            // costs, DFS post-order sweep).
+            {
+                struct TEdge {
+                    long long u, v;
+                    double w;
+                    std::size_t arc;  // kNone: inner edge index in `inner`
+                    std::size_t inner;
+                };
+                // Nodes 0..nNode-1 are the network; node nNode is a virtual
+                // GROUND: fixed boundary arcs hang from it, so a component whose
+                // demand parity is odd (its parity left through a fixed arc into
+                // an excluded region) repairs by flipping the fixed value — the
+                // residue lands at the ground, which carries no balance.
+                const std::size_t ground = nNode;
+                const std::size_t nP = nNode + 1;
+                std::vector<TEdge> edges;
+                edges.reserve(nArc + nInner);
+                for (std::size_t a = 0; a < nArc; ++a) {
+                    if (outside[a]) {
+                        continue;
+                    }
+                    const double c0 =
+                        std::min(cost(a, g[a] + 1), g[a] > 1 ? cost(a, g[a] - 1) : 1e30) -
+                        cost(a, g[a]);
+                    if (fixedArc[a]) {
+                        edges.push_back(
+                            {arcNode[a][0], static_cast<long long>(ground), c0, a, kNone});
+                        continue;
+                    }
+                    edges.push_back({arcNode[a][0], arcNode[a][1], c0, a, kNone});
+                }
+                for (std::size_t ii = 0; ii < nInner; ++ii) {
+                    if (inner[ii].loop) {
+                        continue;  // sigma +-2: flipping never changes any parity
+                    }
+                    edges.push_back({inner[ii].n0, inner[ii].n1, 0.0, kNone, ii});
+                }
+                std::sort(edges.begin(), edges.end(), [](const TEdge& a, const TEdge& b) {
+                    if (a.w != b.w) {
+                        return a.w < b.w;
+                    }
+                    return std::tie(a.u, a.v, a.arc, a.inner) < std::tie(b.u, b.v, b.arc, b.inner);
+                });
+                std::vector<std::size_t> parent(nP);
+                for (std::size_t i = 0; i < nP; ++i) {
+                    parent[i] = i;
+                }
+                std::function<std::size_t(std::size_t)> find = [&](std::size_t x) {
+                    while (parent[x] != x) {
+                        parent[x] = parent[parent[x]];
+                        x = parent[x];
+                    }
+                    return x;
+                };
+                std::vector<std::vector<std::pair<std::size_t, std::size_t>>> tree(
+                    nP);  // (nbr, edge)
+                for (std::size_t e = 0; e < edges.size(); ++e) {
+                    const std::size_t ru = find(static_cast<std::size_t>(edges[e].u));
+                    const std::size_t rv = find(static_cast<std::size_t>(edges[e].v));
+                    if (ru == rv) {
+                        continue;
+                    }
+                    parent[ru] = rv;
+                    tree[static_cast<std::size_t>(edges[e].u)].push_back(
+                        {static_cast<std::size_t>(edges[e].v), e});
+                    tree[static_cast<std::size_t>(edges[e].v)].push_back(
+                        {static_cast<std::size_t>(edges[e].u), e});
+                }
+                // DFS post-order: flip the tree edge of every child whose subtree
+                // parity is odd. Flipping a bi-edge toggles BOTH endpoint parities.
+                std::vector<char> visited(nP, 0);
+                std::vector<char> odd(nP, 0);
+                for (std::size_t i = 0; i < nNode; ++i) {
+                    odd[i] = static_cast<char>(b[i] & 1);
+                }
+                const auto flipEdge = [&](const TEdge& te) {
+                    ++r.parityFlips;
+                    if (te.arc != kNone) {
+                        const std::size_t a = te.arc;
+                        const bool canDown = g[a] > lowBound[a];
+                        if (canDown && cost(a, g[a] - 1) <= cost(a, g[a] + 1)) {
+                            --g[a];
+                        } else {
+                            ++g[a];
+                        }
+                    } else {
+                        InnerEdge& e = inner[te.inner];
+                        if (e.g > 1 && std::abs(static_cast<double>(e.g - 1) - e.t) <=
+                                           std::abs(static_cast<double>(e.g + 1) - e.t)) {
+                            --e.g;
+                        } else {
+                            ++e.g;
+                        }
+                    }
+                };
+                // Ground-rooted component first: any odd residue in it must land
+                // AT the ground (which absorbs it), not at an arbitrary root.
+                for (std::size_t rootStep = 0; rootStep <= nNode; ++rootStep) {
+                    const std::size_t root = rootStep == 0 ? ground : rootStep - 1;
+                    if (visited[root]) {
+                        continue;
+                    }
+                    // Iterative DFS collecting post-order.
+                    std::vector<std::tuple<std::size_t, std::size_t, std::size_t>>
+                        stack;  // node,parent,edge
+                    std::vector<std::tuple<std::size_t, std::size_t, std::size_t>> post;
+                    stack.push_back({root, kNone, kNone});
+                    visited[root] = 1;
+                    while (!stack.empty()) {
+                        const auto [n, par, pe] = stack.back();
+                        stack.pop_back();
+                        post.push_back({n, par, pe});
+                        for (const auto& [nbr, e] : tree[n]) {
+                            if (!visited[nbr]) {
+                                visited[nbr] = 1;
+                                stack.push_back({nbr, n, e});
+                            }
+                        }
+                    }
+                    for (std::size_t i = post.size(); i-- > 1;) {
+                        const auto [n, par, pe] = post[i];
+                        if (odd[n]) {
+                            flipEdge(edges[pe]);
+                            odd[n] = 0;
+                            odd[par] = static_cast<char>(odd[par] ^ 1);
+                        }
+                    }
+                }
+                recomputeB();
+                for (std::size_t i = 0; i < nNode; ++i) {
+                    if (b[i] & 1) {
+                        r.reason = "parity adjustment failed (odd component)";
+                        return r;
+                    }
+                }
             }
-        }
-    }
-    // Double cover: v -> v+ (2v), v- (2v+1); every bi-edge becomes two
-    // directed edges. Head-head (x,y): (x- -> y+), (y- -> x+); tail-tail:
-    // (x+ -> y-), (y+ -> x-). Deviation edges carry convex marginal costs
-    // sampled at even offsets (capacity-2 parallel steps).
-    detail::MinCostFlow flow;
-    const int S = static_cast<int>(2 * nNode);
-    const int T = S + 1;
-    flow.init(T + 1);
-    constexpr int kSteps = 5;
-    struct DevEdges {
-        std::vector<int> upA, upB, dnA, dnB;  // parallel step edge ids per copy
-    };
-    std::vector<DevEdges> arcDev(nArc);
-    const auto vP = [](long long v) { return static_cast<int>(2 * v); };
-    const auto vM = [](long long v) { return static_cast<int>(2 * v + 1); };
-    for (std::size_t a = 0; a < nArc; ++a) {
-        const long long x = arcNode[a][0], y = arcNode[a][1];
-        for (int i = 1; i <= kSteps; ++i) {
-            const double m =
-                std::max(0.0, (cost(a, g[a] + 2 * i) - cost(a, g[a] + 2 * (i - 1))) * 0.5);
-            const int c = static_cast<int>(std::lround(m * kCostScale)) + (i == kSteps ? 1 : 0);
-            const int cap = i == kSteps ? (1 << 20) : 2;
-            arcDev[a].upA.push_back(flow.addEdge(vM(x), vP(y), cap, c));
-            arcDev[a].upB.push_back(flow.addEdge(vM(y), vP(x), cap, c));
-        }
-        long long slack = g[a] - 1;  // keep x >= 1 (min-one / collapse guard)
-        for (int i = 1; i <= kSteps && slack > 0; ++i) {
-            const long long lo = std::max<long long>(g[a] - 2 * i, 1);
-            const double m = std::max(0.0, (cost(a, lo) - cost(a, std::min(g[a], lo + 2))) * 0.5);
-            const int c = static_cast<int>(std::lround(m * kCostScale));
-            const int cap = static_cast<int>(std::min<long long>(2, slack));
-            slack -= cap;
-            arcDev[a].dnA.push_back(flow.addEdge(vP(x), vM(y), cap, c));
-            arcDev[a].dnB.push_back(flow.addEdge(vP(y), vM(x), cap, c));
-        }
-    }
-    for (std::size_t ii = 0; ii < nInner; ++ii) {
-        const InnerEdge& e = inner[ii];
-        const long long x = e.n0, y = e.n1;
-        if (e.loop) {
-            // Head-head loop at the interior node: up copies raise the loop
-            // flow (I- -> I+), down copies lower it, both free — the loop
-            // only carries the even-sum pairing, never a deviation cost.
-            const int dnCap = static_cast<int>(std::max<long long>(e.g - 1, 0));
-            flow.addEdge(vM(x), vP(x), 1 << 20, 0);
-            flow.addEdge(vM(x), vP(x), 1 << 20, 0);
-            flow.addEdge(vP(x), vM(x), dnCap, 0);
-            flow.addEdge(vP(x), vM(x), dnCap, 0);
-            continue;
-        }
-        flow.addEdge(vP(x), vM(y), 1 << 20, 0);
-        flow.addEdge(vP(y), vM(x), 1 << 20, 0);
-        const int dnCap = static_cast<int>(std::max<long long>(e.g - 1, 0));
-        flow.addEdge(vM(x), vP(y), dnCap, 0);
-        flow.addEdge(vM(y), vP(x), dnCap, 0);
-    }
-    long long supply = 0;
-    for (std::size_t v = 0; v < nNode; ++v) {
-        // b(v+) = b[v], b(v-) = -b[v].
-        for (const auto& [node, dem] : {std::make_pair(vP(static_cast<long long>(v)), b[v]),
-                                        std::make_pair(vM(static_cast<long long>(v)), -b[v])}) {
-            if (dem > 0) {
-                flow.addEdge(S, node, static_cast<int>(dem), 0);
-                supply += dem;
-            } else if (dem < 0) {
-                flow.addEdge(node, T, static_cast<int>(-dem), 0);
+            // Double cover: v -> v+ (2v), v- (2v+1); every bi-edge becomes two
+            // directed edges. Head-head (x,y): (x- -> y+), (y- -> x+); tail-tail:
+            // (x+ -> y-), (y+ -> x-). Deviation edges carry convex marginal costs
+            // sampled at even offsets (capacity-2 parallel steps).
+            detail::MinCostFlow flow;
+            const int S = static_cast<int>(2 * nNode);
+            const int T = S + 1;
+            flow.init(T + 1);
+            constexpr int kSteps = 5;
+            struct DevEdges {
+                std::vector<int> upA, upB, dnA, dnB;  // parallel step edge ids per copy
+            };
+            std::vector<DevEdges> arcDev(nArc);
+            const auto vP = [](long long v) { return static_cast<int>(2 * v); };
+            const auto vM = [](long long v) { return static_cast<int>(2 * v + 1); };
+            for (std::size_t a = 0; a < nArc; ++a) {
+                if (outside[a] || fixedArc[a]) {
+                    continue;
+                }
+                const long long x = arcNode[a][0], y = arcNode[a][1];
+                for (int i = 1; i <= kSteps; ++i) {
+                    const double m =
+                        std::max(0.0, (cost(a, g[a] + 2 * i) - cost(a, g[a] + 2 * (i - 1))) * 0.5);
+                    const int c =
+                        static_cast<int>(std::lround(m * kCostScale)) + (i == kSteps ? 1 : 0);
+                    const int cap = i == kSteps ? (1 << 20) : 2;
+                    arcDev[a].upA.push_back(flow.addEdge(vM(x), vP(y), cap, c));
+                    arcDev[a].upB.push_back(flow.addEdge(vM(y), vP(x), cap, c));
+                }
+                long long slack = g[a] - lowBound[a];  // keep x >= floor
+                for (int i = 1; i <= kSteps && slack > 0; ++i) {
+                    const long long lo = std::max<long long>(g[a] - 2 * i, lowBound[a]);
+                    const double m =
+                        std::max(0.0, (cost(a, lo) - cost(a, std::min(g[a], lo + 2))) * 0.5);
+                    const int c = static_cast<int>(std::lround(m * kCostScale));
+                    const int cap = static_cast<int>(std::min<long long>(2, slack));
+                    slack -= cap;
+                    arcDev[a].dnA.push_back(flow.addEdge(vP(x), vM(y), cap, c));
+                    arcDev[a].dnB.push_back(flow.addEdge(vP(y), vM(x), cap, c));
+                }
             }
+            for (std::size_t ii = 0; ii < nInner; ++ii) {
+                const InnerEdge& e = inner[ii];
+                const long long x = e.n0, y = e.n1;
+                if (e.loop) {
+                    // Head-head loop at the interior node: up copies raise the loop
+                    // flow (I- -> I+), down copies lower it, both free — the loop
+                    // only carries the even-sum pairing, never a deviation cost.
+                    const int dnCap = static_cast<int>(std::max<long long>(e.g - 1, 0));
+                    flow.addEdge(vM(x), vP(x), 1 << 20, 0);
+                    flow.addEdge(vM(x), vP(x), 1 << 20, 0);
+                    flow.addEdge(vP(x), vM(x), dnCap, 0);
+                    flow.addEdge(vP(x), vM(x), dnCap, 0);
+                    continue;
+                }
+                flow.addEdge(vP(x), vM(y), 1 << 20, 0);
+                flow.addEdge(vP(y), vM(x), 1 << 20, 0);
+                const int dnCap = static_cast<int>(std::max<long long>(e.g - 1, 0));
+                flow.addEdge(vM(x), vP(y), dnCap, 0);
+                flow.addEdge(vM(y), vP(x), dnCap, 0);
+            }
+            long long supply = 0;
+            struct SupplyEdge {
+                int id;
+                std::size_t node;
+                int cap;
+            };
+            std::vector<SupplyEdge> supplyEdges;
+            for (std::size_t v = 0; v < nNode; ++v) {
+                // b(v+) = b[v], b(v-) = -b[v].
+                for (const auto& [node, dem] :
+                     {std::make_pair(vP(static_cast<long long>(v)), b[v]),
+                      std::make_pair(vM(static_cast<long long>(v)), -b[v])}) {
+                    if (dem > 0) {
+                        supplyEdges.push_back({flow.addEdge(S, node, static_cast<int>(dem), 0), v,
+                                               static_cast<int>(dem)});
+                        supply += dem;
+                    } else if (dem < 0) {
+                        flow.addEdge(node, T, static_cast<int>(-dem), 0);
+                    }
+                }
+            }
+            const auto [pushed, costTotal] = flow.solve(S, T);
+            r.coverCost = costTotal;
+            if (pushed < supply) {
+                // Drop the patches owning the unsatisfiable demand; retry the
+                // whole build without them.
+                std::size_t dropped = 0;
+                for (const SupplyEdge& se : supplyEdges) {
+                    if (flow.flow(se.id) < se.cap && !patchDropped[nodePatch[se.node]]) {
+                        patchDropped[nodePatch[se.node]] = 1;
+                        ++r.droppedPatches;
+                        ++dropped;
+                    }
+                }
+                if (dropped == 0) {
+                    r.reason = "cover flow infeasible (pushed " + std::to_string(pushed) + " of " +
+                               std::to_string(supply) + ", no droppable deficit)";
+                    return r;
+                }
+                infeasible = true;
+                break;  // out of the cover iterations; next drop round
+            }
+            // Map back: f = g + (up copies)/2 - (down copies)/2.
+            r.arcLenHalf.assign(nArc, 0);
+            for (std::size_t a = 0; a < nArc; ++a) {
+                if (outside[a] || fixedArc[a]) {
+                    r.arcLenHalf[a] = g[a];  // rounded relaxed length
+                    continue;
+                }
+                long long up = 0, dn = 0;
+                for (const int e : arcDev[a].upA) {
+                    up += flow.flow(e);
+                }
+                for (const int e : arcDev[a].upB) {
+                    up += flow.flow(e);
+                }
+                for (const int e : arcDev[a].dnA) {
+                    dn += flow.flow(e);
+                }
+                for (const int e : arcDev[a].dnB) {
+                    dn += flow.flow(e);
+                }
+                long long x = g[a] + (up - dn + (up - dn >= 0 ? 1 : -1)) / 2;  // round half away
+                if ((up - dn) % 2 == 0) {
+                    x = g[a] + (up - dn) / 2;
+                } else {
+                    ++r.halfIntegral;
+                }
+                if (x < lowBound[a]) {
+                    x = lowBound[a];
+                    ++r.raisedToMin;
+                }
+                r.arcLenHalf[a] = x;
+            }
+            if (std::getenv("CYBER_QC_BIMDF_DEBUG") != nullptr) {
+                double e = 0.0;
+                for (std::size_t a = 0; a < nArc; ++a) {
+                    e += std::abs(0.5 * static_cast<double>(r.arcLenHalf[a]) - tm.arcs[a].len) /
+                         std::max(tm.arcs[a].len, 0.5);
+                }
+                std::fprintf(stderr, "[qc] bimdf cover outer=%d iter=%d half=%zu energy=%.1f\n",
+                             outer, iter, r.halfIntegral, e);
+            }
+            if (r.halfIntegral == 0) {
+                break;
+            }
+            if (iter + 1 < kCoverIters) {
+                // Re-seed from the rounded result and run the parity + cover again.
+                r.raisedToMin = raisedBase;
+                g = r.arcLenHalf;
+                rebuildInner();
+            }
+        }  // kCoverIters
+        if (!infeasible) {
+            solved = true;
         }
-    }
-    const auto [pushed, costTotal] = flow.solve(S, T);
-    r.coverCost = costTotal;
-    if (pushed < supply) {
-        r.reason = "cover flow infeasible (pushed " + std::to_string(pushed) + " of " +
-                   std::to_string(supply) + ")";
+    }  // kDropRounds
+    if (!solved) {
+        r.reason = "cover flow infeasible after " + std::to_string(kDropRounds) + " drop rounds";
         return r;
     }
-    // Map back: f = g + (up copies)/2 - (down copies)/2.
-    r.arcLenHalf.assign(nArc, 0);
-    for (std::size_t a = 0; a < nArc; ++a) {
-        long long up = 0, dn = 0;
-        for (const int e : arcDev[a].upA) {
-            up += flow.flow(e);
+    r.arcOutside.assign(outside.begin(), outside.end());
+    // Local consistency repair: the double cover's copies can disagree by an
+    // odd amount on arcs (rounded above) or inner edges (invisible to the
+    // per-arc rounding), leaving +-1 side-sum violations and odd polygonal
+    // boundaries. Sweep the patches, nudging the arc whose deviation is
+    // cheapest to move until the violations settle (bounded; the audit below
+    // reports whatever residue remains).
+    {
+        // Arcs on a single accepted patch side are free levers: nudging them
+        // cannot break another patch, so they are strongly preferred (a large
+        // but finite bias — shared arcs remain usable when no lever exists).
+        std::vector<int> patchUses(nArc, 0);
+        for (std::size_t p = 0; p < nPatch; ++p) {
+            if (patchDropped[p]) {
+                continue;
+            }
+            for (const auto& side : tm.patches[p].side) {
+                for (const std::size_t a : side) {
+                    ++patchUses[a];
+                }
+            }
         }
-        for (const int e : arcDev[a].upB) {
-            up += flow.flow(e);
+        const auto nudgeCost = [&](std::size_t a, long long delta) {
+            const long long x = r.arcLenHalf[a] + delta;
+            if (x < lowBound[a]) {
+                return 1e30;
+            }
+            const double t = 2.0 * tm.arcs[a].len;
+            const double bias = patchUses[a] > 1 ? 100.0 : 0.0;
+            return bias + std::abs(static_cast<double>(x) - t) / std::max(t, 1.0) -
+                   std::abs(static_cast<double>(r.arcLenHalf[a]) - t) / std::max(t, 1.0);
+        };
+        constexpr int kRepairSweeps = 16;
+        for (int sweep = 0; sweep < kRepairSweeps; ++sweep) {
+            std::size_t adjustments = 0;
+            for (std::size_t p = 0; p < nPatch; ++p) {
+                if (patchDropped[p]) {
+                    continue;
+                }
+                const Patch& patch = tm.patches[p];
+                if (patch.isQuad()) {
+                    for (int j = 0; j < 2; ++j) {
+                        long long s0 = 0, s1 = 0;
+                        for (const std::size_t a : patch.side[static_cast<std::size_t>(j)]) {
+                            s0 += r.arcLenHalf[a];
+                        }
+                        for (const std::size_t a : patch.side[static_cast<std::size_t>(j + 2)]) {
+                            s1 += r.arcLenHalf[a];
+                        }
+                        if (s0 == s1) {
+                            continue;
+                        }
+                        // Move one arc of the cheaper direction one step.
+                        const auto& big = patch.side[static_cast<std::size_t>(s0 > s1 ? j : j + 2)];
+                        const auto& small =
+                            patch.side[static_cast<std::size_t>(s0 > s1 ? j + 2 : j)];
+                        std::size_t bestA = kNone;
+                        long long bestD = 0;
+                        double bestC = 1e29;
+                        for (const std::size_t a : big) {
+                            const double c = nudgeCost(a, -1);
+                            if (c < bestC) {
+                                bestC = c;
+                                bestA = a;
+                                bestD = -1;
+                            }
+                        }
+                        for (const std::size_t a : small) {
+                            const double c = nudgeCost(a, 1);
+                            if (c < bestC) {
+                                bestC = c;
+                                bestA = a;
+                                bestD = 1;
+                            }
+                        }
+                        if (bestA != kNone) {
+                            r.arcLenHalf[bestA] += bestD;
+                            ++adjustments;
+                        }
+                    }
+                } else {
+                    long long boundary = 0;
+                    for (const auto& side : patch.side) {
+                        for (const std::size_t a : side) {
+                            boundary += r.arcLenHalf[a];
+                        }
+                    }
+                    if (boundary % 2 == 0) {
+                        continue;
+                    }
+                    std::size_t bestA = kNone;
+                    long long bestD = 0;
+                    double bestC = 1e29;
+                    for (const auto& side : patch.side) {
+                        for (const std::size_t a : side) {
+                            for (const long long d : {-1LL, 1LL}) {
+                                const double c = nudgeCost(a, d);
+                                if (c < bestC) {
+                                    bestC = c;
+                                    bestA = a;
+                                    bestD = d;
+                                }
+                            }
+                        }
+                    }
+                    if (bestA != kNone) {
+                        r.arcLenHalf[bestA] += bestD;
+                        ++adjustments;
+                    }
+                }
+            }
+            if (adjustments == 0) {
+                break;
+            }
         }
-        for (const int e : arcDev[a].dnA) {
-            dn += flow.flow(e);
-        }
-        for (const int e : arcDev[a].dnB) {
-            dn += flow.flow(e);
-        }
-        long long x = g[a] + (up - dn + (up - dn >= 0 ? 1 : -1)) / 2;  // round half away
-        if ((up - dn) % 2 == 0) {
-            x = g[a] + (up - dn) / 2;
-        } else {
-            ++r.halfIntegral;
-        }
-        if (x < 1) {
-            x = 1;
-            ++r.raisedToMin;
-        }
-        r.arcLenHalf[a] = x;
     }
     // Consistency audit: opposite side sums for quads (exact when the
     // mapped-back flow was integral everywhere); even boundary sum for
     // polygonal patches (odd = unquantizable under the template).
     for (std::size_t p = 0; p < nPatch; ++p) {
+        if (patchDropped[p]) {
+            continue;
+        }
         const Patch& patch = tm.patches[p];
         if (patch.isQuad()) {
             for (int j = 0; j < 2; ++j) {
