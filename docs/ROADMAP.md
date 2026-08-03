@@ -80,6 +80,69 @@ off, box_sharp recall 1.00 / 8 cones / 0.0° both ways):
 | nefertiti  |  4000 | fail (ray hit crack)            |        0 | SAME   |
 | armadillo  |  4000 | fail (ray hit crack)            |        0 | SAME   |
 
+### Update — 2026-08-02 (branch `feat/substrate-repair`): the "cracks" were kernel-made non-manifold edges — fixed; tracer is fold-tolerant at cone launches
+
+Four-lens diagnosis (fold mechanism / crack census / literature / template
+scoping) pinned both substrate failures to exact mechanisms:
+
+- **"Work-mesh cracks" were never cracks.** Every closed corpus input reaches
+  Bi-MDF with ZERO boundary edges; the defect was NON-MANIFOLD edges
+  (edgeFaceCount>2: duplicate-triangle fins and merged-edge fans) created
+  exclusively by the isotropic CollapsePass because `Mesh::collapseEdge` had
+  no link condition. **Fixed in the kernel**: `collapseEdge` now refuses
+  collapses whose endpoints share a neighbor beyond the incident-face apexes,
+  and CollapsePass clears such obstructions with ordinary manifold-safe edge
+  flips before retrying (a bare refusal deadlocked sliver bands at the
+  cylinder density crossing: @3000 went open-surface, recall 0.77). With the
+  flip resolution the default path IMPROVES: cylinder@3000 sing 18→8
+  (recall 1.00, closed), @4500 sing 56→32, @1400 sing 15→6; box_sharp
+  byte-identical at all 16 sweep cells; bench check green (cylinder@600
+  trades quads 452→430, sing 6→5, angle 9.2→7.1 for haus 0.0052→0.0059,
+  recall 0.96→0.95 — within all tolerances). Ellipsoid pure-quad nominals
+  moved: median min angle 80.7→84.2, edgeCV 0.230→0.240 (threshold 0.25,
+  justification in the test).
+- **Folds are intrinsic to the hard-constrained map at negative-index cones**
+  (a PL fan cannot wind >2π injectively): introduced by the reduced phase,
+  doubled by rounding, ~95% within 1 edge of a cone. Per the literature
+  (QEx/QGP/Bi-MDF), the industrial answer is a fold-TOLERANT tracer, not map
+  repair. Landed: signed UV wedge tests at cone launches (candidates whose
+  launch level provably exits their face rank first; UV-launchable rescue
+  sites are admitted past the 3D margin cutoff), entry-edge re-crossing for
+  folded triangles mid-trace, regular-vertex pass-through, and graceful
+  abandonment of untraceable separatrices (T-mesh refused with statistics
+  instead of aborting at the first fold; `failedRays`/`degraded` reported).
+
+A/B table after both fixes (CYBER_QC_BIMDF=report; output still SAME
+everywhere — no organic reaches injection yet):
+
+| mesh       | quads | T-mesh (was → now)                                        |
+|------------|------:|-----------------------------------------------------------|
+| box_sharp  |  1000 | ok — 12 arcs / 6 patches, energy 0.014 = greedy            |
+| box_sharp  |  4000 | ok — same                                                  |
+| box_sharp  | 16000 | crack in fan → **ok, injectable (maxFrac 0.0000)**         |
+| cylinder   |  1000 | ray hit crack → 15/32 non-quad                             |
+| cylinder   |  4000 | crack in fan → 7/18 non-quad                               |
+| sphere     |  4000 | 10/12 → 15/18 non-quad                                     |
+| torus      |  4000 | 9/12 → 23/24 non-quad                                      |
+| fandisk    |  4000 | 71/110 → 39/128 non-quad                                   |
+| spot       |  4000 | 107/222 → **18/194 non-quad** (91% quad patches)           |
+| nefertiti  |  4000 | ray hit crack → 596/2316 non-quad (first complete T-mesh)  |
+| nefertiti  |  8000 | no level exit → 463/2015 non-quad                          |
+| armadillo  |  4000 | ray hit crack → 294/1386 non-quad (79% quad)               |
+| armadillo  |  8000 | no level exit → 309/1394 non-quad                          |
+
+Corner-valence histograms of the rejected orbits (now printed in the tmesh
+line): nefertiti@4000 = 306 degenerate (≤2 corners), 182 template-coverable
+(3/5/6), 108 high (>6); spot = 8 degenerate / 6 coverable / 4 high. The
+even-sum polygonal template (follow-up (b)) therefore still unblocks ZERO
+meshes on its own — the degenerate bigons/monogons are fold-corrupted corner
+sectors around the remaining folded wedges (rotation-side, not launch-side).
+Exit gates (spot flow ≥ 1000, nefertiti pure sing ≤ 200) remain unreachable
+until those sectors are repaired; next lever in rank order: QEx Alg-8
+signed-angle sector classification in `buildRotation` (the launch-side
+equivalent landed here), then the even-sum template as mop-up, then QGP §7.1
+dynamic re-linearization. Default flip NOT proposed.
+
 ## Update — 2026-08-02 (CAD density robustness: the sweep's 🔴 failures are FIXED; 32/32 gate cells clean)
 
 The two density-dependent robustness bugs the CAD sweep below exposed are fixed
