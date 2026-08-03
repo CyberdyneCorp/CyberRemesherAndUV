@@ -282,7 +282,10 @@ int vertexIndexFromJumps(const Mesh& mesh, const CrossField& field, const std::v
 // Faces the cross-field smoother held constrained: touching a feature or boundary edge, or a
 // crease-aligned interior edge (computeCrossField's pin set, planarity gate dropped — a
 // superset is safe here since pinned faces are merely excluded from editing/relaxation).
-std::vector<char> fieldPinnedFaces(const Mesh& mesh) {
+// `creaseAlignSupport` mirrors computeCrossField's resolution-aware crease-pin gating so the
+// dipole barrier matches the actual pin set (null = every crease pins, historical).
+std::vector<char> fieldPinnedFaces(const Mesh& mesh,
+                                   const std::vector<char>* creaseAlignSupport = nullptr) {
     float alignDeg = 45.0f;
     if (const char* fc = std::getenv("CYBER_QC_FIELD_CREASE_DEG"); fc != nullptr) {
         alignDeg = static_cast<float>(std::atof(fc));
@@ -305,6 +308,10 @@ std::vector<char> fieldPinnedFaces(const Mesh& mesh) {
                 continue;
             }
             if (alignCos <= 1.0f) {
+                if (creaseAlignSupport != nullptr && e.value < creaseAlignSupport->size() &&
+                    (*creaseAlignSupport)[e.value] == 0) {
+                    continue;  // demoted sub-resolution wrinkle: it did not pin the field
+                }
                 const auto ef = mesh.edgeFaces(e);
                 if (dot(normalized(mesh.faceNormal(ef[0])), normalized(mesh.faceNormal(ef[1]))) <
                     alignCos) {
@@ -317,7 +324,9 @@ std::vector<char> fieldPinnedFaces(const Mesh& mesh) {
 }
 
 // Cancels close-by (+1,-1) cross-field index pairs in place. See the block comment above.
-void annihilateFieldDipoles(const Mesh& mesh, CrossField& field) {
+// `creaseAlignSupport`: see fieldPinnedFaces.
+void annihilateFieldDipoles(const Mesh& mesh, CrossField& field,
+                            const std::vector<char>* creaseAlignSupport) {
     if (std::getenv("CYBER_QC_NO_CONE_MERGE") != nullptr) {
         return;
     }
@@ -354,7 +363,7 @@ void annihilateFieldDipoles(const Mesh& mesh, CrossField& field) {
         return;
     }
 
-    const std::vector<char> pinned = fieldPinnedFaces(mesh);
+    const std::vector<char> pinned = fieldPinnedFaces(mesh, creaseAlignSupport);
 
     // An edge the cancellation path (and the jump system) may use: interior, non-feature, and
     // not bordering a pinned face — pinned faces cannot relax, so a 90-degree residual injected
@@ -819,6 +828,65 @@ void annihilateFieldDipoles(const Mesh& mesh, CrossField& field) {
                      plusCones.size(), pairsTried, cancelled, rejectedEdit, rejectedRelax,
                      rejectedTopo, rejectedCurv);
     }
+
+    // Blocking census (CYBER_QC_FIELD_STATS): for each +cone still unmatched, is its failure a
+    // WEB artifact? Re-run the partner BFS twice at the full radius — once over usable edges
+    // (as the pass does), once PERMISSIVE (any interior 2-manifold edge: feature tags and
+    // pinned-face borders ignored). An unmatched cone with no usable-path partner but a
+    // permissive-path partner is blocked specifically by the feature/pin web. This measured
+    // the gap-4 saturation (349 of 521 +cones web-blocked on nefertiti@8000) and is the
+    // number the resolution-aware demotion is judged against.
+    if (std::getenv("CYBER_QC_FIELD_STATS") != nullptr) {
+        const auto findPartner = [&](VertexId v0, bool permissive) {
+            std::vector<char> visited(mesh.vertexCapacity(), 0);
+            std::queue<std::pair<VertexId, int>> bfs;
+            bfs.emplace(v0, 0);
+            visited[v0.value] = 1;
+            while (!bfs.empty()) {
+                const auto [u, depth] = bfs.front();
+                bfs.pop();
+                if (depth >= radius) {
+                    continue;
+                }
+                for (const EdgeId e : mesh.vertexEdges(u)) {
+                    const bool ok =
+                        permissive ? mesh.isAlive(e) && mesh.edgeFaceCount(e) == 2 : usableEdge(e);
+                    if (!ok) {
+                        continue;
+                    }
+                    const auto [a, b] = mesh.edgeVertices(e);
+                    const VertexId w = (a == u) ? b : a;
+                    if (visited[w.value]) {
+                        continue;
+                    }
+                    visited[w.value] = 1;
+                    if (kOrig[w.value] == -1 && !matched[w.value]) {
+                        return true;
+                    }
+                    bfs.emplace(w, depth + 1);
+                }
+            }
+            return false;
+        };
+        std::size_t unmatchedPlus = 0, guardRejected = 0, webBlocked = 0, noPartner = 0;
+        for (const VertexId v0 : plusCones) {
+            if (matched[v0.value]) {
+                continue;
+            }
+            ++unmatchedPlus;
+            if (findPartner(v0, false)) {
+                ++guardRejected;  // partner reachable without crossing the web: a guard said no
+            } else if (findPartner(v0, true)) {
+                ++webBlocked;  // partner exists but every path crosses the feature/pin web
+            } else {
+                ++noPartner;  // genuinely isolated at this radius even ignoring the web
+            }
+        }
+        std::fprintf(stderr,
+                     "[qc] dipole blocking: unmatched+=%zu guardRejected=%zu webBlocked=%zu "
+                     "noPartner=%zu (radius=%d)\n",
+                     unmatchedPlus, guardRejected, webBlocked, noPartner, radius);
+    }
 }
 
 }  // namespace
@@ -833,7 +901,7 @@ int SeamlessSetup::totalIndex() const {
 }
 
 SeamlessSetup buildSeamlessSetup(const Mesh& mesh, int iterations, accel::IBackend& backend,
-                                 bool featureBinding) {
+                                 bool featureBinding, const std::vector<char>* creaseAlignSupport) {
     SeamlessSetup setup;
     if (mesh.faceCapacity() == 0) {
         return setup;
@@ -842,14 +910,15 @@ SeamlessSetup buildSeamlessSetup(const Mesh& mesh, int iterations, accel::IBacke
     // orientation (coarse-to-fine singularity placement) instead of single-level
     // face smoothing. Gated so the stock seamless path is unchanged.
     if (std::getenv("CYBER_QC_CROSSFIELD_MULTIRES") != nullptr) {
-        setup.field = computeCrossFieldFromOrientation(mesh, iterations, backend);
+        setup.field =
+            computeCrossFieldFromOrientation(mesh, iterations, backend, 45.0f, creaseAlignSupport);
     } else {
-        setup.field = computeCrossField(mesh, iterations, backend);
+        setup.field = computeCrossField(mesh, iterations, backend, 45.0f, creaseAlignSupport);
     }
 
     // Cancel topologically-null (+1,-1) field cone pairs before they are promoted to cones
     // below (kill switch CYBER_QC_NO_CONE_MERGE; see annihilateFieldDipoles).
-    annihilateFieldDipoles(mesh, setup.field);
+    annihilateFieldDipoles(mesh, setup.field, creaseAlignSupport);
 
     // Per-edge period jumps. Historically skipped for feature edges (they are always cut, so
     // the comb never crosses them) — but the seam transition rho DOES need the intrinsic field

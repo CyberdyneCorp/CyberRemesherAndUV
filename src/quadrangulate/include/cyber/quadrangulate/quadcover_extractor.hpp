@@ -83,6 +83,11 @@ struct NativeSolveContext {
     Mesh work;            // isotropic-remeshed, feature-tagged solve mesh
     SeamlessSetup setup;  // cross field + period jumps + cut graph on `work`
     bool featureBinding = false;
+    // Resolution-aware feature demotion (kill switch CYBER_QC_NO_FEATURE_DEMOTE): per-edge
+    // flag on `work` — 1 where a crease dihedral traces the ORIGINAL mesh's resolvable sharp
+    // network and may pin the cross field, 0 for sub-resolution wrinkle dihedrals. Empty when
+    // demotion is off (historical: every crease pins). See prepareNativeSolve.
+    std::vector<char> creaseAlignSupport;
     // Direct-solver factorizations (CYBER_QC_DIRECT): the solve operators are
     // spacing-invariant, so the probe and every calibration attempt share them.
     SeamlessSolveCache solveCache;

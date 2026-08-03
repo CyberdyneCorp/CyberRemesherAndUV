@@ -45,9 +45,17 @@ public:
 // arbitrary structure (ungated, that took a subdivided cube's edge CV 0.201 -> 0.397). With the
 // planarity gate, fandisk improves (feature -2.9%, median +0.25, edge CV -0.008 over 7 densities)
 // and flat CAD is left bit-identical. See docs/ROADMAP.md Phase 3 lever c2.
+//
+// `creaseAlignSupport` (optional, indexed by EdgeId) restricts crease-ALIGNMENT pins to edges
+// flagged 1: the resolution-aware feature demotion (quadcover_extractor.cpp) flags only crease
+// edges tracing the ORIGINAL mesh's resolvable sharp network, so sub-resolution wrinkle
+// dihedrals on a coarse organic remesh stop freezing the field (nefertiti@4000: 43% of faces
+// pinned by wrinkle alignment, 1297 cones). Null (the default) keeps every crease pin —
+// historical behavior. Feature/boundary pins are never gated by it.
 [[nodiscard]] CrossField computeCrossField(const Mesh& mesh, int iterations,
                                            accel::IBackend& backend,
-                                           float creaseAlignDegrees = 45.0f);
+                                           float creaseAlignDegrees = 45.0f,
+                                           const std::vector<char>* creaseAlignSupport = nullptr);
 
 // Alternative cross field derived from the multiresolution per-vertex 4-RoSy
 // orientation field (computePositionField): the coarse-to-fine hierarchy places
@@ -61,8 +69,8 @@ public:
 // stock (the raw vertex-to-face hand-off measurably regressed edge CV / normal
 // error). Gated behind CYBER_QC_CROSSFIELD_MULTIRES so the stock seamless path
 // (and the field-aligned engine) are unchanged.
-[[nodiscard]] CrossField computeCrossFieldFromOrientation(const Mesh& mesh, int iterations,
-                                                          accel::IBackend& backend,
-                                                          float creaseAlignDegrees = 45.0f);
+[[nodiscard]] CrossField computeCrossFieldFromOrientation(
+    const Mesh& mesh, int iterations, accel::IBackend& backend, float creaseAlignDegrees = 45.0f,
+    const std::vector<char>* creaseAlignSupport = nullptr);
 
 }  // namespace cyber::remesh

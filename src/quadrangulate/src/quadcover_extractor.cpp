@@ -242,6 +242,227 @@ void filterFeatureEdgesToReference(Mesh& mesh, const std::vector<std::array<Vec3
     }
 }
 
+// True when all three probe points of edge e (endpoints + midpoint) lie within `tol` of the
+// segment network — the same tracing test filterFeatureEdgesToReference uses: the isotropic
+// stage keeps crease vertices ON the source crease polyline, so genuine crease edges sit at
+// distance ~0 while coarse-remesh dihedral noise does not.
+bool edgeNearNetwork(const Mesh& mesh, EdgeId e, const std::vector<std::array<Vec3, 2>>& network,
+                     float tol) {
+    if (network.empty()) {
+        return false;
+    }
+    const auto [a, b] = mesh.edgeVertices(e);
+    const std::array<Vec3, 3> samples{mesh.position(a), mesh.position(b),
+                                      (mesh.position(a) + mesh.position(b)) * 0.5f};
+    for (const Vec3& p : samples) {
+        bool near = false;
+        for (const std::array<Vec3, 2>& s : network) {
+            if (pointSegmentDistance(p, s[0], s[1]) <= tol) {
+                near = true;
+                break;
+            }
+        }
+        if (!near) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// CYBER_QC_FIELD_STATS: census of the post-remesh feature-edge web BEFORE demotion — the
+// "pseudo-feature web" that saturated field-level dipole annihilation (gap #4: nefertiti's
+// coarse remesh pinned a dense wrinkle web and 349 of 521 +cones never found a partner over
+// non-pinned paths). Chains (connected components) of tagged interior feature edges are
+// classified against the output resolution and the ORIGINAL mesh's resolvable sharp network:
+//   resolvable — total length >= 2 output cells AND >= half its edges trace `refNetwork`;
+//   longOffNet — resolvable-scale but NOT tracing the original network (remesh artifact ridge);
+//   subres     — multi-edge chain shorter than ~2 output cells (sub-resolution wrinkle);
+//   isolated   — single tagged edge.
+void reportFeatureWebCensus(const Mesh& mesh, const std::vector<std::array<Vec3, 2>>& refNetwork,
+                            float targetEdgeLength, float tol) {
+    std::unordered_map<Index, Index> parent;
+    const std::function<Index(Index)> find = [&](Index x) {
+        while (true) {
+            auto it = parent.find(x);
+            if (it == parent.end() || it->second == x) {
+                return x;
+            }
+            x = it->second;
+        }
+    };
+    struct EdgeRec {
+        EdgeId e;
+        Index root;
+    };
+    std::vector<EdgeRec> tagged;
+    for (Index ei = 0; ei < mesh.edgeCapacity(); ++ei) {
+        const EdgeId e{ei};
+        if (!mesh.isAlive(e) || mesh.edgeFaceCount(e) != 2 || !mesh.isFeatureEdge(e)) {
+            continue;
+        }
+        const auto [a, b] = mesh.edgeVertices(e);
+        const Index ra = find(a.value), rb = find(b.value);
+        parent.emplace(a.value, a.value);
+        parent.emplace(b.value, b.value);
+        parent[ra] = rb;
+        tagged.push_back({e, rb});
+    }
+    struct Chain {
+        std::size_t edges = 0;
+        std::size_t onNet = 0;
+        float len = 0.0f;
+    };
+    std::unordered_map<Index, Chain> chains;
+    for (EdgeRec& r : tagged) {
+        r.root = find(r.root);
+        Chain& c = chains[r.root];
+        const auto [a, b] = mesh.edgeVertices(r.e);
+        c.edges += 1;
+        c.len += length(mesh.position(b) - mesh.position(a));
+        c.onNet += edgeNearNetwork(mesh, r.e, refNetwork, tol) ? 1U : 0U;
+    }
+    const float resolvableLen = 2.0f * targetEdgeLength;
+    std::size_t nRes = 0, eRes = 0, nOff = 0, eOff = 0, nSub = 0, eSub = 0, nIso = 0;
+    for (const auto& [root, c] : chains) {
+        if (c.edges == 1) {
+            ++nIso;
+        } else if (c.len < resolvableLen) {
+            ++nSub;
+            eSub += c.edges;
+        } else if (2 * c.onNet >= c.edges) {
+            ++nRes;
+            eRes += c.edges;
+        } else {
+            ++nOff;
+            eOff += c.edges;
+        }
+    }
+    std::fprintf(stderr,
+                 "[web] featureEdges=%zu chains=%zu | resolvable=%zu(%zu edges) "
+                 "longOffNet=%zu(%zu edges) subres=%zu(%zu edges) isolated=%zu | refSegs=%zu "
+                 "h=%.4g\n",
+                 tagged.size(), chains.size(), nRes, eRes, nOff, eOff, nSub, eSub, nIso,
+                 refNetwork.size(), static_cast<double>(targetEdgeLength));
+}
+
+// Second resolvability criterion: PERSISTENT BEND at output scale, measured on the ORIGINAL
+// surface. The reference networks above are per-edge dihedrals on the original (fine) mesh,
+// and they miss ridges that are smooth at original resolution but tighter than an output cell
+// — the bunny ears: every original edge bends a few degrees, yet the coarse remesh
+// legitimately reads the ridge as a crease, and demoting its pins measurably shreds the ears
+// (ears 19 -> 64, sing 94 -> 208 with the network test alone). Discriminator: probe the
+// original surface half a cell to each side of the work edge (perpendicular to it, in the
+// tangent plane) and compare the hit faces' normals. A resolvable ridge stays bent across a
+// cell (the ear flanks differ by ~60 degrees); sub-resolution relief re-aligns to the smooth
+// carrier surface on both sides. Measured on the WORK mesh instead this test cannot work: the
+// coarse remesh ALIASES sub-cell relief into cell-scale corrugation, so the work-mesh
+// neighbourhood bend of a wrinkle looks exactly like a real ridge (nefertiti kept 3117 of
+// 5214 wrinkle pins that way, cones 589 -> 1071).
+bool bendPersistsAtScale(const Mesh& work, EdgeId e, const Mesh& original,
+                         const ReferenceSurface& originalRef, float cellSize,
+                         float minAngleDegrees) {
+    const auto ef = work.edgeFaces(e);
+    const auto [a, b] = work.edgeVertices(e);
+    const Vec3 mid = (work.position(a) + work.position(b)) * 0.5f;
+    const Vec3 tangent = normalized(work.position(b) - work.position(a));
+    const Vec3 nAvg =
+        normalized(normalized(work.faceNormal(ef[0])) + normalized(work.faceNormal(ef[1])));
+    const Vec3 across = normalized(cross(tangent, nAvg));
+    if (lengthSquared(across) < 0.5f) {
+        return true;  // degenerate frame (opposed face normals): keep the pin, be conservative
+    }
+    // Three probe distances per side. A resolvable crease separates two COHERENT flanks (each
+    // side's normals agree with each other out to a full cell) that differ across the crease;
+    // cell-scale corrugation (nefertiti's carved stripes, armadillo's warts) fails the
+    // within-side coherence — a single-distance probe cannot tell the two apart (a stripe
+    // period ~= the cell puts opposite flanks under the probes and reads as a crease:
+    // measured, it kept 2975 of nefertiti's 5214 wrinkle pins and cones went 589 -> 1021).
+    constexpr std::array<float, 3> kProbeScales{0.3f, 0.6f, 1.0f};
+    const float coherentCos = std::cos(degreesToRadians(20.0f));
+    Vec3 sideMean[2];
+    for (std::size_t s = 0; s < 2; ++s) {
+        std::array<Vec3, kProbeScales.size()> n{};
+        for (std::size_t k = 0; k < kProbeScales.size(); ++k) {
+            const float sign = s == 0 ? 1.0f : -1.0f;
+            const Vec3 q = mid + across * (sign * kProbeScales[k] * cellSize);
+            const Bvh::ClosestHit hit = originalRef.closest(q);
+            if (!hit.face.valid() || !original.isAlive(hit.face)) {
+                return true;  // no reliable probe: keep the pin
+            }
+            n[k] = normalized(original.faceNormal(hit.face));
+        }
+        for (std::size_t i = 0; i < n.size(); ++i) {
+            for (std::size_t j = i + 1; j < n.size(); ++j) {
+                if (dot(n[i], n[j]) < coherentCos) {
+                    return false;  // oscillating side: sub-resolution relief, demote
+                }
+            }
+        }
+        sideMean[s] = normalized(n[0] + n[1] + n[2]);
+    }
+    return dot(sideMean[0], sideMean[1]) < std::cos(degreesToRadians(minAngleDegrees));
+}
+
+// Resolution-aware feature DEMOTION, tag level (kill switch CYBER_QC_NO_FEATURE_DEMOTE, see
+// prepareNativeSolve): untag interior feature edges that do NOT trace the original mesh's
+// resolvable sharp network. Unlike filterFeatureEdgesToReference there is deliberately no
+// knife-edge fallback — a knife-fold dihedral on the coarse remesh of a smooth surface is
+// exactly the sub-resolution wrinkle the lever exists to demote (it cannot be resolved by the
+// output grid, so it must not act as a hard seam, field pin or dipole barrier). Genuine CAD
+// creases (box/cylinder/fandisk) sit ON the network at distance ~0 and are never demoted.
+std::size_t demoteUnresolvableFeatureEdges(Mesh& mesh,
+                                           const std::vector<std::array<Vec3, 2>>& network,
+                                           float tol, const Mesh& original,
+                                           const ReferenceSurface& originalRef,
+                                           float sampleDistance, float persistDegrees) {
+    std::size_t demoted = 0;
+    for (Index ei = 0; ei < mesh.edgeCapacity(); ++ei) {
+        const EdgeId e{ei};
+        if (!mesh.isAlive(e) || mesh.edgeFaceCount(e) != 2 || !mesh.isFeatureEdge(e)) {
+            continue;
+        }
+        if (!edgeNearNetwork(mesh, e, network, tol) &&
+            !bendPersistsAtScale(mesh, e, original, originalRef, sampleDistance, persistDegrees)) {
+            mesh.setFeatureEdge(e, false);
+            ++demoted;
+        }
+    }
+    return demoted;
+}
+
+// Resolution-aware feature DEMOTION, crease-alignment level: per-edge flags gating the field's
+// 45-degree crease-ALIGNMENT pins (applyPins) and the dipole-annihilation barrier
+// (fieldPinnedFaces) to edges tracing the original mesh's resolvable 45-degree network
+// (`refAlign`). Only alignment CANDIDATES (face-normal angle above ~35 degrees, margin under
+// the 45-degree default) are tested; everything else keeps flag 1 (irrelevant to the pin test,
+// and permissive if CYBER_QC_FIELD_CREASE_DEG is lowered for an A/B). On nefertiti@4000 the
+// wrinkle alignment froze 43% of the substrate faces — the measured cone factory.
+std::vector<char> creaseAlignSupportFlags(const Mesh& mesh,
+                                          const std::vector<std::array<Vec3, 2>>& network,
+                                          float tol, const Mesh& original,
+                                          const ReferenceSurface& originalRef, float sampleDistance,
+                                          float persistDegrees) {
+    std::vector<char> flags(mesh.edgeCapacity(), 1);
+    const float candCos = std::cos(degreesToRadians(35.0f));
+    for (Index ei = 0; ei < mesh.edgeCapacity(); ++ei) {
+        const EdgeId e{ei};
+        if (!mesh.isAlive(e) || mesh.edgeFaceCount(e) != 2) {
+            continue;
+        }
+        const auto ef = mesh.edgeFaces(e);
+        if (dot(normalized(mesh.faceNormal(ef[0])), normalized(mesh.faceNormal(ef[1]))) >=
+            candCos) {
+            continue;  // not an alignment candidate: flag value never consulted
+        }
+        flags[ei] = edgeNearNetwork(mesh, e, network, tol) ||
+                            bendPersistsAtScale(mesh, e, original, originalRef, sampleDistance,
+                                                persistDegrees)
+                        ? 1
+                        : 0;
+    }
+    return flags;
+}
+
 // Fold-tag filter. The isotropic remesh can leave FOLDED triangles in flat regions (a
 // face lying in the plane of its neighbors but wound backwards — the valence-only flip
 // pass has no geometric guard). A folded pair reads as a ~180-degree dihedral, so the
@@ -358,12 +579,62 @@ bool prepareNativeSolve(const Mesh& mesh, float targetEdgeLength, float adaptivi
     // the isotropic remesh, so the post-remesh feature re-tag can be filtered against it
     // (see resolvableCreaseSegments). Only chains at least a couple of output cells long
     // count as creases the grid should follow.
+    // Resolution-aware feature demotion (the wrinkle-web lever, docs/ROADMAP.md gap #4): both
+    // reference networks below come from the ORIGINAL geometry, restricted to chains at least
+    // ~2 output cells long, so "is this post-remesh dihedral a real feature at THIS density?"
+    // has a ground truth. Kill switch CYBER_QC_NO_FEATURE_DEMOTE restores the historical
+    // behavior (every tagged knife edge is a seam+pin, every 45-degree crease aligns).
+    bool demoteFeatures = std::getenv("CYBER_QC_NO_FEATURE_DEMOTE") == nullptr;
+    const bool fieldStats = std::getenv("CYBER_QC_FIELD_STATS") != nullptr;
     std::vector<std::array<Vec3, 2>> refCreases;
-    if (featEnv != nullptr) {
+    if (featEnv != nullptr || demoteFeatures || fieldStats) {
         work.tagFeatureEdges(kFeatureDihedralDegrees);
         refCreases = resolvableCreaseSegments(work, 2.0f * targetEdgeLength);
     }
     work.tagFeatureEdges(kPreserveDihedralDegrees);
+    // The preserve tag doubles as the crease-ALIGNMENT threshold (135 included == the field's
+    // 45-degree normal-angle default), so the align-level reference network is read off the
+    // original mesh right here, while its tags are live.
+    std::vector<std::array<Vec3, 2>> refAlign;
+    Mesh originalSnapshot;  // pre-isotropic copy: the persistence probes sample ITS normals
+    float coarseness = 0.0f;
+    if (demoteFeatures) {
+        // COARSE-SUBSTRATE gate: demotion targets sub-cell structure, which only exists when
+        // the output cell spans several input edges. On a substrate near the input's own
+        // resolution the persistence probes sample scan noise instead of structure — measured
+        // on the bunny default arm @3000 (ratio 3.2): any perturbation of its ear crease pins
+        // costs ears 19 -> 25..64. The aliased regime the lever exists for sits at ratio ~6.6+
+        // (nefertiti/armadillo pure @4000). Threshold 4 output-cell-to-input-edge; density-
+        // relative by construction (nefertiti pure @16000 drops to 3.4 and disengages).
+        // CYBER_QC_DEMOTE_MIN_RATIO overrides for A/Bs.
+        double edgeSum = 0.0;
+        std::size_t edgeCount = 0;
+        for (Index ei = 0; ei < work.edgeCapacity(); ++ei) {
+            const EdgeId e{ei};
+            if (!work.isAlive(e)) {
+                continue;
+            }
+            const auto [a, b] = work.edgeVertices(e);
+            edgeSum += static_cast<double>(length(work.position(b) - work.position(a)));
+            ++edgeCount;
+        }
+        const float meanInputEdge =
+            edgeCount > 0 ? static_cast<float>(edgeSum / static_cast<double>(edgeCount)) : 0.0f;
+        float minRatio = 4.0f;
+        if (const char* r = std::getenv("CYBER_QC_DEMOTE_MIN_RATIO"); r != nullptr) {
+            minRatio = static_cast<float>(std::atof(r));
+        }
+        coarseness = meanInputEdge > 0.0f ? targetEdgeLength / meanInputEdge : 0.0f;
+        demoteFeatures = coarseness >= minRatio;
+        if (fieldStats && !demoteFeatures) {
+            std::fprintf(stderr, "[web] demotion disengaged: coarseness %.2f < %.2f\n",
+                         static_cast<double>(coarseness), static_cast<double>(minRatio));
+        }
+    }
+    if (demoteFeatures) {
+        refAlign = resolvableCreaseSegments(work, 2.0f * targetEdgeLength);
+        originalSnapshot = work;
+    }
 
     if (cancel != nullptr && cancel->isCancelled()) {
         reason = "cancelled";
@@ -403,6 +674,61 @@ bool prepareNativeSolve(const Mesh& mesh, float targetEdgeLength, float adaptivi
     const bool wideBinding = kFeatureDihedralDegrees > 41.0f;
     if (wideBinding) {
         filterFeatureEdgesToReference(work, refCreases, 0.25f * targetEdgeLength, featureDegrees);
+    }
+    // Web census + resolution-aware demotion (see the helpers above). The census reports the
+    // web the filters LEFT (the state the field solve would consume); demotion then unTAGs
+    // sub-resolution chains — removing their hard seams, field pins, planar-fill seeds and
+    // dipole barriers in one stroke, since every consumer reads Mesh::isFeatureEdge — and
+    // gates the 45-degree crease-alignment pins to the original mesh's resolvable network.
+    // The isotropic-stage geometry PRESERVATION (the 135-degree preserve tag) already ran and
+    // is untouched; the featureBinding decision below runs on the demoted tag set, so a mesh
+    // whose entire web is sub-resolution takes the featureless solve path it should have
+    // taken all along.
+    if (fieldStats) {
+        reportFeatureWebCensus(work, refCreases, targetEdgeLength, 0.25f * targetEdgeLength);
+    }
+    ctx.creaseAlignSupport.clear();
+    if (demoteFeatures) {
+        // Persistence threshold for the at-scale bend test (see bendPersistsAtScale). 45 ==
+        // the crease-ALIGNMENT threshold itself: an edge pins because its dihedral crosses 45
+        // degrees, so it keeps the pin only if that bend still measures 45 degrees at cell
+        // scale on the original surface. Measured vs 30: nefertiti greedy 244 -> 220,
+        // armadillo 150 -> 159 (noise-level), CAD unaffected (engagement-gated + on-network).
+        // CYBER_QC_DEMOTE_PERSIST_DEG for A/Bs.
+        float persistDeg = 45.0f;
+        if (const char* p = std::getenv("CYBER_QC_DEMOTE_PERSIST_DEG"); p != nullptr) {
+            persistDeg = static_cast<float>(std::atof(p));
+        }
+        const ReferenceSurface originalRef(originalSnapshot, 0.0f);
+        const float sampleDist = targetEdgeLength;  // probe scales are relative to a cell
+        const std::size_t demoted =
+            demoteUnresolvableFeatureEdges(work, refCreases, 0.25f * targetEdgeLength,
+                                           originalSnapshot, originalRef, sampleDist, persistDeg);
+        ctx.creaseAlignSupport =
+            creaseAlignSupportFlags(work, refAlign, 0.25f * targetEdgeLength, originalSnapshot,
+                                    originalRef, sampleDist, persistDeg);
+        if (fieldStats) {
+            std::size_t candidates = 0, supported = 0;
+            const float candCos = std::cos(degreesToRadians(45.0f));
+            for (Index ei = 0; ei < work.edgeCapacity(); ++ei) {
+                const EdgeId e{ei};
+                if (!work.isAlive(e) || work.edgeFaceCount(e) != 2) {
+                    continue;
+                }
+                const auto ef = work.edgeFaces(e);
+                if (dot(normalized(work.faceNormal(ef[0])), normalized(work.faceNormal(ef[1]))) >=
+                    candCos) {
+                    continue;
+                }
+                ++candidates;
+                supported += ctx.creaseAlignSupport[ei] != 0 ? 1U : 0U;
+            }
+            std::fprintf(stderr,
+                         "[web] demoted=%zu tag edges | align candidates=%zu supported=%zu "
+                         "(refAlign=%zu segs, coarseness=%.2f)\n",
+                         demoted, candidates, supported, refAlign.size(),
+                         static_cast<double>(coarseness));
+        }
     }
     // Feature binding engages only when the (filtered) mesh actually carries
     // tagged interior feature edges AND the surface is closed: a featureless
@@ -479,12 +805,17 @@ bool prepareNativeSolve(const Mesh& mesh, float targetEdgeLength, float adaptivi
     }
 
     auto backend = accel::defaultBackend();
-    ctx.setup = buildSeamlessSetup(work, kFieldIterations, *backend, ctx.featureBinding);
+    ctx.setup =
+        buildSeamlessSetup(work, kFieldIterations, *backend, ctx.featureBinding,
+                           ctx.creaseAlignSupport.empty() ? nullptr : &ctx.creaseAlignSupport);
     const SeamlessSetup& setup = ctx.setup;
-    if (std::getenv("CYBER_QC_FIELD_STATS") != nullptr) {
-        // Cone census: total cones and how many sit off tagged feature edges
-        // (spurious flat-region cones are a field-quality smell).
-        std::size_t cones = 0, coneFlat = 0;
+    if (fieldStats) {
+        // Cone census: total cones, how many sit off tagged feature edges (spurious flat-region
+        // cones are a field-quality smell), and how many sit ON the crease-align web (an
+        // incident interior edge past the 45-degree normal-angle alignment threshold) — the
+        // cones-vs-web statistic for the wrinkle-web lever.
+        std::size_t cones = 0, coneFlat = 0, coneOnAlign = 0;
+        const float alignCos = std::cos(degreesToRadians(45.0f));
         for (Index vi = 0; vi < work.vertexCapacity(); ++vi) {
             const VertexId vv{vi};
             if (!work.isAlive(vv) || vi >= setup.singularityIndex.size() ||
@@ -493,18 +824,28 @@ bool prepareNativeSolve(const Mesh& mesh, float targetEdgeLength, float adaptivi
             }
             ++cones;
             bool onFeature = false;
+            bool onAlign = false;
             for (const EdgeId e : work.vertexEdges(vv)) {
                 if (work.isFeatureEdge(e)) {
                     onFeature = true;
-                    break;
+                }
+                if (work.isAlive(e) && work.edgeFaceCount(e) == 2) {
+                    const auto ef = work.edgeFaces(e);
+                    if (dot(normalized(work.faceNormal(ef[0])),
+                            normalized(work.faceNormal(ef[1]))) < alignCos) {
+                        onAlign = true;
+                    }
                 }
             }
             if (!onFeature) {
                 ++coneFlat;
             }
+            if (onAlign) {
+                ++coneOnAlign;
+            }
         }
-        std::fprintf(stderr, "[native] work faces=%zu cones=%zu offFeature=%zu\n", work.faceCount(),
-                     cones, coneFlat);
+        std::fprintf(stderr, "[native] work faces=%zu cones=%zu offFeature=%zu onAlignWeb=%zu\n",
+                     work.faceCount(), cones, coneFlat, coneOnAlign);
     }
     if (!setup.valid) {
         reason = "setup invalid";

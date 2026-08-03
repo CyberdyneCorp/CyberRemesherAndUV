@@ -58,7 +58,7 @@ std::vector<FaceId> initFrames(const Mesh& mesh, CrossField& field, std::vector<
 // multires hand-off so both paths pin identically.
 std::vector<char> applyPins(const Mesh& mesh, const std::vector<FaceId>& faces,
                             const std::vector<Index>& compact, CrossField& field,
-                            float creaseAlignDegrees);
+                            float creaseAlignDegrees, const std::vector<char>* creaseAlignSupport);
 
 // The converged damped transport-averaging solve shared by computeCrossField (its historical
 // sweep loop, byte-identical) and the multires hand-off relax: builds the 2F x 2F CSR
@@ -86,7 +86,8 @@ float CrossField::angle(FaceId f) const {
 }
 
 CrossField computeCrossField(const Mesh& mesh, int iterations, accel::IBackend& backend,
-                             float creaseAlignDegrees) {
+                             float creaseAlignDegrees,
+                             const std::vector<char>* creaseAlignSupport) {
     const std::size_t cap = mesh.faceCapacity();
     CrossField field;
     field.tangent.assign(cap, Vec3{1, 0, 0});
@@ -100,7 +101,7 @@ CrossField computeCrossField(const Mesh& mesh, int iterations, accel::IBackend& 
         return field;
     }
     const std::vector<char> constrained =
-        applyPins(mesh, faces, compact, field, creaseAlignDegrees);
+        applyPins(mesh, faces, compact, field, creaseAlignDegrees, creaseAlignSupport);
     transportSmooth(mesh, faces, compact, constrained, field, std::max(iterations, 120), backend);
     return field;
 }
@@ -109,7 +110,7 @@ namespace {
 
 std::vector<char> applyPins(const Mesh& mesh, const std::vector<FaceId>& faces,
                             const std::vector<Index>& compact, CrossField& field,
-                            float creaseAlignDegrees) {
+                            float creaseAlignDegrees, const std::vector<char>* creaseAlignSupport) {
     const std::size_t nf = faces.size();
 
     // CYBER_QC_FIELD_CREASE_DEG (lever c2): widen the set of edges the field ALIGNS to without
@@ -122,6 +123,12 @@ std::vector<char> applyPins(const Mesh& mesh, const std::vector<FaceId>& faces,
     const float alignCos = alignDeg > 0.0f ? std::cos(degreesToRadians(alignDeg)) : 2.0f;
     const auto creaseAligned = [&](const EdgeId e) {
         if (alignCos > 1.0f || mesh.edgeFaceCount(e) != 2) {
+            return false;
+        }
+        // Resolution-aware demotion: a crease edge whose dihedral is a sub-resolution wrinkle
+        // (not flagged as tracing the original mesh's resolvable sharp network) must not pin.
+        if (creaseAlignSupport != nullptr && e.value < creaseAlignSupport->size() &&
+            (*creaseAlignSupport)[e.value] == 0) {
             return false;
         }
         const auto ef = mesh.edgeFaces(e);
@@ -416,7 +423,8 @@ Vec3 matchRoSyLocal(Vec3 ref, Vec3 d, Vec3 n) {
 }  // namespace
 
 CrossField computeCrossFieldFromOrientation(const Mesh& mesh, int iterations,
-                                            accel::IBackend& backend, float creaseAlignDegrees) {
+                                            accel::IBackend& backend, float creaseAlignDegrees,
+                                            const std::vector<char>* creaseAlignSupport) {
     const std::size_t cap = mesh.faceCapacity();
     CrossField field;
     field.tangent.assign(cap, Vec3{1, 0, 0});
@@ -478,7 +486,7 @@ CrossField computeCrossFieldFromOrientation(const Mesh& mesh, int iterations,
     // Nerr 12.8 -> 16.5). Local averaging is a contraction, so the converged result inherits
     // the seed's cone placement while restoring stock-level fine-scale smoothness.
     const std::vector<char> constrained =
-        applyPins(mesh, faces, compact, field, creaseAlignDegrees);
+        applyPins(mesh, faces, compact, field, creaseAlignDegrees, creaseAlignSupport);
     transportSmooth(mesh, faces, compact, constrained, field, std::max(iterations, 120), backend);
     return field;
 }

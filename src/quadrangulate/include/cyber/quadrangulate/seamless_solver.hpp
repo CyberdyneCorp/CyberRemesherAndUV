@@ -50,9 +50,13 @@ struct SeamlessSetup {
 // Build the M1 setup: cross field (via computeCrossField, `iterations` smoothing sweeps),
 // per-edge period jumps, per-vertex singularity indices, and a cut graph. Returns
 // valid == false only for an empty/degenerate mesh.
-[[nodiscard]] SeamlessSetup buildSeamlessSetup(const Mesh& mesh, int iterations,
-                                               accel::IBackend& backend,
-                                               bool featureBinding = false);
+//
+// `creaseAlignSupport` (optional, indexed by EdgeId): resolution-aware crease-pin gating,
+// forwarded to computeCrossField and to the dipole-annihilation barrier — see
+// crossfield.hpp. Null keeps every crease pin (historical behavior).
+[[nodiscard]] SeamlessSetup buildSeamlessSetup(
+    const Mesh& mesh, int iterations, accel::IBackend& backend, bool featureBinding = false,
+    const std::vector<char>* creaseAlignSupport = nullptr);
 
 // Euler characteristic V - E + F of the mesh cut open along `setup.isCutEdge`: each cut
 // edge is split so the two sides no longer share it. A cut graph that opens a closed
