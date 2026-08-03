@@ -38,24 +38,29 @@
        byte-exact (ctest 14/14; box output geometry identical on/off).
 - [ ] 5. Corpus + multi-density A/B vs greedy (bench gates + cad_sweep.py);
        flip default only on a clean win; ROADMAP entry with numbers
-       — STILL BLOCKED, two stages further along (branch
-       `feat/bimdf-sectors`): QEx Alg-8 signed-angle sector classification
-       landed in buildRotation (signed wedge angles, fold-run winding lift,
-       seam-holonomy launch authority; degraded nodes nefertiti@4000
-       306 → 44, 282 repaired) and the even-sum polygonal template landed in
-       solveBimdf (3-6-corner patches via interior routing node + σ=+2
-       even-sum loop; unit-tested; polyOdd 0 everywhere measured). Rejected
-       patches nefertiti@4000 596 → 377 (deg ≤2: 306 → 224), @8000
-       463 → 268, armadillo@4000 294 → 174, spot 18 → 11, fandisk 39 → 31.
-       Full A/B (on vs off, cyber + cyber-pure, corpus +
-       spot/nefertiti/armadillo): every output hash SAME, dE identical
-       (spot pure 7.89, nefertiti pure 164.69), bench check green both flag
-       states, CAD spot-check 32/32, ctest 14/14, bunny ears 37 = greedy.
-       Gates (spot flow >= 1000, nefertiti cyber-pure sings <= 200) remain
-       unmeasurable: no organic passes patch validation. New blocker,
-       quantified: twin-separatrix bigons + spur orbits (2-corner rejects
-       201 of 377 on nefertiti@4000; orbit dumps show twin arc pairs and
-       both-sides-of-one-arc traversal) and failedRays (nefertiti 31/3338)
-       which refuses the T-mesh. Ranked next: QEx Alg-7-style twin-arc
-       merge / bigon collapse before patch validation, failedRays
-       elimination, QGP §7.1 re-linearization. Default NOT flipped.
+       — STILL BLOCKED, three stages further along (branch
+       `feat/bimdf-tail`, after `feat/bimdf-sectors`): (i) QEx Alg-8
+       sectors + even-sum polygonal template (see ROADMAP 2026-08-02);
+       (ii) twin-arc merge / bigon collapse with phantom quarters (rejected
+       orbits nefertiti@4000 377 → 143, deg ≤2 224 → 49; armadillo 174 →
+       45; spot 11 → 3); (iii) LOCAL CONTAINMENT — failed rays, rejected
+       orbits and relax-inconsistent quads no longer refuse the T-mesh
+       (their arcs are excluded from injection, greedy rounds them
+       locally), plus solve-side support (fixed boundary constants,
+       T-join ground, infeasibility drop valve, side-level anti-collapse
+       floors, ±1 repair sweep) — every corpus organic AND the open-boundary
+       stanford-bunny now BUILD and SOLVE (nefertiti@4000: 1896/2078
+       patches, halfIntegral 0, sideViolation 2; bunny: 441/471). The
+       injection blocker is now precisely the JOINT HALF-INTEGER LATTICE:
+       ~half the eliminated pivots land at frac exactly 0.5 (spot 71/136
+       clean, nefertiti 861/1649) because the network does not model the
+       parity coupling of half-integer cone positions; partial pinning
+       (CYBER_QC_BIMDF=force) measured: bunny ears 37 → 31 with per-arc
+       floor 0, but nefertiti sing 396 → 431 — so DEFAULT injection
+       requires full consistency + zero contained arcs (A/B: every cell
+       hash SAME, dE identical; bench check green both states; box_sharp
+       8 cones / 1.00 / 0.0°; ctest 14/14). Gates spot@3000 pure flow
+       762.9 (≥ 1000) and nefertiti@4000 pure sing 419 (≤ 200) NOT met.
+       Ranked next: parity-aware quantization (lattice constraints into the
+       Bi-MDF), guided rounding (integral-by-construction greedy toward the
+       flow targets), boundary arcs. Default NOT flipped.

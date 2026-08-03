@@ -2196,17 +2196,22 @@ int solveSeamlessReduced(accel::IBackend& backend, std::size_t nCut,
                     }
                     const char* mode = std::getenv("CYBER_QC_BIMDF");
                     const bool inject = mode == nullptr || std::string(mode) != "report";
-                    // Default injection requires FULL consistency (every
-                    // pivot cleanly determined): the joint half-integer
-                    // lattice leaves ~half the pivots at frac 0.5 on organic
-                    // T-meshes, and pinning only the clean subset was
-                    // measured to cost quality (nefertiti@4000 sing 396 ->
-                    // 431: the pinned values assume flow values for the
-                    // unpinned rest, greedy gives them something else).
-                    // CYBER_QC_BIMDF=force enables the partial pinning for
+                    // Default injection requires FULL consistency: every
+                    // pivot cleanly determined AND the T-mesh fully covered
+                    // (no contained regions). The joint half-integer lattice
+                    // leaves ~half the pivots at frac 0.5 on organic
+                    // T-meshes, and pinning only a clean subset was measured
+                    // to cost quality (nefertiti@4000 sing 396 -> 431); the
+                    // same mismatch appears at containment boundaries even
+                    // when every remaining pivot is clean (cylinder@1000
+                    // haus 0.037 -> 0.067, box_sharp@1000 pure sing 19 ->
+                    // 23). The pinned values assume flow values for the
+                    // uncovered rest; greedy gives them something else.
+                    // CYBER_QC_BIMDF=force enables partial pinning for
                     // experiments.
                     const bool force = mode != nullptr && std::string(mode) == "force";
-                    const bool exact = nPivots > 0 && cleanPivots == nPivots && maxFrac < 0.25;
+                    const bool exact = nPivots > 0 && cleanPivots == nPivots && maxFrac < 0.25 &&
+                                       exclArcs == 0 && injDropped == 0;
                     std::fprintf(stderr,
                                  "[qc] bimdf inject: arcs=%zu badArcs=%zu exclArcs=%zu "
                                  "injDropped=%zu rows=%zu cols=%zu pivots=%zu cleanPivots=%zu "

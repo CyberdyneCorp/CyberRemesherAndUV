@@ -212,6 +212,101 @@ launch sites at the handful of exhausted cones); (c) QGP §7.1 dynamic
 re-linearization to reduce fold damage at the source. Default flip NOT
 proposed.
 
+### Update — 2026-08-03 (branch `feat/bimdf-tail`): twin-arc merge + local containment landed; organics now BUILD and SOLVE end-to-end; the injection blocker is the joint half-integer lattice
+
+Three levers landed (`CYBER_QC_BIMDF` only; flag off byte-exact by
+construction — no non-flag path touched; ctest 14/14; bench check green
+both flag states, box_sharp row identical: 8 cones / recall 1.00 / 0.0°):
+
+- **Twin-arc merge / bigon collapse** (QEx-sanitization spirit, arc-pair
+  driven): two live non-feature arcs with the same endpoints and near-zero
+  relaxed length bound a provably zero-area pocket and MERGE; when the
+  opposite endpoint is a plain 3-valent T-node the whole pocket FUSES into
+  the launching cone (both sides dropped, the crossing ray's continuation
+  retargeted). Merged twins are theta-coincident, so the survivor carries a
+  PHANTOM quarter (buildRotation widens its sector and lifts the winding
+  target). Fixpoint loop with orbit re-tracing; guards: feature arcs
+  untouched, measurable-extent pockets (genuine thin strips) left to the
+  quantizer, retargets must anchor in the cone fan, no surgery may orphan a
+  cone. Rejected orbits (was round-2 → now): nefertiti@4000 377 → **143**
+  (deg ≤2: 224 → 49), @8000 268 → **92**; armadillo@4000 174 → **45**,
+  @8000 198 → **48**; spot 11 → **3**; fandisk 31 → **16**; cylinder@1000
+  9 → **4**. Explicitly reverted after measurement: zero-length T-T node
+  contraction (fixed spot's last knot but degraded nefertiti 143 → 201 via
+  cross-chart T-node fans — recorded as a dead end).
+- **Local containment (failedRays + rejected orbits)**: a failed launch or
+  rejected orbit no longer refuses the T-mesh. Rejected orbits' arcs are
+  EXCLUDED from injection (greedy rounds them locally); orbits touching
+  abandoned-launch cones and 4-corner orbits whose RELAXED opposite sides
+  mismatch (> 0.75 cells — wander orbits closing around fold damage) are
+  contained too. Solve-side support: excluded-interior arcs leave the
+  network, boundary arcs enter their one side as fixed constants (a
+  dangling variable side needs a free cover loop, whose copy-crossing edges
+  MEASURABLY caused the half-integral solutions), fixed arcs hang from a
+  virtual ground in the T-join forest (odd components repair through them),
+  and a cover-infeasibility valve drops deficit patches and retries.
+  Anti-collapse floor moved from arcs to SIDES (an arc that is a whole side
+  keeps min-one; subdividing arcs may hit zero — a blanket per-arc min-one
+  inflated nefertiti@4000 by ~2500 half-cells). Result: nefertiti@4000
+  tmesh ok=1 with 1896/2078 patches accepted, solve halfIntegral 0,
+  sideViolation 2, polyOdd 5, energy 1309 vs greedy-realized 1879; spot
+  184/189; armadillo, fandisk, cylinder, sphere, torus all ok=1.
+- **Open-boundary containment (bunny unblocked at the T-mesh level)**: rays
+  reaching an open boundary are abandoned + contained, boundary vertex fans
+  degrade instead of hard-failing. stanford-bunny@3000 now builds a
+  441-patch T-mesh (12 failed rays, 30 excluded orbits) and solves cleanly
+  (halfIntegral 0, polyOdd 0). Honest scope: true boundary ARCS (QGP-style
+  boundary chains with length variables) are NOT implemented; boundary
+  regions fall back to greedy locally.
+
+**THE INJECTION BLOCKER, precisely diagnosed**: with organics building and
+solving, back-substitution now runs — and the elimination leaves ~half the
+pivots at EXACTLY frac 0.5 (spot 71/136 clean, nefertiti 861/1649, bunny
+190/366; parity census: all 510 spot arc rows have half-integer reduced
+coefficients). The Bi-MDF network models per-patch consistency + polygonal
+evenness, but NOT the joint parity lattice of the half-integer cone
+positions: a Bi-MDF-consistent x is generically outside the image of the
+integer free basis, so exact injection is impossible and the residue is
+structural (dropping "inconsistent" rows cascades to 350/515 arcs —
+measured). Partial pinning (only cleanly-determined variables,
+`CYBER_QC_BIMDF=force`) was fully measured: bunny@3000 WITH per-arc floor 0
+is a real win (sing 135 → 120, ear irregulars 37 → **31** vs QuadriFlow
+20, flow 37.5 → 38.9), spot mixed (flow 97.3 → 106.3, sing 41 → 44), but
+nefertiti regresses (396 → 431) and with side floors the bunny win
+reverses (ears 42) — the pinned subset assumes flow values for the
+unpinned rest and greedy gives them something else. DEFAULT injection
+therefore requires FULL consistency: every pivot clean AND zero contained
+arcs (an exact-but-partial inject on cylinder@1000 cost haus 0.037 →
+0.067; box_sharp@1000 pure sing 19 → 23 — both reverted by the gate).
+
+**A/B (on vs off × cyber/cyber-pure × corpus + spot@3000/4000,
+nefertiti@4000/8000, armadillo@4000/8000)**: 21/22 cells hash-SAME with dE
+identical (spot pure 7.89, nefertiti@4000 pure 185.28/@8000 164.69,
+armadillo pure 92.96/72.05 — @4000 shifts vs round 2 come from the
+BVH-merge substrate, not the flag). The one differing cell is
+box_sharp@1000 cyber-pure: a FULLY-consistent exact injection choosing
+different integers than greedy (dE 5.518 → 5.521, sing 19 → 23) — the
+intended flag-on semantics, on by opt-in only. CAD sweep spot-check
+(box_sharp + cylinder × 8 densities × 2 arms, flag ON vs the recorded
+sweep): 31/32 cells unchanged (quads/sing exact; angle diffs ≤ 3e-3 exist
+flag-OFF too — recorded-CSV float noise, verified cell by cell); the one
+structural change is box_sharp@400 cyber-pure, again a fully-consistent
+exact injection: sing 46 → 30, angle 30.9° → 26.1°, quads 406 → 268
+(further from request). Exit gates measured on the unchanged organics:
+spot@3000 pure flow_loop **762.9** (gate ≥ 1000), nefertiti@4000 pure sing
+**419** (gate ≤ 200) — **NOT met**; injection never engages on organics
+under the safety gate. Bunny ears 37 (= greedy; **31** under
+force+floor-0, the closest measured approach to QuadriFlow's 20).
+
+Ranked next levers: (a) **parity-aware quantization** — derive the joint
+lattice constraints (Smith/Hermite form of the reduced arc system, or arc
+parity classes from the cone half-integer offsets) and feed them into the
+Bi-MDF as parity constraints, making the flow solution exactly liftable;
+(b) **guided rounding** — keep y integral by construction: run the greedy
+schedule but choose each pinned integer to minimize the residual of the
+Bi-MDF arc targets (captures min-one strip-opening without exact lifting);
+(c) boundary arcs for open surfaces. Default flip NOT proposed.
+
 ## Update — 2026-08-02 (CAD density robustness: the sweep's 🔴 failures are FIXED; 32/32 gate cells clean)
 
 The two density-dependent robustness bugs the CAD sweep below exposed are fixed
