@@ -52,8 +52,12 @@ struct SeamEdge {
 // The cut-open relaxed-seamless parameterization, in compact form.
 struct Charts {
     std::size_t nCut = 0;
-    const float* u = nullptr;  // relaxed-seamless UV per cut vertex (z = Tuv w)
-    const float* v = nullptr;
+    // Relaxed-seamless UV per cut vertex (z = Tuv w). Double so that exactly
+    // coincident separatrix levels (twin launches) stay coincident: a float
+    // substrate breaks them apart by one ulp, which the tracer's collinear-
+    // overlap hazard band rejects.
+    const double* u = nullptr;
+    const double* v = nullptr;
     std::vector<std::array<std::size_t, 3>> faces;  // per-face cut-vertex ids
     std::vector<int> coneIndex;                     // per cut vertex, 0 = regular
     std::vector<std::uint32_t> vertexOfCut;         // mesh vertex id per cut vertex

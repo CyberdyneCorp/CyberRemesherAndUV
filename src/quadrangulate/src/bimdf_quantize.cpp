@@ -1552,6 +1552,13 @@ private:
                         if (std::abs(s.c - w.c) >= 1e-9 && std::abs(s.c - w.c) < 1e-7) {
                             const double lo = std::min(pv, exitVar), hi = std::max(pv, exitVar);
                             if (s.a1 > lo - 1e-9 && s.a0 < hi + 1e-9) {
+                                if (std::getenv("CYBER_QC_BIMDF_DEBUG") != nullptr) {
+                                    std::fprintf(stderr,
+                                                 "[qc] collinear overlap: ray=%d vs ray=%d "
+                                                 "face=%zu lc=%d c=%.12f vs %.12f dc=%.3e\n",
+                                                 wk.id, s.ray, w.face, lca, w.c, s.c,
+                                                 std::abs(s.c - w.c));
+                                }
                                 traceFail_ = "collinear separatrix overlap";
                                 return -1;
                             }

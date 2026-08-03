@@ -1410,6 +1410,320 @@ struct SeamRef {
 // reduced Dirichlet energy (CG on T^T blkdiag(L,L) T via accel::spmv), greedily round the
 // integers (round the most-confident, fix it, re-solve), and reconstruct z = T w. Scales to
 // hundreds of singularities: no dense dual, no seam cap. Returns total CG iterations.
+// Context for the substrate fold repair (QGP §7.1 dynamic re-linearization)
+// and the CYBER_FOLD_DIAG fold census: per compact face of the cut mesh, the
+// three cut-vertex ids, the reference UV area (3D face area in grid-cell
+// units) and the edge-distance class to the nearest cone (0,1,2; 3 = farther).
+struct FoldRepairContext {
+    std::vector<std::array<std::size_t, 3>> faceCut;
+    std::vector<float> refArea;
+    std::vector<std::int8_t> coneDist;
+    // Inverse reference shape per face: the 3D triangle flattened isometrically
+    // and scaled to grid-cell units, inverted (row-major 2x2). J = Duv * refInv.
+    std::vector<std::array<double, 4>> refInv;
+};
+
+// Signed UV area of compact face f (u/v indexed by cut id). Equals
+// det(J) * area3d on a consistently oriented face, so area < 0 is a fold.
+template <typename T>
+inline double uvSignedArea(const FoldRepairContext& ctx, std::size_t f, const T* u, const T* v) {
+    const auto& c = ctx.faceCut[f];
+    const double ax = u[c[0]], ay = v[c[0]];
+    const double bx = u[c[1]], by = v[c[1]];
+    const double cx = u[c[2]], cy = v[c[2]];
+    return 0.5 * ((bx - ax) * (cy - ay) - (by - ay) * (cx - ax));
+}
+
+// CYBER_FOLD_DIAG census: folded-face count with cone-distance attribution
+// (reimplements the fold-mechanism diagnosis instrumentation, 2026-08).
+template <typename T>
+void foldCensusReport(const char* phase, const FoldRepairContext& ctx, const T* u, const T* v) {
+    std::size_t folds = 0;
+    std::array<std::size_t, 4> byDist{};
+    for (std::size_t f = 0; f < ctx.faceCut.size(); ++f) {
+        if (uvSignedArea(ctx, f, u, v) < 0.0) {
+            ++folds;
+            ++byDist[static_cast<std::size_t>(ctx.coneDist[f])];
+        }
+    }
+    std::fprintf(stderr, "[fold] phase=%s folds=%zu of=%zu d0=%zu d1=%zu d2=%zu d3plus=%zu\n",
+                 phase, folds, ctx.faceCut.size(), byDist[0], byDist[1], byDist[2], byDist[3]);
+}
+
+// Regularized-Winslow substrate untangling (Garanzha et al. 2021, "Foldover-
+// free maps in 50 lines of code"). Minimizes
+//   E(w) = sum_f refArea_f * ((1-theta) * tr(J^T J)/chi(det J)
+//                             + theta * (det J^2 + 1)/chi(det J)),
+// J = Duv(z) * refInv_f, z = Tuv w, over the reduced free variables w — every
+// iterate satisfies the seam constraints EXACTLY (they live in the
+// reduction). chi(D,eps) = (D + sqrt(eps^2 + D^2))/2 regularizes the 1/det
+// barrier so inverted elements have finite energy and a descent direction;
+// the eps-schedule follows the paper (eps driven by the current min det).
+// L-BFGS with Armijo backtracking, all double precision. Returns the fold
+// count after; zOut receives the untangled substrate.
+std::size_t winslowUntangle(const FoldRepairContext& ctx, std::size_t nCut,
+                            const accel::SparseMatrix& Tuv, const accel::SparseMatrix& Tt,
+                            std::vector<double>& wD, std::vector<double>& zOut, int maxStage,
+                            int maxInner, bool dbg) {
+    const std::size_t nF = ctx.faceCut.size();
+    const std::size_t W = wD.size();
+    const char* thetaEnv = std::getenv("CYBER_QC_FOLD_UNTANGLE_THETA");
+    const double kTheta = thetaEnv != nullptr ? std::atof(thetaEnv) : 0.5;
+    const auto applyCsrD = [](const accel::SparseMatrix& M, const std::vector<double>& x,
+                              std::vector<double>& y) {
+        y.assign(M.rows, 0.0);
+        for (std::size_t r = 0; r < M.rows; ++r) {
+            double s = 0.0;
+            for (std::size_t k = M.rowStart[r]; k < M.rowStart[r + 1]; ++k) {
+                s += static_cast<double>(M.value[k]) * x[M.colIndex[k]];
+            }
+            y[r] = s;
+        }
+    };
+    std::vector<double> z, gz, gw;
+    const auto jacobian = [&](std::size_t f, double J[4]) {
+        const auto& c = ctx.faceCut[f];
+        const double dux1 = z[c[1]] - z[c[0]], dux2 = z[c[2]] - z[c[0]];
+        const double dvx1 = z[nCut + c[1]] - z[nCut + c[0]], dvx2 = z[nCut + c[2]] - z[nCut + c[0]];
+        const auto& R = ctx.refInv[f];
+        J[0] = dux1 * R[0] + dux2 * R[2];
+        J[1] = dux1 * R[1] + dux2 * R[3];
+        J[2] = dvx1 * R[0] + dvx2 * R[2];
+        J[3] = dvx1 * R[1] + dvx2 * R[3];
+    };
+    const auto minDet = [&]() {
+        double m = std::numeric_limits<double>::infinity();
+        for (std::size_t f = 0; f < nF; ++f) {
+            double J[4];
+            jacobian(f, J);
+            m = std::min(m, J[0] * J[3] - J[1] * J[2]);
+        }
+        return m;
+    };
+    const auto foldCount = [&]() {
+        std::size_t n = 0;
+        for (std::size_t f = 0; f < nF; ++f) {
+            double J[4];
+            jacobian(f, J);
+            n += (J[0] * J[3] - J[1] * J[2]) < 0.0 ? 1 : 0;
+        }
+        return n;
+    };
+    // Energy and gradient wrt w at the current wD (recomputes z).
+    double eps = 1e-3;
+    const auto energyGrad = [&](bool wantGrad, double* outE) {
+        applyCsrD(Tuv, wD, z);
+        if (wantGrad) {
+            gz.assign(2 * nCut, 0.0);
+        }
+        double E = 0.0;
+        for (std::size_t f = 0; f < nF; ++f) {
+            double J[4];
+            jacobian(f, J);
+            const double D = J[0] * J[3] - J[1] * J[2];
+            const double sq = std::sqrt(eps * eps + D * D);
+            const double chi = 0.5 * (D + sq);
+            if (chi <= 1e-300) {
+                E = std::numeric_limits<double>::infinity();
+                if (outE != nullptr) {
+                    *outE = E;
+                }
+                return E;
+            }
+            const double tr = J[0] * J[0] + J[1] * J[1] + J[2] * J[2] + J[3] * J[3];
+            const double area = static_cast<double>(ctx.refArea[f]);
+            const double fE = tr / chi;
+            const double gE = (D * D + 1.0) / chi;
+            E += area * ((1.0 - kTheta) * fE + kTheta * gE);
+            if (!wantGrad) {
+                continue;
+            }
+            const double chiP = 0.5 * (1.0 + D / sq);
+            // d(det)/dJ = adj(J)^T
+            const double dD[4] = {J[3], -J[2], -J[1], J[0]};
+            double dPhi[4];
+            for (int k = 0; k < 4; ++k) {
+                const double dfk = (2.0 * J[k] * chi - tr * chiP * dD[k]) / (chi * chi);
+                const double dgk = dD[k] * (2.0 * D * chi - (D * D + 1.0) * chiP) / (chi * chi);
+                dPhi[k] = area * ((1.0 - kTheta) * dfk + kTheta * dgk);
+            }
+            // Chain to Duv: dE/dDuv = dE/dJ * refInv^T; Duv columns are the
+            // two edge vectors, rows are (u, v).
+            const auto& R = ctx.refInv[f];
+            const double dDuv[4] = {
+                dPhi[0] * R[0] + dPhi[1] * R[1], dPhi[0] * R[2] + dPhi[1] * R[3],
+                dPhi[2] * R[0] + dPhi[3] * R[1], dPhi[2] * R[2] + dPhi[3] * R[3]};
+            const auto& c = ctx.faceCut[f];
+            gz[c[0]] -= dDuv[0] + dDuv[1];
+            gz[c[1]] += dDuv[0];
+            gz[c[2]] += dDuv[1];
+            gz[nCut + c[0]] -= dDuv[2] + dDuv[3];
+            gz[nCut + c[1]] += dDuv[2];
+            gz[nCut + c[2]] += dDuv[3];
+        }
+        if (wantGrad) {
+            applyCsrD(Tt, gz, gw);
+        }
+        if (outE != nullptr) {
+            *outE = E;
+        }
+        return E;
+    };
+
+    applyCsrD(Tuv, wD, z);
+    const std::size_t folds0 = foldCount();
+    if (folds0 == 0) {
+        zOut = z;
+        return 0;
+    }
+    // L-BFGS with memory 6.
+    constexpr std::size_t kMem = 6;
+    std::vector<std::vector<double>> sHist, yHist;
+    std::vector<double> rhoHist;
+    std::vector<double> gPrev, wPrev, dir(W), q, alpha;
+    int stage = 0;
+    double lastDMin = -std::numeric_limits<double>::infinity();
+    int stalled = 0;
+    for (; stage < maxStage; ++stage) {
+        const double dMin = minDet();
+        if (dMin > 0.0 && stage > 0) {
+            break;
+        }
+        // Stall guard: residual folds can be locked by the seam structure
+        // (no continuous DOF reaches them); stop burning stages on them.
+        if (dMin <= lastDMin + 1e-6) {
+            if (++stalled >= 2) {
+                break;
+            }
+        } else {
+            stalled = 0;
+        }
+        lastDMin = std::max(lastDMin, dMin);
+        // Paper's regularization choice: eps just large enough to keep chi
+        // positive-definite around the worst element.
+        eps = std::sqrt(1e-12 + 0.04 * std::min(dMin, 0.0) * std::min(dMin, 0.0));
+        sHist.clear();
+        yHist.clear();
+        rhoHist.clear();
+        double E;
+        energyGrad(true, &E);
+        for (int itr = 0; itr < maxInner; ++itr) {
+            // Two-loop recursion.
+            q = gw;
+            alpha.assign(sHist.size(), 0.0);
+            for (std::size_t h = sHist.size(); h-- > 0;) {
+                double sq = 0.0;
+                for (std::size_t i = 0; i < W; ++i) {
+                    sq += sHist[h][i] * q[i];
+                }
+                alpha[h] = rhoHist[h] * sq;
+                for (std::size_t i = 0; i < W; ++i) {
+                    q[i] -= alpha[h] * yHist[h][i];
+                }
+            }
+            double scale = 1.0;
+            if (!sHist.empty()) {
+                double sy = 0.0, yy = 0.0;
+                const auto& sL = sHist.back();
+                const auto& yL = yHist.back();
+                for (std::size_t i = 0; i < W; ++i) {
+                    sy += sL[i] * yL[i];
+                    yy += yL[i] * yL[i];
+                }
+                if (yy > 0.0) {
+                    scale = sy / yy;
+                }
+            }
+            for (std::size_t i = 0; i < W; ++i) {
+                q[i] *= scale;
+            }
+            for (std::size_t h = 0; h < sHist.size(); ++h) {
+                double yq = 0.0;
+                for (std::size_t i = 0; i < W; ++i) {
+                    yq += yHist[h][i] * q[i];
+                }
+                const double beta = rhoHist[h] * yq;
+                for (std::size_t i = 0; i < W; ++i) {
+                    q[i] += (alpha[h] - beta) * sHist[h][i];
+                }
+            }
+            for (std::size_t i = 0; i < W; ++i) {
+                dir[i] = -q[i];
+            }
+            double gd = 0.0, gn = 0.0;
+            for (std::size_t i = 0; i < W; ++i) {
+                gd += gw[i] * dir[i];
+                gn += gw[i] * gw[i];
+            }
+            if (gd >= 0.0) {  // not a descent direction: restart with -g
+                for (std::size_t i = 0; i < W; ++i) {
+                    dir[i] = -gw[i];
+                }
+                gd = -gn;
+                sHist.clear();
+                yHist.clear();
+                rhoHist.clear();
+            }
+            if (std::sqrt(gn) < 1e-10) {
+                break;
+            }
+            // Armijo backtracking.
+            wPrev = wD;
+            gPrev = gw;
+            double step = 1.0;
+            double eNew = E;
+            bool ok = false;
+            for (int ls = 0; ls < 30; ++ls) {
+                for (std::size_t i = 0; i < W; ++i) {
+                    wD[i] = wPrev[i] + step * dir[i];
+                }
+                energyGrad(false, &eNew);
+                if (eNew <= E + 1e-4 * step * gd) {
+                    ok = true;
+                    break;
+                }
+                step *= 0.5;
+            }
+            if (!ok) {
+                wD = wPrev;
+                break;
+            }
+            energyGrad(true, &eNew);
+            // Curvature pair.
+            std::vector<double> sV(W), yV(W);
+            double sy = 0.0;
+            for (std::size_t i = 0; i < W; ++i) {
+                sV[i] = wD[i] - wPrev[i];
+                yV[i] = gw[i] - gPrev[i];
+                sy += sV[i] * yV[i];
+            }
+            if (sy > 1e-14) {
+                if (sHist.size() == kMem) {
+                    sHist.erase(sHist.begin());
+                    yHist.erase(yHist.begin());
+                    rhoHist.erase(rhoHist.begin());
+                }
+                sHist.push_back(std::move(sV));
+                yHist.push_back(std::move(yV));
+                rhoHist.push_back(1.0 / sy);
+            }
+            const double rel = std::abs(E - eNew) / std::max(std::abs(E), 1e-30);
+            E = eNew;
+            if (rel < 1e-9) {
+                break;
+            }
+        }
+        if (dbg) {
+            applyCsrD(Tuv, wD, z);
+            std::fprintf(stderr, "[qc] fold untangle stage=%d eps=%.3e minDet=%.4f folds=%zu\n",
+                         stage, eps, minDet(), foldCount());
+        }
+    }
+    applyCsrD(Tuv, wD, z);
+    zOut = z;
+    return foldCount();
+}
+
 int solveSeamlessReduced(accel::IBackend& backend, std::size_t nCut,
                          const std::vector<std::unordered_map<std::size_t, float>>& rows,
                          const std::vector<float>& bu, const std::vector<float>& bv,
@@ -1417,7 +1731,8 @@ int solveSeamlessReduced(accel::IBackend& backend, std::size_t nCut,
                          std::vector<float>& u, std::vector<float>& v,
                          const CancelToken* cancel = nullptr,
                          SeamlessSolveCacheImpl* cache = nullptr,
-                         bimdf::Charts* bimdfCharts = nullptr) {
+                         bimdf::Charts* bimdfCharts = nullptr,
+                         const FoldRepairContext* foldCtx = nullptr) {
     const std::size_t nSeam = seams.size();
     const std::size_t nUv = 2 * nCut;
     // Feature-seam integer pinning (docs/ROADMAP.md 2026-08-01 priority 1;
@@ -1768,6 +2083,22 @@ int solveSeamlessReduced(accel::IBackend& backend, std::size_t nCut,
     };
     std::vector<SteerRow> steerRows;
     bool steering = false;
+    // Fold-repair penalty rows (QGP §7.1): convexified positive-area rows
+    // enter the objective as 1/2 sum_r mu (row_r . w - b_r)^2 exactly like the
+    // steering rows. gBase is the effective base gradient — gReduced plus the
+    // persistent fold-penalty linear terms in 'full' mode; 'substrate' mode
+    // restores it untouched.
+    std::vector<SteerRow> foldRows;
+    bool foldPen = false;
+    // Proximal damping for the repair solves: + 0.5*tau*||w - wRef||^2. The
+    // equality penalty alone moves the optimum arbitrarily far along
+    // near-floppy modes of the reduced operator (along a direction with
+    // stiffness eps and row component c, the shift is ~d/c once rho*c^2 >>
+    // eps — measured as 6000-cell displacements); the proximal term bounds
+    // it to ~lambda*c*d/tau.
+    double foldTau = 0.0;
+    std::vector<float> foldRef;
+    std::vector<float> gBase = gReduced;
 
     // Reduced operator A(p) = Tt * L2 * Tuv * p, applied via three spmv (or the
     // one fused spmv when CYBER_QC_FUSED_OPERATOR built it explicitly), plus
@@ -1792,6 +2123,23 @@ int solveSeamlessReduced(accel::IBackend& backend, std::size_t nCut,
                 s *= sr.mu;
                 for (const auto& [ri, cf] : sr.a) {
                     out[ri] += static_cast<float>(cf * s);
+                }
+            }
+        }
+        if (foldPen) {
+            for (const SteerRow& fr : foldRows) {
+                double s = 0.0;
+                for (const auto& [ri, cf] : fr.a) {
+                    s += cf * static_cast<double>(p[ri]);
+                }
+                s *= fr.mu;
+                for (const auto& [ri, cf] : fr.a) {
+                    out[ri] += static_cast<float>(cf * s);
+                }
+            }
+            if (foldTau > 0.0) {
+                for (std::size_t i = 0; i < out.size(); ++i) {
+                    out[i] += static_cast<float>(foldTau * static_cast<double>(p[i]));
                 }
             }
         }
@@ -1929,6 +2277,274 @@ int solveSeamlessReduced(accel::IBackend& backend, std::size_t nCut,
     };
     const double eRelaxed = dbg ? reducedEnergy() : 0.0;
 
+    // --- Substrate fold repair: QGP §7.1 dynamic re-linearization ----------
+    // The hard-constrained reduced map inverts triangles at cones (fold
+    // diagnosis 2026-08: the relaxed Poisson map is ~fold-free; folds are
+    // INTRODUCED the moment the seam transitions become hard, 82-100%
+    // cone-adjacent, intrinsic at negative-index cones). Remedy per QGP
+    // Sec 7.1: the positive-area (regularity) constraints, convexified by
+    // linearization about the current pose, enter the reduced solve as soft
+    // penalties mu*(a_f . w - b_f)^2; while violations persist, re-linearize
+    // about the new pose and re-solve. The signed UV area is a homogeneous
+    // quadratic in z, so its linearization g(z^) . z - A(z^) is exact at z^
+    // and linear in w through z = Tuv w — every iterate stays EXACTLY
+    // seamless (the seam constraints live in the reduction).
+    // CYBER_QC_FOLD_RELIN: off|substrate|full. Default (unset): 'substrate'
+    // when the Bi-MDF substrate is being built, else off. 'substrate' feeds
+    // the repaired map ONLY to the T-mesh tracer and restores w so the
+    // greedy/guided rounding path sees the untouched relaxed optimum;
+    // 'full' keeps the penalties through the rounding and final solve.
+    std::vector<double> substrateZ;  // repaired z for the tracer (empty = none)
+    {
+        // Lever 1 (QGP §7.1 re-linearization) measured and DEFAULTED OFF:
+        // the convexified equality penalty only reaches folds 482 -> 382 on
+        // nefertiti@4000 pure and its margin-slivers break the tracer
+        // ("collinear separatrix overlap"); rewinding a >2pi wedge is
+        // intrinsically nonlinear. Kept env-gated for A/B.
+        const char* relinEnv = std::getenv("CYBER_QC_FOLD_RELIN");
+        const std::string relinMode = relinEnv != nullptr ? relinEnv : "off";
+        const bool relinOn = foldCtx != nullptr && !foldCtx->faceCut.empty() &&
+                             relinMode != "off" && relinMode != "0";
+        const bool foldDiag = std::getenv("CYBER_FOLD_DIAG") != nullptr;
+        std::vector<float> z;
+        const auto computeZ = [&]() {
+            accel::Buffer<float> wb(w), zb;
+            accel::spmv(backend, Tuv, wb, zb);
+            z.assign(zb.data(), zb.data() + zb.size());
+        };
+        if (foldCtx != nullptr && !foldCtx->faceCut.empty() && (relinOn || foldDiag)) {
+            computeZ();
+            if (foldDiag) {
+                foldCensusReport("reduced-preint", *foldCtx, z.data(), z.data() + nCut);
+            }
+        }
+        if (relinOn) {
+            const bool fullMode = relinMode == "full";
+            const std::vector<float> wRelaxed = w;
+            const char* lamEnv = std::getenv("CYBER_QC_FOLD_RELIN_LAMBDA");
+            const double lam = lamEnv != nullptr ? std::atof(lamEnv) : 100.0;
+            const char* mrgEnv = std::getenv("CYBER_QC_FOLD_RELIN_MARGIN");
+            const double marginFrac = mrgEnv != nullptr ? std::atof(mrgEnv) : 0.1;
+            const char* tauEnv = std::getenv("CYBER_QC_FOLD_RELIN_TAU");
+            const double tau = tauEnv != nullptr ? std::atof(tauEnv) : 1.0;
+            constexpr int kMaxRelin = 8;
+            // ONE-SIDED active set, rebuilt every iteration: only faces
+            // currently below their margin carry a penalty row (an equality
+            // pull UP to the margin). A monotone active set was measured to
+            // cascade — the equality pulls recovered faces back DOWN to the
+            // margin, squeezing their neighbors negative (nefertiti@4000
+            // pure: folds 482 -> 7211, 14293/15288 faces active). The best
+            // iterate by fold count is kept as the substrate; a 2x fold
+            // blow-up aborts the loop.
+            std::vector<char> active(foldCtx->faceCut.size(), 0);
+            std::size_t folds0 = 0, viol = 0, nActive = 0;
+            std::vector<float> bestZ = z;
+            std::size_t bestFolds = std::numeric_limits<std::size_t>::max();
+            // Penalty rows act on CONTINUOUS frees only: integer translation
+            // frees can sit in near-floppy directions of the reduced operator
+            // (stiffness ~ the 1e-8 ridge), so even a tiny penalty component
+            // there produces enormous translations and wrecks the map
+            // globally (measured: lambda=10 still blew folds 482 -> 5991).
+            std::vector<char> isIntFreeIx(W, 0);
+            for (const std::size_t ri : intFree) {
+                isIntFreeIx[ri] = 1;
+            }
+            int it = 0;
+            for (; it < kMaxRelin; ++it) {
+                std::size_t folds = 0;
+                viol = 0;
+                std::fill(active.begin(), active.end(), 0);
+                for (std::size_t f = 0; f < foldCtx->faceCut.size(); ++f) {
+                    const double A = uvSignedArea(*foldCtx, f, z.data(), z.data() + nCut);
+                    const double bF = marginFrac * static_cast<double>(foldCtx->refArea[f]);
+                    folds += A < 0.0 ? 1 : 0;
+                    if (A < bF) {
+                        ++viol;
+                        active[f] = 1;
+                    }
+                }
+                if (it == 0) {
+                    folds0 = folds;
+                }
+                if (foldDiag) {
+                    std::fprintf(stderr, "[qc] fold relin it=%d folds=%zu viol=%zu\n", it, folds,
+                                 viol);
+                }
+                if (folds < bestFolds) {
+                    bestFolds = folds;
+                    bestZ = z;
+                }
+                if (viol == 0 || folds > 2 * std::max<std::size_t>(folds0, 8)) {
+                    break;
+                }
+                nActive = viol;
+                // Linearize every active row about the current pose.
+                foldRows.clear();
+                for (std::size_t f = 0; f < foldCtx->faceCut.size(); ++f) {
+                    if (!active[f]) {
+                        continue;
+                    }
+                    const auto& c = foldCtx->faceCut[f];
+                    const double u0 = z[c[0]], u1 = z[c[1]], u2 = z[c[2]];
+                    const double v0 = z[nCut + c[0]], v1 = z[nCut + c[1]], v2 = z[nCut + c[2]];
+                    const double ga[6] = {0.5 * (v1 - v2), 0.5 * (v2 - v0), 0.5 * (v0 - v1),
+                                          0.5 * (u2 - u1), 0.5 * (u0 - u2), 0.5 * (u1 - u0)};
+                    const std::size_t zi[6] = {c[0],        c[1],        c[2],
+                                               nCut + c[0], nCut + c[1], nCut + c[2]};
+                    std::unordered_map<std::size_t, double> row;
+                    for (int k = 0; k < 6; ++k) {
+                        if (ga[k] == 0.0) {
+                            continue;
+                        }
+                        const std::size_t j = zi[k];
+                        if (isPivot[j]) {
+                            for (const auto& [c2, w2] : pivotExpr[j]) {
+                                row[freeIx[c2]] += ga[k] * w2;
+                            }
+                        } else {
+                            row[freeIx[j]] += ga[k];
+                        }
+                    }
+                    SteerRow sr;
+                    double nrm2 = 0.0;
+                    double intPart = 0.0;  // frozen integer-free contribution
+                    for (const auto& [ri, cf] : row) {
+                        if (std::abs(cf) <= 1e-9) {
+                            continue;
+                        }
+                        if (isIntFreeIx[ri]) {
+                            intPart += cf * static_cast<double>(w[ri]);
+                        } else {
+                            sr.a.push_back({ri, cf});
+                            nrm2 += cf * cf;
+                        }
+                    }
+                    if (sr.a.empty()) {
+                        continue;  // fully seam-determined or degenerate face
+                    }
+                    (void)nrm2;
+                    const double A = uvSignedArea(*foldCtx, f, z.data(), z.data() + nCut);
+                    const double refA = std::max(static_cast<double>(foldCtx->refArea[f]), 1e-4);
+                    // A_lin(z) = g . z - A(z^); target A_lin = b_f with the
+                    // integer-free part frozen at its current value, so
+                    // row_cont . w = b_f + A(z^) - intPart. Rows stay RAW
+                    // (unnormalized): normalizing turns weakly-controlled
+                    // faces (tiny continuous gradient) into unreachable
+                    // unit-norm targets whose penalty forcing explodes
+                    // (measured 6400-cell displacements); raw rows give them
+                    // a proportionally weak push instead. mu = lambda/refA^2
+                    // penalizes the RELATIVE area deviation, comparable
+                    // across face sizes.
+                    sr.len = marginFrac * refA + A - intPart;
+                    sr.mu = lam / (refA * refA);
+                    foldRows.push_back(std::move(sr));
+                }
+                if (foldRows.empty()) {
+                    break;
+                }
+                gSolve = gReduced;
+                for (const SteerRow& fr : foldRows) {
+                    for (const auto& [ri, cf] : fr.a) {
+                        gSolve[ri] += static_cast<float>(fr.mu * cf * fr.len);
+                    }
+                }
+                foldRef = w;
+                foldTau = tau;
+                for (std::size_t i = 0; i < W; ++i) {
+                    gSolve[i] += static_cast<float>(foldTau * static_cast<double>(foldRef[i]));
+                }
+                foldPen = true;
+                std::vector<float> zPrev;
+                if (foldDiag) {
+                    zPrev = z;
+                }
+                maskedSolve(mask);
+                computeZ();
+                if (foldDiag) {
+                    double maxDz = 0.0;
+                    for (std::size_t i = 0; i < z.size(); ++i) {
+                        maxDz = std::max(maxDz, static_cast<double>(std::abs(z[i] - zPrev[i])));
+                    }
+                    std::fprintf(stderr, "[qc] fold relin it=%d rows=%zu maxDz=%.4f\n", it,
+                                 foldRows.size(), maxDz);
+                }
+            }
+            std::fprintf(stderr,
+                         "[qc] fold relin: mode=%s iters=%d folds %zu -> %zu viol=%zu active=%zu "
+                         "lambda=%.1e margin=%.2f\n",
+                         relinMode.c_str(), it, folds0, bestFolds, viol, nActive, lam, marginFrac);
+            if (!fullMode) {
+                z = bestZ;  // substrate keeps the best iterate by fold count
+            }
+            if (foldDiag) {
+                foldCensusReport("reduced-repaired", *foldCtx, z.data(), z.data() + nCut);
+            }
+            if (fullMode) {
+                // Persist the penalties through the rounding: the direct
+                // engine factored the UNPENALIZED operator, so hand off to
+                // the masked CG for every subsequent solve. The proximal
+                // anchor stays at the repaired pose so later re-solves keep
+                // the trust region (integers pin on top of it).
+                gBase = gSolve;
+                substrateZ.assign(z.begin(), z.end());
+                if (useDirect) {
+                    useDirect = false;
+                }
+            } else {
+                // Substrate mode: the repaired map serves ONLY the tracer.
+                substrateZ.assign(z.begin(), z.end());
+                foldPen = false;
+                foldRows.clear();
+                gSolve = gReduced;
+                w = wRelaxed;
+            }
+        }
+        // Lever 2: regularized-Winslow substrate untangling (Garanzha 2021).
+        // Starts from the current w (the relaxed optimum; overrides a lever-1
+        // substrate when both are enabled) and never touches the rounding
+        // path — the untangled map serves ONLY the T-mesh tracer.
+        // CYBER_QC_FOLD_UNTANGLE: on|off|auto (default auto when the Bi-MDF
+        // substrate is being built). Auto engages only on FOLD-DAMAGED
+        // substrates (> 1% folded faces): healthy meshes keep the raw float
+        // substrate byte-identically (measured: always-on cost the bunny
+        // flagship ears 19 -> 20 / sing 94 -> 100 for zero benefit — its 41
+        // folds, 0.2%, were never the binding damage).
+        const char* untEnv = std::getenv("CYBER_QC_FOLD_UNTANGLE");
+        const std::string untMode =
+            untEnv != nullptr ? untEnv : (bimdfCharts != nullptr ? "auto" : "off");
+        if (foldCtx != nullptr && !foldCtx->faceCut.empty() &&
+            foldCtx->refInv.size() == foldCtx->faceCut.size() && untMode != "off" &&
+            untMode != "0") {
+            const auto tU = std::chrono::steady_clock::now();
+            computeZ();
+            std::size_t foldsBefore = 0;
+            for (std::size_t f = 0; f < foldCtx->faceCut.size(); ++f) {
+                foldsBefore += uvSignedArea(*foldCtx, f, z.data(), z.data() + nCut) < 0.0 ? 1 : 0;
+            }
+            const bool damaged = foldsBefore * 100 > foldCtx->faceCut.size();
+            if (untMode != "auto" || damaged) {
+                std::vector<double> wD(W);
+                for (std::size_t i = 0; i < W; ++i) {
+                    wD[i] = static_cast<double>(w[i]);
+                }
+                std::vector<double> zRep;
+                const char* stEnv = std::getenv("CYBER_QC_FOLD_UNTANGLE_STAGES");
+                const int untStages = stEnv != nullptr ? std::atoi(stEnv) : 30;
+                const std::size_t foldsAfter =
+                    winslowUntangle(*foldCtx, nCut, Tuv, Tt, wD, zRep, untStages, 40, foldDiag);
+                std::fprintf(stderr, "[qc] fold untangle: folds %zu -> %zu of %zu (%ldms)\n",
+                             foldsBefore, foldsAfter, foldCtx->faceCut.size(), msSince(tU));
+                if (foldsAfter <= foldsBefore) {
+                    substrateZ = std::move(zRep);
+                }
+                if (foldDiag && !substrateZ.empty()) {
+                    foldCensusReport("reduced-untangled", *foldCtx, substrateZ.data(),
+                                     substrateZ.data() + nCut);
+                }
+            }
+        }
+    }
+
     // MAGNITUDE CONTROL. The reduction leaves the independent integer translations
     // UNCONSTRAINED — any integers keep the map seamless — so a huge relaxed value would
     // round to a huge integer and blow the map up (the failure the divergence guard used to
@@ -1937,7 +2553,7 @@ int solveSeamlessReduced(accel::IBackend& backend, std::size_t nCut,
     // lines the relaxed UV already spans (plus slack). Clamping here keeps seamlessness intact
     // and simply refuses to place a seam translation the geometry never justified.
     double uvSpan = 0.0;
-    std::vector<float> relaxedUv;  // z = Tuv w at the relaxed optimum (Bi-MDF substrate)
+    std::vector<double> relaxedUv;  // z = Tuv w at the relaxed optimum (Bi-MDF substrate)
     {
         accel::Buffer<float> wProbe(w), zProbe;
         accel::spmv(backend, Tuv, wProbe, zProbe);
@@ -1945,7 +2561,13 @@ int solveSeamlessReduced(accel::IBackend& backend, std::size_t nCut,
             uvSpan = std::max(uvSpan, static_cast<double>(std::abs(zProbe[i])));
         }
         if (bimdfCharts != nullptr) {
-            relaxedUv.assign(zProbe.data(), zProbe.data() + zProbe.size());
+            // Fold-repaired substrate when the repair ran; the raw relaxed
+            // optimum otherwise. Both satisfy the seam constraints exactly.
+            if (!substrateZ.empty()) {
+                relaxedUv = std::move(substrateZ);
+            } else {
+                relaxedUv.assign(zProbe.data(), zProbe.data() + zProbe.size());
+            }
         }
     }
     const double tCap = std::max(uvSpan * 2.0, std::sqrt(static_cast<double>(nCut))) + 8.0;
@@ -2095,9 +2717,13 @@ int solveSeamlessReduced(accel::IBackend& backend, std::size_t nCut,
                     }
                 }
                 const char* modeEnv = std::getenv("CYBER_QC_BIMDF");
+                // CYBER_QC_BIMDF_HEALTH is the measurement override: when
+                // set, ONLY the mismatch bound applies (the crease-fraction
+                // refusal is skipped too, so fold-damaged organics can be
+                // engaged for A/B).
                 if (modeEnv != nullptr && std::string(modeEnv) == "guided" &&
                     (tmesh.maxSideMismatch > kSteerHealthMax ||
-                     featureArcs * 100 > tmesh.arcs.size())) {
+                     (healthEnv == nullptr && featureArcs * 100 > tmesh.arcs.size()))) {
                     std::fprintf(stderr,
                                  "[qc] bimdf guided: refused (sideMismatch %.3f, "
                                  "featureArcs %zu), pure greedy\n",
@@ -2117,6 +2743,20 @@ int solveSeamlessReduced(accel::IBackend& backend, std::size_t nCut,
                     const bimdf::BimdfResult& src = solS.ok ? solS : sol;
                     const char* muEnv = std::getenv("CYBER_QC_BIMDF_MU");
                     const double muBase = muEnv != nullptr ? std::atof(muEnv) : 1.0;
+                    // Substrate-consistency filter: when the tracer ran on a
+                    // fold-repaired substrate, an arc's relaxed length there
+                    // can differ from the length the ACTUAL solve realizes;
+                    // steering toward a target measured on a different map
+                    // drags the integers inconsistently (measured: nefertiti
+                    // pure quads 4098 -> 3403, haus 0.0059 -> 0.0308). Steer
+                    // only arcs where both maps agree. Inert (diff ~ float
+                    // noise) when the substrate is the raw relaxed map.
+                    // Default 0 (off): on the healthy bunny the filter's one
+                    // skipped arc alone moved ears 19 -> 22 / sing 94 -> 110;
+                    // it is an A/B lever for fold-damaged substrates only.
+                    const char* stolEnv = std::getenv("CYBER_QC_BIMDF_STEERTOL");
+                    const double steerTol = stolEnv != nullptr ? std::atof(stolEnv) : 0.0;
+                    std::size_t steerSkipped = 0;
                     for (std::size_t a = 0; a < tmesh.arcs.size(); ++a) {
                         // Contained regions have no flow assignment to steer
                         // toward; their integers round pure-greedy. Feature
@@ -2128,6 +2768,16 @@ int solveSeamlessReduced(accel::IBackend& backend, std::size_t nCut,
                             arcSteerable[a] == 0 || bimdfArcRows[a].empty()) {
                             continue;
                         }
+                        if (steerTol > 0.0) {
+                            double lenRel = 0.0;
+                            for (const auto& [ri, cf] : bimdfArcRows[a]) {
+                                lenRel += cf * static_cast<double>(w[ri]);
+                            }
+                            if (std::abs(std::abs(lenRel) - tmesh.arcs[a].len) > steerTol) {
+                                ++steerSkipped;
+                                continue;
+                            }
+                        }
                         SteerRow sr;
                         sr.a = bimdfArcRows[a];
                         sr.len = 0.5 * static_cast<double>(src.arcLenHalf[a]);
@@ -2138,9 +2788,11 @@ int solveSeamlessReduced(accel::IBackend& backend, std::size_t nCut,
                     }
                     std::fprintf(stderr,
                                  "[qc] bimdf guided: steerSolve ok=%d energy=%.3f mu=%.3f "
-                                 "steerRows=%zu of %zu (unhealthyQuads=%zu mm=%.3f)\n",
+                                 "steerRows=%zu of %zu (unhealthyQuads=%zu mm=%.3f "
+                                 "substrateSkipped=%zu)\n",
                                  solS.ok ? 1 : 0, solS.deviationEnergy, muBase, steerRows.size(),
-                                 tmesh.arcs.size(), unhealthyQuads, tmesh.maxSideMismatch);
+                                 tmesh.arcs.size(), unhealthyQuads, tmesh.maxSideMismatch,
+                                 steerSkipped);
                 }
                 // Back-substitution A y = len over the free integers. Rows
                 // touching a continuous free are the reduction's structural
@@ -2497,7 +3149,7 @@ int solveSeamlessReduced(accel::IBackend& backend, std::size_t nCut,
     // re-solve once over the frozen integer assignment.
     if (steering) {
         steering = false;
-        gSolve = gReduced;
+        gSolve = gBase;  // keeps the fold penalties in 'full' mode; == gReduced otherwise
         maskedSolve(mask);
     }
 
@@ -2643,6 +3295,16 @@ Parameterization solveParameterizationImpl(const Mesh& mesh, const SeamlessSetup
         bimdfCharts->coneIndex.assign(nCut, 0);
         bimdfCharts->vertexOfCut.assign(nCut, 0);
     }
+    // Fold-repair / fold-census context (QGP §7.1 re-linearization in the
+    // reduced solve + the CYBER_FOLD_DIAG census). Built only when the
+    // Bi-MDF substrate is active or the census is requested; the default
+    // path allocates nothing.
+    const bool foldDiag = std::getenv("CYBER_FOLD_DIAG") != nullptr;
+    std::unique_ptr<FoldRepairContext> foldCtx;
+    std::vector<std::array<Index, 3>> foldFaceVerts;
+    if ((foldDiag || bimdfCharts != nullptr) && probeCellArea == nullptr) {
+        foldCtx = std::make_unique<FoldRepairContext>();
+    }
     for (Index fi = 0; fi < mesh.faceCapacity(); ++fi) {
         const FaceId f{fi};
         if (!mesh.isAlive(f) || mesh.faceSize(f) != 3) {
@@ -2696,10 +3358,75 @@ Parameterization solveParameterizationImpl(const Mesh& mesh, const SeamlessSetup
             bimdfCharts->faceE0.push_back({fd.e0.x, fd.e0.y, fd.e0.z});
             bimdfCharts->faceN.push_back({fn.x, fn.y, fn.z});
         }
+        if (foldCtx) {
+            foldCtx->faceCut.push_back(fd.cut);
+            foldCtx->refArea.push_back(fd.area * invS * invS);
+            foldFaceVerts.push_back({vs[0].value, vs[1].value, vs[2].value});
+            // Inverse reference shape for the Winslow untangler: the 3D
+            // triangle flattened isometrically, scaled to cell units.
+            const Vec3 fe1 = p[1] - p[0], fe2 = p[2] - p[0];
+            const float l1 = length(fe1);
+            std::array<double, 4> refInv{1.0, 0.0, 0.0, 1.0};
+            if (l1 > 1e-20f) {
+                const Vec3 xh = fe1 / l1;
+                const Vec3 yh = cross(n, xh);
+                // Dref = invS * [[l1, fe2.xh], [0, fe2.yh]]; refInv = Dref^-1.
+                const double ra = static_cast<double>(invS) * l1;
+                const double rb = static_cast<double>(invS) * dot(fe2, xh);
+                const double rd = static_cast<double>(invS) * dot(fe2, yh);
+                if (std::abs(ra) > 1e-30 && std::abs(rd) > 1e-30) {
+                    refInv = {1.0 / ra, -rb / (ra * rd), 0.0, 1.0 / rd};
+                }
+            }
+            foldCtx->refInv.push_back(refInv);
+        }
         faceData.push_back(fd);
     }
     if (nCut == 0) {
         return out;
+    }
+    if (foldCtx) {
+        // Per-face edge-distance class to the nearest cone: multi-source BFS
+        // over mesh edges from every singular vertex, capped at distance 3.
+        std::vector<std::int8_t> distV(mesh.vertexCapacity(), 3);
+        std::vector<std::vector<Index>> adj(mesh.vertexCapacity());
+        for (Index ei = 0; ei < mesh.edgeCapacity(); ++ei) {
+            const EdgeId e{ei};
+            if (!mesh.isAlive(e)) {
+                continue;
+            }
+            const auto [a, b] = mesh.edgeVertices(e);
+            adj[a.value].push_back(b.value);
+            adj[b.value].push_back(a.value);
+        }
+        std::queue<Index> bfsq;
+        for (Index vi = 0; vi < mesh.vertexCapacity(); ++vi) {
+            if (vi < setup.singularityIndex.size() && setup.singularityIndex[vi] != 0) {
+                distV[vi] = 0;
+                bfsq.push(vi);
+            }
+        }
+        while (!bfsq.empty()) {
+            const Index cur = bfsq.front();
+            bfsq.pop();
+            if (distV[cur] >= 2) {
+                continue;
+            }
+            for (const Index nb : adj[cur]) {
+                if (distV[nb] > distV[cur] + 1) {
+                    distV[nb] = static_cast<std::int8_t>(distV[cur] + 1);
+                    bfsq.push(nb);
+                }
+            }
+        }
+        foldCtx->coneDist.reserve(foldFaceVerts.size());
+        for (const auto& fv : foldFaceVerts) {
+            std::int8_t d = 3;
+            for (const Index vv : fv) {
+                d = std::min(d, distV[vv]);
+            }
+            foldCtx->coneDist.push_back(d);
+        }
     }
 
     // Re-assemble the divergence RHS from per-face target frames. angle[f] rotates the field
@@ -2986,6 +3713,12 @@ Parameterization solveParameterizationImpl(const Mesh& mesh, const SeamlessSetup
     if (cancel != nullptr && cancel->isCancelled()) {
         return out;  // out.valid stays false -> caller degrades cleanly
     }
+    const auto foldCensusPhase = [&](const char* phase) {
+        if (foldDiag && foldCtx) {
+            foldCensusReport(phase, *foldCtx, u.data(), v.data());
+        }
+    };
+    foldCensusPhase("poisson");
 
     // UV grid-cell count at the current u,v: sum of |UV triangle areas| (~1 extracted
     // quad candidate per unit cell). Serves the relaxed-only calibration probe and the
@@ -3083,6 +3816,7 @@ Parameterization solveParameterizationImpl(const Mesh& mesh, const SeamlessSetup
     // path: each ARAP round assembles before it solves, and when the polish is skipped the
     // initial assembleRhs({}) is the angle==0 assembly — so no re-assembly is needed here.
     const std::vector<float> bu0 = bu, bv0 = bv;
+    foldCensusPhase("arap");
     statsAxisMix();
     statsGradHist("relaxed");
     if (cancel != nullptr && cancel->isCancelled()) {
@@ -3197,8 +3931,9 @@ Parameterization solveParameterizationImpl(const Mesh& mesh, const SeamlessSetup
     // it scales to hundreds of cones (spot: ~350 seam edges), reconciling branch-point holonomy.
     if (!seams.empty()) {
         solveSeamlessReduced(backend, nCut, rows, bu0, bv0, seams, gauges, u, v, cancel, cacheImpl,
-                             bimdfCharts.get());
+                             bimdfCharts.get(), foldCtx.get());
     }
+    foldCensusPhase("final");
     statsGradHist("reduced");
     if (cancel != nullptr && cancel->isCancelled()) {
         return out;  // out.valid stays false
