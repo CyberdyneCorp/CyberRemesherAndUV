@@ -94,3 +94,37 @@
        both flag states; flag-off byte-exact vs the main-branch binary
        (4 cells, mtllib-normalized). Default NOT flipped (opt-in lever;
        organic-scoped wins; spot mixed recall −0.023 is a real cost).
+       — ROUND 5 (branch `feat/bimdf-boundary`): the PURE-ARM TRACER WALL
+       is fixed — the "trail density blowup" was ONE self-spiralling
+       separatrix per mesh (511/512 segments in the tripping face were
+       its own trail; the crossing scan exempted own trails from
+       T-junction termination). Landed: self-hit termination (canonical
+       motorcycle-graph rule, 0.25-cell curve-age margin), guard-trip
+       abandonment + containment (whole-T-mesh refusal gone), and
+       fan-anchor failures degrading into containment. Every pure
+       organic now BUILDS and SOLVES (nefertiti@4000 pure 2644 patches /
+       371 contained, armadillo 1392/164, bunny 191/322). GATE MEASURED
+       via the CYBER_QC_BIMDF_HEALTH override: nefertiti pure sing 419
+       (greedy) → 411 guided at mu=1 (mu=2: 310 but haus 0.0072 →
+       0.0194, quads −14%) — **≤ 200 NOT met**; engaging fold-damaged
+       meshes regressed every measured cell (nef mixed 396 → 400, arm
+       mixed 255 → 281, arm pure 273 → 293), so the whole-mesh health
+       gate stays and the wall is now the quarter-density fold damage
+       (1297 cones / 110 degraded nodes), not the tracer or quantizer.
+       QGP BOUNDARY ARCS landed opt-in (`CYBER_QC_BIMDF_BARC=1`):
+       boundary loops → arc chains with ray-hit T-nodes, min-one floors,
+       noExpr (free boundary not grid-aligned), fixed constants in the
+       flow (a variable/hub design measured bit-identical while adding
+       the copy-crossing structure round 3 found half-integral; the
+       floors solve's half=12 on bunny comes from the boundary patches
+       under either encoding, the floors-off steer solve stays half=0).
+       Coverage bunny mixed 441/471 → 457/485
+       (failedRays 12 → 3) but DEFAULT OFF: the recovered regions
+       reshape the flow globally and the flagship regresses across the
+       mu basin (ears 19 → 31-37, sing 94 → 115-129) — round-3
+       containment is load-bearing. Gates: ctest 14/14; bench check
+       green off/report/guided; off-vs-report hash-SAME 22/22; flag-off
+       byte-exact vs main binary (4 cells); CAD spot-check 31/32
+       unchanged (the 1 = round-3-documented box_sharp@400 pure exact
+       injection); bunny ears 19 / sing 94 exactly reproduced;
+       deterministic. Default NOT flipped.

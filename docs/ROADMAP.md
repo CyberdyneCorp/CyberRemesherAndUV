@@ -404,6 +404,94 @@ wins). Default flip NOT proposed: guided is opt-in, wins are
 organic-scoped, spot mixed recall −0.023 and sphere pure sing +1 are
 real (small) costs.
 
+### Update — 2026-08-03 (branch `feat/bimdf-boundary`): pure-arm tracer wall fixed (self-spiralling separatrices) — every pure organic now builds and solves; QGP boundary arcs landed opt-in; the nefertiti pure gate is measured and NOT met (411, wall = quarter-density fold damage)
+
+**Lever 1 — the pure-arm tracer wall, diagnosed and fixed.** Report-mode
+measurement with a per-face trail-density histogram found the mechanism:
+the guard trip on nefertiti@4000 pure is ONE separatrix (cone-v 48843)
+spiralling through the same face — 511 of the 512 segments in the
+tripping face were its OWN trail (the mixed arm's densest face holds 9),
+because the crossing scan exempted a ray's own trail from T-junction
+termination. Not density miscalibration (mesh average 2.4 segs/face), not
+spacing (the guard never fires legitimately). Fixes, all `CYBER_QC_BIMDF`
+only:
+- Self-hit termination (the canonical motorcycle-graph rule: a ray stops
+  at ANY strictly-older trail, its own included) behind a 0.25-cell
+  curve-age margin protecting the just-flushed junction point.
+- Residual guard trips (parallel self-spirals present no perpendicular
+  trail to stop at) ABANDON the ray and contain its region instead of
+  refusing the whole T-mesh.
+- `arc end not anchored in fan` (armadillo pure — a fold-torn vertex fan
+  closing a shorter cycle than an arc's anchor wedge) degrades the node
+  into containment instead of hard-failing the build.
+
+Every pure-arm organic now builds and solves: nefertiti@4000 pure 2644
+patches (371 contained, sideMismatch 0.731, failedRays 64), armadillo
+1392 (164, 0.594), bunny@3000 pure 191/322 (0.704). All round-4 engaged
+cells reproduce exactly (bunny ears 19 / sing 94, spot pure flow 1274,
+sphere 800 pure 18, torus identical, box_sharp@1000 pure injected=6).
+
+**THE GATE (nefertiti@4000 cyber-pure sing ≤ 200): measured, NOT met.**
+With the T-mesh finally built, guided was engaged through the
+`CYBER_QC_BIMDF_HEALTH` measurement override: sing 419 (greedy) → 411 at
+mu=1; mu=2 forces 310 but costs haus 0.0072 → 0.0194, quads −14% and
+flow-loop 456 → 46 — the trajectory shows the gate unreachable by
+attraction strength. Engaging fold-damaged meshes regressed every cell
+measured (nefertiti mixed 396 → 400, armadillo mixed 255 → 281,
+armadillo pure 273 → 293, health-tightening to 0.05 gave 420), so the
+round-4 whole-mesh health gate STAYS (a per-arc filter inside engaged
+meshes remains — no-op on healthy T-meshes). The wall is the
+quarter-density substrate itself: 1297 cones and 110 fold-degraded nodes
+on a 15k-face work mesh — rounding levers cap out; the ranked fix is
+fold repair / locally-injective substrate, not quantization.
+
+**Lever 2 — QGP boundary arcs, landed opt-in (`CYBER_QC_BIMDF_BARC=1`),
+default OFF by measurement.** Boundary loops decompose into boundary arc
+chains; separatrices landing on the boundary terminate at T-nodes (all
+three ends anchor in the hit face — no seam transport needed); boundary
+arcs carry min-one floors, UV-polyline relaxed lengths, no symbolic
+expression (`Arc::noExpr` — the free boundary is not grid-aligned), and
+enter their single patch side. Two designs measured and falsified:
+- VARIABLE boundary arcs (paper semantics) paired through a balance-free
+  cover hub produced BIT-IDENTICAL assignments to fixed constants on
+  bunny@3000 (the deviation optimum keeps boundary arcs at their rounded
+  lengths) while adding the copy-crossing structure round 3 measured to
+  go half-integral — boundary arcs therefore enter as FIXED constants
+  (the round-3 one-sided machinery); interior arcs of boundary patches
+  stay variables tied through side consistency. The floors solve's
+  halfIntegral 0 → 12 / sideViolation 5 on bunny arises from the
+  boundary PATCH structure itself under either encoding; the floors-off
+  steering solve stays integral (half=0).
+- Boundary termination as DEFAULT: bunny@3000 mixed coverage rises
+  441/471 → 457/485 (failedRays 12 → 3; pure arm 223/364, failedRays
+  42 → 15) but the recovered boundary regions reshape the T-mesh and its
+  flow globally and the guided flagship regresses across the whole mu
+  basin — ears 19 → 37/33/31 at mu 0.75/1.0/1.25, sing 94 → 115-129,
+  with the boundary-adjacent steer rows excluded it is STILL 33 —
+  round-3's containment of boundary neighborhoods is load-bearing for
+  the round-4 win. Default off keeps byte-identical behavior (verified:
+  bunny mixed guided ears 19 / sing 94, deterministic run-to-run).
+
+**Gates**: ctest 14/14; bench check green off/report/guided; off vs
+report hash-SAME 22/22 (corpus + spot@3000 + nefertiti@4000/8000 +
+armadillo@4000/8000 + bunny@3000, both arms, mtllib-normalized);
+flag-off byte-exact vs the main-branch binary (spot pure, box_sharp@600
+pure, nefertiti@4000 mixed, bunny mixed); CAD sweep spot-check under
+guided 31/32 unchanged (the 1 diff = the round-3-documented
+box_sharp@400 pure exact injection, identical numbers); box_sharp exact
+injection byte-identical. sphere@4000 pure guided differs from greedy
+(sing 39 → 56, quads +33%) — verified BIT-IDENTICAL on the round-4
+binary, i.e. pre-existing opt-in behavior outside the tracked cells,
+not this round's change. Default flip NOT proposed (unchanged
+evidence: wins organic-scoped and opt-in; nefertiti gate unmet).
+
+Ranked next: (a) fold repair on the quarter-density pure substrate
+(locally-injective relaxed map / QGP §7.1 re-linearization) — now THE
+blocker for the nefertiti pure gate with the tracer wall gone; (b)
+boundary-region flow quality (make BARC default-viable: why do the
+recovered regions steer the global solution off the greedy optimum);
+(c) crease-aware attraction (unchanged).
+
 ## Update — 2026-08-02 (CAD density robustness: the sweep's 🔴 failures are FIXED; 32/32 gate cells clean)
 
 The two density-dependent robustness bugs the CAD sweep below exposed are fixed
