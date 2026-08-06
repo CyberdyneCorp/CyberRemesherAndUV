@@ -14,3 +14,7 @@ examples/reference/autoremesher-src/
 examples/reference/scipp-src/
 .claude/worktrees/
 dist/
+
+# Example byproducts: meshes written next to the committed figures.
+examples/output/*.obj
+examples/output/*.mtl

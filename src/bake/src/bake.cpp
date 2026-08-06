@@ -565,6 +565,21 @@ BakeResult bake(const Mesh& lowPoly, const Mesh& highPoly, BakeMap map, const Ba
         rasterize(lowPoly, lowNormals, *uvs, params.width, params.height);
     result.texelsCovered = texels.size();
     result.image = makeImage(params.width, params.height, channelsFor(map));
+    if (map == BakeMap::Normal) {
+        // Uncovered texels must carry the FLAT tangent normal, not zero. Black
+        // is not a normal: it bleeds garbage into the surface under dilation or
+        // mip generation, and a DirectX preset's green flip turns (0,0,0) into
+        // pure green (0,1,0), so the same bake shipped two different paddings
+        // depending on the target app. (0.5,0.5,1) is what a missed cage ray
+        // already writes, and it is invariant under the green flip.
+        for (int y = 0; y < result.image.height; ++y) {
+            for (int x = 0; x < result.image.width; ++x) {
+                result.image.at(x, y, 0) = 0.5f;
+                result.image.at(x, y, 1) = 0.5f;
+                result.image.at(x, y, 2) = 1.0f;
+            }
+        }
+    }
 
     if (useField) {
         shadeFromField(result, texels, *params.field, map, params, cancel);

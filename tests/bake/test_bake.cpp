@@ -84,6 +84,27 @@ TEST_CASE("normal bake of coincident flat surfaces is tangent-space up") {
     REQUIRE(center(r.image, 2) == doctest::Approx(1.0f).epsilon(0.02));
 }
 
+TEST_CASE("normal-map padding is the flat normal, and survives a DirectX green flip") {
+    // Regression: uncovered texels were left at (0,0,0). Black is not a normal
+    // — it bleeds into the surface under dilation/mips — and the unreal export
+    // preset's green flip turned it into pure green (0,1,0), so one bake shipped
+    // two different paddings depending on the target app. The flat normal is
+    // invariant under the flip, which is the property that makes it correct.
+    const Mesh low = makePlane(0, 0, 0.5f, 0, 0.5f, /*uv=*/true, false);  // covers a UV corner only
+    const Mesh high = makePlane(0, 0, 0.5f, 0, 0.5f, false, false);
+    const bake::BakeResult r = bake::bake(low, high, bake::BakeMap::Normal, params32());
+    REQUIRE_FALSE(r.image.pixels.empty());
+
+    // A texel far outside the layout is padding.
+    const int px = r.image.width - 1;
+    const int py = 0;
+    CHECK(r.image.at(px, py, 0) == doctest::Approx(0.5f));
+    CHECK(r.image.at(px, py, 1) == doctest::Approx(0.5f));
+    CHECK(r.image.at(px, py, 2) == doctest::Approx(1.0f));
+    // g -> 1 - g leaves it unchanged, so both conventions ship the same padding.
+    CHECK(1.0f - r.image.at(px, py, 1) == doctest::Approx(r.image.at(px, py, 1)));
+}
+
 TEST_CASE("displacement bake measures height of the target above the surface") {
     const Mesh low = makePlane(0.0f, 0, 1, 0, 1, true, false);
     const Mesh high = makePlane(0.05f, 0, 1, 0, 1, false, false);  // 0.05 above, within the cage
