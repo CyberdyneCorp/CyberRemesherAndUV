@@ -33,6 +33,52 @@ Mesh makeTriMesh() {
     return Mesh::fromIndexed(positions, faces);
 }
 
+// ---- little-endian probes into a saved document container ------------------
+
+std::uint32_t readU32(const std::vector<std::uint8_t>& bytes, std::size_t at) {
+    return static_cast<std::uint32_t>(bytes[at]) |
+           (static_cast<std::uint32_t>(bytes[at + 1]) << 8) |
+           (static_cast<std::uint32_t>(bytes[at + 2]) << 16) |
+           (static_cast<std::uint32_t>(bytes[at + 3]) << 24);
+}
+
+void writeU32(std::vector<std::uint8_t>& bytes, std::size_t at, std::uint32_t value) {
+    for (std::size_t i = 0; i < 4; ++i) {
+        bytes[at + i] = static_cast<std::uint8_t>((value >> (i * 8)) & 0xFFu);
+    }
+}
+
+std::uint64_t readU64(const std::vector<std::uint8_t>& bytes, std::size_t at) {
+    std::uint64_t v = 0;
+    for (std::size_t i = 0; i < 8; ++i) {
+        v |= static_cast<std::uint64_t>(bytes[at + i]) << (i * 8);
+    }
+    return v;
+}
+
+// Section ids in write order (header is magic + version + section count).
+std::vector<std::uint32_t> sectionIds(const std::vector<std::uint8_t>& bytes) {
+    std::vector<std::uint32_t> ids;
+    std::size_t at = 12;
+    for (std::uint32_t i = 0; i < readU32(bytes, 8); ++i) {
+        ids.push_back(readU32(bytes, at));
+        at += 12 + static_cast<std::size_t>(readU64(bytes, at + 4));
+    }
+    return ids;
+}
+
+// Byte offset of the section header with `id`, or bytes.size() if absent.
+std::size_t sectionOffset(const std::vector<std::uint8_t>& bytes, std::uint32_t id) {
+    std::size_t at = 12;
+    for (std::uint32_t i = 0; i < readU32(bytes, 8); ++i) {
+        if (readU32(bytes, at) == id) {
+            return at;
+        }
+        at += 12 + static_cast<std::size_t>(readU64(bytes, at + 4));
+    }
+    return bytes.size();
+}
+
 // A command that adds a delta to a shared counter with a configurable memory
 // cost, used to exercise the budgeted journal.
 struct AddValueCommand : app::Command {
@@ -71,6 +117,83 @@ TEST_CASE("document save/load round-trip is equal") {
     const auto loaded = app::Document::load(buffer);
     REQUIRE(loaded.has_value());
     CHECK(*loaded == doc);
+}
+
+// ---- named soft-selection slots (add-soft-selection, task 2) ---------------
+
+TEST_CASE("named soft selections round-trip through the document") {
+    app::Document doc;
+    doc.editMesh = makeQuadMesh();
+    doc.softSelections["taper"] = {0.0f, 0.25f, 0.5f, 1.0f};
+    doc.softSelections["arm"] = {1.0f, 1.0f};
+
+    const std::vector<std::uint8_t> buffer = doc.save();
+    const auto loaded = app::Document::load(buffer);
+    REQUIRE(loaded.has_value());
+    CHECK(*loaded == doc);
+    REQUIRE(loaded->softSelections.size() == 2);
+    CHECK(loaded->softSelections.at("taper") == doc.softSelections.at("taper"));
+    CHECK(loaded->softSelections.at("arm") == doc.softSelections.at("arm"));
+}
+
+// The slot section is append-only: it is emitted only when slots exist, so a
+// document without them keeps the exact byte layout earlier builds wrote —
+// four sections, ids 1..4, format version unchanged.
+TEST_CASE("a document without slots keeps the pre-change byte layout") {
+    app::Document doc;
+    doc.target = makeTriMesh();
+    doc.editMesh = makeQuadMesh();
+    REQUIRE(doc.softSelections.empty());
+
+    const std::vector<std::uint8_t> buffer = doc.save();
+    const std::vector<std::uint32_t> ids = sectionIds(buffer);
+    CHECK(readU32(buffer, 4) == app::Document::kFormatVersion);
+    CHECK(readU32(buffer, 8) == 4u);
+    CHECK(ids == std::vector<std::uint32_t>{1u, 2u, 3u, 4u});
+
+    doc.softSelections["taper"] = {0.5f};
+    const std::vector<std::uint8_t> withSlots = doc.save();
+    CHECK(readU32(withSlots, 4) == app::Document::kFormatVersion);
+    CHECK(readU32(withSlots, 8) == 5u);
+    CHECK(sectionIds(withSlots) == std::vector<std::uint32_t>{1u, 2u, 3u, 4u, 5u});
+}
+
+// An OLDER binary sees the slot section as an unknown id and must skip it by
+// its length prefix rather than fail the load. Rewriting the id to one no
+// build knows reproduces exactly that reader.
+TEST_CASE("an unknown trailing section is skipped and the rest still loads") {
+    app::Document doc;
+    doc.target = makeTriMesh();
+    doc.editMesh = makeQuadMesh();
+    doc.params.targetQuadCount = 999;
+    doc.bake.bakeRevision = 7;
+    doc.softSelections["taper"] = {0.0f, 1.0f};
+
+    std::vector<std::uint8_t> buffer = doc.save();
+    const std::size_t offset = sectionOffset(buffer, 5u);
+    REQUIRE(offset != buffer.size());
+    writeU32(buffer, offset, 0xFEEDu);  // an id no reader knows
+
+    const auto loaded = app::Document::load(buffer);
+    REQUIRE(loaded.has_value());
+    CHECK(loaded->softSelections.empty());
+    CHECK(loaded->params.targetQuadCount == 999);
+    CHECK(loaded->bake.bakeRevision == 7);
+    CHECK(loaded->editMesh.faceCount() == doc.editMesh.faceCount());
+}
+
+TEST_CASE("document load rejects an absurd soft-selection weight count") {
+    app::Document doc;
+    doc.editMesh = makeQuadMesh();
+    doc.softSelections["taper"] = {0.0f, 1.0f};
+
+    std::vector<std::uint8_t> buffer = doc.save();
+    const std::size_t offset = sectionOffset(buffer, 5u);
+    REQUIRE(offset != buffer.size());
+    // payload = [slotCount u32][name len u32]["taper"][weightCount u32]...
+    const std::size_t weightCount = offset + 12u + 4u + 4u + 5u;
+    writeU32(buffer, weightCount, 0xFFFFFFFFu);
+    CHECK_FALSE(app::Document::load(buffer).has_value());
 }
 
 TEST_CASE("document load rejects a bad magic and truncation") {

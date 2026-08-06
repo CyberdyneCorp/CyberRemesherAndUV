@@ -7,6 +7,31 @@
 
 ### Added
 
+- **Soft selection for manual retopology** (openspec change
+  `add-soft-selection`): a per-vertex weight field in [0,1] over the EditMesh,
+  filled from three region sources — a **line gradient** (0 at the anchor, 1 at
+  the end and 1 beyond it, with optional 15° angle snapping measured in the
+  view plane), a **sphere** with an easing falloff, and **painted strokes**
+  (pressure-accumulating, with a subtract mode and a one-call gesture route) —
+  reshaped by clear / invert / expand / contract / smooth, and consumed by a
+  **weighted transform** (translate, rotate, scale scaled per vertex by the
+  weight) and a **weighted relax**.
+
+  **Auto re-snap is part of the operation, not a cleanup pass.** The weighted
+  transform and relax re-project the vertices they move onto the Target inside
+  the same pass, so a taper or a pose never peels the retopo off the sculpt and
+  no `snap_all` follow-up is needed — running one would also drag the vertices
+  the selection deliberately left alone. Vertices at weight 0 (and pinned
+  vertices) are skipped entirely, so they are bit-identical afterwards.
+
+  Reachable from the C ABI (`cyber_retopo_selection_*`, including the
+  x/y/z/pressure stroke route), Python (`Mesh.select_line`, `paint_selection`,
+  `transform_selection`, the new `Snapper` wrapper, …) and the Swift package.
+  Named selection slots persist in `cyber::app::Document` through an
+  **append-only** section that is written only when slots exist, so documents
+  saved by earlier builds still load and documents without slots keep the exact
+  previous byte layout (`kFormatVersion` deliberately unchanged).
+
 - **Global integer quantization for the seamless solve** (openspec change
   `bimdf-quantization`, now archived). The quad-cover path's per-seam greedy
   integer rounding gains an alternative backend: a motorcycle-graph / T-mesh

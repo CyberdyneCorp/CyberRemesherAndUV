@@ -19,10 +19,13 @@ from .api import (
     BakeMap,
     BakeParams,
     CyberError,
+    Falloff,
     HAVE_NUMPY,
     Image,
     Mesh,
     RemeshParams,
+    Snapper,
+    SoftTransformReport,
     Statistics,
     bake,
     is_available,
@@ -45,5 +48,8 @@ __all__ = [
     "bake",
     "AtlasParams",
     "AtlasResult",
+    "Falloff",
+    "Snapper",
+    "SoftTransformReport",
 ]
 __version__ = "0.5.0"

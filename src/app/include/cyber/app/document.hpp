@@ -2,8 +2,10 @@
 
 #include <cstdint>
 #include <functional>
+#include <map>
 #include <optional>
 #include <span>
+#include <string>
 #include <vector>
 
 #include "cyber/app/serial.hpp"
@@ -17,6 +19,13 @@
 // container (magic + version + length-prefixed sections) so unknown future
 // sections are skipped rather than corrupting the load, and it carries a dirty
 // flag driving the autosave hook.
+//
+// The section list is APPEND-ONLY: a new section takes the next unused id and is
+// written only when it carries data, so a document without it is byte-identical
+// to what the previous build wrote and older binaries (which skip unknown ids by
+// their length prefix) keep loading new files. That is also why kFormatVersion
+// does NOT move for an added section — `load` rejects version > kFormatVersion,
+// so bumping it would make older binaries refuse files they can in fact read.
 namespace cyber::app {
 
 // Persisted in the document byte container, so values are append-only: an
@@ -56,6 +65,16 @@ public:
     Mesh editMesh;
     remesh::Parameters params;
     BakeState bake;
+
+    // Named soft-selection slots (manual-retopology spec, "Selection
+    // operations"): the raw per-vertex weight field of a
+    // retopo::SoftSelection over the EditMesh, keyed by the slot name the
+    // user saved it under. Ordered so serialization is deterministic. Stored
+    // as plain floats to keep the app layer's dependency on the mesh kernel
+    // alone. Weights are indexed by EditMesh vertex id, so a command that
+    // reassigns ids (subdivide) invalidates the slots along with every other
+    // id-keyed annotation.
+    std::map<std::string, std::vector<float>> softSelections;
 
     // ---- serialization (task 8.1) -------------------------------------
     [[nodiscard]] std::vector<std::uint8_t> save() const;

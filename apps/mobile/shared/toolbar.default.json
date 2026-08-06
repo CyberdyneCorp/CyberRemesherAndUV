@@ -58,6 +58,14 @@
       "androidIcon": "ic_action_cage",
       "stages": ["baking"],
       "command": "tool.cage"
+    },
+    {
+      "id": "soft-selection",
+      "title": "Soft Selection",
+      "systemImage": "circle.dotted",
+      "androidIcon": "ic_action_soft_selection",
+      "stages": ["retopology"],
+      "command": "tool.softSelection"
     }
   ]
 }

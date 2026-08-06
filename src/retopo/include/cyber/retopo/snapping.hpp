@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <optional>
 #include <vector>
 
@@ -42,6 +43,16 @@ struct SurfaceHit {
     Vec3 point;
     FaceId face;
     float distanceSquared = 0.0f;
+};
+
+// Accounting for the ops that move vertices and re-project them onto the Target
+// in the SAME pass (weighted transform, weighted relax): how many vertices the
+// op wrote, how many of those the re-projection pulled back by more than the
+// caller's epsilon, and the largest such correction.
+struct ResnapReport {
+    std::size_t moved = 0;
+    std::size_t resnapped = 0;
+    float maxSnapDistance = 0.0f;
 };
 
 // Result of the vertex-snap modifier.

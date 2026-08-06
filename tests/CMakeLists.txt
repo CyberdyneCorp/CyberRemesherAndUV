@@ -66,7 +66,8 @@ if(TARGET cyber_exportbundle)
     target_link_libraries(cyber_tests PRIVATE cyber_exportbundle)
 endif()
 if(TARGET cyber_retopo)
-    target_sources(cyber_tests PRIVATE retopo/test_retopo.cpp retopo/test_retopo_advanced.cpp)
+    target_sources(cyber_tests PRIVATE retopo/test_retopo.cpp retopo/test_retopo_advanced.cpp
+                                        retopo/test_soft_selection.cpp)
     target_link_libraries(cyber_tests PRIVATE cyber_retopo)
 endif()
 if(TARGET cyber_bakecage)
@@ -142,7 +143,7 @@ if(TARGET cyber_capi_shared AND Python3_FOUND)
     endif()
     foreach(_pyt test_api test_golden test_document_invariants test_bake test_uv_atlas
                  test_hole_fill_policy test_open_surface_cleanup
-                 test_cad_density_robustness)
+                 test_cad_density_robustness test_soft_selection)
         add_test(NAME python_${_pyt}
             COMMAND ${Python3_EXECUTABLE} ${_pydir}/${_pyt}.py)
         set_tests_properties(python_${_pyt} PROPERTIES

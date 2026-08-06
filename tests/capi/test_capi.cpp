@@ -4,6 +4,7 @@
 // that the progress callback fired.
 #include <doctest.h>
 
+#include <cmath>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
@@ -174,4 +175,151 @@ TEST_CASE("capi bakes a normal map onto a UV plane") {
     std::error_code ec;
     std::filesystem::remove(objPath, ec);
     std::filesystem::remove(pngPath, ec);
+}
+
+// ---- soft selection over the C ABI ----------------------------------------
+
+namespace {
+
+// A cols x rows lattice in the plane z = `z`, spanning x in [0, cols-1] and
+// y in [0, rows-1], laid out row-major for cyber_retopo_create_grid.
+std::vector<float> gridLattice(int cols, int rows, float z) {
+    std::vector<float> pts;
+    for (int j = 0; j < rows; ++j) {
+        for (int i = 0; i < cols; ++i) {
+            pts.push_back(static_cast<float>(i));
+            pts.push_back(static_cast<float>(j));
+            pts.push_back(z);
+        }
+    }
+    return pts;
+}
+
+CyberMesh* makeGridMesh(int cols, int rows, float z) {
+    CyberMesh* mesh = cyber_mesh_create();
+    REQUIRE(mesh != nullptr);
+    const std::vector<float> pts = gridLattice(cols, rows, z);
+    size_t faces = 0;
+    REQUIRE(cyber_retopo_create_grid(mesh, pts.data(), static_cast<size_t>(rows - 1),
+                                     static_cast<size_t>(cols - 1), nullptr, &faces) == CYBER_OK);
+    REQUIRE(faces == static_cast<size_t>((rows - 1) * (cols - 1)));
+    return mesh;
+}
+
+std::vector<float> positionsOf(const CyberMesh* mesh) {
+    std::vector<float> out(cyber_mesh_copy_positions(mesh, nullptr, 0));
+    cyber_mesh_copy_positions(mesh, out.data(), out.size());
+    return out;
+}
+
+}  // namespace
+
+TEST_CASE("capi soft selection: line select, smooth, weighted transform with glue") {
+    CyberMesh* target = makeGridMesh(9, 9, 0.0f);
+    CyberSnapper* snapper = nullptr;
+    REQUIRE(cyber_snapper_create(target, &snapper) == CYBER_OK);
+    REQUIRE(snapper != nullptr);
+
+    // EditMesh floating above the Target: a stray re-snap would be obvious.
+    CyberMesh* edit = makeGridMesh(9, 9, 0.3f);
+    const std::vector<float> before = positionsOf(edit);
+
+    const float anchor[3] = {4.0f, 0.0f, 0.0f};
+    const float end[3] = {8.0f, 0.0f, 0.0f};
+    const float viewDir[3] = {0.0f, 0.0f, 1.0f};
+    REQUIRE(cyber_retopo_selection_line(edit, anchor, end, viewDir, 1, 15.0f,
+                                        CYBER_FALLOFF_LINEAR) == CYBER_OK);
+
+    const size_t weightCount = cyber_retopo_selection_copy_weights(edit, nullptr, 0);
+    REQUIRE(weightCount == cyber_mesh_vertex_count(edit));
+    std::vector<float> weights(weightCount);
+    REQUIRE(cyber_retopo_selection_copy_weights(edit, weights.data(), weights.size()) ==
+            weightCount);
+    for (const float w : weights) {
+        REQUIRE(w >= 0.0f);
+        REQUIRE(w <= 1.0f);
+    }
+
+    // Saving and reloading the slot round-trips the field exactly.
+    REQUIRE(cyber_retopo_selection_save(edit, "taper") == CYBER_OK);
+    REQUIRE(cyber_retopo_selection_slot_count(edit) == 1u);
+    REQUIRE(std::string(cyber_retopo_selection_slot_name(edit, 0)) == "taper");
+    REQUIRE(cyber_retopo_selection_load(edit, "nope") == CYBER_ERR_INVALID_ARG);
+
+    REQUIRE(cyber_retopo_selection_smooth(edit, 5) == CYBER_OK);
+    std::vector<float> smoothed(weightCount);
+    cyber_retopo_selection_copy_weights(edit, smoothed.data(), smoothed.size());
+    bool softened = false;
+    for (size_t i = 0; i < weightCount; ++i) {
+        softened = softened || smoothed[i] != weights[i];
+    }
+    REQUIRE(softened);
+
+    REQUIRE(cyber_retopo_selection_load(edit, "taper") == CYBER_OK);
+    std::vector<float> restored(weightCount);
+    cyber_retopo_selection_copy_weights(edit, restored.data(), restored.size());
+    REQUIRE(restored == weights);
+
+    // Weighted translate straight down onto the Target plane.
+    const float xf[12] = {1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, -0.3f};
+    CyberSoftTransformReport report{};
+    REQUIRE(cyber_retopo_selection_transform(edit, xf, snapper, 0.0f, &report) == CYBER_OK);
+    REQUIRE(report.moved > 0u);
+
+    const std::vector<float> after = positionsOf(edit);
+    REQUIRE(after.size() == before.size());
+    size_t movedSeen = 0;
+    for (size_t v = 0; v < weightCount; ++v) {
+        const bool same = after[v * 3 + 0] == before[v * 3 + 0] &&
+                          after[v * 3 + 1] == before[v * 3 + 1] &&
+                          after[v * 3 + 2] == before[v * 3 + 2];
+        if (weights[v] <= 0.0f) {
+            REQUIRE(same);  // zero weight -> bit-identical, never re-snapped
+        } else {
+            ++movedSeen;
+            // Glued to the Target plane by the transform itself.
+            REQUIRE(std::fabs(after[v * 3 + 2]) < 1e-5f);
+        }
+    }
+    REQUIRE(movedSeen == report.moved);
+
+    cyber_snapper_free(snapper);
+    cyber_mesh_free(edit);
+    cyber_mesh_free(target);
+}
+
+TEST_CASE("capi soft selection: paint stroke accumulates and clear zeroes the field") {
+    CyberMesh* edit = makeGridMesh(9, 3, 0.0f);
+    const float centre[3] = {4.0f, 1.0f, 0.0f};
+    REQUIRE(cyber_retopo_selection_paint(edit, centre, 2.5f, 0.5f, 0, CYBER_FALLOFF_SMOOTH) ==
+            CYBER_OK);
+    const size_t n = cyber_retopo_selection_copy_weights(edit, nullptr, 0);
+    std::vector<float> once(n);
+    cyber_retopo_selection_copy_weights(edit, once.data(), once.size());
+
+    const float stroke[8] = {3.0f, 1.0f, 0.0f, 0.5f, 5.0f, 1.0f, 0.0f, 0.5f};
+    REQUIRE(cyber_retopo_selection_paint_stroke(edit, stroke, 2, 2.5f, 0, CYBER_FALLOFF_SMOOTH) ==
+            CYBER_OK);
+    std::vector<float> accumulated(n);
+    cyber_retopo_selection_copy_weights(edit, accumulated.data(), accumulated.size());
+    bool grew = false;
+    for (size_t i = 0; i < n; ++i) {
+        REQUIRE(accumulated[i] >= once[i]);
+        REQUIRE(accumulated[i] <= 1.0f);
+        grew = grew || accumulated[i] > once[i];
+    }
+    REQUIRE(grew);
+
+    REQUIRE(cyber_retopo_selection_clear(edit) == CYBER_OK);
+    std::vector<float> cleared(n);
+    cyber_retopo_selection_copy_weights(edit, cleared.data(), cleared.size());
+    for (const float w : cleared) {
+        REQUIRE(w == 0.0f);
+    }
+
+    REQUIRE(cyber_retopo_selection_line(nullptr, centre, centre, centre, 0, 15.0f,
+                                        CYBER_FALLOFF_LINEAR) == CYBER_ERR_INVALID_ARG);
+    REQUIRE(cyber_retopo_selection_sphere(edit, centre, 0.0f, CYBER_FALLOFF_LINEAR) ==
+            CYBER_ERR_INVALID_ARG);
+    cyber_mesh_free(edit);
 }

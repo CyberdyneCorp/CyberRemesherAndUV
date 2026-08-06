@@ -12,8 +12,11 @@
 #include <cstdint>
 #include <exception>
 #include <filesystem>
+#include <iterator>
+#include <map>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <unordered_set>
@@ -43,6 +46,7 @@
 #include "cyber/retopo/pins.hpp"
 #include "cyber/retopo/relax.hpp"
 #include "cyber/retopo/snapping.hpp"
+#include "cyber/retopo/soft_selection.hpp"
 #include "cyber/retopo/stroke_interpreter.hpp"
 #include "cyber/retopo/symmetry.hpp"
 #include "cyber/retopo/tweak.hpp"
@@ -91,6 +95,11 @@ struct CyberMesh {
     std::optional<cyber::remesh::Statistics> stats;
     std::unordered_set<std::uint32_t> hiddenFaces;
     std::vector<std::uint32_t> taggedEdges;
+    // Soft-selection weight field plus the named slots saved from it. Both are
+    // keyed on vertex ids, so they are dropped wherever the other id-keyed
+    // handle state is (see the ELEMENT-ID STABILITY note in cyber_capi.h).
+    cyber::retopo::SoftSelection selection;
+    std::map<std::string, std::vector<float>> selectionSlots;
     mutable CyberRenderCache render;  // lazy; see ensureRenderCache
 };
 
@@ -2210,9 +2219,12 @@ CyberStatus cyber_retopo_subdivide(CyberMesh* mesh, const CyberSnapper* snapper,
             }
         }
         // Every id was reassigned: the handle's id-keyed overlay state is
-        // meaningless now and would mis-hide/mis-tag unrelated elements.
+        // meaningless now and would mis-hide/mis-tag unrelated elements, and
+        // the soft-selection weights would land on unrelated vertices.
         mesh->hiddenFaces.clear();
         mesh->taggedEdges.clear();
+        mesh->selection = cyber::retopo::SoftSelection{};
+        mesh->selectionSlots.clear();
         if (out_faces != nullptr) {
             *out_faces = mesh->mesh.faceCount();
         }
@@ -2234,6 +2246,265 @@ CyberStatus cyber_retopo_triangulate(CyberMesh* mesh, size_t* out_faces) {
         if (out_faces != nullptr) {
             *out_faces = mesh->mesh.faceCount();
         }
+        return CYBER_OK;
+    });
+}
+
+// ---- soft selection --------------------------------------------------------
+
+namespace {
+
+cyber::retopo::Falloff toFalloff(CyberFalloff falloff) {
+    switch (falloff) {
+        case CYBER_FALLOFF_LINEAR:
+            return cyber::retopo::Falloff::Linear;
+        case CYBER_FALLOFF_SHARP:
+            return cyber::retopo::Falloff::Sharp;
+        case CYBER_FALLOFF_ROUND:
+            return cyber::retopo::Falloff::Round;
+        case CYBER_FALLOFF_SMOOTH:
+            break;
+    }
+    return cyber::retopo::Falloff::Smooth;
+}
+
+// Prologue/epilogue for the selection-only ops. Same argument checks and
+// exception containment as runMeshEdit, but deliberately WITHOUT render-cache
+// invalidation: these ops touch weights, never geometry, so forcing a render
+// re-upload per paint sample would be pure cost.
+template <typename Body>
+CyberStatus runSelectionOp(CyberMesh* mesh, const char* name, Body body) {
+    if (mesh == nullptr) {
+        setError(std::string(name) + ": null mesh");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    try {
+        const CyberStatus status = body();
+        if (status == CYBER_OK) {
+            clearError();
+        }
+        return status;
+    } catch (const std::exception& e) {
+        setError(std::string(name) + ": " + e.what());
+        return CYBER_ERR_RUNTIME;
+    } catch (...) {
+        setError(std::string(name) + ": unknown error");
+        return CYBER_ERR_RUNTIME;
+    }
+}
+
+void fillReport(CyberSoftTransformReport* out, const cyber::retopo::ResnapReport& report) {
+    if (out != nullptr) {
+        out->moved = report.moved;
+        out->resnapped = report.resnapped;
+        out->max_snap_distance = report.maxSnapDistance;
+    }
+}
+
+}  // namespace
+
+CyberStatus cyber_retopo_selection_line(CyberMesh* mesh, const float anchor[3], const float end[3],
+                                        const float view_dir[3], int snap_angle, float snap_degrees,
+                                        CyberFalloff falloff) {
+    return runSelectionOp(mesh, "cyber_retopo_selection_line", [&] {
+        if (anchor == nullptr || end == nullptr || view_dir == nullptr) {
+            setError("cyber_retopo_selection_line: null anchor, end or view direction");
+            return CYBER_ERR_INVALID_ARG;
+        }
+        cyber::retopo::LineRegion region;
+        region.anchor = toVec3(anchor);
+        region.end = toVec3(end);
+        region.viewDir = toVec3(view_dir);
+        region.snapAngle = snap_angle != 0;
+        region.snapDegrees = snap_degrees;
+        region.falloff = toFalloff(falloff);
+        if (cyber::lengthSquared(region.end - region.anchor) <= 0.0f) {
+            setError("cyber_retopo_selection_line: degenerate line");
+            return CYBER_ERR_INVALID_ARG;
+        }
+        cyber::retopo::selectLine(mesh->mesh, mesh->selection, region);
+        return CYBER_OK;
+    });
+}
+
+CyberStatus cyber_retopo_selection_sphere(CyberMesh* mesh, const float center[3], float radius,
+                                          CyberFalloff falloff) {
+    return runSelectionOp(mesh, "cyber_retopo_selection_sphere", [&] {
+        if (center == nullptr || radius <= 0.0f) {
+            setError("cyber_retopo_selection_sphere: null center or radius <= 0");
+            return CYBER_ERR_INVALID_ARG;
+        }
+        cyber::retopo::SphereRegion region;
+        region.center = toVec3(center);
+        region.radius = radius;
+        region.falloff = toFalloff(falloff);
+        cyber::retopo::selectSphere(mesh->mesh, mesh->selection, region);
+        return CYBER_OK;
+    });
+}
+
+CyberStatus cyber_retopo_selection_paint(CyberMesh* mesh, const float center[3], float radius,
+                                         float pressure, int subtract, CyberFalloff falloff) {
+    return runSelectionOp(mesh, "cyber_retopo_selection_paint", [&] {
+        if (center == nullptr || radius <= 0.0f) {
+            setError("cyber_retopo_selection_paint: null center or radius <= 0");
+            return CYBER_ERR_INVALID_ARG;
+        }
+        const cyber::retopo::PaintBrush brush{radius, subtract != 0, toFalloff(falloff)};
+        cyber::retopo::paintSelection(mesh->mesh, mesh->selection, {toVec3(center), pressure},
+                                      brush);
+        return CYBER_OK;
+    });
+}
+
+CyberStatus cyber_retopo_selection_paint_stroke(CyberMesh* mesh, const float* samples_xyzp,
+                                                size_t sample_count, float radius, int subtract,
+                                                CyberFalloff falloff) {
+    return runSelectionOp(mesh, "cyber_retopo_selection_paint_stroke", [&] {
+        if (samples_xyzp == nullptr || sample_count == 0 || radius <= 0.0f) {
+            setError("cyber_retopo_selection_paint_stroke: empty stroke or radius <= 0");
+            return CYBER_ERR_INVALID_ARG;
+        }
+        std::vector<cyber::retopo::PaintDab> dabs;
+        dabs.reserve(sample_count);
+        for (size_t i = 0; i < sample_count; ++i) {
+            const float* s = samples_xyzp + i * 4;
+            dabs.push_back({cyber::Vec3{s[0], s[1], s[2]}, s[3]});
+        }
+        const cyber::retopo::PaintBrush brush{radius, subtract != 0, toFalloff(falloff)};
+        cyber::retopo::paintSelectionStroke(mesh->mesh, mesh->selection, dabs, brush);
+        return CYBER_OK;
+    });
+}
+
+CyberStatus cyber_retopo_selection_clear(CyberMesh* mesh) {
+    return runSelectionOp(mesh, "cyber_retopo_selection_clear", [&] {
+        cyber::retopo::clearSelection(mesh->selection);
+        return CYBER_OK;
+    });
+}
+
+CyberStatus cyber_retopo_selection_invert(CyberMesh* mesh) {
+    return runSelectionOp(mesh, "cyber_retopo_selection_invert", [&] {
+        cyber::retopo::invertSelection(mesh->mesh, mesh->selection);
+        return CYBER_OK;
+    });
+}
+
+CyberStatus cyber_retopo_selection_expand(CyberMesh* mesh, int steps) {
+    return runSelectionOp(mesh, "cyber_retopo_selection_expand", [&] {
+        cyber::retopo::expandSelection(mesh->mesh, mesh->selection, steps);
+        return CYBER_OK;
+    });
+}
+
+CyberStatus cyber_retopo_selection_contract(CyberMesh* mesh, int steps) {
+    return runSelectionOp(mesh, "cyber_retopo_selection_contract", [&] {
+        cyber::retopo::contractSelection(mesh->mesh, mesh->selection, steps);
+        return CYBER_OK;
+    });
+}
+
+CyberStatus cyber_retopo_selection_smooth(CyberMesh* mesh, int steps) {
+    return runSelectionOp(mesh, "cyber_retopo_selection_smooth", [&] {
+        cyber::retopo::smoothSelection(mesh->mesh, mesh->selection, steps);
+        return CYBER_OK;
+    });
+}
+
+size_t cyber_retopo_selection_copy_weights(const CyberMesh* mesh, float* out, size_t capacity) {
+    if (mesh == nullptr) {
+        return 0;
+    }
+    const std::span<const float> weights = mesh->selection.weights();
+    if (out != nullptr) {
+        const size_t n = std::min(capacity, weights.size());
+        std::copy(weights.begin(), weights.begin() + static_cast<std::ptrdiff_t>(n), out);
+    }
+    return weights.size();
+}
+
+CyberStatus cyber_retopo_selection_set_weights(CyberMesh* mesh, const float* weights,
+                                               size_t count) {
+    return runSelectionOp(mesh, "cyber_retopo_selection_set_weights", [&] {
+        if (weights == nullptr && count != 0) {
+            setError("cyber_retopo_selection_set_weights: null weights");
+            return CYBER_ERR_INVALID_ARG;
+        }
+        mesh->selection.fromWeights({weights, count});
+        return CYBER_OK;
+    });
+}
+
+CyberStatus cyber_retopo_selection_save(CyberMesh* mesh, const char* name) {
+    return runSelectionOp(mesh, "cyber_retopo_selection_save", [&] {
+        if (name == nullptr || *name == '\0') {
+            setError("cyber_retopo_selection_save: empty slot name");
+            return CYBER_ERR_INVALID_ARG;
+        }
+        const std::span<const float> weights = mesh->selection.weights();
+        mesh->selectionSlots[name] = std::vector<float>(weights.begin(), weights.end());
+        return CYBER_OK;
+    });
+}
+
+CyberStatus cyber_retopo_selection_load(CyberMesh* mesh, const char* name) {
+    return runSelectionOp(mesh, "cyber_retopo_selection_load", [&] {
+        if (name == nullptr || *name == '\0') {
+            setError("cyber_retopo_selection_load: empty slot name");
+            return CYBER_ERR_INVALID_ARG;
+        }
+        const auto it = mesh->selectionSlots.find(name);
+        if (it == mesh->selectionSlots.end()) {
+            setError(std::string("cyber_retopo_selection_load: unknown slot '") + name + "'");
+            return CYBER_ERR_INVALID_ARG;
+        }
+        mesh->selection.fromWeights(it->second);
+        return CYBER_OK;
+    });
+}
+
+size_t cyber_retopo_selection_slot_count(const CyberMesh* mesh) {
+    return mesh == nullptr ? 0 : mesh->selectionSlots.size();
+}
+
+const char* cyber_retopo_selection_slot_name(const CyberMesh* mesh, size_t index) {
+    if (mesh == nullptr || index >= mesh->selectionSlots.size()) {
+        return nullptr;
+    }
+    auto it = mesh->selectionSlots.begin();
+    std::advance(it, static_cast<std::ptrdiff_t>(index));
+    return it->first.c_str();
+}
+
+CyberStatus cyber_retopo_selection_transform(CyberMesh* mesh, const float xf[12],
+                                             const CyberSnapper* snapper, float resnap_epsilon,
+                                             CyberSoftTransformReport* out_report) {
+    return runMeshEdit(mesh, "cyber_retopo_selection_transform", [&] {
+        if (xf == nullptr) {
+            setError("cyber_retopo_selection_transform: null transform");
+            return CYBER_ERR_INVALID_ARG;
+        }
+        const float eps = resnap_epsilon >= 0.0f ? resnap_epsilon : 0.0f;
+        fillReport(out_report,
+                   cyber::retopo::transformWeighted(mesh->mesh, mesh->selection, toAffine(xf),
+                                                    snapperOf(snapper), nullptr, eps));
+        return CYBER_OK;
+    });
+}
+
+CyberStatus cyber_retopo_selection_relax(CyberMesh* mesh, float strength, int iterations,
+                                         const uint32_t* pinned, size_t pinned_count,
+                                         const CyberSnapper* snapper, float resnap_epsilon,
+                                         CyberSoftTransformReport* out_report) {
+    return runMeshEdit(mesh, "cyber_retopo_selection_relax", [&] {
+        cyber::retopo::RelaxParams params;
+        params.strength = strength;
+        params.iterations = iterations;
+        const cyber::retopo::PinSet pins = makePinSet(pinned, pinned_count);
+        const float eps = resnap_epsilon >= 0.0f ? resnap_epsilon : 0.0f;
+        fillReport(out_report, cyber::retopo::relaxWeighted(mesh->mesh, mesh->selection, params,
+                                                            snapperOf(snapper), &pins, eps));
         return CYBER_OK;
     });
 }

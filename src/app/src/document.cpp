@@ -1,7 +1,10 @@
 #include "cyber/app/document.hpp"
 
 #include <cstddef>
+#include <map>
+#include <string>
 #include <utility>
+#include <vector>
 
 namespace cyber::app {
 namespace {
@@ -11,6 +14,7 @@ enum class SectionId : std::uint32_t {
     EditMesh = 2,
     Parameters = 3,
     BakeState = 4,
+    SoftSelections = 5,
 };
 
 std::vector<std::uint8_t> serializeMesh(const Mesh& mesh) {
@@ -130,6 +134,47 @@ BakeState readBake(ByteReader& r) {
     return b;
 }
 
+std::vector<std::uint8_t> serializeSelections(
+    const std::map<std::string, std::vector<float>>& slots) {
+    ByteWriter w;
+    w.u32(static_cast<std::uint32_t>(slots.size()));
+    for (const auto& [name, weights] : slots) {
+        w.str(name);
+        w.u32(static_cast<std::uint32_t>(weights.size()));
+        for (const float value : weights) {
+            w.f32(value);
+        }
+    }
+    return w.take();
+}
+
+// Every count is validated against the bytes actually left before reserving,
+// the same way readMesh guards its own length fields.
+std::optional<std::map<std::string, std::vector<float>>> readSelections(ByteReader& r) {
+    std::map<std::string, std::vector<float>> slots;
+    const std::uint32_t slotCount = r.u32();
+    if (!r.ok() || slotCount > r.remaining() / 8u) {  // >= 4-byte name + 4-byte count each
+        return std::nullopt;
+    }
+    for (std::uint32_t i = 0; i < slotCount; ++i) {
+        std::string name = r.str();
+        const std::uint32_t weightCount = r.u32();
+        if (!r.ok() || weightCount > r.remaining() / 4u) {
+            return std::nullopt;
+        }
+        std::vector<float> weights;
+        weights.reserve(weightCount);
+        for (std::uint32_t j = 0; j < weightCount; ++j) {
+            weights.push_back(r.f32());
+        }
+        slots.emplace(std::move(name), std::move(weights));
+    }
+    if (!r.ok()) {
+        return std::nullopt;
+    }
+    return slots;
+}
+
 void writeSection(ByteWriter& w, SectionId id, const std::vector<std::uint8_t>& payload) {
     w.u32(static_cast<std::uint32_t>(id));
     w.u64(static_cast<std::uint64_t>(payload.size()));
@@ -155,14 +200,20 @@ bool sameParams(const remesh::Parameters& a, const remesh::Parameters& b) {
 }  // namespace
 
 std::vector<std::uint8_t> Document::save() const {
+    // Optional sections are written only when they carry data, so a document
+    // that uses none of them is byte-identical to what earlier builds wrote.
+    const bool hasSelections = !softSelections.empty();
     ByteWriter w;
     w.u32(kMagic);
     w.u32(kFormatVersion);
-    w.u32(4u);  // section count
+    w.u32(hasSelections ? 5u : 4u);  // section count
     writeSection(w, SectionId::Target, serializeMesh(target));
     writeSection(w, SectionId::EditMesh, serializeMesh(editMesh));
     writeSection(w, SectionId::Parameters, serializeParams(params));
     writeSection(w, SectionId::BakeState, serializeBake(bake));
+    if (hasSelections) {
+        writeSection(w, SectionId::SoftSelections, serializeSelections(softSelections));
+    }
     return w.take();
 }
 
@@ -215,6 +266,14 @@ std::optional<Document> Document::load(std::span<const std::uint8_t> bytes) {
                     return std::nullopt;
                 }
                 break;
+            case SectionId::SoftSelections: {
+                auto slots = readSelections(section);
+                if (!slots) {
+                    return std::nullopt;
+                }
+                doc.softSelections = std::move(*slots);
+                break;
+            }
             default:
                 break;  // unknown section: skipped by its length
         }
@@ -236,7 +295,8 @@ bool Document::autosaveIfDirty(const AutosaveSink& sink) {
 
 bool operator==(const Document& a, const Document& b) {
     return sameMesh(a.target, b.target) && sameMesh(a.editMesh, b.editMesh) &&
-           sameParams(a.params, b.params) && a.bake == b.bake;
+           sameParams(a.params, b.params) && a.bake == b.bake &&
+           a.softSelections == b.softSelections;
 }
 
 }  // namespace cyber::app

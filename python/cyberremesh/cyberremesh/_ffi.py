@@ -25,6 +25,7 @@ from ctypes import (
     c_float,
     c_int32,
     c_size_t,
+    c_uint32,
     c_uint64,
     c_void_p,
 )
@@ -60,6 +61,13 @@ _STATUS_NAMES = {
 POLICY_KEEP_LARGEST = 0
 POLICY_KEEP_ALL = 1
 POLICY_MIN_FACES = 2
+
+# cyber_falloff enum — mirrors cyber::retopo::Falloff. Persisted by callers, so
+# these values are append-only.
+FALLOFF_LINEAR = 0
+FALLOFF_SMOOTH = 1
+FALLOFF_SHARP = 2
+FALLOFF_ROUND = 3
 
 
 def status_name(status: int) -> str:
@@ -240,6 +248,87 @@ def find_library_path() -> Optional[str]:
 # ---------------------------------------------------------------------------
 
 
+class CyberSoftTransformReport(Structure):
+    """Mirror of ``CyberSoftTransformReport`` — weighted transform/relax report."""
+
+    # Layout MUST match CyberSoftTransformReport in capi/include/cyber_capi.h.
+    _fields_ = [
+        ("moved", c_size_t),
+        ("resnapped", c_size_t),
+        ("max_snap_distance", c_float),
+    ]
+
+
+def _declare_soft_selection(lib: ctypes.CDLL) -> None:
+    """Soft selection (gradient regions, selection ops, weighted transform).
+
+    Auto re-snap is INSIDE ``_transform``/``_relax``: passing a snapper glues the
+    moved vertices to the Target within the same call, so no separate snap pass
+    is needed (or wanted — it would drag the untouched vertices too).
+    """
+    # -- region sources ------------------------------------------------------
+    lib.cyber_retopo_selection_line.argtypes = [
+        c_void_p, POINTER(c_float), POINTER(c_float), POINTER(c_float),
+        c_int32, c_float, c_int32,
+    ]
+    lib.cyber_retopo_selection_line.restype = c_int32
+
+    lib.cyber_retopo_selection_sphere.argtypes = [
+        c_void_p, POINTER(c_float), c_float, c_int32,
+    ]
+    lib.cyber_retopo_selection_sphere.restype = c_int32
+
+    lib.cyber_retopo_selection_paint.argtypes = [
+        c_void_p, POINTER(c_float), c_float, c_float, c_int32, c_int32,
+    ]
+    lib.cyber_retopo_selection_paint.restype = c_int32
+
+    # samples are (x, y, z, pressure) quadruplets — the painted-mode gesture route.
+    lib.cyber_retopo_selection_paint_stroke.argtypes = [
+        c_void_p, POINTER(c_float), c_size_t, c_float, c_int32, c_int32,
+    ]
+    lib.cyber_retopo_selection_paint_stroke.restype = c_int32
+
+    # -- selection operations ------------------------------------------------
+    lib.cyber_retopo_selection_clear.argtypes = [c_void_p]
+    lib.cyber_retopo_selection_clear.restype = c_int32
+    lib.cyber_retopo_selection_invert.argtypes = [c_void_p]
+    lib.cyber_retopo_selection_invert.restype = c_int32
+    lib.cyber_retopo_selection_expand.argtypes = [c_void_p, c_int32]
+    lib.cyber_retopo_selection_expand.restype = c_int32
+    lib.cyber_retopo_selection_contract.argtypes = [c_void_p, c_int32]
+    lib.cyber_retopo_selection_contract.restype = c_int32
+    lib.cyber_retopo_selection_smooth.argtypes = [c_void_p, c_int32]
+    lib.cyber_retopo_selection_smooth.restype = c_int32
+
+    # -- weight field --------------------------------------------------------
+    lib.cyber_retopo_selection_copy_weights.argtypes = [c_void_p, POINTER(c_float), c_size_t]
+    lib.cyber_retopo_selection_copy_weights.restype = c_size_t
+    lib.cyber_retopo_selection_set_weights.argtypes = [c_void_p, POINTER(c_float), c_size_t]
+    lib.cyber_retopo_selection_set_weights.restype = c_int32
+
+    # -- named slots ---------------------------------------------------------
+    lib.cyber_retopo_selection_save.argtypes = [c_void_p, c_char_p]
+    lib.cyber_retopo_selection_save.restype = c_int32
+    lib.cyber_retopo_selection_load.argtypes = [c_void_p, c_char_p]
+    lib.cyber_retopo_selection_load.restype = c_int32
+    lib.cyber_retopo_selection_slot_count.argtypes = [c_void_p]
+    lib.cyber_retopo_selection_slot_count.restype = c_size_t
+    lib.cyber_retopo_selection_slot_name.argtypes = [c_void_p, c_size_t]
+    lib.cyber_retopo_selection_slot_name.restype = c_char_p
+
+    # -- weighted transform / relax -----------------------------------------
+    lib.cyber_retopo_selection_transform.argtypes = [
+        c_void_p, POINTER(c_float), c_void_p, c_float, POINTER(CyberSoftTransformReport),
+    ]
+    lib.cyber_retopo_selection_transform.restype = c_int32
+    lib.cyber_retopo_selection_relax.argtypes = [
+        c_void_p, c_float, c_int32, POINTER(c_uint32), c_size_t, c_void_p, c_float,
+        POINTER(CyberSoftTransformReport),
+    ]
+    lib.cyber_retopo_selection_relax.restype = c_int32
+
+
 def _declare(lib: ctypes.CDLL) -> None:
     """Attach argtypes/restypes to every ``cyber_*`` entry point."""
 
@@ -327,6 +416,15 @@ def _declare(lib: ctypes.CDLL) -> None:
     lib.cyber_image_copy_pixels.restype = c_size_t
     lib.cyber_image_save_png.argtypes = [c_void_p, c_char_p]
     lib.cyber_image_save_png.restype = c_int32
+
+    # -- Target snapper ------------------------------------------------------
+    # CyberStatus cyber_snapper_create(const CyberMesh* target, CyberSnapper** out)
+    lib.cyber_snapper_create.argtypes = [c_void_p, POINTER(c_void_p)]
+    lib.cyber_snapper_create.restype = c_int32
+    lib.cyber_snapper_free.argtypes = [c_void_p]
+    lib.cyber_snapper_free.restype = None
+
+    _declare_soft_selection(lib)
 
 
 # ---------------------------------------------------------------------------

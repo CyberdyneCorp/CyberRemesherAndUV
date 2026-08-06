@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import ctypes
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import Callable, List, Optional, Sequence, Tuple
 
 from . import _ffi
 
@@ -37,6 +37,9 @@ __all__ = [
     "BakeParams",
     "Image",
     "bake",
+    "Falloff",
+    "Snapper",
+    "SoftTransformReport",
 ]
 
 
@@ -223,6 +226,77 @@ class AtlasResult:
         )
 
 
+class Falloff:
+    """Soft-selection falloff curves (mirrors ``CyberFalloff``)."""
+
+    LINEAR = _ffi.FALLOFF_LINEAR
+    SMOOTH = _ffi.FALLOFF_SMOOTH
+    SHARP = _ffi.FALLOFF_SHARP
+    ROUND = _ffi.FALLOFF_ROUND
+
+
+@dataclass(frozen=True)
+class SoftTransformReport:
+    """Outcome of a weighted transform/relax."""
+
+    moved: int
+    resnapped: int
+    max_snap_distance: float
+
+    @classmethod
+    def _from_c(cls, c: "_ffi.CyberSoftTransformReport") -> "SoftTransformReport":
+        return cls(
+            moved=int(c.moved),
+            resnapped=int(c.resnapped),
+            max_snap_distance=float(c.max_snap_distance),
+        )
+
+
+class Snapper:
+    """Snapshot snapper over a Target mesh (a BVH for closest-surface queries).
+
+    Snapshot semantics: it does not observe later changes to the Target, so
+    rebuild it whenever the Target changes. Usable as a context manager.
+    """
+
+    __slots__ = ("_handle",)
+
+    def __init__(self, target: "Mesh"):
+        out = ctypes.c_void_p()
+        status = _ffi.get_lib().cyber_snapper_create(target.handle, ctypes.byref(out))
+        if status != _ffi.STATUS_OK:
+            raise CyberError(status, _last_error())
+        self._handle = out.value
+
+    @property
+    def handle(self) -> int:
+        if self._handle is None:
+            raise ValueError("operation on a closed Snapper")
+        return self._handle
+
+    def close(self) -> None:
+        """Release the underlying engine handle (idempotent)."""
+        if self._handle is not None:
+            _ffi.get_lib().cyber_snapper_free(self._handle)
+            self._handle = None
+
+    def __del__(self):  # pragma: no cover - GC timing dependent
+        try:
+            self.close()
+        except Exception:
+            pass
+
+    def __enter__(self) -> "Snapper":
+        return self
+
+    def __exit__(self, *_exc) -> None:
+        self.close()
+
+
+def _vec3(v: Sequence[float]) -> "ctypes.Array":
+    return (ctypes.c_float * 3)(float(v[0]), float(v[1]), float(v[2]))
+
+
 class Mesh:
     """A handle to an engine mesh.
 
@@ -304,6 +378,182 @@ class Mesh:
             )
         )
         return AtlasResult._from_c(c_result)
+
+    # -- soft selection -----------------------------------------------------
+    #
+    # The weight field lives on this handle. Region ops replace it (line,
+    # sphere) or accumulate into it (paint); the selection ops reshape it; the
+    # weighted transform/relax consume it. Passing a :class:`Snapper` to
+    # :meth:`transform_selection` / :meth:`relax_selection` glues the moved
+    # vertices to the Target INSIDE the same call — there is no separate snap
+    # pass, and running one afterwards would drag the untouched vertices too.
+    # Vertices at weight 0 are never moved and never re-snapped.
+
+    def select_line(
+        self,
+        anchor: Sequence[float],
+        end: Sequence[float],
+        view_dir: Sequence[float] = (0.0, 0.0, 1.0),
+        snap_angle: bool = False,
+        snap_degrees: float = 15.0,
+        falloff: int = Falloff.SMOOTH,
+    ) -> None:
+        """Line gradient: 0 at ``anchor``, 1 at ``end`` and 1 beyond it."""
+        _check(
+            _ffi.get_lib().cyber_retopo_selection_line(
+                self.handle, _vec3(anchor), _vec3(end), _vec3(view_dir),
+                1 if snap_angle else 0, float(snap_degrees), int(falloff),
+            )
+        )
+
+    def select_sphere(
+        self, center: Sequence[float], radius: float, falloff: int = Falloff.SMOOTH
+    ) -> None:
+        """Sphere region: 1 at ``center`` falling to 0 at ``radius``."""
+        _check(
+            _ffi.get_lib().cyber_retopo_selection_sphere(
+                self.handle, _vec3(center), float(radius), int(falloff)
+            )
+        )
+
+    def paint_selection(
+        self,
+        center: Sequence[float],
+        radius: float,
+        pressure: float = 1.0,
+        subtract: bool = False,
+        falloff: int = Falloff.SMOOTH,
+    ) -> None:
+        """Accumulate one brush dab into the selection."""
+        _check(
+            _ffi.get_lib().cyber_retopo_selection_paint(
+                self.handle, _vec3(center), float(radius), float(pressure),
+                1 if subtract else 0, int(falloff),
+            )
+        )
+
+    def paint_selection_stroke(
+        self,
+        samples: Sequence[Tuple[float, float, float, float]],
+        radius: float,
+        subtract: bool = False,
+        falloff: int = Falloff.SMOOTH,
+    ) -> None:
+        """Accumulate a whole gesture: ``(x, y, z, pressure)`` samples."""
+        flat = [float(v) for sample in samples for v in sample]
+        buf = (ctypes.c_float * len(flat))(*flat)
+        _check(
+            _ffi.get_lib().cyber_retopo_selection_paint_stroke(
+                self.handle, buf, len(samples), float(radius),
+                1 if subtract else 0, int(falloff),
+            )
+        )
+
+    def clear_selection(self) -> None:
+        """Zero every weight."""
+        _check(_ffi.get_lib().cyber_retopo_selection_clear(self.handle))
+
+    def invert_selection(self) -> None:
+        """``w -> 1 - w`` over the live vertices."""
+        _check(_ffi.get_lib().cyber_retopo_selection_invert(self.handle))
+
+    def expand_selection(self, steps: int = 1) -> None:
+        """Grow the selection by the one-ring maximum, ``steps`` times."""
+        _check(_ffi.get_lib().cyber_retopo_selection_expand(self.handle, int(steps)))
+
+    def contract_selection(self, steps: int = 1) -> None:
+        """Shrink the selection by the one-ring minimum, ``steps`` times."""
+        _check(_ffi.get_lib().cyber_retopo_selection_contract(self.handle, int(steps)))
+
+    def smooth_selection(self, steps: int = 1) -> None:
+        """Soften the weight transition (the shell's smooth by 1 / 5 / 10)."""
+        _check(_ffi.get_lib().cyber_retopo_selection_smooth(self.handle, int(steps)))
+
+    def selection_weights(self) -> List[float]:
+        """The weight field as a list indexed by vertex id (a snapshot)."""
+        lib = _ffi.get_lib()
+        needed = int(lib.cyber_retopo_selection_copy_weights(self.handle, None, 0))
+        buf = (ctypes.c_float * needed)()
+        if needed:
+            lib.cyber_retopo_selection_copy_weights(self.handle, buf, needed)
+        return list(buf)
+
+    def set_selection_weights(self, weights: Sequence[float]) -> None:
+        """Replace the whole weight field (values are clamped into [0, 1])."""
+        buf = (ctypes.c_float * len(weights))(*[float(w) for w in weights])
+        _check(
+            _ffi.get_lib().cyber_retopo_selection_set_weights(
+                self.handle, buf, len(weights)
+            )
+        )
+
+    def save_selection(self, name: str) -> None:
+        """Store the current selection in the named slot on this handle."""
+        _check(
+            _ffi.get_lib().cyber_retopo_selection_save(
+                self.handle, str(name).encode("utf-8")
+            )
+        )
+
+    def load_selection(self, name: str) -> None:
+        """Restore the selection from the named slot."""
+        _check(
+            _ffi.get_lib().cyber_retopo_selection_load(
+                self.handle, str(name).encode("utf-8")
+            )
+        )
+
+    def selection_slots(self) -> List[str]:
+        """Names of the saved selection slots, in name order."""
+        lib = _ffi.get_lib()
+        count = int(lib.cyber_retopo_selection_slot_count(self.handle))
+        names = []
+        for i in range(count):
+            raw = lib.cyber_retopo_selection_slot_name(self.handle, i)
+            names.append(raw.decode("utf-8") if raw else "")
+        return names
+
+    def transform_selection(
+        self,
+        transform: Sequence[float],
+        snapper: Optional["Snapper"] = None,
+        resnap_epsilon: float = 0.0,
+    ) -> SoftTransformReport:
+        """Apply a 12-float affine per vertex scaled by its selection weight.
+
+        ``transform`` is the column-major 3x3 linear part followed by the
+        translation, matching ``cyber_retopo_transform_vertices``.
+        """
+        buf = (ctypes.c_float * 12)(*[float(v) for v in transform])
+        report = _ffi.CyberSoftTransformReport()
+        _check(
+            _ffi.get_lib().cyber_retopo_selection_transform(
+                self.handle, buf, snapper.handle if snapper else None,
+                float(resnap_epsilon), ctypes.byref(report),
+            )
+        )
+        return SoftTransformReport._from_c(report)
+
+    def relax_selection(
+        self,
+        strength: float = 0.5,
+        iterations: int = 1,
+        pinned: Optional[Sequence[int]] = None,
+        snapper: Optional["Snapper"] = None,
+        resnap_epsilon: float = 0.0,
+    ) -> SoftTransformReport:
+        """Relax the mesh with the per-vertex blend scaled by the weights."""
+        pins = pinned or []
+        pin_buf = (ctypes.c_uint32 * len(pins))(*[int(p) for p in pins]) if pins else None
+        report = _ffi.CyberSoftTransformReport()
+        _check(
+            _ffi.get_lib().cyber_retopo_selection_relax(
+                self.handle, float(strength), int(iterations), pin_buf, len(pins),
+                snapper.handle if snapper else None, float(resnap_epsilon),
+                ctypes.byref(report),
+            )
+        )
+        return SoftTransformReport._from_c(report)
 
     # -- queries ------------------------------------------------------------
     @property

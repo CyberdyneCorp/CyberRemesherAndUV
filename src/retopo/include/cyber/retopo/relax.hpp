@@ -1,6 +1,8 @@
 #pragma once
 
+#include <algorithm>
 #include <cmath>
+#include <utility>
 #include <vector>
 
 #include "cyber/core/math.hpp"
@@ -42,41 +44,87 @@ struct RelaxParams {
     return oneRing(mesh, v).size() <= 2;
 }
 
-inline void relax(Mesh& mesh, const RelaxParams& params, const PinSet* pins = nullptr,
-                  const SurfaceSnapper* snap = nullptr) {
+namespace detail {
+
+// A vertex is exempt from a relax sweep when it is dead, pinned, an auto-pinned
+// grid corner, or outside the brush mask.
+[[nodiscard]] inline bool relaxSkips(const Mesh& mesh, VertexId v, const RelaxParams& params,
+                                     const PinSet* pins) {
+    if (!mesh.isAlive(v)) {
+        return true;
+    }
+    if (pins != nullptr && pins->isPinned(v)) {
+        return true;
+    }
+    if (params.autoPinCorners && isGridCorner(mesh, v)) {
+        return true;
+    }
     const float radiusSquared = params.brushRadius * params.brushRadius;
+    return params.brushRadius > 0.0f &&
+           lengthSquared(mesh.position(v) - params.brushCenter) > radiusSquared;
+}
+
+// Tangential Laplacian target for `v`, blended by `w` toward the one-ring
+// centroid with the normal component removed.
+[[nodiscard]] inline Vec3 relaxTarget(const Mesh& mesh, VertexId v, float w) {
+    const Vec3 pos = mesh.position(v);
+    Vec3 delta = neighborCentroid(mesh, v) - pos;
+    const Vec3 n = vertexNormal(mesh, v);
+    delta = delta - n * dot(delta, n);  // keep the move tangential
+    return pos + delta * w;
+}
+
+// The relax sweep shared by plain `relax()` and the weighted relax in
+// soft_selection.hpp. `extraWeight(v)` scales the per-vertex blend on top of the
+// brush falloff; a value <= 0 leaves the vertex COMPLETELY untouched — it is
+// neither moved nor re-snapped, which is what makes zero-weight vertices
+// bit-identical under a weighted relax. Passing a constant 1 reproduces the
+// unweighted sweep exactly (multiplying by 1.0f is bit-neutral).
+template <typename ExtraWeight>
+inline ResnapReport relaxSweep(Mesh& mesh, const RelaxParams& params, const PinSet* pins,
+                               const SurfaceSnapper* snap, float resnapEpsilon,
+                               ExtraWeight extraWeight) {
+    ResnapReport report;
+    const bool snapping = snap != nullptr && !snap->empty();
     for (int iter = 0; iter < params.iterations; ++iter) {
         std::vector<std::pair<VertexId, Vec3>> updates;
         for (Index i = 0; i < mesh.vertexCapacity(); ++i) {
             const VertexId v{i};
-            if (!mesh.isAlive(v)) {
+            if (relaxSkips(mesh, v, params, pins)) {
                 continue;
             }
-            if (pins != nullptr && pins->isPinned(v)) {
-                continue;
-            }
-            if (params.autoPinCorners && isGridCorner(mesh, v)) {
+            const float extra = extraWeight(v);
+            if (extra <= 0.0f) {
                 continue;
             }
             const Vec3 pos = mesh.position(v);
-            if (params.brushRadius > 0.0f &&
-                lengthSquared(pos - params.brushCenter) > radiusSquared) {
+            const float w = params.strength * extra *
+                            brushFalloff(length(pos - params.brushCenter), params.brushRadius);
+            updates.emplace_back(v, relaxTarget(mesh, v, w));
+        }
+        report.moved += updates.size();
+        for (const auto& [v, target] : updates) {
+            if (!snapping) {
+                mesh.setPosition(v, target);
                 continue;
             }
-            const Vec3 centroid = neighborCentroid(mesh, v);
-            Vec3 delta = centroid - pos;
-            const Vec3 n = vertexNormal(mesh, v);
-            delta = delta - n * dot(delta, n);  // keep the move tangential
-            const float w = params.strength *
-                            brushFalloff(length(pos - params.brushCenter), params.brushRadius);
-            updates.emplace_back(v, pos + delta * w);
-        }
-        for (const auto& [v, target] : updates) {
-            const Vec3 p =
-                (snap != nullptr && !snap->empty()) ? snap->snapToSurface(target).point : target;
+            const Vec3 p = snap->snapToSurface(target).point;
+            const float pulled = length(p - target);
+            if (pulled > resnapEpsilon) {
+                ++report.resnapped;
+                report.maxSnapDistance = std::max(report.maxSnapDistance, pulled);
+            }
             mesh.setPosition(v, p);
         }
     }
+    return report;
+}
+
+}  // namespace detail
+
+inline void relax(Mesh& mesh, const RelaxParams& params, const PinSet* pins = nullptr,
+                  const SurfaceSnapper* snap = nullptr) {
+    detail::relaxSweep(mesh, params, pins, snap, 0.0f, [](VertexId) { return 1.0f; });
 }
 
 }  // namespace cyber::retopo

@@ -867,6 +867,136 @@ CyberStatus cyber_retopo_subdivide(CyberMesh* mesh, const CyberSnapper* snapper,
  * STABILITY note above: vertex/edge ids survive, face ids partially. */
 CyberStatus cyber_retopo_triangulate(CyberMesh* mesh, size_t* out_faces);
 
+/* ---- soft selection (manual-retopology spec, gradient regions) ----------
+ *
+ * A per-vertex weight field in [0,1] lives ON THE MESH HANDLE, next to the
+ * hidden-face and tagged-edge overlays. The region ops below REPLACE it
+ * (line, sphere) or ACCUMULATE into it (paint); the selection ops reshape
+ * it; the weighted transform/relax consume it.
+ *
+ * SURFACE GLUE: cyber_retopo_selection_transform and _relax re-project the
+ * vertices they move onto the Target inside the SAME pass whenever a
+ * `snapper` is supplied. There is no separate cleanup call and none is
+ * needed — calling cyber_retopo_snap_all afterwards is redundant and would
+ * also drag the vertices the selection deliberately left alone. A drag
+ * gesture is driven by calling _transform once per incremental delta.
+ *
+ * ZERO WEIGHT MEANS UNTOUCHED: a vertex whose weight is 0 (and any pinned
+ * vertex) is skipped entirely — neither moved nor re-snapped — so its
+ * position is bit-identical after the call.
+ *
+ * ELEMENT-ID STABILITY (see the block above): weights are indexed by vertex
+ * id, so cyber_retopo_subdivide clears the selection and every saved slot
+ * along with the other id-keyed handle state. Triangulate preserves vertex
+ * ids and therefore preserves the selection. */
+
+/* Editable falloff curves. All map 0 -> 0 and 1 -> 1 monotonically, so the
+ * curve changes how a gradient feels, not where it starts or ends.
+ * Persisted by callers, so values are append-only. */
+typedef enum CyberFalloff {
+    CYBER_FALLOFF_LINEAR = 0,
+    CYBER_FALLOFF_SMOOTH = 1, /* smoothstep — the default */
+    CYBER_FALLOFF_SHARP = 2,  /* t^2, weight builds late */
+    CYBER_FALLOFF_ROUND = 3   /* quarter circle, weight builds early */
+} CyberFalloff;
+
+/* Result of a weighted transform/relax. `moved` counts the vertices the op
+ * wrote (weight > 0 and not pinned); `resnapped` counts how many of those
+ * the Target re-projection pulled back further than `resnap_epsilon`, and
+ * `max_snap_distance` is the largest such correction. */
+typedef struct CyberSoftTransformReport {
+    size_t moved;
+    size_t resnapped;
+    float max_snap_distance;
+} CyberSoftTransformReport;
+
+/* Line gradient: weight ramps 0 at `anchor` to 1 at `end` following
+ * `falloff`, and stays 1 beyond `end`. With `snap_angle` non-zero the
+ * anchor->end direction is first quantized to `snap_degrees` increments
+ * (15 is the shell default) measured IN THE VIEW PLANE — the plane
+ * perpendicular to `view_dir`, the same screen-space convention
+ * cyber_retopo_draw_strip and cyber_retopo_surface_cut use. Replaces the
+ * current selection. Fails with CYBER_ERR_INVALID_ARG on a null argument
+ * or a degenerate (zero-length) line. */
+CyberStatus cyber_retopo_selection_line(CyberMesh* mesh, const float anchor[3], const float end[3],
+                                        const float view_dir[3], int snap_angle, float snap_degrees,
+                                        CyberFalloff falloff);
+
+/* Sphere region: weight 1 at `center` falling to 0 at `radius` along
+ * `falloff`. Replaces the current selection. Fails with
+ * CYBER_ERR_INVALID_ARG on a null center or radius <= 0. */
+CyberStatus cyber_retopo_selection_sphere(CyberMesh* mesh, const float center[3], float radius,
+                                          CyberFalloff falloff);
+
+/* Paint one brush dab: covered weights gain `pressure` * falloff, or lose
+ * it when `subtract` is non-zero, saturating at 1 and bottoming out at 0.
+ * Fails with CYBER_ERR_INVALID_ARG on a null center or radius <= 0. */
+CyberStatus cyber_retopo_selection_paint(CyberMesh* mesh, const float center[3], float radius,
+                                         float pressure, int subtract, CyberFalloff falloff);
+
+/* Paint a whole gesture in one call: `samples_xyzp` holds `sample_count`
+ * quadruplets (x, y, z, pressure) along the stroke, all sharing one brush.
+ * Equivalent to calling _paint once per sample but rejects the vertices no
+ * sample can reach up front. Fails with CYBER_ERR_INVALID_ARG on a null or
+ * empty sample list or radius <= 0. */
+CyberStatus cyber_retopo_selection_paint_stroke(CyberMesh* mesh, const float* samples_xyzp,
+                                                size_t sample_count, float radius, int subtract,
+                                                CyberFalloff falloff);
+
+/* Zeroes every weight. */
+CyberStatus cyber_retopo_selection_clear(CyberMesh* mesh);
+/* w -> 1 - w over the live vertices. */
+CyberStatus cyber_retopo_selection_invert(CyberMesh* mesh);
+/* Grows the selection by taking the one-ring maximum, `steps` times
+ * (steps <= 0 is a no-op). */
+CyberStatus cyber_retopo_selection_expand(CyberMesh* mesh, int steps);
+/* Shrinks the selection by taking the one-ring minimum, `steps` times. */
+CyberStatus cyber_retopo_selection_contract(CyberMesh* mesh, int steps);
+/* Softens the weight transition by averaging over the one-ring, `steps`
+ * times — the shell's "smooth by 1 / 5 / 10" is just this count. Never
+ * touches positions. */
+CyberStatus cyber_retopo_selection_smooth(CyberMesh* mesh, int steps);
+
+/* Copies up to `capacity` weights into `out` (index = vertex id) and
+ * returns the total weight count available, exactly like
+ * cyber_mesh_copy_positions. Returns 0 for a NULL mesh. */
+size_t cyber_retopo_selection_copy_weights(const CyberMesh* mesh, float* out, size_t capacity);
+
+/* Replaces the whole weight field; each value is clamped into [0,1]. */
+CyberStatus cyber_retopo_selection_set_weights(CyberMesh* mesh, const float* weights, size_t count);
+
+/* Saves the current selection into the named slot on the handle (an
+ * existing slot of that name is overwritten), and loads it back. The shell
+ * persists the slots with its document; the handle owns them only for the
+ * session. _load fails with CYBER_ERR_INVALID_ARG when the name is unknown.
+ * Names must be non-empty NUL-terminated UTF-8. */
+CyberStatus cyber_retopo_selection_save(CyberMesh* mesh, const char* name);
+CyberStatus cyber_retopo_selection_load(CyberMesh* mesh, const char* name);
+
+/* Slot enumeration, in name order. The pointer returned by _slot_name is
+ * owned by the handle and stays valid until the next _save on that handle
+ * or an op that clears the slots; returns NULL for an out-of-range index. */
+size_t cyber_retopo_selection_slot_count(const CyberMesh* mesh);
+const char* cyber_retopo_selection_slot_name(const CyberMesh* mesh, size_t index);
+
+/* Weighted transform: applies the 12-float affine `xf` (same column-major
+ * layout as cyber_retopo_transform_vertices) per vertex scaled by its
+ * selection weight, re-projecting onto the Target in the same pass when
+ * `snapper` is non-NULL. *out_report may be NULL. Fails with
+ * CYBER_ERR_INVALID_ARG (mesh unchanged) on a null transform. */
+CyberStatus cyber_retopo_selection_transform(CyberMesh* mesh, const float xf[12],
+                                             const CyberSnapper* snapper, float resnap_epsilon,
+                                             CyberSoftTransformReport* out_report);
+
+/* Weighted relax: the ordinary relax sweep (auto-pinned grid corners,
+ * tangential projection, in-pass re-snap) with the per-vertex blend
+ * additionally scaled by the selection weight. `pinned` may be NULL.
+ * *out_report may be NULL. */
+CyberStatus cyber_retopo_selection_relax(CyberMesh* mesh, float strength, int iterations,
+                                         const uint32_t* pinned, size_t pinned_count,
+                                         const CyberSnapper* snapper, float resnap_epsilon,
+                                         CyberSoftTransformReport* out_report);
+
 /* ---- gesture stroke interpretation (retopology phase 3, design D5) ------
  *
  * Two-stage recognizer: a cheap geometric shape classifier over the raw
