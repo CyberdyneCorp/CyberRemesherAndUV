@@ -425,6 +425,8 @@ class BakeMap:
     DISPLACEMENT = _ffi.BAKE_DISPLACEMENT
     POSITION = _ffi.BAKE_POSITION
     COLOR = _ffi.BAKE_COLOR
+    CURVATURE = _ffi.BAKE_CURVATURE
+    CAVITY = _ffi.BAKE_CAVITY
 
 
 @dataclass
@@ -436,6 +438,9 @@ class BakeParams:
     cage_distance: float = 0.1
     ao_samples: int = 16
     ao_radius: float = 1.0
+    #: Curvature magnitude (1/length) saturating CURVATURE/CAVITY to full
+    #: white/black. 0 = auto (95th percentile of |curvature| on the Target).
+    curvature_range: float = 0.0
 
     def _to_c(self) -> "_ffi.CyberBakeParams":
         return _ffi.CyberBakeParams(
@@ -444,6 +449,7 @@ class BakeParams:
             cage_distance=float(self.cage_distance),
             ao_samples=int(self.ao_samples),
             ao_radius=float(self.ao_radius),
+            curvature_range=float(self.curvature_range),
         )
 
 

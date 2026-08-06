@@ -4,6 +4,7 @@ target_include_directories(cyber_doctest SYSTEM INTERFACE ${CMAKE_SOURCE_DIR}/th
 add_executable(cyber_tests
     main.cpp
     bake/test_bake.cpp
+    bake/test_curvature.cpp
     bake/test_tangent.cpp
     bake/test_ao_projected.cpp
     quadrangulate/test_crossfield.cpp

@@ -7,6 +7,7 @@
 
 #include "cyber/accel/backend.hpp"
 #include "cyber/accel/primitives.hpp"
+#include "cyber/bake/curvature.hpp"
 #include "cyber/bake/tangent.hpp"
 #include "cyber/core/bvh.hpp"
 #include "cyber/core/io.hpp"
@@ -86,6 +87,23 @@ Vec3 hitColor(const Mesh& mesh, const Bvh::RayHit& hit, const std::vector<Vec3>*
                                                 mesh.position(verts[1]), mesh.position(verts[2]));
     return (*colors)[verts[0].value] * bc[0] + (*colors)[verts[1].value] * bc[1] +
            (*colors)[verts[2].value] * bc[2];
+}
+
+// Interpolated per-vertex scalar at a ray hit (n-gon faces average the corners,
+// mirroring hitColor()).
+float hitScalar(const Mesh& mesh, const Bvh::RayHit& hit, const std::vector<float>& values) {
+    const std::vector<VertexId> verts = mesh.faceVertices(hit.face);
+    if (verts.size() != 3) {
+        float sum = 0.0f;
+        for (const VertexId v : verts) {
+            sum += values[v.value];
+        }
+        return sum / static_cast<float>(verts.size());
+    }
+    const std::array<float, 3> bc = barycentric(hit.point, mesh.position(verts[0]),
+                                                mesh.position(verts[1]), mesh.position(verts[2]));
+    return values[verts[0].value] * bc[0] + values[verts[1].value] * bc[1] +
+           values[verts[2].value] * bc[2];
 }
 
 // Interpolated Target UV at a ray hit, from the hit face's per-corner "uv"
@@ -261,10 +279,31 @@ int channelsFor(BakeMap map) {
     switch (map) {
         case BakeMap::AmbientOcclusion:
         case BakeMap::Displacement:
+        case BakeMap::Curvature:
+        case BakeMap::Cavity:
             return 1;
         default:
             return 3;
     }
+}
+
+// Grayscale encoding of a signed curvature value. Curvature is centred on
+// mid-gray with convex bright and concave dark; Cavity keeps concavity only, so
+// flat and convex both read white and the map drops straight into a multiply
+// slot. `range` <= 0 means there is nothing to normalize against (a flat
+// Target), in which case every texel takes the neutral value.
+float encodeCurvature(float curvature, float range, bool cavityOnly) {
+    if (cavityOnly) {
+        if (range <= 0.0f) {
+            return 1.0f;
+        }
+        const float concavity = std::clamp(-curvature / range, 0.0f, 1.0f);
+        return 1.0f - concavity;
+    }
+    if (range <= 0.0f) {
+        return 0.5f;
+    }
+    return 0.5f + 0.5f * std::clamp(curvature / range, -1.0f, 1.0f);
 }
 
 }  // namespace
@@ -286,6 +325,16 @@ BakeResult bake(const Mesh& lowPoly, const Mesh& highPoly, BakeMap map, const Ba
     // exist; otherwise the Color bake falls back to Target vertex colors.
     const bool useTexture = params.colorSource.kind == ColorSource::Texture &&
                             params.colorSource.texture != nullptr && highUvs != nullptr;
+
+    // Curvature/cavity read the Target's curvature field at the same cage hit
+    // the normal bake uses, so the two maps register texel for texel.
+    std::vector<float> highCurvature;
+    float curvatureRange = 0.0f;
+    if (map == BakeMap::Curvature || map == BakeMap::Cavity) {
+        highCurvature = vertexMeanCurvature(highPoly);
+        curvatureRange =
+            params.curvatureRange > 0.0f ? params.curvatureRange : curvatureScale(highCurvature);
+    }
 
     const std::vector<Texel> texels =
         rasterize(lowPoly, lowNormals, *uvs, params.width, params.height);
@@ -378,6 +427,15 @@ BakeResult bake(const Mesh& lowPoly, const Mesh& highPoly, BakeMap map, const Ba
                 result.image.at(tx.px, tx.py, 0) = c.x;
                 result.image.at(tx.px, tx.py, 1) = c.y;
                 result.image.at(tx.px, tx.py, 2) = c.z;
+                break;
+            }
+            case BakeMap::Curvature:
+            case BakeMap::Cavity: {
+                // A missed cage ray contributes 0 curvature, which encodes to
+                // the neutral value for both variants (mid-gray / white).
+                const float h = valid ? hitScalar(highPoly, *hit, highCurvature) : 0.0f;
+                result.image.at(tx.px, tx.py, 0) =
+                    encodeCurvature(h, curvatureRange, map == BakeMap::Cavity);
                 break;
             }
             case BakeMap::AmbientOcclusion:

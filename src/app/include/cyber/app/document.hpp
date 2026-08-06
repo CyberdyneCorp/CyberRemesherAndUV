@@ -19,12 +19,16 @@
 // flag driving the autosave hook.
 namespace cyber::app {
 
+// Persisted in the document byte container, so values are append-only: an
+// existing document's stored kind must keep meaning what it meant when saved.
 enum class BakeMapKind : std::uint32_t {
     Normal,
     AmbientOcclusion,
     Displacement,
     Position,
     Color,
+    Curvature,
+    Cavity,
 };
 
 // Persisted bake configuration and status (the pixel maps themselves are

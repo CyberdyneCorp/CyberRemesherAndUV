@@ -21,6 +21,8 @@ enum class BakeMap {
     Displacement,      // signed height along the low-poly normal, single channel
     Position,          // high-poly hit position (RGB, world space)
     Color,             // Target vertex color sampled at the hit (RGB)
+    Curvature,         // signed mean curvature around mid-gray, single channel
+    Cavity,            // concavity only (white = flat or convex), single channel
 };
 
 struct Image {
@@ -65,6 +67,11 @@ struct BakeParams {
     float aoRadius = 1.0f;    // an AO ray hit beyond this does not occlude
     float aoBias = 1e-3f;     // start offset to avoid self-hits
     ColorSource colorSource;  // BakeMap::Color source (default: Target vertex colors)
+    // Curvature magnitude (units 1/length) that saturates a Curvature/Cavity
+    // bake to full white/black. 0 = auto: the 95th percentile of |curvature|
+    // over the Target, which is scale-independent and keeps one pinched vertex
+    // from flattening the map to mid-gray.
+    float curvatureRange = 0.0f;
 };
 
 struct BakeResult {

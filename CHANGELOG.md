@@ -1,5 +1,54 @@
 # Changelog
 
+> Note: releases 0.3.0, 0.4.0 and 0.5.0 were tagged without changelog entries;
+> their content is recorded in `docs/ROADMAP.md`. Entries resume here.
+
+## Unreleased
+
+### Added
+
+- **Curvature and cavity map baking** (openspec change `add-curvature-bake`),
+  the missing quarter of the standard pre-texture recipe (curvature +
+  occlusion + normal). `BakeMap::Curvature` encodes the Target's signed mean
+  curvature around mid-gray — convex bright, concave dark — and
+  `BakeMap::Cavity` keeps concavity only, so flat and convex both read white
+  and the map drops straight into a multiply slot. Both are single-channel and
+  follow the same cage projection, cancellation and PNG/EXR output as every
+  other map: a curvature bake registers texel-for-texel with the normal bake
+  taken through the same cage.
+
+  Curvature is estimated with the Meyer et al. cotangent operator over a mixed
+  Voronoi area (`cyber/bake/curvature.hpp`), fan-triangulating n-gons exactly as
+  the BVH does so the estimate matches what the rays actually hit. Boundary
+  vertices, where the cotangent formula has no meaning, take the mean of their
+  interior neighbours instead of reading as a spurious crease.
+
+  The new `BakeParams::curvatureRange` sets the curvature magnitude that
+  saturates the map; the default of `0` auto-fits it to the 95th percentile of
+  `|curvature|` over the Target, which is scale-independent and keeps a single
+  pinched vertex from flattening everything to mid-gray. Reachable as
+  `CYBER_BAKE_CURVATURE` / `CYBER_BAKE_CAVITY` in the C ABI and
+  `BakeMap.CURVATURE` / `BakeMap.CAVITY` in Python.
+
+### Changed
+
+- `CyberBakeParams` gained a trailing `curvatureRange` field. The struct is
+  passed by pointer and callers allocate it, so a client compiled against the
+  older header must be recompiled; always initialise via
+  `cyber_default_bake_params`.
+- `cmake/CompilerWarnings.cmake` gained `CYBER_WARNINGS_AS_ERRORS` (default
+  `ON`, so CI is unchanged). Toolchains newer than CI's emit diagnostics of
+  their own — GCC 13 raises a known `-Wstringop-overflow` false positive from
+  inside libstdc++ — and there was previously no way to build the tree locally
+  to look at them.
+
+### Fixed
+
+- Two real `-Werror` breaks under GCC 13 that made the tree unbuildable on
+  current Ubuntu: a signed/unsigned conversion in `bimdf_quantize.cpp`'s trail
+  density counters and a lambda parameter shadowing an outer `b` in its T-join
+  sort comparator. Neither changes behaviour.
+
 ## 0.2.5
 
 ### Added

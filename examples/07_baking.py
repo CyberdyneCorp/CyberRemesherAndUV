@@ -34,6 +34,11 @@ def main() -> None:
             for title, kind, png in [
                 ("tangent-space normal", BakeMap.NORMAL, "07_bake_normal.png"),
                 ("displacement", BakeMap.DISPLACEMENT, "07_bake_displacement.png"),
+                # Curvature completes the standard pre-texture recipe
+                # (curvature + occlusion + normal). curvature_range=0 auto-fits
+                # the range to the Target, so it needs no per-model tuning.
+                ("curvature", BakeMap.CURVATURE, "07_bake_curvature.png"),
+                ("cavity", BakeMap.CAVITY, "07_bake_cavity.png"),
             ]:
                 img = bake(low, high, kind, params)
                 maps.append((title, img.to_numpy()))

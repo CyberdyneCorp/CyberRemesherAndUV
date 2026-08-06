@@ -136,6 +136,8 @@ BAKE_AO = 1
 BAKE_DISPLACEMENT = 2
 BAKE_POSITION = 3
 BAKE_COLOR = 4
+BAKE_CURVATURE = 5
+BAKE_CAVITY = 6
 
 
 class CyberBakeParams(Structure):
@@ -147,6 +149,7 @@ class CyberBakeParams(Structure):
         ("cage_distance", c_float),
         ("ao_samples", c_int32),
         ("ao_radius", c_float),
+        ("curvature_range", c_float),
     ]
 
 

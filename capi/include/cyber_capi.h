@@ -999,7 +999,9 @@ typedef enum CyberBakeMap {
     CYBER_BAKE_AO,            /* ambient occlusion / openness (1 channel) */
     CYBER_BAKE_DISPLACEMENT,  /* signed height along the low-poly normal (1 ch) */
     CYBER_BAKE_POSITION,      /* Target hit position, world space (RGB) */
-    CYBER_BAKE_COLOR          /* Target vertex color at the hit (RGB) */
+    CYBER_BAKE_COLOR,         /* Target vertex color at the hit (RGB) */
+    CYBER_BAKE_CURVATURE,     /* signed mean curvature around mid-gray (1 ch) */
+    CYBER_BAKE_CAVITY         /* concavity only, white = flat/convex (1 ch) */
 } CyberBakeMap;
 
 typedef struct CyberBakeParams {
@@ -1008,6 +1010,10 @@ typedef struct CyberBakeParams {
     float cageDistance;  /* rays start at surface + normal*cageDistance, cast inward 2x */
     int aoSamples;       /* hemisphere rays per texel for AO */
     float aoRadius;      /* an AO ray hit beyond this does not occlude */
+    /* Curvature magnitude (1/length) saturating CURVATURE/CAVITY to full
+     * white/black. 0 = auto (95th percentile of |curvature| on the Target).
+     * Appended in 0.6.0 — always initialise via cyber_default_bake_params. */
+    float curvatureRange;
 } CyberBakeParams;
 
 /* Fills params with the engine defaults. No-op on NULL. */

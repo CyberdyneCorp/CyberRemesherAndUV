@@ -7,30 +7,28 @@
 // CyberStatus plus a thread-local message. No exception is ever allowed to
 // unwind across the C boundary.
 
-#include "cyber_capi.h"
-
 #include <algorithm>
 #include <array>
 #include <cstdint>
 #include <exception>
 #include <filesystem>
 #include <memory>
-#include <vector>
 #include <optional>
 #include <string>
 #include <string_view>
 #include <unordered_set>
+#include <vector>
 
 #include "cyber/bake/bake.hpp"
 #include "cyber/core/io.hpp"
 #include "cyber/core/mesh.hpp"
 #include "cyber/core/pipeline.hpp"
-#include "cyber/quadrangulate/field_quadrangulator.hpp"
-#include "cyber/quadrangulate/quadcover_extractor.hpp"
-#include "cyber/quadrangulate/position_field.hpp"
-#include "cyber/imageio/image.hpp"
 #include "cyber/core/progress.hpp"
 #include "cyber/core/remesh_params.hpp"
+#include "cyber/imageio/image.hpp"
+#include "cyber/quadrangulate/field_quadrangulator.hpp"
+#include "cyber/quadrangulate/position_field.hpp"
+#include "cyber/quadrangulate/quadcover_extractor.hpp"
 #include "cyber/retopo/actions.hpp"
 #include "cyber/retopo/boundary.hpp"
 #include "cyber/retopo/build_tools.hpp"
@@ -40,14 +38,15 @@
 #include "cyber/retopo/loop_metrics.hpp"
 #include "cyber/retopo/loops.hpp"
 #include "cyber/retopo/move.hpp"
-#include "cyber/retopo/picking.hpp"
 #include "cyber/retopo/paths.hpp"
+#include "cyber/retopo/picking.hpp"
 #include "cyber/retopo/pins.hpp"
 #include "cyber/retopo/relax.hpp"
 #include "cyber/retopo/snapping.hpp"
 #include "cyber/retopo/stroke_interpreter.hpp"
 #include "cyber/retopo/symmetry.hpp"
 #include "cyber/retopo/tweak.hpp"
+#include "cyber_capi.h"
 #ifdef CYBER_CAPI_WITH_UV
 #include "cyber/uv/atlas.hpp"
 #endif
@@ -340,8 +339,8 @@ CyberStatus cyber_remesh(const CyberMesh* in, const CyberRemeshParams* params,
         // Error: distinguish unusable parameters from a pipeline failure.
         for (const auto& issue : result.parameterIssues) {
             if (issue.fatal) {
-                setError("cyber_remesh: invalid parameter '" + issue.parameter + "': " +
-                         issue.message);
+                setError("cyber_remesh: invalid parameter '" + issue.parameter +
+                         "': " + issue.message);
                 return CYBER_ERR_INVALID_PARAM;
             }
         }
@@ -760,8 +759,7 @@ size_t cyber_mesh_triangle_count(const CyberMesh* mesh) {
     return cache == nullptr ? 0 : cache->indices.size() / 3;
 }
 
-size_t cyber_mesh_copy_triangle_indices(const CyberMesh* mesh, uint32_t* out,
-                                        size_t max_indices) {
+size_t cyber_mesh_copy_triangle_indices(const CyberMesh* mesh, uint32_t* out, size_t max_indices) {
     const CyberRenderCache* cache = ensureRenderCache(mesh);
     if (cache == nullptr) {
         return 0;
@@ -831,8 +829,7 @@ const float* cyber_mesh_colors_ptr(const CyberMesh* mesh, size_t* out_count) {
 // untouched, but the cache (and its pointer views) is invalidated on every
 // setter, exactly like a mutating edit op.
 
-size_t cyber_mesh_live_faces(const CyberMesh* mesh, uint32_t* out_faces,
-                             size_t max_faces) {
+size_t cyber_mesh_live_faces(const CyberMesh* mesh, uint32_t* out_faces, size_t max_faces) {
     if (mesh == nullptr) {
         return 0;
     }
@@ -849,8 +846,7 @@ size_t cyber_mesh_live_faces(const CyberMesh* mesh, uint32_t* out_faces,
     return total;
 }
 
-CyberStatus cyber_mesh_set_hidden_faces(CyberMesh* mesh, const uint32_t* faces,
-                                        size_t face_count) {
+CyberStatus cyber_mesh_set_hidden_faces(CyberMesh* mesh, const uint32_t* faces, size_t face_count) {
     if (mesh == nullptr || (faces == nullptr && face_count > 0)) {
         setError("cyber_mesh_set_hidden_faces: null argument");
         return CYBER_ERR_INVALID_ARG;
@@ -875,8 +871,7 @@ size_t cyber_mesh_hidden_face_count(const CyberMesh* mesh) {
     return mesh == nullptr ? 0 : mesh->hiddenFaces.size();
 }
 
-CyberStatus cyber_mesh_set_tagged_edges(CyberMesh* mesh, const uint32_t* edges,
-                                        size_t edge_count) {
+CyberStatus cyber_mesh_set_tagged_edges(CyberMesh* mesh, const uint32_t* edges, size_t edge_count) {
     if (mesh == nullptr || (edges == nullptr && edge_count > 0)) {
         setError("cyber_mesh_set_tagged_edges: null argument");
         return CYBER_ERR_INVALID_ARG;
@@ -896,8 +891,7 @@ CyberStatus cyber_mesh_set_tagged_edges(CyberMesh* mesh, const uint32_t* edges,
     }
 }
 
-const uint32_t* cyber_mesh_tagged_edge_indices_ptr(const CyberMesh* mesh,
-                                                   size_t* out_count) {
+const uint32_t* cyber_mesh_tagged_edge_indices_ptr(const CyberMesh* mesh, size_t* out_count) {
     const CyberRenderCache* cache = ensureRenderCache(mesh);
     return bufferView(cache == nullptr ? nullptr : &cache->tagged, out_count);
 }
@@ -971,8 +965,8 @@ int cyber_snapper_snap_to_surface(const CyberSnapper* snapper, const float query
     return 1;
 }
 
-int cyber_snapper_snap_to_vertex(const CyberSnapper* snapper, const float query[3],
-                                 float radius, float out_point[3], uint32_t* out_vertex) {
+int cyber_snapper_snap_to_vertex(const CyberSnapper* snapper, const float query[3], float radius,
+                                 float out_point[3], uint32_t* out_vertex) {
     if (snapper == nullptr || query == nullptr) {
         return 0;
     }
@@ -987,8 +981,8 @@ int cyber_snapper_snap_to_vertex(const CyberSnapper* snapper, const float query[
 }
 
 int cyber_snapper_raycast(const CyberSnapper* snapper, const float origin[3],
-                          const float direction[3], float max_distance,
-                          float out_point[3], float* out_t, uint32_t* out_face) {
+                          const float direction[3], float max_distance, float out_point[3],
+                          float* out_t, uint32_t* out_face) {
     if (snapper == nullptr || origin == nullptr || direction == nullptr) {
         return 0;
     }
@@ -1009,9 +1003,8 @@ int cyber_snapper_raycast(const CyberSnapper* snapper, const float origin[3],
     return 1;
 }
 
-int cyber_mesh_nearest_vertex(const CyberMesh* mesh, const float query[3],
-                              float max_distance, uint32_t* out_vertex,
-                              float out_position[3]) {
+int cyber_mesh_nearest_vertex(const CyberMesh* mesh, const float query[3], float max_distance,
+                              uint32_t* out_vertex, float out_position[3]) {
     if (mesh == nullptr || query == nullptr) {
         return 0;
     }
@@ -1041,9 +1034,8 @@ int cyber_mesh_nearest_vertex_excluding(const CyberMesh* mesh, const float query
     return 1;
 }
 
-int cyber_mesh_nearest_edge(const CyberMesh* mesh, const float query[3],
-                            float max_distance, uint32_t* out_edge,
-                            float out_point[3]) {
+int cyber_mesh_nearest_edge(const CyberMesh* mesh, const float query[3], float max_distance,
+                            uint32_t* out_edge, float out_point[3]) {
     if (mesh == nullptr || query == nullptr) {
         return 0;
     }
@@ -1057,10 +1049,8 @@ int cyber_mesh_nearest_edge(const CyberMesh* mesh, const float query[3],
     return 1;
 }
 
-int cyber_mesh_edge_endpoints(const CyberMesh* mesh, uint32_t edge,
-                              uint32_t out_vertices[2]) {
-    if (mesh == nullptr || out_vertices == nullptr ||
-        !mesh->mesh.isAlive(cyber::EdgeId{edge})) {
+int cyber_mesh_edge_endpoints(const CyberMesh* mesh, uint32_t edge, uint32_t out_vertices[2]) {
+    if (mesh == nullptr || out_vertices == nullptr || !mesh->mesh.isAlive(cyber::EdgeId{edge})) {
         return 0;
     }
     const auto [v0, v1] = mesh->mesh.edgeVertices(cyber::EdgeId{edge});
@@ -1076,8 +1066,7 @@ int cyber_mesh_is_boundary_edge(const CyberMesh* mesh, uint32_t edge) {
     return mesh->mesh.isBoundaryEdge(cyber::EdgeId{edge}) ? 1 : 0;
 }
 
-int cyber_mesh_vertex_position(const CyberMesh* mesh, uint32_t vertex,
-                               float out_position[3]) {
+int cyber_mesh_vertex_position(const CyberMesh* mesh, uint32_t vertex, float out_position[3]) {
     if (mesh == nullptr || out_position == nullptr ||
         !mesh->mesh.isAlive(cyber::VertexId{vertex})) {
         return 0;
@@ -1086,8 +1075,8 @@ int cyber_mesh_vertex_position(const CyberMesh* mesh, uint32_t vertex,
     return 1;
 }
 
-int cyber_mesh_edge_faces(const CyberMesh* mesh, uint32_t edge,
-                          uint32_t out_faces[2], size_t out_sizes[2]) {
+int cyber_mesh_edge_faces(const CyberMesh* mesh, uint32_t edge, uint32_t out_faces[2],
+                          size_t out_sizes[2]) {
     if (mesh == nullptr || !mesh->mesh.isAlive(cyber::EdgeId{edge})) {
         return -1;
     }
@@ -1109,8 +1098,8 @@ size_t cyber_mesh_shortest_vertex_path(const CyberMesh* mesh, uint32_t from, uin
     if (mesh == nullptr) {
         return 0;
     }
-    const std::vector<cyber::VertexId> path = cyber::retopo::shortestVertexPath(
-        mesh->mesh, cyber::VertexId{from}, cyber::VertexId{to});
+    const std::vector<cyber::VertexId> path =
+        cyber::retopo::shortestVertexPath(mesh->mesh, cyber::VertexId{from}, cyber::VertexId{to});
     if (out_vertices != nullptr) {
         const size_t n = std::min(path.size(), max_vertices);
         for (size_t i = 0; i < n; ++i) {
@@ -1120,9 +1109,8 @@ size_t cyber_mesh_shortest_vertex_path(const CyberMesh* mesh, uint32_t from, uin
     return path.size();
 }
 
-size_t cyber_mesh_boundary_loop(const CyberMesh* mesh, uint32_t edge,
-                                uint32_t* out_vertices, size_t max_vertices,
-                                int* out_closed) {
+size_t cyber_mesh_boundary_loop(const CyberMesh* mesh, uint32_t edge, uint32_t* out_vertices,
+                                size_t max_vertices, int* out_closed) {
     if (out_closed != nullptr) {
         *out_closed = 0;
     }
@@ -1149,8 +1137,7 @@ namespace {
 
 // copy_positions convention: total count returned, at most max entries
 // filled.
-size_t copyEdgeIds(const std::vector<cyber::EdgeId>& edges, uint32_t* out,
-                   size_t max_edges) {
+size_t copyEdgeIds(const std::vector<cyber::EdgeId>& edges, uint32_t* out, size_t max_edges) {
     if (out != nullptr) {
         const size_t n = std::min(edges.size(), max_edges);
         for (size_t i = 0; i < n; ++i) {
@@ -1167,8 +1154,8 @@ size_t cyber_mesh_edge_loop(const CyberMesh* mesh, uint32_t edge, uint32_t* out_
     if (mesh == nullptr) {
         return 0;
     }
-    return copyEdgeIds(cyber::retopo::edgeLoopFrom(mesh->mesh, cyber::EdgeId{edge}),
-                       out_edges, max_edges);
+    return copyEdgeIds(cyber::retopo::edgeLoopFrom(mesh->mesh, cyber::EdgeId{edge}), out_edges,
+                       max_edges);
 }
 
 size_t cyber_mesh_quad_ring(const CyberMesh* mesh, uint32_t edge, uint32_t* out_edges,
@@ -1190,8 +1177,7 @@ size_t cyber_mesh_quad_ring(const CyberMesh* mesh, uint32_t edge, uint32_t* out_
 // ---- loop metrics (retopology phase 4, task 4.3) --------------------------
 
 CyberStatus cyber_mesh_loop_metrics(const CyberMesh* mesh, uint32_t edge,
-                                    const CyberSnapper* snapper,
-                                    CyberLoopMetrics* out_metrics) {
+                                    const CyberSnapper* snapper, CyberLoopMetrics* out_metrics) {
     if (mesh == nullptr || out_metrics == nullptr) {
         return CYBER_ERR_INVALID_ARG;
     }
@@ -1200,8 +1186,7 @@ CyberStatus cyber_mesh_loop_metrics(const CyberMesh* mesh, uint32_t edge,
     out_metrics->endpoint_b = CYBER_INVALID_ID;
 
     const cyber::retopo::EdgeLoopMetrics metrics = cyber::retopo::measureEdgeLoop(
-        mesh->mesh, cyber::EdgeId{edge},
-        snapper == nullptr ? nullptr : &snapper->snapper);
+        mesh->mesh, cyber::EdgeId{edge}, snapper == nullptr ? nullptr : &snapper->snapper);
 
     out_metrics->edge_count = static_cast<uint32_t>(metrics.edgeCount);
     out_metrics->vertex_count = static_cast<uint32_t>(metrics.vertexCount);
@@ -1212,11 +1197,9 @@ CyberStatus cyber_mesh_loop_metrics(const CyberMesh* mesh, uint32_t edge,
         out_metrics->endpoint_a = metrics.endpoints->first.value;
         out_metrics->endpoint_b = metrics.endpoints->second.value;
     }
-    out_metrics->boundary_edge_count =
-        static_cast<uint32_t>(metrics.boundaryEdgeCount);
+    out_metrics->boundary_edge_count = static_cast<uint32_t>(metrics.boundaryEdgeCount);
     out_metrics->snap_measured = metrics.snapMeasured ? 1 : 0;
-    out_metrics->snapped_vertex_count =
-        static_cast<uint32_t>(metrics.snappedVertexCount);
+    out_metrics->snapped_vertex_count = static_cast<uint32_t>(metrics.snappedVertexCount);
     out_metrics->max_snap_distance = metrics.maxSnapDistance;
     return CYBER_OK;
 }
@@ -1285,9 +1268,8 @@ CyberStatus runMeshEdit(CyberMesh* mesh, const char* name, Body body) {
 
 }  // namespace
 
-CyberStatus cyber_retopo_create_face(CyberMesh* mesh, const float* points_xyz,
-                                     size_t point_count, const CyberSnapper* snapper,
-                                     uint32_t* out_face) {
+CyberStatus cyber_retopo_create_face(CyberMesh* mesh, const float* points_xyz, size_t point_count,
+                                     const CyberSnapper* snapper, uint32_t* out_face) {
     return runMeshEdit(mesh, "cyber_retopo_create_face", [&] {
         if (points_xyz == nullptr || point_count < 3 || point_count > 4) {
             setError("cyber_retopo_create_face: need 3 or 4 points");
@@ -1301,8 +1283,7 @@ CyberStatus cyber_retopo_create_face(CyberMesh* mesh, const float* points_xyz,
         const cyber::retopo::SurfaceSnapper* snap = snapperOf(snapper);
         for (size_t i = 0; i < point_count; ++i) {
             const cyber::Vec3 p = toVec3(points_xyz + i * 3);
-            points.push_back(snap != nullptr && !snap->empty() ? snap->snapToSurface(p).point
-                                                               : p);
+            points.push_back(snap != nullptr && !snap->empty() ? snap->snapToSurface(p).point : p);
         }
         for (size_t i = 0; i < points.size(); ++i) {
             for (size_t j = i + 1; j < points.size(); ++j) {
@@ -1334,8 +1315,8 @@ CyberStatus cyber_retopo_create_face(CyberMesh* mesh, const float* points_xyz,
     });
 }
 
-CyberStatus cyber_retopo_tweak_vertex(CyberMesh* mesh, uint32_t vertex,
-                                      const float target[3], const CyberSnapper* snapper) {
+CyberStatus cyber_retopo_tweak_vertex(CyberMesh* mesh, uint32_t vertex, const float target[3],
+                                      const CyberSnapper* snapper) {
     return runMeshEdit(mesh, "cyber_retopo_tweak_vertex", [&] {
         if (target == nullptr || !mesh->mesh.isAlive(cyber::VertexId{vertex})) {
             setError("cyber_retopo_tweak_vertex: dead vertex or null target");
@@ -1347,9 +1328,8 @@ CyberStatus cyber_retopo_tweak_vertex(CyberMesh* mesh, uint32_t vertex,
     });
 }
 
-CyberStatus cyber_retopo_move(CyberMesh* mesh, uint32_t seed_vertex,
-                              const float displacement[3], float radius,
-                              const uint32_t* pinned, size_t pinned_count,
+CyberStatus cyber_retopo_move(CyberMesh* mesh, uint32_t seed_vertex, const float displacement[3],
+                              float radius, const uint32_t* pinned, size_t pinned_count,
                               const CyberSnapper* snapper) {
     return runMeshEdit(mesh, "cyber_retopo_move", [&] {
         if (displacement == nullptr || !mesh->mesh.isAlive(cyber::VertexId{seed_vertex})) {
@@ -1370,10 +1350,9 @@ CyberStatus cyber_retopo_move(CyberMesh* mesh, uint32_t seed_vertex,
     });
 }
 
-CyberStatus cyber_retopo_relax(CyberMesh* mesh, const float center[3], float radius,
-                               float strength, int iterations, int auto_pin_corners,
-                               const uint32_t* pinned, size_t pinned_count,
-                               const CyberSnapper* snapper) {
+CyberStatus cyber_retopo_relax(CyberMesh* mesh, const float center[3], float radius, float strength,
+                               int iterations, int auto_pin_corners, const uint32_t* pinned,
+                               size_t pinned_count, const CyberSnapper* snapper) {
     return runMeshEdit(mesh, "cyber_retopo_relax", [&] {
         if (center == nullptr) {
             setError("cyber_retopo_relax: null center");
@@ -1415,8 +1394,8 @@ CyberStatus cyber_retopo_erase(CyberMesh* mesh, const float center[3], float bas
     });
 }
 
-CyberStatus cyber_retopo_delete_faces(CyberMesh* mesh, const uint32_t* faces,
-                                      size_t face_count, size_t* out_removed) {
+CyberStatus cyber_retopo_delete_faces(CyberMesh* mesh, const uint32_t* faces, size_t face_count,
+                                      size_t* out_removed) {
     return runMeshEdit(mesh, "cyber_retopo_delete_faces", [&] {
         if (faces == nullptr && face_count > 0) {
             setError("cyber_retopo_delete_faces: null face list");
@@ -1471,9 +1450,8 @@ CyberStatus cyber_retopo_insert_loop(CyberMesh* mesh, uint32_t edge, float t,
     });
 }
 
-CyberStatus cyber_retopo_create_grid(CyberMesh* mesh, const float* points_xyz,
-                                     size_t rows, size_t cols,
-                                     const CyberSnapper* snapper, size_t* out_faces) {
+CyberStatus cyber_retopo_create_grid(CyberMesh* mesh, const float* points_xyz, size_t rows,
+                                     size_t cols, const CyberSnapper* snapper, size_t* out_faces) {
     return runMeshEdit(mesh, "cyber_retopo_create_grid", [&] {
         if (points_xyz == nullptr || rows < 1 || cols < 1) {
             setError("cyber_retopo_create_grid: null lattice or empty grid");
@@ -1488,8 +1466,7 @@ CyberStatus cyber_retopo_create_grid(CyberMesh* mesh, const float* points_xyz,
         const cyber::retopo::SurfaceSnapper* snap = snapperOf(snapper);
         for (size_t i = 0; i < pointCount; ++i) {
             const cyber::Vec3 p = toVec3(points_xyz + i * 3);
-            points.push_back(snap != nullptr && !snap->empty() ? snap->snapToSurface(p).point
-                                                               : p);
+            points.push_back(snap != nullptr && !snap->empty() ? snap->snapToSurface(p).point : p);
         }
         for (size_t i = 0; i < points.size(); ++i) {
             for (size_t j = i + 1; j < points.size(); ++j) {
@@ -1510,9 +1487,9 @@ CyberStatus cyber_retopo_create_grid(CyberMesh* mesh, const float* points_xyz,
         for (size_t r = 0; r < rows && !failed; ++r) {
             for (size_t c = 0; c < cols && !failed; ++c) {
                 const size_t corner = r * stride + c;
-                const std::array<cyber::VertexId, 4> ring = {
-                    verts[corner], verts[corner + 1], verts[corner + stride + 1],
-                    verts[corner + stride]};
+                const std::array<cyber::VertexId, 4> ring = {verts[corner], verts[corner + 1],
+                                                             verts[corner + stride + 1],
+                                                             verts[corner + stride]};
                 const cyber::FaceId f = mesh->mesh.addFace(ring);
                 if (f.valid()) {
                     faces.push_back(f);
@@ -1541,8 +1518,8 @@ CyberStatus cyber_retopo_create_grid(CyberMesh* mesh, const float* points_xyz,
     });
 }
 
-CyberStatus cyber_retopo_dissolve_edges(CyberMesh* mesh, const uint32_t* edges,
-                                        size_t edge_count, size_t* out_dissolved) {
+CyberStatus cyber_retopo_dissolve_edges(CyberMesh* mesh, const uint32_t* edges, size_t edge_count,
+                                        size_t* out_dissolved) {
     return runMeshEdit(mesh, "cyber_retopo_dissolve_edges", [&] {
         if (edges == nullptr && edge_count > 0) {
             setError("cyber_retopo_dissolve_edges: null edge list");
@@ -1568,8 +1545,7 @@ CyberStatus cyber_retopo_merge_vertices(CyberMesh* mesh, uint32_t keep, uint32_t
     return runMeshEdit(mesh, "cyber_retopo_merge_vertices", [&] {
         const cyber::VertexId keepId{keep};
         const cyber::VertexId removeId{remove};
-        if (!mesh->mesh.isAlive(keepId) || !mesh->mesh.isAlive(removeId) ||
-            keep == remove) {
+        if (!mesh->mesh.isAlive(keepId) || !mesh->mesh.isAlive(removeId) || keep == remove) {
             setError("cyber_retopo_merge_vertices: dead or identical vertices");
             return CYBER_ERR_INVALID_ARG;
         }
@@ -1589,8 +1565,9 @@ CyberStatus cyber_retopo_merge_vertices(CyberMesh* mesh, uint32_t keep, uint32_t
 CyberStatus cyber_retopo_rotate_edge(CyberMesh* mesh, uint32_t edge) {
     return runMeshEdit(mesh, "cyber_retopo_rotate_edge", [&] {
         if (!cyber::retopo::rotateEdgeAny(mesh->mesh, cyber::EdgeId{edge})) {
-            setError("cyber_retopo_rotate_edge: edge cannot rotate "
-                     "(dead, boundary, non-tri/quad pair, or fold-over)");
+            setError(
+                "cyber_retopo_rotate_edge: edge cannot rotate "
+                "(dead, boundary, non-tri/quad pair, or fold-over)");
             return CYBER_ERR_INVALID_ARG;
         }
         return CYBER_OK;
@@ -1599,10 +1576,9 @@ CyberStatus cyber_retopo_rotate_edge(CyberMesh* mesh, uint32_t edge) {
 
 // ---- build tools (retopology phase 4, task 4.1) -----------------------------
 
-CyberStatus cyber_retopo_build_face(CyberMesh* mesh, size_t count,
-                                    const uint32_t* vertex_ids, const float* points_xyz,
-                                    const CyberSnapper* snapper, uint32_t* out_face,
-                                    uint32_t* out_ring_vertices) {
+CyberStatus cyber_retopo_build_face(CyberMesh* mesh, size_t count, const uint32_t* vertex_ids,
+                                    const float* points_xyz, const CyberSnapper* snapper,
+                                    uint32_t* out_face, uint32_t* out_ring_vertices) {
     return runMeshEdit(mesh, "cyber_retopo_build_face", [&] {
         if (vertex_ids == nullptr || count < 3 || count > 4) {
             setError("cyber_retopo_build_face: need 3 or 4 ring slots");
@@ -1621,8 +1597,8 @@ CyberStatus cyber_retopo_build_face(CyberMesh* mesh, size_t count,
                     return CYBER_ERR_INVALID_ARG;
                 }
                 const cyber::Vec3 p = toVec3(points_xyz + i * 3);
-                positions.push_back(
-                    snap != nullptr && !snap->empty() ? snap->snapToSurface(p).point : p);
+                positions.push_back(snap != nullptr && !snap->empty() ? snap->snapToSurface(p).point
+                                                                      : p);
             } else {
                 const cyber::VertexId v{vertex_ids[i]};
                 if (!mesh->mesh.isAlive(v)) {
@@ -1708,8 +1684,7 @@ CyberStatus cyber_retopo_build_face(CyberMesh* mesh, size_t count,
 }
 
 CyberStatus cyber_retopo_grow_boundary_edge(CyberMesh* mesh, uint32_t edge,
-                                            const float point_xyz[3],
-                                            const CyberSnapper* snapper,
+                                            const float point_xyz[3], const CyberSnapper* snapper,
                                             uint32_t* out_vertex) {
     return runMeshEdit(mesh, "cyber_retopo_grow_boundary_edge", [&] {
         const cyber::EdgeId e{edge};
@@ -1741,8 +1716,8 @@ CyberStatus cyber_retopo_grow_boundary_edge(CyberMesh* mesh, uint32_t edge,
     });
 }
 
-CyberStatus cyber_retopo_distribute_path(CyberMesh* mesh, const uint32_t* vertices,
-                                         size_t count, const CyberSnapper* snapper) {
+CyberStatus cyber_retopo_distribute_path(CyberMesh* mesh, const uint32_t* vertices, size_t count,
+                                         const CyberSnapper* snapper) {
     return runMeshEdit(mesh, "cyber_retopo_distribute_path", [&] {
         if (vertices == nullptr || count < 3) {
             setError("cyber_retopo_distribute_path: need an ordered chain of >= 3 vertices");
@@ -1760,12 +1735,13 @@ CyberStatus cyber_retopo_distribute_path(CyberMesh* mesh, const uint32_t* vertic
                 setError("cyber_retopo_distribute_path: repeated chain vertex");
                 return CYBER_ERR_INVALID_ARG;
             }
-            if (i > 0 && !mesh->mesh
-                              .edgeBetween(cyber::VertexId{vertices[i - 1]},
-                                           cyber::VertexId{vertices[i]})
-                              .valid()) {
-                setError("cyber_retopo_distribute_path: chain break (no edge between "
-                         "consecutive vertices)");
+            if (i > 0 &&
+                !mesh->mesh
+                     .edgeBetween(cyber::VertexId{vertices[i - 1]}, cyber::VertexId{vertices[i]})
+                     .valid()) {
+                setError(
+                    "cyber_retopo_distribute_path: chain break (no edge between "
+                    "consecutive vertices)");
                 return CYBER_ERR_INVALID_ARG;
             }
         }
@@ -1854,22 +1830,22 @@ CyberStatus validateChain(const CyberMesh* mesh, const char* name, const uint32_
             setError(std::string(name) + ": repeated chain vertex");
             return CYBER_ERR_INVALID_ARG;
         }
-        if (i > 0 && !mesh->mesh
-                          .edgeBetween(cyber::VertexId{chain[i - 1]},
-                                       cyber::VertexId{chain[i]})
-                          .valid()) {
-            setError(std::string(name) + ": chain break (no edge between consecutive "
-                                         "vertices)");
+        if (i > 0 &&
+            !mesh->mesh.edgeBetween(cyber::VertexId{chain[i - 1]}, cyber::VertexId{chain[i]})
+                 .valid()) {
+            setError(std::string(name) +
+                     ": chain break (no edge between consecutive "
+                     "vertices)");
             return CYBER_ERR_INVALID_ARG;
         }
     }
     if (closed != 0) {
-        if (count < 3 || !mesh->mesh
-                              .edgeBetween(cyber::VertexId{chain[count - 1]},
-                                           cyber::VertexId{chain[0]})
-                              .valid()) {
-            setError(std::string(name) + ": closed chain needs >= 3 vertices and a live "
-                                         "wrap edge");
+        if (count < 3 ||
+            !mesh->mesh.edgeBetween(cyber::VertexId{chain[count - 1]}, cyber::VertexId{chain[0]})
+                 .valid()) {
+            setError(std::string(name) +
+                     ": closed chain needs >= 3 vertices and a live "
+                     "wrap edge");
             return CYBER_ERR_INVALID_ARG;
         }
     }
@@ -1882,10 +1858,9 @@ CyberStatus validateChain(const CyberMesh* mesh, const char* name, const uint32_
 
 }  // namespace
 
-CyberStatus cyber_retopo_patch_clone(CyberMesh* mesh, const uint32_t* faces,
-                                     size_t face_count, const float xf[12], int flip,
-                                     const CyberSnapper* snapper, uint32_t* out_new_faces,
-                                     size_t* out_new_face_count) {
+CyberStatus cyber_retopo_patch_clone(CyberMesh* mesh, const uint32_t* faces, size_t face_count,
+                                     const float xf[12], int flip, const CyberSnapper* snapper,
+                                     uint32_t* out_new_faces, size_t* out_new_face_count) {
     return runMeshEdit(mesh, "cyber_retopo_patch_clone", [&] {
         if (faces == nullptr || face_count == 0 || xf == nullptr) {
             setError("cyber_retopo_patch_clone: null/empty faces or transform");
@@ -1905,8 +1880,8 @@ CyberStatus cyber_retopo_patch_clone(CyberMesh* mesh, const uint32_t* faces,
             }
             ids.push_back(cyber::FaceId{faces[i]});
         }
-        const std::vector<cyber::FaceId> cloned = cyber::retopo::patchClone(
-            mesh->mesh, ids, toAffine(xf), snapperOf(snapper), flip != 0);
+        const std::vector<cyber::FaceId> cloned =
+            cyber::retopo::patchClone(mesh->mesh, ids, toAffine(xf), snapperOf(snapper), flip != 0);
         if (out_new_faces != nullptr) {
             for (size_t i = 0; i < cloned.size() && i < face_count; ++i) {
                 out_new_faces[i] = cloned[i].value;
@@ -1919,16 +1894,14 @@ CyberStatus cyber_retopo_patch_clone(CyberMesh* mesh, const uint32_t* faces,
     });
 }
 
-CyberStatus cyber_retopo_extend_boundary_grid(CyberMesh* mesh, const uint32_t* chain,
-                                              size_t count, int closed,
-                                              const float offset[3], int rings,
+CyberStatus cyber_retopo_extend_boundary_grid(CyberMesh* mesh, const uint32_t* chain, size_t count,
+                                              int closed, const float offset[3], int rings,
                                               const CyberSnapper* snapper,
-                                              uint32_t* out_outer_chain,
-                                              size_t* out_new_faces) {
+                                              uint32_t* out_outer_chain, size_t* out_new_faces) {
     return runMeshEdit(mesh, "cyber_retopo_extend_boundary_grid", [&] {
         std::vector<cyber::VertexId> verts;
-        const CyberStatus chainStatus = validateChain(
-            mesh, "cyber_retopo_extend_boundary_grid", chain, count, closed, verts);
+        const CyberStatus chainStatus =
+            validateChain(mesh, "cyber_retopo_extend_boundary_grid", chain, count, closed, verts);
         if (chainStatus != CYBER_OK) {
             return chainStatus;
         }
@@ -1940,9 +1913,8 @@ CyberStatus cyber_retopo_extend_boundary_grid(CyberMesh* mesh, const uint32_t* c
             setError("cyber_retopo_extend_boundary_grid: rings must be >= 1");
             return CYBER_ERR_INVALID_PARAM;
         }
-        const cyber::retopo::BoundaryExtension extension =
-            cyber::retopo::extendBoundaryRings(mesh->mesh, verts, closed != 0,
-                                               toVec3(offset), rings, snapperOf(snapper));
+        const cyber::retopo::BoundaryExtension extension = cyber::retopo::extendBoundaryRings(
+            mesh->mesh, verts, closed != 0, toVec3(offset), rings, snapperOf(snapper));
         if (out_outer_chain != nullptr) {
             for (size_t i = 0; i < extension.outerChain.size() && i < count; ++i) {
                 out_outer_chain[i] = extension.outerChain[i].value;
@@ -1955,15 +1927,14 @@ CyberStatus cyber_retopo_extend_boundary_grid(CyberMesh* mesh, const uint32_t* c
     });
 }
 
-CyberStatus cyber_retopo_extend_boundary_fan(CyberMesh* mesh, const uint32_t* chain,
-                                             size_t count, int closed,
-                                             const float apex_offset[3],
-                                             const CyberSnapper* snapper,
-                                             uint32_t* out_apex, size_t* out_new_faces) {
+CyberStatus cyber_retopo_extend_boundary_fan(CyberMesh* mesh, const uint32_t* chain, size_t count,
+                                             int closed, const float apex_offset[3],
+                                             const CyberSnapper* snapper, uint32_t* out_apex,
+                                             size_t* out_new_faces) {
     return runMeshEdit(mesh, "cyber_retopo_extend_boundary_fan", [&] {
         std::vector<cyber::VertexId> verts;
-        const CyberStatus chainStatus = validateChain(
-            mesh, "cyber_retopo_extend_boundary_fan", chain, count, closed, verts);
+        const CyberStatus chainStatus =
+            validateChain(mesh, "cyber_retopo_extend_boundary_fan", chain, count, closed, verts);
         if (chainStatus != CYBER_OK) {
             return chainStatus;
         }
@@ -2000,9 +1971,8 @@ CyberStatus cyber_retopo_extend_boundary_fan(CyberMesh* mesh, const uint32_t* ch
     });
 }
 
-CyberStatus cyber_retopo_draw_strip(CyberMesh* mesh, const float* path_xyz,
-                                    size_t point_count, float width,
-                                    const float view_dir[3], uint32_t start_a,
+CyberStatus cyber_retopo_draw_strip(CyberMesh* mesh, const float* path_xyz, size_t point_count,
+                                    float width, const float view_dir[3], uint32_t start_a,
                                     uint32_t start_b, const CyberSnapper* snapper,
                                     size_t* out_new_faces) {
     return runMeshEdit(mesh, "cyber_retopo_draw_strip", [&] {
@@ -2047,9 +2017,8 @@ CyberStatus cyber_retopo_draw_strip(CyberMesh* mesh, const float* path_xyz,
     });
 }
 
-CyberStatus cyber_retopo_transform_vertices(CyberMesh* mesh, const uint32_t* vertices,
-                                            size_t count, const float xf[12],
-                                            const CyberSnapper* snapper,
+CyberStatus cyber_retopo_transform_vertices(CyberMesh* mesh, const uint32_t* vertices, size_t count,
+                                            const float xf[12], const CyberSnapper* snapper,
                                             float resnap_epsilon, size_t* out_resnapped,
                                             float* out_max_distance) {
     return runMeshEdit(mesh, "cyber_retopo_transform_vertices", [&] {
@@ -2140,16 +2109,14 @@ CyberStatus cyber_retopo_snap_symmetry_plane(CyberMesh* mesh, const CyberSymmetr
 }
 
 CyberStatus cyber_retopo_apply_symmetry(CyberMesh* mesh, const CyberSymmetry* symmetry,
-                                        const CyberSnapper* snapper,
-                                        size_t* out_added_faces) {
+                                        const CyberSnapper* snapper, size_t* out_added_faces) {
     return runMeshEdit(mesh, "cyber_retopo_apply_symmetry", [&] {
         cyber::retopo::Symmetry sym;
         if (!toSymmetry(symmetry, sym)) {
             setError("cyber_retopo_apply_symmetry: null or degenerate plane");
             return CYBER_ERR_INVALID_ARG;
         }
-        const size_t added =
-            cyber::retopo::applySymmetry(mesh->mesh, sym, snapperOf(snapper));
+        const size_t added = cyber::retopo::applySymmetry(mesh->mesh, sym, snapperOf(snapper));
         if (out_added_faces != nullptr) {
             *out_added_faces = added;
         }
@@ -2158,8 +2125,7 @@ CyberStatus cyber_retopo_apply_symmetry(CyberMesh* mesh, const CyberSymmetry* sy
 }
 
 CyberStatus cyber_retopo_resymmetrize(CyberMesh* mesh, const CyberSymmetry* symmetry,
-                                      float match_tolerance,
-                                      CyberResymmetrizeReport* out_report) {
+                                      float match_tolerance, CyberResymmetrizeReport* out_report) {
     return runMeshEdit(mesh, "cyber_retopo_resymmetrize", [&] {
         cyber::retopo::Symmetry sym;
         if (!toSymmetry(symmetry, sym)) {
@@ -2187,8 +2153,8 @@ CyberStatus cyber_retopo_resymmetrize(CyberMesh* mesh, const CyberSymmetry* symm
 // on exactly those ids.
 
 CyberStatus cyber_retopo_snap_all(CyberMesh* mesh, const CyberSnapper* snapper,
-                                  const uint32_t* pinned, size_t pinned_count,
-                                  size_t* out_moved, float* out_max_distance) {
+                                  const uint32_t* pinned, size_t pinned_count, size_t* out_moved,
+                                  float* out_max_distance) {
     return runMeshEdit(mesh, "cyber_retopo_snap_all", [&] {
         const cyber::retopo::SurfaceSnapper* snap = snapperOf(snapper);
         if (snap == nullptr || snap->empty()) {
@@ -2369,8 +2335,7 @@ CyberElementKind toCElementKind(cyber::retopo::ElementRef::Kind kind) {
 
 const cyber::retopo::InterpretationCandidate* candidateAt(
     const CyberStrokeInterpretation* interpretation, size_t candidate) {
-    if (interpretation == nullptr ||
-        candidate >= interpretation->record.candidates.size()) {
+    if (interpretation == nullptr || candidate >= interpretation->record.candidates.size()) {
         return nullptr;
     }
     return &interpretation->record.candidates[candidate];
@@ -2379,8 +2344,8 @@ const cyber::retopo::InterpretationCandidate* candidateAt(
 }  // namespace
 
 CyberStatus cyber_stroke_interpret(const CyberMesh* edit_mesh, const float* view_proj,
-                                   const float* samples_xyt, size_t sample_count,
-                                   float aspect, CyberStrokeInterpretation** out) {
+                                   const float* samples_xyt, size_t sample_count, float aspect,
+                                   CyberStrokeInterpretation** out) {
     if (samples_xyt == nullptr || sample_count == 0 || out == nullptr) {
         setError("cyber_stroke_interpret: null/empty argument");
         return CYBER_ERR_INVALID_ARG;
@@ -2394,8 +2359,8 @@ CyberStatus cyber_stroke_interpret(const CyberMesh* edit_mesh, const float* view
         std::vector<cyber::retopo::ScreenSample> samples;
         samples.reserve(sample_count);
         for (size_t i = 0; i < sample_count; ++i) {
-            samples.push_back({{samples_xyt[i * 3 + 0], samples_xyt[i * 3 + 1]},
-                               samples_xyt[i * 3 + 2]});
+            samples.push_back(
+                {{samples_xyt[i * 3 + 0], samples_xyt[i * 3 + 1]}, samples_xyt[i * 3 + 2]});
         }
         cyber::retopo::ShapeParams params;
         if (aspect > 0.0f) {
@@ -2403,8 +2368,7 @@ CyberStatus cyber_stroke_interpret(const CyberMesh* edit_mesh, const float* view
         }
         auto handle = std::make_unique<CyberStrokeInterpretation>();
         handle->record = cyber::retopo::interpretStroke(
-            samples, edit_mesh != nullptr ? &edit_mesh->mesh : nullptr, view_proj,
-            params);
+            samples, edit_mesh != nullptr ? &edit_mesh->mesh : nullptr, view_proj, params);
         clearError();
         *out = handle.release();
         return CYBER_OK;
@@ -2429,8 +2393,7 @@ CyberStrokeShape cyber_stroke_interpretation_shape(
 
 float cyber_stroke_interpretation_shape_confidence(
     const CyberStrokeInterpretation* interpretation) {
-    return interpretation == nullptr ? 0.0f
-                                     : interpretation->record.shape.confidence;
+    return interpretation == nullptr ? 0.0f : interpretation->record.shape.confidence;
 }
 
 CyberStrokeContext cyber_stroke_interpretation_context(
@@ -2450,14 +2413,14 @@ CyberStrokeAction cyber_stroke_interpretation_action(
     return c == nullptr ? CYBER_ACTION_NONE : toCAction(c->action);
 }
 
-float cyber_stroke_interpretation_confidence(
-    const CyberStrokeInterpretation* interpretation, size_t candidate) {
+float cyber_stroke_interpretation_confidence(const CyberStrokeInterpretation* interpretation,
+                                             size_t candidate) {
     const auto* c = candidateAt(interpretation, candidate);
     return c == nullptr ? 0.0f : c->confidence;
 }
 
-size_t cyber_stroke_interpretation_element_count(
-    const CyberStrokeInterpretation* interpretation, size_t candidate) {
+size_t cyber_stroke_interpretation_element_count(const CyberStrokeInterpretation* interpretation,
+                                                 size_t candidate) {
     const auto* c = candidateAt(interpretation, candidate);
     return c == nullptr ? 0 : c->elements.size();
 }
@@ -2479,8 +2442,7 @@ int cyber_stroke_interpretation_element(const CyberStrokeInterpretation* interpr
     return 1;
 }
 
-size_t cyber_stroke_interpretation_corner_count(
-    const CyberStrokeInterpretation* interpretation) {
+size_t cyber_stroke_interpretation_corner_count(const CyberStrokeInterpretation* interpretation) {
     return interpretation == nullptr ? 0 : interpretation->record.shape.corners.size();
 }
 
@@ -2527,6 +2489,7 @@ void cyber_default_bake_params(CyberBakeParams* params) {
     params->cageDistance = d.cageDistance;
     params->aoSamples = d.aoSamples;
     params->aoRadius = d.aoRadius;
+    params->curvatureRange = d.curvatureRange;
 }
 
 CyberStatus cyber_bake(const CyberMesh* low, const CyberMesh* high, CyberBakeMap map,
@@ -2543,6 +2506,7 @@ CyberStatus cyber_bake(const CyberMesh* low, const CyberMesh* high, CyberBakeMap
             p.cageDistance = params->cageDistance;
             p.aoSamples = params->aoSamples;
             p.aoRadius = params->aoRadius;
+            p.curvatureRange = params->curvatureRange;
         }
         cyber::bake::BakeMap m{};
         switch (map) {
@@ -2560,6 +2524,12 @@ CyberStatus cyber_bake(const CyberMesh* low, const CyberMesh* high, CyberBakeMap
                 break;
             case CYBER_BAKE_COLOR:
                 m = cyber::bake::BakeMap::Color;
+                break;
+            case CYBER_BAKE_CURVATURE:
+                m = cyber::bake::BakeMap::Curvature;
+                break;
+            case CYBER_BAKE_CAVITY:
+                m = cyber::bake::BakeMap::Cavity;
                 break;
             default:
                 setError("cyber_bake: unknown map type");
