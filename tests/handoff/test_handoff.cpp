@@ -1,9 +1,12 @@
 // Sculpt handoff ingest (pipeline-bridge spec, "Sculpt handoff ingest").
 #include <doctest.h>
 
+#include <array>
 #include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -100,6 +103,95 @@ Fixture makeBoxFixture() {
 fs::path writeHandoffFile(const std::string& name, const std::string& text) {
     const fs::path path = tempDir() / name;
     std::ofstream(path, std::ios::binary) << text;
+    return path;
+}
+
+std::string readAllBytes(const fs::path& path) {
+    std::ifstream file(path, std::ios::binary);
+    return std::string((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+}
+
+// The mesh a glTF producer would export: positions + faces from the fixture,
+// vertex colors, and normals on the CORNER set — the only place the engine's
+// glTF writer reads NORMAL from.
+Mesh makeGltfSourceMesh(const Fixture& fixture) {
+    Mesh mesh;
+    std::vector<VertexId> ids;
+    ids.reserve(fixture.vertices.size());
+    for (const HandoffVertex& v : fixture.vertices) {
+        ids.push_back(mesh.addVertex(v.position));
+    }
+    auto& colors = mesh.vertexAttributes().create<Vec3>(io::kColorAttribute);
+    for (std::size_t i = 0; i < fixture.vertices.size(); ++i) {
+        colors[ids[i].value] = fixture.vertices[i].color;
+    }
+    auto& normals = mesh.cornerAttributes().create<Vec3>(io::kNormalAttribute);
+    for (const auto& t : fixture.triangles) {
+        const std::array<VertexId, 3> tri{ids[static_cast<std::size_t>(t[0])],
+                                          ids[static_cast<std::size_t>(t[1])],
+                                          ids[static_cast<std::size_t>(t[2])]};
+        const FaceId f = mesh.addFace(tri);
+        const std::vector<cyber::LoopId> loops = mesh.faceLoops(f);
+        for (std::size_t c = 0; c < loops.size(); ++c) {
+            normals[loops[c].value] = fixture.vertices[static_cast<std::size_t>(t[c])].normal;
+        }
+    }
+    return mesh;
+}
+
+// The synthetic glTF producer's half that the engine's writer has no slot for:
+// asset.extras.cyberSculptHandoff, exactly as docs/sculpt-handoff-format.md
+// spells it.
+std::string injectHandoffExtras(const std::string& json, int major, int minor,
+                                const std::string& producer) {
+    const std::size_t key = json.find("\"asset\"");
+    const std::size_t brace = json.find('{', key);
+    std::string extras = "\"extras\":{\"cyberSculptHandoff\":{\"major\":" + std::to_string(major) +
+                         ",\"minor\":" + std::to_string(minor);
+    if (!producer.empty()) {
+        extras += ",\"producer\":\"" + producer + "\"";
+    }
+    extras += "}},";
+    std::string out = json;
+    out.insert(brace + 1, extras);
+    return out;
+}
+
+std::uint32_t readU32(const std::string& bytes, std::size_t at) {
+    std::uint32_t value = 0;
+    std::memcpy(&value, bytes.data() + at, 4);
+    return value;
+}
+
+// Rebuilds a GLB around a patched JSON chunk: the chunk must stay 4-byte
+// aligned and both the chunk length and the container length must follow it.
+std::string patchGlbJson(const std::string& glb, int major, int minor,
+                         const std::string& producer) {
+    constexpr std::size_t kJsonChunkData = 20;  // 12 header + 4 length + 4 type
+    const std::uint32_t jsonLength = readU32(glb, 12);
+    std::string json =
+        injectHandoffExtras(glb.substr(kJsonChunkData, jsonLength), major, minor, producer);
+    while (json.size() % 4 != 0) {
+        json.push_back(' ');
+    }
+    const std::string rest = glb.substr(kJsonChunkData + jsonLength);
+    std::string out = glb.substr(0, kJsonChunkData) + json + rest;
+    const auto total = static_cast<std::uint32_t>(out.size());
+    const auto chunk = static_cast<std::uint32_t>(json.size());
+    std::memcpy(out.data() + 8, &total, 4);
+    std::memcpy(out.data() + 12, &chunk, 4);
+    return out;
+}
+
+fs::path writeGltfHandoffFile(const std::string& name, const Mesh& mesh, int major, int minor,
+                              const std::string& producer = "claytest") {
+    const fs::path path = tempDir() / name;
+    const io::Status status = io::exportMesh(mesh, path);
+    REQUIRE(status.ok());
+    std::string bytes = readAllBytes(path);
+    bytes = path.extension() == ".glb" ? patchGlbJson(bytes, major, minor, producer)
+                                       : injectHandoffExtras(bytes, major, minor, producer);
+    std::ofstream(path, std::ios::binary) << bytes;
     return path;
 }
 
@@ -313,6 +405,138 @@ TEST_CASE("a handoff reads from a stream as it does from a file") {
     REQUIRE(result.ok());
     CHECK(result.value().mesh.vertexCount() == 8);
     CHECK(result.value().producer == "stdin");
+}
+
+TEST_CASE("a glTF handoff carries version, producer, geometry, colors and normals") {
+    // The .gltf/.glb profile of docs/sculpt-handoff-format.md, end to end.
+    // Regression: `producer` was declared in asset.extras and never read
+    // (GltfDeclaration::producer was dead), and NORMAL landed only on the
+    // CORNER set while Handoff::hasVertexNormals reads the VERTEX set — so a
+    // file that declared both came back with neither.
+    const Fixture fixture = makeBoxFixture();
+    const Mesh source = makeGltfSourceMesh(fixture);
+    for (const std::string& name : {std::string("handoff.gltf"), std::string("handoff.glb")}) {
+        CAPTURE(name);
+        const fs::path path = writeGltfHandoffFile(name, source, 1, 0, "clay core 2");
+        const auto result = handoff::readFile(path);
+        REQUIRE(result.ok());
+        const handoff::Handoff& h = result.value();
+        CHECK(h.version.major == 1);
+        CHECK(h.version.minor == 0);
+        CHECK(h.producer == "clay core 2");
+        CHECK(h.mesh.vertexCount() == 8);
+        CHECK(h.mesh.faceCount() == 12);
+        CHECK(h.droppedFaces == 0);
+
+        REQUIRE(h.hasVertexColors());
+        REQUIRE(h.hasVertexNormals());
+        const auto* colors = h.mesh.vertexAttributes().find<Vec3>(io::kColorAttribute);
+        REQUIRE(colors != nullptr);
+        CHECK((*colors)[0].x == doctest::Approx(1.0f).epsilon(0.01));
+        CHECK((*colors)[0].y == doctest::Approx(0.0f).epsilon(0.01));
+
+        // The glTF writer splits vertices per distinct corner tuple, so vertex
+        // order is not the fixture's: match the normal by position instead.
+        const auto* normals = h.mesh.vertexAttributes().find<Vec3>(io::kNormalAttribute);
+        REQUIRE(normals != nullptr);
+        for (Index i = 0; i < h.mesh.vertexCapacity(); ++i) {
+            if (!h.mesh.isAlive(VertexId{i})) {
+                continue;
+            }
+            const Vec3 expected =
+                cyber::normalized(h.mesh.position(VertexId{i}) - Vec3{0.5f, 0.5f, 0.5f});
+            CHECK((*normals)[i].x == doctest::Approx(expected.x).epsilon(0.001));
+            CHECK((*normals)[i].y == doctest::Approx(expected.y).epsilon(0.001));
+            CHECK((*normals)[i].z == doctest::Approx(expected.z).epsilon(0.001));
+        }
+
+        // material_mix has no glTF core slot: accepted, but never silently.
+        CHECK(!h.hasMaterialMix());
+        bool warned = false;
+        for (const std::string& warning : h.warnings) {
+            warned = warned || warning.find(handoff::kMaterialMixAttribute) != std::string::npos;
+        }
+        CHECK(warned);
+    }
+}
+
+TEST_CASE("a glTF handoff is gated on the same version rule as a PLY one") {
+    const Fixture fixture = makeBoxFixture();
+    const Mesh source = makeGltfSourceMesh(fixture);
+    for (const std::string& name : {std::string("future.gltf"), std::string("future.glb")}) {
+        CAPTURE(name);
+        const auto result = handoff::readFile(writeGltfHandoffFile(name, source, 2, 0));
+        REQUIRE(!result.ok());
+        CHECK(result.error().code == io::ErrorCode::IncompatibleVersion);
+        CHECK(result.error().message.find("2.0") != std::string::npos);
+        CHECK(result.error().message.find("1.0") != std::string::npos);
+    }
+    for (const std::string& name : {std::string("minor.gltf"), std::string("minor.glb")}) {
+        CAPTURE(name);
+        const auto result = handoff::readFile(writeGltfHandoffFile(name, source, 1, 7));
+        REQUIRE(!result.ok());
+        CHECK(result.error().code == io::ErrorCode::IncompatibleVersion);
+        CHECK(result.error().message.find("1.7") != std::string::npos);
+    }
+}
+
+TEST_CASE("a glTF without the handoff declaration is not a handoff") {
+    const Fixture fixture = makeBoxFixture();
+    const fs::path path = tempDir() / "plain.gltf";
+    REQUIRE(io::exportMesh(makeGltfSourceMesh(fixture), path).ok());
+    const auto result = handoff::readFile(path);
+    REQUIRE(!result.ok());
+    CHECK(result.error().code == io::ErrorCode::UnsupportedFormat);
+}
+
+TEST_CASE("a handoff triangle with a repeated vertex index is reported, not dropped in silence") {
+    // Mesh::addFace refuses a face with a repeated vertex — a routine defect in
+    // sculpt exports. Regression: both the PLY and the buffer route discarded
+    // that FaceId, so the ingest reported success with fewer faces than the
+    // file declared and nothing said so.
+    const Fixture fixture = makeBoxFixture();
+    Fixture broken = fixture;
+    broken.triangles.push_back({2, 2, 5});  // degenerate: two corners on one vertex
+    const fs::path path = writeHandoffFile(
+        "degenerate.ply", writeHandoffText(broken.vertices, broken.triangles, 1, 0, "claytest"));
+
+    const auto fileResult = handoff::readFile(path);
+    REQUIRE(fileResult.ok());
+    CHECK(fileResult.value().mesh.faceCount() == 12);
+    CHECK(fileResult.value().droppedFaces == 1);
+    bool warned = false;
+    for (const std::string& warning : fileResult.value().warnings) {
+        warned = warned || warning.find("1") != std::string::npos;
+    }
+    CHECK(warned);
+
+    std::vector<float> positions, normals, colors, mix;
+    for (const HandoffVertex& v : broken.vertices) {
+        positions.insert(positions.end(), {v.position.x, v.position.y, v.position.z});
+        normals.insert(normals.end(), {v.normal.x, v.normal.y, v.normal.z});
+        colors.insert(colors.end(), {v.color.x, v.color.y, v.color.z});
+        mix.push_back(v.mix);
+    }
+    std::vector<std::uint32_t> indices;
+    for (const auto& t : broken.triangles) {
+        indices.insert(indices.end(),
+                       {static_cast<std::uint32_t>(t[0]), static_cast<std::uint32_t>(t[1]),
+                        static_cast<std::uint32_t>(t[2])});
+    }
+    handoff::BufferView view;
+    view.positions = positions.data();
+    view.normals = normals.data();
+    view.colors = colors.data();
+    view.materialMix = mix.data();
+    view.vertexCount = broken.vertices.size();
+    view.indices = indices.data();
+    view.indexCount = indices.size();
+
+    const auto bufferResult = handoff::readBuffers(view);
+    REQUIRE(bufferResult.ok());
+    CHECK(bufferResult.value().mesh.faceCount() == 12);
+    CHECK(bufferResult.value().droppedFaces == 1);
+    CHECK(!bufferResult.value().warnings.empty());
 }
 
 TEST_CASE("a rejected stream handoff names the stream, not a file") {

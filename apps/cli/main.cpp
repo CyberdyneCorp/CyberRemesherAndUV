@@ -380,6 +380,7 @@ struct HandoffOutcome {
     bool hasVertexColors = false;
     bool hasVertexNormals = false;
     bool hasMaterialMix = false;
+    std::size_t droppedFaces = 0;
 };
 
 void addHandoffToReport(nlohmann::json& report, const HandoffOutcome& outcome) {
@@ -397,6 +398,9 @@ void addHandoffToReport(nlohmann::json& report, const HandoffOutcome& outcome) {
         {"hasVertexColors", outcome.hasVertexColors},
         {"hasVertexNormals", outcome.hasVertexNormals},
         {"hasMaterialMix", outcome.hasMaterialMix},
+        // Triangles the handoff described that the Mesh refused. Reported so a
+        // producer can see the loss in the run record, not only on stderr.
+        {"droppedFaces", outcome.droppedFaces},
         // No field evaluator is reachable from the CLI yet (the evaluator is a
         // C++/C-ABI interface, and this build links no volumetric engine), so
         // nothing here was field-sampled. Recorded explicitly rather than
@@ -780,6 +784,7 @@ int runCli(int argc, char** argv) {
         handoffOutcome.hasVertexColors = h.hasVertexColors();
         handoffOutcome.hasVertexNormals = h.hasVertexNormals();
         handoffOutcome.hasMaterialMix = h.hasMaterialMix();
+        handoffOutcome.droppedFaces = h.droppedFaces;
         source.mesh = std::move(h.mesh);
         source.boundsMin = h.boundsMin;
         source.boundsMax = h.boundsMax;

@@ -406,9 +406,13 @@ void shadeFromMesh(BakeResult& result, const std::vector<Texel>& texels, const M
     std::vector<float> highCurvature;
     float curvatureRange = 0.0f;
     if (map == BakeMap::Curvature || map == BakeMap::Cavity) {
-        highCurvature = vertexMeanCurvature(highPoly);
-        curvatureRange =
-            params.curvatureRange > 0.0f ? params.curvatureRange : curvatureScale(highCurvature);
+        // The auto range is a percentile over SURFACE, not over vertices: a
+        // dense sliver fan (a UV sphere's poles) must not set the range for the
+        // whole model just because it owns a lot of vertices.
+        std::vector<float> highAreas;
+        highCurvature = vertexMeanCurvature(highPoly, &highAreas);
+        curvatureRange = params.curvatureRange > 0.0f ? params.curvatureRange
+                                                      : curvatureScale(highCurvature, highAreas);
     }
 
     auto& backend = *accel::defaultBackend();

@@ -35,6 +35,35 @@ jobs:
       - run: npm install -g @fission-ai/openspec@latest
       - run: openspec validate --all --strict
 
+  # The SwiftPM package binds cyber_capi.h directly, and only an Apple toolchain
+  # can compile it. Without this job the binding rots invisibly: publish-swift.yml
+  # is the sole other Swift lane and it triggers on swift-v* tags only, so a
+  # divergence stays hidden until release day. tests/packaging/test_swift_abi_parity.py
+  # (ctest: swift_abi_parity) catches missing symbols on every platform; this
+  # catches everything else — types, ownership, concurrency, platform #ifs.
+  swift-package:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: lukka/get-cmake@latest
+      - name: Select Xcode
+        run: sudo xcode-select -switch /Applications/Xcode_15.4.app
+      - name: Build the native C ABI the package links
+        run: |
+          cmake -S . -B build/swift -DCMAKE_BUILD_TYPE=Release \
+            -DCYBER_BUILD_CAPI=ON -DCYBER_BUILD_TESTS=OFF
+          cmake --build build/swift --target cyber_capi_shared
+      - name: swift build
+        working-directory: swift
+        run: |
+          set -euo pipefail
+          swift package dump-package >/dev/null
+          swift build \
+            -Xcc -I"${GITHUB_WORKSPACE}/capi/include" \
+            -Xlinker -L"${GITHUB_WORKSPACE}/build/swift/capi"
+
   build-test:
     strategy:
       fail-fast: false

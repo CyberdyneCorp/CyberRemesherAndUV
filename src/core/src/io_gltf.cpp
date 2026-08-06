@@ -190,6 +190,7 @@ Result<ImportedMesh> importGltf(const std::filesystem::path& path,
         return Error{ErrorCode::EmptyMesh, "no usable triangles in '" + path.string() + "'"};
     }
     if (skipped > 0) {
+        out.droppedFaces = skipped;
         out.warnings.push_back("skipped " + std::to_string(skipped) + " degenerate triangle(s)");
     }
     computeBounds(out);

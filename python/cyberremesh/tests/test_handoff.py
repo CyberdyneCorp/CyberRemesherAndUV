@@ -159,6 +159,16 @@ def check_handoff_buffers() -> None:
         else:
             raise AssertionError("a short {0} must be rejected".format(list(kwargs)[0]))
 
+    # A triangle whose corners are not three distinct vertices cannot enter the
+    # mesh. Regression: it was dropped in silence, so the ingest reported
+    # success with fewer faces than the producer sent and nothing said so.
+    degenerate, degenerate_info = Mesh.load_handoff_buffers(
+        _BOX_CORNERS, _BOX_TRIS + [(2, 2, 5)])
+    with degenerate:
+        assert degenerate_info.dropped_faces == 1, degenerate_info
+        assert degenerate_info.face_count == 12, degenerate_info
+    assert info.dropped_faces == 0, info
+
     for bad in ((_BOX_CORNERS, [0, 1, 2, 3]), ([0.0, 1.0], _BOX_TRIS)):
         try:
             Mesh.load_handoff_buffers(*bad)
@@ -167,7 +177,7 @@ def check_handoff_buffers() -> None:
         else:
             raise AssertionError("a ragged buffer must be rejected")
     print("PASS handoff buffers: in-memory profile ingests, gates the version, "
-          "and rejects short payloads")
+          "counts dropped faces and rejects short payloads")
 
 
 def check_field_bake(tmpdir: str) -> None:

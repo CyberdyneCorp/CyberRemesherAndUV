@@ -927,9 +927,11 @@ CyberStatus cyber_retopo_triangulate(CyberMesh* mesh, size_t* out_faces);
  *
  * ZERO WEIGHT MEANS UNTOUCHED: a vertex whose weight is 0 is skipped
  * entirely — neither moved nor re-snapped — so its position is bit-identical
- * after the call. PINS: only _relax takes a `pinned` list and honors it the
- * same way; _transform has no pin argument yet, so on that call weight is the
- * only thing that holds a vertex still. Zero its weight to protect it.
+ * after the call. PINS: a pinned vertex is skipped the same way WHATEVER its
+ * weight. cyber_retopo_selection_relax and
+ * cyber_retopo_selection_transform_pinned take the `pinned` list;
+ * cyber_retopo_selection_transform is the latter with an empty list, so on
+ * that call weight is the only thing that holds a vertex still.
  *
  * ELEMENT-ID STABILITY (see the block above): weights are indexed by vertex
  * id, so cyber_retopo_subdivide clears the selection and every saved slot
@@ -949,19 +951,28 @@ typedef enum CyberFalloff {
 /* Result of a weighted transform/relax.
  *
  * BOTH COUNTS ARE DISTINCT VERTICES, never per-iteration writes: `moved` is
- * the number of distinct vertices the op wrote (weight > 0, and not pinned
- * where the call accepts pins — only _relax does)
+ * the number of distinct vertices the op wrote — weight > 0 and not pinned —
  * and so never exceeds the mesh's vertex count, even for a multi-iteration
- * cyber_retopo_selection_relax that revisits each of them every sweep.
+ * cyber_retopo_selection_relax that revisits each of them every sweep. It
+ * counts WRITES, NOT DISPLACEMENTS: a vertex whose weight is positive but
+ * negligible (say 1e-34, which one-ring smoothing readily produces at the far
+ * tail of a gradient) blends to a target that rounds to its current position
+ * in float, and the op writes that same value back. Such a vertex is in
+ * `moved` even though its position is bit-identical afterwards. Use `moved`
+ * as "how many vertices the selection reached", not as "how many visibly
+ * moved".
  *
  * `resnapped` counts the distinct moved vertices whose Target re-projection
  * pulled them back STRICTLY FURTHER than `resnap_epsilon`, and never exceeds
- * `moved`. With the default epsilon of 0 a vertex the projection did not have
- * to correct at all (correction exactly 0 — it already sat on the Target,
- * which is what happens when the weight is so small that the blended target
- * is bit-identical to the current position) is NOT counted, so
- * `moved - resnapped` is the number of vertices that were already
- * on-surface. `max_snap_distance` is the largest counted correction. */
+ * `moved`. `max_snap_distance` is the largest counted correction.
+ *
+ * `moved - resnapped` is therefore the vertices the re-projection did not
+ * have to correct at all (with the default epsilon of 0, a correction of
+ * exactly 0). There are two ways to land there, and both are normal:
+ *   - the negligible-weight case above — the blend never left the surface, so
+ *     re-projecting an already-projected point returns it unchanged;
+ *   - a vertex whose weighted target happens to still lie on the Target.
+ * Neither is a leak, and neither means a vertex escaped the glue. */
 typedef struct CyberSoftTransformReport {
     size_t moved;
     size_t resnapped;
@@ -1024,10 +1035,13 @@ size_t cyber_retopo_selection_copy_weights(const CyberMesh* mesh, float* out, si
 CyberStatus cyber_retopo_selection_set_weights(CyberMesh* mesh, const float* weights, size_t count);
 
 /* Saves the current selection into the named slot on the handle (an
- * existing slot of that name is overwritten), and loads it back. The shell
- * persists the slots with its document; the handle owns them only for the
- * session. _load fails with CYBER_ERR_INVALID_ARG when the name is unknown.
- * Names must be non-empty NUL-terminated UTF-8. */
+ * existing slot of that name is overwritten), and loads it back. The slots
+ * live on the handle and die with it; to persist them past the session put
+ * the mesh in a CyberDocument (see the document block below) and save that —
+ * cyber_document_set_edit_mesh copies the slots in and
+ * cyber_document_edit_mesh hands them back. _load fails with
+ * CYBER_ERR_INVALID_ARG when the name is unknown. Names must be non-empty
+ * NUL-terminated UTF-8. */
 CyberStatus cyber_retopo_selection_save(CyberMesh* mesh, const char* name);
 CyberStatus cyber_retopo_selection_load(CyberMesh* mesh, const char* name);
 
@@ -1046,6 +1060,20 @@ CyberStatus cyber_retopo_selection_transform(CyberMesh* mesh, const float xf[12]
                                              const CyberSnapper* snapper, float resnap_epsilon,
                                              CyberSoftTransformReport* out_report);
 
+/* The same weighted transform with a pin list: every vertex id in `pinned` is
+ * skipped whatever its weight, so it is neither moved nor re-snapped and its
+ * position is bit-identical after the call — the guarantee the ZERO WEIGHT
+ * MEANS UNTOUCHED note above states for pins. `pinned` may be NULL (with
+ * `pinned_count` 0), which makes this exactly
+ * cyber_retopo_selection_transform. Ids that are not live vertices are
+ * harmless. Fails with CYBER_ERR_INVALID_ARG (mesh unchanged) on a null
+ * transform, or on a null `pinned` with a non-zero count. */
+CyberStatus cyber_retopo_selection_transform_pinned(CyberMesh* mesh, const float xf[12],
+                                                    const uint32_t* pinned, size_t pinned_count,
+                                                    const CyberSnapper* snapper,
+                                                    float resnap_epsilon,
+                                                    CyberSoftTransformReport* out_report);
+
 /* Weighted relax: the ordinary relax sweep (auto-pinned grid corners,
  * tangential projection, in-pass re-snap) with the per-vertex blend
  * additionally scaled by the selection weight. `pinned` may be NULL.
@@ -1054,6 +1082,75 @@ CyberStatus cyber_retopo_selection_relax(CyberMesh* mesh, float strength, int it
                                          const uint32_t* pinned, size_t pinned_count,
                                          const CyberSnapper* snapper, float resnap_epsilon,
                                          CyberSoftTransformReport* out_report);
+
+/* ---- document persistence (application-shell spec) ---------------------
+ *
+ * A CyberDocument is the editing unit that OUTLIVES the session: the
+ * high-poly Target, the low-poly EditMesh, and the named soft-selection
+ * slots, serialized into one versioned byte container. It is what makes a
+ * saved selection survive a restart — the slots on a CyberMesh handle are
+ * session state and vanish with cyber_mesh_free.
+ *
+ * THE SEAM IS EXPLICIT AND BY VALUE. cyber_document_set_edit_mesh copies the
+ * handle's geometry AND its named slots into the document;
+ * cyber_document_edit_mesh hands back a fresh handle carrying those slots.
+ * Nothing is aliased or kept in sync afterwards: mutate the mesh and you must
+ * set it on the document again. The LIVE (unsaved) weight field is not a
+ * slot and is not persisted — cyber_retopo_selection_save it under a name
+ * first, and cyber_retopo_selection_load it after the round trip.
+ *
+ * ELEMENT-ID STABILITY: slot weights are indexed by EditMesh vertex id, so a
+ * document is only meaningful with the EditMesh it was saved with. Store both
+ * or neither.
+ *
+ * BUILD GATE: implemented only when the application-shell library is in the
+ * build (-DCYBER_BUILD_APP=ON, the default). The declarations always exist so
+ * the ABI is stable; without the module every call fails with
+ * CYBER_ERR_RUNTIME or returns NULL/0. */
+typedef struct CyberDocument CyberDocument;
+
+/* An empty document (no meshes, no slots), or NULL when this build has no
+ * application-shell library or allocation failed. Free with
+ * cyber_document_free (NULL is a no-op). */
+CyberDocument* cyber_document_create(void);
+void cyber_document_free(CyberDocument* doc);
+
+/* Copies `mesh` into the document. _set_edit_mesh also copies the handle's
+ * named selection slots, REPLACING any the document already held. A NULL
+ * `mesh` clears that slot of the document (and, for the edit mesh, its
+ * slots). Fails with CYBER_ERR_INVALID_ARG on a NULL document. */
+CyberStatus cyber_document_set_target(CyberDocument* doc, const CyberMesh* mesh);
+CyberStatus cyber_document_set_edit_mesh(CyberDocument* doc, const CyberMesh* mesh);
+
+/* Fresh handles owning a COPY of the document's meshes; free them with
+ * cyber_mesh_free. The edit-mesh handle comes back with the document's named
+ * selection slots restored and an empty live weight field, so
+ * cyber_retopo_selection_load picks up where the save left off. Returns NULL
+ * on a NULL document or allocation failure; a document that never had a mesh
+ * set yields an empty handle (vertex count 0), not NULL. */
+CyberMesh* cyber_document_target(const CyberDocument* doc);
+CyberMesh* cyber_document_edit_mesh(const CyberDocument* doc);
+
+/* The document's named slots without materializing a mesh: the count, the
+ * name at `index` in name order (NULL when out of range; owned by the
+ * document and valid until the next mutation), and the weights of one slot
+ * following the cyber_mesh_copy_positions convention — returns the total
+ * weight count and fills at most `capacity`, so call once with out=NULL to
+ * size the buffer. Weight index == EditMesh vertex id. Returns 0 for an
+ * unknown slot. */
+size_t cyber_document_slot_count(const CyberDocument* doc);
+const char* cyber_document_slot_name(const CyberDocument* doc, size_t index);
+size_t cyber_document_slot_weights(const CyberDocument* doc, const char* name, float* out,
+                                   size_t capacity);
+
+/* Serialization. _save follows the copy_positions convention (returns the
+ * byte count, fills at most `capacity`) and is cached, so the size-then-fill
+ * pair serializes once. _load returns NULL on a truncated or foreign buffer.
+ * _save_file / _load_file are the same container on disk. */
+size_t cyber_document_save(const CyberDocument* doc, uint8_t* out, size_t capacity);
+CyberDocument* cyber_document_load(const uint8_t* bytes, size_t count);
+CyberStatus cyber_document_save_file(const CyberDocument* doc, const char* path);
+CyberDocument* cyber_document_load_file(const char* path);
 
 /* ---- gesture stroke interpretation (retopology phase 3, design D5) ------
  *
@@ -1370,6 +1467,10 @@ typedef struct CyberHandoffInfo {
     int hasVertexColors;
     int hasVertexNormals;
     int hasMaterialMix;
+    /* Triangles the handoff described that the mesh refused (a repeated vertex
+     * index). Non-zero means the Target has less geometry than the producer
+     * sent — the loss is counted here rather than passed over in silence. */
+    size_t droppedFaces;
 } CyberHandoffInfo;
 
 /* Opens a handoff file (PLY profile; .gltf/.glb also accepted) as a Target.

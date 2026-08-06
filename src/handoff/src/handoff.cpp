@@ -161,6 +161,20 @@ void computeBounds(Handoff& out) {
     out.boundsMax = any ? hi : Vec3{};
 }
 
+// A face the Mesh refused (a repeated vertex index — the routine degenerate in
+// a sculpt export) is geometry the producer described and the Target does not
+// have. The pipeline-bridge spec's loudness requirement makes that a counted,
+// warned-about loss rather than a silently smaller mesh.
+void reportDroppedFaces(Handoff& out, std::string_view origin, std::size_t described) {
+    if (out.droppedFaces == 0) {
+        return;
+    }
+    out.warnings.emplace_back(std::string(origin) + ": dropped " +
+                              std::to_string(out.droppedFaces) + " of " +
+                              std::to_string(described) +
+                              " handoff triangle(s) the mesh refused (a repeated vertex index)");
+}
+
 // Copies one required float property into a per-vertex Vec3 column.
 void fillVec3Column(Mesh& mesh, const char* name, const std::vector<float>& x,
                     const std::vector<float>& y, const std::vector<float>& z,
@@ -253,11 +267,14 @@ Result<Handoff> buildFromPly(happly::PLYData& ply, const HeaderDeclaration& head
             }
             tri[k] = ids[face[k]];
         }
-        out.mesh.addFace(tri);
+        if (!out.mesh.addFace(tri).valid()) {
+            ++out.droppedFaces;
+        }
     }
     if (out.mesh.faceCount() == 0) {
         return Error{ErrorCode::EmptyMesh, std::string(origin) + ": handoff has no usable faces"};
     }
+    reportDroppedFaces(out, origin, faces.size());
 
     const PlyVertexPayload& v = payload.value();
     fillVec3Column(out.mesh, io::kNormalAttribute, v.nx, v.ny, v.nz, ids);
@@ -330,21 +347,96 @@ std::optional<int> readJsonInt(std::string_view text, std::string_view key) {
     return parseInt(digits);
 }
 
+// The value of a JSON string member. Backslash escapes are unescaped by taking
+// the next character literally, which is enough for a free-form producer label.
+std::optional<std::string> readJsonString(std::string_view text, std::string_view key) {
+    const std::size_t at = text.find(std::string("\"") + std::string(key) + "\"");
+    if (at == std::string_view::npos) {
+        return std::nullopt;
+    }
+    std::size_t i = text.find(':', at);
+    if (i == std::string_view::npos) {
+        return std::nullopt;
+    }
+    i = text.find('"', i);
+    if (i == std::string_view::npos) {
+        return std::nullopt;
+    }
+    std::string value;
+    for (++i; i < text.size() && text[i] != '"'; ++i) {
+        if (text[i] == '\\' && i + 1 < text.size()) {
+            ++i;
+        }
+        value.push_back(text[i]);
+    }
+    return value;
+}
+
+// The cyberSculptHandoff object as text, from its opening brace to the matching
+// close. Scanning only that span keeps "major"/"minor"/"producer" from matching
+// an unrelated member elsewhere in a large glTF document.
+std::optional<std::string_view> handoffObject(std::string_view text) {
+    const std::size_t key = text.find("cyberSculptHandoff");
+    if (key == std::string_view::npos) {
+        return std::nullopt;
+    }
+    const std::size_t open = text.find('{', key);
+    if (open == std::string_view::npos) {
+        return std::nullopt;
+    }
+    int depth = 0;
+    bool inString = false;
+    for (std::size_t i = open; i < text.size(); ++i) {
+        const char c = text[i];
+        if (inString) {
+            inString = c != '"';
+            i += (c == '\\') ? 1 : 0;
+        } else if (c == '"') {
+            inString = true;
+        } else if (c == '{') {
+            ++depth;
+        } else if (c == '}' && --depth == 0) {
+            return text.substr(open, i - open + 1);
+        }
+    }
+    return std::nullopt;
+}
+
 GltfDeclaration scanGltf(std::string_view text) {
     GltfDeclaration out;
-    const std::size_t at = text.find("cyberSculptHandoff");
-    if (at == std::string_view::npos) {
+    const std::optional<std::string_view> object = handoffObject(text);
+    if (!object) {
         return out;
     }
-    const std::string_view rest = text.substr(at);
-    const std::optional<int> major = readJsonInt(rest, "major");
-    const std::optional<int> minor = readJsonInt(rest, "minor");
+    const std::optional<int> major = readJsonInt(*object, "major");
+    const std::optional<int> minor = readJsonInt(*object, "minor");
     if (!major || !minor) {
         return out;
     }
     out.found = true;
     out.version = Version{*major, *minor};
+    out.producer = readJsonString(*object, "producer").value_or(std::string());
     return out;
+}
+
+// glTF stores NORMAL per vertex, but the engine's importer scatters it onto
+// mesh CORNERS. A handoff reports and consumes VERTEX normals, so fold the
+// corner column back: every corner of a vertex was written from the same glTF
+// vertex's NORMAL, which makes the copy exact rather than an average.
+void promoteCornerNormals(Mesh& mesh) {
+    const auto* corners = mesh.cornerAttributes().find<Vec3>(io::kNormalAttribute);
+    if (corners == nullptr || mesh.vertexAttributes().find<Vec3>(io::kNormalAttribute) != nullptr) {
+        return;
+    }
+    auto& vertexNormals = mesh.vertexAttributes().create<Vec3>(io::kNormalAttribute);
+    for (Index f = 0; f < mesh.faceCapacity(); ++f) {
+        if (!mesh.isAlive(FaceId{f})) {
+            continue;
+        }
+        for (const LoopId loop : mesh.faceLoops(FaceId{f})) {
+            vertexNormals[mesh.loopVertex(loop).value] = (*corners)[loop.value];
+        }
+    }
 }
 
 Result<Handoff> readGltfFile(const std::filesystem::path& path) {
@@ -369,15 +461,28 @@ Result<Handoff> readGltfFile(const std::filesystem::path& path) {
     }
     Handoff out;
     out.version = declaration.version;
+    out.producer = declaration.producer;
     out.mesh = std::move(imported.value().mesh);
     out.boundsMin = imported.value().boundsMin;
     out.boundsMax = imported.value().boundsMax;
     out.warnings = imported.value().warnings;
-    if (!out.hasMaterialMix()) {
-        // glTF core has no slot for it; accepted with a warning rather than
-        // rejected, since it is the one payload the container cannot carry.
-        out.warnings.emplace_back("glTF handoff carries no " + std::string(kMaterialMixAttribute) +
-                                  " attribute");
+    out.droppedFaces = imported.value().droppedFaces;
+    promoteCornerNormals(out.mesh);
+    // Every payload the format doc lists as required but this container did not
+    // deliver is named. material_mix in particular has no glTF core slot, so it
+    // is a warning rather than a rejection — it is the one payload the format
+    // cannot carry natively.
+    const auto warnMissing = [&out](bool present, const std::string& what) {
+        if (!present) {
+            out.warnings.emplace_back("glTF handoff carries no " + what + " payload");
+        }
+    };
+    warnMissing(out.hasVertexNormals(), "per-vertex normal");
+    warnMissing(out.hasVertexColors(), "vertex color");
+    warnMissing(out.hasMaterialMix(), kMaterialMixAttribute);
+    if (out.droppedFaces > 0) {
+        out.warnings.emplace_back(path.string() + ": dropped " + std::to_string(out.droppedFaces) +
+                                  " glTF triangle(s) the mesh refused");
     }
     return out;
 }
@@ -459,11 +564,14 @@ Result<Handoff> readBuffers(const BufferView& buffers) {
             }
             tri[k] = ids[index];
         }
-        out.mesh.addFace(tri);
+        if (!out.mesh.addFace(tri).valid()) {
+            ++out.droppedFaces;
+        }
     }
     if (out.mesh.faceCount() == 0) {
         return Error{ErrorCode::EmptyMesh, "handoff buffers produced no usable faces"};
     }
+    reportDroppedFaces(out, kOrigin, buffers.indexCount / 3);
 
     const auto fillVec3 = [&](const char* name, const float* source) {
         if (source == nullptr) {

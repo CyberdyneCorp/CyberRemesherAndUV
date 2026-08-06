@@ -24,7 +24,13 @@ namespace cyber::bake {
 // is not a flat wedge), so boundary vertices instead take the mean of their
 // interior neighbours -- an open rim reads as a continuation of the surface
 // behind it rather than as a spurious crease.
-[[nodiscard]] std::vector<float> vertexMeanCurvature(const Mesh& mesh);
+//
+// When `vertexAreas` is non-null it receives the mixed Voronoi area each
+// vertex's estimate was normalized by (same indexing, 0 for dead vertices).
+// That is the surface each value speaks for, and it is what curvatureScale()
+// wants as its weights.
+[[nodiscard]] std::vector<float> vertexMeanCurvature(const Mesh& mesh,
+                                                     std::vector<float>* vertexAreas = nullptr);
 
 // Robust normalization scale for a curvature field: the `percentile` (0..1)
 // of |H| over live vertices. Returns 0 for an empty or perfectly flat field,
@@ -34,5 +40,21 @@ namespace cyber::bake {
 // rather than the maximum keeps one pinched vertex from flattening the whole
 // map to mid-gray.
 [[nodiscard]] float curvatureScale(const std::vector<float>& curvature, float percentile = 0.95f);
+
+// Same percentile, but each value counts for `weights[i]` instead of for one
+// vertex -- pass the mixed areas from vertexMeanCurvature() to get a percentile
+// over SURFACE rather than over vertices.
+//
+// The distinction decides the range on any mesh whose vertex density is uneven.
+// A UV sphere piles a fifth of its vertices into the sliver fans around its two
+// poles, which are a per-mille of its area; an unweighted percentile therefore
+// reports the poles' curvature as if it were typical and normalizes the whole
+// map against it. Weighting by area makes a region count for as much of the
+// range as it covers of the model.
+//
+// `weights` must be parallel to `curvature`; any other size is ignored and the
+// call degrades to the unweighted percentile.
+[[nodiscard]] float curvatureScale(const std::vector<float>& curvature,
+                                   const std::vector<float>& weights, float percentile = 0.95f);
 
 }  // namespace cyber::bake

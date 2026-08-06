@@ -74,14 +74,17 @@ if(CYBER_BUILD_UV)
     add_subdirectory(src/exportbundle)
 endif()
 
+# The application-shell library is added BEFORE capi: capi's C document handle
+# (cyber_document_*) links cyber_app when it exists, and the `if(TARGET ...)`
+# probe there only sees targets already defined.
+if(CYBER_BUILD_APP)
+    add_subdirectory(src/app)
+endif()
 if(CYBER_BUILD_CAPI)
     add_subdirectory(capi)
 endif()
 if(CYBER_BUILD_RENDER)
     add_subdirectory(src/render)
-endif()
-if(CYBER_BUILD_APP)
-    add_subdirectory(src/app)
 endif()
 if(CYBER_BUILD_RETOPO)
     add_subdirectory(src/retopo)

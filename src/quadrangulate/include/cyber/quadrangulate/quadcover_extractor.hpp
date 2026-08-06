@@ -3,6 +3,7 @@
 #include <array>
 #include <cstddef>
 #include <memory>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -97,10 +98,14 @@ struct NativeSolveContext {
     // has no hook for either input. Set it before the first call; the isotropic
     // pre-remesh, the cross field and the seamless RHS all read it from here.
     const GuidanceField* guidance = nullptr;
-    // Set false when the guided island ended up on a path that could not honor
-    // the guidance (the vendored fallback). Read back by the quadrangulator and
-    // reported per island — never swallowed.
-    bool guidanceHonored = true;
+    // Empty while the guidance is honored; otherwise the user-facing reason the
+    // guided island ended up on a path that could not honor it — the vendored
+    // Geogram solve, whether because native declined or because
+    // CYBER_QC_NO_NATIVE disabled it. A reason, not a bool, because the two
+    // cases need different remedies (one is a solver failure, the other is an
+    // env var the user set). Read back by the quadrangulator and reported per
+    // island — never swallowed.
+    std::string guidanceUnhonoredReason;
 };
 
 // Compute a seamless integer-grid UV for `mesh`. Milestone 1 obtains it out-of-process

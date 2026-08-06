@@ -1133,3 +1133,221 @@ TEST_CASE("capi export bundle unwraps a low-poly that carries no UVs") {
     std::filesystem::remove_all(outDir, ec);
 }
 #endif  // CYBER_TESTS_HAVE_EXPORTBUNDLE
+
+// ---- pinned weighted transform ---------------------------------------------
+
+// Regression (soft-selection honesty pass, item 2): cyber_capi.h promised "any
+// pinned vertex is not moved" for the weighted transform, but the entry point
+// hard-coded a null PinSet, so a HIGH-weight pinned vertex moved with the rest.
+// Only _relax honoured pins. The fix is the additive
+// cyber_retopo_selection_transform_pinned; _transform is that call with an
+// empty list.
+TEST_CASE("capi weighted transform honours a pin on a high-weight vertex") {
+    CyberMesh* edit = makeGridMesh(5, 5, 0.0f);
+    const size_t vertices = cyber_mesh_vertex_count(edit);
+    REQUIRE(vertices == 25u);
+
+    // Weight 1 everywhere: weight cannot be what holds the pinned vertex still.
+    const std::vector<float> full(vertices, 1.0f);
+    REQUIRE(cyber_retopo_selection_set_weights(edit, full.data(), full.size()) == CYBER_OK);
+    const std::vector<float> before = positionsOf(edit);
+
+    // A translation, so every vertex has somewhere to go.
+    const float xf[12] = {1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 3.0f, 0.0f, 0.0f};
+    const uint32_t pinned[2] = {0u, 7u};
+    CyberSoftTransformReport report{};
+    REQUIRE(cyber_retopo_selection_transform_pinned(edit, xf, pinned, 2, nullptr, 0.0f, &report) ==
+            CYBER_OK);
+
+    // The pinned vertices are excluded from `moved` and are bit-identical.
+    CHECK(report.moved == vertices - 2u);
+    const std::vector<float> after = positionsOf(edit);
+    REQUIRE(after.size() == before.size());
+    for (uint32_t v : pinned) {
+        for (size_t axis = 0; axis < 3; ++axis) {
+            const size_t i = static_cast<size_t>(v) * 3u + axis;
+            CHECK(after[i] == before[i]);
+        }
+    }
+    // Everything else did move by the full translation.
+    for (size_t v = 0; v < vertices; ++v) {
+        if (v == 0u || v == 7u) {
+            continue;
+        }
+        CHECK(after[v * 3u] == doctest::Approx(before[v * 3u] + 3.0f));
+    }
+
+    // The unpinned spelling is the same call with an empty list.
+    CyberMesh* plain = makeGridMesh(5, 5, 0.0f);
+    REQUIRE(cyber_retopo_selection_set_weights(plain, full.data(), full.size()) == CYBER_OK);
+    CyberSoftTransformReport plainReport{};
+    REQUIRE(cyber_retopo_selection_transform(plain, xf, nullptr, 0.0f, &plainReport) == CYBER_OK);
+    CHECK(plainReport.moved == vertices);
+
+    // Argument checks: a null pin list with a non-zero count is rejected and
+    // leaves the mesh alone.
+    const std::vector<float> untouched = positionsOf(plain);
+    REQUIRE(cyber_retopo_selection_transform_pinned(plain, xf, nullptr, 4, nullptr, 0.0f,
+                                                    nullptr) == CYBER_ERR_INVALID_ARG);
+    REQUIRE(cyber_retopo_selection_transform_pinned(plain, nullptr, pinned, 2, nullptr, 0.0f,
+                                                    nullptr) == CYBER_ERR_INVALID_ARG);
+    CHECK(positionsOf(plain) == untouched);
+
+    cyber_mesh_free(plain);
+    cyber_mesh_free(edit);
+}
+
+// Documents the `moved` vs `resnapped` gap the 16_soft_selection figure showed
+// (193 moved, 180 re-snapped): `moved` counts WRITES, not displacements. A
+// vertex whose weight is positive but negligible blends to a target that rounds
+// to its current position, so the op writes the same value back and the Target
+// re-projection has nothing to correct.
+TEST_CASE("capi weighted transform counts a negligible-weight vertex as moved") {
+    CyberMesh* target = makeGridMesh(5, 5, 0.0f);
+    CyberSnapper* snapper = nullptr;
+    REQUIRE(cyber_snapper_create(target, &snapper) == CYBER_OK);
+
+    CyberMesh* edit = makeGridMesh(5, 5, 0.0f);  // already on the Target
+    const size_t vertices = cyber_mesh_vertex_count(edit);
+    std::vector<float> weights(vertices, 0.0f);
+    weights[6] = 1.0f;    // a real edit
+    weights[7] = 1e-34f;  // positive, but far below float resolution here
+    REQUIRE(cyber_retopo_selection_set_weights(edit, weights.data(), weights.size()) == CYBER_OK);
+
+    const std::vector<float> before = positionsOf(edit);
+    const float xf[12] = {1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f};
+    CyberSoftTransformReport report{};
+    REQUIRE(cyber_retopo_selection_transform(edit, xf, snapper, 0.0f, &report) == CYBER_OK);
+
+    // Both weighted vertices are in `moved`; only the real edit needed pulling
+    // back onto the Target.
+    CHECK(report.moved == 2u);
+    CHECK(report.resnapped == 1u);
+
+    // ...and the negligible-weight vertex is bit-identical anyway.
+    const std::vector<float> after = positionsOf(edit);
+    for (size_t axis = 0; axis < 3; ++axis) {
+        CHECK(after[7u * 3u + axis] == before[7u * 3u + axis]);
+    }
+
+    cyber_snapper_free(snapper);
+    cyber_mesh_free(edit);
+    cyber_mesh_free(target);
+}
+
+#ifdef CYBER_TESTS_HAVE_APP
+// ---- document persistence for named selection slots ------------------------
+
+// Regression (soft-selection honesty pass, item 1): the mesh handle owned the
+// slot map and cyber::app::Document owned a serializer for one, and NOTHING in
+// the tree moved weights between them. A slot saved through the ABI was absent
+// from the saved document and a slot in a loaded document was invisible to the
+// ABI. This walks the whole public path: save a weighted selection through the
+// C ABI, serialize the document, load it back, read the weights out again.
+TEST_CASE("capi document round-trips named soft-selection slots end to end") {
+    CyberMesh* edit = makeGridMesh(5, 4, 0.0f);
+    const size_t vertices = cyber_mesh_vertex_count(edit);
+    const float centre[3] = {2.0f, 1.5f, 0.0f};
+    REQUIRE(cyber_retopo_selection_sphere(edit, centre, 2.0f, CYBER_FALLOFF_SMOOTH) == CYBER_OK);
+    REQUIRE(cyber_retopo_selection_save(edit, "taper") == CYBER_OK);
+    REQUIRE(cyber_retopo_selection_smooth(edit, 3) == CYBER_OK);
+    REQUIRE(cyber_retopo_selection_save(edit, "soft-taper") == CYBER_OK);
+
+    std::vector<float> saved(cyber_retopo_selection_copy_weights(edit, nullptr, 0));
+    cyber_retopo_selection_copy_weights(edit, saved.data(), saved.size());
+    REQUIRE(saved.size() >= vertices);
+    const std::vector<float> editPositions = positionsOf(edit);
+
+    CyberMesh* target = makeGridMesh(9, 9, 0.0f);
+    CyberDocument* doc = cyber_document_create();
+    REQUIRE(doc != nullptr);
+    REQUIRE(cyber_document_set_target(doc, target) == CYBER_OK);
+    REQUIRE(cyber_document_set_edit_mesh(doc, edit) == CYBER_OK);
+    // The slots crossed the seam with the mesh.
+    REQUIRE(cyber_document_slot_count(doc) == 2u);
+    REQUIRE(std::string(cyber_document_slot_name(doc, 1)) == "taper");
+
+    // Serialize, then drop every live handle: nothing but the bytes survives.
+    std::vector<uint8_t> bytes(cyber_document_save(doc, nullptr, 0));
+    REQUIRE(!bytes.empty());
+    REQUIRE(cyber_document_save(doc, bytes.data(), bytes.size()) == bytes.size());
+    cyber_document_free(doc);
+    cyber_mesh_free(edit);
+    cyber_mesh_free(target);
+
+    CyberDocument* loaded = cyber_document_load(bytes.data(), bytes.size());
+    REQUIRE(loaded != nullptr);
+    REQUIRE(cyber_document_slot_count(loaded) == 2u);
+    REQUIRE(std::string(cyber_document_slot_name(loaded, 0)) == "soft-taper");
+    REQUIRE(std::string(cyber_document_slot_name(loaded, 1)) == "taper");
+
+    // Read the weights straight off the document...
+    std::vector<float> fromDoc(cyber_document_slot_weights(loaded, "soft-taper", nullptr, 0));
+    REQUIRE(fromDoc.size() == saved.size());
+    cyber_document_slot_weights(loaded, "soft-taper", fromDoc.data(), fromDoc.size());
+    CHECK(fromDoc == saved);
+    CHECK(cyber_document_slot_weights(loaded, "no-such-slot", nullptr, 0) == 0u);
+
+    // ...and through a mesh handle, which is what an editing session does.
+    CyberMesh* restored = cyber_document_edit_mesh(loaded);
+    REQUIRE(restored != nullptr);
+    CHECK(cyber_mesh_vertex_count(restored) == vertices);
+    CHECK(positionsOf(restored) == editPositions);
+    REQUIRE(cyber_retopo_selection_slot_count(restored) == 2u);
+    REQUIRE(cyber_retopo_selection_load(restored, "soft-taper") == CYBER_OK);
+    std::vector<float> reread(cyber_retopo_selection_copy_weights(restored, nullptr, 0));
+    cyber_retopo_selection_copy_weights(restored, reread.data(), reread.size());
+    CHECK(reread == saved);
+
+    CyberMesh* restoredTarget = cyber_document_target(loaded);
+    REQUIRE(restoredTarget != nullptr);
+    CHECK(cyber_mesh_vertex_count(restoredTarget) == 81u);
+    // Only the EditMesh carries slots: the weights are indexed against it.
+    CHECK(cyber_retopo_selection_slot_count(restoredTarget) == 0u);
+
+    cyber_mesh_free(restoredTarget);
+    cyber_mesh_free(restored);
+    cyber_document_free(loaded);
+}
+
+TEST_CASE("capi document survives a file round trip and rejects a foreign buffer") {
+    CyberMesh* edit = makeGridMesh(4, 4, 0.0f);
+    const float centre[3] = {1.5f, 1.5f, 0.0f};
+    REQUIRE(cyber_retopo_selection_sphere(edit, centre, 1.5f, CYBER_FALLOFF_LINEAR) == CYBER_OK);
+    REQUIRE(cyber_retopo_selection_save(edit, "cap") == CYBER_OK);
+    std::vector<float> saved(cyber_retopo_selection_copy_weights(edit, nullptr, 0));
+    cyber_retopo_selection_copy_weights(edit, saved.data(), saved.size());
+
+    CyberDocument* doc = cyber_document_create();
+    REQUIRE(doc != nullptr);
+    REQUIRE(cyber_document_set_edit_mesh(doc, edit) == CYBER_OK);
+
+    const std::filesystem::path path =
+        std::filesystem::temp_directory_path() / "cyber_capi_document.cydc";
+    REQUIRE(cyber_document_save_file(doc, path.string().c_str()) == CYBER_OK);
+    cyber_document_free(doc);
+    cyber_mesh_free(edit);
+
+    CyberDocument* loaded = cyber_document_load_file(path.string().c_str());
+    REQUIRE(loaded != nullptr);
+    std::vector<float> fromFile(cyber_document_slot_weights(loaded, "cap", nullptr, 0));
+    REQUIRE(fromFile.size() == saved.size());
+    cyber_document_slot_weights(loaded, "cap", fromFile.data(), fromFile.size());
+    CHECK(fromFile == saved);
+    cyber_document_free(loaded);
+
+    // Clearing the edit mesh drops the slots that were indexed against it.
+    CyberDocument* cleared = cyber_document_load_file(path.string().c_str());
+    REQUIRE(cleared != nullptr);
+    REQUIRE(cyber_document_set_edit_mesh(cleared, nullptr) == CYBER_OK);
+    CHECK(cyber_document_slot_count(cleared) == 0u);
+    cyber_document_free(cleared);
+
+    const uint8_t garbage[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+    CHECK(cyber_document_load(garbage, sizeof(garbage)) == nullptr);
+    CHECK(cyber_document_load_file("/definitely/not/a/document.cydc") == nullptr);
+
+    std::error_code ec;
+    std::filesystem::remove(path, ec);
+}
+#endif  // CYBER_TESTS_HAVE_APP

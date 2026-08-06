@@ -3,6 +3,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -128,6 +129,15 @@ float CrossField::angle(FaceId f) const {
         theta += kPi / 2.0f;
     }
     return theta;
+}
+
+std::string unhonoredGuideReport(const CrossField& field) {
+    if (field.guidedFaces > 0 || field.guideConflictFaces == 0) {
+        return {};  // the guides biased something, or no guide reached a face at all
+    }
+    return "flow guides: all " + std::to_string(field.guideConflictFaces) +
+           " faces the guides reached are owned by a hard pin (feature edge, boundary or crease "
+           "alignment), so the guides biased no face and the field is the unguided one";
 }
 
 CrossField computeCrossField(const Mesh& mesh, int iterations, accel::IBackend& backend,

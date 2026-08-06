@@ -47,6 +47,10 @@ struct Handoff {
     Vec3 boundsMin{};
     Vec3 boundsMax{};
     std::vector<std::string> warnings;
+    // Triangles the file or buffer described that the Mesh refused (a repeated
+    // vertex index, the routine degenerate in a sculpt export). Ingest keeps
+    // the rest, but the loss is counted and warned about — never silent.
+    std::size_t droppedFaces = 0;
 
     [[nodiscard]] bool hasVertexColors() const {
         return mesh.vertexAttributes().find<Vec3>(io::kColorAttribute) != nullptr;

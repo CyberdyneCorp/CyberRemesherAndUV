@@ -337,6 +337,36 @@ TEST_CASE("painted density shrinks quads inside the painted region") {
     CHECK(countRatio < 3.0);
 }
 
+// The developer kill switch CYBER_QC_NO_NATIVE disables the only quad-cover
+// solve that can see guidance, so a guided island routes to the vendored
+// Geogram solve (or fails outright on a build without it). Either way the run
+// must SAY the guidance was not honored — it used to report "honored" while the
+// guides never reached a solver. No fallback quadrangulator is passed so the
+// assertion holds on builds with and without the vendored solver: with it the
+// vendored solve produces the island, without it the island fails, and the
+// unhonored-guidance report is the reason in both cases.
+TEST_CASE("CYBER_QC_NO_NATIVE reports the dropped guidance instead of claiming it was honored") {
+    const Mesh plane = makePlane(12, 4.0f);
+    remesh::Guidance g;
+    remesh::FlowGuide guide;
+    guide.points = {Vec3{0.5f, 0.5f, 0.0f}, Vec3{3.5f, 3.5f, 0.0f}};
+    guide.strength = 1.0f;
+    guide.radius = 1.0f;
+    g.guides.push_back(guide);
+
+    const auto quadCover = [] { return remesh::makeQuadCoverQuadrangulator(); };
+    setenv("CYBER_QC_NO_NATIVE", "1", 1);
+    const auto result = remesh::remesh(plane, smallRun(300), nullptr, nullptr, quadCover, {}, &g);
+    unsetenv("CYBER_QC_NO_NATIVE");
+
+    REQUIRE(result.islandGuidance.size() == 1);
+    const remesh::IslandGuidance& row = result.islandGuidance[0];
+    CHECK(row.guidesInRange == 1);
+    CHECK_FALSE(row.guidesHonored);
+    MESSAGE("island guidance reason: " << row.reason);
+    CHECK(row.reason.find("CYBER_QC_NO_NATIVE") != std::string::npos);
+}
+
 TEST_CASE("an island on a backend without guide support is reported, not silently dropped") {
     const Mesh plane = makePlane(12, 4.0f);
     remesh::Guidance g;

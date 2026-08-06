@@ -7,6 +7,30 @@
 
 ### Added
 
+- **Named soft-selection slots now persist with the document, end to end.**
+  The two halves existed and nothing connected them: `cyber::app::Document`
+  serialized a `softSelections` map and the C ABI kept its own slot map on
+  `CyberMesh`, but no code in the tree moved weights between them in either
+  direction — a slot saved through the ABI was absent from the saved document,
+  and a slot in a loaded document was invisible to the ABI, so the
+  manual-retopology spec's "savable to and loadable from named slots persisted
+  with the document" was unreachable. The seam is now a real document handle:
+  13 additive `cyber_document_*` entry points (`_create` / `_free`,
+  `_set_target` / `_set_edit_mesh`, `_target` / `_edit_mesh`, `_slot_count` /
+  `_slot_name` / `_slot_weights`, `_save` / `_load` / `_save_file` /
+  `_load_file`), exposed as `cyberremesh.Document` in Python and
+  `Document.swift` in Swift. `set_edit_mesh` copies the handle's named slots
+  into the document and `edit_mesh()` hands back a fresh handle carrying them,
+  so a weighted selection survives serialize → drop every handle → load. The
+  seam is BY VALUE and explicit: nothing is aliased or kept in sync, and the
+  live (unnamed) weight field is deliberately not persisted. Implemented only
+  when the application-shell library is in the build (`-DCYBER_BUILD_APP=ON`,
+  the default); without it the symbols still exist so the ABI is stable and
+  every call reports the missing module, exactly like the UV handles.
+
+- **`cyber_retopo_selection_transform_pinned`** — the weighted transform can
+  finally honor pins from the C ABI, Python and Swift. See *Fixed*.
+
 - **Sculpt handoff bridge** (openspec change `add-claycore-bridge`): the
   receiving half of a `sculpt -> retopo -> UV -> bake` pipeline, landed with
   **zero hard dependency on any sculpting or volumetric engine**. Three
@@ -14,10 +38,12 @@
 
   - **Versioned sculpt handoff ingest** (`src/handoff`, `cyber::handoff`). A
     triangle mesh with positions, per-vertex normals, vertex colors and a
-    `material_mix` weight arrives as a Target through a file (PLY profile;
-    `.gltf`/`.glb` accepted and version-gated, but that route carries geometry
-    only — the declared producer label and vertex normals are not read back, and
-    it has no test coverage yet), a stream (stdin), or plain in-memory buffers
+    `material_mix` weight arrives as a Target through a file (PLY profile, or
+    `.gltf`/`.glb` declaring `asset.extras.cyberSculptHandoff` — that route
+    carries the version, the producer label, geometry, vertex colors and
+    per-vertex normals; `material_mix` is the one payload glTF cannot express
+    and its absence is warned about, not passed over), a stream (stdin), or
+    plain in-memory buffers
     with no intermediate file. The version gate runs on the header text **before any
     geometry is read**, so a bad version can never produce a partial Target,
     however malformed the rest of the payload is; the rejection is the existing
@@ -25,9 +51,13 @@
     on the C ABI, `IncompatibleVersionError` in Python) and names both the
     version found and the version supported. A newer *minor* is refused rather
     than read with the unknown parts dropped, matching the export-preset
-    unknown-field precedent. CLI: `--target <path|->`, mutually exclusive with
-    `--input`, plus a `handoff` block in the JSON report and `--bake <csv>` to
-    override the preset's map set.
+    unknown-field precedent. A triangle the mesh refuses (a repeated vertex
+    index) is counted and warned about — `Handoff::droppedFaces`,
+    `CyberHandoffInfo::droppedFaces`, `HandoffInfo.dropped_faces`,
+    `handoff.droppedFaces` in the CLI report — rather than dropped in silence.
+    CLI: `--target <path|->`, mutually exclusive with `--input`, plus a
+    `handoff` block in the JSON report and `--bake <csv>` to override the
+    preset's map set.
   - **Field-sampled baking through an evaluator interface**
     (`cyber::bake::FieldEvaluator`, `BakeParams::field`, `cyber_bake_field`,
     `cyberremesh.FieldEvaluator` / `bake_field`). A pure-abstract interface —
@@ -102,10 +132,15 @@
   not. Supplying guidance **forces the native seamless route** on the
   quad-cover backend, because the vendored Geogram solve has no hook for either
   input — a documented quality trade (native ~4-5% irregular vs vendored 1-4%
-  on smooth organics), not a hidden one. One known hole in that audit: the
-  developer kill switch `CYBER_QC_NO_NATIVE` disables the native solve, and a
-  guided island then takes the vendored route while still being reported as
-  honored (see `docs/flow-guides.md`). Zero-radius guides, guides with fewer
+  on smooth organics), not a hidden one. Two ways guidance could still slip
+  through that audit are closed: the developer kill switch `CYBER_QC_NO_NATIVE`
+  disables the native solve, and a guided island then takes the vendored route —
+  it is now reported as unhonored, naming the env var, instead of being counted
+  as honored; and a guide whose reached faces are ALL owned by hard pins (feature
+  edges, boundaries, crease alignment) leaves the field bit-for-bit unguided, so
+  it is now reported with its absorbed-face count rather than counted as honored
+  (a partial absorption still counts as honored — the guide did move the field).
+  Zero-radius guides, guides with fewer
   than two points, non-finite values and mismatched density array lengths are
   rejected as fatal rather than silently ignored; out-of-range strength and
   density values clamp with a reported effective value.
@@ -369,6 +404,32 @@
   to look at them.
 
 ### Fixed
+
+- **A pinned vertex was moved by a weighted transform through every binding.**
+  `cyber_capi.h` documented, for that exact block, "a vertex whose weight is 0
+  (and any pinned vertex) is not moved", and the engine's `transformWeighted()`
+  has always accepted a `PinSet` — but `cyber_retopo_selection_transform`
+  hard-coded `nullptr` for it, so the only thing that could hold a vertex still
+  through the C ABI, Python or Swift was a zero weight. Pinning a vertex at
+  weight 1.0 and applying a translation moved it the full distance. The fix is
+  additive: `cyber_retopo_selection_transform_pinned(mesh, xf, pinned,
+  pinned_count, snapper, resnap_epsilon, out_report)` threads the list through,
+  and the existing entry point is now that call with an empty list — no
+  signature or struct moved. Bound as
+  `Mesh.transform_selection(..., pinned=[...])` and
+  `transformSelection(_:snapper:resnapEpsilon:pinned:)`. A pinned vertex is now
+  excluded from `report.moved` and is bit-identical after the call.
+
+- **`CyberSoftTransformReport.moved` vs `resnapped`: the gap is now explained
+  rather than hand-waved.** `examples/16_soft_selection.py` reported 193 moved
+  but only 180 re-snapped with no account of the 13. Measured: all 13 carry a
+  positive but *negligible* weight (<= 1.8e-33, produced by one-ring smoothing
+  at the far tail of a gradient), so the weighted blend rounds to the vertex's
+  own position in float — the op writes the same value back, which is what
+  `moved` counts, and the Target re-projection then has nothing to correct,
+  which is why `resnapped` skips it. `moved` counts WRITES, not displacements.
+  The header now says so precisely, and the example measures the tail instead
+  of asserting a reason. No behaviour change.
 
 - **The ambient-occlusion bake was banded, not shaded.** Every texel fired the
   *identical* Hammersley hemisphere set, so openness could only land on the

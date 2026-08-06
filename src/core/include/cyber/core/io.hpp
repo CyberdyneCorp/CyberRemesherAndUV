@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <filesystem>
 #include <string>
 #include <variant>
@@ -69,6 +70,7 @@ struct ImportedMesh {
     Mesh mesh;
     Vec3 boundsMin, boundsMax;          // mesh-io spec, "Import scale and unit sanity"
     std::vector<std::string> warnings;  // skipped degenerate faces etc.
+    std::size_t droppedFaces = 0;       // triangles the file described that the Mesh refused
 };
 
 // Dispatches on file extension (.obj today; .ply/.stl/.gltf/.glb are task

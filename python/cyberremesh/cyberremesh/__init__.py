@@ -23,6 +23,7 @@ from .api import (
     BundleResult,
     ConformReport,
     CyberError,
+    Document,
     ExportPreset,
     FieldEvaluator,
     HandoffInfo,
@@ -52,6 +53,7 @@ from .api import (
 
 __all__ = [
     "Mesh",
+    "Document",
     "FlowGuide",
     "RemeshParams",
     "Statistics",

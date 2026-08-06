@@ -76,26 +76,36 @@
   pass on this build, including the one on the shipped default backend
   (`tests/core/test_flow_guides_pipeline.cpp:262`, `:276`).
 
-- [~] 4. Per-island loud reporting for unhonored guidance; routing audit for
+- [x] 4. Per-island loud reporting for unhonored guidance; routing audit for
        both backends
 
-  **PARTIAL — the audit has one measured hole: `CYBER_QC_NO_NATIVE` drops
-  guidance silently.** That env kill switch clears `haveNative`
-  (`quadcover_extractor.cpp:1249`), which drops out of the `routeNative`
-  condition at `1265-1269`, so a guided island goes to the vendored Geogram
-  solve WITHOUT passing through the `ctx->guidanceHonored = false` assignment at
-  `1280` — and `NativeSolveContext::guidanceHonored` defaults to `true`
-  (`quadcover_extractor.hpp:103`). `m_unhonored` therefore stays empty
-  (`3543-3549`) and the pipeline records `guidesHonored = true`
-  (`pipeline.cpp:808-811`). Measured on `fandisk --target-quads 600` with one
-  guide: the report says `"guidesHonored": true, "reason": ""` both with and
-  without `CYBER_QC_NO_NATIVE=1`, while the output changes (12 vs 79 non-quads,
-  0.27s vs 1.55s) — i.e. the run took the vendored route, where every guidance
-  hook (`iso.density`, the cross-field bias, the seamless RHS) lives inside
-  `prepareNativeSolve` and is never reached. Everything else in this task is
-  done and tested; the unhonored path is covered only by a test-double backend
-  (`tests/core/test_flow_guides_pipeline.cpp:363`), never by the real
-  quad-cover route.
+  The measured hole is CLOSED. `CYBER_QC_NO_NATIVE` used to clear `haveNative`,
+  drop out of the `routeNative` condition, and send a guided island to the
+  vendored Geogram solve without ever passing the "not honored" assignment, so
+  `m_unhonored` stayed empty and the pipeline recorded `guidesHonored = true`
+  (measured on `fandisk --target-quads 600`: `"guidesHonored": true, "reason":
+  ""` with AND without the env var, while the output changed — 12 vs 79
+  non-quads). `computeSeamlessUv` now sets `NativeSolveContext::
+  guidanceUnhonoredReason` on BOTH ways a guided island can reach the vendored
+  solve (native declined; native disabled by the env var), and the
+  quadrangulator drains that context on every exit — including the early one
+  where no UV was produced at all. Regression test on the real quad-cover route,
+  not a test double: `tests/core/test_flow_guides_pipeline.cpp` "CYBER_QC_NO_NATIVE
+  reports the dropped guidance instead of claiming it was honored" (asserted with
+  no fallback quadrangulator so it holds with and without the vendored solver
+  compiled in).
+
+  Second false-negative from the same review, also closed: `CrossField::
+  guidedFaces` / `guideConflictFaces` were computed and read by nobody outside
+  the tests, so a guide absorbed WHOLE by hard pins (every reached face pinned →
+  the field is bit-for-bit the unguided one) counted as honored. `unhonoredGuideReport`
+  (`crossfield.{hpp,cpp}`) turns that state into a reason string, and both
+  guidance-capable backends push it through `unhonoredGuidance()` — field-aligned
+  from its own field, quad-cover from `NativeSolveContext::setup.field`. A
+  PARTIAL absorption still counts as honored: the guide did move the field.
+  Tests: `tests/quadrangulate/test_flow_guides.cpp` "a backend reports a guide
+  that hard pins absorbed whole" (plus the report assertions on the existing
+  conflict-count case, and a control proving an unguided field reports nothing).
 
   `IQuadrangulator::acceptGuidance` defaults to DECLINING with a reason, so
   greedy / instant-meshes / integer report rather than silently ignore.

@@ -21,26 +21,32 @@
   Consequence: the version gate is proven only against files this repo writes,
   so "loud on both sides" is demonstrated on our side only.
 
-- [~] 2. Handoff reader → Target (file + in-memory buffer), version gating,
+- [x] 2. Handoff reader → Target (file + in-memory buffer), version gating,
        typed errors
 
-  **PARTIAL — the PLY and buffer routes are done and tested; the glTF/GLB route
-  is untested and does not match its own format doc.** No test anywhere touches
-  it: `.gltf`/`.glb` appears in no case in `tests/handoff/test_handoff.cpp`,
-  `tests/capi/test_capi.cpp`, `tests/cli/test_cli.py` or
-  `python/cyberremesh/tests/test_handoff.py`. Driving it by hand with a v1.0
-  `.gltf` (data-URI buffer, POSITION + NORMAL, `asset.extras.cyberSculptHandoff`
-  exactly as documented) shows two gaps against
-  `docs/sculpt-handoff-format.md:95-108`: the declared `producer` is never read
-  (`readGltfFile`, `handoff.cpp:349-380`, fills `out.version` but never
-  `out.producer`; `GltfDeclaration::producer` at `:309` is dead), so the report
-  says `"producer": ""`; and vertex normals do not survive — the glTF importer
-  writes them to the CORNER attribute set (`io_gltf.cpp:151,177`) while
-  `Handoff::hasVertexNormals` reads the VERTEX set (`handoff.hpp:54-56`), so the
-  report says `"hasVertexNormals": false` for a file that declares a NORMAL
-  accessor. Geometry and the version gate itself do work (`"version": {1,0}`,
-  4 vertices / 2 faces read back). The doc has been corrected to describe what
-  the reader does; making glTF carry normals and the producer is follow-up work.
+  **The glTF/GLB route now matches its own format doc and is tested.** It was
+  previously partial: no test anywhere touched `.gltf`/`.glb`, the declared
+  `producer` was never read (`GltfDeclaration::producer` was dead), and vertex
+  normals did not survive — the glTF importer writes NORMAL to the CORNER
+  attribute set while `Handoff::hasVertexNormals` reads the VERTEX set, so a
+  file declaring a NORMAL accessor reported `"hasVertexNormals": false`.
+
+  `readGltfFile` now reads `major`, `minor` **and** `producer` out of
+  `asset.extras.cyberSculptHandoff` — scanning only that object's braces, so a
+  member of the same name elsewhere in a large document cannot be picked up —
+  and folds the importer's corner NORMAL column onto the vertices (every corner
+  of a vertex came from that vertex's NORMAL, so the fold is a copy, not an
+  average). Every documented payload the container did not deliver, `material_mix`
+  included, is named in `Handoff::warnings`; the doc's glTF section was narrowed
+  to say `material_mix` is the one payload glTF cannot carry, and its stale
+  "producer and normals are lost" limits were removed.
+
+  Pinned by three cases in `tests/handoff/test_handoff.cpp` that round-trip a
+  handoff through **both** `.gltf` and `.glb` (the profile is written by
+  exporting through the engine's glTF writer and injecting `asset.extras`, the
+  half the writer has no slot for): version + producer + geometry + colors +
+  per-vertex normals, the version gate (2.0 and 1.7 rejected naming both
+  versions), and a file with no declaration rejected as `UnsupportedFormat`.
 
   **Landed:** new `cyber_handoff` static module (`src/handoff`, namespace
   `cyber::handoff`), linked from `cyber_core` only — no consumer inherits a
@@ -52,6 +58,12 @@
   Positions land in a `cyber::Mesh`; normals and colors land on the VERTEX
   attribute set under `io::kNormalAttribute` / `io::kColorAttribute`, and
   `material_mix` under `handoff::kMaterialMixAttribute`.
+
+  A triangle the `Mesh` refuses — a repeated vertex index, the routine defect in
+  a sculpt export — is counted rather than dropped in silence: `Handoff::droppedFaces`
+  on every route, a warning naming the count (printed by the CLI and recorded as
+  `handoff.droppedFaces` in `--report`), `CyberHandoffInfo::droppedFaces` over the
+  C ABI and `HandoffInfo.dropped_faces` in Python.
 
   The version gate reads the PLY **header text directly**, before happly parses
   anything, so a rejected handoff can never leave a partial Target behind.

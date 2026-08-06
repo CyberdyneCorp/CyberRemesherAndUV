@@ -15,19 +15,25 @@
   `paintSelectionStroke` (AABB-prefiltered) round it out, with four falloff curves
   (Linear/Smooth/Sharp/Round).
 
-- [~] 2. Selection ops: clear/invert/expand/contract/smooth(1|5|10),
+- [x] 2. Selection ops: clear/invert/expand/contract/smooth(1|5|10),
        save/load named slots persisted in the document
 
-  **PARTIAL — the selection ops are done; "persisted in the document" is NOT.**
-  Both halves exist and neither is connected to the other: `Document::save/load`
-  serializes `softSelections` (`src/app/src/document.cpp:205-215`, `269-276`) and
-  the C ABI keeps a slot map on the mesh handle (`capi/src/capi.cpp:111`,
-  `2602-2640`), but nothing moves a slot from one to the other. Outside
-  `tests/app/test_app.cpp` no code anywhere writes `Document::softSelections`
-  (only hits: `document.hpp:77`, `document.cpp`, that test), and `cyber_capi.h`
-  exposes no document surface at all, so the ABI slot map dies with the handle.
-  No selection can actually persist today; the shell that would bridge them does
-  not exist (see task 6).
+  **Persistence CLOSED.** It was previously partial: `Document::save/load`
+  serialized `softSelections` and the C ABI kept its own slot map on the mesh
+  handle, and nothing in the tree moved a slot between them in either direction,
+  so a slot saved through the ABI was absent from the saved document and a slot
+  in a loaded document was invisible to the ABI. The seam is now a real
+  `CyberDocument` handle in the C ABI (`capi/src/capi.cpp`, gated on
+  `CYBER_CAPI_WITH_APP` exactly like the UV handles): `cyber_document_create` /
+  `_free`, `_set_target` / `_set_edit_mesh`, `_target` / `_edit_mesh`,
+  `_slot_count` / `_slot_name` / `_slot_weights`, `_save` / `_load` /
+  `_save_file` / `_load_file`. `_set_edit_mesh` copies the handle's slot map into
+  the document and `_edit_mesh` hands back a fresh handle carrying it, so a
+  selection genuinely survives save → load. Exposed as `cyberremesh.Document`
+  (Python) and `Document.swift` (Swift). Proved end to end by
+  `tests/capi/test_capi.cpp` ("capi document round-trips named soft-selection
+  slots end to end", plus a file round trip) and by `check_document_round_trip`
+  in `python/cyberremesh/tests/test_soft_selection.py`.
 
   `clearSelection`, `invertSelection`, `expandSelection`/`contractSelection`
   (double-buffered morphological max/min over the closed one-ring) and
@@ -41,20 +47,31 @@
   slot map on the mesh handle (`_save`/`_load`/`_slot_count`/`_slot_name`); the
   shell is what moves those into the Document.
 
-- [~] 3. Weighted transform (T/R/S) + weighted relax with in-operation
+- [x] 3. Weighted transform (T/R/S) + weighted relax with in-operation
        re-snap to the Target
 
-  **PARTIAL — the engine half is complete; the pin half of the documented
-  invariant is C++-only.** `cyber_retopo_selection_transform` takes no `pinned`
-  argument and passes `nullptr` for pins (`capi/src/capi.cpp:2653-2654`), unlike
-  `cyber_retopo_selection_relax` (`2667-2670`) and every other mutating op
-  (`cyber_retopo_move` 1520, `_relax` 1544, `_transform_vertices` 2337), so
-  through the C ABI, Python and Swift a pinned vertex IS moved by a weighted
-  transform. `cyber_capi.h:928-930` nevertheless promises "a vertex whose weight
-  is 0 (**and any pinned vertex**) is skipped entirely" for the whole
-  soft-selection section — that half of the header contract is unreachable, and
-  the header has been corrected to say so pending the missing parameter. The
-  zero-weight half holds everywhere and is tested.
+  **Pin gap CLOSED.** `cyber_retopo_selection_transform` used to hard-code
+  `nullptr` for the `PinSet`, so through the C ABI, Python and Swift a pinned
+  vertex WAS moved by a weighted transform even though the header promised the
+  opposite. The additive `cyber_retopo_selection_transform_pinned` now threads
+  the list through to `transformWeighted`, and the old entry point is that call
+  with an empty list, so no existing signature or struct moved. Bound as
+  `Mesh.transform_selection(..., pinned=[...])` in Python and
+  `transformSelection(_:snapper:resnapEpsilon:pinned:)` in Swift. The failing
+  case — a pinned vertex at weight 1.0 — is pinned by "capi weighted transform
+  honours a pin on a high-weight vertex" (`tests/capi/test_capi.cpp`) and
+  `check_transform_honours_pins` in the Python suite.
+
+  **Report semantics documented.** `examples/16_soft_selection.py` reported 193
+  moved / 180 re-snapped with no account of the 13. Measured: all 13 carry a
+  positive but negligible weight (<= 1.8e-33, produced by the one-ring smoothing
+  at the far tail of the gradient), so `lerp(pos, xf(pos), w)` rounds to `pos` in
+  float — the op writes the same value back (counted in `moved`) and the Target
+  re-projection has nothing to correct (excluded from `resnapped`). `moved`
+  counts WRITES, not displacements. Stated precisely in the
+  `CyberSoftTransformReport` block of `cyber_capi.h`, measured rather than
+  asserted by the example, and pinned by "capi weighted transform counts a
+  negligible-weight vertex as moved".
 
   `transformWeighted(mesh, selection, Affine, snapper, pins, resnapEpsilon)` and
   `relaxWeighted(...)`, both returning `retopo::ResnapReport {moved, resnapped,
@@ -85,13 +102,13 @@
   previously unbound `cyber_snapper_create`/`_free`), a `Snapper` class and 16
   `Mesh` methods in `api.py`, all re-exported from the package.
 
-  **Partial — the ABI surface is not complete:**
-  `cyber_retopo_selection_transform` has no `pinned` / `pinned_count` parameter
-  (`capi/include/cyber_capi.h:1042-1044`) and passes `nullptr` to
-  `transformWeighted` (`capi/src/capi.cpp:2654`), so the pin support the engine
-  function offers is unreachable from any binding — see task 3. Adding the two
-  arguments is an ABI change and is left as a follow-up rather than slipped in
-  here.
+  **Follow-up landed:** the missing pin route is now
+  `cyber_retopo_selection_transform_pinned`, appended rather than added to the
+  existing signature so the ABI stays additive, plus the 13 `cyber_document_*`
+  entry points that persist the slots (tasks 2 and 3). `check_parity` in
+  `python/cyberremesh/tests/test_soft_selection.py` was widened to cover the
+  document symbols, so all 31 must stay bound in `_ffi.py`, `api.py` and the
+  Swift package.
 
   **Partial:** `swift/Sources/CyberRemesher/SoftSelection.swift` is written
   against the real ABI but **was not compiled** — there is no Swift toolchain in

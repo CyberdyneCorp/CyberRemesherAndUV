@@ -63,8 +63,87 @@ def check_parity() -> None:
     # mismatch reads garbage instead of failing loudly.
     fields = [name for name, _ in cyberremesh.SoftTransformReport.__annotations__.items()]
     assert fields == ["moved", "resnapped", "max_snap_distance"], fields
-    print("PASS parity: {0} soft-selection symbols bound in C ABI / Python / Swift".format(
-        len(symbols)))
+
+    # The document handle is the persistence seam for the named slots, so it is
+    # part of this surface: bound the same three ways.
+    doc_symbols = sorted(set(re.findall(r"\bcyber_document_[a-z_]+", header)))
+    assert len(doc_symbols) >= 12, doc_symbols
+    doc_swift = _read("swift/Sources/CyberRemesher/Document.swift")
+    for symbol in doc_symbols:
+        assert symbol in ffi, "{0}: no ctypes declaration in _ffi.py".format(symbol)
+        assert symbol in api, "{0}: not reachable from api.py".format(symbol)
+        assert symbol in doc_swift, "{0}: not wrapped in Document.swift".format(symbol)
+
+    print("PASS parity: {0} soft-selection + {1} document symbols bound in "
+          "C ABI / Python / Swift".format(len(symbols), len(doc_symbols)))
+
+
+def check_transform_honours_pins(mesh) -> None:
+    """Regression (honesty pass, item 2): ``cyber_retopo_selection_transform``
+    hard-coded a null PinSet, so a pinned vertex with a HIGH weight was moved
+    anyway — contradicting the header's "any pinned vertex is not moved"."""
+    mesh.set_selection_weights([1.0] * mesh.vertex_count)
+    before = list(mesh._copy_positions())
+    pinned = [0, 7]
+    report = mesh.transform_selection(
+        [1, 0, 0, 0, 1, 0, 0, 0, 1, 3.0, 0, 0], pinned=pinned
+    )
+    assert report.moved == mesh.vertex_count - len(pinned), report
+    after = list(mesh._copy_positions())
+    for v in pinned:
+        assert after[v * 3:v * 3 + 3] == before[v * 3:v * 3 + 3], v
+    for v in range(mesh.vertex_count):
+        if v in pinned:
+            continue
+        assert abs(after[v * 3] - (before[v * 3] + 3.0)) < 1e-5, v
+    mesh.clear_selection()
+
+
+def check_document_round_trip(mesh) -> None:
+    """Regression (honesty pass, item 1): a slot saved through the ABI never
+    reached the document and a slot in a loaded document was invisible to the
+    ABI — the two halves existed and nothing connected them. This walks the
+    whole public path: save a weighted selection, serialize, load, read back."""
+    from cyberremesh import CyberError, Document
+
+    try:
+        Document().close()
+    except CyberError as exc:  # -DCYBER_BUILD_APP=OFF: no document model to test
+        assert "application-shell" in str(exc), exc
+        print("SKIP document round trip: build has no application-shell library")
+        return
+
+    mesh.select_sphere((4.0, 1.0, 0.0), 3.0, falloff=cyberremesh.Falloff.SMOOTH)
+    mesh.save_selection("taper")
+    saved = mesh.selection_weights()
+    assert any(w > 0.0 for w in saved)
+
+    with Document() as doc:
+        doc.set_edit_mesh(mesh)
+        assert "taper" in doc.selection_slots(), doc.selection_slots()
+        blob = doc.save()
+    assert blob
+
+    with Document.load(blob) as loaded:
+        assert "taper" in loaded.selection_slots(), loaded.selection_slots()
+        assert loaded.selection_weights("taper") == saved
+        with loaded.edit_mesh() as restored:
+            assert restored.vertex_count == mesh.vertex_count
+            assert "taper" in restored.selection_slots()
+            restored.load_selection("taper")
+            assert restored.selection_weights() == saved
+
+    handle, path = tempfile.mkstemp(suffix=".cydc")
+    os.close(handle)
+    try:
+        with Document() as doc:
+            doc.set_edit_mesh(mesh)
+            doc.save_file(path)
+        with Document.load_file(path) as loaded:
+            assert loaded.selection_weights("taper") == saved
+    finally:
+        os.unlink(path)
+    mesh.clear_selection()
 
 
 def check_line_gradient(mesh) -> None:
@@ -207,6 +286,8 @@ def main() -> int:
             check_line_gradient(mesh)
             check_paint_accumulates_and_subtracts(mesh)
             check_selection_ops(mesh)
+            check_transform_honours_pins(mesh)
+            check_document_round_trip(mesh)
 
         with Mesh.load_obj(target_obj.name) as target, \
                 Mesh.load_obj(edit_obj.name) as mesh:

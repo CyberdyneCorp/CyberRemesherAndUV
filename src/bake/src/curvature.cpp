@@ -4,6 +4,7 @@
 #include <array>
 #include <cmath>
 #include <cstddef>
+#include <utility>
 
 namespace cyber::bake {
 
@@ -160,10 +161,35 @@ void smoothBoundary(const Mesh& mesh, const std::vector<bool>& onBoundary,
     }
 }
 
+// Smallest |H| whose cumulative weight, over values sorted ascending, reaches
+// `p` of the total. With equal weights this is the plain rank percentile.
+float weightedPercentile(std::vector<std::pair<float, float>>& samples, float p) {
+    if (samples.empty()) {
+        return 0.0f;
+    }
+    std::sort(samples.begin(), samples.end());
+    double total = 0.0;
+    for (const auto& [value, weight] : samples) {
+        total += weight;
+    }
+    const double target = static_cast<double>(std::clamp(p, 0.0f, 1.0f)) * total;
+    double cumulative = 0.0;
+    for (const auto& [value, weight] : samples) {
+        cumulative += weight;
+        if (cumulative >= target) {
+            return value;
+        }
+    }
+    return samples.back().first;
+}
+
 }  // namespace
 
-std::vector<float> vertexMeanCurvature(const Mesh& mesh) {
+std::vector<float> vertexMeanCurvature(const Mesh& mesh, std::vector<float>* vertexAreas) {
     std::vector<float> curvature(mesh.vertexCapacity(), 0.0f);
+    if (vertexAreas != nullptr) {
+        vertexAreas->assign(mesh.vertexCapacity(), 0.0f);
+    }
     if (mesh.faceCount() == 0) {
         return curvature;
     }
@@ -180,27 +206,30 @@ std::vector<float> vertexMeanCurvature(const Mesh& mesh) {
 
     const std::vector<bool> onBoundary = boundaryVertices(mesh);
     smoothBoundary(mesh, onBoundary, curvature);
+    if (vertexAreas != nullptr) {
+        for (Index vi = 0; vi < mesh.vertexCapacity(); ++vi) {
+            (*vertexAreas)[vi] = mesh.isAlive(VertexId{vi}) ? acc.area[vi] : 0.0f;
+        }
+    }
     return curvature;
 }
 
 float curvatureScale(const std::vector<float>& curvature, float percentile) {
-    std::vector<float> magnitudes;
-    magnitudes.reserve(curvature.size());
-    for (const float h : curvature) {
-        if (h != 0.0f) {
-            magnitudes.push_back(std::fabs(h));
+    return curvatureScale(curvature, {}, percentile);
+}
+
+float curvatureScale(const std::vector<float>& curvature, const std::vector<float>& weights,
+                     float percentile) {
+    const bool weighted = weights.size() == curvature.size();
+    std::vector<std::pair<float, float>> samples;
+    samples.reserve(curvature.size());
+    for (std::size_t i = 0; i < curvature.size(); ++i) {
+        const float w = weighted ? weights[i] : 1.0f;
+        if (curvature[i] != 0.0f && w > 0.0f) {
+            samples.emplace_back(std::fabs(curvature[i]), w);
         }
     }
-    if (magnitudes.empty()) {
-        return 0.0f;
-    }
-    const float p = std::clamp(percentile, 0.0f, 1.0f);
-    std::size_t index =
-        static_cast<std::size_t>(p * static_cast<float>(magnitudes.size() - 1) + 0.5f);
-    index = std::min(index, magnitudes.size() - 1);
-    std::nth_element(magnitudes.begin(), magnitudes.begin() + static_cast<std::ptrdiff_t>(index),
-                     magnitudes.end());
-    return magnitudes[index];
+    return weightedPercentile(samples, percentile);
 }
 
 }  // namespace cyber::bake

@@ -92,6 +92,17 @@ end_header
   rejected: a sculpt export that is not triangulated is a producer bug, and
   triangulating it here would change what the bake sees.
 
+## Degenerate triangles are counted, never dropped in silence
+
+A triangle whose corners are not three distinct vertices cannot enter the mesh.
+The reader keeps the rest of the surface, but the loss is reported on every
+route: `Handoff::droppedFaces` counts them, a warning naming the count lands in
+`Handoff::warnings` (the CLI prints it on stderr and records `handoff.droppedFaces`
+in `--report`), the C ABI carries it as `CyberHandoffInfo::droppedFaces`, and
+Python as `HandoffInfo.dropped_faces`. An ingest that reports success with fewer
+faces than the producer sent, and says nothing, is the failure this exists to
+prevent.
+
 ## File profile: glTF / GLB
 
 A `.gltf`/`.glb` handoff declares its version in
@@ -102,18 +113,33 @@ A `.gltf`/`.glb` handoff declares its version in
                                                  "producer": "claycore" } } } }
 ```
 
-Geometry and vertex colors come through the engine's normal glTF import path.
-`material_mix` has no glTF core slot; a GLB handoff that omits it is accepted
-with a warning rather than rejected, since the attribute is the one payload the
-format cannot carry natively.
+`major`, `minor` and the optional `producer` label are all read out of
+`cyberSculptHandoff`, and the version gate runs on the JSON text before the
+geometry is imported — the same rule, and the same ordering, as the PLY profile.
 
-**Known limits of this route — the PLY profile is the normative one.** Only the
-`major`/`minor` pair is read out of `cyberSculptHandoff`: the `producer` label
-is parsed for PLY but not for glTF, so it comes back empty. Vertex normals are
-also lost — the glTF importer attaches `NORMAL` to mesh CORNERS while a handoff
-reports and consumes VERTEX normals, so a glTF handoff reads back as having
-none. Both are reader gaps, not format gaps. Send PLY (or the buffer profile) if
-you need the producer label or normals.
+What comes through:
+
+| Payload | glTF source | Lands as |
+| --- | --- | --- |
+| Positions + triangles | `POSITION` + indices | `cyber::Mesh` |
+| Per-vertex normals | `NORMAL` | vertex attribute `normal`, *and* the importer's corner `normal` |
+| Per-vertex colors | `COLOR_0` | vertex attribute `color` |
+| Producer label | `extras.cyberSculptHandoff.producer` | `Handoff::producer` |
+| `material_mix` | — | **not carried** |
+
+glTF stores `NORMAL` per vertex but the engine's importer attaches it to mesh
+CORNERS; the handoff reader folds that column back onto the vertices, so
+`Handoff::hasVertexNormals()` is true for a file that declares a `NORMAL`
+accessor. Every corner of a vertex was written from that vertex's `NORMAL`, so
+the fold is a copy, not an average. The corner column is left in place as well —
+it is the importer's own output and other consumers read it.
+
+**Known limit of this route — the PLY profile is the normative one.**
+`material_mix` has no glTF core slot, so a `.gltf`/`.glb` handoff cannot carry
+it: the file is accepted with a warning rather than rejected, since it is the
+one payload the container cannot express. Send PLY (or the buffer profile) if
+the mix weight matters. Any other required payload the file omits — normals,
+colors — is likewise named in `Handoff::warnings` rather than passed over.
 
 ## In-memory buffer profile
 
@@ -162,7 +188,7 @@ mesh, info = Mesh.load_handoff_buffers(                 # in-memory profile
     positions, triangles,                               # (n, 3) and (m, 3)
     normals=normals, colors=colors, material_mix=mix,   # all optional
     producer="my-sculpt-tool")
-info.version, info.producer, info.has_vertex_colors
+info.version, info.producer, info.has_vertex_colors, info.dropped_faces
 ```
 
 An unsupported version raises `IncompatibleVersionError` naming both versions;

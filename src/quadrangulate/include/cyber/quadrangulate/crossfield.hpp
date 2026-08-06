@@ -1,5 +1,6 @@
 #pragma once
 
+#include <string>
 #include <vector>
 
 #include "cyber/accel/backend.hpp"
@@ -75,6 +76,15 @@ public:
                                            float creaseAlignDegrees = 45.0f,
                                            const std::vector<char>* creaseAlignSupport = nullptr,
                                            const GuidanceField* guidance = nullptr);
+
+// Loud-reporting hook for the guide accounting above (remeshing-pipeline spec,
+// "Guidance is honored loudly or rejected loudly"). Returns a user-facing reason
+// when the guides reached faces but biased NONE of them — every one was owned by
+// a hard pin, so the field is exactly the unguided field and calling that
+// "honored" would be a false positive. Returns an empty string otherwise
+// (including for an unguided field, where both counts are 0). Backends push the
+// result through IQuadrangulator::unhonoredGuidance().
+[[nodiscard]] std::string unhonoredGuideReport(const CrossField& field);
 
 // Alternative cross field derived from the multiresolution per-vertex 4-RoSy
 // orientation field (computePositionField): the coarse-to-fine hierarchy places

@@ -28,6 +28,7 @@ except ImportError:  # pragma: no cover
 __all__ = [
     "CyberError",
     "Mesh",
+    "Document",
     "RemeshParams",
     "Statistics",
     "remesh",
@@ -955,17 +956,24 @@ class Mesh:
         transform: Sequence[float],
         snapper: Optional["Snapper"] = None,
         resnap_epsilon: float = 0.0,
+        pinned: Optional[Sequence[int]] = None,
     ) -> SoftTransformReport:
         """Apply a 12-float affine per vertex scaled by its selection weight.
 
         ``transform`` is the column-major 3x3 linear part followed by the
         translation, matching ``cyber_retopo_transform_vertices``.
+
+        ``pinned`` holds vertex ids that are skipped whatever their weight, so
+        a pinned vertex is neither moved nor re-snapped and its position is
+        bit-identical after the call.
         """
         buf = (ctypes.c_float * 12)(*[float(v) for v in transform])
+        pins = pinned or []
+        pin_buf = (ctypes.c_uint32 * len(pins))(*[int(p) for p in pins]) if pins else None
         report = _ffi.CyberSoftTransformReport()
         _check(
-            _ffi.get_lib().cyber_retopo_selection_transform(
-                self.handle, buf, snapper.handle if snapper else None,
+            _ffi.get_lib().cyber_retopo_selection_transform_pinned(
+                self.handle, buf, pin_buf, len(pins), snapper.handle if snapper else None,
                 float(resnap_epsilon), ctypes.byref(report),
             )
         )
@@ -1077,6 +1085,150 @@ class Mesh:
         @positions.setter
         def positions(self, values) -> None:
             self.set_positions(values)
+
+
+class Document:
+    """The editing unit that outlives the session.
+
+    Holds the high-poly Target, the low-poly EditMesh and the named
+    soft-selection slots, and serializes all three into one versioned byte
+    container. This is what makes a saved selection survive a restart: the
+    slots on a :class:`Mesh` handle are session state and vanish when the
+    handle is closed.
+
+    The seam is explicit and by value. :meth:`set_edit_mesh` copies the mesh's
+    geometry *and* its named slots in; :meth:`edit_mesh` hands back a fresh
+    :class:`Mesh` carrying those slots. Nothing stays in sync afterwards — edit
+    the mesh and set it again. The live (unsaved) weight field is not a slot
+    and is not persisted, so call :meth:`Mesh.save_selection` first and
+    :meth:`Mesh.load_selection` after the round trip.
+
+        doc = Document()
+        mesh.save_selection("north-taper")
+        doc.set_edit_mesh(mesh)
+        doc.save_file(path)
+        ...
+        restored = Document.load_file(path).edit_mesh()
+        restored.load_selection("north-taper")
+
+    Usable as a context manager.
+    """
+
+    __slots__ = ("_handle",)
+
+    def __init__(self, handle: Optional[int] = None):
+        if handle is None:
+            handle = _ffi.get_lib().cyber_document_create()
+            if not handle:
+                raise CyberError(_ffi.STATUS_ERROR, _last_error())
+        self._handle = handle
+
+    # -- lifetime -----------------------------------------------------------
+    @property
+    def handle(self) -> int:
+        if self._handle is None:
+            raise ValueError("operation on a closed Document")
+        return self._handle
+
+    def close(self) -> None:
+        """Release the underlying engine handle (idempotent)."""
+        if self._handle is not None:
+            _ffi.get_lib().cyber_document_free(self._handle)
+            self._handle = None
+
+    def __del__(self):  # pragma: no cover - GC timing dependent
+        try:
+            self.close()
+        except Exception:
+            pass
+
+    def __enter__(self) -> "Document":
+        return self
+
+    def __exit__(self, *_exc) -> None:
+        self.close()
+
+    # -- meshes -------------------------------------------------------------
+    def set_target(self, mesh: Optional["Mesh"]) -> None:
+        """Copy ``mesh`` in as the high-poly Target (``None`` clears it)."""
+        _check(
+            _ffi.get_lib().cyber_document_set_target(
+                self.handle, mesh.handle if mesh else None
+            )
+        )
+
+    def set_edit_mesh(self, mesh: Optional["Mesh"]) -> None:
+        """Copy ``mesh`` in as the EditMesh, named selection slots included."""
+        _check(
+            _ffi.get_lib().cyber_document_set_edit_mesh(
+                self.handle, mesh.handle if mesh else None
+            )
+        )
+
+    def target(self) -> "Mesh":
+        """A fresh :class:`Mesh` owning a copy of the stored Target."""
+        return self._mesh(_ffi.get_lib().cyber_document_target(self.handle))
+
+    def edit_mesh(self) -> "Mesh":
+        """A fresh :class:`Mesh` with the stored EditMesh and its slots."""
+        return self._mesh(_ffi.get_lib().cyber_document_edit_mesh(self.handle))
+
+    def _mesh(self, handle: Optional[int]) -> "Mesh":
+        if not handle:
+            raise CyberError(_ffi.STATUS_ERROR, _last_error())
+        return Mesh(handle=handle)
+
+    # -- slots --------------------------------------------------------------
+    def selection_slots(self) -> List[str]:
+        """Names of the persisted selection slots, in name order."""
+        lib = _ffi.get_lib()
+        count = int(lib.cyber_document_slot_count(self.handle))
+        names = []
+        for i in range(count):
+            raw = lib.cyber_document_slot_name(self.handle, i)
+            names.append(raw.decode("utf-8") if raw else "")
+        return names
+
+    def selection_weights(self, name: str) -> List[float]:
+        """The weights of one slot, indexed by EditMesh vertex id."""
+        lib = _ffi.get_lib()
+        key = name.encode("utf-8")
+        needed = int(lib.cyber_document_slot_weights(self.handle, key, None, 0))
+        if needed == 0:
+            return []
+        buf = (ctypes.c_float * needed)()
+        lib.cyber_document_slot_weights(self.handle, key, buf, needed)
+        return list(buf)
+
+    # -- serialization ------------------------------------------------------
+    def save(self) -> bytes:
+        """The document as one versioned byte container."""
+        lib = _ffi.get_lib()
+        needed = int(lib.cyber_document_save(self.handle, None, 0))
+        buf = (ctypes.c_uint8 * needed)()
+        lib.cyber_document_save(self.handle, buf, needed)
+        return bytes(buf)
+
+    @staticmethod
+    def load(data: bytes) -> "Document":
+        """Parse a byte container produced by :meth:`save`."""
+        buf = (ctypes.c_uint8 * len(data)).from_buffer_copy(data)
+        handle = _ffi.get_lib().cyber_document_load(buf, len(data))
+        if not handle:
+            raise CyberError(_ffi.STATUS_ERROR, _last_error())
+        return Document(handle=handle)
+
+    def save_file(self, path: str) -> None:
+        """Write the byte container to ``path``."""
+        _check(_ffi.get_lib().cyber_document_save_file(self.handle, path.encode("utf-8")))
+
+    @staticmethod
+    def load_file(path: str) -> "Document":
+        """Read a document written by :meth:`save_file`."""
+        handle = _ffi.get_lib().cyber_document_load_file(path.encode("utf-8"))
+        if not handle:
+            raise CyberError(_ffi.STATUS_ERROR, _last_error())
+        return Document(handle=handle)
 
 
 @dataclass
@@ -1394,6 +1546,9 @@ class HandoffInfo:
     has_vertex_colors: bool
     has_vertex_normals: bool
     has_material_mix: bool
+    #: Triangles the handoff described that the mesh refused (a repeated vertex
+    #: index). Non-zero means the Target carries less geometry than was sent.
+    dropped_faces: int = 0
 
     @staticmethod
     def _from_c(info: "_ffi.CyberHandoffInfo") -> "HandoffInfo":
@@ -1406,6 +1561,7 @@ class HandoffInfo:
             has_vertex_colors=bool(info.has_vertex_colors),
             has_vertex_normals=bool(info.has_vertex_normals),
             has_material_mix=bool(info.has_material_mix),
+            dropped_faces=int(info.dropped_faces),
         )
 
 

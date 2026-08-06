@@ -92,11 +92,12 @@ The one exception is the neutral paint above: a density of 1.0 everywhere is
 dropped at validation, so it never reaches this decision and never moves the
 route.
 
-One hole, stated rather than hidden: setting the developer kill switch
-`CYBER_QC_NO_NATIVE` disables the native solve outright, and a guided island
-then routes to the vendored solve **and is still reported as honored** — the
-"native declined" flag is only set on the fallback inside the forced-native
-branch. Do not set that variable on a guided run until the audit covers it.
+Setting the developer kill switch `CYBER_QC_NO_NATIVE` disables the native solve
+outright, so a guided island routes to the vendored solve (or fails, on a build
+without it). That case is **reported, not silently dropped**: the island's
+`guidance_warnings` entry names the env var and says the vendored solve has no
+guide/density hook, and `guidesHonored` is false. The guidance is still lost —
+unset the variable to get it applied — but the run says so.
 
 On builds with `-DCYBER_WITH_QUADCOVER=ON`, smooth organic meshes normally route
 to the vendored solve (1-4% irregular) while native sits at ~4-5%. **A guided
@@ -117,6 +118,13 @@ or silently dropped.
 Note that on a **flat** panel the crease pins flood-fill across the whole
 coplanar patch, so a guide crossing a crease on flat CAD geometry can be
 entirely outvoted. The count tells you.
+
+When the pins take **every** face a guide reached (`guidedFaces == 0` with a
+non-zero conflict count) the field is exactly the unguided field, so the island
+is reported as **not honored** — a `guidance_warnings` entry naming the number of
+absorbed faces — rather than counted as honored because the backend accepted the
+input. A partial absorption (some faces biased, some pinned) still counts as
+honored; the guide did move the field.
 
 ## Limitations
 

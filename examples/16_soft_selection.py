@@ -78,6 +78,21 @@ def stroke_samples(count=16, pressure_from=0.35):
     return samples
 
 
+def negligible_weight_verts(before, after, weights):
+    """(count, largest weight) of vertices the op wrote without displacing.
+
+    ``report.moved`` counts WRITES, not displacements: a vertex whose weight is
+    positive but tiny blends to a target that rounds to its own position in
+    float, so the op writes the same value back and the Target re-projection has
+    nothing left to correct. Those vertices are exactly the ``moved -
+    resnapped`` gap; this measures the tail they sit in.
+    """
+    w = np.asarray(weights, dtype=float)
+    still = np.all(before["positions"] == after["positions"], axis=1)
+    idx = np.where(still & (w[:len(still)] > 0.0))[0]
+    return len(idx), (float(w[idx].max()) if idx.size else 0.0)
+
+
 def moved_by_weight(before, after, weights):
     """(per-vertex movement, largest movement of a zero-weight vertex)."""
     delta = np.linalg.norm(after["positions"] - before["positions"], axis=1)
@@ -231,21 +246,42 @@ def main() -> None:
             with edit.copy() as free:
                 free_report = free.transform_selection(TAPER)
                 after_free = repose(before, free.positions.copy())
+
+            # Pins beat weight: a pinned vertex is skipped whatever its weight,
+            # so the "not moved" guarantee holds for the transform, not just for
+            # relax. Run on a copy so the figure still shows the plain taper.
+            anchor_vert = int(np.argmax(np.asarray(weights)))
+            with edit.copy() as held:
+                held_before = held.positions.copy()
+                held_report = held.transform_selection(TAPER, pinned=[anchor_vert])
+                held_moved = float(np.linalg.norm(
+                    held.positions[anchor_vert] - held_before[anchor_vert]))
+
             report = edit.transform_selection(TAPER, snapper=snapper)
             after_snap = repose(before, edit.positions.copy())
 
             free_delta, free_zero = moved_by_weight(before, after_free, weights)
             snap_delta, snap_zero = moved_by_weight(before, after_snap, weights)
+            still_count, still_max = negligible_weight_verts(before, after_free, weights)
 
             print("CyberRemesher soft selection")
             print("  slots:            ", edit.selection_slots())
             print("  weight histogram: ", histogram(weights))
             print("  vertices moved:   ", report.moved, "of", edit.vertex_count)
-            # moved - resnapped is not a leak: those vertices were already on the
-            # Target, so the re-projection had nothing to correct.
+            # moved - resnapped is not a leak. `moved` counts WRITES, not
+            # displacements: the gap is the negligible-weight tail, whose blend
+            # rounds to the vertex's own position, so the glue has nothing to
+            # correct. The next line measures that tail rather than asserting it.
             print("  re-snapped:       ", report.resnapped, "of", report.moved,
                   "(max pull {0:.4f}, {1} needed no correction)".format(
                       report.max_snap_distance, report.moved - report.resnapped))
+            print("  of those:          {0} were written but not displaced "
+                  "(weight <= {1:.1e}, blend rounds to the same float)".format(
+                      still_count, still_max))
+            print("  pinned vertex:     id {0} at weight {1:.2f} moved {2:.2e} "
+                  "({3} moved, vs {4} unpinned)".format(
+                      anchor_vert, weights[anchor_vert], held_moved,
+                      held_report.moved, free_report.moved))
             print("  15-deg snap:       7-deg drag == axis drag "
                   "(max weight diff {0:.1e})".format(snap_error))
             print("  free taper:        moved {0}, max {1:.3f}, "

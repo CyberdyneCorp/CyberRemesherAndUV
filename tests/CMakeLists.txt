@@ -61,6 +61,9 @@ endif()
 if(TARGET cyber_app)
     target_sources(cyber_tests PRIVATE app/test_app.cpp)
     target_link_libraries(cyber_tests PRIVATE cyber_app)
+    # The C ABI's cyber_document_* handle is implemented only when this module
+    # is in the build, so the matching capi cases are gated on it.
+    target_compile_definitions(cyber_tests PRIVATE CYBER_TESTS_HAVE_APP)
 endif()
 if(TARGET cyber_uv)
     target_sources(cyber_tests PRIVATE uv/test_uv.cpp uv/test_uv_clone.cpp
@@ -102,6 +105,14 @@ if(Python3_FOUND)
     add_test(NAME version_identity
         COMMAND ${Python3_EXECUTABLE}
                 ${CMAKE_CURRENT_SOURCE_DIR}/packaging/test_version_identity.py)
+
+    # Swift package <-> C ABI parity. The SwiftPM package binds cyber_capi.h
+    # directly but only a macOS runner can compile it, so it silently drifted
+    # until a release lane ran. This is pure text parsing of both sides — no
+    # Swift toolchain, no engine — so it guards the binding everywhere.
+    add_test(NAME swift_abi_parity
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/packaging/test_swift_abi_parity.py)
 endif()
 
 if(CYBER_BUILD_CLI AND Python3_FOUND)

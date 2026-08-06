@@ -13,7 +13,12 @@
 // is driven by calling `transformSelection` once per incremental delta.
 //
 // ZERO WEIGHT MEANS UNTOUCHED: a vertex at weight 0 is neither moved nor
-// re-snapped, so its position is bit-identical after the call.
+// re-snapped, so its position is bit-identical after the call. A PINNED vertex
+// is skipped the same way whatever its weight — both `transformSelection` and
+// `relaxSelection` take the pin list.
+//
+// The named slots live on the mesh handle and die with it. To persist them,
+// put the mesh in a `Document` (Document.swift) and save that.
 
 import CCyberRemesher
 
@@ -251,11 +256,16 @@ extension Mesh {
     /// Applies a 12-float affine (column-major 3x3 then translation) per vertex
     /// scaled by its selection weight, re-snapping to the Target in the same
     /// pass when `snapper` is supplied.
+    ///
+    /// `pinned` holds vertex ids that are skipped whatever their weight, so a
+    /// pinned vertex is neither moved nor re-snapped and its position is
+    /// bit-identical after the call.
     @discardableResult
     public func transformSelection(
         _ transform: [Float],
         snapper: OpaquePointer? = nil,
-        resnapEpsilon: Float = 0
+        resnapEpsilon: Float = 0,
+        pinned: [UInt32] = []
     ) throws -> SoftTransformReport {
         guard transform.count == 12 else {
             throw CyberError.invalidArgument("transform must be 12 floats")
@@ -263,9 +273,12 @@ extension Mesh {
         var report = CyberSoftTransformReport()
         try CyberError.check(
             transform.withUnsafeBufferPointer { buffer in
-                cyber_retopo_selection_transform(
-                    handle, buffer.baseAddress, snapper, resnapEpsilon, &report
-                )
+                pinned.withUnsafeBufferPointer { pins in
+                    cyber_retopo_selection_transform_pinned(
+                        handle, buffer.baseAddress, pins.baseAddress, pinned.count,
+                        snapper, resnapEpsilon, &report
+                    )
+                }
             }
         )
         return SoftTransformReport(

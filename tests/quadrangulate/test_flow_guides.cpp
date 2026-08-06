@@ -2,12 +2,14 @@
 
 #include <cmath>
 #include <cstring>
+#include <string>
 #include <vector>
 
 #include "cyber/accel/backend.hpp"
 #include "cyber/core/guidance.hpp"
 #include "cyber/core/mesh.hpp"
 #include "cyber/quadrangulate/crossfield.hpp"
+#include "cyber/quadrangulate/field_quadrangulator.hpp"
 
 using cyber::FaceId;
 using cyber::Index;
@@ -235,10 +237,20 @@ TEST_CASE("a guide crossing a hard pin does not override it and the conflict is 
     // reaches is hard-pinned. That is exactly the case the conflict count
     // exists to report — the guide is neither applied nor silently dropped.
     CHECK(guided.guidedFaces == 0);
+    // ... and the count is not just computed, it is REPORTED: a guide absorbed
+    // whole by hard pins changed nothing, so it must never be counted as honored.
+    const std::string report = remesh::unhonoredGuideReport(guided);
+    MESSAGE("absorbed-guide report: " << report);
+    CHECK_FALSE(report.empty());
+    CHECK(report.find("flow guides") != std::string::npos);
+    CHECK(report.find(std::to_string(guided.guideConflictFaces)) != std::string::npos);
 
     // Every hard-pinned face the guide reached still carries its pin's angle,
     // i.e. it is aligned with the tagged (x-direction) crease.
     const remesh::CrossField unguided = remesh::computeCrossField(grid, 120, *backend);
+    // An unguided field has nothing to report — the hook cannot fire on the
+    // corpus (this is the guard on the "never moves the unguided path" claim).
+    CHECK(remesh::unhonoredGuideReport(unguided).empty());
     for (Index fi = 0; fi < grid.faceCapacity(); ++fi) {
         const FaceId f{fi};
         if (!grid.isAlive(f)) {
@@ -258,6 +270,54 @@ TEST_CASE("a guide crossing a hard pin does not override it and the conflict is 
         CHECK(guided.real[fi] == doctest::Approx(unguided.real[fi]).epsilon(1e-5));
         CHECK(guided.imag[fi] == doctest::Approx(unguided.imag[fi]).epsilon(1e-5));
     }
+}
+
+// The same absorbed guide, seen through the channel the CLI and the bindings
+// actually surface: IQuadrangulator::unhonoredGuidance() -> the per-island
+// guidance report. Accepting guidance and then reporting nothing would tell the
+// user the stroke was applied when the output is bit-for-bit the unguided one.
+TEST_CASE("a backend reports a guide that hard pins absorbed whole") {
+    constexpr int kN = 10;
+    Mesh grid = makeFlatGrid(kN);
+    for (Index ei = 0; ei < grid.edgeCapacity(); ++ei) {
+        const cyber::EdgeId e{ei};
+        if (!grid.isAlive(e) || grid.edgeFaceCount(e) != 2) {
+            continue;
+        }
+        const auto [a, b] = grid.edgeVertices(e);
+        if (grid.position(a).y == 5.0f && grid.position(b).y == 5.0f) {
+            grid.setFeatureEdge(e, true);
+        }
+    }
+
+    remesh::Guidance g;
+    remesh::FlowGuide guide;
+    guide.points = {Vec3{5.0f, 1.0f, 0.0f}, Vec3{5.0f, 9.0f, 0.0f}};  // crosses the crease
+    guide.strength = 1.0f;
+    guide.radius = 2.0f;
+    g.guides.push_back(guide);
+    const remesh::GuidanceField field(grid, g);
+
+    auto quad = remesh::makeFieldAlignedQuadrangulator();
+    std::string reason;
+    REQUIRE(quad->acceptGuidance(field, reason));
+    const auto outcome = quad->quadrangulate(grid, 1.0f, nullptr, nullptr);
+    REQUIRE(outcome.success);
+
+    const std::vector<std::string> unhonored = quad->unhonoredGuidance();
+    REQUIRE(unhonored.size() == 1);
+    MESSAGE("reported: " << unhonored[0]);
+    CHECK(unhonored[0].find("hard pin") != std::string::npos);
+
+    // Control: the same mesh with a guide the pins do NOT absorb reports nothing.
+    Mesh clean = makeFlatGrid(kN);
+    remesh::Guidance g2;
+    g2.guides.push_back(diagonalGuide(static_cast<float>(kN), 3.0f, 1.0f));
+    const remesh::GuidanceField field2(clean, g2);
+    auto quad2 = remesh::makeFieldAlignedQuadrangulator();
+    REQUIRE(quad2->acceptGuidance(field2, reason));
+    REQUIRE(quad2->quadrangulate(clean, 1.0f, nullptr, nullptr).success);
+    CHECK(quad2->unhonoredGuidance().empty());
 }
 
 TEST_CASE("guidance field density sampling honors the documented clamp") {

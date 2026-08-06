@@ -19,6 +19,14 @@ if(TARGET cyber_uv)
     target_compile_definitions(cyber_capi PRIVATE CYBER_CAPI_WITH_UV)
 endif()
 
+# The C document handle (cyber_document_*) is the persistence seam for the
+# named soft-selection slots. Same pattern as UV: declared always, implemented
+# only when the application-shell library is in the build.
+if(TARGET cyber_app)
+    target_link_libraries(cyber_capi PUBLIC cyber_app)
+    target_compile_definitions(cyber_capi PRIVATE CYBER_CAPI_WITH_APP)
+endif()
+
 # Export presets are pure data in cyber_core, so listing/resolving/reading one
 # works in every configuration. Only cyber_export_bundle_write needs the bundle
 # writer, which rides on CYBER_BUILD_UV; without it that call reports that this
@@ -53,6 +61,10 @@ if(CYBER_BUILD_CAPI_SHARED)
     if(TARGET cyber_uv)
         target_link_libraries(cyber_capi_shared PRIVATE cyber_uv)
         target_compile_definitions(cyber_capi_shared PRIVATE CYBER_CAPI_WITH_UV)
+    endif()
+    if(TARGET cyber_app)
+        target_link_libraries(cyber_capi_shared PRIVATE cyber_app)
+        target_compile_definitions(cyber_capi_shared PRIVATE CYBER_CAPI_WITH_APP)
     endif()
     if(TARGET cyber_exportbundle)
         target_link_libraries(cyber_capi_shared PRIVATE cyber_exportbundle)

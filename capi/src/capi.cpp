@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <exception>
 #include <filesystem>
+#include <fstream>
 #include <iterator>
 #include <map>
 #include <memory>
@@ -55,6 +56,9 @@
 #include "cyber/retopo/symmetry.hpp"
 #include "cyber/retopo/tweak.hpp"
 #include "cyber_capi.h"
+#ifdef CYBER_CAPI_WITH_APP
+#include "cyber/app/document.hpp"
+#endif
 #ifdef CYBER_CAPI_WITH_UV
 #include "cyber/uv/atlas.hpp"
 #include "cyber/uv/seam_path.hpp"
@@ -2640,20 +2644,48 @@ const char* cyber_retopo_selection_slot_name(const CyberMesh* mesh, size_t index
     return it->first.c_str();
 }
 
-CyberStatus cyber_retopo_selection_transform(CyberMesh* mesh, const float xf[12],
-                                             const CyberSnapper* snapper, float resnap_epsilon,
-                                             CyberSoftTransformReport* out_report) {
-    return runMeshEdit(mesh, "cyber_retopo_selection_transform", [&] {
+namespace {
+
+// Shared body of the two weighted-transform entry points; `name` is the one the
+// caller actually invoked so the error text points at their call site.
+CyberStatus selectionTransform(CyberMesh* mesh, const char* name, const float xf[12],
+                               const uint32_t* pinned, size_t pinned_count,
+                               const CyberSnapper* snapper, float resnap_epsilon,
+                               CyberSoftTransformReport* out_report) {
+    return runMeshEdit(mesh, name, [&] {
         if (xf == nullptr) {
-            setError("cyber_retopo_selection_transform: null transform");
+            setError(std::string(name) + ": null transform");
             return CYBER_ERR_INVALID_ARG;
         }
+        if (pinned == nullptr && pinned_count != 0) {
+            setError(std::string(name) + ": null pin list with a non-zero count");
+            return CYBER_ERR_INVALID_ARG;
+        }
+        const cyber::retopo::PinSet pins = makePinSet(pinned, pinned_count);
         const float eps = resnap_epsilon >= 0.0f ? resnap_epsilon : 0.0f;
         fillReport(out_report,
                    cyber::retopo::transformWeighted(mesh->mesh, mesh->selection, toAffine(xf),
-                                                    snapperOf(snapper), nullptr, eps));
+                                                    snapperOf(snapper), &pins, eps));
         return CYBER_OK;
     });
+}
+
+}  // namespace
+
+CyberStatus cyber_retopo_selection_transform(CyberMesh* mesh, const float xf[12],
+                                             const CyberSnapper* snapper, float resnap_epsilon,
+                                             CyberSoftTransformReport* out_report) {
+    return selectionTransform(mesh, "cyber_retopo_selection_transform", xf, nullptr, 0, snapper,
+                              resnap_epsilon, out_report);
+}
+
+CyberStatus cyber_retopo_selection_transform_pinned(CyberMesh* mesh, const float xf[12],
+                                                    const uint32_t* pinned, size_t pinned_count,
+                                                    const CyberSnapper* snapper,
+                                                    float resnap_epsilon,
+                                                    CyberSoftTransformReport* out_report) {
+    return selectionTransform(mesh, "cyber_retopo_selection_transform_pinned", xf, pinned,
+                              pinned_count, snapper, resnap_epsilon, out_report);
 }
 
 CyberStatus cyber_retopo_selection_relax(CyberMesh* mesh, float strength, int iterations,
@@ -2671,6 +2703,310 @@ CyberStatus cyber_retopo_selection_relax(CyberMesh* mesh, float strength, int it
         return CYBER_OK;
     });
 }
+
+// ---- document persistence ---------------------------------------------------
+//
+// The seam that makes a named soft-selection slot outlive the session: the
+// slot map lives on the mesh handle (session state), the document owns the
+// persisted copy, and these entry points move it in both directions. Defined
+// only when the application-shell library is in the build, exactly like the UV
+// handles — without it the symbols still exist so the ABI is stable, but every
+// call reports that this build cannot do it.
+
+#ifdef CYBER_CAPI_WITH_APP
+
+struct CyberDocument {
+    cyber::app::Document document;
+    // Serialized form, rebuilt lazily so the size-then-fill call pattern
+    // (out == NULL for the length, then the real buffer) serializes once.
+    // Handle-local scratch, not observable state, hence mutable.
+    mutable std::vector<std::uint8_t> bytes;
+    mutable bool bytesValid = false;
+
+    void invalidate() { bytesValid = false; }
+
+    const std::vector<std::uint8_t>& serialized() const {
+        if (!bytesValid) {
+            bytes = document.save();
+            bytesValid = true;
+        }
+        return bytes;
+    }
+};
+
+namespace {
+
+// Same prologue/epilogue contract as runSelectionOp, for the document handle.
+// Templated on the pointer so the read-only entry points keep their constness.
+template <typename Doc, typename Body>
+CyberStatus runDocumentOp(Doc* doc, const char* name, Body body) {
+    if (doc == nullptr) {
+        setError(std::string(name) + ": null document");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    try {
+        const CyberStatus status = body();
+        if (status == CYBER_OK) {
+            clearError();
+        }
+        return status;
+    } catch (const std::exception& e) {
+        setError(std::string(name) + ": " + e.what());
+        return CYBER_ERR_RUNTIME;
+    } catch (...) {
+        setError(std::string(name) + ": unknown error");
+        return CYBER_ERR_RUNTIME;
+    }
+}
+
+// A handle over one of the document's meshes. `slots` is the document's slot
+// map for the edit mesh and empty for the target: only the edit mesh carries a
+// soft selection, because that is the mesh the weights are indexed against.
+CyberMesh* documentMeshHandle(const cyber::Mesh& mesh,
+                              const std::map<std::string, std::vector<float>>& slots) {
+    try {
+        auto handle = std::make_unique<CyberMesh>();
+        handle->mesh = mesh;
+        handle->selectionSlots = slots;
+        clearError();
+        return handle.release();
+    } catch (const std::exception& e) {
+        setError(std::string("cyber_document mesh handle: ") + e.what());
+        return nullptr;
+    } catch (...) {
+        setError("cyber_document mesh handle: unknown error");
+        return nullptr;
+    }
+}
+
+}  // namespace
+
+CyberDocument* cyber_document_create(void) {
+    try {
+        clearError();
+        return new CyberDocument();
+    } catch (...) {
+        setError("cyber_document_create: allocation failed");
+        return nullptr;
+    }
+}
+
+void cyber_document_free(CyberDocument* doc) { delete doc; }
+
+CyberStatus cyber_document_set_target(CyberDocument* doc, const CyberMesh* mesh) {
+    return runDocumentOp(doc, "cyber_document_set_target", [&] {
+        doc->document.target = mesh == nullptr ? cyber::Mesh{} : mesh->mesh;
+        doc->document.markDirty();
+        doc->invalidate();
+        return CYBER_OK;
+    });
+}
+
+CyberStatus cyber_document_set_edit_mesh(CyberDocument* doc, const CyberMesh* mesh) {
+    return runDocumentOp(doc, "cyber_document_set_edit_mesh", [&] {
+        if (mesh == nullptr) {
+            doc->document.editMesh = cyber::Mesh{};
+            doc->document.softSelections.clear();
+        } else {
+            doc->document.editMesh = mesh->mesh;
+            // The saved slots travel with the mesh they are indexed against.
+            // The handle's LIVE weight field is deliberately not persisted:
+            // it is scratch until the caller names it with _selection_save.
+            doc->document.softSelections = mesh->selectionSlots;
+        }
+        doc->document.markDirty();
+        doc->invalidate();
+        return CYBER_OK;
+    });
+}
+
+CyberMesh* cyber_document_target(const CyberDocument* doc) {
+    if (doc == nullptr) {
+        setError("cyber_document_target: null document");
+        return nullptr;
+    }
+    return documentMeshHandle(doc->document.target, {});
+}
+
+CyberMesh* cyber_document_edit_mesh(const CyberDocument* doc) {
+    if (doc == nullptr) {
+        setError("cyber_document_edit_mesh: null document");
+        return nullptr;
+    }
+    return documentMeshHandle(doc->document.editMesh, doc->document.softSelections);
+}
+
+size_t cyber_document_slot_count(const CyberDocument* doc) {
+    return doc == nullptr ? 0 : doc->document.softSelections.size();
+}
+
+const char* cyber_document_slot_name(const CyberDocument* doc, size_t index) {
+    if (doc == nullptr || index >= doc->document.softSelections.size()) {
+        return nullptr;
+    }
+    auto it = doc->document.softSelections.begin();
+    std::advance(it, static_cast<std::ptrdiff_t>(index));
+    return it->first.c_str();
+}
+
+size_t cyber_document_slot_weights(const CyberDocument* doc, const char* name, float* out,
+                                   size_t capacity) {
+    if (doc == nullptr || name == nullptr) {
+        return 0;
+    }
+    const auto it = doc->document.softSelections.find(name);
+    if (it == doc->document.softSelections.end()) {
+        return 0;
+    }
+    if (out != nullptr) {
+        const size_t n = std::min(it->second.size(), capacity);
+        std::copy_n(it->second.begin(), n, out);
+    }
+    return it->second.size();
+}
+
+size_t cyber_document_save(const CyberDocument* doc, uint8_t* out, size_t capacity) {
+    if (doc == nullptr) {
+        return 0;
+    }
+    const std::vector<std::uint8_t>& bytes = doc->serialized();
+    if (out != nullptr) {
+        const size_t n = std::min(bytes.size(), capacity);
+        std::copy_n(bytes.begin(), n, out);
+    }
+    return bytes.size();
+}
+
+CyberDocument* cyber_document_load(const uint8_t* bytes, size_t count) {
+    if (bytes == nullptr && count != 0) {
+        setError("cyber_document_load: null buffer with a non-zero count");
+        return nullptr;
+    }
+    try {
+        std::optional<cyber::app::Document> loaded = cyber::app::Document::load({bytes, count});
+        if (!loaded) {
+            setError("cyber_document_load: not a CyberRemesher document");
+            return nullptr;
+        }
+        auto doc = std::make_unique<CyberDocument>();
+        doc->document = std::move(*loaded);
+        clearError();
+        return doc.release();
+    } catch (const std::exception& e) {
+        setError(std::string("cyber_document_load: ") + e.what());
+        return nullptr;
+    } catch (...) {
+        setError("cyber_document_load: unknown error");
+        return nullptr;
+    }
+}
+
+CyberStatus cyber_document_save_file(const CyberDocument* doc, const char* path) {
+    return runDocumentOp(doc, "cyber_document_save_file", [&] {
+        if (path == nullptr) {
+            setError("cyber_document_save_file: null path");
+            return CYBER_ERR_INVALID_ARG;
+        }
+        const std::vector<std::uint8_t>& bytes = doc->serialized();
+        std::ofstream file(path, std::ios::binary);
+        if (!file) {
+            setError(std::string("cyber_document_save_file: cannot open '") + path + "'");
+            return CYBER_ERR_IO;
+        }
+        file.write(reinterpret_cast<const char*>(bytes.data()),
+                   static_cast<std::streamsize>(bytes.size()));
+        if (!file) {
+            setError(std::string("cyber_document_save_file: write failed for '") + path + "'");
+            return CYBER_ERR_IO;
+        }
+        return CYBER_OK;
+    });
+}
+
+CyberDocument* cyber_document_load_file(const char* path) {
+    if (path == nullptr) {
+        setError("cyber_document_load_file: null path");
+        return nullptr;
+    }
+    try {
+        std::ifstream file(path, std::ios::binary);
+        if (!file) {
+            setError(std::string("cyber_document_load_file: cannot open '") + path + "'");
+            return nullptr;
+        }
+        const std::vector<std::uint8_t> bytes((std::istreambuf_iterator<char>(file)),
+                                              std::istreambuf_iterator<char>());
+        return cyber_document_load(bytes.data(), bytes.size());
+    } catch (const std::exception& e) {
+        setError(std::string("cyber_document_load_file: ") + e.what());
+        return nullptr;
+    } catch (...) {
+        setError("cyber_document_load_file: unknown error");
+        return nullptr;
+    }
+}
+
+#else  // CYBER_CAPI_WITH_APP
+
+// No application-shell library in this build: the symbols exist so the ABI is
+// stable, but there is no document model behind them.
+namespace {
+
+CyberStatus documentUnsupported(const char* name) {
+    setError(std::string(name) + ": this build has no application-shell library");
+    return CYBER_ERR_RUNTIME;
+}
+
+}  // namespace
+
+CyberDocument* cyber_document_create(void) {
+    documentUnsupported("cyber_document_create");
+    return nullptr;
+}
+
+void cyber_document_free(CyberDocument*) {}
+
+CyberStatus cyber_document_set_target(CyberDocument*, const CyberMesh*) {
+    return documentUnsupported("cyber_document_set_target");
+}
+
+CyberStatus cyber_document_set_edit_mesh(CyberDocument*, const CyberMesh*) {
+    return documentUnsupported("cyber_document_set_edit_mesh");
+}
+
+CyberMesh* cyber_document_target(const CyberDocument*) {
+    documentUnsupported("cyber_document_target");
+    return nullptr;
+}
+
+CyberMesh* cyber_document_edit_mesh(const CyberDocument*) {
+    documentUnsupported("cyber_document_edit_mesh");
+    return nullptr;
+}
+
+size_t cyber_document_slot_count(const CyberDocument*) { return 0; }
+
+const char* cyber_document_slot_name(const CyberDocument*, size_t) { return nullptr; }
+
+size_t cyber_document_slot_weights(const CyberDocument*, const char*, float*, size_t) { return 0; }
+
+size_t cyber_document_save(const CyberDocument*, uint8_t*, size_t) { return 0; }
+
+CyberDocument* cyber_document_load(const uint8_t*, size_t) {
+    documentUnsupported("cyber_document_load");
+    return nullptr;
+}
+
+CyberStatus cyber_document_save_file(const CyberDocument*, const char*) {
+    return documentUnsupported("cyber_document_save_file");
+}
+
+CyberDocument* cyber_document_load_file(const char*) {
+    documentUnsupported("cyber_document_load_file");
+    return nullptr;
+}
+
+#endif  // CYBER_CAPI_WITH_APP
 
 // ---- gesture stroke interpretation -----------------------------------------
 
@@ -3446,6 +3782,7 @@ CyberStatus finishHandoff(cyber::handoff::Handoff& handoff, CyberMesh** out,
     const bool colors = handoff.hasVertexColors();
     const bool normals = handoff.hasVertexNormals();
     const bool mix = handoff.hasMaterialMix();
+    const std::size_t dropped = handoff.droppedFaces;
 
     auto handle = std::make_unique<CyberMesh>();
     handle->mesh = std::move(handoff.mesh);
@@ -3459,6 +3796,7 @@ CyberStatus finishHandoff(cyber::handoff::Handoff& handoff, CyberMesh** out,
         info->hasVertexColors = colors ? 1 : 0;
         info->hasVertexNormals = normals ? 1 : 0;
         info->hasMaterialMix = mix ? 1 : 0;
+        info->droppedFaces = dropped;
     }
     clearError();
     *out = handle.release();

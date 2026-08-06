@@ -25,6 +25,7 @@ from ctypes import (
     c_float,
     c_int32,
     c_size_t,
+    c_uint8,
     c_uint32,
     c_uint64,
     c_void_p,
@@ -227,6 +228,7 @@ class CyberHandoffInfo(Structure):
         ("has_vertex_colors", c_int32),
         ("has_vertex_normals", c_int32),
         ("has_material_mix", c_int32),
+        ("dropped_faces", c_size_t),
     ]
 
 
@@ -497,6 +499,11 @@ def _declare_soft_selection(lib: ctypes.CDLL) -> None:
         c_void_p, POINTER(c_float), c_void_p, c_float, POINTER(CyberSoftTransformReport),
     ]
     lib.cyber_retopo_selection_transform.restype = c_int32
+    lib.cyber_retopo_selection_transform_pinned.argtypes = [
+        c_void_p, POINTER(c_float), POINTER(c_uint32), c_size_t, c_void_p, c_float,
+        POINTER(CyberSoftTransformReport),
+    ]
+    lib.cyber_retopo_selection_transform_pinned.restype = c_int32
     lib.cyber_retopo_selection_relax.argtypes = [
         c_void_p, c_float, c_int32, POINTER(c_uint32), c_size_t, c_void_p, c_float,
         POINTER(CyberSoftTransformReport),
@@ -707,9 +714,46 @@ def _declare(lib: ctypes.CDLL) -> None:
     lib.cyber_snapper_free.restype = None
 
     _declare_soft_selection(lib)
+    _declare_document(lib)
     _declare_seam_path(lib)
     _declare_bridge(lib)
     _declare_export_presets(lib)
+
+
+def _declare_document(lib: ctypes.CDLL) -> None:
+    """The persisted document handle (application-shell spec).
+
+    The seam that carries named soft-selection slots between a mesh handle
+    (session state) and a saved file. Byte readers follow the
+    ``copy_positions`` convention (total returned, at most ``capacity``
+    filled).
+    """
+    lib.cyber_document_create.argtypes = []
+    lib.cyber_document_create.restype = c_void_p
+    lib.cyber_document_free.argtypes = [c_void_p]
+    lib.cyber_document_free.restype = None
+    lib.cyber_document_set_target.argtypes = [c_void_p, c_void_p]
+    lib.cyber_document_set_target.restype = c_int32
+    lib.cyber_document_set_edit_mesh.argtypes = [c_void_p, c_void_p]
+    lib.cyber_document_set_edit_mesh.restype = c_int32
+    lib.cyber_document_target.argtypes = [c_void_p]
+    lib.cyber_document_target.restype = c_void_p
+    lib.cyber_document_edit_mesh.argtypes = [c_void_p]
+    lib.cyber_document_edit_mesh.restype = c_void_p
+    lib.cyber_document_slot_count.argtypes = [c_void_p]
+    lib.cyber_document_slot_count.restype = c_size_t
+    lib.cyber_document_slot_name.argtypes = [c_void_p, c_size_t]
+    lib.cyber_document_slot_name.restype = c_char_p
+    lib.cyber_document_slot_weights.argtypes = [c_void_p, c_char_p, POINTER(c_float), c_size_t]
+    lib.cyber_document_slot_weights.restype = c_size_t
+    lib.cyber_document_save.argtypes = [c_void_p, POINTER(c_uint8), c_size_t]
+    lib.cyber_document_save.restype = c_size_t
+    lib.cyber_document_load.argtypes = [POINTER(c_uint8), c_size_t]
+    lib.cyber_document_load.restype = c_void_p
+    lib.cyber_document_save_file.argtypes = [c_void_p, c_char_p]
+    lib.cyber_document_save_file.restype = c_int32
+    lib.cyber_document_load_file.argtypes = [c_char_p]
+    lib.cyber_document_load_file.restype = c_void_p
 
 
 def _declare_bridge(lib: ctypes.CDLL) -> None:

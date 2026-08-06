@@ -1277,10 +1277,22 @@ SeamlessUv computeSeamlessUv(const Mesh& mesh, float targetEdgeLength, float har
         // Native declined -> fall back to the vendored path (valid or not). A
         // guided island loses its guidance here; say so instead of pretending.
         if (guided) {
-            ctx->guidanceHonored = false;
+            ctx->guidanceUnhonoredReason =
+                "flow guides and painted density: the native seamless solve declined this "
+                "island and the vendored Geogram quad_cover solve has no guide/density hook";
         }
         return computeSeamlessUvVendored(mesh, targetEdgeLength, harnessScaling, harnessAdaptivity,
                                          cancel);
+    }
+    if (guided) {
+        // Guidance normally FORCES the native route above; the only way a guided
+        // island reaches this line is the developer kill switch, which turns the
+        // guide/density hooks off with it. Report it on the same channel as a
+        // native decline instead of quietly running an unguided vendored solve.
+        ctx->guidanceUnhonoredReason =
+            "flow guides and painted density: CYBER_QC_NO_NATIVE disabled the native seamless "
+            "solve, and the vendored Geogram quad_cover solve it routed to has no guide/density "
+            "hook — unset CYBER_QC_NO_NATIVE to honor the guidance";
     }
 
     // Vendored (Geogram quad_cover) FIRST — QuadriFlow parity (1-4% irregular),
@@ -3439,6 +3451,26 @@ public:
         // parameterization + extraction.
         NativeSolveContext nativeCtx;
         nativeCtx.guidance = m_guidance;  // non-null forces the native route (see the header)
+        // Everything the run could NOT do with the guidance, on the route it
+        // actually took. Called on EVERY exit below (including the early one),
+        // because an island that never reached a solver honored nothing either.
+        const auto reportUnhonoredGuidance = [this, &nativeCtx]() {
+            if (m_guidance == nullptr) {
+                return;
+            }
+            if (!nativeCtx.guidanceUnhonoredReason.empty()) {
+                m_unhonored.push_back(nativeCtx.guidanceUnhonoredReason);
+                return;
+            }
+            // The native route ran: the guides may still have been absorbed
+            // whole by hard pins, which is not "honored" either.
+            if (nativeCtx.ready) {
+                if (std::string absorbed = unhonoredGuideReport(nativeCtx.setup.field);
+                    !absorbed.empty()) {
+                    m_unhonored.push_back(std::move(absorbed));
+                }
+            }
+        };
         // Probe-predicted initial scaling (native route only). The hardcoded 0.5 start
         // overshoots the extracted count 1.5-3x on every corpus mesh, so the loop below
         // always pays a second full solve. The relaxed Poisson phase already fixes the UV
@@ -3484,6 +3516,7 @@ public:
             const SeamlessUv uv = computeSeamlessUv(mesh, targetEdgeLength, scaling, m_adaptivity,
                                                     cancel, m_featureDegrees, &nativeCtx);
             if (!uv.valid) {
+                reportUnhonoredGuidance();
                 return {.success = false,
                         .cancelled = false,
                         .failureReason =
@@ -3540,14 +3573,7 @@ public:
             }
             scaling = std::clamp(scaling * static_cast<float>(std::sqrt(ratio)), 0.2f, 1.5f);
         }
-        if (m_guidance != nullptr && !nativeCtx.guidanceHonored) {
-            // The native solve declined and the vendored Geogram path ran
-            // instead. It cannot see either input, so say which and why rather
-            // than shipping a silently unguided island.
-            m_unhonored.push_back(
-                "flow guides and painted density: the native seamless solve declined this "
-                "island and the vendored Geogram quad_cover solve has no guide/density hook");
-        }
+        reportUnhonoredGuidance();
         if (progress != nullptr) {
             progress->report(0.5f, "quadrangulate (quad-cover: isoline extract)");
         }

@@ -138,6 +138,58 @@ Mesh makeCorrugation(float amplitude, float zOffset) {
         /*withUv=*/false);
 }
 
+// A UV sphere built the way a modelling tool builds one: a quad grid whose
+// first and last rows collapse onto the poles. Those rows are `segments + 1`
+// COINCIDENT vertices, so the polar quads are degenerate and what is left of
+// them is a fan of slivers -- a large share of the vertices sitting on a
+// vanishing share of the area. `poleRipple` displaces only the `rippleRings`
+// rows nearest each pole, so the poles carry genuinely extreme curvature while
+// the rest of the surface stays an exact sphere of radius `r` (H = 1/r).
+Mesh makeUvSphereGrid(float r, int rings, int segments, float poleRipple, int rippleRings,
+                      bool withUv) {
+    std::vector<Vec3> pos;
+    for (int row = 0; row <= rings; ++row) {
+        const float phi = cyber::kPi * static_cast<float>(row) / static_cast<float>(rings);
+        const int toPole = std::min(row, rings - row);
+        const float taper =
+            (toPole == 0 || toPole > rippleRings)
+                ? 0.0f
+                : 1.0f - static_cast<float>(toPole - 1) / static_cast<float>(rippleRings);
+        for (int s = 0; s <= segments; ++s) {
+            const float theta =
+                2.0f * cyber::kPi * static_cast<float>(s) / static_cast<float>(segments);
+            const float rad = r + poleRipple * taper * std::cos(8.0f * theta);
+            pos.push_back({std::sin(phi) * std::cos(theta) * rad,
+                           std::sin(phi) * std::sin(theta) * rad, std::cos(phi) * rad});
+        }
+    }
+    const auto idx = [segments](int row, int s) {
+        return static_cast<Index>(row * (segments + 1) + s);
+    };
+    std::vector<std::vector<Index>> faces;
+    for (int row = 0; row < rings; ++row) {
+        for (int s = 0; s < segments; ++s) {
+            faces.push_back({idx(row, s), idx(row + 1, s), idx(row + 1, s + 1), idx(row, s + 1)});
+        }
+    }
+    Mesh mesh = Mesh::fromIndexed(pos, faces);
+    if (withUv) {
+        auto& uv = mesh.cornerAttributes().create<Vec2>("uv");
+        for (Index fi = 0; fi < mesh.faceCapacity(); ++fi) {
+            if (!mesh.isAlive(FaceId{fi})) {
+                continue;
+            }
+            for (const LoopId l : mesh.faceLoops(FaceId{fi})) {
+                const int vi = static_cast<int>(mesh.loopVertex(l).value);
+                uv[l.value] = {
+                    static_cast<float>(vi % (segments + 1)) / static_cast<float>(segments),
+                    static_cast<float>(vi / (segments + 1)) / static_cast<float>(rings)};
+            }
+        }
+    }
+    return mesh;
+}
+
 }  // namespace
 
 // ---- estimator (analytic shapes) ---------------------------------------
@@ -273,4 +325,53 @@ TEST_CASE("curvature and cavity bakes honor cooperative cancellation") {
     REQUIRE(
         bake::bake(low, high, bake::BakeMap::Curvature, params64(), nullptr, &cancel).cancelled);
     REQUIRE(bake::bake(low, high, bake::BakeMap::Cavity, params64(), nullptr, &cancel).cancelled);
+}
+
+// ---- degenerate parameterizations ---------------------------------------
+
+TEST_CASE("sliver pole fans do not corrupt the estimate itself") {
+    // The polar quads here are degenerate and the surviving fan is slivers with
+    // a mixed area far below the mesh average -- but the surface is a perfect
+    // sphere, so every live vertex must still read 1/r.
+    const float r = 1.5f;
+    const Mesh sphere = makeUvSphereGrid(r, 48, 64, 0.0f, 0, /*withUv=*/false);
+    const std::vector<float> h = bake::vertexMeanCurvature(sphere, nullptr);
+    for (Index vi = 0; vi < sphere.vertexCapacity(); ++vi) {
+        if (sphere.isAlive(VertexId{vi}) && h[vi] != 0.0f) {
+            REQUIRE(h[vi] == doctest::Approx(1.0f / r).epsilon(0.01));
+        }
+    }
+}
+
+TEST_CASE("curvature auto range follows the surface, not a dense pole fan") {
+    // Unit sphere, rippled only within 3 rings of each pole: the ripple is a
+    // per-mille of the area but the poles hold a fifth of the vertices, so it
+    // is exactly the case where counting vertices misreports the range.
+    const Mesh sphere = makeUvSphereGrid(1.0f, 48, 64, 0.05f, 3, /*withUv=*/false);
+    std::vector<float> areas;
+    const std::vector<float> h = bake::vertexMeanCurvature(sphere, &areas);
+    REQUIRE(areas.size() == h.size());
+
+    // Almost all of the surface is an untouched unit sphere, so the range the
+    // map should normalize against is 1.
+    const float weighted = bake::curvatureScale(h, areas);
+    REQUIRE(weighted == doctest::Approx(1.0f).epsilon(0.35));
+    // ... whereas counting vertices hands the range to the pole fans.
+    REQUIRE(bake::curvatureScale(h) > 3.0f * weighted);
+    // The equatorial band the range now serves is genuinely at 1/r.
+    REQUIRE(equatorialCurvature(sphere, h, 0.5f) == doctest::Approx(1.0f).epsilon(0.05));
+}
+
+TEST_CASE("a bake off a pole-heavy Target keeps its interior signal") {
+    // End-to-end: the auto range reaching the encoder must be the area
+    // percentile, or the sphere's own 1/r curvature washes out to mid-gray.
+    const Mesh low = makeUvSphereGrid(1.0f, 16, 32, 0.0f, 0, /*withUv=*/true);
+    const Mesh high = makeUvSphereGrid(1.0f, 48, 64, 0.05f, 3, /*withUv=*/false);
+    bake::BakeParams p = params64();
+    p.cageDistance = 0.15f;
+    const bake::BakeResult r = bake::bake(low, high, bake::BakeMap::Curvature, p);
+    REQUIRE_FALSE(r.cancelled);
+    // Convex, and normalized against a range of ~1: the equator reads bright.
+    REQUIRE(sampleUv(r.image, 0.5f, 0.5f) > 0.9f);
+    REQUIRE(sampleUv(r.image, 0.2f, 0.6f) > 0.9f);
 }
