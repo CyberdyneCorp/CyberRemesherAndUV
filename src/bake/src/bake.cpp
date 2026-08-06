@@ -306,18 +306,62 @@ float encodeCurvature(float curvature, float range, bool cavityOnly) {
     return 0.5f + 0.5f * std::clamp(curvature / range, -1.0f, 1.0f);
 }
 
-}  // namespace
-
-BakeResult bake(const Mesh& lowPoly, const Mesh& highPoly, BakeMap map, const BakeParams& params,
-                ProgressSink* progress, const CancelToken* cancel) {
-    BakeResult result;
-    const auto* uvs = lowPoly.cornerAttributes().find<Vec2>(io::kUvAttribute);
-    if (uvs == nullptr || params.width <= 0 || params.height <= 0 || highPoly.faceCount() == 0) {
-        return result;  // empty image: nothing to bake
+// Which maps an attached field evaluator can serve. The other three
+// (Displacement, Position, Color) describe the Target MESH — a height above the
+// low-poly, a hit point, a vertex color — and have no field counterpart, so
+// they keep requiring the high-poly whatever is attached.
+bool fieldSupports(BakeMap map) {
+    switch (map) {
+        case BakeMap::Normal:
+        case BakeMap::AmbientOcclusion:
+        case BakeMap::Curvature:
+        case BakeMap::Cavity:
+            return true;
+        default:
+            return false;
     }
+}
 
+// AO at one texel on the raycast path: project onto the high-poly with the same
+// cage ray normal/displacement use, then fire the hemisphere from the HIGH-poly
+// hit so occlusion captures the high-poly's crevices, not the low-poly's smooth
+// surface. Falls back to the low-poly frame when the projection misses the cage.
+float aoOpennessFromMesh(const Bvh& bvh, const Mesh& highPoly, const std::vector<Vec3>& highNormals,
+                         const Texel& tx, const BakeParams& params, accel::IBackend& backend) {
+    const Vec3 projOrigin = tx.position + tx.normal * params.cageDistance;
+    const std::optional<Bvh::RayHit> proj = bvh.raycast(projOrigin, tx.normal * -1.0f);
+    const bool projValid = proj.has_value() && proj->t <= 2.0f * params.cageDistance;
+    const Vec3 aoNormal = projValid ? hitNormal(highPoly, *proj, highNormals) : tx.normal;
+    const Vec3 aoPosition = projValid ? proj->point : tx.position;
+    const Vec3 aoTangent = anyTangent(aoNormal);
+    const Vec3 aoBitangent = cross(aoNormal, aoTangent);
+
+    accel::Buffer<Vec3> origins(static_cast<std::size_t>(params.aoSamples));
+    accel::Buffer<Vec3> dirs(static_cast<std::size_t>(params.aoSamples));
+    for (int k = 0; k < params.aoSamples; ++k) {
+        origins[static_cast<std::size_t>(k)] = aoPosition + aoNormal * params.aoBias;
+        dirs[static_cast<std::size_t>(k)] =
+            hemisphereDir(static_cast<std::size_t>(k), static_cast<std::size_t>(params.aoSamples),
+                          aoTangent, aoBitangent, aoNormal);
+    }
+    accel::Buffer<std::optional<Bvh::RayHit>> hits;
+    accel::raycast(backend, bvh, origins, dirs, hits);
+    int occluded = 0;
+    for (std::size_t k = 0; k < hits.size(); ++k) {
+        if (hits[k].has_value() && hits[k]->t <= params.aoRadius) {
+            ++occluded;
+        }
+    }
+    return 1.0f - static_cast<float>(occluded) / static_cast<float>(params.aoSamples);
+}
+
+// The raycast shading pass. Its arithmetic is deliberately untouched by the
+// field-evaluator work: `params.field == nullptr` must reproduce the pre-bridge
+// pixels bit for bit (pipeline-bridge spec, "No evaluator, no behavior change"),
+// which tests/bake/test_field_bake.cpp pins against captured checksums.
+void shadeFromMesh(BakeResult& result, const std::vector<Texel>& texels, const Mesh& highPoly,
+                   BakeMap map, const BakeParams& params, const CancelToken* cancel) {
     const Bvh bvh(highPoly);
-    const std::vector<Vec3> lowNormals = vertexNormals(lowPoly);
     const std::vector<Vec3> highNormals = vertexNormals(highPoly);
     const auto* colors = highPoly.vertexAttributes().find<Vec3>(io::kColorAttribute);
     const auto* highUvs = highPoly.cornerAttributes().find<Vec2>(io::kUvAttribute);
@@ -336,53 +380,18 @@ BakeResult bake(const Mesh& lowPoly, const Mesh& highPoly, BakeMap map, const Ba
             params.curvatureRange > 0.0f ? params.curvatureRange : curvatureScale(highCurvature);
     }
 
-    const std::vector<Texel> texels =
-        rasterize(lowPoly, lowNormals, *uvs, params.width, params.height);
-    result.texelsCovered = texels.size();
-    result.image = makeImage(params.width, params.height, channelsFor(map));
-
     auto& backend = *accel::defaultBackend();
 
     for (std::size_t i = 0; i < texels.size(); ++i) {
         if (cancel != nullptr && i % kCancelStride == 0 && cancel->isCancelled()) {
             result.cancelled = true;
-            return result;
+            return;
         }
         const Texel& tx = texels[i];
 
         if (map == BakeMap::AmbientOcclusion) {
-            // Project the low-poly texel onto the high-poly first (same cage ray
-            // as normal/displacement), then fire the AO hemisphere from the
-            // HIGH-poly hit so occlusion captures the high-poly's crevices, not
-            // the low-poly's smooth surface. Fall back to the low-poly frame
-            // when the projection misses the cage.
-            const Vec3 projOrigin = tx.position + tx.normal * params.cageDistance;
-            const std::optional<Bvh::RayHit> proj = bvh.raycast(projOrigin, tx.normal * -1.0f);
-            const bool projValid = proj.has_value() && proj->t <= 2.0f * params.cageDistance;
-            const Vec3 aoNormal = projValid ? hitNormal(highPoly, *proj, highNormals) : tx.normal;
-            const Vec3 aoPosition = projValid ? proj->point : tx.position;
-            const Vec3 aoTangent = anyTangent(aoNormal);
-            const Vec3 aoBitangent = cross(aoNormal, aoTangent);
-
-            accel::Buffer<Vec3> origins(static_cast<std::size_t>(params.aoSamples));
-            accel::Buffer<Vec3> dirs(static_cast<std::size_t>(params.aoSamples));
-            for (int k = 0; k < params.aoSamples; ++k) {
-                origins[static_cast<std::size_t>(k)] = aoPosition + aoNormal * params.aoBias;
-                dirs[static_cast<std::size_t>(k)] = hemisphereDir(
-                    static_cast<std::size_t>(k), static_cast<std::size_t>(params.aoSamples),
-                    aoTangent, aoBitangent, aoNormal);
-            }
-            accel::Buffer<std::optional<Bvh::RayHit>> hits;
-            accel::raycast(backend, bvh, origins, dirs, hits);
-            int occluded = 0;
-            for (std::size_t k = 0; k < hits.size(); ++k) {
-                if (hits[k].has_value() && hits[k]->t <= params.aoRadius) {
-                    ++occluded;
-                }
-            }
-            const float openness =
-                1.0f - static_cast<float>(occluded) / static_cast<float>(params.aoSamples);
-            result.image.at(tx.px, tx.py, 0) = openness;
+            result.image.at(tx.px, tx.py, 0) =
+                aoOpennessFromMesh(bvh, highPoly, highNormals, tx, params, backend);
             continue;
         }
 
@@ -441,6 +450,129 @@ BakeResult bake(const Mesh& lowPoly, const Mesh& highPoly, BakeMap map, const Ba
             case BakeMap::AmbientOcclusion:
                 break;  // handled above
         }
+    }
+}
+
+// One sphere-traced hit of the cage ray against the field. `t` is the distance
+// travelled from the cage origin, so the caller applies exactly the same
+// `t <= 2 * cageDistance` acceptance rule the BVH path uses.
+struct FieldHit {
+    bool valid = false;
+    Vec3 position;
+    Vec3 normal;
+};
+
+FieldHit traceField(const FieldEvaluator& field, const Texel& tx, const BakeParams& params) {
+    constexpr int kMaxSteps = 96;
+    const float maxT = 2.0f * params.cageDistance;
+    // Surface tolerance scaled to the cage so the tracer's precision follows
+    // the model's size rather than a fixed world epsilon.
+    const float epsilon = std::fmax(1e-6f, params.cageDistance * 1e-4f);
+    const Vec3 origin = tx.position + tx.normal * params.cageDistance;
+    const Vec3 dir = tx.normal * -1.0f;
+
+    float t = 0.0f;
+    for (int step = 0; step < kMaxSteps && t <= maxT; ++step) {
+        const Vec3 p = origin + dir * t;
+        const float d = field.distance(p);
+        if (std::fabs(d) <= epsilon) {
+            return {true, p, normalized(field.gradient(p))};
+        }
+        // |d| because the cage origin can start inside the field (a bulge that
+        // pokes through the low-poly); marching by the magnitude converges from
+        // either side, and the Lipschitz-<=1 contract makes the step safe.
+        t += std::fmax(std::fabs(d), epsilon);
+    }
+    return {};
+}
+
+// The field shading pass. Only the four maps fieldSupports() covers reach here.
+void shadeFromField(BakeResult& result, const std::vector<Texel>& texels,
+                    const FieldEvaluator& field, BakeMap map, const BakeParams& params,
+                    const CancelToken* cancel) {
+    const bool curvatureMap = map == BakeMap::Curvature || map == BakeMap::Cavity;
+    // Central-difference step for the evaluator's curvature default, tied to the
+    // cage the same way the trace tolerance is.
+    const float curvatureStep = std::fmax(1e-5f, params.cageDistance * 0.01f);
+
+    std::vector<FieldHit> hits(texels.size());
+    std::vector<float> samples(curvatureMap ? texels.size() : 0, 0.0f);
+    for (std::size_t i = 0; i < texels.size(); ++i) {
+        if (cancel != nullptr && i % kCancelStride == 0 && cancel->isCancelled()) {
+            result.cancelled = true;
+            return;
+        }
+        hits[i] = traceField(field, texels[i], params);
+        if (curvatureMap && hits[i].valid) {
+            samples[i] = field.curvature(hits[i].position, curvatureStep);
+        }
+    }
+
+    // Without a Target mesh there is no vertex curvature field to take the
+    // auto range from, so it comes from the sampled texels through the same
+    // percentile helper the mesh path uses.
+    const float curvatureRange =
+        params.curvatureRange > 0.0f ? params.curvatureRange : curvatureScale(samples);
+
+    for (std::size_t i = 0; i < texels.size(); ++i) {
+        const Texel& tx = texels[i];
+        const FieldHit& hit = hits[i];
+        switch (map) {
+            case BakeMap::Normal: {
+                Vec3 encoded{0.5f, 0.5f, 1.0f};
+                if (hit.valid) {
+                    const Vec3 tn{dot(hit.normal, tx.tangent), dot(hit.normal, tx.bitangent),
+                                  dot(hit.normal, tx.normal)};
+                    encoded = tn * 0.5f + Vec3{0.5f, 0.5f, 0.5f};
+                }
+                result.image.at(tx.px, tx.py, 0) = encoded.x;
+                result.image.at(tx.px, tx.py, 1) = encoded.y;
+                result.image.at(tx.px, tx.py, 2) = encoded.z;
+                break;
+            }
+            case BakeMap::AmbientOcclusion: {
+                const Vec3 n = hit.valid ? hit.normal : tx.normal;
+                const Vec3 p = hit.valid ? hit.position : tx.position;
+                result.image.at(tx.px, tx.py, 0) = std::clamp(
+                    field.occlusion(p + n * params.aoBias, n, params.aoRadius), 0.0f, 1.0f);
+                break;
+            }
+            default: {  // Curvature | Cavity — fieldSupports() gates the rest out
+                result.image.at(tx.px, tx.py, 0) =
+                    encodeCurvature(samples[i], curvatureRange, map == BakeMap::Cavity);
+                break;
+            }
+        }
+    }
+}
+
+}  // namespace
+
+BakeResult bake(const Mesh& lowPoly, const Mesh& highPoly, BakeMap map, const BakeParams& params,
+                ProgressSink* progress, const CancelToken* cancel) {
+    BakeResult result;
+    const auto* uvs = lowPoly.cornerAttributes().find<Vec2>(io::kUvAttribute);
+    // An evaluator makes the Target mesh optional, but only for the maps the
+    // field can actually answer.
+    const bool useField = params.field != nullptr && fieldSupports(map);
+    if (uvs == nullptr || params.width <= 0 || params.height <= 0 ||
+        (highPoly.faceCount() == 0 && !useField)) {
+        return result;  // empty image: nothing to bake
+    }
+
+    const std::vector<Vec3> lowNormals = vertexNormals(lowPoly);
+    const std::vector<Texel> texels =
+        rasterize(lowPoly, lowNormals, *uvs, params.width, params.height);
+    result.texelsCovered = texels.size();
+    result.image = makeImage(params.width, params.height, channelsFor(map));
+
+    if (useField) {
+        shadeFromField(result, texels, *params.field, map, params, cancel);
+    } else {
+        shadeFromMesh(result, texels, highPoly, map, params, cancel);
+    }
+    if (result.cancelled) {
+        return result;
     }
 
     if (progress != nullptr) {

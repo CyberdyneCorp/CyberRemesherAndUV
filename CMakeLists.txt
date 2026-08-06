@@ -56,6 +56,9 @@ if(CYBER_WITH_SCIPP)
 endif()
 
 add_subdirectory(src/core)
+# Sculpt handoff ingest (pipeline-bridge). Depends on core only and is built
+# unconditionally, so the C ABI can link it in every configuration.
+add_subdirectory(src/handoff)
 add_subdirectory(src/accel)
 add_subdirectory(src/bake)
 # imageio depends on bake (saveImage) and bake uses imageio's header (texture

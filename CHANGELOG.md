@@ -7,6 +7,57 @@
 
 ### Added
 
+- **Sculpt handoff bridge** (openspec change `add-claycore-bridge`): the
+  receiving half of a `sculpt -> retopo -> UV -> bake` pipeline, landed with
+  **zero hard dependency on any sculpting or volumetric engine**. Three
+  additive pieces, all reachable from C++, the C ABI and Python:
+
+  - **Versioned sculpt handoff ingest** (`src/handoff`, `cyber::handoff`). A
+    triangle mesh with positions, per-vertex normals, vertex colors and a
+    `material_mix` weight arrives as a Target through a file (PLY profile,
+    `.gltf`/`.glb` accepted), a stream (stdin), or plain in-memory buffers with
+    no intermediate file. The version gate runs on the header text **before any
+    geometry is read**, so a bad version can never produce a partial Target,
+    however malformed the rest of the payload is; the rejection is the existing
+    typed `io::ErrorCode::IncompatibleVersion` (`CYBER_ERR_INCOMPATIBLE_VERSION`
+    on the C ABI, `IncompatibleVersionError` in Python) and names both the
+    version found and the version supported. A newer *minor* is refused rather
+    than read with the unknown parts dropped, matching the export-preset
+    unknown-field precedent. CLI: `--target <path|->`, mutually exclusive with
+    `--input`, plus a `handoff` block in the JSON report and `--bake <csv>` to
+    override the preset's map set.
+  - **Field-sampled baking through an evaluator interface**
+    (`cyber::bake::FieldEvaluator`, `BakeParams::field`, `cyber_bake_field`,
+    `cyberremesh.FieldEvaluator` / `bake_field`). A pure-abstract interface —
+    signed distance, gradient, occlusion, plus a free central-difference
+    curvature default — is the only coupling point to a volumetric engine. With
+    one attached, normal / AO / curvature / cavity sphere-trace the cage ray
+    through the field and read exact gradients, and the Target mesh becomes
+    optional for those four maps. **Without one, output is bit-identical to the
+    pre-bridge raycast implementation**, pinned by FNV checksums over all seven
+    maps captured from the unmodified binary before the refactor.
+  - **Conform** (`cyber::retopo::conform`, `cyber_conform`,
+    `cyberremesh.conform`). Re-snaps an EditMesh onto a replaced Target,
+    preserving topology exactly (only `setPosition` is ever called), and reports
+    the **maximum AND RMS** deviation plus every vertex past a caller-set
+    threshold. It completes and flags rather than silently stretching. The same
+    code now backs the manual-retopology spec's whole-mesh "snap all vertices to
+    Target" command (`retopo::snapAll`), which had never been implemented, so
+    the two cannot diverge.
+
+  Format: `docs/sculpt-handoff-format.md`. Demo: `examples/18_sculpt_handoff.py`
+  (a synthetic producer plus the one-command run, from a file and over a pipe).
+
+  **Two honest gaps.** (1) The handoff format is defined **unilaterally by this
+  repository**. The proposal's task 1 called for one shared document agreed with
+  ClayCore's export-profile change; ClayCore is not in this tree and no
+  negotiation took place, so the versioning is proven only against files this
+  repo writes — "loud on both sides" is demonstrated on our side only. (2) No
+  real volumetric evaluator was exercised. The field path is validated against
+  analytic SDF test doubles (a sphere and a plane), which proves the interface
+  and the sampling math but not interoperability with any actual sculpting
+  engine.
+
 - **Flow guides and painted density** (openspec change `add-flow-guides`): two
   explicit, opt-in *local* controls on an otherwise fully global pipeline.
   **Flow guides** are 3D polylines drawn on or near the Target whose tangent the

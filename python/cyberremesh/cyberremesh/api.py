@@ -44,6 +44,12 @@ __all__ = [
     "SeamCostParams",
     "SeamSet",
     "SeamPath",
+    "HandoffInfo",
+    "IncompatibleVersionError",
+    "FieldEvaluator",
+    "bake_field",
+    "ConformReport",
+    "conform",
 ]
 
 
@@ -594,6 +600,25 @@ class Mesh:
             )
         )
 
+    @classmethod
+    def load_handoff(cls, path: str) -> Tuple["Mesh", "HandoffInfo"]:
+        """Open a versioned sculpt handoff as a Target.
+
+        Reads the PLY (or glTF) profile documented in
+        ``docs/sculpt-handoff-format.md``. Returns the mesh and what the
+        handoff declared. A version this engine does not support raises
+        :class:`IncompatibleVersionError` naming both versions; no partial mesh
+        is ever produced.
+        """
+        out = ctypes.c_void_p()
+        info = _ffi.CyberHandoffInfo()
+        status = _ffi.get_lib().cyber_handoff_open(
+            str(path).encode("utf-8"), ctypes.byref(out), ctypes.byref(info)
+        )
+        if status != _ffi.STATUS_OK:
+            _raise_status(status)
+        return cls(handle=out.value), HandoffInfo._from_c(info)
+
     def unwrap_atlas(self, params: Optional["AtlasParams"] = None) -> "AtlasResult":
         """Generate an automatic UV atlas for this mesh, IN PLACE.
 
@@ -1117,3 +1142,183 @@ def bake(low: "Mesh", high: "Mesh", bake_map: int = BakeMap.NORMAL,
     if not out.value:
         raise CyberError(_ffi.STATUS_ERROR, _last_error() or "bake produced no image")
     return Image(out.value)
+
+
+# ---------------------------------------------------------------------------
+# Sculpt handoff bridge (pipeline-bridge)
+# ---------------------------------------------------------------------------
+
+
+class IncompatibleVersionError(CyberError):
+    """A versioned file declares a version this engine does not support.
+
+    Distinct from a parse failure: the file is well-formed, the CONTRACT does
+    not match. The message names both the version found and the one supported.
+    """
+
+
+def _raise_status(status: int) -> None:
+    """Raises the most specific exception for a non-OK status."""
+    if status == _ffi.STATUS_INCOMPATIBLE_VERSION:
+        raise IncompatibleVersionError(status, _last_error())
+    raise CyberError(status, _last_error())
+
+
+@dataclass(frozen=True)
+class HandoffInfo:
+    """What a sculpt handoff declared (mirror of ``CyberHandoffInfo``)."""
+
+    version: Tuple[int, int]
+    producer: str
+    vertex_count: int
+    face_count: int
+    has_vertex_colors: bool
+    has_vertex_normals: bool
+    has_material_mix: bool
+
+    @staticmethod
+    def _from_c(info: "_ffi.CyberHandoffInfo") -> "HandoffInfo":
+        producer = info.producer.decode("utf-8", "replace") if info.producer else ""
+        return HandoffInfo(
+            version=(int(info.version_major), int(info.version_minor)),
+            producer=producer,
+            vertex_count=int(info.vertex_count),
+            face_count=int(info.face_count),
+            has_vertex_colors=bool(info.has_vertex_colors),
+            has_vertex_normals=bool(info.has_vertex_normals),
+            has_material_mix=bool(info.has_material_mix),
+        )
+
+
+#: Handoff version this binding supports.
+HANDOFF_VERSION = (_ffi.HANDOFF_VERSION_MAJOR, _ffi.HANDOFF_VERSION_MINOR)
+
+
+class FieldEvaluator:
+    """A sampleable field a bake can read instead of raycasting a mesh.
+
+    Subclass and override :meth:`distance`, :meth:`gradient` and
+    :meth:`occlusion`. ``distance`` MUST be a Lipschitz-<=1 LOWER bound on the
+    true distance to the surface (negative inside): the bake sphere-traces the
+    cage ray through it, and a loose bound overshoots and misses thin features.
+
+    The ctypes trampolines are stored on the instance, so keeping a reference
+    to the evaluator for the duration of the bake is enough to keep them alive.
+    """
+
+    def __init__(self) -> None:
+        self._c_distance = _ffi.FIELD_DISTANCE_CB(self._trampoline_distance)
+        self._c_gradient = _ffi.FIELD_GRADIENT_CB(self._trampoline_gradient)
+        self._c_occlusion = _ffi.FIELD_OCCLUSION_CB(self._trampoline_occlusion)
+        self._c_struct = _ffi.CyberFieldEvaluator(
+            distance=self._c_distance,
+            gradient=self._c_gradient,
+            occlusion=self._c_occlusion,
+            user=None,
+        )
+
+    # -- override these -----------------------------------------------------
+    def distance(self, p: Tuple[float, float, float]) -> float:
+        raise NotImplementedError
+
+    def gradient(self, p: Tuple[float, float, float]) -> Tuple[float, float, float]:
+        raise NotImplementedError
+
+    def occlusion(self, p: Tuple[float, float, float],
+                  n: Tuple[float, float, float], radius: float) -> float:
+        raise NotImplementedError
+
+    # -- ctypes plumbing ----------------------------------------------------
+    # An exception raised inside a ctypes callback cannot propagate across the
+    # C frames, so each trampoline degrades to a neutral value rather than
+    # letting the bake read uninitialised memory.
+    def _trampoline_distance(self, _user, p) -> float:
+        try:
+            return float(self.distance((p[0], p[1], p[2])))
+        except Exception:
+            return 0.0
+
+    def _trampoline_gradient(self, _user, p, out) -> None:
+        try:
+            g = self.gradient((p[0], p[1], p[2]))
+        except Exception:
+            g = (0.0, 0.0, 1.0)
+        out[0], out[1], out[2] = float(g[0]), float(g[1]), float(g[2])
+
+    def _trampoline_occlusion(self, _user, p, n, radius) -> float:
+        try:
+            return float(self.occlusion((p[0], p[1], p[2]), (n[0], n[1], n[2]), float(radius)))
+        except Exception:
+            return 1.0
+
+
+def bake_field(low: "Mesh", bake_map: int, field: FieldEvaluator,
+               params: Optional[BakeParams] = None,
+               high: Optional["Mesh"] = None) -> Image:
+    """Bake ``bake_map`` by sampling ``field`` instead of raycasting a Target.
+
+    ``high`` is optional for NORMAL / AO / CURVATURE / CAVITY — the four maps a
+    field can answer on its own; every other map still needs the Target mesh.
+
+    NOTE: every texel calls back into Python, so this is a correctness surface
+    rather than a fast path. A C++ or C evaluator runs orders of magnitude
+    faster for production bakes.
+    """
+    if params is None:
+        params = BakeParams()
+    c_params = params._to_c()
+    out = ctypes.c_void_p()
+    status = _ffi.get_lib().cyber_bake_field(
+        low.handle,
+        high.handle if high is not None else None,
+        int(bake_map),
+        ctypes.byref(c_params),
+        ctypes.byref(field._c_struct),
+        ctypes.byref(out),
+    )
+    _check(status)
+    if not out.value:
+        raise CyberError(_ffi.STATUS_ERROR, _last_error() or "bake produced no image")
+    return Image(out.value)
+
+
+@dataclass(frozen=True)
+class ConformReport:
+    """Deviation report from :func:`conform`."""
+
+    moved_vertices: int
+    max_deviation: float
+    rms_deviation: float
+    flagged: List[int]
+
+
+def conform(edit: "Mesh", new_target: "Mesh", threshold: float = 0.0) -> ConformReport:
+    """Re-snap ``edit`` onto ``new_target``, preserving its topology exactly.
+
+    The sculpt changed after retopology started: this pulls every vertex back
+    onto the new surface, moving nothing else. Vertices whose deviation exceeds
+    ``threshold`` (<= 0 disables flagging) come back in
+    :attr:`ConformReport.flagged` — the operation still completes; it just
+    never stretches silently.
+    """
+    lib = _ffi.get_lib()
+    # Conform mutates the EditMesh, so it must run EXACTLY ONCE: a query pass
+    # followed by a fetch pass would report the second (already-conformed) run,
+    # which is always zero deviation. The flagged buffer is therefore sized
+    # up-front from the vertex count, which bounds it.
+    c_stats = _ffi.CyberStatistics()
+    capacity = 0
+    if lib.cyber_mesh_stats(edit.handle, ctypes.byref(c_stats)) == _ffi.STATUS_OK:
+        capacity = int(c_stats.vertex_count)
+    buf = (ctypes.c_uint32 * capacity)() if capacity else None
+    report = _ffi.CyberConformReport()
+    _check(lib.cyber_conform(edit.handle, new_target.handle, float(threshold),
+                             ctypes.byref(report), buf, capacity))
+    written = min(int(report.flagged_count), capacity)
+    flagged: List[int] = [int(buf[i]) for i in range(written)] if buf else []
+    return ConformReport(
+        moved_vertices=int(report.moved_vertices),
+        max_deviation=float(report.max_deviation),
+        rms_deviation=float(report.rms_deviation),
+        flagged=flagged,
+    )

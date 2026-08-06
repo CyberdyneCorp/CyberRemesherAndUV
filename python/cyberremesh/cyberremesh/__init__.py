@@ -14,11 +14,16 @@ imports cleanly on a machine where the engine has not been built.
 """
 
 from .api import (
+    HANDOFF_VERSION,
     AtlasParams,
     AtlasResult,
     BakeMap,
     BakeParams,
+    ConformReport,
     CyberError,
+    FieldEvaluator,
+    HandoffInfo,
+    IncompatibleVersionError,
     Falloff,
     HAVE_NUMPY,
     Image,
@@ -32,6 +37,8 @@ from .api import (
     SoftTransformReport,
     Statistics,
     bake,
+    bake_field,
+    conform,
     is_available,
     remesh,
     version,
@@ -58,6 +65,13 @@ __all__ = [
     "SoftTransformReport",
     "SeamCostParams",
     "SeamSet",
+    "HandoffInfo",
+    "HANDOFF_VERSION",
+    "IncompatibleVersionError",
+    "FieldEvaluator",
+    "bake_field",
+    "ConformReport",
+    "conform",
     "SeamPath",
 ]
 __version__ = "0.5.0"

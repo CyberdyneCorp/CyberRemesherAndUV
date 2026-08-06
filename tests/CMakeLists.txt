@@ -7,6 +7,8 @@ add_executable(cyber_tests
     bake/test_curvature.cpp
     bake/test_tangent.cpp
     bake/test_ao_projected.cpp
+    bake/test_field_bake.cpp
+    handoff/test_handoff.cpp
     quadrangulate/test_crossfield.cpp
     quadrangulate/test_field_quadrangulator.cpp
     quadrangulate/test_position_field.cpp
@@ -38,7 +40,8 @@ add_executable(cyber_tests
     accel/test_gpu_geometry.cpp
     accel/test_primitives.cpp
 )
-target_link_libraries(cyber_tests PRIVATE cyber_accel cyber_bake cyber_quadrangulate cyber_doctest)
+target_link_libraries(cyber_tests PRIVATE cyber_accel cyber_bake cyber_handoff
+                                          cyber_quadrangulate cyber_doctest)
 if(TARGET cyber_net)
     target_sources(cyber_tests PRIVATE net/test_bridge.cpp)
     target_link_libraries(cyber_tests PRIVATE cyber_net)
@@ -61,7 +64,8 @@ if(TARGET cyber_app)
 endif()
 if(TARGET cyber_uv)
     target_sources(cyber_tests PRIVATE uv/test_uv.cpp uv/test_uv_clone.cpp
-                                        uv/test_seam_path.cpp)
+                                        uv/test_seam_path.cpp
+                                        handoff/test_handoff_pipeline.cpp)
     target_link_libraries(cyber_tests PRIVATE cyber_uv)
 endif()
 if(TARGET cyber_exportbundle)
@@ -70,7 +74,7 @@ if(TARGET cyber_exportbundle)
 endif()
 if(TARGET cyber_retopo)
     target_sources(cyber_tests PRIVATE retopo/test_retopo.cpp retopo/test_retopo_advanced.cpp
-                                        retopo/test_soft_selection.cpp)
+                                        retopo/test_soft_selection.cpp retopo/test_conform.cpp)
     target_link_libraries(cyber_tests PRIVATE cyber_retopo)
 endif()
 if(TARGET cyber_bakecage)
@@ -146,7 +150,8 @@ if(TARGET cyber_capi_shared AND Python3_FOUND)
     endif()
     foreach(_pyt test_api test_golden test_document_invariants test_bake test_uv_atlas
                  test_hole_fill_policy test_open_surface_cleanup
-                 test_cad_density_robustness test_soft_selection test_seam_path)
+                 test_cad_density_robustness test_soft_selection test_seam_path
+                 test_handoff)
         add_test(NAME python_${_pyt}
             COMMAND ${Python3_EXECUTABLE} ${_pydir}/${_pyt}.py)
         set_tests_properties(python_${_pyt} PROPERTIES

@@ -10,11 +10,13 @@
 #include <csignal>
 #include <cstdio>
 #include <fstream>
+#include <iostream>
 #include <optional>
 #include <string>
 #include <vector>
 
 #ifdef _WIN32
+#include <fcntl.h>
 #include <io.h>
 #define CYBER_ISATTY _isatty
 #define CYBER_FILENO _fileno
@@ -32,6 +34,7 @@
 #include "cyber/core/pipeline.hpp"
 #include "cyber/core/progress.hpp"
 #include "cyber/core/version.hpp"
+#include "cyber/handoff/handoff.hpp"
 #include "cyber/quadrangulate/field_quadrangulator.hpp"
 #include "cyber/quadrangulate/position_field.hpp"
 #include "cyber/quadrangulate/quadcover_extractor.hpp"
@@ -59,6 +62,8 @@ void onSigint(int) { g_interrupted.store(true); }
 
 struct CliOptions {
     std::string input;
+    std::string target;    // sculpt handoff (--target); "-" reads stdin
+    std::string bakeMaps;  // --bake csv override of the preset's map set
     std::string output;
     std::string report;
     std::string guides;                     // guidance sidecar (--guides); empty = no guidance
@@ -75,6 +80,15 @@ struct CliOptions {
 void printUsage() {
     std::fprintf(stderr,
                  "usage: cyberremesh --input <mesh> --output <mesh> [options]\n"
+                 "       cyberremesh --target <handoff|-> --output <mesh> [options]\n"
+                 "  --target <path|->        sculpt handoff as the Target (PLY/GLB\n"
+                 "                           profile, docs/sculpt-handoff-format.md);\n"
+                 "                           '-' reads the handoff from stdin.\n"
+                 "                           Mutually exclusive with --input\n"
+                 "  --bake <csv>             maps to bake, overriding the preset's set\n"
+                 "                           (normal,ao,curvature,cavity,displacement,\n"
+                 "                           color,position). Implies --preset\n"
+                 "                           gltf-generic when no preset is named\n"
                  "  --target-quads <int>     target quad count (default 50000)\n"
                  "  --edge-scale <float>     density scale (default 1.0)\n"
                  "  --sharp-edge <deg>       feature angle (default 90)\n"
@@ -170,6 +184,18 @@ int parseArgs(int argc, char** argv, CliOptions& options, bool& exitEarly) {
                 return kExitArgs;
             }
             options.input = *v;
+        } else if (arg == "--target") {
+            const auto v = next("--target");
+            if (!v) {
+                return kExitArgs;
+            }
+            options.target = *v;
+        } else if (arg == "--bake") {
+            const auto v = next("--bake");
+            if (!v) {
+                return kExitArgs;
+            }
+            options.bakeMaps = *v;
         } else if (arg == "--output" || arg == "-o") {
             const auto v = next("--output");
             if (!v) {
@@ -274,12 +300,103 @@ int parseArgs(int argc, char** argv, CliOptions& options, bool& exitEarly) {
             return kExitArgs;
         }
     }
-    if (options.input.empty() || options.output.empty()) {
-        std::fprintf(stderr, "error: --input and --output are required\n");
+    // --input and --target are two names for the same slot; taking both would
+    // leave the engine silently choosing one, so it is an argument error.
+    if (!options.input.empty() && !options.target.empty()) {
+        std::fprintf(stderr, "error: --input and --target are mutually exclusive\n");
+        return kExitArgs;
+    }
+    if ((options.input.empty() && options.target.empty()) || options.output.empty()) {
+        std::fprintf(stderr, "error: --input (or --target) and --output are required\n");
         printUsage();
         return kExitArgs;
     }
+    // --bake names maps, which only a preset run can produce. Defaulting to the
+    // format-neutral bundle is the least surprising way to honor the flag on
+    // its own rather than rejecting it.
+    if (!options.bakeMaps.empty() && options.preset.empty()) {
+        options.preset = "gltf-generic";
+    }
     return kExitOk;
+}
+
+// --bake <csv> -> the preset's map list. Unknown names are an argument error
+// naming the offender: silently dropping a requested map would ship an asset
+// missing exactly the texture the user asked for.
+bool applyBakeMapOverride(const std::string& csv, cyber::io::ExportPreset& preset,
+                          std::string& error) {
+    std::vector<cyber::io::PresetMapEntry> maps;
+    std::size_t start = 0;
+    while (start <= csv.size()) {
+        const std::size_t comma = csv.find(',', start);
+        const std::size_t end = comma == std::string::npos ? csv.size() : comma;
+        std::string name = csv.substr(start, end - start);
+        start = end + 1;
+        while (!name.empty() && name.front() == ' ') {
+            name.erase(name.begin());
+        }
+        while (!name.empty() && name.back() == ' ') {
+            name.pop_back();
+        }
+        if (name.empty()) {
+            continue;
+        }
+        const auto map = cyber::io::presetMapFromName(name);
+        if (!map) {
+            error = "unknown --bake map '" + name + "'";
+            return false;
+        }
+        cyber::io::PresetMapEntry entry;
+        entry.map = *map;
+        // Color carries appearance, so it keeps the sRGB encoding the built-in
+        // presets give it; every other map carries data and stays linear.
+        entry.colorSpace = *map == cyber::io::PresetMap::Color ? cyber::io::ColorSpace::Srgb
+                                                               : cyber::io::ColorSpace::Linear;
+        entry.suffix = cyber::io::presetMapName(*map);
+        maps.push_back(std::move(entry));
+    }
+    if (maps.empty()) {
+        error = "--bake needs at least one map name";
+        return false;
+    }
+    preset.maps = std::move(maps);
+    return true;
+}
+
+// What a --target run ingested, for the report.
+struct HandoffOutcome {
+    bool active = false;
+    std::string source;
+    cyber::handoff::Version version;
+    std::string producer;
+    std::size_t vertexCount = 0;
+    std::size_t faceCount = 0;
+    bool hasVertexColors = false;
+    bool hasVertexNormals = false;
+    bool hasMaterialMix = false;
+};
+
+void addHandoffToReport(nlohmann::json& report, const HandoffOutcome& outcome) {
+    if (!outcome.active) {
+        return;
+    }
+    report["handoff"] = {
+        {"source", outcome.source},
+        {"version", {{"major", outcome.version.major}, {"minor", outcome.version.minor}}},
+        {"supportedVersion",
+         {{"major", cyber::handoff::kVersionMajor}, {"minor", cyber::handoff::kVersionMinor}}},
+        {"producer", outcome.producer},
+        {"vertices", outcome.vertexCount},
+        {"faces", outcome.faceCount},
+        {"hasVertexColors", outcome.hasVertexColors},
+        {"hasVertexNormals", outcome.hasVertexNormals},
+        {"hasMaterialMix", outcome.hasMaterialMix},
+        // No field evaluator is reachable from the CLI yet (the evaluator is a
+        // C++/C-ABI interface, and this build links no volumetric engine), so
+        // nothing here was field-sampled. Recorded explicitly rather than
+        // omitted so a consumer can tell "none" from "not reported".
+        {"fieldSampledMaps", nlohmann::json::array()},
+    };
 }
 
 // What a --preset run produced, in a form the report can serialise whether or
@@ -467,11 +584,11 @@ void addGuidanceToReport(nlohmann::json& report, const remesh::ValidatedGuidance
 // path is exit 6, never silently skipped (spec).
 int writeReport(const CliOptions& options, const remesh::PipelineResult& result,
                 double elapsedSeconds, const PresetOutcome& presetOutcome,
-                const remesh::ValidatedGuidance& guidance) {
+                const remesh::ValidatedGuidance& guidance, const HandoffOutcome& handoffOutcome) {
     nlohmann::json report;
     report["tool"] = "cyberremesh";
     report["version"] = std::string(cyber::version());
-    report["input"] = options.input;
+    report["input"] = options.input.empty() ? options.target : options.input;
     report["output"] = options.output;
     report["status"] = statusName(result.status);
     report["elapsedSeconds"] = elapsedSeconds;
@@ -505,6 +622,7 @@ int writeReport(const CliOptions& options, const remesh::PipelineResult& result,
                                            {"reason", diag.reason}});
     }
     addPresetToReport(report, presetOutcome);
+    addHandoffToReport(report, handoffOutcome);
     if (!options.guides.empty()) {
         addGuidanceToReport(report, guidance, result);
     }
@@ -554,16 +672,58 @@ int main(int argc, char** argv) {
         if (options.textureSize > 0) {
             presetOutcome.preset.resolution = options.textureSize;
         }
+        if (!options.bakeMaps.empty()) {
+            std::string bakeError;
+            if (!applyBakeMapOverride(options.bakeMaps, presetOutcome.preset, bakeError)) {
+                std::fprintf(stderr, "error: %s\n", bakeError.c_str());
+                return kExitArgs;
+            }
+        }
 #endif
     }
 
-    auto imported = cyber::io::importMesh(options.input);
-    if (!imported.ok()) {
-        std::fprintf(stderr, "error: %s\n", imported.error().message.c_str());
-        return kExitLoad;
+    // The Target: either a plain mesh (--input) or a versioned sculpt handoff
+    // (--target). A rejected handoff — including an incompatible version — is
+    // exit 3 and writes nothing.
+    HandoffOutcome handoffOutcome;
+    cyber::io::ImportedMesh source;
+    if (!options.target.empty()) {
+        const bool fromStdin = options.target == "-";
+#ifdef _WIN32
+        if (fromStdin) {
+            _setmode(_fileno(stdin), _O_BINARY);  // binary_little_endian PLY on stdin
+        }
+#endif
+        auto handoff = fromStdin ? cyber::handoff::readStream(std::cin, "<stdin>")
+                                 : cyber::handoff::readFile(options.target);
+        if (!handoff.ok()) {
+            std::fprintf(stderr, "error: %s\n", handoff.error().message.c_str());
+            return kExitLoad;
+        }
+        cyber::handoff::Handoff& h = handoff.value();
+        handoffOutcome.active = true;
+        handoffOutcome.source = fromStdin ? "<stdin>" : options.target;
+        handoffOutcome.version = h.version;
+        handoffOutcome.producer = h.producer;
+        handoffOutcome.vertexCount = h.mesh.vertexCount();
+        handoffOutcome.faceCount = h.mesh.faceCount();
+        handoffOutcome.hasVertexColors = h.hasVertexColors();
+        handoffOutcome.hasVertexNormals = h.hasVertexNormals();
+        handoffOutcome.hasMaterialMix = h.hasMaterialMix();
+        source.mesh = std::move(h.mesh);
+        source.boundsMin = h.boundsMin;
+        source.boundsMax = h.boundsMax;
+        source.warnings = std::move(h.warnings);
+    } else {
+        auto imported = cyber::io::importMesh(options.input);
+        if (!imported.ok()) {
+            std::fprintf(stderr, "error: %s\n", imported.error().message.c_str());
+            return kExitLoad;
+        }
+        source = std::move(imported.value());
     }
     if (!options.quiet) {
-        for (const auto& warning : imported.value().warnings) {
+        for (const auto& warning : source.warnings) {
             std::fprintf(stderr, "warning: %s\n", warning.c_str());
         }
     }
@@ -592,8 +752,8 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "error: %s\n", guidesError.c_str());
             return kExitArgs;
         }
-        validatedGuidance = remesh::validateGuidance(
-            rawGuidance, imported.value().mesh.vertexCount(), imported.value().mesh.faceCount());
+        validatedGuidance = remesh::validateGuidance(rawGuidance, source.mesh.vertexCount(),
+                                                     source.mesh.faceCount());
         if (!validatedGuidance.ok()) {
             for (const auto& issue : validatedGuidance.issues) {
                 if (issue.fatal) {
@@ -654,7 +814,7 @@ int main(int argc, char** argv) {
                                      []() { return remesh::makeFieldAlignedQuadrangulator(); })
                                : remesh::QuadrangulatorFactory{};
     const remesh::PipelineResult result =
-        remesh::remesh(imported.value().mesh, options.params, &sink, &cancel, makeQuadrangulator,
+        remesh::remesh(source.mesh, options.params, &sink, &cancel, makeQuadrangulator,
                        fallbackFactory, rawGuidance.empty() ? nullptr : &rawGuidance);
     if (showProgress) {
         std::printf("\r");
@@ -700,15 +860,15 @@ int main(int argc, char** argv) {
         // the Target on anything not roughly unit-sized. 1% of the input's
         // bounding-box diagonal reaches the detail without punching through to
         // the far side on the corpus meshes.
-        const cyber::Vec3 extent = imported.value().boundsMax - imported.value().boundsMin;
+        const cyber::Vec3 extent = source.boundsMax - source.boundsMin;
         bundleParams.cageDistance =
             options.cageDistance > 0.0f ? options.cageDistance : 0.01f * cyber::length(extent);
         if (options.aoSamples > 0) {
             bundleParams.aoSamples = options.aoSamples;
         }
         cyber::Mesh low = result.mesh;
-        const cyber::exportbundle::BundleResult bundle = cyber::exportbundle::writeBundle(
-            low, imported.value().mesh, bundleParams, &sink, &cancel);
+        const cyber::exportbundle::BundleResult bundle =
+            cyber::exportbundle::writeBundle(low, source.mesh, bundleParams, &sink, &cancel);
         if (!options.quiet) {
             for (const std::string& warning : bundle.warnings) {
                 std::fprintf(stderr, "warning: %s\n", warning.c_str());
@@ -745,7 +905,7 @@ int main(int argc, char** argv) {
 
     if (!options.report.empty()) {
         const int reportStatus =
-            writeReport(options, result, elapsed, presetOutcome, validatedGuidance);
+            writeReport(options, result, elapsed, presetOutcome, validatedGuidance, handoffOutcome);
         if (reportStatus != kExitOk) {
             return reportStatus;
         }
@@ -753,7 +913,8 @@ int main(int argc, char** argv) {
 
     if (!options.quiet) {
         std::printf("=== cyberremesh report ===\n");
-        std::printf("input:     %s\n", options.input.c_str());
+        std::printf("input:     %s\n",
+                    options.input.empty() ? handoffOutcome.source.c_str() : options.input.c_str());
         std::printf("output:    %s\n", options.output.c_str());
         std::printf("status:    %s\n", statusName(result.status));
         std::printf("vertices:  %zu\n", result.stats.vertexCount);

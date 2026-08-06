@@ -31,7 +31,11 @@ typedef enum CyberStatus {
     CYBER_ERR_INVALID_PARAM, /* remesh parameters were unusable (NaN, etc.) */
     CYBER_ERR_EMPTY,         /* mesh had no geometry */
     CYBER_ERR_RUNTIME,       /* pipeline failed */
-    CYBER_ERR_CANCELLED      /* the operation was cooperatively cancelled */
+    CYBER_ERR_CANCELLED,     /* the operation was cooperatively cancelled */
+    /* A versioned data file declares a version this engine does not support.
+     * Distinct from a parse error: the file is well-formed, the CONTRACT does
+     * not match. Appended in 0.6.0 — existing values keep their numbers. */
+    CYBER_ERR_INCOMPATIBLE_VERSION
 } CyberStatus;
 
 /* Engine semantic version (mirrors the CMake project() version). */
@@ -1294,6 +1298,114 @@ uint32_t cyber_seam_path_resume_marker(const CyberSeamPath* path);
 /* Forgets the resume marker so the next waypoint starts a fresh path. Never
  * touches a seam set — committed seams are unaffected. */
 void cyber_seam_path_drop_resume_marker(CyberSeamPath* path);
+
+/* ---- sculpt handoff bridge (pipeline-bridge) -------------------------
+ *
+ * A versioned interchange for taking a sculpt as a Target, plus a field
+ * evaluator that lets a bake sample exact normals/AO/curvature instead of
+ * raycasting a mesh, plus conform (re-snap an EditMesh onto a replaced
+ * Target). NOTHING here links a specific sculpting or volumetric engine: the
+ * format and the evaluator interface are the only coupling points.
+ * Format reference: docs/sculpt-handoff-format.md. */
+
+/* Handoff version this build supports. */
+#define CYBER_HANDOFF_VERSION_MAJOR 1
+#define CYBER_HANDOFF_VERSION_MINOR 0
+
+/* What a handoff declared, filled on a successful open. `producer` points into
+ * a thread-local buffer valid until the next capi call on this thread. */
+typedef struct CyberHandoffInfo {
+    int versionMajor;
+    int versionMinor;
+    const char* producer; /* never NULL; empty when the handoff declared none */
+    size_t vertexCount;
+    size_t faceCount;
+    int hasVertexColors;
+    int hasVertexNormals;
+    int hasMaterialMix;
+} CyberHandoffInfo;
+
+/* Opens a handoff file (PLY profile; .gltf/.glb also accepted) as a Target.
+ * On success *out receives a new CyberMesh the caller frees with
+ * cyber_mesh_free, and `info` (may be NULL) is filled.
+ * An unsupported version is CYBER_ERR_INCOMPATIBLE_VERSION with *out left
+ * NULL — no partial Target is ever produced. cyber_last_error() names both
+ * the found and the supported version. */
+CyberStatus cyber_handoff_open(const char* path, CyberMesh** out, CyberHandoffInfo* info);
+
+/* The in-memory handoff profile: plain arrays, no intermediate file. Optional
+ * pointers may be NULL; positions and indices may not. Triangles only
+ * (index_count % 3 == 0). */
+typedef struct CyberHandoffBuffers {
+    const float* positions;    /* 3 * vertex_count */
+    const float* normals;      /* 3 * vertex_count, optional */
+    const float* colors;       /* 3 * vertex_count in [0,1], optional */
+    const float* material_mix; /* vertex_count, optional */
+    size_t vertex_count;
+    const uint32_t* indices;
+    size_t index_count;
+    int version_major;
+    int version_minor;
+    const char* producer; /* optional */
+} CyberHandoffBuffers;
+
+/* Same contract as cyber_handoff_open, from buffers instead of a file —
+ * including the version gate, so an in-process producer cannot bypass it. */
+CyberStatus cyber_handoff_open_buffers(const CyberHandoffBuffers* buffers, CyberMesh** out,
+                                       CyberHandoffInfo* info);
+
+/* ---- field-sampled baking -------------------------------------------- */
+
+/* A sampleable field, as three C callbacks plus an opaque user pointer.
+ * `distance` MUST be a Lipschitz-<=1 LOWER bound on the true distance to the
+ * surface (negative inside): the bake sphere-traces the cage ray through it,
+ * and a loose bound overshoots and misses thin features.
+ * `gradient` writes the (not necessarily unit) field gradient at p.
+ * `occlusion` returns openness in [0,1] over a hemisphere of `radius`.
+ * All three are called from the baking thread and must be reentrant. */
+typedef float (*CyberFieldDistanceFn)(void* user, const float p[3]);
+typedef void (*CyberFieldGradientFn)(void* user, const float p[3], float out_gradient[3]);
+typedef float (*CyberFieldOcclusionFn)(void* user, const float p[3], const float n[3],
+                                       float radius);
+
+typedef struct CyberFieldEvaluator {
+    CyberFieldDistanceFn distance;
+    CyberFieldGradientFn gradient;
+    CyberFieldOcclusionFn occlusion;
+    void* user;
+} CyberFieldEvaluator;
+
+/* Bakes `map` from a field instead of a Target mesh. `high` MAY be NULL for
+ * CYBER_BAKE_NORMAL / _AO / _CURVATURE / _CAVITY — the four maps a field can
+ * answer; every other map still needs the Target and returns
+ * CYBER_ERR_INVALID_ARG with a NULL one.
+ *
+ * A separate entry point rather than a field on CyberBakeParams, deliberately:
+ * growing that struct would break every caller that allocates it. */
+CyberStatus cyber_bake_field(const CyberMesh* low, const CyberMesh* high, CyberBakeMap map,
+                             const CyberBakeParams* params, const CyberFieldEvaluator* field,
+                             CyberImage** out);
+
+/* ---- conform ---------------------------------------------------------- */
+
+typedef struct CyberConformReport {
+    size_t movedVertices;
+    float maxDeviation;
+    float rmsDeviation;
+    size_t flaggedCount; /* total, even when out_flagged could not hold them all */
+} CyberConformReport;
+
+/* Re-snaps every live vertex of `edit` onto `new_target`, preserving the
+ * EditMesh's topology exactly (only positions change), and reports the maximum
+ * and RMS deviation. Vertices whose deviation exceeds `threshold` (<= 0
+ * disables flagging) are flagged: the operation still completes, it just never
+ * stretches silently.
+ *
+ * Follows the copy-positions convention: `report->flaggedCount` is the total,
+ * and at most `max_flagged` ids are written to `out_flagged` (may be NULL).
+ * The Target snapper is built internally, so no snapper handle is needed. */
+CyberStatus cyber_conform(CyberMesh* edit, const CyberMesh* new_target, float threshold,
+                          CyberConformReport* report, uint32_t* out_flagged, size_t max_flagged);
 
 #ifdef __cplusplus
 } /* extern "C" */

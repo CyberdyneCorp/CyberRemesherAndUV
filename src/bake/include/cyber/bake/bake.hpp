@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <vector>
 
+#include "cyber/bake/field_evaluator.hpp"
 #include "cyber/core/mesh.hpp"
 #include "cyber/core/progress.hpp"
 #include "cyber/imageio/load.hpp"
@@ -72,6 +73,14 @@ struct BakeParams {
     // over the Target, which is scale-independent and keeps one pinched vertex
     // from flattening the map to mid-gray.
     float curvatureRange = 0.0f;
+    // Optional field evaluator (pipeline-bridge spec, "Field-sampled baking").
+    // When set, Normal / AmbientOcclusion / Curvature / Cavity sample the field
+    // directly — the cage ray is sphere-traced through it and normals come from
+    // exact gradients instead of interpolated mesh normals. Every other map,
+    // and every bake with `field == nullptr`, takes the raycast path with
+    // BIT-IDENTICAL output. `highPoly` may be empty only when an evaluator is
+    // attached and the requested map is one of the four it covers.
+    const FieldEvaluator* field = nullptr;
 };
 
 struct BakeResult {

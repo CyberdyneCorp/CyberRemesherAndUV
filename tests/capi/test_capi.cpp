@@ -541,3 +541,203 @@ TEST_CASE("cyber_remesh_guided reports unhonored guidance through the warning ca
     std::error_code ec;
     std::filesystem::remove(objPath, ec);
 }
+
+// ---- sculpt handoff bridge over the C ABI ---------------------------------
+
+namespace {
+
+// The synthetic producer, C-ABI side: the ASCII PLY profile from
+// docs/sculpt-handoff-format.md, with the version left as a parameter so a
+// test can emit one this engine must refuse.
+std::filesystem::path writeHandoffPly(const std::string& name, int major, int minor) {
+    const std::filesystem::path path = std::filesystem::temp_directory_path() / name;
+    std::ofstream out(path);
+    out << "ply\nformat ascii 1.0\n";
+    out << "comment cyber_sculpt_handoff " << major << " " << minor << "\n";
+    out << "comment cyber_handoff_producer capi-test\n";
+    out << "element vertex 4\n"
+           "property float x\nproperty float y\nproperty float z\n"
+           "property float nx\nproperty float ny\nproperty float nz\n"
+           "property uchar red\nproperty uchar green\nproperty uchar blue\n"
+           "property float material_mix\n"
+           "element face 2\n"
+           "property list uchar int vertex_indices\n"
+           "end_header\n";
+    out << "0 0 0 0 0 1 255 0 0 0.1\n"
+           "1 0 0 0 0 1 255 0 0 0.2\n"
+           "1 1 0 0 0 1 255 0 0 0.3\n"
+           "0 1 0 0 0 1 255 0 0 0.4\n"
+           "3 0 1 2\n3 0 2 3\n";
+    return path;
+}
+
+// An analytic plane field: distance is the height above z=0.
+float planeDistance(void*, const float p[3]) { return p[2]; }
+void planeGradient(void*, const float[3], float out[3]) {
+    out[0] = 0.0f;
+    out[1] = 0.0f;
+    out[2] = 1.0f;
+}
+float planeOcclusion(void* user, const float[3], const float[3], float) {
+    return *static_cast<const float*>(user);
+}
+
+}  // namespace
+
+TEST_CASE("capi opens a sculpt handoff as a Target") {
+    const std::filesystem::path path = writeHandoffPly("cyber_capi_handoff.ply", 1, 0);
+    CyberMesh* mesh = nullptr;
+    CyberHandoffInfo info{};
+    REQUIRE(cyber_handoff_open(path.string().c_str(), &mesh, &info) == CYBER_OK);
+    REQUIRE(mesh != nullptr);
+    CHECK(info.versionMajor == CYBER_HANDOFF_VERSION_MAJOR);
+    CHECK(info.versionMinor == CYBER_HANDOFF_VERSION_MINOR);
+    CHECK(std::string(info.producer) == "capi-test");
+    CHECK(info.vertexCount == 4u);
+    CHECK(info.faceCount == 2u);
+    CHECK(info.hasVertexColors == 1);
+    CHECK(info.hasVertexNormals == 1);
+    CHECK(info.hasMaterialMix == 1);
+    cyber_mesh_free(mesh);
+    std::error_code ec;
+    std::filesystem::remove(path, ec);
+}
+
+TEST_CASE("capi rejects an unsupported handoff version and allocates nothing") {
+    const std::filesystem::path path = writeHandoffPly("cyber_capi_handoff_future.ply", 2, 0);
+    CyberMesh* mesh = reinterpret_cast<CyberMesh*>(0x1);  // must be overwritten with NULL
+    REQUIRE(cyber_handoff_open(path.string().c_str(), &mesh, nullptr) ==
+            CYBER_ERR_INCOMPATIBLE_VERSION);
+    CHECK(mesh == nullptr);
+    const std::string message = cyber_last_error();
+    CHECK(message.find("2.0") != std::string::npos);
+    CHECK(message.find("1.0") != std::string::npos);
+    CHECK(std::string(cyber_status_string(CYBER_ERR_INCOMPATIBLE_VERSION)) ==
+          "incompatible version");
+    std::error_code ec;
+    std::filesystem::remove(path, ec);
+}
+
+TEST_CASE("capi opens a handoff from buffers under the same version gate") {
+    const float positions[] = {0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0};
+    const float colors[] = {1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0};
+    const float mix[] = {0.1f, 0.2f, 0.3f, 0.4f};
+    const uint32_t indices[] = {0, 1, 2, 0, 2, 3};
+
+    CyberHandoffBuffers buffers{};
+    buffers.positions = positions;
+    buffers.colors = colors;
+    buffers.material_mix = mix;
+    buffers.vertex_count = 4;
+    buffers.indices = indices;
+    buffers.index_count = 6;
+    buffers.version_major = CYBER_HANDOFF_VERSION_MAJOR;
+    buffers.version_minor = CYBER_HANDOFF_VERSION_MINOR;
+    buffers.producer = "buffers";
+
+    CyberMesh* mesh = nullptr;
+    CyberHandoffInfo info{};
+    REQUIRE(cyber_handoff_open_buffers(&buffers, &mesh, &info) == CYBER_OK);
+    CHECK(info.vertexCount == 4u);
+    CHECK(info.hasMaterialMix == 1);
+    CHECK(info.hasVertexNormals == 0);  // none supplied
+    CHECK(std::string(info.producer) == "buffers");
+    cyber_mesh_free(mesh);
+
+    buffers.version_major = CYBER_HANDOFF_VERSION_MAJOR + 1;
+    CyberMesh* rejected = nullptr;
+    CHECK(cyber_handoff_open_buffers(&buffers, &rejected, nullptr) ==
+          CYBER_ERR_INCOMPATIBLE_VERSION);
+    CHECK(rejected == nullptr);
+}
+
+TEST_CASE("capi bakes through a C field evaluator") {
+    const std::filesystem::path objPath = writeUvPlaneObj();
+    CyberMesh* low = nullptr;
+    REQUIRE(cyber_mesh_load_obj(objPath.string().c_str(), &low) == CYBER_OK);
+
+    CyberBakeParams params{};
+    cyber_default_bake_params(&params);
+    params.width = 16;
+    params.height = 16;
+
+    float openness = 0.25f;
+    CyberFieldEvaluator field{};
+    field.distance = &planeDistance;
+    field.gradient = &planeGradient;
+    field.occlusion = &planeOcclusion;
+    field.user = &openness;
+
+    // No Target mesh at all: the field answers the normal bake on its own.
+    CyberImage* normal = nullptr;
+    REQUIRE(cyber_bake_field(low, nullptr, CYBER_BAKE_NORMAL, &params, &field, &normal) ==
+            CYBER_OK);
+    std::vector<float> pixels(cyber_image_copy_pixels(normal, nullptr, 0));
+    REQUIRE(cyber_image_copy_pixels(normal, pixels.data(), pixels.size()) == pixels.size());
+    const size_t centre = (8u * 16u + 8u) * 3u;
+    CHECK(pixels[centre + 2] == doctest::Approx(1.0f).epsilon(0.05));
+    cyber_image_free(normal);
+
+    // AO comes straight from the evaluator's occlusion callback.
+    CyberImage* ao = nullptr;
+    REQUIRE(cyber_bake_field(low, nullptr, CYBER_BAKE_AO, &params, &field, &ao) == CYBER_OK);
+    std::vector<float> aoPixels(cyber_image_copy_pixels(ao, nullptr, 0));
+    REQUIRE(cyber_image_copy_pixels(ao, aoPixels.data(), aoPixels.size()) == aoPixels.size());
+    CHECK(aoPixels[8u * 16u + 8u] == doctest::Approx(0.25f).epsilon(0.01));
+    cyber_image_free(ao);
+
+    // A map a field cannot answer still needs the Target.
+    CyberImage* colorMap = nullptr;
+    CHECK(cyber_bake_field(low, nullptr, CYBER_BAKE_COLOR, &params, &field, &colorMap) ==
+          CYBER_ERR_INVALID_ARG);
+    CHECK(colorMap == nullptr);
+
+    cyber_mesh_free(low);
+    std::error_code ec;
+    std::filesystem::remove(objPath, ec);
+}
+
+TEST_CASE("capi conform re-snaps onto a new Target and reports max/RMS deviation") {
+    // The EditMesh sits at z = 0; the new Target is the same plane lifted 0.25.
+    const std::filesystem::path editPath = writeUvPlaneObj();
+    const std::filesystem::path targetPath =
+        std::filesystem::temp_directory_path() / "cyber_capi_conform_target.obj";
+    {
+        std::ofstream out(targetPath);
+        out << "v 0 0 0.25\nv 1 0 0.25\nv 1 1 0.25\nv 0 1 0.25\n"
+               "f 1 2 3\nf 1 3 4\n";
+    }
+
+    CyberMesh* edit = nullptr;
+    CyberMesh* target = nullptr;
+    REQUIRE(cyber_mesh_load_obj(editPath.string().c_str(), &edit) == CYBER_OK);
+    REQUIRE(cyber_mesh_load_obj(targetPath.string().c_str(), &target) == CYBER_OK);
+
+    const CyberStats before = [&] {
+        CyberStats s{};
+        REQUIRE(cyber_mesh_stats(edit, &s) == CYBER_OK);
+        return s;
+    }();
+
+    CyberConformReport report{};
+    std::vector<uint32_t> flagged(8, 0xffffffffu);
+    REQUIRE(cyber_conform(edit, target, /*threshold=*/0.1f, &report, flagged.data(),
+                          flagged.size()) == CYBER_OK);
+    CHECK(report.movedVertices == 4u);
+    CHECK(report.maxDeviation == doctest::Approx(0.25f).epsilon(0.02));
+    CHECK(report.rmsDeviation == doctest::Approx(0.25f).epsilon(0.02));
+    CHECK(report.flaggedCount == 4u);  // every vertex is past the 0.1 threshold
+
+    // Topology preserved: the conform only ever moved positions.
+    CyberStats after{};
+    REQUIRE(cyber_mesh_stats(edit, &after) == CYBER_OK);
+    CHECK(after.vertices == before.vertices);
+    CHECK(after.triangles == before.triangles);
+    CHECK(after.quads == before.quads);
+
+    cyber_mesh_free(edit);
+    cyber_mesh_free(target);
+    std::error_code ec;
+    std::filesystem::remove(editPath, ec);
+    std::filesystem::remove(targetPath, ec);
+}

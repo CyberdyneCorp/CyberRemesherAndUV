@@ -4,7 +4,8 @@ add_executable(cyberremesh
 
 # cyber_accel propagates cyber_core publicly; cyber_quadrangulate provides the
 # field-aligned quadrangulator the CLI injects.
-target_link_libraries(cyberremesh PRIVATE cyber_accel cyber_quadrangulate)
+# cyber_handoff provides --target (the versioned sculpt handoff reader).
+target_link_libraries(cyberremesh PRIVATE cyber_accel cyber_quadrangulate cyber_handoff)
 # --preset packages the mesh plus its baked maps. The bundle module rides on
 # CYBER_BUILD_UV (it unwraps a low-poly that has no UVs); without it the flag
 # reports that this build cannot honor presets rather than silently skipping.

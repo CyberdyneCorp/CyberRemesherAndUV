@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "cyber/core/mesh.hpp"
+#include "cyber/retopo/conform.hpp"
 #include "cyber/retopo/pins.hpp"
 #include "cyber/retopo/relax.hpp"
 #include "cyber/retopo/symmetry.hpp"
@@ -36,6 +37,16 @@ inline void relaxAll(Mesh& mesh, const PinSet* pins = nullptr, int iterations = 
     params.iterations = iterations;
     params.brushRadius = 0.0f;
     relax(mesh, params, pins, snap);
+}
+
+// Whole-mesh snap-all (manual-retopology spec, "snap all vertices to Target"):
+// pull every live unpinned vertex back onto the Target. This is conform() with
+// no flagging threshold — the two share one implementation deliberately, so the
+// interactive command and the pipeline-bridge conform can never diverge. The
+// returned report carries max/RMS deviation for callers that want it.
+inline ConformReport snapAll(Mesh& mesh, const SurfaceSnapper& snapper,
+                             const PinSet* pins = nullptr) {
+    return conform(mesh, snapper, ConformParams{}, pins);
 }
 
 // Whole-mesh subdivide-all: linear (Catmull-Clark topology) subdivision to

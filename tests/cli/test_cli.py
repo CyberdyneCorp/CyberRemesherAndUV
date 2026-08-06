@@ -59,6 +59,34 @@ def write_sphere_obj(path: Path) -> None:
             f.write(f"f {face[0]} {face[1]} {face[2]}\n")
 
 
+def handoff_ply(major: int, minor: int) -> str:
+    """The sculpt handoff PLY profile (docs/sculpt-handoff-format.md) for a
+    small closed box. The version is a parameter so a test can emit one the
+    engine has to refuse."""
+    corners = [(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0),
+               (0, 0, 1), (1, 0, 1), (1, 1, 1), (0, 1, 1)]
+    quads = [(0, 3, 2, 1), (4, 5, 6, 7), (0, 1, 5, 4),
+             (1, 2, 6, 5), (2, 3, 7, 6), (3, 0, 4, 7)]
+    tris = [t for q in quads for t in ((q[0], q[1], q[2]), (q[0], q[2], q[3]))]
+    lines = ["ply", "format ascii 1.0",
+             f"comment cyber_sculpt_handoff {major} {minor}",
+             "comment cyber_handoff_producer cli-test",
+             f"element vertex {len(corners)}",
+             "property float x", "property float y", "property float z",
+             "property float nx", "property float ny", "property float nz",
+             "property uchar red", "property uchar green", "property uchar blue",
+             "property float material_mix",
+             f"element face {len(tris)}",
+             "property list uchar int vertex_indices",
+             "end_header"]
+    for i, c in enumerate(corners):
+        n = [c[k] - 0.5 for k in range(3)]
+        lines.append(f"{c[0]} {c[1]} {c[2]} {n[0]} {n[1]} {n[2]} 255 0 0 {i / 8.0}")
+    for t in tris:
+        lines.append(f"3 {t[0]} {t[1]} {t[2]}")
+    return "\n".join(lines) + "\n"
+
+
 def main() -> int:
     tmp = Path(tempfile.mkdtemp(prefix="cyber_cli_"))
     sphere = tmp / "sphere.obj"
@@ -260,6 +288,83 @@ def main() -> int:
     check("empty-guides run exit 0", r.returncode == 0, r.stderr)
     check("empty guide list is byte-identical to no --guides",
           plain_out.read_bytes() == empty_out.read_bytes())
+
+    # ---- sculpt handoff Target (pipeline-bridge / cli-headless) ----------
+    handoff_dir = tmp / "handoff"
+    handoff_dir.mkdir()
+    handoff = handoff_dir / "sculpt.ply"
+    handoff.write_text(handoff_ply(1, 0))
+
+    # One command: handoff -> remesh -> unwrap -> bake, with the report naming
+    # the handoff version.
+    handoff_report = handoff_dir / "handoff.json"
+    handoff_out = handoff_dir / "low.obj"
+    r = run("--target", str(handoff), "--output", str(handoff_out), "--target-quads", "120",
+            "--preset", "blender", "--bake", "normal,ao,curvature",
+            "--texture-size", "64", "--report", str(handoff_report), "--quiet")
+    check("handoff run exit 0", r.returncode == 0, r.stderr)
+    check("handoff run wrote the low-poly", handoff_out.exists())
+    if handoff_report.exists():
+        data = json.loads(handoff_report.read_text())
+        block = data.get("handoff", {})
+        check("report carries the handoff version",
+              block.get("version", {}) == {"major": 1, "minor": 0}, str(block))
+        check("report carries the handoff producer",
+              block.get("producer") == "cli-test", str(block.get("producer")))
+        check("report carries the handoff source",
+              block.get("source") == str(handoff), str(block.get("source")))
+        check("report records the handoff payloads",
+              block.get("hasVertexColors") is True and block.get("hasMaterialMix") is True,
+              str(block))
+        kinds = {o.get("kind") for o in data.get("outputs", [])}
+        check("--bake wrote exactly the requested maps",
+              kinds == {"mesh", "normal", "ao", "curvature"}, str(kinds))
+    else:
+        check("handoff report written", False)
+
+    # The same run with the handoff piped on stdin.
+    stdin_report = handoff_dir / "stdin.json"
+    stdin_out = handoff_dir / "low_stdin.obj"
+    with handoff.open("rb") as f:
+        r = subprocess.run([str(BINARY), "--target", "-", "--output", str(stdin_out),
+                            "--target-quads", "120", "--report", str(stdin_report), "--quiet"],
+                           stdin=f, capture_output=True, text=True, timeout=300)
+    check("stdin handoff exit 0", r.returncode == 0, r.stderr)
+    check("stdin handoff wrote the low-poly", stdin_out.exists())
+    if stdin_report.exists():
+        block = json.loads(stdin_report.read_text()).get("handoff", {})
+        check("stdin report names <stdin> as the source",
+              block.get("source") == "<stdin>", str(block.get("source")))
+        check("stdin report carries the handoff version",
+              block.get("version", {}) == {"major": 1, "minor": 0}, str(block))
+
+    # --target and --input name the same slot: taking both is exit 2.
+    r = run("--input", str(sphere), "--target", str(handoff),
+            "--output", str(handoff_dir / "never.obj"), "--quiet")
+    check("--target with --input is exit 2", r.returncode == 2, str(r.returncode))
+
+    # An unsupported handoff version is exit 3, names both versions, writes
+    # nothing.
+    future = handoff_dir / "future.ply"
+    future.write_text(handoff_ply(2, 0))
+    future_out = handoff_dir / "future.obj"
+    r = run("--target", str(future), "--output", str(future_out), "--quiet")
+    check("future handoff is exit 3", r.returncode == 3, str(r.returncode))
+    check("future handoff names both versions",
+          "2.0" in r.stderr and "1.0" in r.stderr, r.stderr)
+    check("future handoff wrote no output", not future_out.exists())
+
+    # A PLY without the handoff comment is not a handoff (exit 3).
+    plain = handoff_dir / "plain.ply"
+    plain.write_text(handoff_ply(1, 0).replace("comment cyber_sculpt_handoff 1 0\n", ""))
+    r = run("--target", str(plain), "--output", str(handoff_dir / "plain.obj"), "--quiet")
+    check("a plain PLY is not a handoff", r.returncode == 3, str(r.returncode))
+
+    # An unknown --bake map is an argument error naming the offender.
+    r = run("--target", str(handoff), "--output", str(handoff_dir / "bad.obj"),
+            "--bake", "normal,glitter", "--quiet")
+    check("unknown --bake map is exit 2", r.returncode == 2, str(r.returncode))
+    check("unknown --bake map is named", "glitter" in r.stderr, r.stderr)
 
     print(f"\n{len(FAILURES)} failure(s)")
     return 1 if FAILURES else 0

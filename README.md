@@ -126,6 +126,50 @@ texel count, so the default 2048² map set takes minutes on a desktop CPU. Use
 `--texture-size` (and `--ao-samples`) to trade resolution for time; parallelising
 the bake's texel loop is the open follow-up.
 
+## Sculpt handoff bridge
+
+The pipeline story is `sculpt -> retopo -> UV -> bake` in one place. This engine
+owns the second half, and takes the first half's output through a **versioned
+interchange** rather than a library dependency: there is **no build or link
+dependency on any sculpting or volumetric engine**, and there never will be —
+the format and the evaluator interface are the only coupling points.
+
+```sh
+# One command: sculpt handoff in, low-poly plus maps out.
+cyberremesh --target sculpt.ply --output low.obj \
+            --preset blender --bake normal,ao,curvature --report run.json
+
+# Or straight off a producer's stdout.
+producer --for-retopo | cyberremesh --target - --output low.obj --preset blender
+```
+
+`run.json` gains a `handoff` block recording the declared version, the producer
+label, and which optional payloads (vertex colors, normals, material mix) were
+present. A handoff declaring a version this engine does not support is **exit 3
+naming both versions**, and writes nothing — a newer minor is refused rather
+than read with the unknown parts dropped.
+
+The format — a PLY profile carrying positions, normals, vertex colors and a
+`material_mix` weight, plus a GLB profile and an in-memory buffer profile — is
+specified in [`docs/sculpt-handoff-format.md`](docs/sculpt-handoff-format.md).
+`examples/18_sculpt_handoff.py` is a working synthetic producer end to end.
+
+Two more pieces ride on the same "no hard dependency" rule:
+
+- **Field-sampled baking.** `cyber::bake::FieldEvaluator` is a pure-abstract
+  interface (signed distance, gradient, occlusion, curvature). Attach one to a
+  bake and normal/AO/curvature/cavity sample the field directly — the cage ray
+  is sphere-traced through it and normals come from exact gradients instead of
+  interpolated mesh normals, with no Target mesh needed at all. Without one,
+  baking takes the raycast path with **bit-identical** output. Reachable from
+  C++ (`BakeParams::field`), the C ABI (`cyber_bake_field`) and Python
+  (`cyberremesh.FieldEvaluator` + `bake_field`).
+- **Conform.** When the sculpt changes after retopology has started,
+  `cyber::retopo::conform` (`cyber_conform`, `cyberremesh.conform`) re-snaps the
+  EditMesh onto the new Target preserving its topology exactly, and reports the
+  **maximum and RMS deviation** plus any vertices past a caller-set threshold.
+  It completes and flags rather than silently stretching.
+
 ## How it works
 
 Two algorithms carry the project: the quad retopology pipeline (triangles in, an
@@ -239,6 +283,7 @@ src/app/         document model, tools, undo (toolkit-free)
 src/render/      viewport renderer (Metal | Vulkan)
 src/accel/       compute backends: cpu | metal | cuda | opencl
 src/core/        mesh kernel, io, remeshing pipeline, uv, bake
+src/handoff/     versioned sculpt-handoff ingest (pipeline bridge)
 tests/           unit + property + golden regression tests
 thirdparty/      vendored permissive dependencies (manifest.json)
 ```

@@ -23,11 +23,13 @@
 #include <vector>
 
 #include "cyber/bake/bake.hpp"
+#include "cyber/bake/field_evaluator.hpp"
 #include "cyber/core/io.hpp"
 #include "cyber/core/mesh.hpp"
 #include "cyber/core/pipeline.hpp"
 #include "cyber/core/progress.hpp"
 #include "cyber/core/remesh_params.hpp"
+#include "cyber/handoff/handoff.hpp"
 #include "cyber/imageio/image.hpp"
 #include "cyber/quadrangulate/field_quadrangulator.hpp"
 #include "cyber/quadrangulate/position_field.hpp"
@@ -36,6 +38,7 @@
 #include "cyber/retopo/boundary.hpp"
 #include "cyber/retopo/build_tools.hpp"
 #include "cyber/retopo/commands.hpp"
+#include "cyber/retopo/conform.hpp"
 #include "cyber/retopo/dissolve.hpp"
 #include "cyber/retopo/erase.hpp"
 #include "cyber/retopo/loop_metrics.hpp"
@@ -191,6 +194,8 @@ const char* cyber_status_string(CyberStatus status) {
             return "runtime error";
         case CYBER_ERR_CANCELLED:
             return "cancelled";
+        case CYBER_ERR_INCOMPATIBLE_VERSION:
+            return "incompatible version";
     }
     return "unknown status";
 }
@@ -3328,4 +3333,254 @@ void cyber_seam_path_drop_resume_marker([[maybe_unused]] CyberSeamPath* path) {
         path->path.dropResumeMarker();
     }
 #endif
+}
+
+/* ---- sculpt handoff bridge (pipeline-bridge) -------------------------- */
+
+namespace {
+
+// Handoff producer labels are returned as `const char*` in CyberHandoffInfo,
+// so they live in a thread-local slot with the same lifetime contract as
+// cyber_last_error(): valid until the next capi call on this thread.
+std::string& producerSlot() {
+    thread_local std::string slot;
+    return slot;
+}
+
+CyberStatus statusFromIoError(const cyber::io::Error& error) {
+    switch (error.code) {
+        case cyber::io::ErrorCode::IncompatibleVersion:
+            return CYBER_ERR_INCOMPATIBLE_VERSION;
+        case cyber::io::ErrorCode::FileNotFound:
+        case cyber::io::ErrorCode::WriteFailed:
+            return CYBER_ERR_IO;
+        case cyber::io::ErrorCode::EmptyMesh:
+            return CYBER_ERR_EMPTY;
+        default:
+            return CYBER_ERR_RUNTIME;
+    }
+}
+
+// Shared tail of both handoff entry points: publish the mesh and the info.
+CyberStatus finishHandoff(cyber::handoff::Handoff& handoff, CyberMesh** out,
+                          CyberHandoffInfo* info) {
+    // Payload flags are read BEFORE the mesh moves out of the handoff — they
+    // are queries on `handoff.mesh`, and a moved-from mesh answers all of them
+    // "absent".
+    const bool colors = handoff.hasVertexColors();
+    const bool normals = handoff.hasVertexNormals();
+    const bool mix = handoff.hasMaterialMix();
+
+    auto handle = std::make_unique<CyberMesh>();
+    handle->mesh = std::move(handoff.mesh);
+    producerSlot() = handoff.producer;
+    if (info != nullptr) {
+        info->versionMajor = handoff.version.major;
+        info->versionMinor = handoff.version.minor;
+        info->producer = producerSlot().c_str();
+        info->vertexCount = handle->mesh.vertexCount();
+        info->faceCount = handle->mesh.faceCount();
+        info->hasVertexColors = colors ? 1 : 0;
+        info->hasVertexNormals = normals ? 1 : 0;
+        info->hasMaterialMix = mix ? 1 : 0;
+    }
+    clearError();
+    *out = handle.release();
+    return CYBER_OK;
+}
+
+// Adapts the C callback triple onto the C++ evaluator interface. Owns nothing:
+// the caller's struct outlives the bake call.
+class CallbackField final : public cyber::bake::FieldEvaluator {
+public:
+    explicit CallbackField(const CyberFieldEvaluator& c) : m_c(c) {}
+
+    [[nodiscard]] float distance(cyber::Vec3 p) const override {
+        const float xyz[3] = {p.x, p.y, p.z};
+        return m_c.distance(m_c.user, xyz);
+    }
+    [[nodiscard]] cyber::Vec3 gradient(cyber::Vec3 p) const override {
+        const float xyz[3] = {p.x, p.y, p.z};
+        float g[3] = {0.0f, 0.0f, 1.0f};
+        m_c.gradient(m_c.user, xyz, g);
+        return cyber::Vec3{g[0], g[1], g[2]};
+    }
+    [[nodiscard]] float occlusion(cyber::Vec3 p, cyber::Vec3 n, float radius) const override {
+        const float xyz[3] = {p.x, p.y, p.z};
+        const float nrm[3] = {n.x, n.y, n.z};
+        return m_c.occlusion(m_c.user, xyz, nrm, radius);
+    }
+
+private:
+    CyberFieldEvaluator m_c;
+};
+
+bool fieldCanServe(CyberBakeMap map) {
+    return map == CYBER_BAKE_NORMAL || map == CYBER_BAKE_AO || map == CYBER_BAKE_CURVATURE ||
+           map == CYBER_BAKE_CAVITY;
+}
+
+}  // namespace
+
+CyberStatus cyber_handoff_open(const char* path, CyberMesh** out, CyberHandoffInfo* info) {
+    if (path == nullptr || out == nullptr) {
+        setError("cyber_handoff_open: null argument");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    *out = nullptr;
+    try {
+        auto result = cyber::handoff::readFile(path);
+        if (!result.ok()) {
+            setError(result.error().message);
+            return statusFromIoError(result.error());
+        }
+        return finishHandoff(result.value(), out, info);
+    } catch (const std::exception& e) {
+        setError(std::string("cyber_handoff_open: ") + e.what());
+        return CYBER_ERR_RUNTIME;
+    } catch (...) {
+        setError("cyber_handoff_open: unknown error");
+        return CYBER_ERR_RUNTIME;
+    }
+}
+
+CyberStatus cyber_handoff_open_buffers(const CyberHandoffBuffers* buffers, CyberMesh** out,
+                                       CyberHandoffInfo* info) {
+    if (buffers == nullptr || out == nullptr) {
+        setError("cyber_handoff_open_buffers: null argument");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    *out = nullptr;
+    try {
+        cyber::handoff::BufferView view;
+        view.positions = buffers->positions;
+        view.normals = buffers->normals;
+        view.colors = buffers->colors;
+        view.materialMix = buffers->material_mix;
+        view.vertexCount = buffers->vertex_count;
+        view.indices = buffers->indices;
+        view.indexCount = buffers->index_count;
+        view.version = cyber::handoff::Version{buffers->version_major, buffers->version_minor};
+        view.producer = buffers->producer;
+        auto result = cyber::handoff::readBuffers(view);
+        if (!result.ok()) {
+            setError(result.error().message);
+            return statusFromIoError(result.error());
+        }
+        return finishHandoff(result.value(), out, info);
+    } catch (const std::exception& e) {
+        setError(std::string("cyber_handoff_open_buffers: ") + e.what());
+        return CYBER_ERR_RUNTIME;
+    } catch (...) {
+        setError("cyber_handoff_open_buffers: unknown error");
+        return CYBER_ERR_RUNTIME;
+    }
+}
+
+CyberStatus cyber_bake_field(const CyberMesh* low, const CyberMesh* high, CyberBakeMap map,
+                             const CyberBakeParams* params, const CyberFieldEvaluator* field,
+                             CyberImage** out) {
+    if (low == nullptr || out == nullptr || field == nullptr || field->distance == nullptr ||
+        field->gradient == nullptr || field->occlusion == nullptr) {
+        setError("cyber_bake_field: null argument");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    if (high == nullptr && !fieldCanServe(map)) {
+        setError(
+            "cyber_bake_field: this map needs a Target mesh (only normal, ao, curvature "
+            "and cavity can be answered by a field alone)");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    try {
+        const CallbackField adapter(*field);
+        cyber::bake::BakeParams p;
+        if (params != nullptr) {
+            p.width = params->width;
+            p.height = params->height;
+            p.cageDistance = params->cageDistance;
+            p.aoSamples = params->aoSamples;
+            p.aoRadius = params->aoRadius;
+            p.curvatureRange = params->curvatureRange;
+        }
+        p.field = &adapter;
+        cyber::bake::BakeMap m{};
+        switch (map) {
+            case CYBER_BAKE_NORMAL:
+                m = cyber::bake::BakeMap::Normal;
+                break;
+            case CYBER_BAKE_AO:
+                m = cyber::bake::BakeMap::AmbientOcclusion;
+                break;
+            case CYBER_BAKE_DISPLACEMENT:
+                m = cyber::bake::BakeMap::Displacement;
+                break;
+            case CYBER_BAKE_POSITION:
+                m = cyber::bake::BakeMap::Position;
+                break;
+            case CYBER_BAKE_COLOR:
+                m = cyber::bake::BakeMap::Color;
+                break;
+            case CYBER_BAKE_CURVATURE:
+                m = cyber::bake::BakeMap::Curvature;
+                break;
+            case CYBER_BAKE_CAVITY:
+                m = cyber::bake::BakeMap::Cavity;
+                break;
+            default:
+                setError("cyber_bake_field: unknown map type");
+                return CYBER_ERR_INVALID_ARG;
+        }
+        const cyber::Mesh empty;
+        cyber::bake::BakeResult result =
+            cyber::bake::bake(low->mesh, high == nullptr ? empty : high->mesh, m, p);
+        if (result.image.pixels.empty()) {
+            setError("cyber_bake_field: empty result (the low-poly needs UVs)");
+            return CYBER_ERR_EMPTY;
+        }
+        auto handle = std::make_unique<CyberImage>();
+        handle->image = std::move(result.image);
+        clearError();
+        *out = handle.release();
+        return CYBER_OK;
+    } catch (const std::exception& e) {
+        setError(std::string("cyber_bake_field: ") + e.what());
+        return CYBER_ERR_RUNTIME;
+    } catch (...) {
+        setError("cyber_bake_field: unknown error");
+        return CYBER_ERR_RUNTIME;
+    }
+}
+
+CyberStatus cyber_conform(CyberMesh* edit, const CyberMesh* new_target, float threshold,
+                          CyberConformReport* report, uint32_t* out_flagged, size_t max_flagged) {
+    if (edit == nullptr || new_target == nullptr) {
+        setError("cyber_conform: null argument");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    try {
+        const cyber::retopo::SurfaceSnapper snapper(new_target->mesh);
+        if (snapper.empty()) {
+            setError("cyber_conform: the new Target has no faces");
+            return CYBER_ERR_EMPTY;
+        }
+        cyber::retopo::ConformParams params;
+        params.deviationThreshold = threshold;
+        const cyber::retopo::ConformReport result =
+            cyber::retopo::conform(edit->mesh, snapper, params);
+        if (report != nullptr) {
+            report->movedVertices = result.movedVertices;
+            report->maxDeviation = result.maxDeviation;
+            report->rmsDeviation = result.rmsDeviation;
+            report->flaggedCount = result.flagged.size();
+        }
+        copyVertexIds(result.flagged, out_flagged, max_flagged);
+        clearError();
+        return CYBER_OK;
+    } catch (const std::exception& e) {
+        setError(std::string("cyber_conform: ") + e.what());
+        return CYBER_ERR_RUNTIME;
+    } catch (...) {
+        setError("cyber_conform: unknown error");
+        return CYBER_ERR_RUNTIME;
+    }
 }

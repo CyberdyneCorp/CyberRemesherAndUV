@@ -45,6 +45,7 @@ STATUS_INVALID_PARAM = 3
 STATUS_EMPTY = 4
 STATUS_RUNTIME = 5
 STATUS_CANCELLED = 6
+STATUS_INCOMPATIBLE_VERSION = 7
 STATUS_ERROR = STATUS_RUNTIME  # generic-failure alias used by the wrapper
 
 _STATUS_NAMES = {
@@ -55,6 +56,7 @@ _STATUS_NAMES = {
     STATUS_EMPTY: "EMPTY",
     STATUS_RUNTIME: "RUNTIME",
     STATUS_CANCELLED: "CANCELLED",
+    STATUS_INCOMPATIBLE_VERSION: "INCOMPATIBLE_VERSION",
 }
 
 # cyber_small_patch_policy enum — mirrors cyber::remesh::SmallPatchPolicy.
@@ -202,6 +204,57 @@ class CyberBakeParams(Structure):
     ]
 
 
+# -- sculpt handoff bridge (pipeline-bridge) --------------------------------
+
+# Handoff version this binding supports; must match CYBER_HANDOFF_VERSION_* in
+# capi/include/cyber_capi.h.
+HANDOFF_VERSION_MAJOR = 1
+HANDOFF_VERSION_MINOR = 0
+
+
+class CyberHandoffInfo(Structure):
+    """Mirror of ``CyberHandoffInfo`` in capi/include/cyber_capi.h."""
+
+    _fields_ = [
+        ("version_major", c_int32),
+        ("version_minor", c_int32),
+        ("producer", c_char_p),
+        ("vertex_count", c_size_t),
+        ("face_count", c_size_t),
+        ("has_vertex_colors", c_int32),
+        ("has_vertex_normals", c_int32),
+        ("has_material_mix", c_int32),
+    ]
+
+
+class CyberHandoffBuffers(Structure):
+    """Mirror of ``CyberHandoffBuffers`` — the in-memory handoff profile."""
+
+    _fields_ = [
+        ("positions", POINTER(c_float)),
+        ("normals", POINTER(c_float)),
+        ("colors", POINTER(c_float)),
+        ("material_mix", POINTER(c_float)),
+        ("vertex_count", c_size_t),
+        ("indices", POINTER(c_uint32)),
+        ("index_count", c_size_t),
+        ("version_major", c_int32),
+        ("version_minor", c_int32),
+        ("producer", c_char_p),
+    ]
+
+
+class CyberConformReport(Structure):
+    """Mirror of ``CyberConformReport``."""
+
+    _fields_ = [
+        ("moved_vertices", c_size_t),
+        ("max_deviation", c_float),
+        ("rms_deviation", c_float),
+        ("flagged_count", c_size_t),
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Callback trampolines
 # ---------------------------------------------------------------------------
@@ -212,6 +265,24 @@ PROGRESS_CB = CFUNCTYPE(None, c_float, c_char_p, c_void_p)
 CANCEL_CB = CFUNCTYPE(c_int32, c_void_p)
 # void (*)(const char* message, void* user) — the guidance "loud" channel.
 WARNING_CB = CFUNCTYPE(None, c_char_p, c_void_p)
+
+# Field evaluator callbacks (CyberFieldEvaluator). Every instance MUST be kept
+# alive by the Python side for as long as the bake runs: ctypes does not own
+# the trampolines, and a collected one is a segfault.
+FIELD_DISTANCE_CB = CFUNCTYPE(c_float, c_void_p, POINTER(c_float))
+FIELD_GRADIENT_CB = CFUNCTYPE(None, c_void_p, POINTER(c_float), POINTER(c_float))
+FIELD_OCCLUSION_CB = CFUNCTYPE(c_float, c_void_p, POINTER(c_float), POINTER(c_float), c_float)
+
+
+class CyberFieldEvaluator(Structure):
+    """Mirror of ``CyberFieldEvaluator`` in capi/include/cyber_capi.h."""
+
+    _fields_ = [
+        ("distance", FIELD_DISTANCE_CB),
+        ("gradient", FIELD_GRADIENT_CB),
+        ("occlusion", FIELD_OCCLUSION_CB),
+        ("user", c_void_p),
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -560,6 +631,40 @@ def _declare(lib: ctypes.CDLL) -> None:
 
     _declare_soft_selection(lib)
     _declare_seam_path(lib)
+    _declare_bridge(lib)
+
+
+def _declare_bridge(lib: ctypes.CDLL) -> None:
+    """Sculpt handoff ingest, field-sampled baking and conform."""
+    # CyberStatus cyber_handoff_open(const char*, CyberMesh**, CyberHandoffInfo*)
+    lib.cyber_handoff_open.argtypes = [c_char_p, POINTER(c_void_p), POINTER(CyberHandoffInfo)]
+    lib.cyber_handoff_open.restype = c_int32
+    lib.cyber_handoff_open_buffers.argtypes = [
+        POINTER(CyberHandoffBuffers),
+        POINTER(c_void_p),
+        POINTER(CyberHandoffInfo),
+    ]
+    lib.cyber_handoff_open_buffers.restype = c_int32
+    # CyberStatus cyber_bake_field(low, high, map, params, field, out)
+    lib.cyber_bake_field.argtypes = [
+        c_void_p,
+        c_void_p,
+        c_int32,
+        POINTER(CyberBakeParams),
+        POINTER(CyberFieldEvaluator),
+        POINTER(c_void_p),
+    ]
+    lib.cyber_bake_field.restype = c_int32
+    # CyberStatus cyber_conform(edit, new_target, threshold, report, out_flagged, max)
+    lib.cyber_conform.argtypes = [
+        c_void_p,
+        c_void_p,
+        c_float,
+        POINTER(CyberConformReport),
+        POINTER(c_uint32),
+        c_size_t,
+    ]
+    lib.cyber_conform.restype = c_int32
 
 
 # ---------------------------------------------------------------------------
