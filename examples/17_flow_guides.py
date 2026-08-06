@@ -27,6 +27,7 @@ sys.path.insert(0, os.path.join(_REPO, "python", "cyberremesh"))
 from cyberremesh import FlowGuide, Mesh, RemeshParams, remesh  # noqa: E402
 
 MODELS = os.path.join(_REPO, "examples", "models")
+OUTPUT = os.path.join(_REPO, "examples", "output")
 
 
 def load_obj(path):
@@ -164,6 +165,43 @@ def run_model(name, quads, axis, other, radius_fraction):
     return dev_g
 
 
+def render_comparison(name, quads, axis, other, radius_fraction, out_path):
+    """Unguided vs guided quad layout for one model, with the stroke drawn on.
+
+    The numbers below are the gate; this is the picture that says whether the
+    loops actually turned to follow the stroke, which a mean angle cannot show.
+    Rendering is optional — the measurement runs without matplotlib.
+    """
+    try:
+        import common as c
+    except Exception as exc:  # pragma: no cover - matplotlib/numpy absent
+        print(f"  (no render: {exc})")
+        return
+    path = os.path.join(MODELS, name)
+    if not os.path.exists(path):
+        return
+    positions, _ = load_obj(path)
+    guide = sample_guide_on_surface(positions, axis, other, 12, radius_fraction)
+    params = RemeshParams(target_quad_count=quads, adaptivity=0.0)
+    tmp = tempfile.mkdtemp()
+    with Mesh.load_obj(path) as source:
+        remesh(source, params).save_obj(os.path.join(tmp, "u.obj"))
+        remesh(source, params, guides=[guide]).save_obj(os.path.join(tmp, "g.obj"))
+    meshes = [c.load_obj(os.path.join(tmp, "u.obj")), c.load_obj(os.path.join(tmp, "g.obj"))]
+    devs = []
+    for mesh in meshes:
+        points = [tuple(row) for row in mesh["positions"]]
+        devs.append(mean_in_radius_deviation(points, mesh["faces"], guide)[0])
+    dev_u, dev_g = devs
+    c.render_panels(
+        meshes,
+        [f"unguided — {dev_u:.1f}° mean deviation", f"guided — {dev_g:.1f}° mean deviation"],
+        out_path,
+        suptitle=f"Flow guides on {name} — one stroke, radius {radius_fraction:.2f} x bbox diagonal",
+    )
+    print(f"  wrote {out_path}")
+
+
 def main() -> int:
     print("Flow-guide exit gate: mean in-radius deviation in degrees, folded mod 90.")
     print("Random field = 22.5; proposal target <= 15.\n")
@@ -181,6 +219,9 @@ def main() -> int:
         print(f"mean guided deviation {mean:.2f} deg, worst {worst:.2f} deg over "
               f"{len(measured)} runs")
         print("EXIT GATE (<= 15 deg on every run):", "MET" if worst <= 15.0 else "NOT MET")
+    print()
+    render_comparison("spot.obj", 2000, 0, 2, 0.12,
+                      os.path.join(OUTPUT, "17_flow_guides.png"))
     return 0
 
 
