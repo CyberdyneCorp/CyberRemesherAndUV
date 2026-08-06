@@ -7,6 +7,35 @@
 
 ### Added
 
+- **Global integer quantization for the seamless solve** (openspec change
+  `bimdf-quantization`, now archived). The quad-cover path's per-seam greedy
+  integer rounding gains an alternative backend: a motorcycle-graph / T-mesh
+  decomposition of the seamless parameterization solved as a min-deviation flow
+  over a bi-directed graph, after Heistermann et al. 2023. GPL discipline —
+  derived from the papers alone; no quadwild/libsatsuma code was read or
+  vendored.
+
+  Ships **opt-in and off by default**, behind `CYBER_QC_BIMDF`:
+  `report` runs it in A/B mode without injecting, `guided` steers the greedy
+  schedule by attracting its re-solves toward a Bi-MDF solve, `force` injects
+  directly. With the flag off the output is byte-exact against the previous
+  binary.
+
+  Where `guided` engages it is a real win: stanford-bunny@3000 singularities
+  135 → 94 with ear irregulars 37 → 19 (beating QuadriFlow's 20), and spot@3000
+  pure flow-loop length 762.9 → 1274. **The default was not flipped**, and the
+  campaign's own gates were not met: nefertiti@4000 pure singularities reach 411
+  against a ≤200 gate. The remaining wall is now quarter-density fold damage
+  (1297 cones, 110 degraded nodes), not the tracer or the quantizer — the
+  self-spiralling-separatrix tracer wall and the whole-T-mesh refusal were both
+  fixed along the way, so every corpus mesh now builds and solves a T-mesh.
+
+  Two design directions were measured and **falsified**, and are recorded so
+  they are not retried: coordinate-wise floor/ceil steering (lost on every
+  scoring variant) and parity-aware quantization (the parity classes are a
+  coupled GF(2) system beyond the graphic T-join, and exact flow realization
+  hurts precisely where injection is blocked).
+
 - **Curvature and cavity map baking** (openspec change `add-curvature-bake`),
   the missing quarter of the standard pre-texture recipe (curvature +
   occlusion + normal). `BakeMap::Curvature` encodes the Target's signed mean
