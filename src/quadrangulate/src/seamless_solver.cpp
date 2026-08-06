@@ -2592,7 +2592,9 @@ int solveSeamlessReduced(accel::IBackend& backend, std::size_t nCut,
             computeZ();
             std::size_t foldsBefore = 0;
             for (std::size_t f = 0; f < foldCtx->faceCut.size(); ++f) {
-                foldsBefore += uvSignedArea(*foldCtx, f, z.data(), z.data() + nCut) < 0.0 ? 1 : 0;
+                if (uvSignedArea(*foldCtx, f, z.data(), z.data() + nCut) < 0.0) {
+                    ++foldsBefore;
+                }
             }
             const bool damaged = foldsBefore * 100 > foldCtx->faceCut.size();
             if (untMode != "auto" || damaged) {
