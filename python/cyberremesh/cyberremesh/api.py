@@ -50,6 +50,12 @@ __all__ = [
     "bake_field",
     "ConformReport",
     "conform",
+    "builtin_presets",
+    "ExportPreset",
+    "PresetMapEntry",
+    "BundleFile",
+    "BundleResult",
+    "write_bundle",
 ]
 
 
@@ -213,14 +219,21 @@ class AtlasParams:
 class AtlasResult:
     """Aggregate atlas quality/packing report (mirror of ``CyberAtlasResult``)."""
 
+    #: Charts that occupy area in the packed atlas.
     chart_count: int = 0
     seam_edges: int = 0
     max_angle_distortion: float = 0.0
     rms_angle_distortion: float = 0.0
     flipped_charts: int = 0
     fallback_charts: int = 0
+    #: Fraction of the unit square the chart geometry covers (texel efficiency).
     packed_area: float = 0.0
     texel_density: float = 0.0
+    #: Degenerate islands that cover nothing; ``chart_count + dropped_charts``
+    #: is the number of islands the seams cut the mesh into.
+    dropped_charts: int = 0
+    #: Fraction covered by the charts' bounding boxes (packer tightness).
+    packed_box_area: float = 0.0
 
     @classmethod
     def _from_c(cls, c: "_ffi.CyberAtlasResult") -> "AtlasResult":
@@ -233,6 +246,8 @@ class AtlasResult:
             fallback_charts=int(c.fallback_charts),
             packed_area=float(c.packed_area),
             texel_density=float(c.texel_density),
+            dropped_charts=int(c.dropped_charts),
+            packed_box_area=float(c.packed_box_area),
         )
 
 
@@ -247,10 +262,25 @@ class Falloff:
 
 @dataclass(frozen=True)
 class SoftTransformReport:
-    """Outcome of a weighted transform/relax."""
+    """Outcome of a weighted transform/relax.
 
+    Both counts are DISTINCT VERTICES, never per-iteration writes:
+    :attr:`moved` never exceeds the mesh's vertex count even for a
+    multi-iteration :meth:`Mesh.relax_selection` that revisits each of them
+    every sweep, and :attr:`resnapped` never exceeds :attr:`moved`.
+    """
+
+    #: Distinct vertices the op wrote (weight > 0 and not pinned).
     moved: int
+    #: Distinct moved vertices the Target re-projection pulled back strictly
+    #: further than ``resnap_epsilon``. With the default epsilon of 0 a vertex
+    #: the projection did not have to correct at all (correction exactly 0 —
+    #: it already sat on the Target, which is what happens when the weight is
+    #: so small that the blended target is bit-identical to the current
+    #: position) is not counted, so ``moved - resnapped`` is the number of
+    #: vertices that were already on-surface.
     resnapped: int
+    #: Largest counted correction.
     max_snap_distance: float
 
     @classmethod
@@ -307,6 +337,38 @@ def _vec3(v: Sequence[float]) -> "ctypes.Array":
     return (ctypes.c_float * 3)(float(v[0]), float(v[1]), float(v[2]))
 
 
+def _float_buffer(values) -> "ctypes.Array":
+    """A packed ``c_float`` array from an ``(n, 3)`` or already-flat sequence."""
+    if HAVE_NUMPY:
+        flat = _np.ascontiguousarray(_np.asarray(values, dtype=_np.float32).reshape(-1))
+        buf = (ctypes.c_float * int(flat.size))()
+        ctypes.memmove(buf, flat.ctypes.data, int(flat.nbytes))
+        return buf
+    flat_list: List[float] = []
+    for item in values:
+        if isinstance(item, (int, float)):
+            flat_list.append(float(item))
+        else:
+            flat_list.extend(float(v) for v in item)
+    return (ctypes.c_float * len(flat_list))(*flat_list)
+
+
+def _uint32_buffer(values) -> "ctypes.Array":
+    """A packed ``c_uint32`` array from an ``(n, k)`` or already-flat sequence."""
+    if HAVE_NUMPY:
+        flat = _np.ascontiguousarray(_np.asarray(values, dtype=_np.uint32).reshape(-1))
+        buf = (ctypes.c_uint32 * int(flat.size))()
+        ctypes.memmove(buf, flat.ctypes.data, int(flat.nbytes))
+        return buf
+    flat_list: List[int] = []
+    for item in values:
+        if isinstance(item, int):
+            flat_list.append(item)
+        else:
+            flat_list.extend(int(v) for v in item)
+    return (ctypes.c_uint32 * len(flat_list))(*flat_list)
+
+
 def _read_ids(reader: Callable[[Optional["ctypes.Array"], int], int]) -> List[int]:
     """copy_positions convention: size query, then fill."""
     total = reader(None, 0)
@@ -322,13 +384,20 @@ class SeamCostParams:
     """Seam-routing cost multipliers (mirror of ``cyber::uv::SeamCostOptions``).
 
     Each field is a multiplier on an edge's length; lower means "prefer this
-    edge". Defaults bias the route toward feature-tagged and concave (valley)
-    edges so a routed seam follows the groove instead of the flat shortcut.
+    edge". Defaults bias the route toward feature-tagged and creased edges so a
+    routed seam follows the hard edge instead of the flat shortcut. Valleys
+    (``concave_weight``) and ridges (``convex_weight``) are tuned separately —
+    ``crease_degrees`` is compared against the dihedral's MAGNITUDE. The convex
+    default is much closer to neutral because a seam hides better in a valley:
+    a ridge is taken over flat ground but never pulls the route off a valley
+    that is available. Lower it toward ``concave_weight`` for aggressive
+    ridge-following on convex-creased CAD parts.
     """
 
     flat_weight: float = 1.0
     feature_weight: float = 0.25
     concave_weight: float = 0.35
+    convex_weight: float = 0.8
     crease_degrees: float = 20.0
     min_weight: float = 1e-3
 
@@ -337,6 +406,7 @@ class SeamCostParams:
             flat_weight=float(self.flat_weight),
             feature_weight=float(self.feature_weight),
             concave_weight=float(self.concave_weight),
+            convex_weight=float(self.convex_weight),
             crease_degrees=float(self.crease_degrees),
             min_weight=float(self.min_weight),
         )
@@ -350,6 +420,7 @@ class SeamCostParams:
             flat_weight=float(c.flat_weight),
             feature_weight=float(c.feature_weight),
             concave_weight=float(c.concave_weight),
+            convex_weight=float(c.convex_weight),
             crease_degrees=float(c.crease_degrees),
             min_weight=float(c.min_weight),
         )
@@ -580,6 +651,27 @@ class Mesh:
     def __exit__(self, *_exc) -> None:
         self.close()
 
+    def copy(self) -> "Mesh":
+        """An independent in-memory duplicate of this mesh.
+
+        Exact and lossless — unlike a :meth:`save_obj` / :meth:`load_obj` round
+        trip, which narrows to the OBJ text precision and so reports spurious
+        vertex movement in a before/after comparison. The copy carries the
+        whole handle: geometry, statistics, the hidden-face and tagged-edge
+        overlays, the soft-selection weight field and its saved slots. Element
+        ids are preserved, so ids collected against this mesh still address the
+        same elements in the copy.
+        """
+        out = ctypes.c_void_p()
+        _check(_ffi.get_lib().cyber_mesh_clone(self.handle, ctypes.byref(out)))
+        copy = type(self)(handle=out.value)
+        copy._stats = self._stats
+        copy.guidance_warnings = list(self.guidance_warnings)
+        return copy
+
+    def __copy__(self) -> "Mesh":
+        return self.copy()
+
     # -- I/O ----------------------------------------------------------------
     @classmethod
     def load_obj(cls, path: str) -> "Mesh":
@@ -614,6 +706,82 @@ class Mesh:
         info = _ffi.CyberHandoffInfo()
         status = _ffi.get_lib().cyber_handoff_open(
             str(path).encode("utf-8"), ctypes.byref(out), ctypes.byref(info)
+        )
+        if status != _ffi.STATUS_OK:
+            _raise_status(status)
+        return cls(handle=out.value), HandoffInfo._from_c(info)
+
+    @classmethod
+    def load_handoff_buffers(
+        cls,
+        positions,
+        indices,
+        normals=None,
+        colors=None,
+        material_mix=None,
+        version: Optional[Tuple[int, int]] = None,
+        producer: str = "",
+    ) -> Tuple["Mesh", "HandoffInfo"]:
+        """Open an IN-MEMORY sculpt handoff as a Target — no intermediate file.
+
+        The second profile documented in ``docs/sculpt-handoff-format.md``:
+        plain arrays instead of a PLY. ``positions`` is ``(n, 3)`` (or flat)
+        and ``indices`` is ``(m, 3)`` (or flat) — triangles only. The optional
+        ``normals`` / ``colors`` (both ``(n, 3)``, colours in [0, 1]) and
+        ``material_mix`` (``(n,)``) carry the same payloads the file profile
+        does. ``version`` defaults to :data:`HANDOFF_VERSION`.
+
+        The version gate is the file profile's, so an in-process producer
+        cannot bypass it: an unsupported version raises
+        :class:`IncompatibleVersionError` naming both versions.
+        """
+        pos = _float_buffer(positions)
+        if len(pos) % 3 != 0:
+            raise ValueError("load_handoff_buffers: positions must be a multiple of 3 floats")
+        vertex_count = len(pos) // 3
+        idx = _uint32_buffer(indices)
+        if len(idx) % 3 != 0:
+            raise ValueError("load_handoff_buffers: indices must be a multiple of 3 (triangles)")
+
+        # The C struct carries pointers with an IMPLIED length, so a short
+        # optional array would be read past its end. Checked here, where the
+        # length is still known, rather than trusting the caller.
+        def optional(values, per_vertex: int, label: str):
+            if values is None:
+                return None
+            buf = _float_buffer(values)
+            if len(buf) != vertex_count * per_vertex:
+                raise ValueError(
+                    "load_handoff_buffers: {0} needs {1} floats for {2} vertices, got {3}".format(
+                        label, vertex_count * per_vertex, vertex_count, len(buf)
+                    )
+                )
+            return buf
+
+        nrm = optional(normals, 3, "normals")
+        col = optional(colors, 3, "colors")
+        mix = optional(material_mix, 1, "material_mix")
+
+        def as_float_ptr(buf):
+            return ctypes.cast(buf, ctypes.POINTER(ctypes.c_float)) if buf is not None else None
+
+        major, minor = HANDOFF_VERSION if version is None else version
+        buffers = _ffi.CyberHandoffBuffers()
+        buffers.positions = as_float_ptr(pos)
+        buffers.normals = as_float_ptr(nrm)
+        buffers.colors = as_float_ptr(col)
+        buffers.material_mix = as_float_ptr(mix)
+        buffers.vertex_count = vertex_count
+        buffers.indices = ctypes.cast(idx, ctypes.POINTER(ctypes.c_uint32))
+        buffers.index_count = len(idx)
+        buffers.version_major = int(major)
+        buffers.version_minor = int(minor)
+        buffers.producer = producer.encode("utf-8") if producer else None
+
+        out = ctypes.c_void_p()
+        info = _ffi.CyberHandoffInfo()
+        status = _ffi.get_lib().cyber_handoff_open_buffers(
+            ctypes.byref(buffers), ctypes.byref(out), ctypes.byref(info)
         )
         if status != _ffi.STATUS_OK:
             _raise_status(status)
@@ -838,6 +1006,32 @@ class Mesh:
         """Statistics from the run that produced this mesh, if any."""
         return self._stats
 
+    def edge_endpoints(self, edge: int) -> Optional[Tuple[int, int]]:
+        """The two vertex ids of a live edge, or ``None`` when it is not alive.
+
+        This is how an edge id becomes drawable geometry: the seam APIs
+        (:meth:`SeamSet.edges`, :meth:`SeamPath.edges`) hand back edge ids, and
+        pairing this with :meth:`vertex_position` resolves each one to a
+        segment — which is the only way to render a COMMITTED seam, since a
+        committed seam is a set of edge ids and nothing else.
+        """
+        buf = (ctypes.c_uint32 * 2)()
+        if _ffi.get_lib().cyber_mesh_edge_endpoints(self.handle, int(edge), buf) != 1:
+            return None
+        return int(buf[0]), int(buf[1])
+
+    def vertex_position(self, vertex: int) -> Optional[Tuple[float, float, float]]:
+        """Position of a live vertex BY ID, or ``None`` when it is not alive.
+
+        Prefer this over indexing :attr:`positions` with a vertex id: that
+        array is in compacted order, which only coincides with the stable ids
+        while no vertex has been removed.
+        """
+        buf = (ctypes.c_float * 3)()
+        if _ffi.get_lib().cyber_mesh_vertex_position(self.handle, int(vertex), buf) != 1:
+            return None
+        return float(buf[0]), float(buf[1]), float(buf[2])
+
     def _copy_positions(self) -> "ctypes.Array":
         lib = _ffi.get_lib()
         needed = int(lib.cyber_mesh_copy_positions(self.handle, None, 0))
@@ -846,6 +1040,26 @@ class Mesh:
             lib.cyber_mesh_copy_positions(self.handle, buf, needed)
         return buf
 
+    def set_positions(self, values) -> None:
+        """Write vertex positions back — the exact inverse of :attr:`positions`.
+
+        ``values`` is an ``(n, 3)`` array/sequence (or an already-flat xyz
+        sequence) in the same compacted order :attr:`positions` returns, and
+        must hold exactly ``vertex_count`` vertices; a mismatch raises rather
+        than silently pairing positions with the wrong vertices. Topology, ids
+        and every overlay are untouched, so this restores a snapshot taken from
+        :attr:`positions` as long as no vertex was added or removed in between.
+        """
+        buf = _float_buffer(values)
+        expected = self.vertex_count * 3
+        if len(buf) != expected:
+            raise ValueError(
+                "set_positions: expected {0} floats ({1} vertices), got {2}".format(
+                    expected, self.vertex_count, len(buf)
+                )
+            )
+        _check(_ffi.get_lib().cyber_mesh_set_positions(self.handle, buf, len(buf)))
+
     if HAVE_NUMPY:
 
         @property
@@ -853,11 +1067,16 @@ class Mesh:
             """Vertex positions as an ``(n, 3)`` float32 ndarray (a snapshot).
 
             The engine stores vertices in an index-addressed pool, so this is a
-            packed copy rather than a live view into engine memory.
+            packed copy rather than a live view into engine memory. Assigning
+            to it calls :meth:`set_positions`.
             """
             buf = self._copy_positions()
             arr = _np.frombuffer(buf, dtype=_np.float32).copy()
             return arr.reshape((-1, 3))
+
+        @positions.setter
+        def positions(self, values) -> None:
+            self.set_positions(values)
 
 
 @dataclass
@@ -1043,7 +1262,7 @@ class BakeParams:
     width: int = 512
     height: int = 512
     cage_distance: float = 0.1
-    ao_samples: int = 16
+    ao_samples: int = 64
     ao_radius: float = 1.0
     #: Curvature magnitude (1/length) saturating CURVATURE/CAVITY to full
     #: white/black. 0 = auto (95th percentile of |curvature| on the Target).
@@ -1322,3 +1541,317 @@ def conform(edit: "Mesh", new_target: "Mesh", threshold: float = 0.0) -> Conform
         rms_deviation=float(report.rms_deviation),
         flagged=flagged,
     )
+
+
+# ---------------------------------------------------------------------------
+# Named export presets (mesh-io)
+# ---------------------------------------------------------------------------
+
+
+def builtin_presets() -> List[str]:
+    """Names of the shipped built-in export presets, in help-text order."""
+    lib = _ffi.get_lib()
+    count = int(lib.cyber_export_preset_builtin_count())
+    names: List[str] = []
+    for i in range(count):
+        raw = lib.cyber_export_preset_builtin_name(i)
+        if raw:
+            names.append(raw.decode("utf-8", "replace"))
+    return names
+
+
+@dataclass(frozen=True)
+class PresetMapEntry:
+    """One map an export preset requests (mirror of ``CyberExportPresetMap``)."""
+
+    map: str
+    color_space: str
+    #: Token substituted for ``{map}`` in the preset's naming pattern.
+    suffix: str
+
+
+class ExportPreset:
+    """A resolved named export preset — what one target app expects.
+
+    A preset is pure DATA: which maps to bake, how to name the files, what
+    colour space and normal-map convention the app reads, which mesh container
+    to write. Resolve one with :meth:`resolve`, inspect it, optionally override
+    :attr:`resolution`, then hand it to :func:`write_bundle`.
+
+    Owns a C handle; use it as a context manager or call :meth:`close`.
+    """
+
+    __slots__ = ("_handle",)
+
+    def __init__(self, handle: int):
+        self._handle = handle
+
+    @classmethod
+    def resolve(cls, name_or_path: str) -> "ExportPreset":
+        """Resolve a built-in preset name, or a path to a preset JSON file.
+
+        A file declaring a schema version this engine does not support raises
+        :class:`IncompatibleVersionError` naming both versions — never a
+        partially honored preset. A name that is neither built in nor a
+        readable file raises :class:`CyberError` listing the built-ins.
+        """
+        out = ctypes.c_void_p()
+        status = _ffi.get_lib().cyber_export_preset_resolve(
+            str(name_or_path).encode("utf-8"), ctypes.byref(out)
+        )
+        if status != _ffi.STATUS_OK:
+            _raise_status(status)
+        return cls(handle=out.value)
+
+    @property
+    def handle(self) -> int:
+        if self._handle is None:
+            raise CyberError(_ffi.STATUS_ERROR, "preset has been closed")
+        return self._handle
+
+    def close(self) -> None:
+        if getattr(self, "_handle", None):
+            _ffi.get_lib().cyber_export_preset_free(self._handle)
+            self._handle = None
+
+    def __enter__(self) -> "ExportPreset":
+        return self
+
+    def __exit__(self, *_exc) -> None:
+        self.close()
+
+    def __del__(self):  # pragma: no cover - GC timing
+        try:
+            self.close()
+        except Exception:
+            pass
+
+    def _info(self) -> "_ffi.CyberExportPresetInfo":
+        info = _ffi.CyberExportPresetInfo()
+        _check(_ffi.get_lib().cyber_export_preset_info(self.handle, ctypes.byref(info)))
+        return info
+
+    @staticmethod
+    def _text(raw: Optional[bytes]) -> str:
+        return raw.decode("utf-8", "replace") if raw else ""
+
+    @property
+    def name(self) -> str:
+        return self._text(self._info().name)
+
+    @property
+    def schema_version(self) -> int:
+        return int(self._info().schema_version)
+
+    @property
+    def mesh_format(self) -> str:
+        """Mesh container extension without the dot: ``obj``, ``glb``, ..."""
+        return self._text(self._info().mesh_format)
+
+    @property
+    def texture_format(self) -> str:
+        """Texture container extension without the dot: ``png`` or ``exr``."""
+        return self._text(self._info().texture_format)
+
+    @property
+    def naming_pattern(self) -> str:
+        """Tokens: ``{basename}``, ``{map}``, ``{preset}``, ``{ext}``."""
+        return self._text(self._info().naming_pattern)
+
+    @property
+    def units(self) -> str:
+        return self._text(self._info().units)
+
+    @property
+    def up_axis(self) -> str:
+        return self._text(self._info().up_axis)
+
+    @property
+    def normal_green(self) -> str:
+        """``"+Y"`` (OpenGL — Blender, Unity, glTF) or ``"-Y"`` (DirectX — Unreal).
+
+        Not cosmetic: reading a map with the wrong convention inverts every
+        dent and bump in the shaded result.
+        """
+        return "+Y" if self._info().normal_green_plus_y else "-Y"
+
+    @property
+    def resolution(self) -> int:
+        """Texture resolution, in texels per side. Writable."""
+        return int(self._info().resolution)
+
+    @resolution.setter
+    def resolution(self, value: int) -> None:
+        _check(_ffi.get_lib().cyber_export_preset_set_resolution(self.handle, int(value)))
+
+    @property
+    def maps(self) -> List[PresetMapEntry]:
+        lib = _ffi.get_lib()
+        entries: List[PresetMapEntry] = []
+        for i in range(int(self._info().map_count)):
+            entry = _ffi.CyberExportPresetMap()
+            _check(lib.cyber_export_preset_map(self.handle, i, ctypes.byref(entry)))
+            entries.append(
+                PresetMapEntry(
+                    map=self._text(entry.map),
+                    color_space=self._text(entry.color_space),
+                    suffix=self._text(entry.suffix),
+                )
+            )
+        return entries
+
+    def map_file_name(self, index: int, basename: str) -> str:
+        """The file name map ``index`` produces for ``basename``.
+
+        Expanded by the engine, so the token rules never drift from what
+        :func:`write_bundle` actually writes.
+        """
+        raw = _ffi.get_lib().cyber_export_preset_map_file_name(
+            self.handle, int(index), str(basename).encode("utf-8")
+        )
+        if not raw:
+            raise CyberError(_ffi.STATUS_ERROR, "map index out of range")
+        return raw.decode("utf-8", "replace")
+
+    def __repr__(self) -> str:
+        return "ExportPreset(name={0!r}, mesh_format={1!r}, normal_green={2!r}, maps={3})".format(
+            self.name, self.mesh_format, self.normal_green, [m.map for m in self.maps]
+        )
+
+
+@dataclass(frozen=True)
+class BundleFile:
+    """One file :func:`write_bundle` wrote."""
+
+    path: str
+    #: ``"mesh"``, or the preset map name (``"normal"``, ``"ao"``, ...).
+    kind: str
+    #: Encoding actually written: ``"linear"`` or ``"srgb"``. Empty for the mesh.
+    color_space: str
+    width: int
+    height: int
+
+
+@dataclass(frozen=True)
+class BundleResult:
+    """What an export bundle produced."""
+
+    files: List[BundleFile]
+    #: Non-fatal notes — a preset/extension mismatch, a map the source could
+    #: not feed. Never silently dropped.
+    warnings: List[str]
+    #: True when the low-poly carried no UVs and the bundle unwrapped it; the
+    #: chart count and distortion below are that unwrap's.
+    unwrapped: bool
+    chart_count: int
+    max_angle_distortion: float
+
+    def file(self, kind: str) -> Optional[BundleFile]:
+        """The written file of one kind, or None when the bundle has none."""
+        for entry in self.files:
+            if entry.kind == kind:
+                return entry
+        return None
+
+
+def write_bundle(
+    low: "Mesh",
+    high: "Mesh",
+    preset: ExportPreset,
+    mesh_path: str,
+    basename: str = "",
+    cage_distance: Optional[float] = None,
+    ao_samples: Optional[int] = None,
+    ao_radius: Optional[float] = None,
+    progress: Optional[Callable[[float, str], None]] = None,
+    cancel: Optional[Callable[[], bool]] = None,
+) -> BundleResult:
+    """Write ``preset``'s export bundle: the mesh plus one baked map per entry.
+
+    ``low`` IS MODIFIED IN PLACE when it carries no UVs — baking is impossible
+    without them, and requiring a pre-unwrap would make presets useless on a
+    freshly remeshed mesh. Call ``low.copy()`` first to keep the original.
+    ``high`` is the projection source and is never modified.
+
+    ``mesh_path``'s extension wins over the preset's mesh format (an explicit
+    output path is the user speaking last); the mismatch comes back in
+    :attr:`BundleResult.warnings` rather than being silently resolved.
+    ``basename`` (default: the mesh path's stem) fills ``{basename}`` in the
+    preset's naming pattern.
+
+    ``progress`` / ``cancel`` behave exactly as in :func:`remesh`; cancelling
+    raises :class:`CyberError` with a CANCELLED status and leaves whatever
+    files were already written on disk.
+    """
+    lib = _ffi.get_lib()
+    params = _ffi.CyberBundleParams()
+    lib.cyber_default_bundle_params(ctypes.byref(params))
+    params.mesh_path = str(mesh_path).encode("utf-8")
+    params.basename = basename.encode("utf-8") if basename else None
+    if cage_distance is not None:
+        params.cage_distance = float(cage_distance)
+    if ao_samples is not None:
+        params.ao_samples = int(ao_samples)
+    if ao_radius is not None:
+        params.ao_radius = float(ao_radius)
+
+    def _progress_trampoline(fraction, stage_ptr, _user):
+        if progress is None:
+            return
+        try:
+            stage = stage_ptr.decode("utf-8", "replace") if stage_ptr else ""
+            progress(float(fraction), stage)
+        except Exception:
+            # Never let a Python exception cross back into C.
+            pass
+
+    def _cancel_trampoline(_user):
+        if cancel is None:
+            return 0
+        try:
+            return 1 if cancel() else 0
+        except Exception:
+            return 0
+
+    progress_cb = _ffi.PROGRESS_CB(_progress_trampoline)
+    cancel_cb = _ffi.CANCEL_CB(_cancel_trampoline)
+
+    out = ctypes.c_void_p()
+    _check(
+        lib.cyber_export_bundle_write(
+            low.handle,
+            high.handle,
+            preset.handle,
+            ctypes.byref(params),
+            progress_cb,
+            cancel_cb,
+            None,
+            ctypes.byref(out),
+        )
+    )
+    try:
+        files: List[BundleFile] = []
+        for i in range(int(lib.cyber_bundle_result_file_count(out))):
+            entry = _ffi.CyberBundleFile()
+            _check(lib.cyber_bundle_result_file(out, i, ctypes.byref(entry)))
+            files.append(
+                BundleFile(
+                    path=ExportPreset._text(entry.path),
+                    kind=ExportPreset._text(entry.kind),
+                    color_space=ExportPreset._text(entry.color_space),
+                    width=int(entry.width),
+                    height=int(entry.height),
+                )
+            )
+        messages: List[str] = []
+        for i in range(int(lib.cyber_bundle_result_warning_count(out))):
+            messages.append(ExportPreset._text(lib.cyber_bundle_result_warning(out, i)))
+        return BundleResult(
+            files=files,
+            warnings=messages,
+            unwrapped=bool(lib.cyber_bundle_result_unwrapped(out)),
+            chart_count=int(lib.cyber_bundle_result_chart_count(out)),
+            max_angle_distortion=float(lib.cyber_bundle_result_max_angle_distortion(out)),
+        )
+    finally:
+        lib.cyber_bundle_result_free(out)

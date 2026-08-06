@@ -24,6 +24,7 @@
 
 #include "cyber/bake/bake.hpp"
 #include "cyber/bake/field_evaluator.hpp"
+#include "cyber/core/export_preset.hpp"
 #include "cyber/core/io.hpp"
 #include "cyber/core/mesh.hpp"
 #include "cyber/core/pipeline.hpp"
@@ -58,6 +59,9 @@
 #include "cyber/uv/atlas.hpp"
 #include "cyber/uv/seam_path.hpp"
 #include "cyber/uv/seams.hpp"
+#endif
+#ifdef CYBER_CAPI_WITH_EXPORTBUNDLE
+#include "cyber/exportbundle/bundle.hpp"
 #endif
 
 // Version numbers are injected from the CMake project() version so this file
@@ -556,6 +560,8 @@ CyberStatus cyber_uv_atlas([[maybe_unused]] CyberMesh* mesh,
             out->fallbackCharts = r.fallbackCharts;
             out->packedArea = r.packedArea;
             out->texelDensity = r.texelDensity;
+            out->droppedCharts = r.droppedCharts;
+            out->packedBoxArea = r.packedBoxArea;
         }
         clearError();
         return r.ok ? CYBER_OK : CYBER_ERR_RUNTIME;
@@ -1375,6 +1381,65 @@ CyberStatus runMeshEdit(CyberMesh* mesh, const char* name, Body body) {
 }
 
 }  // namespace
+
+// ---- handle copy / position write-back -------------------------------------
+//
+// Declared next to cyber_mesh_copy_positions in the header but defined here:
+// cyber_mesh_set_positions is a mutating op and needs runMeshEdit's
+// render-cache invalidation, which is only in scope from this point on.
+
+CyberStatus cyber_mesh_clone(const CyberMesh* mesh, CyberMesh** out) {
+    if (mesh == nullptr || out == nullptr) {
+        setError("cyber_mesh_clone: null mesh or output");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    try {
+        // Copies every id-keyed field of the handle; `render` is deliberately
+        // left default so the copy rebuilds its own cache on first access.
+        auto copy = std::make_unique<CyberMesh>();
+        copy->mesh = mesh->mesh;
+        copy->stats = mesh->stats;
+        copy->hiddenFaces = mesh->hiddenFaces;
+        copy->taggedEdges = mesh->taggedEdges;
+        copy->selection = mesh->selection;
+        copy->selectionSlots = mesh->selectionSlots;
+        *out = copy.release();
+        clearError();
+        return CYBER_OK;
+    } catch (const std::exception& e) {
+        setError(std::string("cyber_mesh_clone: ") + e.what());
+        return CYBER_ERR_RUNTIME;
+    } catch (...) {
+        setError("cyber_mesh_clone: unknown error");
+        return CYBER_ERR_RUNTIME;
+    }
+}
+
+CyberStatus cyber_mesh_set_positions(CyberMesh* mesh, const float* positions, size_t float_count) {
+    return runMeshEdit(mesh, "cyber_mesh_set_positions", [&] {
+        if (positions == nullptr && float_count != 0) {
+            setError("cyber_mesh_set_positions: null positions");
+            return CYBER_ERR_INVALID_ARG;
+        }
+        if (float_count != mesh->mesh.vertexCount() * 3) {
+            setError("cyber_mesh_set_positions: expected 3 * vertex_count floats");
+            return CYBER_ERR_INVALID_ARG;
+        }
+        // Same traversal cyber_mesh_copy_positions exports (live vertices in
+        // id order), so index i here is the vertex row i read back from there.
+        size_t next = 0;
+        for (cyber::Index i = 0; i < mesh->mesh.vertexCapacity(); ++i) {
+            const cyber::VertexId v{i};
+            if (!mesh->mesh.isAlive(v)) {
+                continue;
+            }
+            mesh->mesh.setPosition(v, cyber::Vec3{positions[next * 3], positions[next * 3 + 1],
+                                                  positions[next * 3 + 2]});
+            ++next;
+        }
+        return CYBER_OK;
+    });
+}
 
 CyberStatus cyber_retopo_create_face(CyberMesh* mesh, const float* points_xyz, size_t point_count,
                                      const CyberSnapper* snapper, uint32_t* out_face) {
@@ -2969,6 +3034,24 @@ CyberStatus cyber_image_save_png(const CyberImage* image, const char* path) {
     }
 }
 
+namespace {
+
+// The copy_positions convention for a vertex-id list. Shared by the seam-path
+// readers and by cyber_conform, which is NOT UV-gated — so this must live
+// outside the CYBER_CAPI_WITH_UV block or a -DCYBER_BUILD_UV=OFF build fails
+// to compile.
+size_t copyVertexIds(const std::vector<cyber::VertexId>& ids, uint32_t* out, size_t max_ids) {
+    if (out != nullptr) {
+        const size_t n = std::min(ids.size(), max_ids);
+        for (size_t i = 0; i < n; ++i) {
+            out[i] = ids[i].value;
+        }
+    }
+    return ids.size();
+}
+
+}  // namespace
+
 /* ---- auto-routed seam paths (uv-editing) ------------------------------- */
 
 // Opaque handles over the UV seam model. Defined only in the UV build, exactly
@@ -2995,20 +3078,11 @@ cyber::uv::SeamCostOptions toSeamCostOptions(const CyberSeamPathOptions* options
         opts.flatWeight = options->flatWeight;
         opts.featureWeight = options->featureWeight;
         opts.concaveWeight = options->concaveWeight;
+        opts.convexWeight = options->convexWeight;
         opts.creaseDegrees = options->creaseDegrees;
         opts.minWeight = options->minWeight;
     }
     return opts;
-}
-
-size_t copyVertexIds(const std::vector<cyber::VertexId>& ids, uint32_t* out, size_t max_ids) {
-    if (out != nullptr) {
-        const size_t n = std::min(ids.size(), max_ids);
-        for (size_t i = 0; i < n; ++i) {
-            out[i] = ids[i].value;
-        }
-    }
-    return ids.size();
 }
 
 }  // namespace
@@ -3023,12 +3097,14 @@ void cyber_default_seam_path_options(CyberSeamPathOptions* options) {
     options->flatWeight = defaults.flatWeight;
     options->featureWeight = defaults.featureWeight;
     options->concaveWeight = defaults.concaveWeight;
+    options->convexWeight = defaults.convexWeight;
     options->creaseDegrees = defaults.creaseDegrees;
     options->minWeight = defaults.minWeight;
 #else
     options->flatWeight = 1.0f;
     options->featureWeight = 0.25f;
     options->concaveWeight = 0.35f;
+    options->convexWeight = 0.8f;
     options->creaseDegrees = 20.0f;
     options->minWeight = 1e-3f;
 #endif
@@ -3583,4 +3659,290 @@ CyberStatus cyber_conform(CyberMesh* edit, const CyberMesh* new_target, float th
         setError("cyber_conform: unknown error");
         return CYBER_ERR_RUNTIME;
     }
+}
+
+/* ---- named export presets (mesh-io) ----------------------------------- */
+
+// The preset DATA lives in core, so listing/resolving/reading a preset works
+// in EVERY configuration. Only cyber_export_bundle_write is gated on the
+// bundle module (see CYBER_CAPI_WITH_EXPORTBUNDLE below).
+struct CyberExportPreset {
+    cyber::io::ExportPreset preset;
+    // The token each entry actually substitutes for {map}, resolved once so
+    // the accessor never hands back the empty string a preset may declare.
+    std::vector<std::string> suffixes;
+};
+
+// Mirrors cyber::exportbundle::BundleResult, but declared unconditionally so
+// the result accessors compile in a build without the bundle module.
+struct CyberBundleResult {
+    struct File {
+        std::string path;
+        std::string kind;
+        std::string colorSpace;
+        int width = 0;
+        int height = 0;
+    };
+    std::vector<File> files;
+    std::vector<std::string> warnings;
+    bool unwrapped = false;
+    int chartCount = 0;
+    float maxAngleDistortion = 0.0f;
+};
+
+namespace {
+
+// Preset resolution fails in argument-shaped ways, so it does not reuse
+// statusFromIoError's file-oriented mapping: a typo'd preset name is a bad
+// argument, not a runtime fault, and the message already lists the built-ins.
+CyberStatus statusFromPresetError(const cyber::io::Error& error) {
+    switch (error.code) {
+        case cyber::io::ErrorCode::IncompatibleVersion:
+            return CYBER_ERR_INCOMPATIBLE_VERSION;
+        case cyber::io::ErrorCode::UnsupportedFormat:
+            return CYBER_ERR_INVALID_ARG;
+        default:
+            return CYBER_ERR_IO;
+    }
+}
+
+const std::vector<std::string>& builtinPresetNameList() {
+    static const std::vector<std::string> names = cyber::io::builtinPresetNames();
+    return names;
+}
+
+}  // namespace
+
+size_t cyber_export_preset_builtin_count(void) { return builtinPresetNameList().size(); }
+
+const char* cyber_export_preset_builtin_name(size_t index) {
+    const std::vector<std::string>& names = builtinPresetNameList();
+    return index < names.size() ? names[index].c_str() : nullptr;
+}
+
+CyberStatus cyber_export_preset_resolve(const char* name_or_path, CyberExportPreset** out) {
+    if (name_or_path == nullptr || out == nullptr) {
+        setError("cyber_export_preset_resolve: null argument");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    *out = nullptr;
+    try {
+        auto resolved = cyber::io::resolvePreset(std::string(name_or_path));
+        if (!resolved.ok()) {
+            setError(resolved.error().message);
+            return statusFromPresetError(resolved.error());
+        }
+        auto handle = std::make_unique<CyberExportPreset>();
+        handle->preset = std::move(resolved.value());
+        handle->suffixes.reserve(handle->preset.maps.size());
+        for (const cyber::io::PresetMapEntry& entry : handle->preset.maps) {
+            handle->suffixes.push_back(entry.suffix.empty() ? cyber::io::presetMapName(entry.map)
+                                                            : entry.suffix);
+        }
+        *out = handle.release();
+        clearError();
+        return CYBER_OK;
+    } catch (const std::exception& e) {
+        setError(std::string("cyber_export_preset_resolve: ") + e.what());
+        return CYBER_ERR_RUNTIME;
+    } catch (...) {
+        setError("cyber_export_preset_resolve: unknown error");
+        return CYBER_ERR_RUNTIME;
+    }
+}
+
+void cyber_export_preset_free(CyberExportPreset* preset) { delete preset; }
+
+CyberStatus cyber_export_preset_info(const CyberExportPreset* preset, CyberExportPresetInfo* out) {
+    if (preset == nullptr || out == nullptr) {
+        setError("cyber_export_preset_info: null argument");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    const cyber::io::ExportPreset& p = preset->preset;
+    out->name = p.name.c_str();
+    out->schemaVersion = p.schemaVersion;
+    out->meshFormat = p.meshFormat.c_str();
+    out->textureFormat = p.textureFormat.c_str();
+    out->namingPattern = p.namingPattern.c_str();
+    out->units = p.units.c_str();
+    out->upAxis = p.upAxis.c_str();
+    out->resolution = p.resolution;
+    out->normalGreenPlusY = p.normalGreen == cyber::io::GreenChannel::MinusY ? 0 : 1;
+    out->mapCount = p.maps.size();
+    clearError();
+    return CYBER_OK;
+}
+
+CyberStatus cyber_export_preset_map(const CyberExportPreset* preset, size_t index,
+                                    CyberExportPresetMap* out) {
+    if (preset == nullptr || out == nullptr) {
+        setError("cyber_export_preset_map: null argument");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    if (index >= preset->preset.maps.size()) {
+        setError("cyber_export_preset_map: index out of range");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    const cyber::io::PresetMapEntry& entry = preset->preset.maps[index];
+    out->map = cyber::io::presetMapName(entry.map);
+    out->colorSpace = cyber::io::colorSpaceName(entry.colorSpace);
+    out->suffix = preset->suffixes[index].c_str();
+    clearError();
+    return CYBER_OK;
+}
+
+const char* cyber_export_preset_map_file_name(const CyberExportPreset* preset, size_t index,
+                                              const char* basename) {
+    thread_local std::string expanded;
+    if (preset == nullptr || index >= preset->preset.maps.size()) {
+        return nullptr;
+    }
+    expanded = cyber::io::presetMapFileName(preset->preset, preset->preset.maps[index],
+                                            basename != nullptr ? basename : "");
+    return expanded.c_str();
+}
+
+CyberStatus cyber_export_preset_set_resolution(CyberExportPreset* preset, int resolution) {
+    if (preset == nullptr) {
+        setError("cyber_export_preset_set_resolution: null preset");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    if (resolution <= 0) {
+        setError("cyber_export_preset_set_resolution: resolution must be positive");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    preset->preset.resolution = resolution;
+    clearError();
+    return CYBER_OK;
+}
+
+/* ---- export bundles --------------------------------------------------- */
+
+void cyber_default_bundle_params(CyberBundleParams* params) {
+    if (params == nullptr) {
+        return;
+    }
+    params->meshPath = nullptr;
+    params->basename = nullptr;
+#ifdef CYBER_CAPI_WITH_EXPORTBUNDLE
+    const cyber::exportbundle::BundleParams defaults;
+    params->cageDistance = defaults.cageDistance;
+    params->aoSamples = defaults.aoSamples;
+    params->aoRadius = defaults.aoRadius;
+#else
+    params->cageDistance = 0.1f;
+    params->aoSamples = 64;
+    params->aoRadius = 1.0f;
+#endif
+}
+
+CyberStatus cyber_export_bundle_write([[maybe_unused]] CyberMesh* low,
+                                      [[maybe_unused]] const CyberMesh* high,
+                                      [[maybe_unused]] const CyberExportPreset* preset,
+                                      [[maybe_unused]] const CyberBundleParams* params,
+                                      [[maybe_unused]] CyberProgressCb progress,
+                                      [[maybe_unused]] CyberCancelCb cancel,
+                                      [[maybe_unused]] void* user, CyberBundleResult** out) {
+    if (out == nullptr) {
+        setError("cyber_export_bundle_write: null output");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    *out = nullptr;
+#ifndef CYBER_CAPI_WITH_EXPORTBUNDLE
+    setError(
+        "cyber_export_bundle_write: this build has no export-bundle module "
+        "(configure with -DCYBER_BUILD_UV=ON)");
+    return CYBER_ERR_RUNTIME;
+#else
+    // The bundle unwraps `low` in place when it has no UVs, so this is a
+    // mutating op and needs runMeshEdit's render-cache invalidation.
+    return runMeshEdit(low, "cyber_export_bundle_write", [&]() -> CyberStatus {
+        if (high == nullptr || preset == nullptr || params == nullptr ||
+            params->meshPath == nullptr) {
+            setError("cyber_export_bundle_write: null argument");
+            return CYBER_ERR_INVALID_ARG;
+        }
+        cyber::exportbundle::BundleParams bundleParams;
+        bundleParams.preset = preset->preset;
+        bundleParams.meshPath = std::filesystem::path(params->meshPath);
+        bundleParams.basename = params->basename != nullptr ? params->basename : "";
+        bundleParams.cageDistance = params->cageDistance;
+        bundleParams.aoSamples = params->aoSamples;
+        bundleParams.aoRadius = params->aoRadius;
+
+        const cyber::CancelToken token;
+        token.setPoll([cancel, user]() { return cancel != nullptr && cancel(user) != 0; });
+        cyber::ProgressSink sink = makeSink(progress, cancel, user, token);
+        const cyber::exportbundle::BundleResult result =
+            cyber::exportbundle::writeBundle(low->mesh, high->mesh, bundleParams, &sink, &token);
+        if (result.cancelled) {
+            setError("cyber_export_bundle_write: cancelled");
+            return CYBER_ERR_CANCELLED;
+        }
+        if (!result.ok) {
+            setError(result.error);
+            return CYBER_ERR_IO;
+        }
+        auto handle = std::make_unique<CyberBundleResult>();
+        for (const cyber::exportbundle::BundleFile& file : result.files) {
+            handle->files.push_back(
+                {file.path, file.kind, file.colorSpace, file.width, file.height});
+        }
+        handle->warnings = result.warnings;
+        handle->unwrapped = result.unwrapped;
+        handle->chartCount = result.chartCount;
+        handle->maxAngleDistortion = result.maxAngleDistortion;
+        *out = handle.release();
+        return CYBER_OK;
+    });
+#endif
+}
+
+void cyber_bundle_result_free(CyberBundleResult* result) { delete result; }
+
+size_t cyber_bundle_result_file_count(const CyberBundleResult* result) {
+    return result != nullptr ? result->files.size() : 0;
+}
+
+CyberStatus cyber_bundle_result_file(const CyberBundleResult* result, size_t index,
+                                     CyberBundleFile* out) {
+    if (result == nullptr || out == nullptr) {
+        setError("cyber_bundle_result_file: null argument");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    if (index >= result->files.size()) {
+        setError("cyber_bundle_result_file: index out of range");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    const CyberBundleResult::File& file = result->files[index];
+    out->path = file.path.c_str();
+    out->kind = file.kind.c_str();
+    out->colorSpace = file.colorSpace.c_str();
+    out->width = file.width;
+    out->height = file.height;
+    clearError();
+    return CYBER_OK;
+}
+
+size_t cyber_bundle_result_warning_count(const CyberBundleResult* result) {
+    return result != nullptr ? result->warnings.size() : 0;
+}
+
+const char* cyber_bundle_result_warning(const CyberBundleResult* result, size_t index) {
+    if (result == nullptr || index >= result->warnings.size()) {
+        return nullptr;
+    }
+    return result->warnings[index].c_str();
+}
+
+int cyber_bundle_result_unwrapped(const CyberBundleResult* result) {
+    return result != nullptr && result->unwrapped ? 1 : 0;
+}
+
+int cyber_bundle_result_chart_count(const CyberBundleResult* result) {
+    return result != nullptr ? result->chartCount : 0;
+}
+
+float cyber_bundle_result_max_angle_distortion(const CyberBundleResult* result) {
+    return result != nullptr ? result->maxAngleDistortion : 0.0f;
 }

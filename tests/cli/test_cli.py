@@ -59,6 +59,39 @@ def write_sphere_obj(path: Path) -> None:
             f.write(f"f {face[0]} {face[1]} {face[2]}\n")
 
 
+def write_box_obj(path: Path, n: int = 6) -> None:
+    """Closed unit box, n cells per side, triangulated and welded."""
+    verts: list[tuple[float, float, float]] = []
+    index: dict[tuple[int, int, int], int] = {}
+    faces: list[tuple[int, int, int]] = []
+
+    def vid(axis: int, side: int, u: int, v: int) -> int:
+        key = [0, 0, 0]
+        key[axis] = side
+        key[(axis + 1) % 3] = u
+        key[(axis + 2) % 3] = v
+        k = (key[0], key[1], key[2])
+        if k not in index:
+            index[k] = len(verts) + 1  # 1-based OBJ indices
+            verts.append((k[0] / n, k[1] / n, k[2] / n))
+        return index[k]
+
+    for axis in range(3):
+        for side in (0, n):
+            for i in range(n):
+                for j in range(n):
+                    a, b = vid(axis, side, i, j), vid(axis, side, i + 1, j)
+                    c, d = vid(axis, side, i + 1, j + 1), vid(axis, side, i, j + 1)
+                    faces.append((a, b, c))
+                    faces.append((a, c, d))
+
+    with path.open("w") as f:
+        for v in verts:
+            f.write(f"v {v[0]} {v[1]} {v[2]}\n")
+        for face in faces:
+            f.write(f"f {face[0]} {face[1]} {face[2]}\n")
+
+
 def handoff_ply(major: int, minor: int) -> str:
     """The sculpt handoff PLY profile (docs/sculpt-handoff-format.md) for a
     small closed box. The version is a parameter so a test can emit one the
@@ -269,6 +302,33 @@ def main() -> int:
             "--guides", str(missing), "--quiet")
     check("missing sidecar exit 2", r.returncode == 2, str(r.returncode))
 
+    # Valid JSON, wrong TYPES. Every one of these used to reach an unguarded
+    # nlohmann accessor and abort the process (SIGABRT, exit 134); each must be
+    # an exit-2 argument error naming the file and the offending field.
+    type_cases = [
+        ("version", {"version": "1"}, "version"),
+        ("strength", {"version": 1,
+                      "guides": [{"points": [[0, 0, 1], [1, 0, 0]], "strength": "strong",
+                                  "radius": 0.4}]}, "strength"),
+        ("radius", {"version": 1,
+                    "guides": [{"points": [[0, 0, 1], [1, 0, 0]], "radius": "wide"}]}, "radius"),
+        ("point", {"version": 1,
+                   "guides": [{"points": [["a", "b", "c"], [1, 0, 0]], "radius": 0.4}]}, "point"),
+        ("density.perVertex", {"version": 1, "density": {"perVertex": ["a"]}}, "perVertex"),
+        ("density.perFace", {"version": 1, "density": {"perFace": [1.0, "x"]}}, "perFace"),
+        ("density object", {"version": 1, "density": 3}, "density"),
+        ("guides array", {"version": 1, "guides": 7}, "guides"),
+    ]
+    for label, payload, needle in type_cases:
+        bad = guides_dir / f"type_{label.replace('.', '_').replace(' ', '_')}.json"
+        bad.write_text(json.dumps(payload))
+        r = run("--input", str(sphere), "--output", str(guides_dir / "t.obj"),
+                "--target-quads", "300", "--guides", str(bad), "--quiet")
+        check(f"sidecar type mismatch ({label}) exit 2", r.returncode == 2,
+              f"exit {r.returncode}: {r.stderr}")
+        check(f"sidecar type mismatch ({label}) names the file and the field",
+              str(bad) in r.stderr and needle in r.stderr, r.stderr)
+
     # An EMPTY guide list must reproduce the no-guides output byte for byte.
     empty = guides_dir / "empty.json"
     empty.write_text(json.dumps({"version": 1, "guides": []}))
@@ -288,6 +348,56 @@ def main() -> int:
     check("empty-guides run exit 0", r.returncode == 0, r.stderr)
     check("empty guide list is byte-identical to no --guides",
           plain_out.read_bytes() == empty_out.read_bytes())
+
+    # A density of 1.0 everywhere must be a no-op on the SHIPPED DEFAULT method
+    # (quad-cover), not just on field-aligned: supplying one used to switch the
+    # seamless-UV route and change the mesh (remeshing-pipeline spec, "A density
+    # of 1.0 everywhere SHALL reproduce today's uniform sizing byte-identically").
+    # The input is a creased BOX, not the sphere: creases route quad-cover to the
+    # native seamless solve, the bit-reproducible one. The vendored Geogram solve
+    # a smooth mesh lands on is not (measured: 1 run in 30 differs), which would
+    # make a byte comparison flaky for reasons that have nothing to do with
+    # guidance.
+    box = tmp / "box.obj"
+    write_box_obj(box)
+    vertex_count = sum(1 for line in box.read_text().splitlines() if line.startswith("v "))
+    ones = guides_dir / "ones.json"
+    ones.write_text(json.dumps({"version": 1, "density": {"perVertex": [1.0] * vertex_count}}))
+    dens_dirs = {}
+    for name in ("base", "repeat", "ones", "painted"):
+        dens_dirs[name] = guides_dir / f"dens_{name}"
+        dens_dirs[name].mkdir()
+    base_out = dens_dirs["base"] / "out.obj"
+    repeat_out = dens_dirs["repeat"] / "out.obj"
+    ones_out = dens_dirs["ones"] / "out.obj"
+    r = run("--input", str(box), "--output", str(base_out), "--target-quads", "300", "--quiet")
+    check("default-method no-density run exit 0", r.returncode == 0, r.stderr)
+    r = run("--input", str(box), "--output", str(repeat_out), "--target-quads", "300", "--quiet")
+    # Guards the comparison below: it proves nothing if the run cannot repeat itself.
+    check("default-method run repeats itself byte-for-byte",
+          base_out.read_bytes() == repeat_out.read_bytes())
+    ones_report = guides_dir / "ones_report.json"
+    r = run("--input", str(box), "--output", str(ones_out), "--target-quads", "300",
+            "--guides", str(ones), "--report", str(ones_report), "--quiet")
+    check("density 1.0 run exit 0", r.returncode == 0, r.stderr)
+    check("density 1.0 everywhere is byte-identical to no --guides (default method)",
+          base_out.read_bytes() == ones_out.read_bytes())
+    data = json.loads(ones_report.read_text())
+    check("the ignored uniform density is reported, not silent",
+          any("density" in w for w in data.get("warnings", [])), str(data.get("warnings")))
+
+    # A non-uniform density is still a real request: it must change the mesh.
+    painted = guides_dir / "painted.json"
+    painted.write_text(json.dumps({
+        "version": 1,
+        "density": {"perVertex": [4.0 if i % 2 == 0 else 1.0 for i in range(vertex_count)]},
+    }))
+    painted_out = dens_dirs["painted"] / "out.obj"
+    r = run("--input", str(box), "--output", str(painted_out), "--target-quads", "300",
+            "--guides", str(painted), "--quiet")
+    check("painted density run exit 0", r.returncode == 0, r.stderr)
+    check("a painted density still changes the mesh",
+          base_out.read_bytes() != painted_out.read_bytes())
 
     # ---- sculpt handoff Target (pipeline-bridge / cli-headless) ----------
     handoff_dir = tmp / "handoff"

@@ -51,6 +51,35 @@ Mesh makeGrid(float grooveDepth) {
 Mesh makeGrooveGrid() { return makeGrid(0.5f); }
 Mesh makeFlatGrid() { return makeGrid(0.0f); }
 
+// A tent whose apex runs along y == 1: the row rises to `apex` and the surface
+// then falls away at a constant 45 degrees, so rows 2..4 lie in ONE plane and
+// carry no dihedral at all. The apex is a convex ridge; the straight run along
+// row 2 just below it is genuinely flat and slightly shorter, so the router
+// only climbs onto the ridge if it is actually discounted.
+//
+// Mirroring makeGrooveGrid instead would not do: there the straight shortcut
+// row sits on a shallow break of its own, which would decide the race by
+// itself rather than testing the ridge term.
+Mesh makeRidgeGrid(float apex = 0.5f, float fall = 0.2f) {
+    std::vector<Vec3> p;
+    for (Index y = 0; y < kRows; ++y) {
+        const float drop = y == 0 ? 0.0f : static_cast<float>(y - 1) * fall;
+        const float py = y == 0 ? 0.0f : 1.0f + drop;
+        const float pz = y == 0 ? 0.0f : apex - drop;
+        for (Index x = 0; x < kCols; ++x) {
+            p.push_back({static_cast<float>(x), py, pz});
+        }
+    }
+    std::vector<std::vector<Index>> f;
+    for (Index y = 0; y + 1 < kRows; ++y) {
+        for (Index x = 0; x + 1 < kCols; ++x) {
+            f.push_back({gridVertex(x, y), gridVertex(x + 1, y), gridVertex(x + 1, y + 1),
+                         gridVertex(x, y + 1)});
+        }
+    }
+    return Mesh::fromIndexed(p, f);
+}
+
 // The dog-leg that follows the groove: down the left wall, along the valley
 // floor, back up the right wall.
 std::vector<VertexId> grooveChain() {
@@ -154,6 +183,44 @@ TEST_CASE("seam edge cost discounts feature and concave edges, never below a pos
     CHECK(uv::seamEdgeCost(mesh, plain, broken) > 0.0f);
 }
 
+TEST_CASE("seam edge cost discounts a convex ridge, independently of the valley weight") {
+    const Mesh ridged = makeRidgeGrid();
+    const Mesh grooved = makeGrooveGrid();
+    const uv::SeamCostOptions options;
+
+    const EdgeId ridge = ridged.edgeBetween(VertexId{gridVertex(2, 1)}, VertexId{gridVertex(3, 1)});
+    const EdgeId plain = ridged.edgeBetween(VertexId{gridVertex(2, 3)}, VertexId{gridVertex(3, 3)});
+    REQUIRE(ridge.valid());
+    REQUIRE(plain.valid());
+    // A ridge past the crease angle, expressed as a NEGATIVE dihedral — the
+    // sign that used to make the whole discount unreachable on convex models.
+    REQUIRE(uv::edgeSignedDihedral(ridged, ridge) <= -options.creaseDegrees);
+    REQUIRE(uv::edgeSignedDihedral(ridged, plain) == doctest::Approx(0.0f));
+    CHECK(uv::seamEdgeCost(ridged, ridge, options) < uv::seamEdgeCost(ridged, plain, options));
+
+    // Same edge, same length, mirrored bend: by default the valley is still
+    // the cheaper of the two, so a mesh offering both keeps preferring it.
+    const EdgeId groove =
+        grooved.edgeBetween(VertexId{gridVertex(2, 1)}, VertexId{gridVertex(3, 1)});
+    REQUIRE(groove.valid());
+    CHECK(uv::seamEdgeCost(grooved, groove, options) < uv::seamEdgeCost(ridged, ridge, options));
+
+    // The two terms are tunable apart: neutralising the convex weight leaves
+    // the ridge at the flat cost while the valley discount is untouched.
+    uv::SeamCostOptions flatRidge = options;
+    flatRidge.convexWeight = options.flatWeight;
+    CHECK(uv::seamEdgeCost(ridged, ridge, flatRidge) ==
+          doctest::Approx(uv::seamEdgeCost(ridged, plain, flatRidge)));
+    CHECK(uv::seamEdgeCost(grooved, groove, flatRidge) ==
+          doctest::Approx(uv::seamEdgeCost(grooved, groove, options)));
+
+    // A negative convex weight must not produce a non-positive Dijkstra step.
+    uv::SeamCostOptions broken;
+    broken.convexWeight = -1.0f;
+    broken.minWeight = 0.0f;
+    CHECK(uv::seamEdgeCost(ridged, ridge, broken) > 0.0f);
+}
+
 // ---- Scenario: Route follows the groove ---------------------------------
 
 TEST_CASE("routed seam path follows a concave groove instead of the flat shortcut") {
@@ -183,6 +250,42 @@ TEST_CASE("routed seam path follows a concave groove instead of the flat shortcu
     REQUIRE(path.addWaypoint(to));
     REQUIRE(path.routed());
     CHECK(path.vertices() == groove);
+}
+
+// The mirror of the groove scenario, and the regression for the convex blind
+// spot: a hard edge deserves the seam whichever way it bends, and CAD parts
+// (fandisk, rocker-arm) carry their creases overwhelmingly as ridges.
+TEST_CASE("routed seam path follows a convex ridge instead of the flat shortcut") {
+    const Mesh mesh = makeRidgeGrid();
+    const VertexId from{gridVertex(0, 2)};
+    const VertexId to{gridVertex(kCols - 1, 2)};
+    const uv::SeamCostOptions options;
+    const std::vector<VertexId> ridge = grooveChain();  // same dog-leg, now raised
+
+    // (a) The bias is doing the work: unweighted, the flat run across is
+    // strictly shorter and is what Dijkstra picks.
+    const std::vector<VertexId> geodesic = retopo::shortestVertexPath(mesh, from, to);
+    REQUIRE(geodesic.size() == kCols);
+    CHECK(geodesic != ridge);
+    CHECK(routeLength(mesh, geodesic) < routeLength(mesh, ridge));
+
+    // (b) With the seam cost model the route climbs onto the ridge, ...
+    CHECK(uv::routeSeamSegment(mesh, from, to, options) == ridge);
+    // (c) ... because the ridge is strictly cheaper under that cost model.
+    CHECK(routeCost(mesh, ridge, options) < routeCost(mesh, geodesic, options));
+
+    // (d) Neutralise the convex weight — the router has no ridge term left and
+    // collapses back onto the plain geodesic. This is exactly what every
+    // convex-creased model used to get.
+    uv::SeamCostOptions blind = options;
+    blind.convexWeight = options.flatWeight;
+    CHECK(uv::routeSeamSegment(mesh, from, to, blind) == geodesic);
+
+    uv::SeamPath path(mesh, options);
+    REQUIRE(path.addWaypoint(from));
+    REQUIRE(path.addWaypoint(to));
+    REQUIRE(path.routed());
+    CHECK(path.vertices() == ridge);
 }
 
 TEST_CASE("a feature-tagged detour is preferred over an untagged straight run") {

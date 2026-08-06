@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdint>
 #include <optional>
 
 #include "cyber/accel/backend.hpp"
@@ -244,9 +245,36 @@ Vec3 anyTangent(Vec3 n) {
     return normalized(Vec3{1.0f + sign * n.x * n.x * a, sign * bxy, -sign * n.x});
 }
 
-// Cosine-weighted hemisphere direction from a Hammersley pair, in tangent
-// space (deterministic — no RNG, so AO bakes are reproducible).
-Vec3 hemisphereDir(std::size_t i, std::size_t n, Vec3 t, Vec3 b, Vec3 nrm) {
+// Integer avalanche (Wang-style), the hash behind the per-texel sample
+// rotation. A hash, not an RNG: the same texel always yields the same offsets,
+// so a bake is still reproducible bit for bit.
+std::uint32_t mixBits(std::uint32_t x) {
+    x ^= x >> 16;
+    x *= 0x7feb352du;
+    x ^= x >> 15;
+    x *= 0x846ca68bu;
+    x ^= x >> 16;
+    return x;
+}
+
+// Per-texel Cranley-Patterson offsets in [0,1) for the (radius, azimuth) pair.
+// Every texel used to fire the IDENTICAL Hammersley set, so openness could only
+// land on the k/aoSamples lattice AND whole neighbourhoods snapped to the same
+// rung — visible banding, not noise. Shifting the sequence toroidally per texel
+// keeps its low-discrepancy stratification while breaking that lock-step, which
+// turns the residual estimator error into fine dither.
+Vec2 texelRotation(int px, int py) {
+    constexpr float kInv32 = 2.3283064e-10f;  // 1 / 2^32
+    const std::uint32_t h1 = mixBits(static_cast<std::uint32_t>(px) * 0x9e3779b9u ^
+                                     mixBits(static_cast<std::uint32_t>(py)));
+    const std::uint32_t h2 = mixBits(h1 ^ 0x68bc21ebu);
+    return Vec2{static_cast<float>(h1) * kInv32, static_cast<float>(h2) * kInv32};
+}
+
+// Cosine-weighted hemisphere direction from a Hammersley pair rotated by
+// `rot`, in tangent space (deterministic — no RNG, so AO bakes are
+// reproducible).
+Vec3 hemisphereDir(std::size_t i, std::size_t n, Vec2 rot, Vec3 t, Vec3 b, Vec3 nrm) {
     float bits = 0.0f;
     float inv = 0.5f;
     for (std::size_t v = i; v != 0; v >>= 1) {
@@ -255,9 +283,10 @@ Vec3 hemisphereDir(std::size_t i, std::size_t n, Vec3 t, Vec3 b, Vec3 nrm) {
         }
         inv *= 0.5f;
     }
-    const float u1 = (static_cast<float>(i) + 0.5f) / static_cast<float>(n);
+    const auto wrap = [](float v) { return v - std::floor(v); };
+    const float u1 = wrap((static_cast<float>(i) + 0.5f) / static_cast<float>(n) + rot.x);
     const float r = std::sqrt(u1);
-    const float phi = 2.0f * kPi * bits;
+    const float phi = 2.0f * kPi * wrap(bits + rot.y);
     const float x = r * std::cos(phi);
     const float y = r * std::sin(phi);
     const float z = std::sqrt(std::fmax(0.0f, 1.0f - u1));
@@ -336,13 +365,15 @@ float aoOpennessFromMesh(const Bvh& bvh, const Mesh& highPoly, const std::vector
     const Vec3 aoTangent = anyTangent(aoNormal);
     const Vec3 aoBitangent = cross(aoNormal, aoTangent);
 
+    const Vec2 rot = texelRotation(tx.px, tx.py);
+
     accel::Buffer<Vec3> origins(static_cast<std::size_t>(params.aoSamples));
     accel::Buffer<Vec3> dirs(static_cast<std::size_t>(params.aoSamples));
     for (int k = 0; k < params.aoSamples; ++k) {
         origins[static_cast<std::size_t>(k)] = aoPosition + aoNormal * params.aoBias;
         dirs[static_cast<std::size_t>(k)] =
             hemisphereDir(static_cast<std::size_t>(k), static_cast<std::size_t>(params.aoSamples),
-                          aoTangent, aoBitangent, aoNormal);
+                          rot, aoTangent, aoBitangent, aoNormal);
     }
     accel::Buffer<std::optional<Bvh::RayHit>> hits;
     accel::raycast(backend, bvh, origins, dirs, hits);

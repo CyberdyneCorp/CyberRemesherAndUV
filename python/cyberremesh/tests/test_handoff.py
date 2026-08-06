@@ -27,13 +27,18 @@ _UV_PLANE = (
 _LIFTED_PLANE = "v 0 0 0.25\nv 1 0 0.25\nv 1 1 0.25\nv 0 1 0.25\nf 1 2 3\nf 1 3 4\n"
 
 
+_BOX_CORNERS = [(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0),
+                (0, 0, 1), (1, 0, 1), (1, 1, 1), (0, 1, 1)]
+_BOX_QUADS = [(0, 3, 2, 1), (4, 5, 6, 7), (0, 1, 5, 4),
+              (1, 2, 6, 5), (2, 3, 7, 6), (3, 0, 4, 7)]
+_BOX_TRIS = [t for q in _BOX_QUADS
+             for t in ((q[0], q[1], q[2]), (q[0], q[2], q[3]))]
+
+
 def handoff_ply(major: int, minor: int) -> str:
     """The PLY profile from docs/sculpt-handoff-format.md, for a red box."""
-    corners = [(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0),
-               (0, 0, 1), (1, 0, 1), (1, 1, 1), (0, 1, 1)]
-    quads = [(0, 3, 2, 1), (4, 5, 6, 7), (0, 1, 5, 4),
-             (1, 2, 6, 5), (2, 3, 7, 6), (3, 0, 4, 7)]
-    tris = [t for q in quads for t in ((q[0], q[1], q[2]), (q[0], q[2], q[3]))]
+    corners = _BOX_CORNERS
+    tris = _BOX_TRIS
     lines = ["ply", "format ascii 1.0",
              f"comment cyber_sculpt_handoff {major} {minor}",
              "comment cyber_handoff_producer python-test",
@@ -86,6 +91,83 @@ def check_handoff_ingest(tmpdir: str) -> None:
     else:
         raise AssertionError("a future handoff version must raise")
     print("PASS handoff: version 1.0 ingests with its payloads; 2.0 raises naming both")
+
+
+def check_handoff_buffers() -> None:
+    """The in-memory profile: the same box, no intermediate file."""
+    from cyberremesh import IncompatibleVersionError, Mesh
+
+    # Both documented profiles must be reachable, not just declared: the
+    # buffer reader sat in _ffi.py with no api.py wrapper for a whole release.
+    repo = os.path.dirname(
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    )
+    for module in ("_ffi.py", "api.py"):
+        path = os.path.join(repo, "python", "cyberremesh", "cyberremesh", module)
+        with open(path, "r", encoding="utf-8") as handle:
+            assert "cyber_handoff_open_buffers" in handle.read(), module
+
+    normals = [(c[0] - 0.5, c[1] - 0.5, c[2] - 0.5) for c in _BOX_CORNERS]
+    mesh, info = Mesh.load_handoff_buffers(
+        _BOX_CORNERS, _BOX_TRIS,
+        normals=normals,
+        colors=[(1.0, 0.0, 0.0)] * len(_BOX_CORNERS),
+        material_mix=[i / 8.0 for i in range(len(_BOX_CORNERS))],
+        producer="python-test-buffers",
+    )
+    with mesh:
+        assert info.version == cyberremesh.HANDOFF_VERSION, info.version
+        assert info.producer == "python-test-buffers", info.producer
+        assert info.vertex_count == 8, info.vertex_count
+        assert info.face_count == 12, info.face_count
+        assert info.has_vertex_colors and info.has_vertex_normals, info
+        assert info.has_material_mix, info
+        assert mesh.vertex_count == 8, mesh.vertex_count
+
+    # Positions alone are a valid handoff; the optional payloads report absent.
+    bare, bare_info = Mesh.load_handoff_buffers(_BOX_CORNERS, _BOX_TRIS)
+    with bare:
+        assert not bare_info.has_vertex_colors, bare_info
+        assert not bare_info.has_material_mix, bare_info
+
+    # Flat sequences are accepted alongside (n, 3) ones and mean the same thing.
+    flat, _ = Mesh.load_handoff_buffers(
+        [v for c in _BOX_CORNERS for v in c],
+        [i for t in _BOX_TRIS for i in t],
+    )
+    with flat:
+        assert flat.vertex_count == 8, flat.vertex_count
+
+    # The version gate is the FILE profile's, so an in-process producer cannot
+    # bypass it by going through memory.
+    try:
+        Mesh.load_handoff_buffers(_BOX_CORNERS, _BOX_TRIS, version=(2, 0))
+    except IncompatibleVersionError as exc:
+        assert "2.0" in str(exc) and "1.0" in str(exc), str(exc)
+    else:
+        raise AssertionError("a future handoff version must raise from buffers too")
+
+    # A short optional array would be read past its end by the C struct (whose
+    # pointers carry an IMPLIED length), so it is rejected here.
+    for kwargs in ({"colors": [(1.0, 0.0, 0.0)] * 3},
+                   {"normals": [(0.0, 0.0, 1.0)] * 7},
+                   {"material_mix": [0.0, 1.0]}):
+        try:
+            Mesh.load_handoff_buffers(_BOX_CORNERS, _BOX_TRIS, **kwargs)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("a short {0} must be rejected".format(list(kwargs)[0]))
+
+    for bad in ((_BOX_CORNERS, [0, 1, 2, 3]), ([0.0, 1.0], _BOX_TRIS)):
+        try:
+            Mesh.load_handoff_buffers(*bad)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("a ragged buffer must be rejected")
+    print("PASS handoff buffers: in-memory profile ingests, gates the version, "
+          "and rejects short payloads")
 
 
 def check_field_bake(tmpdir: str) -> None:
@@ -157,6 +239,7 @@ def main() -> int:
 
     tmpdir = tempfile.mkdtemp(prefix="cyber_py_handoff_")
     check_handoff_ingest(tmpdir)
+    check_handoff_buffers()
     check_field_bake(tmpdir)
     check_conform(tmpdir)
     return 0

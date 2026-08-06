@@ -55,7 +55,7 @@ The C ABI and Python bindings SHALL expose the automatic UV atlas so a caller ca
 
 #### Scenario: One-call atlas from Python
 - **WHEN** a caller invokes `Mesh.unwrap_atlas` (C: `cyber_uv_atlas`) on a loaded mesh
-- **THEN** the binding SHALL seam, unwrap, re-orient, and pack the mesh in place and return an atlas result — chart count, seam-edge count, max/RMS conformal distortion, flipped- and fallback-chart counts, packed area, and texel density — and a subsequent OBJ save SHALL emit the per-corner UVs (`vt` / `f v/vt`)
+- **THEN** the binding SHALL seam, unwrap, re-orient, and pack the mesh in place and return an atlas result — chart count, dropped-chart count, seam-edge count, max/RMS conformal distortion, flipped- and fallback-chart counts, packed area (geometry coverage), packed bounding-box area, and texel density — and a subsequent OBJ save SHALL emit the per-corner UVs (`vt` / `f v/vt`)
 
 #### Scenario: Atlas parameters mirror the engine options
 - **WHEN** a caller supplies atlas parameters (C: `CyberAtlasParams` / Python: `AtlasParams`)
@@ -65,3 +65,56 @@ The C ABI and Python bindings SHALL expose the automatic UV atlas so a caller ca
 - **WHEN** the engine is built without the UV module
 - **THEN** `cyber_uv_atlas` SHALL still be a declared, linkable symbol that returns a runtime error status (not a missing symbol), so binaries built against the header keep a stable ABI
 
+
+### Requirement: Mesh state duplication, write-back and element resolution
+The C ABI and Python bindings SHALL let a caller duplicate a mesh in memory, write vertex positions back, and resolve an element id to geometry, so before/after comparison, undo snapshots and overlay rendering are possible without leaving the process. A duplicate SHALL be lossless (no serialization round trip) and SHALL preserve element ids. Position write-back SHALL use the same compacted vertex order the position reader returns and SHALL reject a count that does not match the vertex count.
+
+#### Scenario: Lossless in-memory duplicate
+- **WHEN** a caller duplicates a mesh (C: `cyber_mesh_clone` / Python: `Mesh.copy`) and compares the copy's positions against the original
+- **THEN** the positions SHALL be bit-identical, the copy SHALL carry the handle's statistics, hidden-face and tagged-edge overlays, soft-selection weight field and saved selection slots, element ids SHALL address the same elements in both, and editing either mesh SHALL leave the other unchanged
+
+#### Scenario: Snapshot restored exactly
+- **WHEN** a caller reads positions, edits the mesh, and writes the saved positions back (C: `cyber_mesh_set_positions` / Python: `Mesh.set_positions` or the `Mesh.positions` setter)
+- **THEN** the mesh SHALL return to bit-identical positions with topology, ids and overlays untouched, and a write whose float count is not three times the vertex count SHALL be rejected with an invalid-argument error leaving the mesh unchanged
+
+#### Scenario: A committed seam is drawable
+- **WHEN** a caller commits a seam path and asks for the endpoints and positions of each committed edge id (C: `cyber_mesh_edge_endpoints` / `cyber_mesh_vertex_position`; Python: `Mesh.edge_endpoints` / `Mesh.vertex_position`)
+- **THEN** each live edge id SHALL resolve to its two vertex ids and each live vertex id to its position, and an id that is not alive SHALL report absence rather than a fabricated result
+
+### Requirement: Weighted-edit reports count distinct vertices
+The weighted transform and weighted relax reports (C: `CyberSoftTransformReport` / Python: `SoftTransformReport`) SHALL report DISTINCT vertices in every field, never per-iteration writes, so a count can never exceed the mesh's vertex count. The C ABI header, the Python docstring and the Swift wrapper SHALL state the same meaning.
+
+#### Scenario: A multi-iteration relax stays inside the mesh
+- **WHEN** a caller runs a weighted relax for N iterations over a selected region
+- **THEN** the reported moved count SHALL equal the number of distinct vertices written — independent of N — SHALL not exceed the mesh's vertex count, and the reported re-snapped count SHALL not exceed it
+
+### Requirement: In-memory sculpt handoff is reachable from the bindings
+Both documented sculpt-handoff profiles — the file profile and the in-memory buffer profile — SHALL have a binding surface. The buffer profile SHALL apply the SAME version gate as the file profile, so an in-process producer cannot bypass it, and SHALL reject an optional payload whose length does not match the vertex count rather than reading past its end.
+
+#### Scenario: A handoff arrives as plain arrays
+- **WHEN** a caller passes positions, triangle indices and the optional normal / colour / `material_mix` payloads (C: `cyber_handoff_open_buffers` / Python: `Mesh.load_handoff_buffers`)
+- **THEN** the binding SHALL produce a Target mesh and the same declared-payload report the file profile returns, with no intermediate file written
+
+#### Scenario: The version gate holds through memory
+- **WHEN** an in-memory handoff declares a version this engine does not support
+- **THEN** the call SHALL fail with the typed incompatible-version error naming both versions and SHALL produce no partial Target
+
+
+### Requirement: Named export presets and bundles have a binding surface
+The C ABI and Python bindings SHALL expose named export presets: listing the built-ins, resolving one by name or by file path, reading everything it declares, and writing its bundle for a low/high mesh pair. The preset DATA half SHALL be available in every configuration, since presets live in core; only the bundle WRITER may depend on the UV module, and where it is absent the symbol SHALL still be declared and return a runtime error rather than being missing.
+
+#### Scenario: Presets are listed, resolved and read
+- **WHEN** a caller lists the built-ins and resolves one (C: `cyber_export_preset_builtin_name` / `cyber_export_preset_resolve`; Python: `builtin_presets` / `ExportPreset.resolve`)
+- **THEN** the binding SHALL report the preset's name, schema version, mesh and texture container, naming pattern, units, up axis, resolution, normal-map green-channel convention, and its map list with each map's colour space and `{map}` substitution token, and SHALL expand the naming pattern for a given basename so a caller never re-implements the token rules
+
+#### Scenario: A preset from an unsupported schema is refused loudly
+- **WHEN** a caller resolves a preset file declaring a schema version this engine does not support
+- **THEN** the call SHALL fail with the typed incompatible-version error (Python: `IncompatibleVersionError`) naming both versions and SHALL produce no partially honoured preset; a name that is neither built in nor a readable file SHALL fail with an invalid-argument error whose message lists the built-ins
+
+#### Scenario: A bundle is written from the bindings
+- **WHEN** a caller writes a preset bundle for a low/high mesh pair (C: `cyber_export_bundle_write` / Python: `write_bundle`)
+- **THEN** the binding SHALL write the mesh plus one baked map per preset entry and report every file with its kind, colour space and pixel size, plus whether the low-poly had to be unwrapped and that unwrap's chart count and distortion, and SHALL surface a preset/extension mismatch as a warning rather than resolving it silently
+
+#### Scenario: ABI stable without the export-bundle module
+- **WHEN** the engine is built without the UV module (and therefore without the export-bundle writer)
+- **THEN** listing, resolving and reading presets SHALL still work, and `cyber_export_bundle_write` SHALL remain a declared, linkable symbol that returns a runtime error status naming the missing module

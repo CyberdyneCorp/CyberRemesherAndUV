@@ -44,7 +44,9 @@ together, e.g. a cube's six faces into two flat strips), LSCM-unwraps each chart
 conformally, re-orients each chart to its minimum-area bounding box, skyline-packs
 them into the unit square, and writes the per-corner UV attribute —
 mesh in, packed atlas out, no manual seams. It returns chart count, conformal
-(angle) distortion, flip count and packing efficiency. On the remeshed quad output
+(angle) distortion, flip count and packing efficiency — where `packed_area` is
+the fraction of the UV square the chart *geometry* covers (the bounding-box
+fraction is reported separately as `packed_box_area`). On the remeshed quad output
 it holds angular distortion under ~0.05 (conformal error, 0 = angle-preserving)
 with no flipped charts; min-area re-orientation roughly doubles usable coverage on
 box-like meshes (45°-diamond faces → axis-aligned squares). `examples/14_uv_atlas.py`
@@ -72,9 +74,12 @@ The pending path stays editable: any waypoint can be dragged
 (`move_waypoint_to` snaps it to the nearest vertex) or deleted, and an edit
 re-routes **only the segments adjacent to it** — the rest of the path keeps its
 route, and each segment's `segment_revision` counter tells a viewport exactly
-what to redraw. `commit` marks the route into a `SeamSet` — the same seam model
-the freehand Pencil/Erase gestures use, so gesture unwrap and sew behave
-identically — and arms a resume marker so the next waypoint continues from the
+what to redraw. `commit` marks the route into a `SeamSet` — the one seam model,
+the same `mark`/`erase`/`sew` set a hand-drawn seam edits, so in C++ island
+computation, unwrap and stitch treat a routed seam exactly like a hand-marked
+one (note that those three consume a seam set only in C++ today: the bindings
+expose the set and the path, not island/unwrap/stitch over it) — and arms a
+resume marker so the next waypoint continues from the
 last committed point. Committing returns the edge ids it newly marked: that
 list is the undo record (`revert_commit`), and edges that were already seams
 are never in it, so they survive the undo. Dropping the resume marker only
@@ -121,6 +126,23 @@ drop — a preset that quietly loses the field you added is worse than one that
 refuses to load. The JSON report records the effective preset and every file
 produced.
 
+The same thing from Python, without the CLI (C ABI: `cyber_export_preset_*` and
+`cyber_export_bundle_write`):
+
+```python
+from cyberremesh import ExportPreset, builtin_presets, write_bundle
+
+builtin_presets()                                  # ['blender', 'unity', ...]
+with ExportPreset.resolve("unreal") as preset:     # or a path to your JSON
+    preset.resolution = 1024                       # == --texture-size
+    preset.normal_green                            # '-Y' — Unreal reads DirectX
+    result = write_bundle(low, high, preset, "out/hero.glb")
+result.files                                       # mesh + one per baked map
+```
+
+Listing, resolving and reading a preset works in every build; only
+`write_bundle` needs the UV-gated bundle module, and says so where it is absent.
+
 **Cost:** the AO bake dominates a preset run — about 96% of it — and scales with
 texel count, so the default 2048² map set takes minutes on a desktop CPU. Use
 `--texture-size` (and `--ao-samples`) to trade resolution for time; parallelising
@@ -152,7 +174,15 @@ than read with the unknown parts dropped.
 The format — a PLY profile carrying positions, normals, vertex colors and a
 `material_mix` weight, plus a GLB profile and an in-memory buffer profile — is
 specified in [`docs/sculpt-handoff-format.md`](docs/sculpt-handoff-format.md).
-`examples/18_sculpt_handoff.py` is a working synthetic producer end to end.
+`examples/18_sculpt_handoff.py` is a working synthetic producer end to end. From
+Python, `Mesh.load_handoff` takes the file profile and
+`Mesh.load_handoff_buffers` the in-memory one — an in-process producer needs no
+temporary file, and gets the same version gate either way.
+
+PLY and the buffer profile are the proven paths. The `.gltf`/`.glb` route is
+accepted and version-gated but carries geometry only today: the declared
+producer label is not read back and vertex normals do not reach the Target, so
+prefer PLY when either matters.
 
 Two more pieces ride on the same "no hard dependency" rule:
 

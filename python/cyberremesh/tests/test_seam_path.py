@@ -74,6 +74,7 @@ def check_parity() -> None:
         "flat_weight",
         "feature_weight",
         "concave_weight",
+        "convex_weight",
         "crease_degrees",
         "min_weight",
     ], fields
@@ -87,6 +88,7 @@ def check_defaults() -> None:
 
     defaults = SeamCostParams.defaults()
     assert defaults.flat_weight > defaults.concave_weight, defaults
+    assert defaults.flat_weight > defaults.convex_weight, defaults
     assert defaults.flat_weight > defaults.feature_weight, defaults
     assert defaults.min_weight > 0.0, defaults
 

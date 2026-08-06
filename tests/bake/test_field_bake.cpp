@@ -235,9 +235,14 @@ TEST_CASE("bake without an evaluator reproduces the pre-bridge pixels") {
         std::uint64_t checksum;
     };
     // Captured from the unmodified binary before the field-evaluator refactor.
+    // AO alone was RE-captured when the hemisphere sample set gained its
+    // per-texel Cranley-Patterson rotation: firing the identical Hammersley set
+    // at every texel locked whole neighbourhoods onto the same k/aoSamples rung
+    // and banded the map, so that pixel-for-pixel contract had to be broken on
+    // purpose. Every other map still holds the pre-bridge bits.
     const std::vector<Case> cases = {
         {bake::BakeMap::Normal, 192, 0xaaf59aec8138d50eull},
-        {bake::BakeMap::AmbientOcclusion, 64, 0xa2271c9caa4697c3ull},
+        {bake::BakeMap::AmbientOcclusion, 64, 0x1ab03f2993f16ba3ull},
         {bake::BakeMap::Curvature, 64, 0xe0b4081bacc11bb3ull},
         {bake::BakeMap::Cavity, 64, 0xf099b3ccc9e3755full},
         {bake::BakeMap::Displacement, 64, 0x258044b372d77e53ull},

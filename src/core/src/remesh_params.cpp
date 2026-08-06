@@ -162,6 +162,17 @@ ValidatedGuidance validateGuidance(const Guidance& raw, std::size_t targetVertex
                  std::to_string(kDensityMin) + ", " + std::to_string(kDensityMax) + "]",
              false});
     }
+    // A post-clamp density of 1.0 everywhere is the identity of the sizing
+    // relation, so it must leave the run exactly as it was. Dropping it HERE —
+    // at the single validation gate every entry point shares — is what makes
+    // that true: downstream, a merely-present guidance field also decides which
+    // seamless-UV backend runs, so carrying a neutral paint any further would
+    // silently change the mesh (remeshing-pipeline spec: byte-identical).
+    if (density.isNeutral()) {
+        values.clear();
+        out.issues.push_back(
+            {"density", "density is 1.0 everywhere (no sizing change); ignored", false});
+    }
     return out;
 }
 

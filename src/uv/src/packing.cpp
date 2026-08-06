@@ -152,7 +152,9 @@ PackResult packBoxes(std::span<const Bounds2> boxes, const PackParams& params) {
 
     result.ok = true;
     result.scale = scale;
-    result.usedArea = static_cast<float>(placedArea);
+    result.boxArea = static_cast<float>(placedArea);
+    // Without geometry the boxes are all we cover; packIslands refines this.
+    result.usedArea = result.boxArea;
     result.texelDensity = static_cast<float>(params.textureSize) * scale;
     return result;
 }
@@ -165,13 +167,14 @@ PackResult packIslands(Mesh& mesh, std::span<const std::vector<FaceId>> islands,
         boxes.push_back(islandUvBounds(mesh, island));
     }
 
-    const PackResult result = packBoxes(boxes, params);
+    PackResult result = packBoxes(boxes, params);
     if (!result.ok) {
         return result;
     }
 
     std::vector<Vec2>* uv = uvColumn(mesh);
     if (uv == nullptr) {
+        result.usedArea = 0.0f;  // nothing was placed: no UVs to cover anything
         return result;
     }
     for (std::size_t i = 0; i < islands.size(); ++i) {
@@ -185,6 +188,13 @@ PackResult packIslands(Mesh& mesh, std::span<const std::vector<FaceId>> islands,
             }
         }
     }
+
+    // Real coverage: the packed island geometry, not the boxes around it.
+    double covered = 0.0;
+    for (const std::vector<FaceId>& island : islands) {
+        covered += islandUvArea(mesh, island);
+    }
+    result.usedArea = static_cast<float>(covered);
     return result;
 }
 

@@ -19,6 +19,15 @@ if(TARGET cyber_uv)
     target_compile_definitions(cyber_capi PRIVATE CYBER_CAPI_WITH_UV)
 endif()
 
+# Export presets are pure data in cyber_core, so listing/resolving/reading one
+# works in every configuration. Only cyber_export_bundle_write needs the bundle
+# writer, which rides on CYBER_BUILD_UV; without it that call reports that this
+# build cannot write bundles rather than silently doing nothing.
+if(TARGET cyber_exportbundle)
+    target_link_libraries(cyber_capi PUBLIC cyber_exportbundle)
+    target_compile_definitions(cyber_capi PRIVATE CYBER_CAPI_WITH_EXPORTBUNDLE)
+endif()
+
 # The C-facing version mirrors the CMake project() version.
 target_compile_definitions(cyber_capi PRIVATE
     CYBER_CAPI_VERSION_MAJOR=${PROJECT_VERSION_MAJOR}
@@ -44,6 +53,10 @@ if(CYBER_BUILD_CAPI_SHARED)
     if(TARGET cyber_uv)
         target_link_libraries(cyber_capi_shared PRIVATE cyber_uv)
         target_compile_definitions(cyber_capi_shared PRIVATE CYBER_CAPI_WITH_UV)
+    endif()
+    if(TARGET cyber_exportbundle)
+        target_link_libraries(cyber_capi_shared PRIVATE cyber_exportbundle)
+        target_compile_definitions(cyber_capi_shared PRIVATE CYBER_CAPI_WITH_EXPORTBUNDLE)
     endif()
     set_target_properties(cyber_capi_shared PROPERTIES
         OUTPUT_NAME cyber_capi

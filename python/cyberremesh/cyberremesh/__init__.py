@@ -19,8 +19,11 @@ from .api import (
     AtlasResult,
     BakeMap,
     BakeParams,
+    BundleFile,
+    BundleResult,
     ConformReport,
     CyberError,
+    ExportPreset,
     FieldEvaluator,
     HandoffInfo,
     IncompatibleVersionError,
@@ -33,15 +36,18 @@ from .api import (
     SeamCostParams,
     SeamPath,
     SeamSet,
+    PresetMapEntry,
     Snapper,
     SoftTransformReport,
     Statistics,
     bake,
     bake_field,
+    builtin_presets,
     conform,
     is_available,
     remesh,
     version,
+    write_bundle,
 )
 
 __all__ = [
@@ -73,5 +79,11 @@ __all__ = [
     "ConformReport",
     "conform",
     "SeamPath",
+    "builtin_presets",
+    "ExportPreset",
+    "PresetMapEntry",
+    "BundleFile",
+    "BundleResult",
+    "write_bundle",
 ]
 __version__ = "0.5.0"

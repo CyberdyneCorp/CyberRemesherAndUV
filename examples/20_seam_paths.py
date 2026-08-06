@@ -5,8 +5,11 @@ FOLLOWS THE GROOVE.
 Hand-placing a UV seam means clicking every edge along a feature. ``SeamPath``
 takes waypoints instead and routes the least-cost edge path between them, where
 "cost" is edge length scaled by :class:`SeamCostParams`: feature-tagged and
-concave (valley) edges are cheap, flat surface is expensive. A seam therefore
-sinks into a groove instead of taking the shortcut across the flat.
+creased edges are cheap, flat surface is expensive. A seam therefore sinks into
+a groove instead of taking the shortcut across the flat. Valleys and ridges are
+weighted separately (``concave_weight`` / ``convex_weight``) — a seam hides best
+in a valley, but a hard convex edge, which is what most CAD parts are made of,
+is worth following too.
 
 The figure makes that the whole point. The same router runs twice on the same
 two waypoints of a grooved disk:
@@ -22,8 +25,13 @@ around inside the trench.
 The console half also exercises the editing surface a UV tool needs: waypoints
 stay live (``move_waypoint_to``), only the touched segments re-route
 (``segment_revision``), and ``commit`` / ``revert_commit`` are an undoable pair.
+The blue overlay in the top-down panel is that COMMITTED seam, drawn straight
+from its edge ids through ``Mesh.edge_endpoints`` + ``Mesh.vertex_position`` —
+a committed seam is a set of edge ids and nothing else, so without those two
+accessors it could not be rendered at all.
 
-Only the concave term is demonstrated. ``SeamCostParams.feature_weight`` is
+This figure demonstrates the concave term; the convex one behaves the same way
+over a ridge. ``SeamCostParams.feature_weight`` is
 settable, but nothing in the C ABI can tag an edge as a feature edge, so on a
 mesh loaded from disk that term never fires.
 
@@ -138,6 +146,11 @@ def editing_demo(mesh, positions):
     seams = SeamSet()
     marked = path.commit(seams)
     committed = len(seams)
+    # A committed seam is a SET OF EDGE IDS and nothing else. Mesh.edge_endpoints
+    # turns each id back into a vertex pair and Mesh.vertex_position into two
+    # points, which is what makes a committed seam drawable at all — the routed
+    # path's own vertex list is gone the moment the path is closed.
+    seam_segments = committed_segments(mesh, seams)
     seams.revert_commit(marked)
     reverted = len(seams)
     marker = path.resume_marker
@@ -147,8 +160,17 @@ def editing_demo(mesh, positions):
         "waypoints": len(ids), "segments": len(revs_before),
         "revs_before": revs_before, "revs_after": revs_after, "dragged": dragged,
         "marked": len(marked), "committed": committed, "reverted": reverted,
-        "marker": marker,
+        "marker": marker, "seam_segments": seam_segments,
     }
+
+
+def committed_segments(mesh, seams):
+    """The committed seam as an ``(n, 2, 3)`` array of world-space segments."""
+    segments = []
+    for edge in seams.edges():
+        v0, v1 = mesh.edge_endpoints(edge)
+        segments.append((mesh.vertex_position(v0), mesh.vertex_position(v1)))
+    return np.asarray(segments, dtype=float)
 
 
 # ---------------------------------------------------------------------------
@@ -158,6 +180,7 @@ _FLAT = np.array([0.86, 0.88, 0.91])
 _DEEP = np.array([0.33, 0.39, 0.47])
 _ROUTED = "#e0393e"
 _SHORTEST = "#f0a020"
+_COMMITTED = "#3f7fd0"
 
 
 def surface_polys(mesh_data):
@@ -173,10 +196,17 @@ def surface_polys(mesh_data):
     return polys, colors
 
 
-def draw_surface(ax, mesh_data, paths, elev, azim, title, lift=0.03):
+def draw_surface(ax, mesh_data, paths, elev, azim, title, lift=0.03, seam=None):
     polys, colors = surface_polys(mesh_data)
     ax.add_collection3d(Poly3DCollection(polys, facecolors=colors,
                                          edgecolors=(0.1, 0.13, 0.18, 0.10), linewidths=0.08))
+    if seam is not None and len(seam):
+        # Drawn edge by edge from the committed SeamSet, resolved through
+        # Mesh.edge_endpoints — no routed polyline involved.
+        for i, (a, b) in enumerate(seam):
+            ax.plot([a[0], b[0]], [a[1], b[1]], [a[2] + lift, b[2] + lift],
+                    color=_COMMITTED, linewidth=4.5, solid_capstyle="round", zorder=5,
+                    label="committed seam (from edge ids)" if i == 0 else None)
     for label, color, m in paths:
         p = m["points"]
         # Lift the polyline clear of the surface: matplotlib has no depth buffer,
@@ -233,7 +263,8 @@ def main():
         end = nearest_vertex(positions, ring_point(165.0))
 
         defaults = SeamCostParams.defaults()
-        uniform = SeamCostParams(flat_weight=1.0, feature_weight=1.0, concave_weight=1.0)
+        uniform = SeamCostParams(flat_weight=1.0, feature_weight=1.0, concave_weight=1.0,
+                                 convex_weight=1.0)
         variants = [("routed (valley-biased)", _ROUTED, defaults),
                     ("shortest path (uniform cost)", _SHORTEST, uniform)]
 
@@ -277,6 +308,9 @@ def main():
     print(f"  segment revisions after drag   {edit['revs_after']}  "
           f"(only the touched segment re-routed)")
     print(f"  commit -> {edit['marked']} edges marked, seam set holds {edit['committed']}")
+    seam_len = float(np.linalg.norm(np.diff(edit["seam_segments"], axis=1), axis=-1).sum())
+    print(f"  edge_endpoints -> {len(edit['seam_segments'])} drawable segments, "
+          f"{seam_len:.3f} total length")
     print(f"  revert_commit -> seam set holds {edit['reverted']}")
     print(f"  resume_marker armed at vertex {edit['marker']}")
 
@@ -290,7 +324,10 @@ def main():
                  f"routed seam\nrides concave edges vs {paths[1][2]['concave_pct']:.0f}%")
     ax2 = fig.add_subplot(1, 3, 2, projection="3d")
     draw_surface(ax2, mesh_data, paths, 89, -90,
-                 "seen from above — the trench is the dark ring")
+                 f"seen from above — the trench is the dark ring\n"
+                 f"blue: the COMMITTED seam, {len(edit['seam_segments'])} edge ids "
+                 f"resolved to segments",
+                 seam=edit["seam_segments"])
     handles, labels = ax2.get_legend_handles_labels()
     fig.legend(handles, labels, fontsize=10, ncol=2, loc="lower center",
                bbox_to_anchor=(0.34, -0.01), framealpha=0.95)

@@ -167,6 +167,26 @@ def check_weighted_transform_glue(mesh, snapper) -> None:
             assert abs(after[v * 3 + 2]) < 1e-5, (v, after[v * 3 + 2])
 
 
+def check_relax_report_counts_distinct_vertices(mesh, snapper) -> None:
+    """Regression: ``moved`` used to be a CUMULATIVE per-iteration write count
+    for the weighted relax while ``transform_selection`` reported DISTINCT
+    vertices, so a multi-iteration relax reported more moved vertices than the
+    mesh has — a count that exceeds the vertex count is a trap, not a report."""
+    mesh.select_sphere((4.0, 1.0, 0.0), 3.0, falloff=cyberremesh.Falloff.SMOOTH)
+    selected = sum(1 for w in mesh.selection_weights() if w > 0.0)
+    assert selected > 0
+
+    once = mesh.relax_selection(strength=0.5, iterations=1, snapper=snapper)
+    many = mesh.relax_selection(strength=0.5, iterations=12, snapper=snapper)
+    assert once.moved > 0, once
+    assert many.moved == once.moved, (many, once)
+    assert many.moved <= mesh.vertex_count, (many.moved, mesh.vertex_count)
+    assert many.moved <= selected, (many.moved, selected)
+    assert many.resnapped <= many.moved, many
+    # Twelve sweeps of the old cumulative count would have overflowed the mesh.
+    assert 12 * once.moved > mesh.vertex_count, (once.moved, mesh.vertex_count)
+
+
 def main() -> int:
     check_parity()
 
@@ -192,6 +212,7 @@ def main() -> int:
                 Mesh.load_obj(edit_obj.name) as mesh:
             with Snapper(target) as snapper:
                 check_weighted_transform_glue(mesh, snapper)
+                check_relax_report_counts_distinct_vertices(mesh, snapper)
     finally:
         os.unlink(target_obj.name)
         os.unlink(edit_obj.name)

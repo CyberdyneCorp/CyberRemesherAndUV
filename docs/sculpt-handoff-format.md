@@ -102,10 +102,18 @@ A `.gltf`/`.glb` handoff declares its version in
                                                  "producer": "claycore" } } } }
 ```
 
-Geometry, normals and vertex colors come through the engine's normal glTF
-import path. `material_mix` has no glTF core slot; a GLB handoff that omits it
-is accepted with a warning rather than rejected, since the attribute is the one
-payload the format cannot carry natively.
+Geometry and vertex colors come through the engine's normal glTF import path.
+`material_mix` has no glTF core slot; a GLB handoff that omits it is accepted
+with a warning rather than rejected, since the attribute is the one payload the
+format cannot carry natively.
+
+**Known limits of this route — the PLY profile is the normative one.** Only the
+`major`/`minor` pair is read out of `cyberSculptHandoff`: the `producer` label
+is parsed for PLY but not for glTF, so it comes back empty. Vertex normals are
+also lost — the glTF importer attaches `NORMAL` to mesh CORNERS while a handoff
+reports and consumes VERTEX normals, so a glTF handoff reads back as having
+none. Both are reader gaps, not format gaps. Send PLY (or the buffer profile) if
+you need the producer label or normals.
 
 ## In-memory buffer profile
 
@@ -142,6 +150,24 @@ const cyber::Mesh& target = result.value().mesh;
 
 `readStream(std::istream&, originLabel)` reads the same profile from stdin or
 any other stream; `readBuffers(const BufferView&)` reads the in-memory profile.
+
+Both profiles are reachable from Python, and both apply the same version gate —
+going through memory cannot bypass it:
+
+```python
+from cyberremesh import Mesh
+
+mesh, info = Mesh.load_handoff("sculpt.ply")            # file profile
+mesh, info = Mesh.load_handoff_buffers(                 # in-memory profile
+    positions, triangles,                               # (n, 3) and (m, 3)
+    normals=normals, colors=colors, material_mix=mix,   # all optional
+    producer="my-sculpt-tool")
+info.version, info.producer, info.has_vertex_colors
+```
+
+An unsupported version raises `IncompatibleVersionError` naming both versions;
+an optional payload whose length does not match the vertex count is rejected
+before it reaches the C ABI, whose pointers carry an implied length.
 
 From the CLI:
 

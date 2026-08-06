@@ -49,8 +49,11 @@ float seamEdgeCost(const Mesh& mesh, EdgeId edge, const SeamCostOptions& options
     if (mesh.isFeatureEdge(edge)) {
         weight = std::fmin(weight, options.featureWeight);
     }
-    if (edgeSignedDihedral(mesh, edge) >= options.creaseDegrees) {
+    const float dihedral = edgeSignedDihedral(mesh, edge);
+    if (dihedral >= options.creaseDegrees) {
         weight = std::fmin(weight, options.concaveWeight);
+    } else if (-dihedral >= options.creaseDegrees) {
+        weight = std::fmin(weight, options.convexWeight);
     }
     return len * std::fmax(weightFloor(options), weight);
 }

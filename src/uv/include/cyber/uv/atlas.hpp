@@ -43,7 +43,13 @@ struct AtlasOptions {
 
 struct AtlasResult {
     bool ok = false;
+    // Charts that actually occupy area in the packed atlas.
     int chartCount = 0;
+    // Charts the seams produced that cover nothing once packed: LSCM and the
+    // planar fallback both came out degenerate (a zero-area or collinear
+    // island), so they are invisible in the layout. chartCount + droppedCharts
+    // is the number of islands the seam set cut the mesh into.
+    int droppedCharts = 0;
     std::size_t seamEdges = 0;
     // Worst / RMS conformal (angle) error across all charts, in [0, 1).
     float maxAngleDistortion = 0.0f;
@@ -53,8 +59,14 @@ struct AtlasResult {
     int fallbackCharts = 0;
     // Charts whose net UV winding is mirrored (non-disk or folded).
     int flippedCharts = 0;
-    // Packing outcome (fraction of the unit square covered, texel density).
+    // Fraction of the unit square the chart GEOMETRY covers (summed UV face
+    // areas) — the texel efficiency a painter sees.
     float packedArea = 0.0f;
+    // Fraction covered by the charts' bounding boxes: how tightly the packer
+    // placed them, regardless of how much of each box its chart fills. The gap
+    // to packedArea is the slack inside the charts' own boxes; a folded chart
+    // (see flippedCharts) can invert it by covering its own faces twice.
+    float packedBoxArea = 0.0f;
     float texelDensity = 0.0f;
 };
 

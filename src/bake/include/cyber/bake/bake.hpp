@@ -64,7 +64,11 @@ struct BakeParams {
     // inward up to 2*cageDistance to find the Target (11.2 makes this a
     // per-vertex editable cage; here it is a uniform distance).
     float cageDistance = 0.1f;
-    int aoSamples = 16;       // hemisphere rays per texel for AO
+    // Hemisphere rays per texel for AO. Binary visibility quantizes openness to
+    // aoSamples+1 rungs, so a low budget ships a visibly stepped map even with
+    // the per-texel sample rotation dithering it; 64 is the smallest default
+    // that reads as continuous in 8-bit.
+    int aoSamples = 64;
     float aoRadius = 1.0f;    // an AO ray hit beyond this does not occlude
     float aoBias = 1e-3f;     // start offset to avoid self-hits
     ColorSource colorSource;  // BakeMap::Color source (default: Target vertex colors)

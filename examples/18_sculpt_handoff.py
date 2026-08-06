@@ -412,7 +412,7 @@ def run_pipeline(tmp, verts, tris):
                  quality=common.quad_quality({"positions": pos, "faces": faces_v}))
 
     # 4. Bake the handoff's detail down onto the retopology's UVs.
-    params = BakeParams(width=192, height=192, cage_distance=0.3, ao_samples=16, ao_radius=0.5)
+    params = BakeParams(width=192, height=192, cage_distance=0.3, ao_samples=64, ao_radius=0.5)
     for key, kind, label in (("normal", BakeMap.NORMAL, "normal"), ("ao", BakeMap.AO, "ao")):
         img = bake(low, target, kind, params)
         state[key] = img.to_numpy()

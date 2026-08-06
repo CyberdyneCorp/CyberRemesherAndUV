@@ -46,9 +46,19 @@ struct SurfaceHit {
 };
 
 // Accounting for the ops that move vertices and re-project them onto the Target
-// in the SAME pass (weighted transform, weighted relax): how many vertices the
-// op wrote, how many of those the re-projection pulled back by more than the
-// caller's epsilon, and the largest such correction.
+// in the SAME pass (weighted transform, weighted relax).
+//
+// BOTH COUNTS ARE DISTINCT VERTICES, never per-iteration updates: a multi-
+// iteration relax revisits the same vertex every sweep, so counting the writes
+// would report a number larger than the mesh's vertex count. `moved` therefore
+// never exceeds the live vertex count and `resnapped` never exceeds `moved`.
+//
+// `resnapped` counts the moved vertices whose re-projection correction was
+// STRICTLY GREATER than the caller's epsilon. With the default epsilon of 0 a
+// vertex the projection did not have to correct at all (correction exactly 0 —
+// it already sat on the Target, which happens for weights so small the blended
+// target is bit-identical to the current position) is not counted, so
+// `moved - resnapped` is the number of vertices that were already on-surface.
 struct ResnapReport {
     std::size_t moved = 0;
     std::size_t resnapped = 0;

@@ -4,6 +4,7 @@
 // that the progress callback fired.
 #include <doctest.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
@@ -324,6 +325,132 @@ TEST_CASE("capi soft selection: paint stroke accumulates and clear zeroes the fi
     cyber_mesh_free(edit);
 }
 
+// Regression (binding-gap report, item 1): CyberSoftTransformReport::moved used
+// to be a CUMULATIVE per-iteration write count for the weighted relax while
+// _transform reported DISTINCT vertices, so a multi-iteration relax could
+// report more "moved" vertices than the mesh has. Both must report distinct
+// vertices, and resnapped must never exceed moved.
+TEST_CASE("capi soft relax reports distinct vertices, not per-iteration writes") {
+    CyberMesh* target = makeGridMesh(9, 9, 0.0f);
+    CyberSnapper* snapper = nullptr;
+    REQUIRE(cyber_snapper_create(target, &snapper) == CYBER_OK);
+
+    CyberMesh* edit = makeGridMesh(9, 9, 0.0f);
+    const size_t vertices = cyber_mesh_vertex_count(edit);
+    const float centre[3] = {4.0f, 4.0f, 0.0f};
+    REQUIRE(cyber_retopo_selection_sphere(edit, centre, 3.0f, CYBER_FALLOFF_SMOOTH) == CYBER_OK);
+
+    std::vector<float> weights(vertices);
+    cyber_retopo_selection_copy_weights(edit, weights.data(), weights.size());
+    size_t selected = 0;
+    for (const float w : weights) {
+        selected += w > 0.0f ? 1u : 0u;
+    }
+    REQUIRE(selected > 0u);
+
+    CyberSoftTransformReport once{};
+    REQUIRE(cyber_retopo_selection_relax(edit, 0.5f, 1, nullptr, 0, snapper, 0.0f, &once) ==
+            CYBER_OK);
+    REQUIRE(once.moved > 0u);
+
+    // Twelve sweeps over the same region: a cumulative count would report
+    // 12 * once.moved, which here exceeds the mesh's vertex count outright.
+    CyberSoftTransformReport many{};
+    REQUIRE(cyber_retopo_selection_relax(edit, 0.5f, 12, nullptr, 0, snapper, 0.0f, &many) ==
+            CYBER_OK);
+    REQUIRE(many.moved == once.moved);
+    REQUIRE(many.moved <= vertices);
+    REQUIRE(many.moved <= selected);
+    REQUIRE(many.resnapped <= many.moved);
+    REQUIRE(12u * once.moved > vertices);  // the old count would have been out of range
+
+    cyber_snapper_free(snapper);
+    cyber_mesh_free(edit);
+    cyber_mesh_free(target);
+}
+
+// Regression (binding-gap report, item 2): there was no in-memory way to
+// duplicate a mesh or restore a previous state, so callers round-tripped
+// through save_obj/load_obj and picked up float narrowing.
+TEST_CASE("capi clones a mesh handle and writes positions back") {
+    CyberMesh* mesh = makeGridMesh(5, 4, 0.0f);
+    const float centre[3] = {2.0f, 1.5f, 0.0f};
+    REQUIRE(cyber_retopo_selection_sphere(mesh, centre, 2.0f, CYBER_FALLOFF_SMOOTH) == CYBER_OK);
+    REQUIRE(cyber_retopo_selection_save(mesh, "cap") == CYBER_OK);
+    const uint32_t tagged[2] = {0u, 1u};
+    REQUIRE(cyber_mesh_set_tagged_edges(mesh, tagged, 2) == CYBER_OK);
+
+    CyberMesh* copy = nullptr;
+    REQUIRE(cyber_mesh_clone(mesh, &copy) == CYBER_OK);
+    REQUIRE(copy != nullptr);
+    REQUIRE(copy != mesh);
+    REQUIRE(cyber_mesh_vertex_count(copy) == cyber_mesh_vertex_count(mesh));
+    REQUIRE(cyber_mesh_face_count(copy) == cyber_mesh_face_count(mesh));
+    REQUIRE(positionsOf(copy) == positionsOf(mesh));  // exact, no float narrowing
+
+    // The whole handle rides along: overlays, weight field, saved slots.
+    const size_t n = cyber_mesh_vertex_count(mesh);
+    std::vector<float> original(n);
+    std::vector<float> copied(n);
+    cyber_retopo_selection_copy_weights(mesh, original.data(), original.size());
+    cyber_retopo_selection_copy_weights(copy, copied.data(), copied.size());
+    REQUIRE(copied == original);
+    REQUIRE(cyber_retopo_selection_slot_count(copy) == 1u);
+    REQUIRE(std::string(cyber_retopo_selection_slot_name(copy, 0)) == "cap");
+    size_t taggedCount = 0;
+    REQUIRE(cyber_mesh_tagged_edge_indices_ptr(copy, &taggedCount) != nullptr);
+
+    // Editing the copy leaves the original alone.
+    const std::vector<float> snapshot = positionsOf(mesh);
+    std::vector<float> lifted = snapshot;
+    for (size_t i = 2; i < lifted.size(); i += 3) {
+        lifted[i] += 1.0f;
+    }
+    REQUIRE(cyber_mesh_set_positions(copy, lifted.data(), lifted.size()) == CYBER_OK);
+    REQUIRE(positionsOf(copy) == lifted);
+    REQUIRE(positionsOf(mesh) == snapshot);
+
+    // ... and the snapshot restores bit-exactly through the same door.
+    REQUIRE(cyber_mesh_set_positions(copy, snapshot.data(), snapshot.size()) == CYBER_OK);
+    REQUIRE(positionsOf(copy) == snapshot);
+
+    // A count mismatch is rejected and changes nothing.
+    REQUIRE(cyber_mesh_set_positions(copy, snapshot.data(), snapshot.size() - 3) ==
+            CYBER_ERR_INVALID_ARG);
+    REQUIRE(positionsOf(copy) == snapshot);
+    REQUIRE(cyber_mesh_set_positions(copy, nullptr, snapshot.size()) == CYBER_ERR_INVALID_ARG);
+    REQUIRE(cyber_mesh_set_positions(nullptr, snapshot.data(), snapshot.size()) ==
+            CYBER_ERR_INVALID_ARG);
+    REQUIRE(cyber_mesh_clone(nullptr, &copy) == CYBER_ERR_INVALID_ARG);
+    REQUIRE(cyber_mesh_clone(mesh, nullptr) == CYBER_ERR_INVALID_ARG);
+
+    cyber_mesh_free(copy);
+    cyber_mesh_free(mesh);
+}
+
+// Regression (binding-gap report, item 3): a committed seam is a set of edge
+// ids, so it is undrawable without an edge -> vertex-pair accessor.
+TEST_CASE("capi resolves an edge id to its endpoint positions") {
+    CyberMesh* mesh = makeGridMesh(4, 3, 0.0f);
+    uint32_t endpoints[2] = {0u, 0u};
+    REQUIRE(cyber_mesh_edge_endpoints(mesh, 0u, endpoints) == 1);
+    REQUIRE(endpoints[0] != endpoints[1]);
+
+    float a[3] = {0.0f, 0.0f, 0.0f};
+    float b[3] = {0.0f, 0.0f, 0.0f};
+    REQUIRE(cyber_mesh_vertex_position(mesh, endpoints[0], a) == 1);
+    REQUIRE(cyber_mesh_vertex_position(mesh, endpoints[1], b) == 1);
+    const float dx = a[0] - b[0];
+    const float dy = a[1] - b[1];
+    const float dz = a[2] - b[2];
+    REQUIRE(std::sqrt(dx * dx + dy * dy + dz * dz) > 0.0f);
+
+    REQUIRE(cyber_mesh_edge_endpoints(mesh, 100000u, endpoints) == 0);
+    REQUIRE(cyber_mesh_edge_endpoints(nullptr, 0u, endpoints) == 0);
+    REQUIRE(cyber_mesh_vertex_position(mesh, 100000u, a) == 0);
+    cyber_mesh_free(mesh);
+}
+
 TEST_CASE("capi seam path: route, edit, commit, resume, drop") {
     // 7 x 5 flat lattice; vertex ids follow the row-major lattice order.
     constexpr int kCols = 7;
@@ -343,6 +470,7 @@ TEST_CASE("capi seam path: route, edit, commit, resume, drop") {
     CyberSeamPathOptions options{};
     cyber_default_seam_path_options(&options);
     REQUIRE(options.flatWeight > options.concaveWeight);
+    REQUIRE(options.flatWeight > options.convexWeight);
     REQUIRE(options.minWeight > 0.0f);
 
     CyberSeamPath* path = nullptr;
@@ -741,3 +869,267 @@ TEST_CASE("capi conform re-snaps onto a new Target and reports max/RMS deviation
     std::filesystem::remove(editPath, ec);
     std::filesystem::remove(targetPath, ec);
 }
+
+// ---- named export presets ---------------------------------------------------
+//
+// The preset DATA half of the C ABI is available in EVERY configuration (it is
+// pure core), so these cases are unconditional; only the bundle writer below is
+// gated on the export-bundle module.
+
+TEST_CASE("capi lists and resolves the built-in export presets") {
+    const size_t count = cyber_export_preset_builtin_count();
+    REQUIRE(count >= 4u);
+    CHECK(cyber_export_preset_builtin_name(count) == nullptr);  // out of range
+
+    bool sawBlender = false;
+    bool sawUnreal = false;
+    for (size_t i = 0; i < count; ++i) {
+        const char* name = cyber_export_preset_builtin_name(i);
+        REQUIRE(name != nullptr);
+
+        CyberExportPreset* preset = nullptr;
+        REQUIRE(cyber_export_preset_resolve(name, &preset) == CYBER_OK);
+        REQUIRE(preset != nullptr);
+
+        CyberExportPresetInfo info{};
+        REQUIRE(cyber_export_preset_info(preset, &info) == CYBER_OK);
+        CHECK(std::string(info.name) == name);
+        CHECK(info.schemaVersion == CYBER_PRESET_SCHEMA_VERSION);
+        CHECK(std::string(info.meshFormat).find('.') == std::string::npos);
+        CHECK(info.resolution > 0);
+        CHECK(info.mapCount > 0u);
+        sawBlender = sawBlender || std::string(name) == "blender";
+        sawUnreal = sawUnreal || std::string(name) == "unreal";
+        // Only Unreal reads DirectX-style normals; the rest are OpenGL-style.
+        CHECK(info.normalGreenPlusY == (std::string(name) == "unreal" ? 0 : 1));
+
+        // Every map expands to a distinct file name, or one would overwrite
+        // the previous one.
+        std::vector<std::string> names;
+        for (size_t m = 0; m < info.mapCount; ++m) {
+            CyberExportPresetMap entry{};
+            REQUIRE(cyber_export_preset_map(preset, m, &entry) == CYBER_OK);
+            CHECK(std::string(entry.map).empty() == false);
+            CHECK((std::string(entry.colorSpace) == "linear" ||
+                   std::string(entry.colorSpace) == "srgb"));
+            CHECK(std::string(entry.suffix).empty() == false);
+            const char* fileName = cyber_export_preset_map_file_name(preset, m, "spot");
+            REQUIRE(fileName != nullptr);
+            const std::string expanded(fileName);
+            CHECK(expanded.find("spot") != std::string::npos);
+            CHECK(expanded.find('{') == std::string::npos);  // every token expanded
+            CHECK(std::find(names.begin(), names.end(), expanded) == names.end());
+            names.push_back(expanded);
+        }
+        CHECK(cyber_export_preset_map(preset, info.mapCount, nullptr) == CYBER_ERR_INVALID_ARG);
+        CHECK(cyber_export_preset_map_file_name(preset, info.mapCount, "spot") == nullptr);
+
+        // --texture-size override, and its guard.
+        REQUIRE(cyber_export_preset_set_resolution(preset, 64) == CYBER_OK);
+        CyberExportPresetInfo resized{};
+        REQUIRE(cyber_export_preset_info(preset, &resized) == CYBER_OK);
+        CHECK(resized.resolution == 64);
+        CHECK(cyber_export_preset_set_resolution(preset, 0) == CYBER_ERR_INVALID_ARG);
+
+        cyber_export_preset_free(preset);
+    }
+    CHECK(sawBlender);
+    CHECK(sawUnreal);
+    cyber_export_preset_free(nullptr);  // free(NULL) is a no-op
+}
+
+TEST_CASE("capi rejects an unknown preset name and an unsupported preset schema") {
+    CyberExportPreset* preset = reinterpret_cast<CyberExportPreset*>(0x1);
+    CHECK(cyber_export_preset_resolve("definitely-not-a-preset", &preset) == CYBER_ERR_INVALID_ARG);
+    CHECK(preset == nullptr);
+    // The message names the alternatives rather than just failing.
+    CHECK(std::string(cyber_last_error()).find("blender") != std::string::npos);
+
+    // A well-formed preset from a FUTURE schema is a contract mismatch, not a
+    // parse error: it must be rejected loudly, never partially honored.
+    const std::filesystem::path future =
+        std::filesystem::temp_directory_path() / "cyber_capi_future_preset.json";
+    {
+        std::ofstream out(future);
+        out << R"({"schemaVersion": 99, "name": "future", "maps": [{"map": "normal"}]})";
+    }
+    preset = reinterpret_cast<CyberExportPreset*>(0x1);
+    CHECK(cyber_export_preset_resolve(future.string().c_str(), &preset) ==
+          CYBER_ERR_INCOMPATIBLE_VERSION);
+    CHECK(preset == nullptr);
+    const std::string message(cyber_last_error());
+    CHECK(message.find("99") != std::string::npos);
+    CHECK(message.find("1") != std::string::npos);
+
+    // A malformed preset file is an I/O-class failure, distinct from the above.
+    const std::filesystem::path broken =
+        std::filesystem::temp_directory_path() / "cyber_capi_broken_preset.json";
+    {
+        std::ofstream out(broken);
+        out << R"({"schemaVersion": 1, "name": "broken"})";  // no "maps"
+    }
+    preset = nullptr;
+    CHECK(cyber_export_preset_resolve(broken.string().c_str(), &preset) == CYBER_ERR_IO);
+    CHECK(preset == nullptr);
+
+    CHECK(cyber_export_preset_resolve(nullptr, &preset) == CYBER_ERR_INVALID_ARG);
+    CHECK(cyber_export_preset_info(nullptr, nullptr) == CYBER_ERR_INVALID_ARG);
+
+    std::error_code ec;
+    std::filesystem::remove(future, ec);
+    std::filesystem::remove(broken, ec);
+}
+
+#ifdef CYBER_TESTS_HAVE_EXPORTBUNDLE
+TEST_CASE("capi writes an export bundle for a mesh pair") {
+    // A UV'd plane as the low-poly (so the bundle does NOT need to unwrap) and
+    // the same plane lifted as the projection source.
+    const std::filesystem::path lowPath = writeUvPlaneObj();
+    const std::filesystem::path highPath =
+        std::filesystem::temp_directory_path() / "cyber_capi_bundle_high.obj";
+    {
+        std::ofstream out(highPath);
+        out << "v 0 0 0.05\nv 1 0 0.05\nv 1 1 0.05\nv 0 1 0.05\nf 1 2 3\nf 1 3 4\n";
+    }
+    const std::filesystem::path outDir =
+        std::filesystem::temp_directory_path() / "cyber_capi_bundle_out";
+    std::error_code ec;
+    std::filesystem::remove_all(outDir, ec);
+    std::filesystem::create_directories(outDir, ec);
+
+    CyberMesh* low = nullptr;
+    CyberMesh* high = nullptr;
+    REQUIRE(cyber_mesh_load_obj(lowPath.string().c_str(), &low) == CYBER_OK);
+    REQUIRE(cyber_mesh_load_obj(highPath.string().c_str(), &high) == CYBER_OK);
+
+    CyberExportPreset* preset = nullptr;
+    REQUIRE(cyber_export_preset_resolve("blender", &preset) == CYBER_OK);
+    REQUIRE(cyber_export_preset_set_resolution(preset, 16) == CYBER_OK);
+
+    CyberBundleParams params{};
+    cyber_default_bundle_params(&params);
+    CHECK(params.aoSamples > 0);
+    const std::string meshOut = (outDir / "plane.obj").string();
+    params.meshPath = meshOut.c_str();
+    params.aoSamples = 4;
+    params.cageDistance = 0.2f;
+
+    int progressCalls = 0;
+    auto onProgress = [](float, const char*, void* user) { ++*static_cast<int*>(user); };
+
+    CyberBundleResult* result = nullptr;
+    REQUIRE(cyber_export_bundle_write(low, high, preset, &params, onProgress, nullptr,
+                                      &progressCalls, &result) == CYBER_OK);
+    REQUIRE(result != nullptr);
+    CHECK(progressCalls > 0);
+
+    // The low-poly already had UVs, so nothing was unwrapped.
+    CHECK(cyber_bundle_result_unwrapped(result) == 0);
+    CHECK(cyber_bundle_result_chart_count(result) == 0);
+
+    CyberExportPresetInfo info{};
+    REQUIRE(cyber_export_preset_info(preset, &info) == CYBER_OK);
+    const size_t fileCount = cyber_bundle_result_file_count(result);
+    CHECK(fileCount == info.mapCount + 1u);  // one mesh plus one file per map
+
+    bool sawMesh = false;
+    for (size_t i = 0; i < fileCount; ++i) {
+        CyberBundleFile file{};
+        REQUIRE(cyber_bundle_result_file(result, i, &file) == CYBER_OK);
+        CHECK(std::filesystem::exists(file.path));
+        if (std::string(file.kind) == "mesh") {
+            sawMesh = true;
+            CHECK(file.width == 0);
+        } else {
+            // Every map honours the resolution override.
+            CHECK(file.width == 16);
+            CHECK(file.height == 16);
+            CHECK((std::string(file.colorSpace) == "linear" ||
+                   std::string(file.colorSpace) == "srgb"));
+        }
+    }
+    CHECK(sawMesh);
+    CHECK(cyber_bundle_result_file(result, fileCount, nullptr) == CYBER_ERR_INVALID_ARG);
+    CHECK(cyber_bundle_result_warning(result, cyber_bundle_result_warning_count(result)) ==
+          nullptr);
+
+    cyber_bundle_result_free(result);
+
+    // Null-argument contract: the output pointer is always cleared first.
+    result = reinterpret_cast<CyberBundleResult*>(0x1);
+    CHECK(cyber_export_bundle_write(low, nullptr, preset, &params, nullptr, nullptr, nullptr,
+                                    &result) == CYBER_ERR_INVALID_ARG);
+    CHECK(result == nullptr);
+    CHECK(cyber_export_bundle_write(nullptr, high, preset, &params, nullptr, nullptr, nullptr,
+                                    &result) == CYBER_ERR_INVALID_ARG);
+
+    cyber_export_preset_free(preset);
+    cyber_mesh_free(low);
+    cyber_mesh_free(high);
+    std::filesystem::remove(lowPath, ec);
+    std::filesystem::remove(highPath, ec);
+    std::filesystem::remove_all(outDir, ec);
+}
+
+TEST_CASE("capi export bundle unwraps a low-poly that carries no UVs") {
+    // No vt in the low-poly: baking is impossible without UVs, so the bundle
+    // unwraps it IN PLACE rather than refusing.
+    const std::filesystem::path lowPath =
+        std::filesystem::temp_directory_path() / "cyber_capi_bundle_nouv.obj";
+    {
+        std::ofstream out(lowPath);
+        out << "v 0 0 0\nv 1 0 0\nv 1 1 0\nv 0 1 0\nf 1 2 3\nf 1 3 4\n";
+    }
+    const std::filesystem::path outDir =
+        std::filesystem::temp_directory_path() / "cyber_capi_bundle_nouv_out";
+    std::error_code ec;
+    std::filesystem::remove_all(outDir, ec);
+    std::filesystem::create_directories(outDir, ec);
+
+    CyberMesh* mesh = nullptr;
+    REQUIRE(cyber_mesh_load_obj(lowPath.string().c_str(), &mesh) == CYBER_OK);
+    CyberExportPreset* preset = nullptr;
+    REQUIRE(cyber_export_preset_resolve("gltf-generic", &preset) == CYBER_OK);
+    REQUIRE(cyber_export_preset_set_resolution(preset, 16) == CYBER_OK);
+
+    CyberBundleParams params{};
+    cyber_default_bundle_params(&params);
+    const std::string meshOut = (outDir / "plane.ply").string();
+    params.meshPath = meshOut.c_str();
+    params.basename = "custom";
+    params.aoSamples = 4;
+    params.cageDistance = 0.2f;
+
+    CyberBundleResult* result = nullptr;
+    REQUIRE(cyber_export_bundle_write(mesh, mesh, preset, &params, nullptr, nullptr, nullptr,
+                                      &result) == CYBER_OK);
+    REQUIRE(result != nullptr);
+    CHECK(cyber_bundle_result_unwrapped(result) == 1);
+    CHECK(cyber_bundle_result_chart_count(result) > 0);
+
+    // The preset declares glb but the output path says ply: the explicit path
+    // wins and the mismatch is reported, never silently resolved.
+    bool sawMismatch = false;
+    for (size_t i = 0; i < cyber_bundle_result_warning_count(result); ++i) {
+        const char* warning = cyber_bundle_result_warning(result, i);
+        REQUIRE(warning != nullptr);
+        sawMismatch = sawMismatch || std::string(warning).find("ply") != std::string::npos;
+    }
+    CHECK(sawMismatch);
+
+    // `basename` drove the map file names.
+    for (size_t i = 0; i < cyber_bundle_result_file_count(result); ++i) {
+        CyberBundleFile file{};
+        REQUIRE(cyber_bundle_result_file(result, i, &file) == CYBER_OK);
+        if (std::string(file.kind) != "mesh") {
+            CHECK(std::filesystem::path(file.path).filename().string().rfind("custom", 0) == 0u);
+        }
+    }
+
+    cyber_bundle_result_free(result);
+    cyber_export_preset_free(preset);
+    cyber_mesh_free(mesh);
+    std::filesystem::remove(lowPath, ec);
+    std::filesystem::remove_all(outDir, ec);
+}
+#endif  // CYBER_TESTS_HAVE_EXPORTBUNDLE

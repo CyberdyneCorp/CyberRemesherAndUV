@@ -1,13 +1,16 @@
 #include <doctest.h>
 
+#include <array>
 #include <cmath>
 #include <cstring>
+#include <map>
 #include <string>
 #include <vector>
 
 #include "cyber/core/guidance.hpp"
 #include "cyber/core/pipeline.hpp"
 #include "cyber/quadrangulate/field_quadrangulator.hpp"
+#include "cyber/quadrangulate/quadcover_extractor.hpp"
 
 using cyber::FaceId;
 using cyber::Index;
@@ -33,6 +36,46 @@ Mesh makePlane(int n, float size) {
         for (int j = 0; j < n; ++j) {
             f.push_back({idx(i, j), idx(i + 1, j), idx(i + 1, j + 1)});
             f.push_back({idx(i, j), idx(i + 1, j + 1), idx(i, j + 1)});
+        }
+    }
+    return Mesh::fromIndexed(p, f);
+}
+
+// Closed unit box, `n` cells per side, triangulated. Its creases route the
+// quad-cover method to the native seamless solve on every build, which is the
+// bit-reproducible one — the vendored Geogram solve is not (measured: 1 run in
+// 30 differs), so a byte-identity check needs an input that never lands there.
+Mesh makeBox(int n) {
+    std::vector<Vec3> p;
+    std::vector<std::vector<Index>> f;
+    std::map<std::array<int, 3>, Index> lookup;
+    const float step = 1.0f / static_cast<float>(n);
+    // One shared vertex per lattice point, so the box is welded along its edges.
+    const auto vertexAt = [&](int axis, int side, int u, int v) {
+        const auto slot = [](int a) { return static_cast<std::size_t>(a % 3); };
+        std::array<int, 3> key{};
+        key[slot(axis)] = side;
+        key[slot(axis + 1)] = u;
+        key[slot(axis + 2)] = v;
+        const auto [it, inserted] = lookup.emplace(key, static_cast<Index>(p.size()));
+        if (inserted) {
+            p.push_back({static_cast<float>(key[0]) * step, static_cast<float>(key[1]) * step,
+                         static_cast<float>(key[2]) * step});
+        }
+        return it->second;
+    };
+    for (int axis = 0; axis < 3; ++axis) {
+        for (const int side : {0, n}) {
+            for (int i = 0; i < n; ++i) {
+                for (int j = 0; j < n; ++j) {
+                    const Index a = vertexAt(axis, side, i, j);
+                    const Index b = vertexAt(axis, side, i + 1, j);
+                    const Index c = vertexAt(axis, side, i + 1, j + 1);
+                    const Index d = vertexAt(axis, side, i, j + 1);
+                    f.push_back({a, b, c});
+                    f.push_back({a, c, d});  // winding is fixed by the pipeline's orient stage
+                }
+            }
         }
     }
     return Mesh::fromIndexed(p, f);
@@ -223,6 +266,32 @@ TEST_CASE("an empty guide set reproduces the unguided output byte-for-byte") {
         REQUIRE(same.status == remesh::RunStatus::Success);
         CHECK(meshesBitIdentical(unguided.mesh, same.mesh));
     }
+}
+
+// The same SHALL, on the SHIPPED DEFAULT backend (quad-cover) — where it used
+// to fail: merely CARRYING a density field forces the native seamless route and
+// the probe-predicted initial scaling, so an all-1.0 paint silently changed the
+// mesh. A neutral density is now dropped at validation, so nothing downstream
+// can see it.
+TEST_CASE("a density of 1.0 everywhere is byte-identical on the default quad-cover backend") {
+    const Mesh box = makeBox(6);
+    const remesh::Parameters params = smallRun(300);
+    const auto quadCover = [] { return remesh::makeQuadCoverQuadrangulator(); };
+
+    const auto unguided = remesh::remesh(box, params, nullptr, nullptr, quadCover, fieldAligned());
+    REQUIRE(unguided.status == remesh::RunStatus::Success);
+    // The comparison below only means something if the backend repeats itself.
+    const auto repeat = remesh::remesh(box, params, nullptr, nullptr, quadCover, fieldAligned());
+    REQUIRE(meshesBitIdentical(unguided.mesh, repeat.mesh));
+
+    remesh::Guidance g;
+    g.density.vertexValues.assign(box.vertexCount(), 1.0f);
+    const auto same = remesh::remesh(box, params, nullptr, nullptr, quadCover, fieldAligned(), &g);
+    REQUIRE(same.status == remesh::RunStatus::Success);
+    CHECK(meshesBitIdentical(unguided.mesh, same.mesh));
+    // Dropped, but not silently: the run says the paint had no effect.
+    CHECK(same.islandGuidance.empty());
+    CHECK(same.parameterIssues.size() == 1);
 }
 
 TEST_CASE("painted density shrinks quads inside the painted region") {

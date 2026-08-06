@@ -14,9 +14,11 @@
 
   - **Versioned sculpt handoff ingest** (`src/handoff`, `cyber::handoff`). A
     triangle mesh with positions, per-vertex normals, vertex colors and a
-    `material_mix` weight arrives as a Target through a file (PLY profile,
-    `.gltf`/`.glb` accepted), a stream (stdin), or plain in-memory buffers with
-    no intermediate file. The version gate runs on the header text **before any
+    `material_mix` weight arrives as a Target through a file (PLY profile;
+    `.gltf`/`.glb` accepted and version-gated, but that route carries geometry
+    only — the declared producer label and vertex normals are not read back, and
+    it has no test coverage yet), a stream (stdin), or plain in-memory buffers
+    with no intermediate file. The version gate runs on the header text **before any
     geometry is read**, so a bad version can never produce a partial Target,
     however malformed the rest of the payload is; the rejection is the existing
     typed `io::ErrorCode::IncompatibleVersion` (`CYBER_ERR_INCOMPATIBLE_VERSION`
@@ -83,6 +85,15 @@
   invocations produced 6 distinct outputs there), which is a pre-existing
   property of that route and is recorded here rather than papered over.
 
+  **A density of 1.0 everywhere is a no-op too.** 1.0 is the identity of the
+  sizing relation, but merely *carrying* a density field forces the native
+  seamless route, so an all-1.0 paint used to change the mesh on the shipped
+  default backend (`fandisk --target-quads 1000`: md5 `3add9afb` unguided vs
+  `b390b987` with `perVertex=[1.0]*6475`). `validateGuidance` now drops a
+  post-clamp neutral density and reports it as a non-fatal issue, so it is
+  byte-identical to no density at all; a uniform density of any other value
+  still applies normally.
+
   **Guidance is honored loudly or rejected loudly.** `IQuadrangulator` grows
   `acceptGuidance`, whose default body *declines* and states why, plus an
   `unhonoredGuidance()` query for guidance accepted up front but lost at run
@@ -91,7 +102,10 @@
   not. Supplying guidance **forces the native seamless route** on the
   quad-cover backend, because the vendored Geogram solve has no hook for either
   input — a documented quality trade (native ~4-5% irregular vs vendored 1-4%
-  on smooth organics), not a hidden one. Zero-radius guides, guides with fewer
+  on smooth organics), not a hidden one. One known hole in that audit: the
+  developer kill switch `CYBER_QC_NO_NATIVE` disables the native solve, and a
+  guided island then takes the vendored route while still being reported as
+  honored (see `docs/flow-guides.md`). Zero-radius guides, guides with fewer
   than two points, non-finite values and mismatched density array lengths are
   rejected as fatal rather than silently ignored; out-of-range strength and
   density values clamp with a reported effective value.
@@ -102,8 +116,12 @@
   as `Mesh.guidance_warnings` and through `warnings.warn`), the network bridge
   (`push_guides` / `pull_guides` / `clear_guides` / `push_density` /
   `pull_density`, no protocol-version bump), and the CLI (`--guides
-  <file.json>` sidecar plus a `guidance` block in `--report`). See
-  `docs/flow-guides.md`.
+  <file.json>` sidecar plus a `guidance` block in `--report`). Every sidecar
+  field is type-checked before it is read — a string where a number belongs is
+  an exit-2 argument error naming the file and the field, where it previously
+  reached an unguarded JSON accessor and aborted the process (SIGABRT) — and
+  `main` has a last-resort handler so no escaping exception can ever replace a
+  diagnosis with a crash. See `docs/flow-guides.md`.
 
   **Exit gate: NOT met corpus-wide, reported as measured.** The proposal's gate
   is <=15 deg mean deviation between extracted loop direction and the guide
@@ -132,9 +150,12 @@
   deleted, and an edit re-routes **only the segments adjacent to it**; every
   other segment keeps both its route and its per-segment `routeRevision`
   counter, so a viewport can redraw exactly what changed. Committing marks the
-  route into the existing `cyber::uv::SeamSet` — the same seam model the
-  freehand Pencil/Erase gestures use, so `computeIslands`, gesture unwrap and
-  sew behave as they do for hand-drawn seams — and arms a **resume marker** so
+  route into the existing `cyber::uv::SeamSet` — the one seam model, the same
+  `mark`/`erase`/`sew` set a hand-drawn seam edits, so `computeIslands`,
+  `unwrapIslandToUv` and `stitchAlongSeams` treat a routed seam exactly like a
+  hand-marked one (all three are C++ only: the bindings expose the seam set and
+  the path, not island/unwrap/stitch over it, and there is no stroke→seam
+  gesture entry point on any surface) — and arms a **resume marker** so
   the next waypoint continues from the last committed point. Commit returns a
   `SeamCommit` undo record listing only the edges it *newly* marked, so
   `revertCommit` restores the exact pre-commit state and edges that were
@@ -165,16 +186,24 @@
   transform and relax re-project the vertices they move onto the Target inside
   the same pass, so a taper or a pose never peels the retopo off the sculpt and
   no `snap_all` follow-up is needed — running one would also drag the vertices
-  the selection deliberately left alone. Vertices at weight 0 (and pinned
-  vertices) are skipped entirely, so they are bit-identical afterwards.
+  the selection deliberately left alone. Vertices at weight 0 are skipped
+  entirely, so they are bit-identical afterwards; pinned vertices are skipped
+  too wherever pins can be supplied, which through the C ABI today means the
+  weighted relax only — `cyber_retopo_selection_transform` has no `pinned`
+  argument yet, so on that call weight is the only thing that holds a vertex
+  still.
 
   Reachable from the C ABI (`cyber_retopo_selection_*`, including the
   x/y/z/pressure stroke route), Python (`Mesh.select_line`, `paint_selection`,
   `transform_selection`, the new `Snapper` wrapper, …) and the Swift package.
-  Named selection slots persist in `cyber::app::Document` through an
+  Named selection slots have both halves of their persistence in place but are
+  **not yet persisted end to end**: `cyber::app::Document` gains an
   **append-only** section that is written only when slots exist, so documents
   saved by earlier builds still load and documents without slots keep the exact
-  previous byte layout (`kFormatVersion` deliberately unchanged).
+  previous byte layout (`kFormatVersion` deliberately unchanged), while the C
+  ABI's `cyber_retopo_selection_save`/`_load` slots live on the mesh handle for
+  the session. Nothing connects the two yet — that is shell work, and until it
+  exists a saved slot does not survive the process.
 
 - **Global integer quantization for the seamless solve** (openspec change
   `bimdf-quantization`, now archived). The quad-cover path's per-seam greedy
@@ -256,8 +285,73 @@
   each target's documented spec and pinned by unit tests, but have not been
   verified inside Blender, Unity or Unreal.
 
+- **In-memory mesh copy and position write-back** (`cyber_mesh_clone`,
+  `cyber_mesh_set_positions`; `Mesh.copy` and `Mesh.set_positions` / the
+  `Mesh.positions` setter in Python). There was previously no way to duplicate
+  a mesh or restore a previous state without a `save_obj` / `load_obj` round
+  trip, which narrows to the OBJ text precision — `examples/16_soft_selection.py`
+  was reporting ~8e-07 of spurious vertex movement from that alone, and now
+  reports exactly 0. `cyber_mesh_clone` copies the whole handle (geometry,
+  statistics, hidden-face and tagged-edge overlays, the soft-selection weight
+  field and its saved slots) and preserves element ids, so it works as an undo
+  snapshot. `cyber_mesh_set_positions` takes the same compacted order
+  `cyber_mesh_copy_positions` returns and rejects a count mismatch rather than
+  pairing positions with the wrong vertices.
+
+- **Edge -> vertex-pair and vertex -> position accessors in Python**
+  (`Mesh.edge_endpoints`, `Mesh.vertex_position`, over the existing
+  `cyber_mesh_edge_endpoints` / `cyber_mesh_vertex_position` ABI). A committed
+  seam is a set of opaque edge ids, so `SeamSet.edges()` / `SeamPath.edges()`
+  could not be resolved to geometry from Python and a committed seam could not
+  be drawn at all; `examples/20_seam_paths.py` now renders one.
+
+- **In-memory sculpt handoff from Python** (`Mesh.load_handoff_buffers`, over
+  the existing `cyber_handoff_open_buffers` ABI). Two handoff profiles are
+  documented — a file and plain in-memory buffers — but only the file one had a
+  Python surface (`Mesh.load_handoff` takes a path), so an in-process producer
+  had to write a temporary PLY. The buffer profile carries the same optional
+  normal / colour / `material_mix` payloads and applies the SAME version gate,
+  so going through memory cannot bypass it; a payload whose length does not
+  match the vertex count is rejected in Python rather than read past its end
+  (the C struct's pointers carry an implied length).
+
+- **Named export presets and bundles on the C ABI and in Python**
+  (`cyber_export_preset_builtin_count` / `_builtin_name` / `_resolve` /
+  `_info` / `_map` / `_map_file_name` / `_set_resolution` / `_free`,
+  `cyber_default_bundle_params`, `cyber_export_bundle_write` and the
+  `cyber_bundle_result_*` readers; `builtin_presets`, `ExportPreset`,
+  `PresetMapEntry`, `write_bundle`, `BundleResult` and `BundleFile` in
+  Python). Presets were CLI-only: the C ABI had no export entry point at all,
+  so `examples/19_export_presets.py` had to shell out to the `cyberremesh`
+  binary and re-read its JSON report. The example now drives the bindings
+  directly — it also reads each preset's declared mesh container instead of
+  carrying a hard-coded extension table, and unwraps the low-poly once so all
+  four bundles bake against byte-identical UVs. Preset DATA lives in core, so
+  listing, resolving and reading a preset works in **every** configuration;
+  only `cyber_export_bundle_write` needs the UV-gated bundle module, and
+  without it the symbol is still declared and returns a runtime error naming
+  the missing module. A preset file from an unsupported schema surfaces as
+  `CYBER_ERR_INCOMPATIBLE_VERSION` / `IncompatibleVersionError` naming both
+  versions, and an unknown preset name as an invalid-argument error listing the
+  built-ins.
+
 ### Changed
 
+- **`CyberSoftTransformReport.moved` now counts DISTINCT vertices for the
+  weighted relax too, not per-iteration writes.** It already meant distinct
+  vertices for `cyber_retopo_selection_transform`, but
+  `cyber_retopo_selection_relax` accumulated `updates.size()` once per sweep,
+  so the same field meant two different things and a multi-iteration relax
+  could report more moved vertices than the mesh has: 12 iterations over 78
+  selected vertices of an 861-vertex mesh reported **936**, and the same call
+  now reports **78**. `resnapped` is counted the same way (distinct vertices,
+  so it can no longer exceed `moved`); `max_snap_distance` is unchanged.
+  Positions produced by either op are bit-identical — only the report changed.
+  Callers that printed the old number as a "vertex updates" total will see a
+  smaller value. The C ABI header, the Python docstring and the Swift wrapper
+  now all state this, along with why `moved - resnapped` can be non-zero: with
+  the default `resnap_epsilon` of 0 a vertex the re-projection did not have to
+  correct at all is not counted as re-snapped.
 - `cyberremesh`'s reported `elapsedSeconds` now covers export as well as the
   solve. It previously stopped at the end of the remesh, which understated a
   `--preset` run by the entire bake.
@@ -275,6 +369,68 @@
   to look at them.
 
 ### Fixed
+
+- **The ambient-occlusion bake was banded, not shaded.** Every texel fired the
+  *identical* Hammersley hemisphere set, so openness could only land on the
+  `k / aoSamples` lattice **and** neighbouring texels snapped to the same rung.
+  With the old default of 16 rays that is 17 possible values laid down in flat
+  contours: a 256x256 bake of `spot.obj` used **14 distinct levels** across its
+  26 413 charted texels, with 47.7% pinned at 255 and *nothing at all* between
+  240 and 254. Two fixes: the sample set now gets a per-texel Cranley-Patterson
+  rotation (a deterministic hash of the texel coordinate — still no RNG, a
+  re-bake is bit-identical), which converts the banding into fine dither at zero
+  extra ray cost; and `aoSamples` defaults to **64** rather than 16, because no
+  amount of dithering can add rungs that a 16-ray estimator does not have. On
+  that same bake: distinct levels **14 -> 45**, texels at exactly 255 **47.7% ->
+  31.6%**, and the fraction of adjacent texel pairs that differ (the banding
+  measure) **16.0% -> 55.1%**. Mean openness is unchanged (232.5 -> 232.7 of
+  255), so the estimator is still unbiased — the map is not darker, it is
+  resolved. **Behaviour change:** every AO bake produces different pixels than
+  before, and the default bake costs 4x the AO rays (a 3 000-quad `spot.obj`
+  preset run went 8.1s -> 11.0s end to end); pass `--ao-samples 16` /
+  `BakeParams::aoSamples = 16` to keep the old budget, which now at least
+  dithers. The AO entry of the field-bridge pixel checksum was re-captured for
+  this; the other six maps still hold their pre-bridge bits.
+
+- **The UV atlas over-reported coverage and over-counted charts.**
+  `AtlasResult::packedArea` (`packed_area` in Python, `packedArea` in the C ABI)
+  is documented as "fraction of the unit square covered", but it summed the
+  packed islands' BOUNDING BOXES. A chart fills only part of its box, so the
+  number ran 1.6-2.3x high on curved models — a torus reported 76.6% against
+  35.5% of the UV square actually painted. It is now the summed UV face area of
+  the packed charts, i.e. the coverage a texture painter sees; the box figure is
+  still available, honestly named, as `packedBoxArea` / `packed_box_area` (how
+  tightly the box packer placed the charts). The same
+  split lands on `PackResult`: `usedArea` is real coverage, `boxArea` is the box
+  fraction (`packBoxes` is given boxes only, so there the two agree).
+  `chartCount` also counted charts that never land — an island whose LSCM and
+  planar-projection unwraps both come out degenerate covers nothing, so the
+  reported count disagreed with the visible layout. Degenerate islands are now
+  reported as `droppedCharts` / `dropped_charts`, and `chartCount +
+  droppedCharts` is the island count. **Behaviour change:** `packed_area` drops
+  (torus 0.766 -> 0.355, bumpy sphere 0.755 -> 0.323, sphere 0.552 -> 0.344,
+  cube 0.667 -> 0.766 where re-oriented square charts fill their boxes), and
+  `chart_count` drops on meshes carrying degenerate faces. Callers gating on the
+  old number should re-baseline against the true value.
+
+- **Seam routing ignored convex creases.** `cyber::uv::seamEdgeCost` discounted
+  an edge only when its signed dihedral was `>= creaseDegrees`, i.e. valleys
+  only — a ridge reports a NEGATIVE dihedral, so on convex-creased models (every
+  CAD part in the corpus: fandisk carries 761 convex crease edges against 115
+  concave, rocker-arm 2993 against 716) the router degenerated to a plain
+  geodesic and the feature did nothing. Creases now discount whichever way they
+  bend, with `convexWeight` (`convex_weight` in Python, `convexWeight` in the C
+  ABI and Swift) as a separate, tunable multiplier defaulting to `0.8`;
+  `creaseDegrees` is now compared against the dihedral's magnitude. Routing
+  between the ends of a convex crease chain, the share of routed length that
+  actually rides the crease goes 78.7% -> 97.1% on fandisk (41/57 -> 52/57
+  chains followed end to end) and 60.0% -> 81.4% on rocker-arm (48/143 ->
+  70/143). **Behaviour change:** a route that used to cross a ridge at full
+  cost may now follow it. Valleys are unaffected (`concaveWeight` is untouched
+  at 0.35 and still strictly cheaper than a ridge), and the conservative
+  default means a ridge detour is only taken when it costs less than ~25% extra
+  length; set `convex_weight` to 1.0 for the old behaviour, or down toward 0.45
+  for aggressive ridge-following (fandisk 100%, 57/57).
 
 - Two real `-Werror` breaks under GCC 13 that made the tree unbuildable on
   current Ubuntu: a signed/unsigned conversion in `bimdf_quantize.cpp`'s trail

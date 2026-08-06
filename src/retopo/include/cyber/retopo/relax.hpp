@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <utility>
 #include <vector>
 
@@ -74,6 +75,15 @@ namespace detail {
     return pos + delta * w;
 }
 
+// Tallies `v` at most once for the whole sweep. The iterations revisit the same
+// vertices, and ResnapReport counts DISTINCT vertices, not writes.
+inline void countVertexOnce(std::vector<std::uint8_t>& seen, VertexId v, std::size_t& counter) {
+    if (v.value < seen.size() && seen[v.value] == 0) {
+        seen[v.value] = 1;
+        ++counter;
+    }
+}
+
 // The relax sweep shared by plain `relax()` and the weighted relax in
 // soft_selection.hpp. `extraWeight(v)` scales the per-vertex blend on top of the
 // brush falloff; a value <= 0 leaves the vertex COMPLETELY untouched — it is
@@ -86,6 +96,8 @@ inline ResnapReport relaxSweep(Mesh& mesh, const RelaxParams& params, const PinS
                                ExtraWeight extraWeight) {
     ResnapReport report;
     const bool snapping = snap != nullptr && !snap->empty();
+    std::vector<std::uint8_t> movedSeen(mesh.vertexCapacity(), 0);
+    std::vector<std::uint8_t> resnappedSeen(mesh.vertexCapacity(), 0);
     for (int iter = 0; iter < params.iterations; ++iter) {
         std::vector<std::pair<VertexId, Vec3>> updates;
         for (Index i = 0; i < mesh.vertexCapacity(); ++i) {
@@ -102,8 +114,8 @@ inline ResnapReport relaxSweep(Mesh& mesh, const RelaxParams& params, const PinS
                             brushFalloff(length(pos - params.brushCenter), params.brushRadius);
             updates.emplace_back(v, relaxTarget(mesh, v, w));
         }
-        report.moved += updates.size();
         for (const auto& [v, target] : updates) {
+            countVertexOnce(movedSeen, v, report.moved);
             if (!snapping) {
                 mesh.setPosition(v, target);
                 continue;
@@ -111,7 +123,7 @@ inline ResnapReport relaxSweep(Mesh& mesh, const RelaxParams& params, const PinS
             const Vec3 p = snap->snapToSurface(target).point;
             const float pulled = length(p - target);
             if (pulled > resnapEpsilon) {
-                ++report.resnapped;
+                countVertexOnce(resnappedSeen, v, report.resnapped);
                 report.maxSnapDistance = std::max(report.maxSnapDistance, pulled);
             }
             mesh.setPosition(v, p);

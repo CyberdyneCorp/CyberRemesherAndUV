@@ -161,6 +161,7 @@ class CyberSeamPathOptions(Structure):
         ("flat_weight", c_float),
         ("feature_weight", c_float),
         ("concave_weight", c_float),
+        ("convex_weight", c_float),
         ("crease_degrees", c_float),
         ("min_weight", c_float),
     ]
@@ -178,6 +179,8 @@ class CyberAtlasResult(Structure):
         ("fallback_charts", c_int32),
         ("packed_area", c_float),
         ("texel_density", c_float),
+        ("dropped_charts", c_int32),
+        ("packed_box_area", c_float),
     ]
 
 
@@ -241,6 +244,64 @@ class CyberHandoffBuffers(Structure):
         ("version_major", c_int32),
         ("version_minor", c_int32),
         ("producer", c_char_p),
+    ]
+
+
+# -- named export presets (mesh-io) -----------------------------------------
+
+# Preset schema version this binding understands; must match
+# CYBER_PRESET_SCHEMA_VERSION in capi/include/cyber_capi.h.
+PRESET_SCHEMA_VERSION = 1
+
+
+class CyberExportPresetInfo(Structure):
+    """Mirror of ``CyberExportPresetInfo``."""
+
+    _fields_ = [
+        ("name", c_char_p),
+        ("schema_version", c_int32),
+        ("mesh_format", c_char_p),
+        ("texture_format", c_char_p),
+        ("naming_pattern", c_char_p),
+        ("units", c_char_p),
+        ("up_axis", c_char_p),
+        ("resolution", c_int32),
+        ("normal_green_plus_y", c_int32),
+        ("map_count", c_size_t),
+    ]
+
+
+class CyberExportPresetMap(Structure):
+    """Mirror of ``CyberExportPresetMap``."""
+
+    _fields_ = [
+        ("map", c_char_p),
+        ("color_space", c_char_p),
+        ("suffix", c_char_p),
+    ]
+
+
+class CyberBundleParams(Structure):
+    """Mirror of ``CyberBundleParams``."""
+
+    _fields_ = [
+        ("mesh_path", c_char_p),
+        ("basename", c_char_p),
+        ("cage_distance", c_float),
+        ("ao_samples", c_int32),
+        ("ao_radius", c_float),
+    ]
+
+
+class CyberBundleFile(Structure):
+    """Mirror of ``CyberBundleFile``."""
+
+    _fields_ = [
+        ("path", c_char_p),
+        ("kind", c_char_p),
+        ("color_space", c_char_p),
+        ("width", c_int32),
+        ("height", c_int32),
     ]
 
 
@@ -536,6 +597,10 @@ def _declare(lib: ctypes.CDLL) -> None:
     lib.cyber_mesh_destroy.argtypes = [c_void_p]
     lib.cyber_mesh_destroy.restype = None
 
+    # CyberStatus cyber_mesh_clone(const CyberMesh*, CyberMesh** out)
+    lib.cyber_mesh_clone.argtypes = [c_void_p, POINTER(c_void_p)]
+    lib.cyber_mesh_clone.restype = c_int32
+
     # -- mesh I/O ------------------------------------------------------------
     # CyberStatus cyber_mesh_load_obj(const char* path, CyberMesh** out)
     lib.cyber_mesh_load_obj.argtypes = [c_char_p, POINTER(c_void_p)]
@@ -564,6 +629,18 @@ def _declare(lib: ctypes.CDLL) -> None:
     # returns the total float count available (vertex_count * 3).
     lib.cyber_mesh_copy_positions.argtypes = [c_void_p, POINTER(c_float), c_size_t]
     lib.cyber_mesh_copy_positions.restype = c_size_t
+
+    # CyberStatus cyber_mesh_set_positions(CyberMesh*, const float*, size_t)
+    lib.cyber_mesh_set_positions.argtypes = [c_void_p, POINTER(c_float), c_size_t]
+    lib.cyber_mesh_set_positions.restype = c_int32
+
+    # int cyber_mesh_edge_endpoints(const CyberMesh*, uint32_t, uint32_t out[2])
+    lib.cyber_mesh_edge_endpoints.argtypes = [c_void_p, c_uint32, POINTER(c_uint32)]
+    lib.cyber_mesh_edge_endpoints.restype = c_int32
+
+    # int cyber_mesh_vertex_position(const CyberMesh*, uint32_t, float out[3])
+    lib.cyber_mesh_vertex_position.argtypes = [c_void_p, c_uint32, POINTER(c_float)]
+    lib.cyber_mesh_vertex_position.restype = c_int32
 
     # -- parameters ----------------------------------------------------------
     lib.cyber_remesh_params_default.argtypes = [POINTER(CyberRemeshParams)]
@@ -632,6 +709,7 @@ def _declare(lib: ctypes.CDLL) -> None:
     _declare_soft_selection(lib)
     _declare_seam_path(lib)
     _declare_bridge(lib)
+    _declare_export_presets(lib)
 
 
 def _declare_bridge(lib: ctypes.CDLL) -> None:
@@ -665,6 +743,58 @@ def _declare_bridge(lib: ctypes.CDLL) -> None:
         c_size_t,
     ]
     lib.cyber_conform.restype = c_int32
+
+
+def _declare_export_presets(lib: ctypes.CDLL) -> None:
+    """Named export presets and the bundle writer."""
+    lib.cyber_export_preset_builtin_count.argtypes = []
+    lib.cyber_export_preset_builtin_count.restype = c_size_t
+    lib.cyber_export_preset_builtin_name.argtypes = [c_size_t]
+    lib.cyber_export_preset_builtin_name.restype = c_char_p
+    lib.cyber_export_preset_resolve.argtypes = [c_char_p, POINTER(c_void_p)]
+    lib.cyber_export_preset_resolve.restype = c_int32
+    lib.cyber_export_preset_free.argtypes = [c_void_p]
+    lib.cyber_export_preset_free.restype = None
+    lib.cyber_export_preset_info.argtypes = [c_void_p, POINTER(CyberExportPresetInfo)]
+    lib.cyber_export_preset_info.restype = c_int32
+    lib.cyber_export_preset_map.argtypes = [c_void_p, c_size_t, POINTER(CyberExportPresetMap)]
+    lib.cyber_export_preset_map.restype = c_int32
+    lib.cyber_export_preset_map_file_name.argtypes = [c_void_p, c_size_t, c_char_p]
+    lib.cyber_export_preset_map_file_name.restype = c_char_p
+    lib.cyber_export_preset_set_resolution.argtypes = [c_void_p, c_int32]
+    lib.cyber_export_preset_set_resolution.restype = c_int32
+
+    lib.cyber_default_bundle_params.argtypes = [POINTER(CyberBundleParams)]
+    lib.cyber_default_bundle_params.restype = None
+    # CyberStatus cyber_export_bundle_write(low, high, preset, params,
+    #                                       progress, cancel, user, out)
+    lib.cyber_export_bundle_write.argtypes = [
+        c_void_p,
+        c_void_p,
+        c_void_p,
+        POINTER(CyberBundleParams),
+        PROGRESS_CB,
+        CANCEL_CB,
+        c_void_p,
+        POINTER(c_void_p),
+    ]
+    lib.cyber_export_bundle_write.restype = c_int32
+    lib.cyber_bundle_result_free.argtypes = [c_void_p]
+    lib.cyber_bundle_result_free.restype = None
+    lib.cyber_bundle_result_file_count.argtypes = [c_void_p]
+    lib.cyber_bundle_result_file_count.restype = c_size_t
+    lib.cyber_bundle_result_file.argtypes = [c_void_p, c_size_t, POINTER(CyberBundleFile)]
+    lib.cyber_bundle_result_file.restype = c_int32
+    lib.cyber_bundle_result_warning_count.argtypes = [c_void_p]
+    lib.cyber_bundle_result_warning_count.restype = c_size_t
+    lib.cyber_bundle_result_warning.argtypes = [c_void_p, c_size_t]
+    lib.cyber_bundle_result_warning.restype = c_char_p
+    lib.cyber_bundle_result_unwrapped.argtypes = [c_void_p]
+    lib.cyber_bundle_result_unwrapped.restype = c_int32
+    lib.cyber_bundle_result_chart_count.argtypes = [c_void_p]
+    lib.cyber_bundle_result_chart_count.restype = c_int32
+    lib.cyber_bundle_result_max_angle_distortion.argtypes = [c_void_p]
+    lib.cyber_bundle_result_max_angle_distortion.restype = c_float
 
 
 # ---------------------------------------------------------------------------

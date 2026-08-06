@@ -5,7 +5,8 @@
 
   Landed in `src/uv/include/cyber/uv/seam_path.hpp` + `src/uv/src/seam_path.cpp`:
   `SeamCostOptions` (per-unit-length multipliers: flat 1.0, feature 0.25,
-  concave 0.35 past a 20° crease, positive floor 1e-3), `edgeSignedDihedral`
+  concave 0.35 and convex 0.8 past a 20° crease **in either direction**,
+  positive floor 1e-3), `edgeSignedDihedral`
   (degrees; **positive in a valley, negative on a ridge**, 0 for flat, boundary
   and non-manifold edges, sign from the orientation-robust symmetric centroid
   test), `seamEdgeCost` = length × cheapest applicable weight, and
@@ -21,10 +22,15 @@
   `cyber_mesh_shortest_vertex_path` are unaffected. `src/uv/CMakeLists.txt`
   takes retopo's include dir WITHOUT a link (both headers are header-only and
   core-only; src/uv configures before src/retopo and `CYBER_BUILD_RETOPO` can
-  be OFF) — the `cyber_bake` ↔ `cyber_imageio` precedent. Proven with an
-  explicit throwaway `-DCYBER_BUILD_RETOPO=OFF` configure: `cyber_uv` compiles
-  and links there. (That configuration still fails later at
-  `cyber_capi_shared`, which links `cyber_retopo` unconditionally —
+  be OFF) — the `cyber_bake` ↔ `cyber_imageio` precedent. Checked with an
+  explicit throwaway `-DCYBER_BUILD_RETOPO=OFF` configure: `cmake --build
+  --target cyber_uv` succeeds there. **That is a compile proof, not a link
+  proof** — `cyber_uv` is `add_library(... STATIC ...)`
+  (`src/uv/CMakeLists.txt:1`), and `ar` resolves no symbols, so the build
+  succeeding says only that every retopo facility `seam_path.cpp` uses is
+  header-only, which is also true by inspection. Nothing here proves an
+  executable can link. (The full `-DCYBER_BUILD_RETOPO=OFF` build still fails
+  later at `cyber_capi_shared`, which links `cyber_retopo` unconditionally —
   pre-existing on main, untouched here.)
 
 - [x] 2. Pending-path state: waypoints, per-segment routes, reposition/delete
@@ -141,6 +147,19 @@
   `README.md` gains an "Auto-routed seam paths" section next to the automatic
   UV atlas (routing bias, editable-until-commit with per-segment revisions,
   commit/resume/drop and the undo record, a short Python snippet).
+
+  **Corrected after review:** both the README and the CHANGELOG claimed that
+  because a commit marks into the same seam model "gesture unwrap and sew behave
+  identically". That overstated the reach. `cyber::uv::SeamSet` really is the
+  one seam model — `SeamPath::commit` marks into it and `computeIslands`
+  (`seams.hpp:68`) and `stitchAlongSeams` (`layout.hpp:149`) read it, which
+  `tests/uv/test_seam_path.cpp:460` pins end to end. But there is no gesture
+  layer to be identical *to*: `SeamSet::mark/erase/sew` (`seams.hpp:20-31`) are
+  the only "Pencil/Erase" implementation, there is no stroke→seam-edge entry
+  point anywhere, and no C ABI / Python / Swift function consumes a
+  `CyberSeamSet` except `cyber_seam_set_*` and `cyber_seam_path_commit` — island
+  computation, unwrap and stitch over a seam set are C++-only. Both documents
+  now say that instead.
   `CHANGELOG.md` gains an entry under the existing `## Unreleased` /
   `### Added` (added, not replaced), recording the additive ABI and the
   behaviour-identical `shortestVertexPath` → `weightedVertexPath` refactor. No

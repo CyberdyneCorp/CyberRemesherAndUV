@@ -183,6 +183,62 @@ TEST_CASE("density values clamp to the documented range with an aggregated issue
     CHECK(validated.guidance.density.vertexValues[0] == doctest::Approx(1.0f));
 }
 
+// 1.0 is the identity of edge = base / sqrt(density), so an all-1.0 paint must
+// leave the run untouched. It cannot merely be applied-and-cancel: carrying a
+// density field downstream also decides which seamless-UV backend runs, so
+// validation drops it here (remeshing-pipeline spec: byte-identical).
+TEST_CASE("a density of 1.0 everywhere is dropped, loudly, instead of carried") {
+    SUBCASE("per-vertex") {
+        remesh::Guidance g;
+        g.density.vertexValues = {1.0f, 1.0f, 1.0f, 1.0f};
+        const auto validated = remesh::validateGuidance(g, 4, 2);
+        REQUIRE(validated.ok());
+        CHECK(validated.guidance.density.empty());
+        CHECK(validated.guidance.empty());
+        REQUIRE(validated.issues.size() == 1);
+        CHECK_FALSE(validated.issues[0].fatal);
+        CHECK(validated.issues[0].parameter == "density");
+    }
+    SUBCASE("per-face") {
+        remesh::Guidance g;
+        g.density.faceValues = {1.0f, 1.0f};
+        const auto validated = remesh::validateGuidance(g, 4, 2);
+        REQUIRE(validated.ok());
+        CHECK(validated.guidance.density.empty());
+    }
+    SUBCASE("a single non-neutral value keeps the whole field") {
+        remesh::Guidance g;
+        g.density.vertexValues = {1.0f, 1.0f, 2.0f, 1.0f};
+        const auto validated = remesh::validateGuidance(g, 4, 2);
+        REQUIRE(validated.ok());
+        CHECK(validated.guidance.density.vertexValues.size() == 4);
+        CHECK(validated.issues.empty());
+    }
+    SUBCASE("uniform but not 1.0 is a real request, not a no-op") {
+        remesh::Guidance g;
+        g.density.vertexValues = {2.0f, 2.0f, 2.0f, 2.0f};
+        const auto validated = remesh::validateGuidance(g, 4, 2);
+        REQUIRE(validated.ok());
+        CHECK(validated.guidance.density.vertexValues.size() == 4);
+    }
+    SUBCASE("values that clamp TO 1.0 are neutral after clamping") {
+        remesh::Guidance g;  // out of range, clamps into the [0.25, 4] band, not to 1.0
+        g.density.vertexValues = {100.0f, 100.0f, 100.0f, 100.0f};
+        const auto validated = remesh::validateGuidance(g, 4, 2);
+        REQUIRE(validated.ok());
+        CHECK_FALSE(validated.guidance.density.empty());
+    }
+}
+
+TEST_CASE("DensityField::isNeutral") {
+    remesh::DensityField d;
+    CHECK_FALSE(d.isNeutral());  // no values at all is `empty()`, not neutral
+    d.vertexValues = {1.0f, 1.0f + 1e-7f, 1.0f - 1e-7f};
+    CHECK(d.isNeutral());
+    d.vertexValues.push_back(1.5f);
+    CHECK_FALSE(d.isNeutral());
+}
+
 TEST_CASE("a density array of the wrong length is fatal") {
     SUBCASE("per-vertex") {
         remesh::Guidance g;

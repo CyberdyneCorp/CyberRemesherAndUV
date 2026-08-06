@@ -536,8 +536,22 @@ AtlasResult unwrapAtlas(Mesh& mesh, const AtlasOptions& options) {
     pack.strategy = PackStrategy::Skyline;
     const PackResult packResult = packIslands(mesh, islands, pack);
     result.packedArea = packResult.usedArea;
+    result.packedBoxArea = packResult.boxArea;
     result.texelDensity = packResult.texelDensity;
     result.ok = packResult.ok;
+
+    // An island whose UVs stayed degenerate (both LSCM and the planar fallback
+    // failed, or the projection collapsed to a line) packs to a box with a zero
+    // extent: it covers nothing, so counting it as a chart makes the report
+    // disagree with the layout users can see.
+    int landed = 0;
+    for (const PackedIsland& island : packResult.islands) {
+        if (island.placed.area() > 0.0f) {
+            ++landed;
+        }
+    }
+    result.droppedCharts = result.chartCount - landed;
+    result.chartCount = landed;
     return result;
 }
 

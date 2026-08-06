@@ -85,15 +85,14 @@ def moved_by_weight(before, after, weights):
     return delta, float(zeros.max()) if zeros.size else 0.0
 
 
-def load_copy(path, weights):
-    """A fresh handle on the same geometry, carrying the same weight field.
+def repose(frame, positions):
+    """`frame`'s faces with engine-read positions substituted in.
 
-    The binding has no Mesh.copy, so a copy is a save/load round trip; the
-    weights ride along through set_selection_weights.
+    Everything the panels draw is topology from the OBJ but geometry straight
+    out of the engine, so no comparison here measures the OBJ round trip's
+    float32 rounding.
     """
-    mesh = Mesh.load_obj(path)
-    mesh.set_selection_weights(weights)
-    return mesh
+    return {"positions": positions, "faces": frame["faces"]}
 
 
 # ---------------------------------------------------------------------------
@@ -205,7 +204,9 @@ def main() -> None:
             edit.set_selection_weights([1.0] * edit.vertex_count)
             edit.transform_selection(IDENTITY, snapper=snapper)
             edit.save_obj(glued_path)
-            before = c.load_obj(glued_path)
+            # Faces from the OBJ, geometry from the engine: Mesh.positions is a
+            # lossless read, the OBJ text is not.
+            before = repose(c.load_obj(glued_path), edit.positions.copy())
 
             # The 15-degree angle snap: a drag 7 degrees off the +y axis (in the
             # view plane, view_dir = +z) quantizes back onto the axis, so its
@@ -225,13 +226,13 @@ def main() -> None:
 
             # The same weighted taper twice: free, then with the Target attached.
             # Auto re-snap is part of the second call, not a follow-up pass.
-            with load_copy(glued_path, weights) as free:
+            # Mesh.copy duplicates the handle in memory — weight field included —
+            # so the two runs start from bit-identical geometry.
+            with edit.copy() as free:
                 free_report = free.transform_selection(TAPER)
-                free.save_obj(os.path.join(tmp, "free.obj"))
-                after_free = c.load_obj(os.path.join(tmp, "free.obj"))
+                after_free = repose(before, free.positions.copy())
             report = edit.transform_selection(TAPER, snapper=snapper)
-            edit.save_obj(os.path.join(tmp, "snapped.obj"))
-            after_snap = c.load_obj(os.path.join(tmp, "snapped.obj"))
+            after_snap = repose(before, edit.positions.copy())
 
             free_delta, free_zero = moved_by_weight(before, after_free, weights)
             snap_delta, snap_zero = moved_by_weight(before, after_snap, weights)
@@ -240,8 +241,11 @@ def main() -> None:
             print("  slots:            ", edit.selection_slots())
             print("  weight histogram: ", histogram(weights))
             print("  vertices moved:   ", report.moved, "of", edit.vertex_count)
-            print("  re-snapped:       ", report.resnapped,
-                  "(max pull {0:.4f})".format(report.max_snap_distance))
+            # moved - resnapped is not a leak: those vertices were already on the
+            # Target, so the re-projection had nothing to correct.
+            print("  re-snapped:       ", report.resnapped, "of", report.moved,
+                  "(max pull {0:.4f}, {1} needed no correction)".format(
+                      report.max_snap_distance, report.moved - report.resnapped))
             print("  15-deg snap:       7-deg drag == axis drag "
                   "(max weight diff {0:.1e})".format(snap_error))
             print("  free taper:        moved {0}, max {1:.3f}, "
@@ -259,10 +263,7 @@ def main() -> None:
             region_path = os.path.join(tmp, "region.obj")
             c.uv_sphere_obj(region_path, rings=20, segments=40)
             with Mesh.load_obj(region_path) as probe:
-                # Snapshot through the engine so the before/after comparison is
-                # not measuring the OBJ round trip's float32 rounding.
-                probe.save_obj(os.path.join(tmp, "region_base.obj"))
-                region_before = c.load_obj(os.path.join(tmp, "region_base.obj"))
+                region_before = repose(c.load_obj(region_path), probe.positions.copy())
                 center = VIEW / np.linalg.norm(VIEW)
                 probe.select_sphere(center, 0.9, falloff=Falloff.SMOOTH)
                 sphere_weights = probe.selection_weights()
@@ -272,15 +273,17 @@ def main() -> None:
                                              falloff=Falloff.SMOOTH)
                 stroke_weights = probe.selection_weights()
                 relax = probe.relax_selection(strength=0.7, iterations=12, snapper=snapper)
-                probe.save_obj(os.path.join(tmp, "relaxed.obj"))
-                after_relax = c.load_obj(os.path.join(tmp, "relaxed.obj"))
+                after_relax = repose(region_before, probe.positions.copy())
                 region_count = probe.vertex_count
             _, relax_zero = moved_by_weight(region_before, after_relax, stroke_weights)
             print("  sphere region:     weight>0 on {0} of {1} v".format(
                 sum(1 for w in sphere_weights if w > 0.0), region_count))
-            print("  painted stroke:    weight>0 on {0} v, relax applied {1} vertex "
-                  "updates (zero-weight verts moved {2:.2e})".format(
-                      sum(1 for w in stroke_weights if w > 0.0), relax.moved, relax_zero))
+            # relax.moved is DISTINCT vertices, so it stays inside the mesh even
+            # though 12 sweeps wrote each of them 12 times.
+            print("  painted stroke:    weight>0 on {0} v, relax moved {1} of {2} v over "
+                  "12 iters (zero-weight verts moved {3:.2e})".format(
+                      sum(1 for w in stroke_weights if w > 0.0), relax.moved, region_count,
+                      relax_zero))
 
             # The four falloff curves, measured on the dense Target: select_line
             # along +y makes the weight a pure function of t = (y + 1) / 2.
@@ -309,8 +312,10 @@ def main() -> None:
                                       f"moved {free_report.moved} v · "
                                       f"w=0 moved {free_zero:.1e}", None),
                 (after_snap, weights, f"4. transform_selection(snapper=Target)\n"
-                                      f"re-snapped {report.resnapped} v · "
-                                      f"stays on the Target, slides instead", None),
+                                      f"re-snapped {report.resnapped} of {report.moved} moved · "
+                                      f"the other {report.moved - report.resnapped} were\n"
+                                      f"already on the Target · stays on it, slides instead",
+                 None),
                 (region_before, sphere_weights,
                  "7. select_sphere(r=0.9) — radial falloff\n"
                  "the same weight field, a different region tool", None),

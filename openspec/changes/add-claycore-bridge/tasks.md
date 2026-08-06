@@ -21,8 +21,26 @@
   Consequence: the version gate is proven only against files this repo writes,
   so "loud on both sides" is demonstrated on our side only.
 
-- [x] 2. Handoff reader → Target (file + in-memory buffer), version gating,
+- [~] 2. Handoff reader → Target (file + in-memory buffer), version gating,
        typed errors
+
+  **PARTIAL — the PLY and buffer routes are done and tested; the glTF/GLB route
+  is untested and does not match its own format doc.** No test anywhere touches
+  it: `.gltf`/`.glb` appears in no case in `tests/handoff/test_handoff.cpp`,
+  `tests/capi/test_capi.cpp`, `tests/cli/test_cli.py` or
+  `python/cyberremesh/tests/test_handoff.py`. Driving it by hand with a v1.0
+  `.gltf` (data-URI buffer, POSITION + NORMAL, `asset.extras.cyberSculptHandoff`
+  exactly as documented) shows two gaps against
+  `docs/sculpt-handoff-format.md:95-108`: the declared `producer` is never read
+  (`readGltfFile`, `handoff.cpp:349-380`, fills `out.version` but never
+  `out.producer`; `GltfDeclaration::producer` at `:309` is dead), so the report
+  says `"producer": ""`; and vertex normals do not survive — the glTF importer
+  writes them to the CORNER attribute set (`io_gltf.cpp:151,177`) while
+  `Handoff::hasVertexNormals` reads the VERTEX set (`handoff.hpp:54-56`), so the
+  report says `"hasVertexNormals": false` for a file that declares a NORMAL
+  accessor. Geometry and the version gate itself do work (`"version": {1,0}`,
+  4 vertices / 2 faces read back). The doc has been corrected to describe what
+  the reader does; making glTF carry normals and the producer is follow-up work.
 
   **Landed:** new `cyber_handoff` static module (`src/handoff`, namespace
   `cyber::handoff`), linked from `cyber_core` only — no consumer inherits a
@@ -100,8 +118,13 @@
   **Landed:** `--target <path|->` (`-` reads stdin, `_setmode(_O_BINARY)` on
   Windows for binary PLY), mutually exclusive with `--input` (exit 2 when both
   are given). `--bake <csv>` overrides the preset's map set and implies
-  `--preset gltf-generic` when no preset is named; an unknown map name is exit 2
-  naming the offender. A rejected handoff — including `IncompatibleVersion` — is
+  `--preset gltf-generic` when no preset is named (`main.cpp:317-319`); an
+  unknown map name is exit 2 naming the offender. **`--bake` is UV-only:**
+  the override lives behind `CYBER_CLI_HAVE_PRESETS` (`main.cpp:330-370`), so in
+  a `-DCYBER_BUILD_UV=OFF` build the implied preset hits the
+  `#ifndef CYBER_CLI_HAVE_PRESETS` branch at `main.cpp:727-731` and the flag is
+  an exit-2 "this build has no export-preset support" rather than a bake. The
+  `--target` ingest half is unconditional. A rejected handoff — including `IncompatibleVersion` — is
   **exit 3, names both versions, and writes no output file**. The JSON report
   gains a `handoff` block: source, declared version, supported version,
   producer, vertex/face counts, which optional payloads were present, and
@@ -134,7 +157,10 @@
   in `tests/capi/test_capi.cpp`.
 
   Python — `_ffi` mirrors every new struct/CFUNCTYPE and declares the four new
-  entry points; `api` adds `Mesh.load_handoff`, `HandoffInfo`,
+  entry points; `api` adds `Mesh.load_handoff` and `Mesh.load_handoff_buffers`
+  (the buffer profile shipped declared-but-unwrapped and was wired up during
+  review — `api.py:783`, gated by `test_handoff.py:104-112` so a declaration
+  without a wrapper fails), `HandoffInfo`,
   `IncompatibleVersionError`, `FieldEvaluator` (a subclassable base whose ctypes
   trampolines are kept alive on the instance), `bake_field` and `conform` +
   `ConformReport`. All exported from `cyberremesh/__init__.py`. Covered by

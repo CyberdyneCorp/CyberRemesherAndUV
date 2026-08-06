@@ -56,8 +56,18 @@ from an arbitrary mesh to a packed UV atlas without a human drawing every seam.
    one with the smallest square bounding extent wins. (The interactive path keeps
    the simpler `Shelf` default.)
 
-Returns `AtlasResult` (chart count, seam edges, max/RMS angle distortion,
-flipped + fallback chart counts, packed-area fraction, texel density).
+Returns `AtlasResult` (chart count, dropped-chart count, seam edges, max/RMS
+angle distortion, flipped + fallback chart counts, packed-area fraction, packed
+bounding-box fraction, texel density).
+
+`packedArea` is the **geometry** coverage — the summed UV face areas of the
+packed charts, the fraction of the square a texture painter actually sees.
+`packedBoxArea` is the fraction the charts' bounding boxes cover, i.e. how
+tightly the box packer placed them; the gap between the two is the slack inside
+each chart's own box, and closing it is what polygon nesting would buy.
+`chartCount` counts only charts that land: an island whose LSCM *and* planar
+fallback both come out degenerate covers nothing and is reported as
+`droppedCharts` instead, so the two always sum to the island count.
 
 ## Surfaces
 

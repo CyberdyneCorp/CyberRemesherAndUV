@@ -31,6 +31,7 @@ public struct SeamCostParams {
     public var flatWeight: Float
     public var featureWeight: Float
     public var concaveWeight: Float
+    public var convexWeight: Float
     public var creaseDegrees: Float
     public var minWeight: Float
 
@@ -41,6 +42,7 @@ public struct SeamCostParams {
         flatWeight = c.flatWeight
         featureWeight = c.featureWeight
         concaveWeight = c.concaveWeight
+        convexWeight = c.convexWeight
         creaseDegrees = c.creaseDegrees
         minWeight = c.minWeight
     }
@@ -50,6 +52,7 @@ public struct SeamCostParams {
             flatWeight: flatWeight,
             featureWeight: featureWeight,
             concaveWeight: concaveWeight,
+            convexWeight: convexWeight,
             creaseDegrees: creaseDegrees,
             minWeight: minWeight
         )

@@ -69,8 +69,33 @@
   Measured: painting 4.0 on half a plane gives a painted/unpainted mean edge
   ratio of **0.5006** against the documented `1/sqrt(4) = 0.5`.
 
-- [x] 4. Per-island loud reporting for unhonored guidance; routing audit for
+  Re-verified after review: a post-clamp neutral density is dropped at the one
+  shared validation gate (`remesh_params.cpp:165-177`, reached from
+  `pipeline.cpp:552` for every entry point) with a non-fatal issue, so density
+  1.0 everywhere cannot change the route or the mesh. Both byte-identity cases
+  pass on this build, including the one on the shipped default backend
+  (`tests/core/test_flow_guides_pipeline.cpp:262`, `:276`).
+
+- [~] 4. Per-island loud reporting for unhonored guidance; routing audit for
        both backends
+
+  **PARTIAL — the audit has one measured hole: `CYBER_QC_NO_NATIVE` drops
+  guidance silently.** That env kill switch clears `haveNative`
+  (`quadcover_extractor.cpp:1249`), which drops out of the `routeNative`
+  condition at `1265-1269`, so a guided island goes to the vendored Geogram
+  solve WITHOUT passing through the `ctx->guidanceHonored = false` assignment at
+  `1280` — and `NativeSolveContext::guidanceHonored` defaults to `true`
+  (`quadcover_extractor.hpp:103`). `m_unhonored` therefore stays empty
+  (`3543-3549`) and the pipeline records `guidesHonored = true`
+  (`pipeline.cpp:808-811`). Measured on `fandisk --target-quads 600` with one
+  guide: the report says `"guidesHonored": true, "reason": ""` both with and
+  without `CYBER_QC_NO_NATIVE=1`, while the output changes (12 vs 79 non-quads,
+  0.27s vs 1.55s) — i.e. the run took the vendored route, where every guidance
+  hook (`iso.density`, the cross-field bias, the seamless RHS) lives inside
+  `prepareNativeSolve` and is never reached. Everything else in this task is
+  done and tested; the unhonored path is covered only by a test-double backend
+  (`tests/core/test_flow_guides_pipeline.cpp:363`), never by the real
+  quad-cover route.
 
   `IQuadrangulator::acceptGuidance` defaults to DECLINING with a reason, so
   greedy / instant-meshes / integer report rather than silently ignore.
@@ -120,6 +145,17 @@
   Unreal add-on session** — no DCC can be driven from this build environment.
   The Swift binding was not extended either; it still sees only `cyber_remesh`,
   which is unchanged and keeps working.
+
+  Also partial, and previously undisclosed: **no ctest-registered Python test
+  covers the guidance surface.** Every sibling change ships one
+  (`tests/CMakeLists.txt:155-158` registers `test_soft_selection`,
+  `test_seam_path`, `test_handoff`, `test_export_presets`, …); there is no
+  `test_flow_guides.py`, and no existing python test passes `guides=` or
+  `density=`. The surface does work — `remesh(m, p, guides=[FlowGuide(...)])`
+  returns a guided mesh and re-raises `island 0: 1 guide(s) in range, guides
+  honored, density NOT honored`, and a neutral density warns "ignored" — but the
+  only thing exercising it is `examples/17_flow_guides.py`, which ctest does not
+  run.
 
 - [~] 6. Guided test corpus + exit gate measurement (≤15° mean deviation in
        radius; unguided metrics unchanged)

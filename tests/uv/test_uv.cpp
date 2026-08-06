@@ -355,6 +355,57 @@ TEST_CASE("unwrapAtlas is deterministic") {
     }
 }
 
+TEST_CASE("packedArea is the fraction of the UV square geometry really covers") {
+    // LSCM lays each cube face out as a 45-degree diamond, whose axis-aligned
+    // bounding box is twice its area. Summing bounding boxes therefore reports
+    // roughly double the coverage a texture painter would see.
+    Mesh mesh = makeCube();
+    uv::AtlasOptions opts;
+    opts.maxChartDistortion = 0.0f;  // one chart per face -> diamonds
+    opts.reorientCharts = false;     // keep them diamonds
+    const uv::AtlasResult atlas = uv::unwrapAtlas(mesh, opts);
+    REQUIRE(atlas.ok);
+
+    // Ground truth: the summed |UV area| of every face, in the unit square.
+    const std::vector<FaceId> faces = aliveFaces(mesh);
+    const double covered = uv::islandUvArea(mesh, faces);
+
+    REQUIRE(atlas.packedArea == doctest::Approx(static_cast<float>(covered)).epsilon(1e-3));
+    // The bounding-box figure is reported separately and is materially larger.
+    REQUIRE(atlas.packedBoxArea > atlas.packedArea * 1.4f);
+    REQUIRE(atlas.packedArea > 0.0f);
+    REQUIRE(atlas.packedArea <= 1.0f);
+}
+
+TEST_CASE("charts that never land are reported as dropped, not as charts") {
+    // Two islands: a unit quad, and a quad whose four vertices are collinear.
+    // The degenerate one has no surface, so neither LSCM nor the planar
+    // fallback can give it area — it covers nothing in the packed atlas and
+    // must not inflate chartCount.
+    const std::vector<Vec3> p = {{0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0},
+                                 {2, 0, 0}, {3, 0, 0}, {4, 0, 0}, {5, 0, 0}};
+    const std::vector<std::vector<Index>> f = {{0, 1, 2, 3}, {4, 5, 6, 7}};
+    Mesh mesh = Mesh::fromIndexed(p, f);
+
+    const uv::AtlasResult atlas = uv::unwrapAtlas(mesh);
+    REQUIRE(atlas.ok);
+    REQUIRE(uv::computeIslands(mesh, uv::autoSeams(mesh)).size() == 2);
+
+    // One chart lands, one is dropped; the two must reconcile with the islands.
+    REQUIRE(atlas.chartCount == 1);
+    REQUIRE(atlas.droppedCharts == 1);
+
+    // ...and the surviving chart is exactly the one with UV area.
+    int withArea = 0;
+    for (const FaceId face : aliveFaces(mesh)) {
+        const std::vector<FaceId> single{face};
+        if (uv::islandUvArea(mesh, single) > 0.0) {
+            ++withArea;
+        }
+    }
+    REQUIRE(withArea == atlas.chartCount);
+}
+
 TEST_CASE("mirrored UVs are detected as a flipped island") {
     Mesh mesh = makeQuad(1.0f, 1.0f);
     const std::vector<FaceId> island = aliveFaces(mesh);

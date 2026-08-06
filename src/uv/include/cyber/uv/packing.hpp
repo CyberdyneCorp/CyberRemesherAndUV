@@ -46,8 +46,18 @@ struct PackResult {
     bool ok = false;
     std::vector<PackedIsland> islands;  // one per input box, input order
     float scale = 1.0f;                 // uniform scale applied to every box
-    float usedArea = 0.0f;              // fraction of the unit square covered
-    float texelDensity = 0.0f;          // texels per UV unit at `scale`
+    // Fraction of the unit square actually covered: the summed UV face areas of
+    // the packed islands — the texel budget the geometry consumes. packBoxes is
+    // given boxes only, so there the boxes ARE the geometry and this equals
+    // boxArea.
+    float usedArea = 0.0f;
+    // Fraction of the unit square covered by the packed BOUNDING BOXES — how
+    // tightly the box packer placed them, independent of how much of each box
+    // its island fills. Exceeds usedArea for any island that does not fill its
+    // box; only a self-overlapping (folded) island can invert that, because its
+    // faces are then counted more than once.
+    float boxArea = 0.0f;
+    float texelDensity = 0.0f;  // texels per UV unit at `scale`
 };
 
 // Packs `boxes` (island bounding boxes) into the unit square with a single

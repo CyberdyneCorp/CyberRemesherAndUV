@@ -50,6 +50,14 @@ struct DensityField {
     std::vector<float> faceValues;    // indexed by the Target's live face order
 
     [[nodiscard]] bool empty() const { return vertexValues.empty() && faceValues.empty(); }
+
+    // True when values are supplied and every one of them is 1.0 (within float
+    // noise): 1.0 is the identity of the sizing relation above, so such a paint
+    // asks for nothing. Callers drop it rather than carry it, because merely
+    // CARRYING guidance changes which backend runs (remeshing-pipeline spec:
+    // "A density of 1.0 everywhere SHALL reproduce today's uniform sizing
+    // byte-identically"). An empty field is not neutral — it is `empty()`.
+    [[nodiscard]] bool isNeutral() const;
 };
 
 struct Guidance {

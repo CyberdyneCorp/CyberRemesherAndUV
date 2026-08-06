@@ -30,7 +30,7 @@ EXAMPLES = [
     ("16_soft_selection", "16_soft_selection.png"),
     ("17_flow_guides", "17_flow_guides.png"),
     ("18_sculpt_handoff", "18_sculpt_handoff.png"),
-    ("19_export_presets", "19_export_presets.png"),  # presets are CLI-only; drives the binary
+    ("19_export_presets", "19_export_presets.png"),
     ("20_seam_paths", "20_seam_paths.png"),
 ]
 
@@ -38,9 +38,9 @@ EXAMPLES = [
 def run_example(module_name: str) -> str | None:
     """Runs one example. Returns None on success, else why it failed.
 
-    Examples bail with ``sys.exit`` on an unmet prerequisite (19 needs the CLI binary,
-    which a bindings-only build does not produce). One of those must not cost the
-    whole gallery, so failures are collected and reported at the end instead.
+    Examples bail with ``sys.exit`` on an unmet prerequisite (09 downloads
+    community models). One of those must not cost the whole gallery, so failures
+    are collected and reported at the end instead.
     """
     try:
         importlib.import_module(module_name).main()

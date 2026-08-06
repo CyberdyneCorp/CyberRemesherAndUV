@@ -10,9 +10,9 @@
 
 // Auto-routed seam paths (uv-editing spec, "Auto-routed seam paths"). The user
 // places waypoints on the EditMesh; between consecutive waypoints the engine
-// routes a least-cost edge path whose cost prefers feature-tagged and concave
-// (valley) edges over flat-region crossings, so short hops "follow the groove"
-// instead of cutting the geodesic shortcut.
+// routes a least-cost edge path whose cost prefers feature-tagged and creased
+// edges — valleys and ridges alike — over flat-region crossings, so short hops
+// "follow the hard edge" instead of cutting the geodesic shortcut.
 //
 // This complements — it does not replace — stroke-over-edges seam editing:
 // committing a path marks edges into the very same cyber::uv::SeamSet, so
@@ -25,11 +25,20 @@ namespace cyber::uv {
 // "cheaper, prefer this edge". Weights are clamped to a strictly positive
 // floor before use, so no setting can break Dijkstra's non-negative-weight
 // requirement or stall the frontier.
+//
+// A hard edge is worth seaming whichever way it bends, so concave and convex
+// creases each get their own multiplier past the same `creaseDegrees`
+// threshold (which is compared against the MAGNITUDE of the dihedral). The
+// convex default is deliberately much closer to neutral than the concave one:
+// a seam hides better down in a valley, so a ridge is taken over flat ground
+// but never pulls the route off a valley that is available. Lower it toward
+// concaveWeight for aggressive ridge-following on convex-creased CAD parts.
 struct SeamCostOptions {
     float flatWeight = 1.0f;      // baseline multiplier for an ordinary edge
     float featureWeight = 0.25f;  // multiplier for a feature-tagged edge
     float concaveWeight = 0.35f;  // multiplier for a valley edge past the crease angle
-    float creaseDegrees = 20.0f;  // concavity (in degrees) that counts as a groove
+    float convexWeight = 0.8f;    // multiplier for a ridge edge past the crease angle
+    float creaseDegrees = 20.0f;  // dihedral magnitude (degrees) that counts as a crease
     float minWeight = 1e-3f;      // floor applied to the chosen multiplier
 };
 

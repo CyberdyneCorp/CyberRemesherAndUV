@@ -56,9 +56,11 @@
        the DirectX green flip measured as `gl + dx == 255`, sRGB-on-EXR warning,
        mesh-format mismatch warning, cancellation, a user preset file honored
        like a built-in, and a future-schema preset producing NO partial output.
-       Not done: no C ABI / Python surface for presets — the C ABI has no export
-       entry point to hang them off, and adding one is `engine-bindings` work,
-       not this change. Golden outputs were not recorded: the maps are 2048²
+       Was "not done: no C ABI / Python surface for presets" — that is now
+       stale: the review round added `cyber_export_preset_*` /
+       `cyber_export_bundle_write` (`capi/include/cyber_capi.h:1454+`), the
+       Python `ExportPreset` / `builtin_presets` / `write_bundle` surface, and
+       `python/cyberremesh/tests/test_export_presets.py` in the ctest loop. Golden outputs were not recorded: the maps are 2048²
        by default and the run is dominated by a non-deterministic-cost AO bake,
        so the tests assert conventions and structure instead.
 - [x] 6. Docs + CHANGELOG

@@ -21,17 +21,21 @@
        scale-independent and outlier-resistant. A flat Target (range 0) and a
        missed cage ray both encode to the neutral value — mid-gray for
        curvature, white for cavity.
-- [x] 3. Reachability: CLI map-type flags, C ABI, Python and Swift bindings,
+- [~] 3. Reachability: CLI map-type flags, C ABI, Python and Swift bindings,
        bake report entries
        — `CYBER_BAKE_CURVATURE` / `CYBER_BAKE_CAVITY` + the `curvatureRange`
        field in `CyberBakeParams`; `BakeMap.CURVATURE` / `.CAVITY` and
        `BakeParams.curvature_range` in Python; `app::BakeMapKind` extended
-       append-only so saved documents keep their meaning. NOT DONE because the
-       surfaces do not exist: the CLI has no bake command at all, there are no
-       Swift bake bindings, and there is no bake report. Those are gaps in
-       `cli-headless` / `engine-bindings`, not in this change — the proposal's
-       rule was "wherever `normal`/`ao` are reachable today", and this matches
-       that reach exactly.
+       append-only so saved documents keep their meaning. Downgraded to PARTIAL:
+       the C ABI and Python halves are done, and the CLI half now exists too —
+       since `add-export-presets` / `add-claycore-bridge` landed a baking CLI,
+       `cyberremesh --bake curvature,cavity --texture-size 64` writes
+       `*_curvature.png` / `*_cavity.png` and lists both in the report's
+       `outputs` block (verified on `cube.obj`). **Still missing: Swift.**
+       `swift/Sources/CyberRemesher/` has no bake wrapper of any kind, so that
+       named surface is unimplemented. The original note here ("the CLI has no
+       bake command at all … and there is no bake report") was true when written
+       and is now stale.
 - [x] 4. Tests: encoding correctness on analytic shapes (sphere, saddle,
        filleted box), cage-following parity with the normal bake, cancel path
        — `tests/bake/test_curvature.cpp`, 10 cases: sphere reads 1/r and

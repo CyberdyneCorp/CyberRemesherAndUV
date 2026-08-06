@@ -106,7 +106,7 @@ void printUsage() {
                  "  --cage <float>           bake cage distance (default: 1%% of the\n"
                  "                           input's bounding-box diagonal)\n"
                  "  --texture-size <int>     override the preset's map resolution\n"
-                 "  --ao-samples <int>       hemisphere rays per texel (default 16)\n"
+                 "  --ao-samples <int>       hemisphere rays per texel (default 64)\n"
                  "  --list-presets           print built-in export presets and exit\n"
                  "  --verbose | --quiet      diagnostic detail / errors only\n"
                  "  --list-backends          print compute backends and exit\n"
@@ -486,6 +486,117 @@ const char* statusName(remesh::RunStatus status) {
 // Anything wrong with the file is exit 2 naming the file and the offending
 // guide index. A malformed sidecar is NEVER a silent skip: the whole point of
 // the feature is that supplied guidance is honored loudly or rejected loudly.
+//
+// Every value is type-checked before it is read: nlohmann THROWS on a type
+// mismatch (a string where a number belongs), and an escaping throw would
+// abort the process instead of producing the exit-2 argument error a bad file
+// deserves.
+
+// Optional numeric field. Absent leaves `out` at the caller's default.
+bool readNumberField(const nlohmann::json& obj, const char* key, const std::string& where,
+                     float& out, std::string& error) {
+    const auto it = obj.find(key);
+    if (it == obj.end()) {
+        return true;
+    }
+    if (!it->is_number()) {
+        error = where + ": \"" + std::string(key) + "\" must be a number";
+        return false;
+    }
+    out = it->get<float>();
+    return true;
+}
+
+bool readNumberArray(const nlohmann::json& node, const std::string& where, std::vector<float>& out,
+                     std::string& error) {
+    if (!node.is_array()) {
+        error = where + " must be an array of numbers";
+        return false;
+    }
+    out.clear();
+    out.reserve(node.size());
+    for (std::size_t i = 0; i < node.size(); ++i) {
+        if (!node[i].is_number()) {
+            error = where + "[" + std::to_string(i) + "] must be a number";
+            return false;
+        }
+        out.push_back(node[i].get<float>());
+    }
+    return true;
+}
+
+bool parseGuide(const nlohmann::json& g, const std::string& where, remesh::Guidance& out,
+                std::string& error) {
+    if (!g.is_object() || !g.contains("points") || !g["points"].is_array()) {
+        error = where + ": missing a \"points\" array";
+        return false;
+    }
+    remesh::FlowGuide guide;
+    if (!readNumberField(g, "strength", where, guide.strength, error) ||
+        !readNumberField(g, "radius", where, guide.radius, error)) {
+        return false;
+    }
+    for (const auto& p : g["points"]) {
+        std::vector<float> xyz;
+        if (!p.is_array() || p.size() != 3 || !readNumberArray(p, where + " point", xyz, error)) {
+            error = where + ": each point must be [x, y, z] of numbers";
+            return false;
+        }
+        guide.points.push_back(cyber::Vec3{xyz[0], xyz[1], xyz[2]});
+    }
+    out.guides.push_back(std::move(guide));
+    return true;
+}
+
+bool parseGuidanceDoc(const nlohmann::json& doc, const std::string& path, remesh::Guidance& out,
+                      std::string& error) {
+    if (!doc.is_object()) {
+        error = "guides file '" + path + "' must contain a JSON object";
+        return false;
+    }
+    const std::string file = "guides file '" + path + "'";
+    int version = 1;
+    if (const auto it = doc.find("version"); it != doc.end()) {
+        if (!it->is_number_integer()) {
+            error = file + ": \"version\" must be an integer";
+            return false;
+        }
+        version = it->get<int>();
+    }
+    if (version != 1) {
+        error = file + ": unsupported version " + std::to_string(version);
+        return false;
+    }
+    if (doc.contains("guides")) {
+        if (!doc["guides"].is_array()) {
+            error = file + ": \"guides\" must be an array";
+            return false;
+        }
+        for (std::size_t i = 0; i < doc["guides"].size(); ++i) {
+            if (!parseGuide(doc["guides"][i], file + " guide " + std::to_string(i), out, error)) {
+                return false;
+            }
+        }
+    }
+    if (doc.contains("density")) {
+        const nlohmann::json& d = doc["density"];
+        if (!d.is_object()) {
+            error = file + ": \"density\" must be an object";
+            return false;
+        }
+        if (d.contains("perVertex") &&
+            !readNumberArray(d["perVertex"], file + ": \"density.perVertex\"",
+                             out.density.vertexValues, error)) {
+            return false;
+        }
+        if (d.contains("perFace") && !readNumberArray(d["perFace"], file + ": \"density.perFace\"",
+                                                      out.density.faceValues, error)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 bool loadGuidanceSidecar(const std::string& path, remesh::Guidance& out, std::string& error) {
     std::ifstream file(path);
     if (!file) {
@@ -495,59 +606,14 @@ bool loadGuidanceSidecar(const std::string& path, remesh::Guidance& out, std::st
     nlohmann::json doc;
     try {
         file >> doc;
+        // The typed readers above cover every documented field; the catch is
+        // the backstop that keeps an unforeseen nlohmann throw an exit-2
+        // argument error rather than a std::terminate.
+        return parseGuidanceDoc(doc, path, out, error);
     } catch (const std::exception& e) {
         error = "guides file '" + path + "' is not valid JSON: " + e.what();
         return false;
     }
-    if (!doc.is_object()) {
-        error = "guides file '" + path + "' must contain a JSON object";
-        return false;
-    }
-    const int version = doc.value("version", 1);
-    if (version != 1) {
-        error = "guides file '" + path + "': unsupported version " + std::to_string(version);
-        return false;
-    }
-    if (doc.contains("guides")) {
-        if (!doc["guides"].is_array()) {
-            error = "guides file '" + path + "': \"guides\" must be an array";
-            return false;
-        }
-        for (std::size_t i = 0; i < doc["guides"].size(); ++i) {
-            const nlohmann::json& g = doc["guides"][i];
-            const std::string where = "guides file '" + path + "' guide " + std::to_string(i);
-            if (!g.is_object() || !g.contains("points") || !g["points"].is_array()) {
-                error = where + ": missing a \"points\" array";
-                return false;
-            }
-            remesh::FlowGuide guide;
-            guide.strength = g.value("strength", 1.0f);
-            guide.radius = g.value("radius", 0.0f);
-            for (const auto& p : g["points"]) {
-                if (!p.is_array() || p.size() != 3) {
-                    error = where + ": each point must be [x, y, z]";
-                    return false;
-                }
-                guide.points.push_back(
-                    cyber::Vec3{p[0].get<float>(), p[1].get<float>(), p[2].get<float>()});
-            }
-            out.guides.push_back(std::move(guide));
-        }
-    }
-    if (doc.contains("density")) {
-        const nlohmann::json& d = doc["density"];
-        if (!d.is_object()) {
-            error = "guides file '" + path + "': \"density\" must be an object";
-            return false;
-        }
-        if (d.contains("perVertex")) {
-            out.density.vertexValues = d["perVertex"].get<std::vector<float>>();
-        }
-        if (d.contains("perFace")) {
-            out.density.faceValues = d["perFace"].get<std::vector<float>>();
-        }
-    }
-    return true;
 }
 
 // Post-clamp guidance block for the machine-readable report (remeshing-
@@ -646,9 +712,7 @@ int writeReport(const CliOptions& options, const remesh::PipelineResult& result,
     return kExitOk;
 }
 
-}  // namespace
-
-int main(int argc, char** argv) {
+int runCli(int argc, char** argv) {
     CliOptions options;
     bool exitEarly = false;
     const int argStatus = parseArgs(argc, argv, options, exitEarly);
@@ -939,4 +1003,18 @@ int main(int argc, char** argv) {
         std::printf("time:      %.2fs\n", elapsed);
     }
     return result.status == remesh::RunStatus::Partial ? kExitPartial : kExitOk;
+}
+
+}  // namespace
+
+int main(int argc, char** argv) {
+    // Last-resort guard: a CLI must report a failure, never abort. Without it
+    // any escaping exception (a JSON reader, an allocation, a decoder) reaches
+    // std::terminate and the user gets SIGABRT instead of a diagnosis.
+    try {
+        return runCli(argc, argv);
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "error: unexpected failure: %s\n", e.what());
+        return kExitPipeline;
+    }
 }

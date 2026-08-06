@@ -186,14 +186,19 @@ typedef struct CyberAtlasParams {
 
 /* Aggregate atlas quality/packing report. */
 typedef struct CyberAtlasResult {
-    int chartCount;           /* number of charts (islands) */
+    int chartCount;           /* charts that occupy area in the packed atlas */
     size_t seamEdges;         /* edges cut to form the charts */
     float maxAngleDistortion; /* worst conformal error across charts, [0,1) */
     float rmsAngleDistortion; /* RMS conformal error across charts */
     int flippedCharts;        /* charts with mirrored net UV winding */
     int fallbackCharts;       /* charts unwrapped by planar-projection fallback */
-    float packedArea;         /* fraction of the unit square covered */
+    float packedArea;         /* fraction of the unit square the chart GEOMETRY
+                               * covers, i.e. the summed UV face areas */
     float texelDensity;       /* texels per UV unit at the packed scale */
+    int droppedCharts;        /* degenerate islands that cover nothing;
+                               * chartCount + droppedCharts = island count */
+    float packedBoxArea;      /* fraction covered by the charts' bounding boxes
+                               * (packer tightness) */
 } CyberAtlasResult;
 
 /* Fills params with the engine defaults. No-op on NULL. */
@@ -212,6 +217,20 @@ CyberStatus cyber_uv_atlas(CyberMesh* mesh, const CyberAtlasParams* params, Cybe
 CyberMesh* cyber_mesh_create(void);
 /* Alias of cyber_mesh_free (the bindings use the create/destroy pairing). */
 void cyber_mesh_destroy(CyberMesh* mesh);
+
+/* Deep-copies `mesh` into a fresh independent handle written to *out (release
+ * with cyber_mesh_destroy/free). The copy is exact and in-memory — no float
+ * narrowing, unlike a save/load round trip — and carries the whole handle:
+ * geometry, the remesh statistics, the hidden-face and tagged-edge overlays,
+ * the soft-selection weight field and its saved slots.
+ *
+ * ELEMENT IDS ARE PRESERVED, so a vertex/edge/face id means the same thing in
+ * both handles and any id-keyed caller state stays valid against the copy —
+ * which is what makes this usable as an undo snapshot or a before/after
+ * baseline. The render cache is not copied; the copy rebuilds it lazily.
+ * Fails with CYBER_ERR_INVALID_ARG on a null mesh or a null `out`. */
+CyberStatus cyber_mesh_clone(const CyberMesh* mesh, CyberMesh** out);
+
 /* Number of live vertices / faces. */
 size_t cyber_mesh_vertex_count(const CyberMesh* mesh);
 size_t cyber_mesh_face_count(const CyberMesh* mesh);
@@ -219,6 +238,19 @@ size_t cyber_mesh_face_count(const CyberMesh* mesh);
  * most `max_floats`; returns the number of floats written. Pass out=NULL to
  * query the required count (3 * vertex_count). */
 size_t cyber_mesh_copy_positions(const CyberMesh* mesh, float* out, size_t max_floats);
+
+/* Writes vertex positions back, the exact inverse of
+ * cyber_mesh_copy_positions: `positions` holds x,y,z per vertex in the SAME
+ * compacted order (live vertices in id order) and `float_count` must equal
+ * 3 * vertex_count exactly — a partial write would silently pair positions
+ * with the wrong vertices, so a mismatch is rejected instead.
+ *
+ * Positions only: topology, ids and every overlay are untouched, so this
+ * restores a snapshot taken with cyber_mesh_copy_positions as long as no
+ * vertex was added or removed in between. Invalidates the render cache and
+ * its pointer views. Fails with CYBER_ERR_INVALID_ARG (mesh unchanged) on a
+ * null mesh, a null `positions` with a non-zero count, or a count mismatch. */
+CyberStatus cyber_mesh_set_positions(CyberMesh* mesh, const float* positions, size_t float_count);
 /* Alias of cyber_default_params. */
 void cyber_remesh_params_default(CyberRemeshParams* params);
 
@@ -893,9 +925,11 @@ CyberStatus cyber_retopo_triangulate(CyberMesh* mesh, size_t* out_faces);
  * also drag the vertices the selection deliberately left alone. A drag
  * gesture is driven by calling _transform once per incremental delta.
  *
- * ZERO WEIGHT MEANS UNTOUCHED: a vertex whose weight is 0 (and any pinned
- * vertex) is skipped entirely — neither moved nor re-snapped — so its
- * position is bit-identical after the call.
+ * ZERO WEIGHT MEANS UNTOUCHED: a vertex whose weight is 0 is skipped
+ * entirely — neither moved nor re-snapped — so its position is bit-identical
+ * after the call. PINS: only _relax takes a `pinned` list and honors it the
+ * same way; _transform has no pin argument yet, so on that call weight is the
+ * only thing that holds a vertex still. Zero its weight to protect it.
  *
  * ELEMENT-ID STABILITY (see the block above): weights are indexed by vertex
  * id, so cyber_retopo_subdivide clears the selection and every saved slot
@@ -912,10 +946,22 @@ typedef enum CyberFalloff {
     CYBER_FALLOFF_ROUND = 3   /* quarter circle, weight builds early */
 } CyberFalloff;
 
-/* Result of a weighted transform/relax. `moved` counts the vertices the op
- * wrote (weight > 0 and not pinned); `resnapped` counts how many of those
- * the Target re-projection pulled back further than `resnap_epsilon`, and
- * `max_snap_distance` is the largest such correction. */
+/* Result of a weighted transform/relax.
+ *
+ * BOTH COUNTS ARE DISTINCT VERTICES, never per-iteration writes: `moved` is
+ * the number of distinct vertices the op wrote (weight > 0, and not pinned
+ * where the call accepts pins — only _relax does)
+ * and so never exceeds the mesh's vertex count, even for a multi-iteration
+ * cyber_retopo_selection_relax that revisits each of them every sweep.
+ *
+ * `resnapped` counts the distinct moved vertices whose Target re-projection
+ * pulled them back STRICTLY FURTHER than `resnap_epsilon`, and never exceeds
+ * `moved`. With the default epsilon of 0 a vertex the projection did not have
+ * to correct at all (correction exactly 0 — it already sat on the Target,
+ * which is what happens when the weight is so small that the blended target
+ * is bit-identical to the current position) is NOT counted, so
+ * `moved - resnapped` is the number of vertices that were already
+ * on-surface. `max_snap_distance` is the largest counted correction. */
 typedef struct CyberSoftTransformReport {
     size_t moved;
     size_t resnapped;
@@ -1211,7 +1257,8 @@ typedef struct CyberSeamPathOptions {
     float flatWeight;    /* baseline multiplier for an ordinary edge */
     float featureWeight; /* multiplier for a feature-tagged edge */
     float concaveWeight; /* multiplier for a valley edge past creaseDegrees */
-    float creaseDegrees; /* concavity (degrees) that counts as a groove */
+    float convexWeight;  /* multiplier for a ridge edge past creaseDegrees */
+    float creaseDegrees; /* dihedral MAGNITUDE (degrees) that counts as a crease */
     float minWeight;     /* floor applied to the chosen multiplier */
 } CyberSeamPathOptions;
 
@@ -1406,6 +1453,148 @@ typedef struct CyberConformReport {
  * The Target snapper is built internally, so no snapper handle is needed. */
 CyberStatus cyber_conform(CyberMesh* edit, const CyberMesh* new_target, float threshold,
                           CyberConformReport* report, uint32_t* out_flagged, size_t max_flagged);
+
+/* ---- named export presets (mesh-io) ----------------------------------
+ *
+ * A preset is pure DATA describing an export bundle for one target app: which
+ * maps to bake, how to name them, what colour space and normal-map convention
+ * that app expects, and which mesh container to write. The DATA half
+ * (listing, resolving, reading) lives in core and is available in EVERY
+ * build. Only cyber_export_bundle_write needs the UV module — it unwraps a
+ * low-poly that carries no UVs — and without it that one call returns
+ * CYBER_ERR_RUNTIME, exactly like cyber_uv_atlas. */
+
+/* Preset schema version this build understands. A preset file declaring any
+ * other version is rejected rather than partially honored. */
+#define CYBER_PRESET_SCHEMA_VERSION 1
+
+/* The built-in presets, in a stable order suitable for help text.
+ * cyber_export_preset_builtin_name returns static storage (valid for the
+ * process) or NULL for an out-of-range index. */
+size_t cyber_export_preset_builtin_count(void);
+const char* cyber_export_preset_builtin_name(size_t index);
+
+/* A resolved preset. Opaque; release with cyber_export_preset_free. */
+typedef struct CyberExportPreset CyberExportPreset;
+
+/* Resolves a preset argument the way the CLI's --preset does: a built-in name
+ * if one matches, otherwise a path to a user preset JSON file. On success
+ * *out receives a handle the caller frees with cyber_export_preset_free.
+ *
+ * A preset file declaring an unsupported schema version is
+ * CYBER_ERR_INCOMPATIBLE_VERSION (cyber_last_error names both versions); a
+ * name that is neither built in nor a readable file is CYBER_ERR_INVALID_ARG
+ * listing the built-ins; a malformed or contradictory file is CYBER_ERR_IO.
+ * *out is left NULL in every failure case. */
+CyberStatus cyber_export_preset_resolve(const char* name_or_path, CyberExportPreset** out);
+void cyber_export_preset_free(CyberExportPreset* preset);
+
+/* Everything a preset declares except its per-map list. Every `const char*`
+ * points into `preset` and stays valid until it is freed. */
+typedef struct CyberExportPresetInfo {
+    const char* name;
+    int schemaVersion;
+    const char* meshFormat;    /* container extension, no dot: obj|ply|stl|gltf|glb */
+    const char* textureFormat; /* container extension, no dot: png|exr */
+    const char* namingPattern; /* tokens: {basename} {map} {preset} {ext} */
+    const char* units;
+    const char* upAxis;
+    int resolution;
+    /* Normal-map green channel: 1 = +Y (OpenGL — Blender, Unity, glTF),
+     * 0 = -Y (DirectX — Unreal). Getting this wrong inverts every bump. */
+    int normalGreenPlusY;
+    size_t mapCount;
+} CyberExportPresetInfo;
+
+CyberStatus cyber_export_preset_info(const CyberExportPreset* preset, CyberExportPresetInfo* out);
+
+/* One entry of the preset's map list. Strings point into `preset`. */
+typedef struct CyberExportPresetMap {
+    const char* map;        /* canonical kind: normal|ao|curvature|cavity|
+                             * displacement|color|position */
+    const char* colorSpace; /* "linear" | "srgb" */
+    /* Token substituted for {map} in the naming pattern — the map's canonical
+     * name unless the preset overrode it to match an app's suffix style. */
+    const char* suffix;
+} CyberExportPresetMap;
+
+CyberStatus cyber_export_preset_map(const CyberExportPreset* preset, size_t index,
+                                    CyberExportPresetMap* out);
+
+/* The file name entry `index` produces for `basename`, with the naming
+ * pattern's tokens expanded. Points into a thread-local buffer valid until the
+ * next capi call on this thread (same contract as CyberHandoffInfo.producer).
+ * NULL on a null preset or an out-of-range index. */
+const char* cyber_export_preset_map_file_name(const CyberExportPreset* preset, size_t index,
+                                              const char* basename);
+
+/* Overrides the preset's texture resolution, the way the CLI's --texture-size
+ * does. Rejects a non-positive value rather than baking a zero-sized map. */
+CyberStatus cyber_export_preset_set_resolution(CyberExportPreset* preset, int resolution);
+
+/* ---- export bundles --------------------------------------------------- */
+
+typedef struct CyberBundleParams {
+    const char* meshPath; /* required; its extension wins over the preset's
+                           * (an explicit output path is the user speaking
+                           * last) and a mismatch comes back as a warning */
+    const char* basename; /* substituted for {basename}; NULL or empty means
+                           * the mesh path's stem */
+    float cageDistance;   /* projection cage for every bake, in model units */
+    int aoSamples;
+    float aoRadius;
+} CyberBundleParams;
+
+/* Fills params with the engine defaults (meshPath and basename left NULL).
+ * No-op on NULL. */
+void cyber_default_bundle_params(CyberBundleParams* params);
+
+/* What a bundle wrote. Opaque; release with cyber_bundle_result_free. */
+typedef struct CyberBundleResult CyberBundleResult;
+
+/* Writes `preset`'s bundle for the (low, high) pair: the mesh, then one baked
+ * map per preset entry, named and encoded the way the target app expects.
+ *
+ * `low` IS MODIFIED IN PLACE when it carries no UVs — baking is impossible
+ * without them, and requiring a pre-unwrap would make presets useless on a
+ * freshly remeshed mesh. Clone it first (cyber_mesh_clone) to keep the
+ * original. `high` is never modified and MUST NOT be NULL: every map is a
+ * projection from it.
+ *
+ * On success *out receives the result handle. On a cooperative cancel the
+ * status is CYBER_ERR_CANCELLED and *out is left NULL; files already written
+ * are not removed. Returns CYBER_ERR_RUNTIME when the engine was built
+ * without the UV module. Either callback may be NULL. */
+CyberStatus cyber_export_bundle_write(CyberMesh* low, const CyberMesh* high,
+                                      const CyberExportPreset* preset,
+                                      const CyberBundleParams* params, CyberProgressCb progress,
+                                      CyberCancelCb cancel, void* user, CyberBundleResult** out);
+void cyber_bundle_result_free(CyberBundleResult* result);
+
+/* One file the bundle wrote. Strings point into the result handle. */
+typedef struct CyberBundleFile {
+    const char* path;
+    const char* kind;       /* "mesh", or the preset map name ("normal", ...) */
+    const char* colorSpace; /* encoding actually written; "" for the mesh */
+    int width;              /* 0 for the mesh */
+    int height;
+} CyberBundleFile;
+
+size_t cyber_bundle_result_file_count(const CyberBundleResult* result);
+CyberStatus cyber_bundle_result_file(const CyberBundleResult* result, size_t index,
+                                     CyberBundleFile* out);
+
+/* Non-fatal notes — a preset/extension mismatch, a map the source could not
+ * feed. `cyber_bundle_result_warning` returns NULL for a bad index. */
+size_t cyber_bundle_result_warning_count(const CyberBundleResult* result);
+const char* cyber_bundle_result_warning(const CyberBundleResult* result, size_t index);
+
+/* Set when the low-poly carried no UVs and the bundle unwrapped it; the chart
+ * count and worst angle distortion are that unwrap's. All three read 0 when
+ * the low-poly already had UVs. */
+int cyber_bundle_result_unwrapped(const CyberBundleResult* result);
+int cyber_bundle_result_chart_count(const CyberBundleResult* result);
+float cyber_bundle_result_max_angle_distortion(const CyberBundleResult* result);
 
 #ifdef __cplusplus
 } /* extern "C" */

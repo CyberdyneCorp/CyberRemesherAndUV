@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Per-DCC export presets — one flag, a bundle the target app can read as-is.
+"""Per-DCC export presets — one call, a bundle the target app can read as-is.
 
-``--preset <name>`` turns a remesh into an *export bundle*: the mesh plus one
+An *export preset* turns a remesh into an export *bundle*: the mesh plus one
 baked map per entry, written under the target application's file naming, colour
 space and normal-map conventions. Four presets ship built in — blender, unity,
 unreal and gltf-generic.
@@ -14,19 +14,17 @@ that channel at write time and the others do not. This example bakes the same
 model through all four presets and shows the two normal maps side by side, plus
 their difference — green, and only green.
 
-NOTE: export presets are a CLI-only feature. The C ABI has no export/bundle
-entry point, so the ``cyberremesh`` Python package cannot request a preset
-bundle; this example therefore drives the CLI binary. Everything the bindings
-*do* expose (loading the exported mesh back) still goes through them.
+Everything here runs through the ``cyberremesh`` bindings: ``ExportPreset``
+resolves a preset and reports what it declares (including which mesh container
+it wants, which is why no extension table is hard-coded below), and
+``write_bundle`` writes the bundle. The low-poly is unwrapped ONCE up front, so
+all four bundles bake against byte-identical UVs and any difference between
+them is the preset convention and nothing else.
 
     examples/run.sh examples/19_export_presets.py
 """
 
-import json
 import os
-import shutil
-import subprocess
-import sys
 import tempfile
 
 import matplotlib.image as mpimg
@@ -34,64 +32,57 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 import common as c
-from cyberremesh import Mesh
+from cyberremesh import ExportPreset, Mesh, RemeshParams, remesh, write_bundle
 
 MODEL = os.path.join(c.MODELS_DIR, "spot.obj")
 PRESETS = ["blender", "unity", "unreal", "gltf-generic"]
 TARGET_QUADS = 1200
 TEXTURE_SIZE = 256  # small on purpose: the AO bake is ~all of the runtime
-AO_SAMPLES = 4
-
-# The container each preset declares. The CLI honours the --output extension
-# over the preset (an explicit path is the user speaking last) and has no way to
-# report a preset's mesh format without running it, so the caller must supply a
-# matching extension itself.
-MESH_EXT = {"blender": "obj", "unity": "glb", "unreal": "glb", "gltf-generic": "glb"}
+AO_SAMPLES = 32  # 4 was too few once AO gained per-texel dither: the figure read as speckle
 
 
-def cli_binary():
-    """Locate the cyberremesh CLI, which is where --preset lives."""
-    lib = os.environ.get("CYBER_CAPI_LIB", "")
-    build = os.path.dirname(os.path.dirname(lib)) if lib else ""
-    candidates = [
-        os.environ.get("CYBER_CLI"),
-        os.path.join(build, "apps", "cli", "cyberremesh") if build else None,
-        os.path.join(c._REPO, "build", "apps", "cli", "cyberremesh"),
-        shutil.which("cyberremesh"),
-    ]
-    for path in candidates:
-        if path and os.path.exists(path):
-            return path
-    print("cyberremesh CLI not found. Build it and re-run:\n"
-          "  cmake --build --preset cpu-headless --target cyberremesh\n"
-          "  CYBER_CLI=<path> examples/run.sh examples/19_export_presets.py",
-          file=sys.stderr)
-    sys.exit(1)
+def to_report(preset, result, chart_count):
+    """Flatten a preset and its bundle into the dict the figure code reads."""
+    return {
+        "preset": {
+            "name": preset.name,
+            "schemaVersion": preset.schema_version,
+            "meshFormat": preset.mesh_format,
+            "textureFormat": preset.texture_format,
+            "namingPattern": preset.naming_pattern,
+            "normalGreen": preset.normal_green,
+            "resolution": preset.resolution,
+            "units": preset.units,
+            "upAxis": preset.up_axis,
+            "chartCount": chart_count,
+        },
+        "outputs": [{"path": f.path, "kind": f.kind, "colorSpace": f.color_space,
+                     "width": f.width, "height": f.height}
+                    for f in result.files],
+        "warnings": result.warnings,
+    }
 
 
-def run_preset(binary, preset, workdir):
-    """Export one bundle. Returns the run report (which lists every file written)."""
-    out_dir = os.path.join(workdir, preset)
+def run_preset(low, high, name, workdir, cage_distance, chart_count):
+    """Export one bundle through the bindings. Returns its report."""
+    out_dir = os.path.join(workdir, name)
     os.makedirs(out_dir, exist_ok=True)
-    report_path = os.path.join(out_dir, "report.json")
-    run = subprocess.run(
-        [binary,
-         "--input", MODEL,
-         "--output", os.path.join(out_dir, f"spot.{MESH_EXT[preset]}"),
-         "--preset", preset,
-         "--target-quads", str(TARGET_QUADS),
-         "--texture-size", str(TEXTURE_SIZE),
-         "--ao-samples", str(AO_SAMPLES),
-         "--report", report_path,
-         "--quiet"],
-        capture_output=True, text=True, timeout=900)
-    if run.returncode != 0:
-        # A build without the export-bundle module rejects --preset outright,
-        # and that message is far more useful than a CalledProcessError.
-        print(f"preset '{preset}' failed:\n{run.stderr.strip()[-500:]}", file=sys.stderr)
-        sys.exit(1)
-    with open(report_path, "r", encoding="utf-8") as fh:
-        return json.load(fh)
+    with ExportPreset.resolve(name) as preset:
+        preset.resolution = TEXTURE_SIZE
+        # The preset itself names the container it wants, so the output path
+        # can match it instead of being guessed from a hard-coded table.
+        mesh_path = os.path.join(out_dir, "spot.{0}".format(preset.mesh_format))
+        result = write_bundle(low, high, preset, mesh_path,
+                              cage_distance=cage_distance, ao_samples=AO_SAMPLES)
+        for warning in result.warnings:
+            print("warning ({0}): {1}".format(name, warning))
+        return to_report(preset, result, chart_count)
+
+
+def cage_distance(mesh):
+    """1% of the bounding-box diagonal — a fixed cage misses a non-unit model."""
+    positions = np.asarray(mesh.positions).reshape(-1, 3)
+    return 0.01 * float(np.linalg.norm(positions.max(axis=0) - positions.min(axis=0)))
 
 
 def output_path(report, kind):
@@ -139,8 +130,8 @@ def map_diff(reports, kind):
 
 
 def bundle_mesh_stats(report):
-    """Load the exported mesh back through the Python bindings — the one part of
-    this workflow the bindings can do — so the figure can quote real counts."""
+    """Load the exported mesh back and quote its real counts. Only the presets
+    whose container is OBJ can be re-read here; the glTF ones are binary."""
     path = output_path(report, "mesh")
     with Mesh.load_obj(path) as mesh:
         return mesh.vertex_count, mesh.face_count
@@ -242,12 +233,18 @@ def summary_lines(reports, check, mesh_stats, other_diffs):
 
 def main():
     c.require_engine()
-    binary = cli_binary()
     workdir = tempfile.mkdtemp(prefix="cyber_presets_")
 
-    reports = {}
-    for preset in PRESETS:
-        reports[preset] = run_preset(binary, preset, workdir)
+    with Mesh.load_obj(MODEL) as high:
+        cage = cage_distance(high)
+        low = remesh(high, RemeshParams(target_quad_count=TARGET_QUADS))
+        with low:
+            # Unwrapped once, up front: write_bundle would do it per bundle,
+            # but sharing one atlas is what makes the texel-by-texel
+            # comparison below provably about the presets and nothing else.
+            atlas = low.unwrap_atlas()
+            reports = {name: run_preset(low, high, name, workdir, cage, atlas.chart_count)
+                       for name in PRESETS}
 
     print_table(reports)
 

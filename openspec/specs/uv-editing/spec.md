@@ -52,6 +52,11 @@ In addition to the interactive editor (hand-drawn seams, gesture unwrap, manual/
 - **WHEN** the automatic atlas runs on a mesh that carries no UVs
 - **THEN** it SHALL grow charts by normal coherence, LSCM-unwrap each chart (falling back to a planar projection for a chart LSCM rejects), and pack the charts into the 0–1 UV square without overlaps, leaving every corner with a UV coordinate and returning chart count, maximum and RMS conformal (angle) distortion, flipped-chart count, and packed-area / texel-density readouts
 
+#### Scenario: The packing readout reports coverage the caller can act on
+- **WHEN** the automatic atlas reports how much of the UV square it filled
+- **THEN** the packed-area readout SHALL be the fraction the chart GEOMETRY covers (the summed UV face areas), not the fraction covered by the charts' bounding boxes, and the bounding-box fraction SHALL be reported separately as a distinct packer-tightness readout
+- **AND** a chart that ends up degenerate (no UV area, so invisible in the packed layout) SHALL NOT be counted in the chart count; it SHALL be reported as a dropped chart, so chart count plus dropped charts equals the number of islands the seams produced
+
 #### Scenario: Chart merging trades seams against distortion under a bound
 - **WHEN** chart merging is enabled
 - **THEN** the atlas SHALL first merge adjacent charts whose union stays within one normal cone (fewer seams with no rise in distortion), then optionally merge further while the combined conformal-plus-area distortion of the LSCM-unwrapped union stays at or below a caller-set cap (folding developable regions together to cut the chart count), and SHALL NOT merge charts that would fold or exceed the cap

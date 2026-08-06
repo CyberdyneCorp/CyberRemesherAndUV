@@ -28,7 +28,7 @@ struct BundleParams {
     std::string basename;
     // Projection cage for every bake, in model units.
     float cageDistance = 0.1f;
-    int aoSamples = 16;
+    int aoSamples = 64;
     float aoRadius = 1.0f;
 };
 

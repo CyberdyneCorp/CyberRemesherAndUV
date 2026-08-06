@@ -41,6 +41,16 @@ float segmentDistanceSq(Vec3 p, Vec3 a, Vec3 b) {
 
 }  // namespace
 
+bool DensityField::isNeutral() const {
+    if (empty()) {
+        return false;
+    }
+    constexpr float kNeutralEpsilon = 1e-6f;
+    const auto neutral = [](float v) { return std::fabs(v - 1.0f) <= kNeutralEpsilon; };
+    return std::all_of(vertexValues.begin(), vertexValues.end(), neutral) &&
+           std::all_of(faceValues.begin(), faceValues.end(), neutral);
+}
+
 GuidanceField::~GuidanceField() = default;
 GuidanceField::GuidanceField(GuidanceField&&) noexcept = default;
 GuidanceField& GuidanceField::operator=(GuidanceField&&) noexcept = default;

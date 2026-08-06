@@ -87,13 +87,23 @@ public struct PaintSample {
 }
 
 /// Outcome of a weighted transform or relax.
+///
+/// Both counts are DISTINCT VERTICES, never per-iteration writes: `moved` never
+/// exceeds the mesh's vertex count even for a multi-iteration `relaxSelection`
+/// that revisits each of them every sweep, and `resnapped` never exceeds
+/// `moved`.
 public struct SoftTransformReport: Equatable {
-    /// Vertices the operation wrote (weight > 0 and not pinned).
+    /// Distinct vertices the operation wrote (weight > 0 and not pinned).
     public var moved: Int
-    /// Of those, how many the Target re-projection pulled back further than the
-    /// caller's epsilon.
+    /// Of those, how many the Target re-projection pulled back STRICTLY further
+    /// than the caller's epsilon. With the default epsilon of 0 a vertex the
+    /// projection did not have to correct at all (correction exactly 0 — it
+    /// already sat on the Target, which is what happens when the weight is so
+    /// small that the blended target is bit-identical to the current position)
+    /// is not counted, so `moved - resnapped` is the number of vertices that
+    /// were already on-surface.
     public var resnapped: Int
-    /// Largest such correction.
+    /// Largest counted correction.
     public var maxSnapDistance: Float
 }
 

@@ -15,8 +15,19 @@
   `paintSelectionStroke` (AABB-prefiltered) round it out, with four falloff curves
   (Linear/Smooth/Sharp/Round).
 
-- [x] 2. Selection ops: clear/invert/expand/contract/smooth(1|5|10),
+- [~] 2. Selection ops: clear/invert/expand/contract/smooth(1|5|10),
        save/load named slots persisted in the document
+
+  **PARTIAL — the selection ops are done; "persisted in the document" is NOT.**
+  Both halves exist and neither is connected to the other: `Document::save/load`
+  serializes `softSelections` (`src/app/src/document.cpp:205-215`, `269-276`) and
+  the C ABI keeps a slot map on the mesh handle (`capi/src/capi.cpp:111`,
+  `2602-2640`), but nothing moves a slot from one to the other. Outside
+  `tests/app/test_app.cpp` no code anywhere writes `Document::softSelections`
+  (only hits: `document.hpp:77`, `document.cpp`, that test), and `cyber_capi.h`
+  exposes no document surface at all, so the ABI slot map dies with the handle.
+  No selection can actually persist today; the shell that would bridge them does
+  not exist (see task 6).
 
   `clearSelection`, `invertSelection`, `expandSelection`/`contractSelection`
   (double-buffered morphological max/min over the closed one-ring) and
@@ -30,8 +41,20 @@
   slot map on the mesh handle (`_save`/`_load`/`_slot_count`/`_slot_name`); the
   shell is what moves those into the Document.
 
-- [x] 3. Weighted transform (T/R/S) + weighted relax with in-operation
+- [~] 3. Weighted transform (T/R/S) + weighted relax with in-operation
        re-snap to the Target
+
+  **PARTIAL — the engine half is complete; the pin half of the documented
+  invariant is C++-only.** `cyber_retopo_selection_transform` takes no `pinned`
+  argument and passes `nullptr` for pins (`capi/src/capi.cpp:2653-2654`), unlike
+  `cyber_retopo_selection_relax` (`2667-2670`) and every other mutating op
+  (`cyber_retopo_move` 1520, `_relax` 1544, `_transform_vertices` 2337), so
+  through the C ABI, Python and Swift a pinned vertex IS moved by a weighted
+  transform. `cyber_capi.h:928-930` nevertheless promises "a vertex whose weight
+  is 0 (**and any pinned vertex**) is skipped entirely" for the whole
+  soft-selection section — that half of the header contract is unreachable, and
+  the header has been corrected to say so pending the missing parameter. The
+  zero-weight half holds everywhere and is tested.
 
   `transformWeighted(mesh, selection, Affine, snapper, pins, resnapEpsilon)` and
   `relaxWeighted(...)`, both returning `retopo::ResnapReport {moved, resnapped,
@@ -62,6 +85,14 @@
   previously unbound `cyber_snapper_create`/`_free`), a `Snapper` class and 16
   `Mesh` methods in `api.py`, all re-exported from the package.
 
+  **Partial — the ABI surface is not complete:**
+  `cyber_retopo_selection_transform` has no `pinned` / `pinned_count` parameter
+  (`capi/include/cyber_capi.h:1042-1044`) and passes `nullptr` to
+  `transformWeighted` (`capi/src/capi.cpp:2654`), so the pin support the engine
+  function offers is unreachable from any binding — see task 3. Adding the two
+  arguments is an ABI change and is left as a follow-up rather than slipped in
+  here.
+
   **Partial:** `swift/Sources/CyberRemesher/SoftSelection.swift` is written
   against the real ABI but **was not compiled** — there is no Swift toolchain in
   this environment (`swift`/`swiftc` are absent) and the whole `swift/` package is
@@ -84,7 +115,8 @@
 - [x] 5. Tests: ramp/saturation, zero-weight immobility, glue invariant,
        save/load round-trip
 
-  `tests/retopo/test_soft_selection.cpp` (11 cases) covers every scenario in the
+  `tests/retopo/test_soft_selection.cpp` (11 cases as landed, 13 today — review
+  added the non-finite-weight regressions) covers every scenario in the
   delta: line ramp/saturation across all four curves, 15° snapping (including the
   fixed-point and no-snap controls), sphere falloff, paint accumulate/saturate/
   subtract/clamp plus stroke-vs-per-dab equivalence, clear/invert,

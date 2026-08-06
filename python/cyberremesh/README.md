@@ -54,6 +54,28 @@ clamps out-of-range values and reports the clamps. Any non-OK C ABI status is
 raised as `CyberError`, carrying the numeric status and the engine's
 `cyber_last_error()` message.
 
+### Export presets
+
+`--preset` is not CLI-only: the whole preset surface is bound.
+
+```python
+from cyberremesh import ExportPreset, builtin_presets, write_bundle
+
+builtin_presets()                                # ['blender', 'unity', ...]
+with ExportPreset.resolve("blender") as preset:  # or a path to a preset JSON
+    preset.resolution = 1024
+    [m.map for m in preset.maps]                 # ['normal', 'ao', ...]
+    bundle = write_bundle(low, high, preset, "out/hero.obj")
+bundle.files                                     # mesh + one file per map
+bundle.warnings                                  # never silently dropped
+```
+
+`write_bundle` unwraps `low` **in place** when it carries no UVs (baking is
+impossible without them) — pass `low.copy()` to keep the original. Listing,
+resolving and reading a preset works in every build; only `write_bundle` needs
+the UV-gated bundle module, and raises `CyberError` naming it where absent. A
+preset from an unsupported schema raises `IncompatibleVersionError`.
+
 ### Quadrangulator choice
 
 `quad_method` selects how triangles become quads:

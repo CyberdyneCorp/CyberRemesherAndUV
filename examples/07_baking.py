@@ -25,7 +25,7 @@ def main() -> None:
 
         # 320^2 with 16 AO rays keeps the CPU run brisk; a GPU build is far
         # faster (ray casting dispatches through the accel layer).
-        params = BakeParams(width=320, height=320, cage_distance=0.35, ao_samples=16, ao_radius=0.5)
+        params = BakeParams(width=320, height=320, cage_distance=0.35, ao_samples=64, ao_radius=0.5)
 
         maps = []
         with Mesh.load_obj(low_path) as low, Mesh.load_obj(high_path) as high:

@@ -25,6 +25,15 @@ Byte-identity was therefore checked against `fandisk` — deterministic and
 byte-for-byte unchanged — plus `ctest -R bench` and in-process bit
 comparisons, not against `spot` or `stanford-bunny`.)
 
+**A density of 1.0 everywhere is dropped, not applied.** 1.0 is the identity of
+the sizing relation below, so a uniform-1.0 paint asks for nothing — but merely
+*carrying* a density field forces the native seamless route (see below), which
+would change the mesh. `validateGuidance` therefore drops a post-clamp all-1.0
+density and reports it (`density is 1.0 everywhere (no sizing change);
+ignored`), so `--guides` with a neutral density is byte-identical to no
+`--guides` at all. A uniform density of any *other* value is a real request and
+is applied normally.
+
 ## The sizing relation
 
 Density is a **quads-per-unit-area multiplier**. A quad covers `edge^2` of
@@ -78,6 +87,16 @@ solve**. The vendored Geogram `quad_cover` builds its own frame field from its
 own single scalar density inside sources we do not patch, so it has no hook for
 either input; routing a guided island there would silently drop the guidance,
 which is precisely the failure this feature exists to avoid.
+
+The one exception is the neutral paint above: a density of 1.0 everywhere is
+dropped at validation, so it never reaches this decision and never moves the
+route.
+
+One hole, stated rather than hidden: setting the developer kill switch
+`CYBER_QC_NO_NATIVE` disables the native solve outright, and a guided island
+then routes to the vendored solve **and is still reported as honored** — the
+"native declined" flag is only set on the fallback inside the forced-native
+branch. Do not set that variable on a guided run until the audit covers it.
 
 On builds with `-DCYBER_WITH_QUADCOVER=ON`, smooth organic meshes normally route
 to the vendored solve (1-4% irregular) while native sits at ~4-5%. **A guided
