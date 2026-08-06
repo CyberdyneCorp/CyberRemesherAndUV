@@ -61,6 +61,7 @@ struct CliOptions {
     std::string input;
     std::string output;
     std::string report;
+    std::string guides;                     // guidance sidecar (--guides); empty = no guidance
     std::string quadMethod = "quad-cover";  // roadmap default (2026-07-22)
     std::string preset;                     // empty = mesh-only export (the historical behaviour)
     float cageDistance = 0.0f;              // 0 = derive from the input's bounds
@@ -86,6 +87,7 @@ void printUsage() {
                  "  --hole-fill <int>        max hole boundary to fill (default 64)\n"
                  "  --patch-policy <p>       keep-largest | keep-all | min-faces:<N>\n"
                  "  --report <path.json>     machine-readable run report\n"
+                 "  --guides <path.json>     flow-guide / painted-density sidecar\n"
                  "  --preset <name|path>     export a per-DCC bundle (mesh + baked maps)\n"
                  "  --cage <float>           bake cage distance (default: 1%% of the\n"
                  "                           input's bounding-box diagonal)\n"
@@ -192,6 +194,12 @@ int parseArgs(int argc, char** argv, CliOptions& options, bool& exitEarly) {
             if (!numeric("--ao-samples", options.aoSamples)) {
                 return kExitArgs;
             }
+        } else if (arg == "--guides") {
+            const auto v = next("--guides");
+            if (!v) {
+                return kExitArgs;
+            }
+            options.guides = *v;
         } else if (arg == "--report") {
             const auto v = next("--report");
             if (!v) {
@@ -346,10 +354,120 @@ const char* statusName(remesh::RunStatus status) {
     return "unknown";
 }
 
+// ---- guidance sidecar (--guides) ---------------------------------------
+//
+// {"version": 1,
+//  "guides": [{"points": [[x,y,z], ...], "strength": 1.0, "radius": 0.15}],
+//  "density": {"perVertex": [...]}}      (or "perFace")
+//
+// Anything wrong with the file is exit 2 naming the file and the offending
+// guide index. A malformed sidecar is NEVER a silent skip: the whole point of
+// the feature is that supplied guidance is honored loudly or rejected loudly.
+bool loadGuidanceSidecar(const std::string& path, remesh::Guidance& out, std::string& error) {
+    std::ifstream file(path);
+    if (!file) {
+        error = "cannot read guides file '" + path + "'";
+        return false;
+    }
+    nlohmann::json doc;
+    try {
+        file >> doc;
+    } catch (const std::exception& e) {
+        error = "guides file '" + path + "' is not valid JSON: " + e.what();
+        return false;
+    }
+    if (!doc.is_object()) {
+        error = "guides file '" + path + "' must contain a JSON object";
+        return false;
+    }
+    const int version = doc.value("version", 1);
+    if (version != 1) {
+        error = "guides file '" + path + "': unsupported version " + std::to_string(version);
+        return false;
+    }
+    if (doc.contains("guides")) {
+        if (!doc["guides"].is_array()) {
+            error = "guides file '" + path + "': \"guides\" must be an array";
+            return false;
+        }
+        for (std::size_t i = 0; i < doc["guides"].size(); ++i) {
+            const nlohmann::json& g = doc["guides"][i];
+            const std::string where = "guides file '" + path + "' guide " + std::to_string(i);
+            if (!g.is_object() || !g.contains("points") || !g["points"].is_array()) {
+                error = where + ": missing a \"points\" array";
+                return false;
+            }
+            remesh::FlowGuide guide;
+            guide.strength = g.value("strength", 1.0f);
+            guide.radius = g.value("radius", 0.0f);
+            for (const auto& p : g["points"]) {
+                if (!p.is_array() || p.size() != 3) {
+                    error = where + ": each point must be [x, y, z]";
+                    return false;
+                }
+                guide.points.push_back(
+                    cyber::Vec3{p[0].get<float>(), p[1].get<float>(), p[2].get<float>()});
+            }
+            out.guides.push_back(std::move(guide));
+        }
+    }
+    if (doc.contains("density")) {
+        const nlohmann::json& d = doc["density"];
+        if (!d.is_object()) {
+            error = "guides file '" + path + "': \"density\" must be an object";
+            return false;
+        }
+        if (d.contains("perVertex")) {
+            out.density.vertexValues = d["perVertex"].get<std::vector<float>>();
+        }
+        if (d.contains("perFace")) {
+            out.density.faceValues = d["perFace"].get<std::vector<float>>();
+        }
+    }
+    return true;
+}
+
+// Post-clamp guidance block for the machine-readable report (remeshing-
+// parameters spec: "The effective post-clamp values SHALL appear in the
+// machine-readable report").
+void addGuidanceToReport(nlohmann::json& report, const remesh::ValidatedGuidance& guidance,
+                         const remesh::PipelineResult& result) {
+    nlohmann::json block;
+    block["guides"] = nlohmann::json::array();
+    for (const auto& g : guidance.guidance.guides) {
+        block["guides"].push_back(
+            {{"pointCount", g.points.size()}, {"strength", g.strength}, {"radius", g.radius}});
+    }
+    const auto& density = guidance.guidance.density;
+    const bool haveDensity = !density.empty();
+    block["density"] = {
+        {"present", haveDensity},
+        {"kind", density.vertexValues.empty() ? "perFace" : "perVertex"},
+        {"count",
+         density.vertexValues.empty() ? density.faceValues.size() : density.vertexValues.size()},
+        {"clampRange", {remesh::kDensityMin, remesh::kDensityMax}},
+    };
+    block["issues"] = nlohmann::json::array();
+    for (const auto& issue : guidance.issues) {
+        block["issues"].push_back(
+            {{"parameter", issue.parameter}, {"message", issue.message}, {"fatal", issue.fatal}});
+    }
+    block["islands"] = nlohmann::json::array();
+    for (const auto& row : result.islandGuidance) {
+        block["islands"].push_back({{"island", row.islandIndex},
+                                    {"guidesInRange", row.guidesInRange},
+                                    {"guidesHonored", row.guidesHonored},
+                                    {"densityHonored", row.densityHonored},
+                                    {"reason", row.reason}});
+    }
+    report["guidance"] = block;
+}
+
 // Writing the report is a hard requirement when requested: an unwritable
 // path is exit 6, never silently skipped (spec).
 int writeReport(const CliOptions& options, const remesh::PipelineResult& result,
-                double elapsedSeconds, const PresetOutcome& presetOutcome) {
+                double elapsedSeconds, const PresetOutcome& presetOutcome,
+                const remesh::ValidatedGuidance& guidance) {
     nlohmann::json report;
     report["tool"] = "cyberremesh";
     report["version"] = std::string(cyber::version());
@@ -387,6 +505,9 @@ int writeReport(const CliOptions& options, const remesh::PipelineResult& result,
                                            {"reason", diag.reason}});
     }
     addPresetToReport(report, presetOutcome);
+    if (!options.guides.empty()) {
+        addGuidanceToReport(report, guidance, result);
+    }
 
     std::ofstream file(options.report, std::ios::trunc);
     if (!file) {
@@ -460,6 +581,30 @@ int main(int argc, char** argv) {
         }
     });
 
+    // Guidance sidecar: parsed and validated BEFORE the solve. A missing,
+    // unreadable, malformed or fatally-invalid sidecar is exit 2 naming the
+    // file and the offending guide — never a silent skip.
+    remesh::Guidance rawGuidance;
+    remesh::ValidatedGuidance validatedGuidance;
+    if (!options.guides.empty()) {
+        std::string guidesError;
+        if (!loadGuidanceSidecar(options.guides, rawGuidance, guidesError)) {
+            std::fprintf(stderr, "error: %s\n", guidesError.c_str());
+            return kExitArgs;
+        }
+        validatedGuidance = remesh::validateGuidance(
+            rawGuidance, imported.value().mesh.vertexCount(), imported.value().mesh.faceCount());
+        if (!validatedGuidance.ok()) {
+            for (const auto& issue : validatedGuidance.issues) {
+                if (issue.fatal) {
+                    std::fprintf(stderr, "error: guides file '%s': %s\n", options.guides.c_str(),
+                                 issue.message.c_str());
+                }
+            }
+            return kExitArgs;
+        }
+    }
+
     const auto start = std::chrono::steady_clock::now();
     // Default method is quad-cover (docs/ROADMAP.md, 2026-07-22) — the CLI
     // previously hardcoded field-aligned, silently diverging from the
@@ -508,8 +653,9 @@ int main(int argc, char** argv) {
         method == "quad-cover" ? remesh::QuadrangulatorFactory(
                                      []() { return remesh::makeFieldAlignedQuadrangulator(); })
                                : remesh::QuadrangulatorFactory{};
-    const remesh::PipelineResult result = remesh::remesh(
-        imported.value().mesh, options.params, &sink, &cancel, makeQuadrangulator, fallbackFactory);
+    const remesh::PipelineResult result =
+        remesh::remesh(imported.value().mesh, options.params, &sink, &cancel, makeQuadrangulator,
+                       fallbackFactory, rawGuidance.empty() ? nullptr : &rawGuidance);
     if (showProgress) {
         std::printf("\r");
     }
@@ -517,6 +663,18 @@ int main(int argc, char** argv) {
     if (!options.quiet) {
         for (const auto& issue : result.parameterIssues) {
             std::fprintf(stderr, "warning: %s\n", issue.message.c_str());
+        }
+        // Unhonored guidance is a warning the user must see, not a report-only
+        // detail: an island whose backend cannot follow the strokes looks
+        // identical to one that did unless we say so.
+        for (const auto& row : result.islandGuidance) {
+            if (row.reason.empty()) {
+                continue;
+            }
+            std::fprintf(
+                stderr, "warning: island %zu: %zu guide(s) in range, guides %s, density %s (%s)\n",
+                row.islandIndex, row.guidesInRange, row.guidesHonored ? "honored" : "NOT honored",
+                row.densityHonored ? "honored" : "NOT honored", row.reason.c_str());
         }
         for (const auto& diag : result.failedIslands) {
             std::fprintf(stderr, "warning: island %zu failed at %s: %s\n", diag.islandIndex,
@@ -586,7 +744,8 @@ int main(int argc, char** argv) {
         std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
 
     if (!options.report.empty()) {
-        const int reportStatus = writeReport(options, result, elapsed, presetOutcome);
+        const int reportStatus =
+            writeReport(options, result, elapsed, presetOutcome, validatedGuidance);
         if (reportStatus != kExitOk) {
             return reportStatus;
         }

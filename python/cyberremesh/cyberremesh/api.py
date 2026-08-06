@@ -8,6 +8,7 @@ ctypes callback marshalling behind normal Python objects and exceptions.
 from __future__ import annotations
 
 import ctypes
+import warnings
 from dataclasses import dataclass
 from typing import Callable, List, Optional, Sequence, Tuple
 
@@ -535,7 +536,7 @@ class Mesh:
     :meth:`close` or garbage collection.
     """
 
-    __slots__ = ("_handle", "_stats")
+    __slots__ = ("_handle", "_stats", "guidance_warnings")
 
     def __init__(self, handle: Optional[int] = None):
         if handle is None:
@@ -544,6 +545,9 @@ class Mesh:
                 raise CyberError(_ffi.STATUS_ERROR, _last_error())
         self._handle = handle
         self._stats: Optional[Statistics] = None
+        # Guidance the engine could not honor (see remesh()). Always present so
+        # callers can read it unconditionally.
+        self.guidance_warnings: List[str] = []
 
     # -- lifetime -----------------------------------------------------------
     @property
@@ -831,11 +835,30 @@ class Mesh:
             return arr.reshape((-1, 3))
 
 
+@dataclass
+class FlowGuide:
+    """A user-drawn flow guide: an ordered polyline on or near the surface.
+
+    The cross field is softly biased toward the guide's tangent within
+    ``radius`` of the stroke, scaled by ``strength`` (clamped to ``[0, 1]``).
+    ``radius`` is a world-space distance and must be greater than 0 — a
+    zero-radius guide could never be honored, so it is rejected rather than
+    silently ignored.
+    """
+
+    points: Sequence[Sequence[float]]
+    strength: float = 1.0
+    radius: float = 0.0
+
+
 def remesh(
     mesh: Mesh,
     params: Optional[RemeshParams] = None,
     progress: Optional[Callable[[float, str], None]] = None,
     cancel: Optional[Callable[[], bool]] = None,
+    guides: Optional[Sequence[FlowGuide]] = None,
+    density: Optional[Sequence[float]] = None,
+    density_per_face: bool = False,
 ) -> Mesh:
     """Run the automatic quad-remeshing pipeline on ``mesh``.
 
@@ -850,6 +873,16 @@ def remesh(
     Exceptions raised inside the Python callbacks are swallowed at the C
     boundary (they must never unwind through C) but the pipeline continues; a
     raising ``cancel`` is treated as "do not cancel".
+
+    ``guides`` — optional :class:`FlowGuide` strokes biasing the cross field.
+    ``density`` — optional painted sizing multiplier, one value per input
+    vertex (or per face with ``density_per_face=True``); values are clamped to
+    ``[0.25, 4.0]`` and the local edge length becomes ``base / sqrt(density)``.
+
+    Guidance the engine could not honor is never dropped silently: the
+    messages are attached to the result as ``Mesh.guidance_warnings`` AND
+    re-raised through :func:`warnings.warn`, so a script that ignores the
+    attribute still sees them.
     """
     if params is None:
         params = RemeshParams()
@@ -877,26 +910,85 @@ def remesh(
         except Exception:
             return 0
 
+    guidance_warnings: List[str] = []
+
+    def _warning_trampoline(message_ptr, _user):
+        try:
+            if message_ptr:
+                guidance_warnings.append(message_ptr.decode("utf-8", "replace"))
+        except Exception:
+            pass
+
     progress_cb = _ffi.PROGRESS_CB(_progress_trampoline)
     cancel_cb = _ffi.CANCEL_CB(_cancel_trampoline)
+    warning_cb = _ffi.WARNING_CB(_warning_trampoline)
 
     c_params = params._to_c()
     out_handle = ctypes.c_void_p()
 
-    status = lib.cyber_remesh(
-        mesh.handle,
-        ctypes.byref(c_params),
-        progress_cb,
-        cancel_cb,
-        None,
-        ctypes.byref(out_handle),
-    )
+    if guides is None and density is None:
+        status = lib.cyber_remesh(
+            mesh.handle,
+            ctypes.byref(c_params),
+            progress_cb,
+            cancel_cb,
+            None,
+            ctypes.byref(out_handle),
+        )
+    else:
+        # Every buffer below must stay alive across the call, so the point
+        # arrays are held in `keepalive` rather than built inline.
+        keepalive: List[object] = []
+        c_guides = (_ffi.CyberFlowGuide * len(guides or []))()
+        for i, guide in enumerate(guides or []):
+            flat = [float(c) for point in guide.points for c in point]
+            buf = (ctypes.c_float * len(flat))(*flat)
+            keepalive.append(buf)
+            c_guides[i].points = ctypes.cast(buf, ctypes.POINTER(ctypes.c_float))
+            c_guides[i].point_count = len(guide.points)
+            c_guides[i].strength = float(guide.strength)
+            c_guides[i].radius = float(guide.radius)
+        c_guidance = _ffi.CyberGuidance()
+        c_guidance.guides = (
+            ctypes.cast(c_guides, ctypes.POINTER(_ffi.CyberFlowGuide)) if guides else None
+        )
+        c_guidance.guide_count = len(guides or [])
+        density_buf = None
+        if density is not None:
+            values = [float(v) for v in density]
+            density_buf = (ctypes.c_float * len(values))(*values)
+            keepalive.append(density_buf)
+        ptr = (
+            ctypes.cast(density_buf, ctypes.POINTER(ctypes.c_float))
+            if density_buf is not None
+            else None
+        )
+        count = len(density) if density is not None else 0
+        if density_per_face:
+            c_guidance.face_density = ptr
+            c_guidance.face_density_count = count
+        else:
+            c_guidance.vertex_density = ptr
+            c_guidance.vertex_density_count = count
+        status = lib.cyber_remesh_guided(
+            mesh.handle,
+            ctypes.byref(c_params),
+            ctypes.byref(c_guidance),
+            progress_cb,
+            cancel_cb,
+            warning_cb,
+            None,
+            ctypes.byref(out_handle),
+        )
     _check(status)
 
     if not out_handle.value:
         raise CyberError(_ffi.STATUS_ERROR, _last_error() or "remesh produced no mesh")
 
     result = Mesh(handle=out_handle.value)
+    result.guidance_warnings = list(guidance_warnings)
+    for message in guidance_warnings:
+        warnings.warn(f"cyberremesh guidance: {message}", stacklevel=2)
     # Statistics are fetched from the result mesh (the C ABI has no out-stats).
     c_stats = _ffi.CyberStatistics()
     if lib.cyber_mesh_stats(result.handle, ctypes.byref(c_stats)) == _ffi.STATUS_OK:

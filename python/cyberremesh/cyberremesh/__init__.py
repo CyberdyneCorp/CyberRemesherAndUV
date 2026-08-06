@@ -23,6 +23,7 @@ from .api import (
     HAVE_NUMPY,
     Image,
     Mesh,
+    FlowGuide,
     RemeshParams,
     SeamCostParams,
     SeamPath,
@@ -38,6 +39,7 @@ from .api import (
 
 __all__ = [
     "Mesh",
+    "FlowGuide",
     "RemeshParams",
     "Statistics",
     "remesh",

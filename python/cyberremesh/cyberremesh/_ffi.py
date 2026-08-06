@@ -99,6 +99,32 @@ class CyberRemeshParams(Structure):
     ]
 
 
+class CyberFlowGuide(Structure):
+    """Mirror of ``CyberFlowGuide`` — one polyline flow guide."""
+
+    # Layout MUST match CyberFlowGuide in capi/include/cyber_capi.h.
+    _fields_ = [
+        ("points", POINTER(c_float)),  # 3 * point_count floats
+        ("point_count", c_size_t),
+        ("strength", c_float),
+        ("radius", c_float),
+    ]
+
+
+class CyberGuidance(Structure):
+    """Mirror of ``CyberGuidance`` — flow guides plus painted density."""
+
+    # Layout MUST match CyberGuidance in capi/include/cyber_capi.h.
+    _fields_ = [
+        ("guides", POINTER(CyberFlowGuide)),
+        ("guide_count", c_size_t),
+        ("vertex_density", POINTER(c_float)),
+        ("vertex_density_count", c_size_t),
+        ("face_density", POINTER(c_float)),
+        ("face_density_count", c_size_t),
+    ]
+
+
 class CyberStatistics(Structure):
     """Mirror of ``cyber_statistics`` — pipeline result counters."""
 
@@ -184,6 +210,8 @@ class CyberBakeParams(Structure):
 PROGRESS_CB = CFUNCTYPE(None, c_float, c_char_p, c_void_p)
 # int (*)(void* user) — return non-zero to request cancellation.
 CANCEL_CB = CFUNCTYPE(c_int32, c_void_p)
+# void (*)(const char* message, void* user) — the guidance "loud" channel.
+WARNING_CB = CFUNCTYPE(None, c_char_p, c_void_p)
 
 
 # ---------------------------------------------------------------------------
@@ -483,6 +511,22 @@ def _declare(lib: ctypes.CDLL) -> None:
         POINTER(c_void_p),
     ]
     lib.cyber_remesh.restype = c_int32
+
+    # CyberStatus cyber_remesh_guided(const CyberMesh* in, const CyberRemeshParams*,
+    #                                 const CyberGuidance*, CyberProgressCb,
+    #                                 CyberCancelCb, CyberWarningCb, void* user,
+    #                                 CyberMesh** out)
+    lib.cyber_remesh_guided.argtypes = [
+        c_void_p,
+        POINTER(CyberRemeshParams),
+        POINTER(CyberGuidance),
+        PROGRESS_CB,
+        CANCEL_CB,
+        WARNING_CB,
+        c_void_p,
+        POINTER(c_void_p),
+    ]
+    lib.cyber_remesh_guided.restype = c_int32
 
     # -- surface baking ------------------------------------------------------
     lib.cyber_default_bake_params.argtypes = [POINTER(CyberBakeParams)]

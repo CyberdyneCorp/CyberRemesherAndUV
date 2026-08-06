@@ -461,7 +461,8 @@ public:
     Outcome quadrangulate(Mesh& mesh, float /*targetEdgeLength*/, ProgressSink* progress,
                           const CancelToken* cancel) override {
         auto backend = accel::defaultBackend();
-        const CrossField field = computeCrossField(mesh, m_iterations, *backend);
+        const CrossField field =
+            computeCrossField(mesh, m_iterations, *backend, 45.0f, nullptr, m_guidance);
         if (cancel && cancel->isCancelled()) {
             return {.success = false, .cancelled = true, .failureReason = "cancelled"};
         }
@@ -503,10 +504,20 @@ public:
         return {.success = true, .cancelled = false, .failureReason = {}};
     }
 
+    // Flow guides reach this backend's own cross field directly; painted
+    // density reaches it through the pipeline's isotropic sizing stage, which
+    // ran before this quadrangulator (unlike quad-cover, which skips it).
+    bool acceptGuidance(const GuidanceField& field, std::string& reason) override {
+        (void)reason;
+        m_guidance = &field;
+        return true;
+    }
+
     [[nodiscard]] std::string name() const override { return "field-aligned"; }
 
 private:
     int m_iterations;
+    const GuidanceField* m_guidance = nullptr;
 };
 
 }  // namespace

@@ -40,6 +40,48 @@ json handle(BridgeSession& session, const json& req) {
                     {"present", session.hasTarget()},
                     {"mesh", meshToJson(session.target())}};
     }
+    // Guidance transport. Adding commands is backward compatible (an older
+    // server answers "unknown command" loudly), so kProtocolVersion is NOT
+    // bumped — bumping it would reject every existing client.
+    if (type == "push_guides") {
+        std::vector<WireGuide> guides;
+        for (const json& g : req.at("guides")) {
+            WireGuide guide;
+            for (const json& p : g.at("points")) {
+                guide.points.push_back(p[0].get<float>());
+                guide.points.push_back(p[1].get<float>());
+                guide.points.push_back(p[2].get<float>());
+            }
+            guide.strength = g.value("strength", 1.0f);
+            guide.radius = g.value("radius", 0.0f);
+            guides.push_back(std::move(guide));
+        }
+        const std::size_t n = guides.size();
+        session.setGuides(std::move(guides));
+        return json{{"type", "ok"}, {"guides", n}};
+    }
+    if (type == "pull_guides") {
+        json guides = json::array();
+        for (const WireGuide& g : session.guides()) {
+            json points = json::array();
+            for (std::size_t i = 0; i + 2 < g.points.size(); i += 3) {
+                points.push_back({g.points[i], g.points[i + 1], g.points[i + 2]});
+            }
+            guides.push_back({{"points", points}, {"strength", g.strength}, {"radius", g.radius}});
+        }
+        return json{{"type", "guides"}, {"guides", guides}};
+    }
+    if (type == "clear_guides") {
+        session.clearGuides();
+        return json{{"type", "ok"}};
+    }
+    if (type == "push_density") {
+        session.setDensity(req.at("values").get<std::vector<float>>());
+        return json{{"type", "ok"}, {"values", session.density().size()}};
+    }
+    if (type == "pull_density") {
+        return json{{"type", "density"}, {"values", session.density()}};
+    }
     if (type == "clear_scene") {
         session.clearScene();
         return json{{"type", "ok"}};

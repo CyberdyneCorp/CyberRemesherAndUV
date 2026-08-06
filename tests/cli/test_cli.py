@@ -185,6 +185,82 @@ def main() -> int:
     check("future preset names both versions", "99" in r.stderr, r.stderr)
     check("future preset wrote nothing", not any(bad_dir.iterdir()), str(list(bad_dir.iterdir())))
 
+    # ---- guidance sidecar (--guides) ------------------------------------
+    guides_dir = tmp / "guides"
+    guides_dir.mkdir()
+
+    good = guides_dir / "good.json"
+    good.write_text(json.dumps({
+        "version": 1,
+        "guides": [{"points": [[0.0, 0.0, 1.0], [0.5, 0.0, 0.7], [0.9, 0.0, 0.2]],
+                    "strength": 5.0,   # out of range: must clamp to 1.0 and be reported
+                    "radius": 0.4}],
+    }))
+    guided_report = guides_dir / "guided.json"
+    r = run("--input", str(sphere), "--output", str(guides_dir / "g.obj"), "--target-quads", "300",
+            "--guides", str(good), "--report", str(guided_report), "--quiet")
+    check("guides happy path exit 0", r.returncode == 0, r.stderr)
+    data = json.loads(guided_report.read_text())
+    check("report has a guidance block", "guidance" in data, str(list(data)))
+    block = data.get("guidance", {})
+    check("report records the POST-CLAMP strength",
+          block.get("guides", [{}])[0].get("strength") == 1.0, json.dumps(block.get("guides")))
+    check("report records the guide radius",
+          abs(block.get("guides", [{}])[0].get("radius", 0.0) - 0.4) < 1e-5,
+          json.dumps(block.get("guides")))
+    check("report records the density clamp range",
+          block.get("density", {}).get("clampRange") == [0.25, 4.0],
+          json.dumps(block.get("density")))
+    check("report names the clamp issue",
+          any("strength" in i.get("parameter", "") for i in block.get("issues", [])),
+          json.dumps(block.get("issues")))
+    check("report has a per-island guidance row", len(block.get("islands", [])) >= 1,
+          json.dumps(block.get("islands")))
+
+    # A zero-radius guide could never be honored: exit 2, naming the file.
+    zero = guides_dir / "zero.json"
+    zero.write_text(json.dumps({
+        "version": 1,
+        "guides": [{"points": [[0, 0, 1], [1, 0, 0]], "strength": 1.0, "radius": 0.0}],
+    }))
+    r = run("--input", str(sphere), "--output", str(guides_dir / "z.obj"), "--target-quads", "300",
+            "--guides", str(zero), "--quiet")
+    check("zero-radius guide exit 2", r.returncode == 2, str(r.returncode))
+    check("zero-radius guide names the file", str(zero) in r.stderr, r.stderr)
+
+    # A malformed sidecar is exit 2, never a silent skip.
+    broken = guides_dir / "broken.json"
+    broken.write_text("{ this is not json")
+    r = run("--input", str(sphere), "--output", str(guides_dir / "b.obj"), "--target-quads", "300",
+            "--guides", str(broken), "--quiet")
+    check("malformed sidecar exit 2", r.returncode == 2, str(r.returncode))
+    check("malformed sidecar names the file", str(broken) in r.stderr, r.stderr)
+
+    missing = guides_dir / "nope.json"
+    r = run("--input", str(sphere), "--output", str(guides_dir / "m.obj"), "--target-quads", "300",
+            "--guides", str(missing), "--quiet")
+    check("missing sidecar exit 2", r.returncode == 2, str(r.returncode))
+
+    # An EMPTY guide list must reproduce the no-guides output byte for byte.
+    empty = guides_dir / "empty.json"
+    empty.write_text(json.dumps({"version": 1, "guides": []}))
+    # Same BASENAME in two directories: the OBJ writer emits an "mtllib
+    # <basename>.mtl" line, so differing file names would differ trivially.
+    plain_dir = guides_dir / "plain"
+    empty_dir = guides_dir / "empty"
+    plain_dir.mkdir()
+    empty_dir.mkdir()
+    plain_out = plain_dir / "out.obj"
+    empty_out = empty_dir / "out.obj"
+    r = run("--input", str(sphere), "--output", str(plain_out), "--target-quads", "300",
+            "--quad-method", "field-aligned", "--quiet")
+    check("no-guides run exit 0", r.returncode == 0, r.stderr)
+    r = run("--input", str(sphere), "--output", str(empty_out), "--target-quads", "300",
+            "--quad-method", "field-aligned", "--guides", str(empty), "--quiet")
+    check("empty-guides run exit 0", r.returncode == 0, r.stderr)
+    check("empty guide list is byte-identical to no --guides",
+          plain_out.read_bytes() == empty_out.read_bytes())
+
     print(f"\n{len(FAILURES)} failure(s)")
     return 1 if FAILURES else 0
 

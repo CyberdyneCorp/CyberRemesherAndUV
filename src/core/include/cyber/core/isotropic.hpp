@@ -1,5 +1,6 @@
 #pragma once
 
+#include "cyber/core/guidance.hpp"
 #include "cyber/core/mesh.hpp"
 #include "cyber/core/progress.hpp"
 #include "cyber/core/reference_surface.hpp"
@@ -21,6 +22,12 @@ struct IsotropicOptions {
     int iterations = 3;
     float adaptivity = 0.0f;           // 0 = uniform; curvature-adaptive otherwise
     float smoothNormalDegrees = 0.0f;  // 0 = flat projection; > 0 = PN-triangle smoothing
+    // Painted density (remeshing-pipeline spec, "Painted density scales local
+    // sizing"). Non-null scales the local target edge length by
+    // 1 / sqrt(density) — density is a quads-per-unit-area multiplier, so 4.0
+    // halves the edge length there. Null leaves the sizing arithmetic
+    // untouched, which is what keeps unguided runs byte-identical.
+    const GuidanceField* density = nullptr;
 };
 
 enum class IsotropicStatus { Success, Cancelled, InvalidInput };

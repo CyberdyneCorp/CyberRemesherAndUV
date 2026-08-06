@@ -415,3 +415,129 @@ TEST_CASE("capi seam path: route, edit, commit, resume, drop") {
     cyber_seam_set_free(seams);
     cyber_mesh_free(mesh);
 }
+
+namespace {
+
+void collectWarning(const char* message, void* user) {
+    auto* sink = static_cast<std::vector<std::string>*>(user);
+    sink->emplace_back(message != nullptr ? message : "");
+}
+
+// Loads the shared unit-cube OBJ through the C entry point; the file is left
+// on disk for the duration of the case and removed by the caller.
+CyberMesh* makeCapiBox(std::filesystem::path& objPath) {
+    objPath = writeCubeObj();
+    CyberMesh* mesh = nullptr;
+    if (cyber_mesh_load_obj(objPath.string().c_str(), &mesh) != CYBER_OK) {
+        return nullptr;
+    }
+    return mesh;
+}
+
+}  // namespace
+
+TEST_CASE("cyber_remesh_guided with null guidance matches cyber_remesh exactly") {
+    std::filesystem::path objPath;
+    CyberMesh* input = makeCapiBox(objPath);
+    REQUIRE(input != nullptr);
+    CyberRemeshParams params{};
+    cyber_default_params(&params);
+    params.targetQuads = 200;
+    params.quadMethod = CYBER_QUAD_FIELD_ALIGNED;  // deterministic across builds
+
+    CyberMesh* plain = nullptr;
+    CyberMesh* guided = nullptr;
+    REQUIRE(cyber_remesh(input, &params, nullptr, nullptr, nullptr, &plain) == CYBER_OK);
+    REQUIRE(cyber_remesh_guided(input, &params, nullptr, nullptr, nullptr, nullptr, nullptr,
+                                &guided) == CYBER_OK);
+    REQUIRE(plain != nullptr);
+    REQUIRE(guided != nullptr);
+
+    CyberStats a{}, b{};
+    REQUIRE(cyber_mesh_stats(plain, &a) == CYBER_OK);
+    REQUIRE(cyber_mesh_stats(guided, &b) == CYBER_OK);
+    CHECK(a.vertices == b.vertices);
+    CHECK(a.quads == b.quads);
+    CHECK(a.triangles == b.triangles);
+
+    std::vector<float> pa(a.vertices * 3), pb(b.vertices * 3);
+    cyber_mesh_copy_positions(plain, pa.data(), pa.size());
+    cyber_mesh_copy_positions(guided, pb.data(), pb.size());
+    CHECK(pa == pb);  // byte-for-byte: same floats, not "close enough"
+
+    cyber_mesh_free(plain);
+    cyber_mesh_free(guided);
+    cyber_mesh_free(input);
+    std::error_code ec;
+    std::filesystem::remove(objPath, ec);
+}
+
+TEST_CASE("cyber_remesh_guided rejects an unusable guide and allocates nothing") {
+    std::filesystem::path objPath;
+    CyberMesh* input = makeCapiBox(objPath);
+    REQUIRE(input != nullptr);
+    CyberRemeshParams params{};
+    cyber_default_params(&params);
+    params.targetQuads = 200;
+
+    const float points[] = {0.0f, 0.0f, 0.0f};  // one point: not a polyline
+    CyberFlowGuide guide{};
+    guide.points = points;
+    guide.point_count = 1;
+    guide.strength = 1.0f;
+    guide.radius = 0.5f;
+    CyberGuidance guidance{};
+    guidance.guides = &guide;
+    guidance.guide_count = 1;
+
+    std::vector<std::string> warnings;
+    CyberMesh* out = reinterpret_cast<CyberMesh*>(0x1);  // must be overwritten with null
+    const CyberStatus status = cyber_remesh_guided(input, &params, &guidance, nullptr, nullptr,
+                                                   collectWarning, &warnings, &out);
+    CHECK(status == CYBER_ERR_INVALID_PARAM);
+    CHECK(out == nullptr);
+    CHECK_FALSE(warnings.empty());  // the rejection is LOUD
+    cyber_mesh_free(input);
+    std::error_code ec;
+    std::filesystem::remove(objPath, ec);
+}
+
+TEST_CASE("cyber_remesh_guided reports unhonored guidance through the warning callback") {
+    std::filesystem::path objPath;
+    CyberMesh* input = makeCapiBox(objPath);
+    REQUIRE(input != nullptr);
+    CyberRemeshParams params{};
+    cyber_default_params(&params);
+    params.targetQuads = 200;
+    // The Instant-Meshes extractor takes IQuadrangulator's default
+    // acceptGuidance, which declines — the island must say so.
+    params.quadMethod = CYBER_QUAD_INSTANT_MESHES;
+
+    const float points[] = {0.1f, 0.1f, 0.0f, 0.9f, 0.9f, 0.0f};
+    CyberFlowGuide guide{};
+    guide.points = points;
+    guide.point_count = 2;
+    guide.strength = 1.0f;
+    guide.radius = 0.5f;
+    CyberGuidance guidance{};
+    guidance.guides = &guide;
+    guidance.guide_count = 1;
+
+    std::vector<std::string> warnings;
+    CyberMesh* out = nullptr;
+    const CyberStatus status = cyber_remesh_guided(input, &params, &guidance, nullptr, nullptr,
+                                                   collectWarning, &warnings, &out);
+    REQUIRE(status == CYBER_OK);
+    REQUIRE(out != nullptr);
+    bool named = false;
+    for (const std::string& w : warnings) {
+        if (w.find("NOT honored") != std::string::npos) {
+            named = true;
+        }
+    }
+    CHECK(named);
+    cyber_mesh_free(out);
+    cyber_mesh_free(input);
+    std::error_code ec;
+    std::filesystem::remove(objPath, ec);
+}

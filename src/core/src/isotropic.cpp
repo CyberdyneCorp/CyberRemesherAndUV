@@ -224,10 +224,10 @@ std::array<float, 3> barycentricWeights(Vec3 p, const std::array<Vec3, 3>& tri) 
 class ScaleField {
 public:
     ScaleField(const Mesh& inputMesh, const ReferenceSurface& reference, float adaptivity,
-               float targetEdgeLength)
-        : m_reference(reference), m_uniform(adaptivity <= 0.0f) {
+               float targetEdgeLength, const GuidanceField* density = nullptr)
+        : m_reference(reference), m_density(density), m_uniform(adaptivity <= 0.0f) {
         if (m_uniform) {
-            return;
+            return;  // density-only (if any): at() applies the multiplier directly
         }
         std::vector<float> vertexScales;
         computeTargetScales(inputMesh, adaptivity, targetEdgeLength, vertexScales);
@@ -248,23 +248,30 @@ public:
         }
     }
 
-    [[nodiscard]] bool uniform() const { return m_uniform; }
+    [[nodiscard]] bool uniform() const { return m_uniform && m_density == nullptr; }
 
     // Scale at an arbitrary point: barycentric interpolation on the closest
     // input triangle. One BVH query per call — the passes bound-check first
     // so mid-band edges skip the query entirely.
     [[nodiscard]] float at(Vec3 p) const {
-        if (m_uniform) {
+        if (m_uniform && m_density == nullptr) {
             return 1.0f;
+        }
+        // Painted density is a quads-per-unit-area multiplier, so it shortens
+        // the local target edge by 1/sqrt(density) (docs/flow-guides.md).
+        const float densityScale =
+            m_density != nullptr ? 1.0f / std::sqrt(m_density->densityAt(p)) : 1.0f;
+        if (m_uniform) {
+            return std::clamp(densityScale, kMinScale, kMaxScale);
         }
         const Bvh::ClosestHit hit = m_reference.closest(p);
         if (!hit.face.valid() || hit.face.value >= m_triangles.size()) {
-            return 1.0f;
+            return std::clamp(densityScale, kMinScale, kMaxScale);
         }
         const FieldTriangle& tri = m_triangles[hit.face.value];
         const std::array<float, 3> w = barycentricWeights(hit.point, tri.position);
         const float scale = w[0] * tri.scale[0] + w[1] * tri.scale[1] + w[2] * tri.scale[2];
-        return std::clamp(scale, kMinScale, kMaxScale);
+        return std::clamp(scale * densityScale, kMinScale, kMaxScale);
     }
 
 private:
@@ -274,6 +281,7 @@ private:
     };
 
     const ReferenceSurface& m_reference;
+    const GuidanceField* m_density = nullptr;
     std::vector<FieldTriangle> m_triangles;
     bool m_uniform = false;
 };
@@ -608,7 +616,9 @@ IsotropicStatus isotropicRemesh(Mesh& mesh, const ReferenceSurface& reference,
     const bool isoTime = std::getenv("CYBER_ISO_TIME") != nullptr;
     using Clk = std::chrono::steady_clock;
     const auto t0 = Clk::now();
-    const ScaleField field(mesh, reference, options.adaptivity, options.targetEdgeLength);
+    const ScaleField field(
+        mesh, reference, options.adaptivity, options.targetEdgeLength,
+        options.density != nullptr && options.density->hasDensity() ? options.density : nullptr);
     long long tScale = 0, tSplit = 0, tCollapse = 0, tFlip = 0, tSmooth = 0;
     const auto ms = [](Clk::time_point a, Clk::time_point b) {
         return std::chrono::duration_cast<std::chrono::milliseconds>(b - a).count();

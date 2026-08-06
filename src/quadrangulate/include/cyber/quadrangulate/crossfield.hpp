@@ -3,6 +3,7 @@
 #include <vector>
 
 #include "cyber/accel/backend.hpp"
+#include "cyber/core/guidance.hpp"
 #include "cyber/core/mesh.hpp"
 
 // Per-face cross (4-symmetry / N-RoSy, N=4) field over a triangle mesh — the
@@ -23,6 +24,15 @@ public:
     std::vector<Vec3> bitangent;  // per-face normal x tangent
     std::vector<float> real;      // per-face cos(4*theta)
     std::vector<float> imag;      // per-face sin(4*theta)
+
+    // Flow-guide accounting (0/0 for an unguided solve). `guidedFaces` counts
+    // faces the guides actually biased; `guideConflictFaces` counts faces a
+    // guide reached but could NOT bias because a hard pin (feature / boundary /
+    // crease alignment) owns them. The conflict count is reported rather than
+    // resolved: guides are soft by design, so a guide drawn across a crease is
+    // legitimately only partially honored and the user is told so.
+    std::size_t guidedFaces = 0;
+    std::size_t guideConflictFaces = 0;
 
     [[nodiscard]] std::size_t size() const { return real.size(); }
     // Representative cross direction (theta) of face f in world space.
@@ -52,10 +62,19 @@ public:
 // dihedrals on a coarse organic remesh stop freezing the field (nefertiti@4000: 43% of faces
 // pinned by wrinkle alignment, 1297 cones). Null (the default) keeps every crease pin —
 // historical behavior. Feature/boundary pins are never gated by it.
+//
+// `guidance` (optional) applies user-drawn flow guides as a SOFT alignment
+// constraint: inside a guide's influence radius each smoothing sweep blends the
+// transported average toward the guide's tangent by the guide's falloff weight.
+// Hard pins still win — a pinned face is never blended, it is only counted in
+// CrossField::guideConflictFaces. A null pointer (or a field with no guides)
+// leaves the sweep textually identical to the unguided one, so unguided output
+// is byte-identical by construction rather than by tuning.
 [[nodiscard]] CrossField computeCrossField(const Mesh& mesh, int iterations,
                                            accel::IBackend& backend,
                                            float creaseAlignDegrees = 45.0f,
-                                           const std::vector<char>* creaseAlignSupport = nullptr);
+                                           const std::vector<char>* creaseAlignSupport = nullptr,
+                                           const GuidanceField* guidance = nullptr);
 
 // Alternative cross field derived from the multiresolution per-vertex 4-RoSy
 // orientation field (computePositionField): the coarse-to-fine hierarchy places
@@ -71,6 +90,6 @@ public:
 // (and the field-aligned engine) are unchanged.
 [[nodiscard]] CrossField computeCrossFieldFromOrientation(
     const Mesh& mesh, int iterations, accel::IBackend& backend, float creaseAlignDegrees = 45.0f,
-    const std::vector<char>* creaseAlignSupport = nullptr);
+    const std::vector<char>* creaseAlignSupport = nullptr, const GuidanceField* guidance = nullptr);
 
 }  // namespace cyber::remesh

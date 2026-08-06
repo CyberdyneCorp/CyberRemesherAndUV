@@ -103,6 +103,50 @@ CyberStatus cyber_remesh(const CyberMesh* in, const CyberRemeshParams* params,
                          CyberProgressCb progress, CyberCancelCb cancel, void* user,
                          CyberMesh** out);
 
+/* ---- guided remeshing (flow guides + painted density) ---------------- */
+
+/* One flow guide: an ordered polyline on or near the input surface whose
+ * tangent the cross field is softly biased toward. `points` is
+ * 3 * point_count floats (x,y,z per point) and needs at least 2 points.
+ * `strength` is clamped to [0,1]; `radius` is the world-space influence
+ * radius and MUST be > 0 (a zero-radius guide could never be honored, so it
+ * is rejected rather than silently ignored). */
+typedef struct CyberFlowGuide {
+    const float* points;
+    size_t point_count;
+    float strength;
+    float radius;
+} CyberFlowGuide;
+
+/* Painted guidance. Supply at most ONE of vertex_density / face_density; its
+ * length must match the input mesh's vertex or face count exactly. Values are
+ * quads-per-unit-area multipliers clamped to [0.25, 4.0], so the local target
+ * edge length becomes base / sqrt(density). */
+typedef struct CyberGuidance {
+    const CyberFlowGuide* guides;
+    size_t guide_count;
+    const float* vertex_density;
+    size_t vertex_density_count;
+    const float* face_density;
+    size_t face_density_count;
+} CyberGuidance;
+
+/* Guidance warning channel: called once per clamp, per rejection, and per
+ * island whose backend could not honor the supplied guidance. This is the
+ * ABI's "loud" path — guidance is never silently dropped. */
+typedef void (*CyberWarningCb)(const char* message, void* user);
+
+/* Runs the pipeline with user guidance. Identical to cyber_remesh when
+ * `guidance` is NULL (or carries neither guides nor density), including
+ * byte-for-byte output. `warning` may be NULL, in which case the messages are
+ * simply not delivered (fatal problems still fail the call).
+ * Returns CYBER_ERR_INVALID_PARAM when a guide or density array is unusable;
+ * *out is left NULL in that case. */
+CyberStatus cyber_remesh_guided(const CyberMesh* in, const CyberRemeshParams* params,
+                                const CyberGuidance* guidance, CyberProgressCb progress,
+                                CyberCancelCb cancel, CyberWarningCb warning, void* user,
+                                CyberMesh** out);
+
 /* ---- statistics ------------------------------------------------------ */
 
 /* Topology summary of a mesh. */
@@ -138,14 +182,14 @@ typedef struct CyberAtlasParams {
 
 /* Aggregate atlas quality/packing report. */
 typedef struct CyberAtlasResult {
-    int chartCount;             /* number of charts (islands) */
-    size_t seamEdges;           /* edges cut to form the charts */
-    float maxAngleDistortion;   /* worst conformal error across charts, [0,1) */
-    float rmsAngleDistortion;   /* RMS conformal error across charts */
-    int flippedCharts;          /* charts with mirrored net UV winding */
-    int fallbackCharts;         /* charts unwrapped by planar-projection fallback */
-    float packedArea;           /* fraction of the unit square covered */
-    float texelDensity;         /* texels per UV unit at the packed scale */
+    int chartCount;           /* number of charts (islands) */
+    size_t seamEdges;         /* edges cut to form the charts */
+    float maxAngleDistortion; /* worst conformal error across charts, [0,1) */
+    float rmsAngleDistortion; /* RMS conformal error across charts */
+    int flippedCharts;        /* charts with mirrored net UV winding */
+    int fallbackCharts;       /* charts unwrapped by planar-projection fallback */
+    float packedArea;         /* fraction of the unit square covered */
+    float texelDensity;       /* texels per UV unit at the packed scale */
 } CyberAtlasResult;
 
 /* Fills params with the engine defaults. No-op on NULL. */
@@ -156,8 +200,7 @@ void cyber_default_atlas_params(CyberAtlasParams* params);
  * attribute IN PLACE (so a subsequent cyber_mesh_save_obj emits vt / f v/vt).
  * `params` may be NULL (defaults); `out` may be NULL. Returns CYBER_ERR_RUNTIME
  * when the engine was built without the UV module. */
-CyberStatus cyber_uv_atlas(CyberMesh* mesh, const CyberAtlasParams* params,
-                           CyberAtlasResult* out);
+CyberStatus cyber_uv_atlas(CyberMesh* mesh, const CyberAtlasParams* params, CyberAtlasResult* out);
 
 /* --- Accessors used by the language bindings (Python, Swift) ------------- */
 
@@ -200,8 +243,7 @@ size_t cyber_mesh_triangle_count(const CyberMesh* mesh);
  * whole triangles only, at most `max_indices` values; returns the number of
  * indices written. Pass out=NULL to query the required count
  * (3 * triangle_count). */
-size_t cyber_mesh_copy_triangle_indices(const CyberMesh* mesh, uint32_t* out,
-                                        size_t max_indices);
+size_t cyber_mesh_copy_triangle_indices(const CyberMesh* mesh, uint32_t* out, size_t max_indices);
 
 /* Copies per-vertex unit normals (x,y,z per vertex, compacted vertex order)
  * into `out`, at most `max_floats`; returns the number of floats written.
@@ -233,8 +275,7 @@ size_t cyber_mesh_edge_count(const CyberMesh* mesh);
  * whole edges only, at most `max_indices` values; returns the number of
  * indices written. Pass out=NULL to query the required count
  * (2 * edge_count). */
-size_t cyber_mesh_copy_edge_indices(const CyberMesh* mesh, uint32_t* out,
-                                    size_t max_indices);
+size_t cyber_mesh_copy_edge_indices(const CyberMesh* mesh, uint32_t* out, size_t max_indices);
 
 /* ---- zero-copy render buffer views ------------------------------------
  *
@@ -277,15 +318,13 @@ const float* cyber_mesh_colors_ptr(const CyberMesh* mesh, size_t* out_count);
  * faces not currently hidden). copy_positions convention: returns the
  * TOTAL live-face count and fills at most max_faces entries of out_faces
  * (which may be NULL when max_faces is 0, for size queries). */
-size_t cyber_mesh_live_faces(const CyberMesh* mesh, uint32_t* out_faces,
-                             size_t max_faces);
+size_t cyber_mesh_live_faces(const CyberMesh* mesh, uint32_t* out_faces, size_t max_faces);
 
 /* Replaces the hidden-face set (faces may be NULL when face_count is 0 —
  * show all). Hidden faces are dropped from the triangle, edge, and normal
  * streams; vertices used exclusively by hidden faces are dropped from the
  * compacted position/color streams. */
-CyberStatus cyber_mesh_set_hidden_faces(CyberMesh* mesh, const uint32_t* faces,
-                                        size_t face_count);
+CyberStatus cyber_mesh_set_hidden_faces(CyberMesh* mesh, const uint32_t* faces, size_t face_count);
 
 /* Number of face ids currently in the hidden set (dead ids included until
  * the next set call — the set stores ids verbatim). 0 for NULL. */
@@ -294,14 +333,12 @@ size_t cyber_mesh_hidden_face_count(const CyberMesh* mesh);
 /* Replaces the tagged-edge list (edges may be NULL when edge_count is 0 —
  * clear). Tagged edges surface through the accessor below for the
  * overlay's colored loop-tag pass. */
-CyberStatus cyber_mesh_set_tagged_edges(CyberMesh* mesh, const uint32_t* edges,
-                                        size_t edge_count);
+CyberStatus cyber_mesh_set_tagged_edges(CyberMesh* mesh, const uint32_t* edges, size_t edge_count);
 
 /* Compacted index pairs (2 per tagged, live, visible edge) in tag order —
  * same LIFETIME contract as the pointer views above. NULL with
  * *out_count = 0 when the mesh is NULL or nothing is tagged. */
-const uint32_t* cyber_mesh_tagged_edge_indices_ptr(const CyberMesh* mesh,
-                                                   size_t* out_count);
+const uint32_t* cyber_mesh_tagged_edge_indices_ptr(const CyberMesh* mesh, size_t* out_count);
 
 /* ---- spatial queries (retopology phase 3) ------------------------------
  *
@@ -334,16 +371,16 @@ int cyber_snapper_snap_to_surface(const CyberSnapper* snapper, const float query
 
 /* Nearest Target vertex within `radius` of `query`. Returns 1 and fills
  * out_point/out_vertex (either may be NULL) when one exists, else 0. */
-int cyber_snapper_snap_to_vertex(const CyberSnapper* snapper, const float query[3],
-                                 float radius, float out_point[3], uint32_t* out_vertex);
+int cyber_snapper_snap_to_vertex(const CyberSnapper* snapper, const float query[3], float radius,
+                                 float out_point[3], uint32_t* out_vertex);
 
 /* First Target surface hit along the ray origin + t*direction, t in
  * (0, max_distance]. `direction` need not be normalized (it is normalized
  * internally; a zero direction misses). Returns 1 on a hit filling
  * out_point/out_t/out_face (each may be NULL), else 0. */
 int cyber_snapper_raycast(const CyberSnapper* snapper, const float origin[3],
-                          const float direction[3], float max_distance,
-                          float out_point[3], float* out_t, uint32_t* out_face);
+                          const float direction[3], float max_distance, float out_point[3],
+                          float* out_t, uint32_t* out_face);
 
 /* ---- EditMesh element queries (world space, brute force at cage scale) --
  *
@@ -351,9 +388,8 @@ int cyber_snapper_raycast(const CyberSnapper* snapper, const float origin[3],
 
 /* Nearest live vertex within `max_distance` of `query`. Returns 1 and fills
  * out_vertex/out_position (either may be NULL) when found, else 0. */
-int cyber_mesh_nearest_vertex(const CyberMesh* mesh, const float query[3],
-                              float max_distance, uint32_t* out_vertex,
-                              float out_position[3]);
+int cyber_mesh_nearest_vertex(const CyberMesh* mesh, const float query[3], float max_distance,
+                              uint32_t* out_vertex, float out_position[3]);
 
 /* Nearest live vertex within `max_distance` of `query`, skipping
  * `exclude_vertex` (pass a dead/out-of-range id, e.g. UINT32_MAX, to skip
@@ -368,14 +404,12 @@ int cyber_mesh_nearest_vertex_excluding(const CyberMesh* mesh, const float query
 /* Nearest live edge (closest point on its segment) within `max_distance` of
  * `query`. Returns 1 and fills out_edge/out_point (either may be NULL) when
  * found, else 0. */
-int cyber_mesh_nearest_edge(const CyberMesh* mesh, const float query[3],
-                            float max_distance, uint32_t* out_edge,
-                            float out_point[3]);
+int cyber_mesh_nearest_edge(const CyberMesh* mesh, const float query[3], float max_distance,
+                            uint32_t* out_edge, float out_point[3]);
 
 /* Endpoint vertex ids of a live edge. Returns 1 on success, 0 when the mesh
  * is NULL or the edge id is not alive. */
-int cyber_mesh_edge_endpoints(const CyberMesh* mesh, uint32_t edge,
-                              uint32_t out_vertices[2]);
+int cyber_mesh_edge_endpoints(const CyberMesh* mesh, uint32_t edge, uint32_t out_vertices[2]);
 
 /* 1 when the live edge borders exactly one face, 0 when interior, -1 when
  * the mesh is NULL or the edge id is not alive. */
@@ -383,8 +417,7 @@ int cyber_mesh_is_boundary_edge(const CyberMesh* mesh, uint32_t edge);
 
 /* Position of a live vertex. Returns 1 on success, 0 when the mesh is NULL
  * or the vertex id is not alive. */
-int cyber_mesh_vertex_position(const CyberMesh* mesh, uint32_t vertex,
-                               float out_position[3]);
+int cyber_mesh_vertex_position(const CyberMesh* mesh, uint32_t vertex, float out_position[3]);
 
 /* Live faces adjacent to a live edge, with each face's ring size (vertex
  * count) — the Build Quad/Build Triangle edge-drag semantics dispatch on
@@ -392,8 +425,8 @@ int cyber_mesh_vertex_position(const CyberMesh* mesh, uint32_t vertex,
  * 4.1). Fills out_faces/out_sizes (either may be NULL) in deterministic
  * (radial) order. Returns the adjacent live face count (0-2 for manifold
  * meshes), or -1 when the mesh is NULL or the edge id is not alive. */
-int cyber_mesh_edge_faces(const CyberMesh* mesh, uint32_t edge,
-                          uint32_t out_faces[2], size_t out_sizes[2]);
+int cyber_mesh_edge_faces(const CyberMesh* mesh, uint32_t edge, uint32_t out_faces[2],
+                          size_t out_sizes[2]);
 
 /* Shortest edge path between two live vertices (Dijkstra over live edges,
  * Euclidean weights; deterministic — Path Distribute's "closest path
@@ -403,9 +436,8 @@ int cyber_mesh_edge_faces(const CyberMesh* mesh, uint32_t edge,
  * entries of out_vertices (may be NULL when max_vertices is 0, for size
  * queries). Returns 0 when either vertex is dead, from == to, or no path
  * exists. */
-size_t cyber_mesh_shortest_vertex_path(const CyberMesh* mesh, uint32_t from,
-                                       uint32_t to, uint32_t* out_vertices,
-                                       size_t max_vertices);
+size_t cyber_mesh_shortest_vertex_path(const CyberMesh* mesh, uint32_t from, uint32_t to,
+                                       uint32_t* out_vertices, size_t max_vertices);
 
 /* Boundary chain through `edge` (retopology phase 4, task 4.2: Extend
  * Boundary's boundary auto-select; see retopo/boundary.hpp): walks the
@@ -417,9 +449,8 @@ size_t cyber_mesh_shortest_vertex_path(const CyberMesh* mesh, uint32_t from,
  * NULL when max_vertices is 0, for size queries). Writes 1 to *out_closed
  * (may be NULL) when the chain is a closed loop. Returns 0 when `edge` is
  * dead or not a boundary edge. */
-size_t cyber_mesh_boundary_loop(const CyberMesh* mesh, uint32_t edge,
-                                uint32_t* out_vertices, size_t max_vertices,
-                                int* out_closed);
+size_t cyber_mesh_boundary_loop(const CyberMesh* mesh, uint32_t edge, uint32_t* out_vertices,
+                                size_t max_vertices, int* out_closed);
 
 /* ---- quad-loop topology queries (retopology phase 3, task 3.4) ----------
  *
@@ -472,8 +503,7 @@ typedef struct CyberLoopMetrics {
  * Returns CYBER_ERR_INVALID_ARG on NULL mesh/out_metrics, and CYBER_OK
  * with edge_count 0 when `edge` is dead. */
 CyberStatus cyber_mesh_loop_metrics(const CyberMesh* mesh, uint32_t edge,
-                                    const CyberSnapper* snapper,
-                                    CyberLoopMetrics* out_metrics);
+                                    const CyberSnapper* snapper, CyberLoopMetrics* out_metrics);
 
 /* Quad ring through `edge`: the consecutive "across" edges crossing each
  * quad to its opposite edge until the ring closes or hits a boundary /
@@ -498,24 +528,22 @@ size_t cyber_mesh_quad_ring(const CyberMesh* mesh, uint32_t edge, uint32_t* out_
  * non-NULL. Writes the new face id to *out_face (may be NULL). Fails with
  * CYBER_ERR_INVALID_ARG on a degenerate polygon (wrong count / repeated
  * corners), leaving the mesh unchanged. */
-CyberStatus cyber_retopo_create_face(CyberMesh* mesh, const float* points_xyz,
-                                     size_t point_count, const CyberSnapper* snapper,
-                                     uint32_t* out_face);
+CyberStatus cyber_retopo_create_face(CyberMesh* mesh, const float* points_xyz, size_t point_count,
+                                     const CyberSnapper* snapper, uint32_t* out_face);
 
 /* Tweak: drops a live vertex at `target`, snapped to the Target surface
  * when `snapper` is non-NULL. Tweak ignores pins by design (pinned
  * vertices stay movable by explicit tweak). */
-CyberStatus cyber_retopo_tweak_vertex(CyberMesh* mesh, uint32_t vertex,
-                                      const float target[3], const CyberSnapper* snapper);
+CyberStatus cyber_retopo_tweak_vertex(CyberMesh* mesh, uint32_t vertex, const float target[3],
+                                      const CyberSnapper* snapper);
 
 /* Move with surface-geodesic falloff: displaces `seed_vertex` by
  * `displacement`, with a smooth falloff over geodesic (through-the-surface)
  * distance up to `radius`. Vertices of disconnected components are NEVER
  * affected, no matter how close in space. Pinned vertices resist; moved
  * vertices reproject onto the Target when `snapper` is non-NULL. */
-CyberStatus cyber_retopo_move(CyberMesh* mesh, uint32_t seed_vertex,
-                              const float displacement[3], float radius,
-                              const uint32_t* pinned, size_t pinned_count,
+CyberStatus cyber_retopo_move(CyberMesh* mesh, uint32_t seed_vertex, const float displacement[3],
+                              float radius, const uint32_t* pinned, size_t pinned_count,
                               const CyberSnapper* snapper);
 
 /* Relax: tangential Laplacian smoothing inside the brush (`center`,
@@ -524,10 +552,9 @@ CyberStatus cyber_retopo_move(CyberMesh* mesh, uint32_t seed_vertex,
  * (non-zero) additionally pins low-valence grid corners so regular patch
  * shapes survive. Vertices reproject onto the Target when `snapper` is
  * non-NULL. */
-CyberStatus cyber_retopo_relax(CyberMesh* mesh, const float center[3], float radius,
-                               float strength, int iterations, int auto_pin_corners,
-                               const uint32_t* pinned, size_t pinned_count,
-                               const CyberSnapper* snapper);
+CyberStatus cyber_retopo_relax(CyberMesh* mesh, const float center[3], float radius, float strength,
+                               int iterations, int auto_pin_corners, const uint32_t* pinned,
+                               size_t pinned_count, const CyberSnapper* snapper);
 
 /* Erase: removes every face whose centroid lies within the pressure-scaled
  * radius of `center` (radius grows with stylus pressure in [0,1]: half the
@@ -539,8 +566,8 @@ CyberStatus cyber_retopo_erase(CyberMesh* mesh, const float center[3], float bas
 /* Deletes the listed faces (dead/out-of-range ids are skipped), then any
  * vertices left isolated. Writes the number of faces actually removed to
  * *out_removed (may be NULL). */
-CyberStatus cyber_retopo_delete_faces(CyberMesh* mesh, const uint32_t* faces,
-                                      size_t face_count, size_t* out_removed);
+CyberStatus cyber_retopo_delete_faces(CyberMesh* mesh, const uint32_t* faces, size_t face_count,
+                                      size_t* out_removed);
 
 /* Inserts a COMPLETE edge loop around the quad ring through `edge` (the
  * "line across a face ring" gesture, task 3.4): every ring edge is split
@@ -560,9 +587,8 @@ CyberStatus cyber_retopo_insert_loop(CyberMesh* mesh, uint32_t edge, float t,
  * rows * cols disconnected quads). Writes the number of created faces to
  * *out_faces (may be NULL). Fails with CYBER_ERR_INVALID_ARG (mesh
  * unchanged) on degenerate lattices (coincident points after snapping). */
-CyberStatus cyber_retopo_create_grid(CyberMesh* mesh, const float* points_xyz,
-                                     size_t rows, size_t cols,
-                                     const CyberSnapper* snapper, size_t* out_faces);
+CyberStatus cyber_retopo_create_grid(CyberMesh* mesh, const float* points_xyz, size_t rows,
+                                     size_t cols, const CyberSnapper* snapper, size_t* out_faces);
 
 /* Dissolves interior edges (the "scribble over an edge" gesture): each
  * listed edge with exactly two live faces is removed and its faces merged
@@ -571,8 +597,8 @@ CyberStatus cyber_retopo_create_grid(CyberMesh* mesh, const float* points_xyz,
  * earlier dissolve in the same call. Writes the number of edges actually
  * dissolved to *out_dissolved (may be NULL); dissolving none is CYBER_OK
  * with 0. */
-CyberStatus cyber_retopo_dissolve_edges(CyberMesh* mesh, const uint32_t* edges,
-                                        size_t edge_count, size_t* out_dissolved);
+CyberStatus cyber_retopo_dissolve_edges(CyberMesh* mesh, const uint32_t* edges, size_t edge_count,
+                                        size_t* out_dissolved);
 
 /* Merges vertex `remove` into vertex `keep` (the "vertex-to-vertex line"
  * gesture: the line's start vertex snaps onto its end vertex). Faces
@@ -613,12 +639,9 @@ CyberStatus cyber_retopo_rotate_edge(CyberMesh* mesh, uint32_t edge);
  * CYBER_ERR_INVALID_ARG (mesh unchanged) on bad counts (only 3 or 4
  * supported), dead ids, repeated ring vertices, or degenerate/coincident
  * ring positions after snapping. */
-CyberStatus cyber_retopo_build_face(CyberMesh* mesh, size_t count,
-                                    const uint32_t* vertex_ids,
-                                    const float* points_xyz,
-                                    const CyberSnapper* snapper,
-                                    uint32_t* out_face,
-                                    uint32_t* out_ring_vertices);
+CyberStatus cyber_retopo_build_face(CyberMesh* mesh, size_t count, const uint32_t* vertex_ids,
+                                    const float* points_xyz, const CyberSnapper* snapper,
+                                    uint32_t* out_face, uint32_t* out_ring_vertices);
 
 /* Grows the single triangle on a BOUNDARY edge into a quad (Build Quad's
  * triangle-edge drag, task 4.1): splits `edge` and drops the new ring
@@ -628,8 +651,7 @@ CyberStatus cyber_retopo_build_face(CyberMesh* mesh, size_t count,
  * unchanged) when the edge is dead, interior, or its face is not a
  * triangle (growing a quad would leave an n-gon). */
 CyberStatus cyber_retopo_grow_boundary_edge(CyberMesh* mesh, uint32_t edge,
-                                            const float point_xyz[3],
-                                            const CyberSnapper* snapper,
+                                            const float point_xyz[3], const CyberSnapper* snapper,
                                             uint32_t* out_vertex);
 
 /* Path Distribute (task 4.1): repositions an ordered chain of live
@@ -640,8 +662,8 @@ CyberStatus cyber_retopo_grow_boundary_edge(CyberMesh* mesh, uint32_t edge,
  * are joined by live edges (e.g. a cyber_mesh_shortest_vertex_path
  * result). Positions only — topology is untouched. Fails with
  * CYBER_ERR_INVALID_ARG (mesh unchanged) on short/dead/broken chains. */
-CyberStatus cyber_retopo_distribute_path(CyberMesh* mesh, const uint32_t* vertices,
-                                         size_t count, const CyberSnapper* snapper);
+CyberStatus cyber_retopo_distribute_path(CyberMesh* mesh, const uint32_t* vertices, size_t count,
+                                         const CyberSnapper* snapper);
 
 /* Surface Cut (task 4.1): knife cut along the straight segment a -> b as
  * seen from `view_dir` (the cut plane spans the segment and the view
@@ -654,11 +676,9 @@ CyberStatus cyber_retopo_distribute_path(CyberMesh* mesh, const uint32_t* vertic
  * *out_split_edges / *out_split_faces (either may be NULL). Cutting
  * nothing is CYBER_OK with 0 counts. Fails with CYBER_ERR_INVALID_ARG
  * (mesh unchanged) on a degenerate segment or view direction. */
-CyberStatus cyber_retopo_surface_cut(CyberMesh* mesh, const float a[3],
-                                     const float b[3], const float view_dir[3],
-                                     int triangulate_ngons,
-                                     const CyberSnapper* snapper,
-                                     size_t* out_split_edges,
+CyberStatus cyber_retopo_surface_cut(CyberMesh* mesh, const float a[3], const float b[3],
+                                     const float view_dir[3], int triangulate_ngons,
+                                     const CyberSnapper* snapper, size_t* out_split_edges,
                                      size_t* out_split_faces);
 
 /* ---- camera-as-manipulator placement ops (task 4.2) ---------------------
@@ -678,11 +698,9 @@ CyberStatus cyber_retopo_surface_cut(CyberMesh* mesh, const float a[3],
  * `face_count` entries; *out_new_face_count (may be NULL) receives the
  * count (== face_count on success). Fails with CYBER_ERR_INVALID_ARG
  * (mesh unchanged) on an empty list, dead ids, or repeated faces. */
-CyberStatus cyber_retopo_patch_clone(CyberMesh* mesh, const uint32_t* faces,
-                                     size_t face_count, const float xf[12], int flip,
-                                     const CyberSnapper* snapper,
-                                     uint32_t* out_new_faces,
-                                     size_t* out_new_face_count);
+CyberStatus cyber_retopo_patch_clone(CyberMesh* mesh, const uint32_t* faces, size_t face_count,
+                                     const float xf[12], int flip, const CyberSnapper* snapper,
+                                     uint32_t* out_new_faces, size_t* out_new_face_count);
 
 /* Extend Boundary, quad strips (task 4.2): extrudes the ordered boundary
  * vertex chain by `offset` in `rings` successive rows of quads, each row
@@ -697,12 +715,10 @@ CyberStatus cyber_retopo_patch_clone(CyberMesh* mesh, const uint32_t* faces,
  * with CYBER_ERR_INVALID_ARG (mesh unchanged) on chains shorter than 2,
  * dead/repeated vertices, consecutive vertices not joined by a live edge,
  * rings < 1, or a zero offset. */
-CyberStatus cyber_retopo_extend_boundary_grid(CyberMesh* mesh, const uint32_t* chain,
-                                              size_t count, int closed,
-                                              const float offset[3], int rings,
+CyberStatus cyber_retopo_extend_boundary_grid(CyberMesh* mesh, const uint32_t* chain, size_t count,
+                                              int closed, const float offset[3], int rings,
                                               const CyberSnapper* snapper,
-                                              uint32_t* out_outer_chain,
-                                              size_t* out_new_faces);
+                                              uint32_t* out_outer_chain, size_t* out_new_faces);
 
 /* Extend Boundary, triangle fan (task 4.2): closes the ordered boundary
  * chain onto a single apex at the chain centroid + `apex_offset` (snapped
@@ -712,11 +728,9 @@ CyberStatus cyber_retopo_extend_boundary_grid(CyberMesh* mesh, const uint32_t* c
  * vertex id to *out_apex and the new face count to *out_new_faces (either
  * may be NULL). Chain validation matches
  * cyber_retopo_extend_boundary_grid. */
-CyberStatus cyber_retopo_extend_boundary_fan(CyberMesh* mesh, const uint32_t* chain,
-                                             size_t count, int closed,
-                                             const float apex_offset[3],
-                                             const CyberSnapper* snapper,
-                                             uint32_t* out_apex,
+CyberStatus cyber_retopo_extend_boundary_fan(CyberMesh* mesh, const uint32_t* chain, size_t count,
+                                             int closed, const float apex_offset[3],
+                                             const CyberSnapper* snapper, uint32_t* out_apex,
                                              size_t* out_new_faces);
 
 /* Draw Strip (task 4.2): a quad strip welded onto the boundary edge
@@ -730,9 +744,8 @@ CyberStatus cyber_retopo_extend_boundary_fan(CyberMesh* mesh, const uint32_t* ch
  * CYBER_ERR_INVALID_ARG (mesh unchanged) on an empty path, width <= 0, a
  * degenerate view direction, or when start_a/start_b are dead or not
  * joined by a live BOUNDARY edge. */
-CyberStatus cyber_retopo_draw_strip(CyberMesh* mesh, const float* path_xyz,
-                                    size_t point_count, float width,
-                                    const float view_dir[3], uint32_t start_a,
+CyberStatus cyber_retopo_draw_strip(CyberMesh* mesh, const float* path_xyz, size_t point_count,
+                                    float width, const float view_dir[3], uint32_t start_a,
                                     uint32_t start_b, const CyberSnapper* snapper,
                                     size_t* out_new_faces);
 
@@ -743,11 +756,9 @@ CyberStatus cyber_retopo_draw_strip(CyberMesh* mesh, const float* path_xyz,
  * (*out_resnapped) with the maximum such distance (*out_max_distance;
  * either may be NULL). Fails with CYBER_ERR_INVALID_ARG (mesh unchanged)
  * on an empty list, dead ids, or repeated vertices. */
-CyberStatus cyber_retopo_transform_vertices(CyberMesh* mesh, const uint32_t* vertices,
-                                            size_t count, const float xf[12],
-                                            const CyberSnapper* snapper,
-                                            float resnap_epsilon,
-                                            size_t* out_resnapped,
+CyberStatus cyber_retopo_transform_vertices(CyberMesh* mesh, const uint32_t* vertices, size_t count,
+                                            const float xf[12], const CyberSnapper* snapper,
+                                            float resnap_epsilon, size_t* out_resnapped,
                                             float* out_max_distance);
 
 /* ---- symmetry (retopology phase 4, task 4.4) ----------------------------
@@ -787,8 +798,7 @@ CyberStatus cyber_retopo_snap_symmetry_plane(CyberMesh* mesh, const CyberSymmetr
  * vertices reproject onto the Target when `snapper` is non-NULL. Writes the
  * number of faces added to *out_added_faces (may be NULL). */
 CyberStatus cyber_retopo_apply_symmetry(CyberMesh* mesh, const CyberSymmetry* symmetry,
-                                        const CyberSnapper* snapper,
-                                        size_t* out_added_faces);
+                                        const CyberSnapper* snapper, size_t* out_added_faces);
 
 /* Result of cyber_retopo_resymmetrize. */
 typedef struct CyberResymmetrizeReport {
@@ -811,8 +821,7 @@ typedef struct CyberResymmetrizeReport {
  * weld_tolerance); callers scale it to the mesh so the verdict is
  * scale-free. *out_report may be NULL. */
 CyberStatus cyber_retopo_resymmetrize(CyberMesh* mesh, const CyberSymmetry* symmetry,
-                                      float match_tolerance,
-                                      CyberResymmetrizeReport* out_report);
+                                      float match_tolerance, CyberResymmetrizeReport* out_report);
 
 /* ---- EditMesh batch commands (retopology phase 4, task 4.5) -------------
  *
@@ -848,8 +857,8 @@ CyberStatus cyber_retopo_resymmetrize(CyberMesh* mesh, const CyberSymmetry* symm
  * actually moved further than a hair (*out_moved) and the largest such
  * displacement (*out_max_distance); either may be NULL. */
 CyberStatus cyber_retopo_snap_all(CyberMesh* mesh, const CyberSnapper* snapper,
-                                  const uint32_t* pinned, size_t pinned_count,
-                                  size_t* out_moved, float* out_max_distance);
+                                  const uint32_t* pinned, size_t pinned_count, size_t* out_moved,
+                                  float* out_max_distance);
 
 /* Linear (Catmull-Clark topology, NO smoothing) subdivision into quads. The
  * engine has no smooth/limit-surface subdivision, so this is linear
@@ -859,8 +868,7 @@ CyberStatus cyber_retopo_snap_all(CyberMesh* mesh, const CyberSnapper* snapper,
  * curvature — linear subdivision alone only adds vertices along the
  * existing facets). Writes the resulting face count to *out_faces (may be
  * NULL). See the ELEMENT-ID STABILITY note above: all ids are reassigned. */
-CyberStatus cyber_retopo_subdivide(CyberMesh* mesh, const CyberSnapper* snapper,
-                                   size_t* out_faces);
+CyberStatus cyber_retopo_subdivide(CyberMesh* mesh, const CyberSnapper* snapper, size_t* out_faces);
 
 /* Fan-triangulates every face with more than three sides. Writes the
  * resulting face count to *out_faces (may be NULL). See the ELEMENT-ID
@@ -1068,16 +1076,14 @@ typedef struct CyberStrokeInterpretation CyberStrokeInterpretation;
  *
  * Deterministic: identical inputs produce identical records. */
 CyberStatus cyber_stroke_interpret(const CyberMesh* edit_mesh, const float* view_proj,
-                                   const float* samples_xyt, size_t sample_count,
-                                   float aspect, CyberStrokeInterpretation** out);
+                                   const float* samples_xyt, size_t sample_count, float aspect,
+                                   CyberStrokeInterpretation** out);
 
 void cyber_stroke_interpretation_free(CyberStrokeInterpretation* interpretation);
 
 /* Stage-1 result: shape class and its heuristic confidence (0..1). */
-CyberStrokeShape cyber_stroke_interpretation_shape(
-    const CyberStrokeInterpretation* interpretation);
-float cyber_stroke_interpretation_shape_confidence(
-    const CyberStrokeInterpretation* interpretation);
+CyberStrokeShape cyber_stroke_interpretation_shape(const CyberStrokeInterpretation* interpretation);
+float cyber_stroke_interpretation_shape_confidence(const CyberStrokeInterpretation* interpretation);
 
 /* Stage-2 under-stroke context. */
 CyberStrokeContext cyber_stroke_interpretation_context(
@@ -1085,19 +1091,18 @@ CyberStrokeContext cyber_stroke_interpretation_context(
 
 /* Ranked candidates, best first. Index 0 is the chosen interpretation; the
  * rest are the one-tap alternatives. */
-size_t cyber_stroke_interpretation_candidate_count(
-    const CyberStrokeInterpretation* interpretation);
+size_t cyber_stroke_interpretation_candidate_count(const CyberStrokeInterpretation* interpretation);
 CyberStrokeAction cyber_stroke_interpretation_action(
     const CyberStrokeInterpretation* interpretation, size_t candidate);
-float cyber_stroke_interpretation_confidence(
-    const CyberStrokeInterpretation* interpretation, size_t candidate);
+float cyber_stroke_interpretation_confidence(const CyberStrokeInterpretation* interpretation,
+                                             size_t candidate);
 
 /* Mesh elements candidate `candidate` would touch, in deterministic order.
  * Element ids are engine element ids (see CYBER_INVALID_ID note above).
  * Returns 1 and fills out_kind/out_id (either may be NULL) when the indices
  * are in range, else 0. */
-size_t cyber_stroke_interpretation_element_count(
-    const CyberStrokeInterpretation* interpretation, size_t candidate);
+size_t cyber_stroke_interpretation_element_count(const CyberStrokeInterpretation* interpretation,
+                                                 size_t candidate);
 int cyber_stroke_interpretation_element(const CyberStrokeInterpretation* interpretation,
                                         size_t candidate, size_t element,
                                         CyberElementKind* out_kind, uint32_t* out_id);
@@ -1109,8 +1114,7 @@ int cyber_stroke_interpretation_element(const CyberStrokeInterpretation* interpr
  * (detected stroke corners when the stroke reads as a quad, a stable
  * inscribed quad otherwise); 0 for open shapes. Returns 1 and fills
  * out_xy when `corner` is in range, else 0. */
-size_t cyber_stroke_interpretation_corner_count(
-    const CyberStrokeInterpretation* interpretation);
+size_t cyber_stroke_interpretation_corner_count(const CyberStrokeInterpretation* interpretation);
 int cyber_stroke_interpretation_corner(const CyberStrokeInterpretation* interpretation,
                                        size_t corner, float out_xy[2]);
 
@@ -1125,21 +1129,21 @@ int cyber_stroke_interpretation_grid_size(const CyberStrokeInterpretation* inter
 
 /* Bakeable map types (surface-baking spec). */
 typedef enum CyberBakeMap {
-    CYBER_BAKE_NORMAL = 0,    /* tangent-space normal map (RGB, encoded [0,1]) */
-    CYBER_BAKE_AO,            /* ambient occlusion / openness (1 channel) */
-    CYBER_BAKE_DISPLACEMENT,  /* signed height along the low-poly normal (1 ch) */
-    CYBER_BAKE_POSITION,      /* Target hit position, world space (RGB) */
-    CYBER_BAKE_COLOR,         /* Target vertex color at the hit (RGB) */
-    CYBER_BAKE_CURVATURE,     /* signed mean curvature around mid-gray (1 ch) */
-    CYBER_BAKE_CAVITY         /* concavity only, white = flat/convex (1 ch) */
+    CYBER_BAKE_NORMAL = 0,   /* tangent-space normal map (RGB, encoded [0,1]) */
+    CYBER_BAKE_AO,           /* ambient occlusion / openness (1 channel) */
+    CYBER_BAKE_DISPLACEMENT, /* signed height along the low-poly normal (1 ch) */
+    CYBER_BAKE_POSITION,     /* Target hit position, world space (RGB) */
+    CYBER_BAKE_COLOR,        /* Target vertex color at the hit (RGB) */
+    CYBER_BAKE_CURVATURE,    /* signed mean curvature around mid-gray (1 ch) */
+    CYBER_BAKE_CAVITY        /* concavity only, white = flat/convex (1 ch) */
 } CyberBakeMap;
 
 typedef struct CyberBakeParams {
-    int width;           /* output resolution */
+    int width; /* output resolution */
     int height;
-    float cageDistance;  /* rays start at surface + normal*cageDistance, cast inward 2x */
-    int aoSamples;       /* hemisphere rays per texel for AO */
-    float aoRadius;      /* an AO ray hit beyond this does not occlude */
+    float cageDistance; /* rays start at surface + normal*cageDistance, cast inward 2x */
+    int aoSamples;      /* hemisphere rays per texel for AO */
+    float aoRadius;     /* an AO ray hit beyond this does not occlude */
     /* Curvature magnitude (1/length) saturating CURVATURE/CAVITY to full
      * white/black. 0 = auto (95th percentile of |curvature| on the Target).
      * Appended in 0.6.0 — always initialise via cyber_default_bake_params. */

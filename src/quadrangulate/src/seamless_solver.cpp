@@ -901,7 +901,8 @@ int SeamlessSetup::totalIndex() const {
 }
 
 SeamlessSetup buildSeamlessSetup(const Mesh& mesh, int iterations, accel::IBackend& backend,
-                                 bool featureBinding, const std::vector<char>* creaseAlignSupport) {
+                                 bool featureBinding, const std::vector<char>* creaseAlignSupport,
+                                 const GuidanceField* guidance) {
     SeamlessSetup setup;
     if (mesh.faceCapacity() == 0) {
         return setup;
@@ -914,10 +915,11 @@ SeamlessSetup buildSeamlessSetup(const Mesh& mesh, int iterations, accel::IBacke
     // cyber-pure 220 -> 176 cones, sphere 35 -> 21). Kill switch restores the
     // stock single-level field.
     if (std::getenv("CYBER_QC_NO_CROSSFIELD_MULTIRES") == nullptr) {
-        setup.field =
-            computeCrossFieldFromOrientation(mesh, iterations, backend, 45.0f, creaseAlignSupport);
+        setup.field = computeCrossFieldFromOrientation(mesh, iterations, backend, 45.0f,
+                                                       creaseAlignSupport, guidance);
     } else {
-        setup.field = computeCrossField(mesh, iterations, backend, 45.0f, creaseAlignSupport);
+        setup.field =
+            computeCrossField(mesh, iterations, backend, 45.0f, creaseAlignSupport, guidance);
     }
 
     // Cancel topologically-null (+1,-1) field cone pairs before they are promoted to cones
@@ -3281,7 +3283,8 @@ namespace {
 Parameterization solveParameterizationImpl(const Mesh& mesh, const SeamlessSetup& setup,
                                            float spacing, accel::IBackend& backend,
                                            const CancelToken* cancel, double* probeCellArea,
-                                           SeamlessSolveCache* cache) {
+                                           SeamlessSolveCache* cache,
+                                           const GuidanceField* density) {
     Parameterization out;
     if (!setup.valid || spacing <= 0.0f || mesh.faceCapacity() == 0) {
         return out;
@@ -3355,6 +3358,11 @@ Parameterization solveParameterizationImpl(const Mesh& mesh, const SeamlessSetup
         std::array<Vec3, 3> gradPhi{};
         float area = 0.0f;
         Vec3 e0{}, e1{};
+        // Painted density as a per-face grid-spacing multiplier: the target
+        // frame is scaled by invS * densityScale, i.e. the local cell is
+        // spacing / sqrt(density). Exactly 1.0 with no density field, so the
+        // RHS arithmetic is unchanged (invS * 1.0f == invS).
+        float densityScale = 1.0f;
     };
     std::vector<FaceData> faceData;
     faceData.reserve(mesh.faceCapacity());
@@ -3398,6 +3406,9 @@ Parameterization solveParameterizationImpl(const Mesh& mesh, const SeamlessSetup
         fd.area = 0.5f * area2;
         fd.e0 = normalized(combedDirection(setup.field, f, n, comb[fi], angleConvention));
         fd.e1 = cross(n, fd.e0);
+        if (density != nullptr) {
+            fd.densityScale = std::sqrt(density->densityAt((p[0] + p[1] + p[2]) / 3.0f));
+        }
         for (int k = 0; k < 3; ++k) {
             fd.cut[static_cast<std::size_t>(k)] = cutOf(fi, vs[static_cast<std::size_t>(k)].value);
         }
@@ -3516,8 +3527,9 @@ Parameterization solveParameterizationImpl(const Mesh& mesh, const SeamlessSetup
             const float th = angle.empty() ? 0.0f : angle[fdi];
             const float ct = std::cos(th), st = std::sin(th);
             // R(theta) rows: (ct,-st) and (st,ct), applied to (e0,e1).
-            const Vec3 gu = (fd.e0 * ct - fd.e1 * st) * invS;
-            const Vec3 gv = (fd.e0 * st + fd.e1 * ct) * invS;
+            const float invSf = invS * fd.densityScale;
+            const Vec3 gu = (fd.e0 * ct - fd.e1 * st) * invSf;
+            const Vec3 gv = (fd.e0 * st + fd.e1 * ct) * invSf;
             for (int k = 0; k < 3; ++k) {
                 const Vec3& gp = fd.gradPhi[static_cast<std::size_t>(k)];
                 bu[fd.cut[static_cast<std::size_t>(k)]] += fd.area * dot(gp, gu);
@@ -4040,15 +4052,16 @@ Parameterization solveParameterizationImpl(const Mesh& mesh, const SeamlessSetup
 
 Parameterization solveParameterization(const Mesh& mesh, const SeamlessSetup& setup, float spacing,
                                        accel::IBackend& backend, const CancelToken* cancel,
-                                       SeamlessSolveCache* cache) {
-    return solveParameterizationImpl(mesh, setup, spacing, backend, cancel, nullptr, cache);
+                                       SeamlessSolveCache* cache, const GuidanceField* density) {
+    return solveParameterizationImpl(mesh, setup, spacing, backend, cancel, nullptr, cache,
+                                     density);
 }
 
 double relaxedCellArea(const Mesh& mesh, const SeamlessSetup& setup, float spacing,
                        accel::IBackend& backend, const CancelToken* cancel,
-                       SeamlessSolveCache* cache) {
+                       SeamlessSolveCache* cache, const GuidanceField* density) {
     double cells = -1.0;
-    (void)solveParameterizationImpl(mesh, setup, spacing, backend, cancel, &cells, cache);
+    (void)solveParameterizationImpl(mesh, setup, spacing, backend, cancel, &cells, cache, density);
     return cells;
 }
 

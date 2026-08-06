@@ -60,14 +60,33 @@ std::vector<char> applyPins(const Mesh& mesh, const std::vector<FaceId>& faces,
                             const std::vector<Index>& compact, CrossField& field,
                             float creaseAlignDegrees, const std::vector<char>* creaseAlignSupport);
 
+// A flow guide's soft pull on one face: `weight` in (0,1] and the guide tangent
+// encoded as the 4-RoSy unit complex (cos 4a, sin 4a) in that face's frame.
+struct GuideBias {
+    float weight = 0.0f;
+    float real = 1.0f;
+    float imag = 0.0f;
+};
+
+// Per-dense-face guide bias. Returns an EMPTY vector when there is nothing to
+// apply, which is what keeps the unguided sweep textually identical.
+std::vector<GuideBias> buildGuideConstraints(const Mesh& mesh, const std::vector<FaceId>& faces,
+                                             const std::vector<char>& constrained,
+                                             CrossField& field, const GuidanceField* guidance);
+
 // The converged damped transport-averaging solve shared by computeCrossField (its historical
 // sweep loop, byte-identical) and the multires hand-off relax: builds the 2F x 2F CSR
 // neighbour-averaging operator from the CURRENT field frames and iterates from the field's
 // current real/imag until maxDelta < 1e-6 (min 9 sweeps, cap `sweepCap`), re-pinning the
 // constrained faces every sweep. CYBER_QC_FIELD_ITERS overrides the cap for calibration.
+//
+// `bias` (empty by default) is the flow-guide soft constraint: a face with a positive
+// weight has its renormalised value blended toward the guide encoding each sweep. An
+// empty vector never enters that branch, so the unguided sweep is bit-identical.
 void transportSmooth(const Mesh& mesh, const std::vector<FaceId>& faces,
                      const std::vector<Index>& compact, const std::vector<char>& constrained,
-                     CrossField& field, int sweepCap, accel::IBackend& backend);
+                     CrossField& field, int sweepCap, accel::IBackend& backend,
+                     const std::vector<GuideBias>& bias = {});
 
 // CYBER_QC_FIELD_DUMP=<path>: write each live face's centroid, normal and final field
 // direction (one line per face) after the solve. Diagnosis instrumentation only.
@@ -112,8 +131,8 @@ float CrossField::angle(FaceId f) const {
 }
 
 CrossField computeCrossField(const Mesh& mesh, int iterations, accel::IBackend& backend,
-                             float creaseAlignDegrees,
-                             const std::vector<char>* creaseAlignSupport) {
+                             float creaseAlignDegrees, const std::vector<char>* creaseAlignSupport,
+                             const GuidanceField* guidance) {
     const std::size_t cap = mesh.faceCapacity();
     CrossField field;
     field.tangent.assign(cap, Vec3{1, 0, 0});
@@ -128,12 +147,65 @@ CrossField computeCrossField(const Mesh& mesh, int iterations, accel::IBackend& 
     }
     const std::vector<char> constrained =
         applyPins(mesh, faces, compact, field, creaseAlignDegrees, creaseAlignSupport);
-    transportSmooth(mesh, faces, compact, constrained, field, std::max(iterations, 120), backend);
+    const std::vector<GuideBias> bias =
+        buildGuideConstraints(mesh, faces, constrained, field, guidance);
+    transportSmooth(mesh, faces, compact, constrained, field, std::max(iterations, 120), backend,
+                    bias);
     dumpField(mesh, faces, field);
     return field;
 }
 
 namespace {
+
+std::vector<GuideBias> buildGuideConstraints(const Mesh& mesh, const std::vector<FaceId>& faces,
+                                             const std::vector<char>& constrained,
+                                             CrossField& field, const GuidanceField* guidance) {
+    std::size_t guidedFaces = 0;
+    std::size_t conflictFaces = 0;
+    if (guidance == nullptr || !guidance->hasGuides()) {
+        return {};
+    }
+    std::vector<GuideBias> bias(faces.size());
+    for (std::size_t c = 0; c < faces.size(); ++c) {
+        const FaceId f = faces[c];
+        const std::vector<VertexId> fv = mesh.faceVertices(f);
+        Vec3 centroid{0, 0, 0};
+        for (const VertexId v : fv) {
+            centroid += mesh.position(v);
+        }
+        centroid = centroid / static_cast<float>(fv.size());
+        const Vec3 n = normalized(mesh.faceNormal(f));
+        const GuideSample sample = guidance->guideAt(centroid, n);
+        if (!(sample.weight > 0.0f)) {
+            continue;
+        }
+        if (constrained[c] != 0) {
+            // A hard pin owns this face. Guides are soft by design, so the pin
+            // wins and the conflict is counted (never silently overridden, and
+            // never silently dropped either — the island report names it).
+            ++conflictFaces;
+            continue;
+        }
+        // Project the guide tangent into the face plane; a tangent that is
+        // (nearly) normal to the face carries no in-plane direction.
+        const Vec3 t = sample.tangent - n * dot(n, sample.tangent);
+        if (lengthSquared(t) < 1e-12f) {
+            continue;
+        }
+        const Vec3 tn = normalized(t);
+        const float alpha = frameAngle(tn, field.tangent[f.value], field.bitangent[f.value]);
+        bias[c].weight = std::clamp(sample.weight, 0.0f, 1.0f);
+        bias[c].real = std::cos(4.0f * alpha);
+        bias[c].imag = std::sin(4.0f * alpha);
+        ++guidedFaces;
+    }
+    field.guidedFaces = guidedFaces;
+    field.guideConflictFaces = conflictFaces;
+    if (guidedFaces == 0) {
+        return {};  // nothing to blend: keep the unguided sweep textually identical
+    }
+    return bias;
+}
 
 std::vector<char> applyPins(const Mesh& mesh, const std::vector<FaceId>& faces,
                             const std::vector<Index>& compact, CrossField& field,
@@ -331,7 +403,8 @@ std::vector<char> applyPins(const Mesh& mesh, const std::vector<FaceId>& faces,
 
 void transportSmooth(const Mesh& mesh, const std::vector<FaceId>& faces,
                      const std::vector<Index>& compact, const std::vector<char>& constrained,
-                     CrossField& field, int sweepCap, accel::IBackend& backend) {
+                     CrossField& field, int sweepCap, accel::IBackend& backend,
+                     const std::vector<GuideBias>& bias) {
     const std::size_t nf = faces.size();
 
     // Build the 2F x 2F transport-averaging operator as CSR: row 2c/2c+1 hold
@@ -403,8 +476,22 @@ void transportSmooth(const Mesh& mesh, const std::vector<FaceId>& faces,
             if (constrained[c]) {
                 continue;
             }
-            const float re = y[2 * c];
-            const float im = y[2 * c + 1];
+            float re = y[2 * c];
+            float im = y[2 * c + 1];
+            // Flow-guide soft constraint. Pulling the TRANSPORTED value toward
+            // the guide encoding every sweep (rather than pinning) keeps the
+            // guide competing with the smoothness term instead of overriding
+            // it, so the influence decays smoothly outside the radius.
+            if (!bias.empty() && bias[c].weight > 0.0f) {
+                const float w = bias[c].weight;
+                const float len0 = std::sqrt(re * re + im * im);
+                if (len0 > 1e-12f) {
+                    re /= len0;
+                    im /= len0;
+                }
+                re = (1.0f - w) * re + w * bias[c].real;
+                im = (1.0f - w) * im + w * bias[c].imag;
+            }
             const float len = std::sqrt(re * re + im * im);
             if (len > 1e-12f) {
                 const float nr = re / len;
@@ -451,7 +538,8 @@ Vec3 matchRoSyLocal(Vec3 ref, Vec3 d, Vec3 n) {
 
 CrossField computeCrossFieldFromOrientation(const Mesh& mesh, int iterations,
                                             accel::IBackend& backend, float creaseAlignDegrees,
-                                            const std::vector<char>* creaseAlignSupport) {
+                                            const std::vector<char>* creaseAlignSupport,
+                                            const GuidanceField* guidance) {
     const std::size_t cap = mesh.faceCapacity();
     CrossField field;
     field.tangent.assign(cap, Vec3{1, 0, 0});
@@ -517,7 +605,10 @@ CrossField computeCrossFieldFromOrientation(const Mesh& mesh, int iterations,
     // the seed's cone placement while restoring stock-level fine-scale smoothness.
     const std::vector<char> constrained =
         applyPins(mesh, faces, compact, field, creaseAlignDegrees, creaseAlignSupport);
-    transportSmooth(mesh, faces, compact, constrained, field, std::max(iterations, 120), backend);
+    const std::vector<GuideBias> bias =
+        buildGuideConstraints(mesh, faces, constrained, field, guidance);
+    transportSmooth(mesh, faces, compact, constrained, field, std::max(iterations, 120), backend,
+                    bias);
     dumpField(mesh, faces, field);
     return field;
 }

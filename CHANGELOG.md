@@ -7,6 +7,67 @@
 
 ### Added
 
+- **Flow guides and painted density** (openspec change `add-flow-guides`): two
+  explicit, opt-in *local* controls on an otherwise fully global pipeline.
+  **Flow guides** are 3D polylines drawn on or near the Target whose tangent the
+  4-RoSy cross field is softly biased toward within a per-guide influence radius
+  and strength. **Painted density** is a per-vertex or per-face scalar on the
+  Target that multiplies local sizing under the documented relation
+  `localEdgeLength = baseEdgeLength / sqrt(density)` — density is a
+  quads-per-unit-area multiplier, so it composes with the area-derived
+  `targetQuadCount` instead of fighting it. Nothing here is inferred; this is
+  deliberately distinct from the automatic curvature adaptivity the roadmap
+  descoped after measurement retracted its claimed win.
+
+  **Unguided output is byte-identical**, structurally rather than by tuning:
+  every guidance path sits behind a null/empty check, so a run without guidance
+  executes textually the same arithmetic as before. Verified by bit-comparing
+  `CrossField::real/imag`, by two in-process `remesh()` runs compared as raw
+  float bits plus face lists, by a CLI `cmp` of an empty-guide-list run against
+  no `--guides` at all, by `ctest -R bench` matching its recorded baseline
+  number for number, and by re-running `fandisk` at 1000 and 4000 quads
+  byte-for-byte against a pre-change baseline. `spot` and `stanford-bunny`
+  could NOT serve as oracles: on the vendored Geogram quad-cover route they are
+  already run-to-run non-deterministic on unmodified `main` (6 identical spot
+  invocations produced 6 distinct outputs there), which is a pre-existing
+  property of that route and is recorded here rather than papered over.
+
+  **Guidance is honored loudly or rejected loudly.** `IQuadrangulator` grows
+  `acceptGuidance`, whose default body *declines* and states why, plus an
+  `unhonoredGuidance()` query for guidance accepted up front but lost at run
+  time. `PipelineResult::islandGuidance` carries one row per island naming the
+  guides in range, whether guides and density were honored, and the reason if
+  not. Supplying guidance **forces the native seamless route** on the
+  quad-cover backend, because the vendored Geogram solve has no hook for either
+  input — a documented quality trade (native ~4-5% irregular vs vendored 1-4%
+  on smooth organics), not a hidden one. Zero-radius guides, guides with fewer
+  than two points, non-finite values and mismatched density array lengths are
+  rejected as fatal rather than silently ignored; out-of-range strength and
+  density values clamp with a reported effective value.
+
+  Reachable from the C ABI (`cyber_remesh_guided` + `CyberWarningCb`;
+  `cyber_remesh` and `CyberRemeshParams` are untouched and ABI-identical),
+  Python (`FlowGuide`, `remesh(..., guides=, density=)`, warnings surfaced both
+  as `Mesh.guidance_warnings` and through `warnings.warn`), the network bridge
+  (`push_guides` / `pull_guides` / `clear_guides` / `push_density` /
+  `pull_density`, no protocol-version bump), and the CLI (`--guides
+  <file.json>` sidecar plus a `guidance` block in `--report`). See
+  `docs/flow-guides.md`.
+
+  **Exit gate: NOT met corpus-wide, reported as measured.** The proposal's gate
+  is <=15 deg mean deviation between extracted loop direction and the guide
+  tangent inside the influence radius (random baseline 22.5). Measured by
+  `examples/17_flow_guides.py` on `spot` and `stanford-bunny` at 2000 quads
+  across three influence radii: guided **17.17 deg mean, 25.10 deg worst**, with
+  2 of 6 runs at or under 15. Guides improve alignment on **every** run
+  (e.g. spot 30.01 -> 18.17, bunny 15.40 -> 11.31), and the constraint is strong
+  at the field stage (a flat grid with a 45-deg guide goes 44.84 -> 11.29 deg,
+  and a tube end-to-end through the field-aligned backend 12.08 -> 9.23). The
+  loss is dilution between the cross field and the extracted mesh — the seamless
+  Poisson solve, integer rounding and isoline extraction each shed angular
+  fidelity. Carrying the guide into the seamless solve as a per-face
+  target-frame rotation is the follow-up.
+
 - **Auto-routed seam paths** (openspec change `add-seam-path-tool`): the UV
   Path tool. Place waypoints on the EditMesh and the engine routes a least-cost
   edge path between consecutive ones, under a cost model that discounts

@@ -91,6 +91,16 @@ struct NativeSolveContext {
     // Direct-solver factorizations (CYBER_QC_DIRECT): the solve operators are
     // spacing-invariant, so the probe and every calibration attempt share them.
     SeamlessSolveCache solveCache;
+    // User-drawn guidance (flow guides + painted density). Non-null FORCES the
+    // native route: the vendored Geogram quad_cover builds its own frame field
+    // from its own single scalar density inside sources we do not patch, so it
+    // has no hook for either input. Set it before the first call; the isotropic
+    // pre-remesh, the cross field and the seamless RHS all read it from here.
+    const GuidanceField* guidance = nullptr;
+    // Set false when the guided island ended up on a path that could not honor
+    // the guidance (the vendored fallback). Read back by the quadrangulator and
+    // reported per island — never swallowed.
+    bool guidanceHonored = true;
 };
 
 // Compute a seamless integer-grid UV for `mesh`. Milestone 1 obtains it out-of-process
@@ -211,6 +221,11 @@ void eliminateNonQuadCaps(std::vector<Vec3>& vertices,
 // `holeFillMaxBoundary` forwards the run's hole-fill policy to extraction (see
 // extractIsolineQuads above); the default matches RemeshParams so a caller that
 // does not care keeps the documented behaviour.
+// Guidance (IQuadrangulator::acceptGuidance) is honored on the NATIVE seamless
+// route only, which supplying it therefore forces — see NativeSolveContext.
+// That is a measured quality trade on builds where the vendored Geogram solve is
+// available (it wins on smooth organic meshes); it is documented in
+// docs/flow-guides.md rather than hidden.
 std::unique_ptr<IQuadrangulator> makeQuadCoverQuadrangulator(int fieldIterations = 40,
                                                              float adaptivity = 0.0f,
                                                              int holeFillMaxBoundary = 64,

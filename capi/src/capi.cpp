@@ -263,8 +263,14 @@ void cyber_default_params(CyberRemeshParams* params) {
     params->quadMethod = CYBER_QUAD_QUADCOVER;
 }
 
-CyberStatus cyber_remesh(const CyberMesh* in, const CyberRemeshParams* params,
-                         CyberProgressCb progress, CyberCancelCb cancel, void* user,
+namespace {
+
+// Shared body of cyber_remesh and cyber_remesh_guided. `guidance` is null for
+// the unguided entry point, which therefore takes exactly the same code path
+// it always did.
+CyberStatus remeshShared(const CyberMesh* in, const CyberRemeshParams* params,
+                         const cyber::remesh::Guidance* guidance, CyberProgressCb progress,
+                         CyberCancelCb cancel, CyberWarningCb warning, void* user,
                          CyberMesh** out) {
     if (in == nullptr || params == nullptr || out == nullptr) {
         setError("cyber_remesh: null argument");
@@ -329,7 +335,32 @@ CyberStatus cyber_remesh(const CyberMesh* in, const CyberRemeshParams* params,
         }
         cyber::remesh::PipelineResult result = cyber::remesh::remesh(
             in->mesh, cppParams, &sink, &token,
-            [quadMethod, makeQuad]() { return makeQuad(quadMethod); }, fallback);
+            [quadMethod, makeQuad]() { return makeQuad(quadMethod); }, fallback, guidance);
+
+        // The loud channel: every clamp, every rejection and every island whose
+        // backend could not honor the guidance reaches the caller.
+        if (warning != nullptr) {
+            for (const auto& issue : result.parameterIssues) {
+                warning((issue.parameter + ": " + issue.message).c_str(), user);
+            }
+            for (const auto& row : result.islandGuidance) {
+                if (row.guidesHonored && (row.densityHonored || !row.reason.empty())) {
+                    continue;
+                }
+                if (row.reason.empty() && row.guidesInRange == 0) {
+                    continue;  // nothing to say: no guide reaches this island
+                }
+                std::string message =
+                    "island " + std::to_string(row.islandIndex) + ": " +
+                    std::to_string(row.guidesInRange) + " guide(s) in range, guides " +
+                    (row.guidesHonored ? "honored" : "NOT honored") + ", density " +
+                    (row.densityHonored ? "honored" : "NOT honored");
+                if (!row.reason.empty()) {
+                    message += " (" + row.reason + ")";
+                }
+                warning(message.c_str(), user);
+            }
+        }
 
         switch (result.status) {
             case cyber::remesh::RunStatus::Success:
@@ -365,6 +396,66 @@ CyberStatus cyber_remesh(const CyberMesh* in, const CyberRemeshParams* params,
         setError("cyber_remesh: unknown error");
         return CYBER_ERR_RUNTIME;
     }
+}
+
+// CyberGuidance -> cyber::remesh::Guidance. Rejects arrays whose pointer is
+// null while the count is not (and vice versa) rather than reading garbage;
+// value-level validation is validateGuidance's job inside the pipeline.
+bool toGuidance(const CyberGuidance& in, cyber::remesh::Guidance& out) {
+    if ((in.guides == nullptr) != (in.guide_count == 0)) {
+        return false;
+    }
+    for (size_t i = 0; i < in.guide_count; ++i) {
+        const CyberFlowGuide& g = in.guides[i];
+        if (g.points == nullptr && g.point_count != 0) {
+            return false;
+        }
+        cyber::remesh::FlowGuide guide;
+        guide.strength = g.strength;
+        guide.radius = g.radius;
+        guide.points.reserve(g.point_count);
+        for (size_t k = 0; k < g.point_count; ++k) {
+            guide.points.push_back(
+                cyber::Vec3{g.points[3 * k], g.points[3 * k + 1], g.points[3 * k + 2]});
+        }
+        out.guides.push_back(std::move(guide));
+    }
+    if ((in.vertex_density == nullptr) != (in.vertex_density_count == 0)) {
+        return false;
+    }
+    if ((in.face_density == nullptr) != (in.face_density_count == 0)) {
+        return false;
+    }
+    out.density.vertexValues.assign(in.vertex_density, in.vertex_density + in.vertex_density_count);
+    out.density.faceValues.assign(in.face_density, in.face_density + in.face_density_count);
+    return true;
+}
+
+}  // namespace
+
+CyberStatus cyber_remesh(const CyberMesh* in, const CyberRemeshParams* params,
+                         CyberProgressCb progress, CyberCancelCb cancel, void* user,
+                         CyberMesh** out) {
+    return remeshShared(in, params, nullptr, progress, cancel, nullptr, user, out);
+}
+
+CyberStatus cyber_remesh_guided(const CyberMesh* in, const CyberRemeshParams* params,
+                                const CyberGuidance* guidance, CyberProgressCb progress,
+                                CyberCancelCb cancel, CyberWarningCb warning, void* user,
+                                CyberMesh** out) {
+    if (guidance == nullptr) {
+        return remeshShared(in, params, nullptr, progress, cancel, warning, user, out);
+    }
+    cyber::remesh::Guidance converted;
+    if (!toGuidance(*guidance, converted)) {
+        if (out != nullptr) {
+            *out = nullptr;
+        }
+        setError("cyber_remesh_guided: guidance array pointer/count mismatch");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    return remeshShared(in, params, converted.empty() ? nullptr : &converted, progress, cancel,
+                        warning, user, out);
 }
 
 CyberStatus cyber_mesh_stats(const CyberMesh* mesh, CyberStats* out) {

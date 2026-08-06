@@ -178,3 +178,57 @@ TEST_CASE("a client speaking the wrong version is refused") {
     REQUIRE(reply.find("reject") != std::string::npos);
     server.stop();
 }
+
+TEST_CASE("guidance transport: guides and density round-trip and clear with the scene") {
+    net::BridgeSession session;
+
+    SUBCASE("push_guides -> pull_guides") {
+        const std::string push = net::processRequest(
+            session, R"({"type":"push_guides","guides":[{"points":[[0,0,0],[1,0,0],[1,1,0]],)"
+                     R"("strength":0.5,"radius":0.25}]})");
+        REQUIRE(push.find("\"ok\"") != std::string::npos);
+        REQUIRE(session.guides().size() == 1);
+        REQUIRE(session.guides()[0].points.size() == 9);
+        REQUIRE(session.guides()[0].strength == doctest::Approx(0.5f));
+
+        const std::string pull = net::processRequest(session, R"({"type":"pull_guides"})");
+        REQUIRE(pull.find("\"guides\"") != std::string::npos);
+        REQUIRE(pull.find("0.25") != std::string::npos);
+    }
+
+    SUBCASE("clear_guides drops them") {
+        (void)net::processRequest(
+            session,
+            R"({"type":"push_guides","guides":[{"points":[[0,0,0],[1,0,0]],"radius":0.1}]})");
+        REQUIRE(session.guides().size() == 1);
+        REQUIRE(net::processRequest(session, R"({"type":"clear_guides"})").find("\"ok\"") !=
+                std::string::npos);
+        REQUIRE(session.guides().empty());
+    }
+
+    SUBCASE("push_density -> pull_density") {
+        REQUIRE(net::processRequest(session, R"({"type":"push_density","values":[1.0,4.0,0.5]})")
+                    .find("\"ok\"") != std::string::npos);
+        REQUIRE(session.density().size() == 3);
+        REQUIRE(net::processRequest(session, R"({"type":"pull_density"})").find("4.0") !=
+                std::string::npos);
+    }
+
+    SUBCASE("a malformed guide payload is an error reply, not a crash") {
+        // "points" missing entirely.
+        REQUIRE(net::processRequest(session, R"({"type":"push_guides","guides":[{"radius":1}]})")
+                    .find("error") != std::string::npos);
+        REQUIRE(session.guides().empty());
+    }
+
+    SUBCASE("clear_scene drops guidance with the Target it was drawn on") {
+        (void)net::processRequest(
+            session,
+            R"({"type":"push_guides","guides":[{"points":[[0,0,0],[1,0,0]],"radius":0.1}]})");
+        (void)net::processRequest(session, R"({"type":"push_density","values":[1.0]})");
+        REQUIRE(net::processRequest(session, R"({"type":"clear_scene"})").find("\"ok\"") !=
+                std::string::npos);
+        REQUIRE(session.guides().empty());
+        REQUIRE(session.density().empty());
+    }
+}

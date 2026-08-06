@@ -16,6 +16,7 @@ add_executable(cyber_tests
     quadrangulate/test_sparse_cholesky.cpp
     quadrangulate/test_quad_cleanup.cpp
     quadrangulate/test_mcf_edgediff.cpp
+    quadrangulate/test_flow_guides.cpp
     core/test_bvh.cpp
     core/test_golden.cpp
     core/test_golden_organic.cpp
@@ -28,6 +29,7 @@ add_executable(cyber_tests
     core/test_pure_quad_quality.cpp
     core/test_reference_surface.cpp
     core/test_remesh_params.cpp
+    core/test_flow_guides_pipeline.cpp
     core/test_mesh.cpp
     core/test_mesh_property.cpp
     core/test_version.cpp

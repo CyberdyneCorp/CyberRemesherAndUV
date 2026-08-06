@@ -651,6 +651,9 @@ bool prepareNativeSolve(const Mesh& mesh, float targetEdgeLength, float adaptivi
     IsotropicOptions iso;
     iso.targetEdgeLength = targetEdgeLength;
     iso.adaptivity = adaptivity;
+    // Painted density sizes the solve substrate: quad-cover skips the pipeline's
+    // isotropic stage, so this is where density has to enter for this backend.
+    iso.density = ctx.guidance;
     if (isotropicRemesh(work, reference, iso, nullptr, cancel) != IsotropicStatus::Success ||
         work.faceCount() == 0) {
         reason = "isotropic remesh failed (or cancelled)";
@@ -805,9 +808,9 @@ bool prepareNativeSolve(const Mesh& mesh, float targetEdgeLength, float adaptivi
     }
 
     auto backend = accel::defaultBackend();
-    ctx.setup =
-        buildSeamlessSetup(work, kFieldIterations, *backend, ctx.featureBinding,
-                           ctx.creaseAlignSupport.empty() ? nullptr : &ctx.creaseAlignSupport);
+    ctx.setup = buildSeamlessSetup(
+        work, kFieldIterations, *backend, ctx.featureBinding,
+        ctx.creaseAlignSupport.empty() ? nullptr : &ctx.creaseAlignSupport, ctx.guidance);
     const SeamlessSetup& setup = ctx.setup;
     if (fieldStats) {
         // Cone census: total cones, how many sit off tagged feature edges (spurious flat-region
@@ -928,8 +931,9 @@ SeamlessUv computeSeamlessUvNative(const Mesh& mesh, float targetEdgeLength, flo
     const char* spEnv = std::getenv("CYBER_QC_SPACING_MUL");
     const float spacingMul = spEnv != nullptr ? static_cast<float>(std::atof(spEnv)) : spacingScale;
     const auto tSolve0 = tick();
-    const Parameterization param = solveParameterization(work, setup, targetEdgeLength * spacingMul,
-                                                         *backend, cancel, &prep.solveCache);
+    const Parameterization param =
+        solveParameterization(work, setup, targetEdgeLength * spacingMul, *backend, cancel,
+                              &prep.solveCache, prep.guidance);
     if (!param.valid) {
         logNative(false, "parameterization invalid (or cancelled)");
         return uv;
@@ -1044,8 +1048,8 @@ double nativeRelaxedCellArea(const Mesh& mesh, float targetEdgeLength, float ada
     }
     auto backend = accel::defaultBackend();
     const auto tRelax0 = tick();
-    const double cells =
-        relaxedCellArea(ctx.work, ctx.setup, targetEdgeLength, *backend, cancel, &ctx.solveCache);
+    const double cells = relaxedCellArea(ctx.work, ctx.setup, targetEdgeLength, *backend, cancel,
+                                         &ctx.solveCache, ctx.guidance);
     if (std::getenv("CYBER_QC_TIME") != nullptr) {
         std::fprintf(stderr,
                      "[qc-time] probe: isotropic=%ldms field+setup=%ldms relaxed=%ldms "
@@ -1253,8 +1257,16 @@ SeamlessUv computeSeamlessUv(const Mesh& mesh, float targetEdgeLength, float har
     // the original vendored-first order for A/B.
     const char* routeEnv = std::getenv("CYBER_QC_ROUTE_CREASE");
     const float routeThresh = routeEnv != nullptr ? static_cast<float>(std::atof(routeEnv)) : 0.02f;
-    const bool routeNative = haveNative && std::getenv("CYBER_QC_NO_ROUTE") == nullptr &&
-                             routeThresh > 0.0f && creaseEdgeFraction(mesh, 45.0f) >= routeThresh;
+    // User-drawn guidance FORCES the native route: the vendored Geogram
+    // quad_cover has no hook for either flow guides or painted density (it
+    // builds its own frame field from a single scalar density inside sources we
+    // do not patch). Routing a guided island there would silently drop the
+    // input, which is precisely the failure mode this feature exists to avoid.
+    const bool guided = ctx != nullptr && ctx->guidance != nullptr;
+    const bool routeNative =
+        haveNative &&
+        (guided || (std::getenv("CYBER_QC_NO_ROUTE") == nullptr && routeThresh > 0.0f &&
+                    creaseEdgeFraction(mesh, 45.0f) >= routeThresh));
 
     if (routeNative) {
         SeamlessUv native = computeSeamlessUvNative(mesh, targetEdgeLength, harnessAdaptivity,
@@ -1262,7 +1274,11 @@ SeamlessUv computeSeamlessUv(const Mesh& mesh, float targetEdgeLength, float har
         if (native.valid) {
             return native;
         }
-        // Native declined -> fall back to the vendored path (valid or not).
+        // Native declined -> fall back to the vendored path (valid or not). A
+        // guided island loses its guidance here; say so instead of pretending.
+        if (guided) {
+            ctx->guidanceHonored = false;
+        }
         return computeSeamlessUvVendored(mesh, targetEdgeLength, harnessScaling, harnessAdaptivity,
                                          cancel);
     }
@@ -3422,6 +3438,7 @@ public:
         // context computes them once and each attempt re-runs only the (spacing-dependent)
         // parameterization + extraction.
         NativeSolveContext nativeCtx;
+        nativeCtx.guidance = m_guidance;  // non-null forces the native route (see the header)
         // Probe-predicted initial scaling (native route only). The hardcoded 0.5 start
         // overshoots the extracted count 1.5-3x on every corpus mesh, so the loop below
         // always pays a second full solve. The relaxed Poisson phase already fixes the UV
@@ -3447,7 +3464,8 @@ public:
                                   std::getenv("CYBER_QC_NO_NATIVE") == nullptr &&
                                   std::getenv("CYBER_QC_SCALING") == nullptr &&
                                   std::getenv("CYBER_QC_SPACING_MUL") == nullptr &&
-                                  !vendoredSeamlessAvailable() && targetQuads > 0.0;
+                                  (!vendoredSeamlessAvailable() || m_guidance != nullptr) &&
+                                  targetQuads > 0.0;
         if (probeEnabled) {
             const double cells = nativeRelaxedCellArea(mesh, targetEdgeLength, m_adaptivity,
                                                        m_featureDegrees, cancel, nativeCtx);
@@ -3521,6 +3539,14 @@ public:
                 break;  // within band -> accept
             }
             scaling = std::clamp(scaling * static_cast<float>(std::sqrt(ratio)), 0.2f, 1.5f);
+        }
+        if (m_guidance != nullptr && !nativeCtx.guidanceHonored) {
+            // The native solve declined and the vendored Geogram path ran
+            // instead. It cannot see either input, so say which and why rather
+            // than shipping a silently unguided island.
+            m_unhonored.push_back(
+                "flow guides and painted density: the native seamless solve declined this "
+                "island and the vendored Geogram quad_cover solve has no guide/density hook");
         }
         if (progress != nullptr) {
             progress->report(0.5f, "quadrangulate (quad-cover: isoline extract)");
@@ -3623,6 +3649,20 @@ public:
         return {.success = true, .cancelled = false, .failureReason = {}};
     }
 
+    // Guides reach the native cross field; painted density reaches both the
+    // native solve's isotropic pre-remesh AND its per-face grid spacing. Both
+    // are native-only, so accepting here also forces the native route.
+    bool acceptGuidance(const GuidanceField& field, std::string& reason) override {
+        (void)reason;
+        m_guidance = &field;
+        m_unhonored.clear();
+        return true;
+    }
+
+    [[nodiscard]] std::vector<std::string> unhonoredGuidance() const override {
+        return m_unhonored;
+    }
+
     [[nodiscard]] std::string name() const override { return "quad-cover"; }
 
 private:
@@ -3630,6 +3670,8 @@ private:
     float m_adaptivity;
     int m_holeFillMaxBoundary;
     float m_featureDegrees = 40.0f;
+    const GuidanceField* m_guidance = nullptr;
+    std::vector<std::string> m_unhonored;
 };
 
 }  // namespace
