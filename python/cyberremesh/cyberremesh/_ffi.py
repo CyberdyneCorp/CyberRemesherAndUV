@@ -62,6 +62,9 @@ POLICY_KEEP_LARGEST = 0
 POLICY_KEEP_ALL = 1
 POLICY_MIN_FACES = 2
 
+# CYBER_INVALID_ID — the sentinel every element-id accessor returns for "none".
+INVALID_ID = 0xFFFFFFFF
+
 # cyber_falloff enum — mirrors cyber::retopo::Falloff. Persisted by callers, so
 # these values are append-only.
 FALLOFF_LINEAR = 0
@@ -120,6 +123,18 @@ class CyberAtlasParams(Structure):
         ("reorient_charts", c_int32),
         ("merge_charts", c_int32),
         ("max_chart_distortion", c_float),
+    ]
+
+
+class CyberSeamPathOptions(Structure):
+    """Mirror of ``CyberSeamPathOptions`` in capi/include/cyber_capi.h."""
+
+    _fields_ = [
+        ("flat_weight", c_float),
+        ("feature_weight", c_float),
+        ("concave_weight", c_float),
+        ("crease_degrees", c_float),
+        ("min_weight", c_float),
     ]
 
 
@@ -329,6 +344,81 @@ def _declare_soft_selection(lib: ctypes.CDLL) -> None:
     lib.cyber_retopo_selection_relax.restype = c_int32
 
 
+def _declare_seam_path(lib: ctypes.CDLL) -> None:
+    """Auto-routed seam paths (the UV Path tool).
+
+    Handle-based like the snapper: a ``CyberSeamSet`` holds the committed seam
+    edges and a ``CyberSeamPath`` holds the editable waypoints. The size-query
+    readers follow the ``copy_positions`` convention (total returned, at most
+    ``max`` filled).
+    """
+    lib.cyber_default_seam_path_options.argtypes = [POINTER(CyberSeamPathOptions)]
+    lib.cyber_default_seam_path_options.restype = None
+    lib.cyber_mesh_edge_signed_dihedral.argtypes = [c_void_p, c_uint32]
+    lib.cyber_mesh_edge_signed_dihedral.restype = c_float
+
+    # -- seam set ------------------------------------------------------------
+    lib.cyber_seam_set_create.argtypes = [POINTER(c_void_p)]
+    lib.cyber_seam_set_create.restype = c_int32
+    lib.cyber_seam_set_free.argtypes = [c_void_p]
+    lib.cyber_seam_set_free.restype = None
+    lib.cyber_seam_set_count.argtypes = [c_void_p]
+    lib.cyber_seam_set_count.restype = c_size_t
+    lib.cyber_seam_set_is_seam.argtypes = [c_void_p, c_uint32]
+    lib.cyber_seam_set_is_seam.restype = c_int32
+    lib.cyber_seam_set_edges.argtypes = [c_void_p, POINTER(c_uint32), c_size_t]
+    lib.cyber_seam_set_edges.restype = c_size_t
+    lib.cyber_seam_set_mark.argtypes = [c_void_p, c_uint32]
+    lib.cyber_seam_set_mark.restype = c_int32
+    lib.cyber_seam_set_erase.argtypes = [c_void_p, c_uint32]
+    lib.cyber_seam_set_erase.restype = c_int32
+
+    # -- pending path --------------------------------------------------------
+    lib.cyber_seam_path_create.argtypes = [
+        c_void_p, POINTER(CyberSeamPathOptions), POINTER(c_void_p),
+    ]
+    lib.cyber_seam_path_create.restype = c_int32
+    lib.cyber_seam_path_free.argtypes = [c_void_p]
+    lib.cyber_seam_path_free.restype = None
+
+    lib.cyber_seam_path_add_waypoint.argtypes = [c_void_p, c_uint32]
+    lib.cyber_seam_path_add_waypoint.restype = c_int32
+    lib.cyber_seam_path_move_waypoint.argtypes = [c_void_p, c_size_t, c_uint32]
+    lib.cyber_seam_path_move_waypoint.restype = c_int32
+    lib.cyber_seam_path_move_waypoint_to.argtypes = [
+        c_void_p, c_size_t, POINTER(c_float), c_float,
+    ]
+    lib.cyber_seam_path_move_waypoint_to.restype = c_int32
+    lib.cyber_seam_path_remove_waypoint.argtypes = [c_void_p, c_size_t]
+    lib.cyber_seam_path_remove_waypoint.restype = c_int32
+    lib.cyber_seam_path_clear.argtypes = [c_void_p]
+    lib.cyber_seam_path_clear.restype = None
+
+    lib.cyber_seam_path_waypoint_count.argtypes = [c_void_p]
+    lib.cyber_seam_path_waypoint_count.restype = c_size_t
+    lib.cyber_seam_path_waypoints.argtypes = [c_void_p, POINTER(c_uint32), c_size_t]
+    lib.cyber_seam_path_waypoints.restype = c_size_t
+    lib.cyber_seam_path_segment_count.argtypes = [c_void_p]
+    lib.cyber_seam_path_segment_count.restype = c_size_t
+    lib.cyber_seam_path_segment.argtypes = [c_void_p, c_size_t, POINTER(c_uint32), c_size_t]
+    lib.cyber_seam_path_segment.restype = c_size_t
+    lib.cyber_seam_path_segment_revision.argtypes = [c_void_p, c_size_t]
+    lib.cyber_seam_path_segment_revision.restype = c_uint64
+    lib.cyber_seam_path_is_routed.argtypes = [c_void_p]
+    lib.cyber_seam_path_is_routed.restype = c_int32
+    lib.cyber_seam_path_vertices.argtypes = [c_void_p, POINTER(c_uint32), c_size_t]
+    lib.cyber_seam_path_vertices.restype = c_size_t
+    lib.cyber_seam_path_edges.argtypes = [c_void_p, POINTER(c_uint32), c_size_t]
+    lib.cyber_seam_path_edges.restype = c_size_t
+
+    lib.cyber_seam_path_commit.argtypes = [c_void_p, c_void_p, POINTER(c_uint32), c_size_t]
+    lib.cyber_seam_path_commit.restype = c_size_t
+    lib.cyber_seam_path_resume_marker.argtypes = [c_void_p]
+    lib.cyber_seam_path_resume_marker.restype = c_uint32
+    lib.cyber_seam_path_drop_resume_marker.argtypes = [c_void_p]
+    lib.cyber_seam_path_drop_resume_marker.restype = None
+
+
 def _declare(lib: ctypes.CDLL) -> None:
     """Attach argtypes/restypes to every ``cyber_*`` entry point."""
 
@@ -425,6 +515,7 @@ def _declare(lib: ctypes.CDLL) -> None:
     lib.cyber_snapper_free.restype = None
 
     _declare_soft_selection(lib)
+    _declare_seam_path(lib)
 
 
 # ---------------------------------------------------------------------------

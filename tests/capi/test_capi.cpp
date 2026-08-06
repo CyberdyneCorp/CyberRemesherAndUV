@@ -323,3 +323,95 @@ TEST_CASE("capi soft selection: paint stroke accumulates and clear zeroes the fi
             CYBER_ERR_INVALID_ARG);
     cyber_mesh_free(edit);
 }
+
+TEST_CASE("capi seam path: route, edit, commit, resume, drop") {
+    // 7 x 5 flat lattice; vertex ids follow the row-major lattice order.
+    constexpr int kCols = 7;
+    constexpr int kRows = 5;
+    const auto vid = [](int x, int y) { return static_cast<uint32_t>(y * kCols + x); };
+    CyberMesh* mesh = makeGridMesh(kCols, kRows, 0.0f);
+
+    CyberSeamSet* seams = nullptr;
+    if (cyber_seam_set_create(&seams) != CYBER_OK) {
+        // Engine built without the UV module: the symbols exist but do nothing.
+        MESSAGE("seam path ABI unavailable (CYBER_BUILD_UV=OFF)");
+        cyber_mesh_free(mesh);
+        return;
+    }
+    REQUIRE(seams != nullptr);
+
+    CyberSeamPathOptions options{};
+    cyber_default_seam_path_options(&options);
+    REQUIRE(options.flatWeight > options.concaveWeight);
+    REQUIRE(options.minWeight > 0.0f);
+
+    CyberSeamPath* path = nullptr;
+    REQUIRE(cyber_seam_path_create(mesh, &options, &path) == CYBER_OK);
+    REQUIRE(path != nullptr);
+
+    // Three waypoints across the top row, then a drag of the middle one.
+    REQUIRE(cyber_seam_path_add_waypoint(path, vid(0, 0)) == 1);
+    REQUIRE(cyber_seam_path_add_waypoint(path, vid(3, 0)) == 1);
+    REQUIRE(cyber_seam_path_add_waypoint(path, vid(6, 0)) == 1);
+    REQUIRE(cyber_seam_path_add_waypoint(path, vid(6, 0)) == 0);  // repeat rejected
+    REQUIRE(cyber_seam_path_waypoint_count(path) == 3u);
+    REQUIRE(cyber_seam_path_segment_count(path) == 2u);
+    REQUIRE(cyber_seam_path_is_routed(path) == 1);
+
+    const uint64_t rev0 = cyber_seam_path_segment_revision(path, 0);
+    const uint64_t rev1 = cyber_seam_path_segment_revision(path, 1);
+    const float drag[3] = {3.0f, 2.05f, 0.0f};
+    REQUIRE(cyber_seam_path_move_waypoint_to(path, 1, drag, 0.5f) == 1);
+    REQUIRE(cyber_seam_path_segment_revision(path, 0) == rev0 + 1);
+    REQUIRE(cyber_seam_path_segment_revision(path, 1) == rev1 + 1);
+
+    std::vector<uint32_t> waypoints(cyber_seam_path_waypoint_count(path));
+    REQUIRE(cyber_seam_path_waypoints(path, waypoints.data(), waypoints.size()) ==
+            waypoints.size());
+    REQUIRE(waypoints[1] == vid(3, 2));
+
+    // Back to the straight run, then commit.
+    REQUIRE(cyber_seam_path_remove_waypoint(path, 1) == 1);
+    REQUIRE(cyber_seam_path_segment_count(path) == 1u);
+    const size_t chainLen = cyber_seam_path_vertices(path, nullptr, 0);
+    REQUIRE(chainLen == static_cast<size_t>(kCols));
+    const size_t edgeCount = cyber_seam_path_edges(path, nullptr, 0);
+    REQUIRE(edgeCount == chainLen - 1);
+
+    std::vector<uint32_t> marked(edgeCount);
+    REQUIRE(cyber_seam_path_commit(path, seams, marked.data(), marked.size()) == edgeCount);
+    REQUIRE(cyber_seam_set_count(seams) == edgeCount);
+    for (const uint32_t e : marked) {
+        REQUIRE(cyber_seam_set_is_seam(seams, e) == 1);
+    }
+    REQUIRE(cyber_seam_path_waypoint_count(path) == 0u);
+
+    // Resume: the marker is the path's last vertex and seeds the next route.
+    REQUIRE(cyber_seam_path_resume_marker(path) == vid(6, 0));
+    REQUIRE(cyber_seam_path_add_waypoint(path, vid(6, 4)) == 1);
+    REQUIRE(cyber_seam_path_waypoint_count(path) == 2u);
+    std::vector<uint32_t> resumed(cyber_seam_path_segment(path, 0, nullptr, 0));
+    REQUIRE(cyber_seam_path_segment(path, 0, resumed.data(), resumed.size()) == resumed.size());
+    REQUIRE(resumed.front() == vid(6, 0));
+
+    // Dropping the marker discards nothing committed.
+    const size_t committed = cyber_seam_set_count(seams);
+    std::vector<uint32_t> before(committed);
+    REQUIRE(cyber_seam_set_edges(seams, before.data(), before.size()) == committed);
+    cyber_seam_path_clear(path);
+    cyber_seam_path_drop_resume_marker(path);
+    REQUIRE(cyber_seam_path_resume_marker(path) == CYBER_INVALID_ID);
+    std::vector<uint32_t> after(cyber_seam_set_count(seams));
+    REQUIRE(cyber_seam_set_edges(seams, after.data(), after.size()) == committed);
+    REQUIRE(after == before);
+
+    // Erasing the reported ids is the undo of the commit.
+    for (const uint32_t e : marked) {
+        REQUIRE(cyber_seam_set_erase(seams, e) == CYBER_OK);
+    }
+    REQUIRE(cyber_seam_set_count(seams) == 0u);
+
+    cyber_seam_path_free(path);
+    cyber_seam_set_free(seams);
+    cyber_mesh_free(mesh);
+}

@@ -53,6 +53,8 @@
 #include "cyber_capi.h"
 #ifdef CYBER_CAPI_WITH_UV
 #include "cyber/uv/atlas.hpp"
+#include "cyber/uv/seam_path.hpp"
+#include "cyber/uv/seams.hpp"
 #endif
 
 // Version numbers are injected from the CMake project() version so this file
@@ -2869,4 +2871,370 @@ CyberStatus cyber_image_save_png(const CyberImage* image, const char* path) {
         setError("cyber_image_save_png: unknown error");
         return CYBER_ERR_IO;
     }
+}
+
+/* ---- auto-routed seam paths (uv-editing) ------------------------------- */
+
+// Opaque handles over the UV seam model. Defined only in the UV build, exactly
+// like the cyber_uv_atlas entry point: without the module the declarations
+// still exist (the ABI stays stable) but every call is a no-op / error.
+#ifdef CYBER_CAPI_WITH_UV
+struct CyberSeamSet {
+    cyber::uv::SeamSet seams;
+};
+
+struct CyberSeamPath {
+    // The mesh outlives the path by contract (snapshot semantics, documented
+    // in cyber_capi.h), so holding the reference inside is safe.
+    explicit CyberSeamPath(const cyber::Mesh& mesh, const cyber::uv::SeamCostOptions& options)
+        : path(mesh, options) {}
+    cyber::uv::SeamPath path;
+};
+
+namespace {
+
+cyber::uv::SeamCostOptions toSeamCostOptions(const CyberSeamPathOptions* options) {
+    cyber::uv::SeamCostOptions opts;
+    if (options != nullptr) {
+        opts.flatWeight = options->flatWeight;
+        opts.featureWeight = options->featureWeight;
+        opts.concaveWeight = options->concaveWeight;
+        opts.creaseDegrees = options->creaseDegrees;
+        opts.minWeight = options->minWeight;
+    }
+    return opts;
+}
+
+size_t copyVertexIds(const std::vector<cyber::VertexId>& ids, uint32_t* out, size_t max_ids) {
+    if (out != nullptr) {
+        const size_t n = std::min(ids.size(), max_ids);
+        for (size_t i = 0; i < n; ++i) {
+            out[i] = ids[i].value;
+        }
+    }
+    return ids.size();
+}
+
+}  // namespace
+#endif
+
+void cyber_default_seam_path_options(CyberSeamPathOptions* options) {
+    if (options == nullptr) {
+        return;
+    }
+#ifdef CYBER_CAPI_WITH_UV
+    const cyber::uv::SeamCostOptions defaults;
+    options->flatWeight = defaults.flatWeight;
+    options->featureWeight = defaults.featureWeight;
+    options->concaveWeight = defaults.concaveWeight;
+    options->creaseDegrees = defaults.creaseDegrees;
+    options->minWeight = defaults.minWeight;
+#else
+    options->flatWeight = 1.0f;
+    options->featureWeight = 0.25f;
+    options->concaveWeight = 0.35f;
+    options->creaseDegrees = 20.0f;
+    options->minWeight = 1e-3f;
+#endif
+}
+
+float cyber_mesh_edge_signed_dihedral([[maybe_unused]] const CyberMesh* mesh,
+                                      [[maybe_unused]] uint32_t edge) {
+#ifdef CYBER_CAPI_WITH_UV
+    if (mesh == nullptr) {
+        return 0.0f;
+    }
+    return cyber::uv::edgeSignedDihedral(mesh->mesh, cyber::EdgeId{edge});
+#else
+    return 0.0f;
+#endif
+}
+
+CyberStatus cyber_seam_set_create([[maybe_unused]] CyberSeamSet** out) {
+#ifdef CYBER_CAPI_WITH_UV
+    if (out == nullptr) {
+        setError("cyber_seam_set_create: null argument");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    try {
+        *out = new CyberSeamSet();
+        clearError();
+        return CYBER_OK;
+    } catch (...) {
+        setError("cyber_seam_set_create: allocation failure");
+        return CYBER_ERR_RUNTIME;
+    }
+#else
+    setError("cyber_seam_set_create: engine built without the UV module (CYBER_BUILD_UV=OFF)");
+    return CYBER_ERR_RUNTIME;
+#endif
+}
+
+void cyber_seam_set_free([[maybe_unused]] CyberSeamSet* seams) {
+#ifdef CYBER_CAPI_WITH_UV
+    delete seams;
+#endif
+}
+
+size_t cyber_seam_set_count([[maybe_unused]] const CyberSeamSet* seams) {
+#ifdef CYBER_CAPI_WITH_UV
+    return seams == nullptr ? 0 : seams->seams.size();
+#else
+    return 0;
+#endif
+}
+
+int cyber_seam_set_is_seam([[maybe_unused]] const CyberSeamSet* seams,
+                           [[maybe_unused]] uint32_t edge) {
+#ifdef CYBER_CAPI_WITH_UV
+    return seams != nullptr && seams->seams.isSeam(cyber::EdgeId{edge}) ? 1 : 0;
+#else
+    return 0;
+#endif
+}
+
+size_t cyber_seam_set_edges([[maybe_unused]] const CyberSeamSet* seams,
+                            [[maybe_unused]] uint32_t* out_edges,
+                            [[maybe_unused]] size_t max_edges) {
+#ifdef CYBER_CAPI_WITH_UV
+    if (seams == nullptr) {
+        return 0;
+    }
+    return copyEdgeIds(seams->seams.edges(), out_edges, max_edges);
+#else
+    return 0;
+#endif
+}
+
+CyberStatus cyber_seam_set_mark([[maybe_unused]] CyberSeamSet* seams,
+                                [[maybe_unused]] uint32_t edge) {
+#ifdef CYBER_CAPI_WITH_UV
+    if (seams == nullptr || edge == CYBER_INVALID_ID) {
+        setError("cyber_seam_set_mark: invalid argument");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    seams->seams.mark(cyber::EdgeId{edge});
+    clearError();
+    return CYBER_OK;
+#else
+    setError("cyber_seam_set_mark: engine built without the UV module (CYBER_BUILD_UV=OFF)");
+    return CYBER_ERR_RUNTIME;
+#endif
+}
+
+CyberStatus cyber_seam_set_erase([[maybe_unused]] CyberSeamSet* seams,
+                                 [[maybe_unused]] uint32_t edge) {
+#ifdef CYBER_CAPI_WITH_UV
+    if (seams == nullptr || edge == CYBER_INVALID_ID) {
+        setError("cyber_seam_set_erase: invalid argument");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    seams->seams.erase(cyber::EdgeId{edge});
+    clearError();
+    return CYBER_OK;
+#else
+    setError("cyber_seam_set_erase: engine built without the UV module (CYBER_BUILD_UV=OFF)");
+    return CYBER_ERR_RUNTIME;
+#endif
+}
+
+CyberStatus cyber_seam_path_create([[maybe_unused]] const CyberMesh* mesh,
+                                   [[maybe_unused]] const CyberSeamPathOptions* options,
+                                   [[maybe_unused]] CyberSeamPath** out) {
+#ifdef CYBER_CAPI_WITH_UV
+    if (mesh == nullptr || out == nullptr) {
+        setError("cyber_seam_path_create: null argument");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    *out = nullptr;
+    try {
+        *out = new CyberSeamPath(mesh->mesh, toSeamCostOptions(options));
+        clearError();
+        return CYBER_OK;
+    } catch (...) {
+        setError("cyber_seam_path_create: allocation failure");
+        return CYBER_ERR_RUNTIME;
+    }
+#else
+    setError("cyber_seam_path_create: engine built without the UV module (CYBER_BUILD_UV=OFF)");
+    return CYBER_ERR_RUNTIME;
+#endif
+}
+
+void cyber_seam_path_free([[maybe_unused]] CyberSeamPath* path) {
+#ifdef CYBER_CAPI_WITH_UV
+    delete path;
+#endif
+}
+
+int cyber_seam_path_add_waypoint([[maybe_unused]] CyberSeamPath* path,
+                                 [[maybe_unused]] uint32_t vertex) {
+#ifdef CYBER_CAPI_WITH_UV
+    return path != nullptr && path->path.addWaypoint(cyber::VertexId{vertex}) ? 1 : 0;
+#else
+    return 0;
+#endif
+}
+
+int cyber_seam_path_move_waypoint([[maybe_unused]] CyberSeamPath* path,
+                                  [[maybe_unused]] size_t index, [[maybe_unused]] uint32_t vertex) {
+#ifdef CYBER_CAPI_WITH_UV
+    return path != nullptr && path->path.moveWaypoint(index, cyber::VertexId{vertex}) ? 1 : 0;
+#else
+    return 0;
+#endif
+}
+
+int cyber_seam_path_move_waypoint_to([[maybe_unused]] CyberSeamPath* path,
+                                     [[maybe_unused]] size_t index,
+                                     [[maybe_unused]] const float position[3],
+                                     [[maybe_unused]] float radius) {
+#ifdef CYBER_CAPI_WITH_UV
+    if (path == nullptr || position == nullptr) {
+        return 0;
+    }
+    return path->path.moveWaypointTo(index, toVec3(position), radius) ? 1 : 0;
+#else
+    return 0;
+#endif
+}
+
+int cyber_seam_path_remove_waypoint([[maybe_unused]] CyberSeamPath* path,
+                                    [[maybe_unused]] size_t index) {
+#ifdef CYBER_CAPI_WITH_UV
+    return path != nullptr && path->path.removeWaypoint(index) ? 1 : 0;
+#else
+    return 0;
+#endif
+}
+
+void cyber_seam_path_clear([[maybe_unused]] CyberSeamPath* path) {
+#ifdef CYBER_CAPI_WITH_UV
+    if (path != nullptr) {
+        path->path.clearPending();
+    }
+#endif
+}
+
+size_t cyber_seam_path_waypoint_count([[maybe_unused]] const CyberSeamPath* path) {
+#ifdef CYBER_CAPI_WITH_UV
+    return path == nullptr ? 0 : path->path.waypointCount();
+#else
+    return 0;
+#endif
+}
+
+size_t cyber_seam_path_waypoints([[maybe_unused]] const CyberSeamPath* path,
+                                 [[maybe_unused]] uint32_t* out_vertices,
+                                 [[maybe_unused]] size_t max_vertices) {
+#ifdef CYBER_CAPI_WITH_UV
+    if (path == nullptr) {
+        return 0;
+    }
+    return copyVertexIds(path->path.waypoints(), out_vertices, max_vertices);
+#else
+    return 0;
+#endif
+}
+
+size_t cyber_seam_path_segment_count([[maybe_unused]] const CyberSeamPath* path) {
+#ifdef CYBER_CAPI_WITH_UV
+    return path == nullptr ? 0 : path->path.segmentCount();
+#else
+    return 0;
+#endif
+}
+
+size_t cyber_seam_path_segment([[maybe_unused]] const CyberSeamPath* path,
+                               [[maybe_unused]] size_t index,
+                               [[maybe_unused]] uint32_t* out_vertices,
+                               [[maybe_unused]] size_t max_vertices) {
+#ifdef CYBER_CAPI_WITH_UV
+    if (path == nullptr || index >= path->path.segmentCount()) {
+        return 0;
+    }
+    return copyVertexIds(path->path.segment(index).vertices, out_vertices, max_vertices);
+#else
+    return 0;
+#endif
+}
+
+uint64_t cyber_seam_path_segment_revision([[maybe_unused]] const CyberSeamPath* path,
+                                          [[maybe_unused]] size_t index) {
+#ifdef CYBER_CAPI_WITH_UV
+    if (path == nullptr || index >= path->path.segmentCount()) {
+        return 0;
+    }
+    return path->path.segment(index).routeRevision;
+#else
+    return 0;
+#endif
+}
+
+int cyber_seam_path_is_routed([[maybe_unused]] const CyberSeamPath* path) {
+#ifdef CYBER_CAPI_WITH_UV
+    return path != nullptr && path->path.routed() ? 1 : 0;
+#else
+    return 0;
+#endif
+}
+
+size_t cyber_seam_path_vertices([[maybe_unused]] const CyberSeamPath* path,
+                                [[maybe_unused]] uint32_t* out_vertices,
+                                [[maybe_unused]] size_t max_vertices) {
+#ifdef CYBER_CAPI_WITH_UV
+    if (path == nullptr) {
+        return 0;
+    }
+    return copyVertexIds(path->path.vertices(), out_vertices, max_vertices);
+#else
+    return 0;
+#endif
+}
+
+size_t cyber_seam_path_edges([[maybe_unused]] const CyberSeamPath* path,
+                             [[maybe_unused]] uint32_t* out_edges,
+                             [[maybe_unused]] size_t max_edges) {
+#ifdef CYBER_CAPI_WITH_UV
+    if (path == nullptr) {
+        return 0;
+    }
+    return copyEdgeIds(path->path.pendingEdges(), out_edges, max_edges);
+#else
+    return 0;
+#endif
+}
+
+size_t cyber_seam_path_commit([[maybe_unused]] CyberSeamPath* path,
+                              [[maybe_unused]] CyberSeamSet* seams,
+                              [[maybe_unused]] uint32_t* out_edges,
+                              [[maybe_unused]] size_t max_edges) {
+#ifdef CYBER_CAPI_WITH_UV
+    if (path == nullptr || seams == nullptr) {
+        return 0;
+    }
+    const cyber::uv::SeamCommit record = path->path.commit(seams->seams);
+    return copyEdgeIds(record.markedEdges, out_edges, max_edges);
+#else
+    return 0;
+#endif
+}
+
+uint32_t cyber_seam_path_resume_marker([[maybe_unused]] const CyberSeamPath* path) {
+#ifdef CYBER_CAPI_WITH_UV
+    if (path == nullptr) {
+        return CYBER_INVALID_ID;
+    }
+    return path->path.resumeMarker().value;
+#else
+    return CYBER_INVALID_ID;
+#endif
+}
+
+void cyber_seam_path_drop_resume_marker([[maybe_unused]] CyberSeamPath* path) {
+#ifdef CYBER_CAPI_WITH_UV
+    if (path != nullptr) {
+        path->path.dropResumeMarker();
+    }
+#endif
 }

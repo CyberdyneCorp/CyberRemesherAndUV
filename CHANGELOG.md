@@ -7,6 +7,38 @@
 
 ### Added
 
+- **Auto-routed seam paths** (openspec change `add-seam-path-tool`): the UV
+  Path tool. Place waypoints on the EditMesh and the engine routes a least-cost
+  edge path between consecutive ones, under a cost model that discounts
+  feature-tagged edges and concave (valley) edges past a crease angle — so a
+  two-click hop **follows the groove** instead of cutting the geodesic shortcut
+  across flat surface, which is what makes spiral-looped auto-retopo output
+  seamable at all.
+
+  **The pending path stays editable until commit.** Any waypoint can be
+  repositioned (by id, or dragged onto the nearest vertex within a radius) or
+  deleted, and an edit re-routes **only the segments adjacent to it**; every
+  other segment keeps both its route and its per-segment `routeRevision`
+  counter, so a viewport can redraw exactly what changed. Committing marks the
+  route into the existing `cyber::uv::SeamSet` — the same seam model the
+  freehand Pencil/Erase gestures use, so `computeIslands`, gesture unwrap and
+  sew behave as they do for hand-drawn seams — and arms a **resume marker** so
+  the next waypoint continues from the last committed point. Commit returns a
+  `SeamCommit` undo record listing only the edges it *newly* marked, so
+  `revertCommit` restores the exact pre-commit state and edges that were
+  already seams survive the undo; dropping the resume marker only forgets where
+  to continue and never touches a committed seam. A path with an unroutable
+  segment (disconnected components) commits nothing and stays pending for
+  repair.
+
+  Reachable from the C ABI (`cyber_seam_set_*` / `cyber_seam_path_*` plus
+  `cyber_mesh_edge_signed_dihedral`, all additive — no existing struct layout
+  changed), Python (`SeamSet`, `SeamPath`, `SeamCostParams`) and the Swift
+  package. Internally this reuses the existing shortest-path machinery:
+  `cyber::retopo::shortestVertexPath` was generalized into a templated
+  `weightedVertexPath` and is now a one-line wrapper over it, so Path Distribute
+  and `cyber_mesh_shortest_vertex_path` are behaviour-identical.
+
 - **Soft selection for manual retopology** (openspec change
   `add-soft-selection`): a per-vertex weight field in [0,1] over the EditMesh,
   filled from three region sources — a **line gradient** (0 at the anchor, 1 at

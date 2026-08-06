@@ -40,6 +40,9 @@ __all__ = [
     "Falloff",
     "Snapper",
     "SoftTransformReport",
+    "SeamCostParams",
+    "SeamSet",
+    "SeamPath",
 ]
 
 
@@ -297,6 +300,233 @@ def _vec3(v: Sequence[float]) -> "ctypes.Array":
     return (ctypes.c_float * 3)(float(v[0]), float(v[1]), float(v[2]))
 
 
+def _read_ids(reader: Callable[[Optional["ctypes.Array"], int], int]) -> List[int]:
+    """copy_positions convention: size query, then fill."""
+    total = reader(None, 0)
+    if total == 0:
+        return []
+    buf = (ctypes.c_uint32 * total)()
+    filled = reader(buf, total)
+    return [int(buf[i]) for i in range(min(filled, total))]
+
+
+@dataclass
+class SeamCostParams:
+    """Seam-routing cost multipliers (mirror of ``cyber::uv::SeamCostOptions``).
+
+    Each field is a multiplier on an edge's length; lower means "prefer this
+    edge". Defaults bias the route toward feature-tagged and concave (valley)
+    edges so a routed seam follows the groove instead of the flat shortcut.
+    """
+
+    flat_weight: float = 1.0
+    feature_weight: float = 0.25
+    concave_weight: float = 0.35
+    crease_degrees: float = 20.0
+    min_weight: float = 1e-3
+
+    def _to_c(self) -> "_ffi.CyberSeamPathOptions":
+        return _ffi.CyberSeamPathOptions(
+            flat_weight=float(self.flat_weight),
+            feature_weight=float(self.feature_weight),
+            concave_weight=float(self.concave_weight),
+            crease_degrees=float(self.crease_degrees),
+            min_weight=float(self.min_weight),
+        )
+
+    @classmethod
+    def defaults(cls) -> "SeamCostParams":
+        """The engine's own defaults, read back through the ABI."""
+        c = _ffi.CyberSeamPathOptions()
+        _ffi.get_lib().cyber_default_seam_path_options(ctypes.byref(c))
+        return cls(
+            flat_weight=float(c.flat_weight),
+            feature_weight=float(c.feature_weight),
+            concave_weight=float(c.concave_weight),
+            crease_degrees=float(c.crease_degrees),
+            min_weight=float(c.min_weight),
+        )
+
+
+class _Handle:
+    """Shared close/__del__/context-manager plumbing for opaque ABI handles."""
+
+    __slots__ = ("_handle",)
+    _free_symbol = ""
+
+    @property
+    def handle(self) -> int:
+        if self._handle is None:
+            raise ValueError("operation on a closed {0}".format(type(self).__name__))
+        return self._handle
+
+    def close(self) -> None:
+        """Release the underlying engine handle (idempotent)."""
+        if self._handle is not None:
+            getattr(_ffi.get_lib(), self._free_symbol)(self._handle)
+            self._handle = None
+
+    def __del__(self):  # pragma: no cover - GC timing dependent
+        try:
+            self.close()
+        except Exception:
+            pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc) -> None:
+        self.close()
+
+
+class SeamSet(_Handle):
+    """A mutable set of seam edges — the model gesture unwrap and sew read.
+
+    Routed seam paths commit into it exactly like hand-drawn Pencil strokes.
+    """
+
+    __slots__ = ()
+    _free_symbol = "cyber_seam_set_free"
+
+    def __init__(self):
+        out = ctypes.c_void_p()
+        _check(_ffi.get_lib().cyber_seam_set_create(ctypes.byref(out)))
+        self._handle = out.value
+
+    def __len__(self) -> int:
+        return int(_ffi.get_lib().cyber_seam_set_count(self.handle))
+
+    def is_seam(self, edge: int) -> bool:
+        return _ffi.get_lib().cyber_seam_set_is_seam(self.handle, int(edge)) == 1
+
+    def edges(self) -> List[int]:
+        """Seam edge ids in ascending order."""
+        lib = _ffi.get_lib()
+        return _read_ids(lambda buf, n: lib.cyber_seam_set_edges(self.handle, buf, n))
+
+    def mark(self, edge: int) -> None:
+        _check(_ffi.get_lib().cyber_seam_set_mark(self.handle, int(edge)))
+
+    def erase(self, edge: int) -> None:
+        _check(_ffi.get_lib().cyber_seam_set_erase(self.handle, int(edge)))
+
+    def revert_commit(self, marked_edges: Sequence[int]) -> None:
+        """Undo a :meth:`SeamPath.commit` from the edge ids it returned."""
+        for edge in marked_edges:
+            self.erase(edge)
+
+
+class SeamPath(_Handle):
+    """An editable, auto-routed seam path (the UV Path tool).
+
+    Place waypoints with :meth:`add_waypoint`; the engine routes least-cost
+    edge paths between consecutive ones, biased toward feature and valley
+    edges. Waypoints stay editable until :meth:`commit`, which marks the route
+    into a :class:`SeamSet` and arms :attr:`resume_marker`.
+
+    Snapshot semantics, as for :class:`Snapper`: the path references the mesh
+    it was built on, so recreate it if that mesh is edited.
+    """
+
+    __slots__ = ()
+    _free_symbol = "cyber_seam_path_free"
+
+    def __init__(self, mesh: "Mesh", params: Optional[SeamCostParams] = None):
+        c_params = (params or SeamCostParams())._to_c()
+        out = ctypes.c_void_p()
+        _check(
+            _ffi.get_lib().cyber_seam_path_create(
+                mesh.handle, ctypes.byref(c_params), ctypes.byref(out)
+            )
+        )
+        self._handle = out.value
+
+    # -- editing ------------------------------------------------------------
+    def add_waypoint(self, vertex: int) -> bool:
+        return _ffi.get_lib().cyber_seam_path_add_waypoint(self.handle, int(vertex)) == 1
+
+    def move_waypoint(self, index: int, vertex: int) -> bool:
+        return (
+            _ffi.get_lib().cyber_seam_path_move_waypoint(self.handle, int(index), int(vertex))
+            == 1
+        )
+
+    def move_waypoint_to(self, index: int, position: Sequence[float], radius: float) -> bool:
+        """Drag waypoint ``index`` onto the nearest vertex within ``radius``."""
+        return (
+            _ffi.get_lib().cyber_seam_path_move_waypoint_to(
+                self.handle, int(index), _vec3(position), float(radius)
+            )
+            == 1
+        )
+
+    def remove_waypoint(self, index: int) -> bool:
+        return _ffi.get_lib().cyber_seam_path_remove_waypoint(self.handle, int(index)) == 1
+
+    def clear(self) -> None:
+        """Drop the pending waypoints; committed seams and the marker stay."""
+        _ffi.get_lib().cyber_seam_path_clear(self.handle)
+
+    # -- pending state ------------------------------------------------------
+    def waypoint_count(self) -> int:
+        return int(_ffi.get_lib().cyber_seam_path_waypoint_count(self.handle))
+
+    def waypoints(self) -> List[int]:
+        lib = _ffi.get_lib()
+        return _read_ids(lambda buf, n: lib.cyber_seam_path_waypoints(self.handle, buf, n))
+
+    def segment_count(self) -> int:
+        return int(_ffi.get_lib().cyber_seam_path_segment_count(self.handle))
+
+    def segment(self, index: int) -> List[int]:
+        lib = _ffi.get_lib()
+        return _read_ids(
+            lambda buf, n: lib.cyber_seam_path_segment(self.handle, int(index), buf, n)
+        )
+
+    def segment_revision(self, index: int) -> int:
+        """Counter bumped each time THIS segment re-routes."""
+        return int(_ffi.get_lib().cyber_seam_path_segment_revision(self.handle, int(index)))
+
+    def is_routed(self) -> bool:
+        return _ffi.get_lib().cyber_seam_path_is_routed(self.handle) == 1
+
+    def vertices(self) -> List[int]:
+        lib = _ffi.get_lib()
+        return _read_ids(lambda buf, n: lib.cyber_seam_path_vertices(self.handle, buf, n))
+
+    def edges(self) -> List[int]:
+        lib = _ffi.get_lib()
+        return _read_ids(lambda buf, n: lib.cyber_seam_path_edges(self.handle, buf, n))
+
+    # -- commit / resume ----------------------------------------------------
+    def commit(self, seams: SeamSet) -> List[int]:
+        """Turn the routed path into seams; returns the newly marked edge ids.
+
+        That list is the undo record: erasing exactly those ids restores the
+        pre-commit state (edges that were already seams are never listed).
+        """
+        # commit() MUTATES, so the usual size-query-then-fill dance would
+        # commit twice. The pending edge count is an exact upper bound on the
+        # newly marked ones, so size the buffer from it and call once.
+        capacity = len(self.edges())
+        buf = (ctypes.c_uint32 * capacity)() if capacity else None
+        total = _ffi.get_lib().cyber_seam_path_commit(
+            self.handle, seams.handle, buf, capacity
+        )
+        return [int(buf[i]) for i in range(min(int(total), capacity))]
+
+    @property
+    def resume_marker(self) -> Optional[int]:
+        """Vertex the last commit ended on, or None when no marker is armed."""
+        value = int(_ffi.get_lib().cyber_seam_path_resume_marker(self.handle))
+        return None if value == _ffi.INVALID_ID else value
+
+    def drop_resume_marker(self) -> None:
+        """Start the next path fresh. Never touches a committed seam."""
+        _ffi.get_lib().cyber_seam_path_drop_resume_marker(self.handle)
+
+
 class Mesh:
     """A handle to an engine mesh.
 
@@ -378,6 +608,16 @@ class Mesh:
             )
         )
         return AtlasResult._from_c(c_result)
+
+    def edge_signed_dihedral(self, edge: int) -> float:
+        """Dihedral angle of an edge in degrees: >0 in a valley, <0 on a ridge.
+
+        0 for flat edges and for edges that are not two-face manifold. This is
+        the curvature term :class:`SeamPath` routes on.
+        """
+        return float(
+            _ffi.get_lib().cyber_mesh_edge_signed_dihedral(self.handle, int(edge))
+        )
 
     # -- soft selection -----------------------------------------------------
     #

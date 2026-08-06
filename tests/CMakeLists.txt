@@ -58,7 +58,8 @@ if(TARGET cyber_app)
     target_link_libraries(cyber_tests PRIVATE cyber_app)
 endif()
 if(TARGET cyber_uv)
-    target_sources(cyber_tests PRIVATE uv/test_uv.cpp uv/test_uv_clone.cpp)
+    target_sources(cyber_tests PRIVATE uv/test_uv.cpp uv/test_uv_clone.cpp
+                                        uv/test_seam_path.cpp)
     target_link_libraries(cyber_tests PRIVATE cyber_uv)
 endif()
 if(TARGET cyber_exportbundle)
@@ -143,7 +144,7 @@ if(TARGET cyber_capi_shared AND Python3_FOUND)
     endif()
     foreach(_pyt test_api test_golden test_document_invariants test_bake test_uv_atlas
                  test_hole_fill_policy test_open_surface_cleanup
-                 test_cad_density_robustness test_soft_selection)
+                 test_cad_density_robustness test_soft_selection test_seam_path)
         add_test(NAME python_${_pyt}
             COMMAND ${Python3_EXECUTABLE} ${_pydir}/${_pyt}.py)
         set_tests_properties(python_${_pyt} PROPERTIES

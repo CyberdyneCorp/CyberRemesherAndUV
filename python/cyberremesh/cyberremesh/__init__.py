@@ -24,6 +24,9 @@ from .api import (
     Image,
     Mesh,
     RemeshParams,
+    SeamCostParams,
+    SeamPath,
+    SeamSet,
     Snapper,
     SoftTransformReport,
     Statistics,
@@ -51,5 +54,8 @@ __all__ = [
     "Falloff",
     "Snapper",
     "SoftTransformReport",
+    "SeamCostParams",
+    "SeamSet",
+    "SeamPath",
 ]
 __version__ = "0.5.0"

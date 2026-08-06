@@ -1170,6 +1170,127 @@ size_t cyber_image_copy_pixels(const CyberImage* image, float* out, size_t max_f
 /* Writes the image to an 8-bit PNG (tonemapped). */
 CyberStatus cyber_image_save_png(const CyberImage* image, const char* path);
 
+/* ---- auto-routed seam paths (uv-editing) -----------------------------
+ *
+ * The UV Path tool: place waypoints on the EditMesh and the engine routes a
+ * least-cost edge path between consecutive ones, biased toward feature-tagged
+ * and concave (valley) edges so short hops follow the groove instead of
+ * cutting straight across flat surface. Waypoints stay editable until commit;
+ * commit marks the routed edges into a CyberSeamSet — the SAME seam model the
+ * stroke-over-edges Pencil/Erase gestures use — and arms a resume marker so
+ * the next path continues from the last committed point.
+ *
+ * Every entry point here returns 0 / CYBER_ERR_RUNTIME when the engine was
+ * built without the UV module (CYBER_BUILD_UV=OFF), exactly like
+ * cyber_uv_atlas. */
+
+/* Opaque mutable set of seam edges (wraps cyber::uv::SeamSet). Free with
+ * cyber_seam_set_free. */
+typedef struct CyberSeamSet CyberSeamSet;
+
+/* Opaque pending seam path (wraps cyber::uv::SeamPath). SNAPSHOT SEMANTICS,
+ * as for CyberSnapper: it references the mesh it was created from and caches
+ * vertex ids against it, so recreate it if that mesh is edited. Free with
+ * cyber_seam_path_free. */
+typedef struct CyberSeamPath CyberSeamPath;
+
+/* Per-unit-length routing multipliers (POD mirror of
+ * cyber::uv::SeamCostOptions). Lower means "cheaper, prefer this edge". Fill
+ * with cyber_default_seam_path_options, then override as needed; values are
+ * clamped to a strictly positive floor internally, so no setting can break
+ * the router. */
+typedef struct CyberSeamPathOptions {
+    float flatWeight;    /* baseline multiplier for an ordinary edge */
+    float featureWeight; /* multiplier for a feature-tagged edge */
+    float concaveWeight; /* multiplier for a valley edge past creaseDegrees */
+    float creaseDegrees; /* concavity (degrees) that counts as a groove */
+    float minWeight;     /* floor applied to the chosen multiplier */
+} CyberSeamPathOptions;
+
+/* Fills options with the engine defaults. No-op on NULL. */
+void cyber_default_seam_path_options(CyberSeamPathOptions* options);
+
+/* Signed dihedral angle of a live edge IN DEGREES: positive in a concave
+ * valley, negative over a convex ridge, 0 when flat or when the edge is not
+ * exactly two-face manifold. Returns 0 on NULL / dead ids. */
+float cyber_mesh_edge_signed_dihedral(const CyberMesh* mesh, uint32_t edge);
+
+/* --- seam set --- */
+CyberStatus cyber_seam_set_create(CyberSeamSet** out);
+void cyber_seam_set_free(CyberSeamSet* seams);
+size_t cyber_seam_set_count(const CyberSeamSet* seams);
+int cyber_seam_set_is_seam(const CyberSeamSet* seams, uint32_t edge);
+/* Seam edge ids in ascending order. Follows the copy_positions convention:
+ * returns the TOTAL count and fills at most max_edges entries (out_edges may
+ * be NULL when max_edges is 0, for size queries). */
+size_t cyber_seam_set_edges(const CyberSeamSet* seams, uint32_t* out_edges, size_t max_edges);
+CyberStatus cyber_seam_set_mark(CyberSeamSet* seams, uint32_t edge);
+/* Erases a seam edge — also the undo primitive for a commit: erase every id
+ * cyber_seam_path_commit reported and the pre-commit state is back (edges
+ * that were already seams are never reported, so they survive). */
+CyberStatus cyber_seam_set_erase(CyberSeamSet* seams, uint32_t edge);
+
+/* --- pending path --- */
+/* Creates a path over `mesh`; `options` may be NULL (defaults). */
+CyberStatus cyber_seam_path_create(const CyberMesh* mesh, const CyberSeamPathOptions* options,
+                                   CyberSeamPath** out);
+void cyber_seam_path_free(CyberSeamPath* path);
+
+/* Appends a waypoint and routes the segment closing onto it. With the resume
+ * marker armed and no waypoints yet, the path is seeded at the marker first.
+ * Returns 1 on success, 0 for a dead vertex or a repeat of the last waypoint. */
+int cyber_seam_path_add_waypoint(CyberSeamPath* path, uint32_t vertex);
+/* Repositions waypoint `index`, re-routing ONLY its adjacent segments.
+ * Returns 1 on success, 0 when the index or the vertex is invalid. */
+int cyber_seam_path_move_waypoint(CyberSeamPath* path, size_t index, uint32_t vertex);
+/* Repositions waypoint `index` onto the nearest live vertex within `radius`
+ * of `position` (the drag gesture). Returns 1 on success, 0 when nothing is
+ * in range (the path is then untouched). */
+int cyber_seam_path_move_waypoint_to(CyberSeamPath* path, size_t index, const float position[3],
+                                     float radius);
+/* Deletes waypoint `index`; an interior deletion merges its two adjacent
+ * segments into one re-routed segment. Returns 1 on success, else 0. */
+int cyber_seam_path_remove_waypoint(CyberSeamPath* path, size_t index);
+/* Drops the pending waypoints; committed seams and the resume marker stay. */
+void cyber_seam_path_clear(CyberSeamPath* path);
+
+size_t cyber_seam_path_waypoint_count(const CyberSeamPath* path);
+/* Waypoint vertex ids, copy_positions convention. */
+size_t cyber_seam_path_waypoints(const CyberSeamPath* path, uint32_t* out_vertices,
+                                 size_t max_vertices);
+size_t cyber_seam_path_segment_count(const CyberSeamPath* path);
+/* Routed vertex chain of one segment (endpoints inclusive), copy_positions
+ * convention. Returns 0 for an out-of-range index or an unroutable segment. */
+size_t cyber_seam_path_segment(const CyberSeamPath* path, size_t index, uint32_t* out_vertices,
+                               size_t max_vertices);
+/* Monotonic counter bumped each time THIS segment re-routes — the local
+ * re-route isolation an editor needs to know which geometry to redraw.
+ * Returns 0 for an out-of-range index. */
+uint64_t cyber_seam_path_segment_revision(const CyberSeamPath* path, size_t index);
+/* 1 when there is at least one segment and every segment routed. */
+int cyber_seam_path_is_routed(const CyberSeamPath* path);
+/* Whole pending path as one vertex chain (shared joints appear once) /
+ * as the live edges it would seam. Both copy_positions convention. */
+size_t cyber_seam_path_vertices(const CyberSeamPath* path, uint32_t* out_vertices,
+                                size_t max_vertices);
+size_t cyber_seam_path_edges(const CyberSeamPath* path, uint32_t* out_edges, size_t max_edges);
+
+/* Turns the pending path into seam edges in `seams`, arms the resume marker
+ * at the path's last vertex and clears the pending waypoints. A path that is
+ * not fully routed commits nothing and is LEFT PENDING for repair.
+ * Follows the copy_positions convention over the UNDO RECORD: returns the
+ * total number of edges this commit newly marked (edges that were already
+ * seams are excluded, so erasing the reported ids restores the exact
+ * pre-commit state) and fills at most max_edges of them. */
+size_t cyber_seam_path_commit(CyberSeamPath* path, CyberSeamSet* seams, uint32_t* out_edges,
+                              size_t max_edges);
+/* Vertex the last commit ended on, or CYBER_INVALID_ID when no marker is
+ * armed. */
+uint32_t cyber_seam_path_resume_marker(const CyberSeamPath* path);
+/* Forgets the resume marker so the next waypoint starts a fresh path. Never
+ * touches a seam set — committed seams are unaffected. */
+void cyber_seam_path_drop_resume_marker(CyberSeamPath* path);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif

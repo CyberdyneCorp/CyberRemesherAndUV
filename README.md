@@ -58,6 +58,35 @@ charts tighter (higher coverage), the one remaining gap.
 
 <sub>Each quad mesh (left) auto-seamed, unwrapped, re-oriented, and packed into a UV atlas (right), tinted by chart · <code>examples/14_uv_atlas.py</code></sub>
 
+### Auto-routed seam paths
+
+Between "draw every seam edge by hand" and "let the atlas decide" sits the UV
+Path tool (`SeamPath` in Python/Swift, `cyber_seam_path_*` in C). You place
+waypoints; the engine routes a least-cost edge path between consecutive ones
+with a cost model that discounts feature-tagged and concave (valley) edges, so
+a two-click hop **follows the groove** instead of cutting the geodesic shortcut
+across flat surface. This is what makes seaming spiral-looped auto-retopo
+output tractable — exactly the layouts where no traceable edge loop exists.
+
+The pending path stays editable: any waypoint can be dragged
+(`move_waypoint_to` snaps it to the nearest vertex) or deleted, and an edit
+re-routes **only the segments adjacent to it** — the rest of the path keeps its
+route, and each segment's `segment_revision` counter tells a viewport exactly
+what to redraw. `commit` marks the route into a `SeamSet` — the same seam model
+the freehand Pencil/Erase gestures use, so gesture unwrap and sew behave
+identically — and arms a resume marker so the next waypoint continues from the
+last committed point. Committing returns the edge ids it newly marked: that
+list is the undo record (`revert_commit`), and edges that were already seams
+are never in it, so they survive the undo. Dropping the resume marker only
+forgets where to continue; it never touches a committed seam.
+
+```python
+seams, path = SeamSet(), SeamPath(mesh)
+path.add_waypoint(a); path.add_waypoint(b)
+path.move_waypoint_to(1, (x, y, z), radius=0.5)   # re-routes one segment
+undo = path.commit(seams)                          # -> newly seamed edge ids
+```
+
 ### Per-DCC export presets
 
 `--preset` turns a run into a ready-to-hand-off bundle instead of a bare mesh:
