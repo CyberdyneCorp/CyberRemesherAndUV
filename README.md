@@ -58,6 +58,45 @@ charts tighter (higher coverage), the one remaining gap.
 
 <sub>Each quad mesh (left) auto-seamed, unwrapped, re-oriented, and packed into a UV atlas (right), tinted by chart · <code>examples/14_uv_atlas.py</code></sub>
 
+### Per-DCC export presets
+
+`--preset` turns a run into a ready-to-hand-off bundle instead of a bare mesh:
+remesh → auto-UV → bake the preset's map set → write the mesh and its maps under
+the preset's naming, color-space and normal conventions.
+
+```sh
+cyberremesh --input sculpt.obj --output out/hero.obj --preset blender \
+            --report out/report.json
+# out/hero.obj  hero_normal.png  hero_ao.png  hero_curvature.png  hero_color.png
+```
+
+Four built-ins ship — `blender`, `unity`, `unreal`, `gltf-generic` (list them
+with `--list-presets`). They differ where the target apps actually differ: only
+`unreal` uses the DirectX green-channel convention (green points down), and only
+`gltf-generic` drops curvature, because glTF 2.0 core has no slot for it. Color
+is the one sRGB-encoded map in every preset; normal, AO and curvature carry data,
+not appearance, and a gamma curve on them is a bug in every target app.
+
+A preset is versioned JSON, so `--preset ./mine.json` behaves exactly like a
+built-in:
+
+```json
+{ "schemaVersion": 1, "name": "mine", "resolution": 2048,
+  "namingPattern": "{basename}_{map}.{ext}",
+  "maps": ["normal", "ao", {"map": "color", "colorSpace": "srgb", "suffix": "basecolor"}] }
+```
+
+A preset declaring a schema version this engine does not support is rejected by
+name, and a field the engine does not recognise is an error rather than a silent
+drop — a preset that quietly loses the field you added is worse than one that
+refuses to load. The JSON report records the effective preset and every file
+produced.
+
+**Cost:** the AO bake dominates a preset run — about 96% of it — and scales with
+texel count, so the default 2048² map set takes minutes on a desktop CPU. Use
+`--texture-size` (and `--ao-samples`) to trade resolution for time; parallelising
+the bake's texel loop is the open follow-up.
+
 ## How it works
 
 Two algorithms carry the project: the quad retopology pipeline (triangles in, an

@@ -20,6 +20,7 @@ add_executable(cyber_tests
     core/test_golden.cpp
     core/test_golden_organic.cpp
     core/test_holes.cpp
+    core/test_export_preset.cpp
     core/test_io_formats.cpp
     core/test_io_obj.cpp
     core/test_isotropic.cpp
@@ -59,6 +60,10 @@ endif()
 if(TARGET cyber_uv)
     target_sources(cyber_tests PRIVATE uv/test_uv.cpp uv/test_uv_clone.cpp)
     target_link_libraries(cyber_tests PRIVATE cyber_uv)
+endif()
+if(TARGET cyber_exportbundle)
+    target_sources(cyber_tests PRIVATE exportbundle/test_bundle.cpp)
+    target_link_libraries(cyber_tests PRIVATE cyber_exportbundle)
 endif()
 if(TARGET cyber_retopo)
     target_sources(cyber_tests PRIVATE retopo/test_retopo.cpp retopo/test_retopo_advanced.cpp)

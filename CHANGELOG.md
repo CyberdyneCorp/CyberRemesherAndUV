@@ -30,12 +30,46 @@
   `CYBER_BAKE_CURVATURE` / `CYBER_BAKE_CAVITY` in the C ABI and
   `BakeMap.CURVATURE` / `BakeMap.CAVITY` in Python.
 
+- **Per-DCC export presets** (openspec change `add-export-presets`). `--preset
+  <name|path>` turns a CLI run into a ready-to-hand-off bundle: remesh → auto-UV
+  (when the low-poly has none) → bake the preset's map set → write the mesh and
+  its maps under the preset's naming, color-space and normal-map conventions.
+  Four built-ins ship — `blender`, `unity`, `unreal`, `gltf-generic`, listed by
+  `--list-presets`. They differ where the target apps do: only `unreal` uses the
+  DirectX green-channel convention, and only `gltf-generic` omits curvature
+  (glTF 2.0 core has no slot for it). Color is the one sRGB map everywhere else;
+  the data maps stay linear.
+
+  A preset is versioned JSON (`cyber/core/export_preset.hpp`), so a user file
+  passed by path behaves exactly like a built-in. An unsupported `schemaVersion`
+  is rejected with a typed `IncompatibleVersion` error naming both the found and
+  the supported version, and an unrecognised field is an error rather than a
+  silent drop. An unknown preset name exits with the argument-error code and
+  lists the built-ins, before the remesh rather than after it.
+
+  New CLI flags: `--preset`, `--list-presets`, `--texture-size`, `--ao-samples`,
+  `--cage`. The JSON report gains `preset` (name, schema version, resolved map
+  set, conventions) and `outputs` (every file produced, with its written color
+  space and dimensions).
+
+  Known limitations: the maps are written as sibling files and are **not**
+  referenced from the glTF material for the glb-based presets, so those bundles
+  are import-ready but not auto-wired. The built-in conventions are encoded from
+  each target's documented spec and pinned by unit tests, but have not been
+  verified inside Blender, Unity or Unreal.
+
 ### Changed
 
+- `cyberremesh`'s reported `elapsedSeconds` now covers export as well as the
+  solve. It previously stopped at the end of the remesh, which understated a
+  `--preset` run by the entire bake.
 - `CyberBakeParams` gained a trailing `curvatureRange` field. The struct is
   passed by pointer and callers allocate it, so a client compiled against the
   older header must be recompiled; always initialise via
   `cyber_default_bake_params`.
+- `io::ErrorCode` gained `IncompatibleVersion` for versioned data files whose
+  schema the engine does not support. The C ABI maps it to `CYBER_ERR_IO` like
+  the other I/O codes, so no C client behaviour changes.
 - `cmake/CompilerWarnings.cmake` gained `CYBER_WARNINGS_AS_ERRORS` (default
   `ON`, so CI is unchanged). Toolchains newer than CI's emit diagnostics of
   their own — GCC 13 raises a known `-Wstringop-overflow` false positive from

@@ -1,5 +1,6 @@
 add_library(cyber_core STATIC
     src/bvh.cpp
+    src/export_preset.cpp
     src/io.cpp
     src/io_gltf.cpp
     src/io_obj.cpp

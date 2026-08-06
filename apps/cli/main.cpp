@@ -27,6 +27,7 @@
 #include <json.hpp>
 
 #include "cyber/accel/backend.hpp"
+#include "cyber/core/export_preset.hpp"
 #include "cyber/core/io.hpp"
 #include "cyber/core/pipeline.hpp"
 #include "cyber/core/progress.hpp"
@@ -34,6 +35,10 @@
 #include "cyber/quadrangulate/field_quadrangulator.hpp"
 #include "cyber/quadrangulate/position_field.hpp"
 #include "cyber/quadrangulate/quadcover_extractor.hpp"
+
+#ifdef CYBER_CLI_HAVE_PRESETS
+#include "cyber/exportbundle/bundle.hpp"
+#endif
 
 namespace {
 
@@ -57,6 +62,10 @@ struct CliOptions {
     std::string output;
     std::string report;
     std::string quadMethod = "quad-cover";  // roadmap default (2026-07-22)
+    std::string preset;                     // empty = mesh-only export (the historical behaviour)
+    float cageDistance = 0.0f;              // 0 = derive from the input's bounds
+    int textureSize = 0;                    // 0 = the preset's own resolution
+    int aoSamples = 0;                      // 0 = the bake default
     remesh::Parameters params;
     bool verbose = false;
     bool quiet = false;
@@ -77,6 +86,12 @@ void printUsage() {
                  "  --hole-fill <int>        max hole boundary to fill (default 64)\n"
                  "  --patch-policy <p>       keep-largest | keep-all | min-faces:<N>\n"
                  "  --report <path.json>     machine-readable run report\n"
+                 "  --preset <name|path>     export a per-DCC bundle (mesh + baked maps)\n"
+                 "  --cage <float>           bake cage distance (default: 1%% of the\n"
+                 "                           input's bounding-box diagonal)\n"
+                 "  --texture-size <int>     override the preset's map resolution\n"
+                 "  --ao-samples <int>       hemisphere rays per texel (default 16)\n"
+                 "  --list-presets           print built-in export presets and exit\n"
                  "  --verbose | --quiet      diagnostic detail / errors only\n"
                  "  --list-backends          print compute backends and exit\n"
                  "  --version                print version and exit\n");
@@ -135,6 +150,13 @@ int parseArgs(int argc, char** argv, CliOptions& options, bool& exitEarly) {
             exitEarly = true;
             return kExitOk;
         }
+        if (arg == "--list-presets") {
+            for (const std::string& name : cyber::io::builtinPresetNames()) {
+                std::printf("%s\n", name.c_str());
+            }
+            exitEarly = true;
+            return kExitOk;
+        }
         if (arg == "--help" || arg == "-h") {
             printUsage();
             exitEarly = true;
@@ -152,6 +174,24 @@ int parseArgs(int argc, char** argv, CliOptions& options, bool& exitEarly) {
                 return kExitArgs;
             }
             options.output = *v;
+        } else if (arg == "--preset") {
+            const auto v = next("--preset");
+            if (!v) {
+                return kExitArgs;
+            }
+            options.preset = *v;
+        } else if (arg == "--cage") {
+            if (!numeric("--cage", options.cageDistance)) {
+                return kExitArgs;
+            }
+        } else if (arg == "--texture-size") {
+            if (!numeric("--texture-size", options.textureSize)) {
+                return kExitArgs;
+            }
+        } else if (arg == "--ao-samples") {
+            if (!numeric("--ao-samples", options.aoSamples)) {
+                return kExitArgs;
+            }
         } else if (arg == "--report") {
             const auto v = next("--report");
             if (!v) {
@@ -234,6 +274,64 @@ int parseArgs(int argc, char** argv, CliOptions& options, bool& exitEarly) {
     return kExitOk;
 }
 
+// What a --preset run produced, in a form the report can serialise whether or
+// not this build has the bundle module compiled in.
+struct PresetOutcome {
+    bool active = false;
+    cyber::io::ExportPreset preset;
+    struct File {
+        std::string path;
+        std::string kind;
+        std::string colorSpace;
+        int width = 0;
+        int height = 0;
+    };
+    std::vector<File> files;
+    bool unwrapped = false;
+    int chartCount = 0;
+};
+
+const char* greenName(cyber::io::GreenChannel green) {
+    return green == cyber::io::GreenChannel::MinusY ? "-Y" : "+Y";
+}
+
+void addPresetToReport(nlohmann::json& report, const PresetOutcome& outcome) {
+    if (!outcome.active) {
+        return;
+    }
+    const cyber::io::ExportPreset& preset = outcome.preset;
+    nlohmann::json maps = nlohmann::json::array();
+    for (const auto& entry : preset.maps) {
+        maps.push_back({{"map", cyber::io::presetMapName(entry.map)},
+                        {"colorSpace", cyber::io::colorSpaceName(entry.colorSpace)},
+                        {"suffix", entry.suffix}});
+    }
+    report["preset"] = {
+        {"name", preset.name},
+        {"schemaVersion", preset.schemaVersion},
+        {"meshFormat", preset.meshFormat},
+        {"textureFormat", preset.textureFormat},
+        {"namingPattern", preset.namingPattern},
+        {"normalGreen", greenName(preset.normalGreen)},
+        {"resolution", preset.resolution},
+        {"units", preset.units},
+        {"upAxis", preset.upAxis},
+        {"maps", maps},
+        {"unwrapped", outcome.unwrapped},
+        {"chartCount", outcome.chartCount},
+    };
+    report["outputs"] = nlohmann::json::array();
+    for (const PresetOutcome::File& file : outcome.files) {
+        nlohmann::json entry = {{"path", file.path}, {"kind", file.kind}};
+        if (file.width > 0) {
+            entry["colorSpace"] = file.colorSpace;
+            entry["width"] = file.width;
+            entry["height"] = file.height;
+        }
+        report["outputs"].push_back(entry);
+    }
+}
+
 const char* statusName(remesh::RunStatus status) {
     switch (status) {
         case remesh::RunStatus::Success:
@@ -251,7 +349,7 @@ const char* statusName(remesh::RunStatus status) {
 // Writing the report is a hard requirement when requested: an unwritable
 // path is exit 6, never silently skipped (spec).
 int writeReport(const CliOptions& options, const remesh::PipelineResult& result,
-                double elapsedSeconds) {
+                double elapsedSeconds, const PresetOutcome& presetOutcome) {
     nlohmann::json report;
     report["tool"] = "cyberremesh";
     report["version"] = std::string(cyber::version());
@@ -288,6 +386,7 @@ int writeReport(const CliOptions& options, const remesh::PipelineResult& result,
                                            {"stage", diag.stage},
                                            {"reason", diag.reason}});
     }
+    addPresetToReport(report, presetOutcome);
 
     std::ofstream file(options.report, std::ios::trunc);
     if (!file) {
@@ -312,6 +411,30 @@ int main(int argc, char** argv) {
         return argStatus;
     }
     std::signal(SIGINT, onSigint);
+
+    // Resolve the preset BEFORE the remesh: an unknown preset is an argument
+    // error, and making the user wait through a full solve to learn they typo'd
+    // a name would be the opposite of loud.
+    PresetOutcome presetOutcome;
+    if (!options.preset.empty()) {
+#ifndef CYBER_CLI_HAVE_PRESETS
+        std::fprintf(stderr,
+                     "error: this build has no export-preset support "
+                     "(configure with -DCYBER_BUILD_UV=ON)\n");
+        return kExitArgs;
+#else
+        const auto resolved = cyber::io::resolvePreset(options.preset);
+        if (!resolved.ok()) {
+            std::fprintf(stderr, "error: %s\n", resolved.error().message.c_str());
+            return kExitArgs;
+        }
+        presetOutcome.active = true;
+        presetOutcome.preset = resolved.value();
+        if (options.textureSize > 0) {
+            presetOutcome.preset.resolution = options.textureSize;
+        }
+#endif
+    }
 
     auto imported = cyber::io::importMesh(options.input);
     if (!imported.ok()) {
@@ -387,8 +510,6 @@ int main(int argc, char** argv) {
                                : remesh::QuadrangulatorFactory{};
     const remesh::PipelineResult result = remesh::remesh(
         imported.value().mesh, options.params, &sink, &cancel, makeQuadrangulator, fallbackFactory);
-    const double elapsed =
-        std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
     if (showProgress) {
         std::printf("\r");
     }
@@ -412,14 +533,60 @@ int main(int argc, char** argv) {
         return kExitPipeline;
     }
 
-    const auto exportStatus = cyber::io::exportMesh(result.mesh, options.output);
-    if (!exportStatus.ok()) {
-        std::fprintf(stderr, "error: %s\n", exportStatus.error().message.c_str());
-        return kExitWrite;
+#ifdef CYBER_CLI_HAVE_PRESETS
+    if (presetOutcome.active) {
+        cyber::exportbundle::BundleParams bundleParams;
+        bundleParams.preset = presetOutcome.preset;
+        bundleParams.meshPath = options.output;
+        // The cage has to scale with the model: a fixed default silently misses
+        // the Target on anything not roughly unit-sized. 1% of the input's
+        // bounding-box diagonal reaches the detail without punching through to
+        // the far side on the corpus meshes.
+        const cyber::Vec3 extent = imported.value().boundsMax - imported.value().boundsMin;
+        bundleParams.cageDistance =
+            options.cageDistance > 0.0f ? options.cageDistance : 0.01f * cyber::length(extent);
+        if (options.aoSamples > 0) {
+            bundleParams.aoSamples = options.aoSamples;
+        }
+        cyber::Mesh low = result.mesh;
+        const cyber::exportbundle::BundleResult bundle = cyber::exportbundle::writeBundle(
+            low, imported.value().mesh, bundleParams, &sink, &cancel);
+        if (!options.quiet) {
+            for (const std::string& warning : bundle.warnings) {
+                std::fprintf(stderr, "warning: %s\n", warning.c_str());
+            }
+        }
+        if (bundle.cancelled) {
+            std::fprintf(stderr, "cancelled\n");
+            return kExitCancelled;
+        }
+        if (!bundle.ok) {
+            std::fprintf(stderr, "error: %s\n", bundle.error.c_str());
+            return kExitWrite;
+        }
+        presetOutcome.unwrapped = bundle.unwrapped;
+        presetOutcome.chartCount = bundle.chartCount;
+        for (const auto& file : bundle.files) {
+            presetOutcome.files.push_back(
+                {file.path, file.kind, file.colorSpace, file.width, file.height});
+        }
+    }
+#endif
+    if (!presetOutcome.active) {
+        const auto exportStatus = cyber::io::exportMesh(result.mesh, options.output);
+        if (!exportStatus.ok()) {
+            std::fprintf(stderr, "error: %s\n", exportStatus.error().message.c_str());
+            return kExitWrite;
+        }
     }
 
+    // Measured here, not right after the solve: with --preset the bake and
+    // write dominate, and a time that excluded them would be misleading.
+    const double elapsed =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+
     if (!options.report.empty()) {
-        const int reportStatus = writeReport(options, result, elapsed);
+        const int reportStatus = writeReport(options, result, elapsed, presetOutcome);
         if (reportStatus != kExitOk) {
             return reportStatus;
         }
@@ -436,6 +603,13 @@ int main(int argc, char** argv) {
                     result.stats.triangleCount + result.stats.otherPolygonCount);
         std::printf("islands:   %zu (%zu failed)\n", result.stats.islandCount,
                     result.stats.islandsFailed);
+        if (presetOutcome.active) {
+            std::printf("preset:    %s (schema %d)\n", presetOutcome.preset.name.c_str(),
+                        presetOutcome.preset.schemaVersion);
+            for (const PresetOutcome::File& file : presetOutcome.files) {
+                std::printf("  %-12s %s\n", file.kind.c_str(), file.path.c_str());
+            }
+        }
         std::printf("time:      %.2fs\n", elapsed);
     }
     return result.status == remesh::RunStatus::Partial ? kExitPartial : kExitOk;

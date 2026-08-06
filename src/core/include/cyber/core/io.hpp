@@ -18,6 +18,10 @@ enum class ErrorCode {
     ParseError,
     EmptyMesh,
     WriteFailed,
+    // A versioned data file (an export preset) declares a schema version this
+    // engine does not support. Distinct from ParseError because the file is
+    // well-formed -- it is the contract that does not match.
+    IncompatibleVersion,
 };
 
 struct Error {

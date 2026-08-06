@@ -113,6 +113,7 @@ CyberStatus mapIoError(const cyber::io::Error& error) {
         case cyber::io::ErrorCode::UnsupportedFormat:
         case cyber::io::ErrorCode::ParseError:
         case cyber::io::ErrorCode::WriteFailed:
+        case cyber::io::ErrorCode::IncompatibleVersion:
             break;
     }
     return CYBER_ERR_IO;

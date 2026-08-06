@@ -119,6 +119,72 @@ def main() -> int:
         data = json.loads(report.read_text())
         check("pure quads: zero triangles", data["statistics"]["triangles"] == 0, str(data))
 
+    # --- export presets ------------------------------------------------
+    r = run("--list-presets")
+    check("list-presets exit 0", r.returncode == 0)
+    builtins = r.stdout.split()
+    check("list-presets names four", builtins == ["blender", "unity", "unreal", "gltf-generic"],
+          r.stdout)
+
+    # An unknown preset is an argument error that names the alternatives, and
+    # it fails BEFORE the remesh rather than after a full solve.
+    r = run("--input", str(sphere), "--output", str(out), "--preset", "nosuch")
+    check("unknown preset exit 2", r.returncode == 2, str(r.returncode))
+    check("unknown preset lists built-ins", "blender" in r.stderr, r.stderr)
+
+    preset_dir = tmp / "bundle"
+    preset_dir.mkdir()
+    preset_out = preset_dir / "hero.obj"
+    # --texture-size keeps the test fast: the AO bake is ~96% of a preset run's
+    # cost and scales with texel count, so the default 2048 would be minutes.
+    r = run("--input", str(sphere), "--output", str(preset_out), "--target-quads", "300",
+            "--preset", "blender", "--texture-size", "64", "--ao-samples", "4",
+            "--report", str(report), "--quiet")
+    check("preset run exit 0", r.returncode == 0, r.stderr)
+    for name in ("hero.obj", "hero_normal.png", "hero_ao.png", "hero_curvature.png",
+                 "hero_color.png"):
+        check(f"preset emitted {name}", (preset_dir / name).exists())
+    if report.exists():
+        data = json.loads(report.read_text())
+        check("report names the preset", data.get("preset", {}).get("name") == "blender",
+              str(data.get("preset")))
+        check("report records schema version", data["preset"]["schemaVersion"] == 1)
+        check("report lists every output", len(data.get("outputs", [])) == 5,
+              str(data.get("outputs")))
+        kinds = [o["kind"] for o in data["outputs"]]
+        check("report kinds", kinds == ["mesh", "normal", "ao", "curvature", "color"], str(kinds))
+        colors = {o["kind"]: o.get("colorSpace") for o in data["outputs"] if "colorSpace" in o}
+        check("color is sRGB, data maps linear",
+              colors == {"normal": "linear", "ao": "linear", "curvature": "linear",
+                         "color": "srgb"}, str(colors))
+
+    # A user preset file behaves exactly like a built-in.
+    user_preset = tmp / "mine.json"
+    user_preset.write_text(json.dumps({
+        "schemaVersion": 1, "name": "mine", "resolution": 64,
+        "namingPattern": "{basename}.{map}.{ext}", "maps": ["curvature"],
+    }))
+    check("report time covers the bake", json.loads(report.read_text())["elapsedSeconds"] > 0.0)
+    user_dir = tmp / "user"
+    user_dir.mkdir()
+    r = run("--input", str(sphere), "--output", str(user_dir / "u.obj"), "--target-quads", "300",
+            "--preset", str(user_preset), "--quiet")
+    check("user preset exit 0", r.returncode == 0, r.stderr)
+    check("user preset naming honored", (user_dir / "u.curvature.png").exists())
+
+    # An incompatible schema version fails loudly and produces nothing.
+    bad_preset = tmp / "future.json"
+    bad_preset.write_text(json.dumps({
+        "schemaVersion": 99, "name": "future", "maps": ["normal"],
+    }))
+    bad_dir = tmp / "bad"
+    bad_dir.mkdir()
+    r = run("--input", str(sphere), "--output", str(bad_dir / "b.obj"), "--target-quads", "300",
+            "--preset", str(bad_preset), "--quiet")
+    check("future preset exit 2", r.returncode == 2, str(r.returncode))
+    check("future preset names both versions", "99" in r.stderr, r.stderr)
+    check("future preset wrote nothing", not any(bad_dir.iterdir()), str(list(bad_dir.iterdir())))
+
     print(f"\n{len(FAILURES)} failure(s)")
     return 1 if FAILURES else 0
 

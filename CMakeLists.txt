@@ -65,6 +65,10 @@ add_subdirectory(src/quadrangulate)
 # UV module before capi so the C ABI can conditionally link cyber_uv (atlas).
 if(CYBER_BUILD_UV)
     add_subdirectory(src/uv)
+    # Preset-driven export packaging needs to unwrap a low-poly that has no UVs,
+    # so it rides on the UV module's availability. Without it the CLI still
+    # remeshes; only --preset is unavailable, and it says so.
+    add_subdirectory(src/exportbundle)
 endif()
 
 if(CYBER_BUILD_CAPI)
