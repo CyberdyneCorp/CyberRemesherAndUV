@@ -2,6 +2,7 @@
 
 #include <cmath>
 #include <cstddef>
+#include <limits>
 #include <vector>
 
 #include "cyber/core/mesh.hpp"
@@ -100,6 +101,52 @@ bool weightsInUnitRange(const retopo::SoftSelection& selection) {
 float radialDistance(Vec3 p) { return std::sqrt(p.x * p.x + p.z * p.z); }
 
 }  // namespace
+
+TEST_CASE("a non-finite weight cannot enter the field or move a vertex") {
+    // Regression: the [0,1] invariant was enforced with std::clamp alone, and
+    // std::clamp returns NaN unchanged (both of its comparisons are false for
+    // NaN). A NaN weight then slipped past the `w <= 0` early-out in
+    // transformWeighted and lerped the vertex to (nan,nan,nan) — one bad weight
+    // from a binding or a file silently destroyed the mesh.
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    const float inf = std::numeric_limits<float>::infinity();
+
+    retopo::SoftSelection selection;
+    selection.setWeight(VertexId{0}, nan);
+    selection.setWeight(VertexId{1}, inf);
+    selection.setWeight(VertexId{2}, -inf);
+    // Every non-finite value reads as "not selected". Saturating +inf to 1
+    // would be defensible arithmetically, but an infinite weight is always an
+    // upstream bug, and fully moving a vertex on a garbage value is worse than
+    // leaving it alone.
+    CHECK(selection.weight(VertexId{0}) == 0.0f);
+    CHECK(selection.weight(VertexId{1}) == 0.0f);
+    CHECK(selection.weight(VertexId{2}) == 0.0f);
+
+    const std::vector<float> raw = {nan, 0.5f, inf};
+    retopo::SoftSelection fromRaw;
+    fromRaw.fromWeights(raw);
+    for (std::size_t i = 0; i < raw.size(); ++i) {
+        const float w = fromRaw.weight(VertexId{static_cast<Index>(i)});
+        CHECK(std::isfinite(w));
+        CHECK(w >= 0.0f);
+        CHECK(w <= 1.0f);
+    }
+
+    // End to end: a NaN weight must leave its vertex exactly where it was.
+    Mesh mesh = makeGrid(3, 3);
+    retopo::SoftSelection sel;
+    sel.setWeight(VertexId{0}, nan);
+    const Vec3 before = mesh.position(VertexId{0});
+    retopo::Affine move;
+    move.translation = Vec3{100.0f, 100.0f, 100.0f};
+    retopo::transformWeighted(mesh, sel, move, nullptr, nullptr);
+    const Vec3 after = mesh.position(VertexId{0});
+    CHECK(std::isfinite(after.x));
+    CHECK(after.x == doctest::Approx(before.x));
+    CHECK(after.y == doctest::Approx(before.y));
+    CHECK(after.z == doctest::Approx(before.z));
+}
 
 // ---- gradient region selection: line ---------------------------------------
 

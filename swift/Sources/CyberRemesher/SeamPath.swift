@@ -65,7 +65,7 @@ public final class SeamSet {
         var out: OpaquePointer?
         try CyberError.check(cyber_seam_set_create(&out))
         guard let handle = out else {
-            throw CyberError.runtime("cyber_seam_set_create returned a null handle")
+            throw CyberError.outOfMemory  // "cyber_seam_set_create returned a null handle"
         }
         self.handle = handle
     }
@@ -125,7 +125,7 @@ public final class SeamPath {
         var out: OpaquePointer?
         try CyberError.check(cyber_seam_path_create(mesh.handle, &options, &out))
         guard let handle = out else {
-            throw CyberError.runtime("cyber_seam_path_create returned a null handle")
+            throw CyberError.outOfMemory  // "cyber_seam_path_create returned a null handle"
         }
         self.handle = handle
         self.mesh = mesh

@@ -105,6 +105,23 @@ fs::path writeHandoffFile(const std::string& name, const std::string& text) {
 
 }  // namespace
 
+TEST_CASE("a producer label that also occurs inside the comment key is read whole") {
+    // Regression: the label was located with comment.find(<label>) over the
+    // WHOLE line, so any label that is also a substring of the literal key
+    // "cyber_handoff_producer" matched inside the key itself — producer "a"
+    // came back as "andoff_producer a". Every pre-existing test used a label
+    // ("claytest", "buffers", "stdin") that could not collide, so the bug was
+    // invisible. Labels may also contain spaces, which the parse must keep.
+    const Fixture fixture = makeBoxFixture();
+    for (const std::string& label : {std::string("a"), std::string("producer"), std::string("c"),
+                                     std::string("clay core 2")}) {
+        const auto result = handoff::readFile(writeHandoffFile(
+            "producer.ply", writeHandoffText(fixture.vertices, fixture.triangles, 1, 0, label)));
+        REQUIRE(result.ok());
+        CHECK(result.value().producer == label);
+    }
+}
+
 TEST_CASE("a valid handoff file loads as a Target with its colors, normals and material mix") {
     const Fixture fixture = makeBoxFixture();
     const fs::path path = writeHandoffFile(

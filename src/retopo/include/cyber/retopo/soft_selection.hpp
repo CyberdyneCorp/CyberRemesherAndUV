@@ -57,7 +57,7 @@ public:
         if (i >= m_weights.size()) {
             m_weights.resize(i + 1, 0.0f);
         }
-        m_weights[i] = std::clamp(w, 0.0f, 1.0f);
+        m_weights[i] = sanitize(w);
     }
 
     // Zeroes every weight, keeping the allocated size.
@@ -70,11 +70,20 @@ public:
     void fromWeights(std::span<const float> w) {
         m_weights.assign(w.begin(), w.end());
         for (float& value : m_weights) {
-            value = std::clamp(value, 0.0f, 1.0f);
+            value = sanitize(value);
         }
     }
 
 private:
+    // std::clamp returns NaN unchanged (both of its comparisons are false for
+    // NaN), so clamping alone does NOT enforce the [0,1] invariant. A NaN that
+    // reaches the field then slips past the `w <= 0` early-out in the weighted
+    // transforms and lerps a vertex to (nan,nan,nan) — one bad weight silently
+    // destroys geometry. Non-finite input means "not selected".
+    [[nodiscard]] static float sanitize(float w) {
+        return std::isfinite(w) ? std::clamp(w, 0.0f, 1.0f) : 0.0f;
+    }
+
     std::vector<float> m_weights;
 };
 

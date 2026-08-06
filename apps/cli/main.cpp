@@ -323,6 +323,11 @@ int parseArgs(int argc, char** argv, CliOptions& options, bool& exitEarly) {
 // --bake <csv> -> the preset's map list. Unknown names are an argument error
 // naming the offender: silently dropping a requested map would ship an asset
 // missing exactly the texture the user asked for.
+//
+// Guarded to match its only call site: without the export-bundle module there
+// is nothing to bake, and an unconditional definition is an unused function,
+// which this tree compiles as an error.
+#ifdef CYBER_CLI_HAVE_PRESETS
 bool applyBakeMapOverride(const std::string& csv, cyber::io::ExportPreset& preset,
                           std::string& error) {
     std::vector<cyber::io::PresetMapEntry> maps;
@@ -362,6 +367,7 @@ bool applyBakeMapOverride(const std::string& csv, cyber::io::ExportPreset& prese
     preset.maps = std::move(maps);
     return true;
 }
+#endif  // CYBER_CLI_HAVE_PRESETS
 
 // What a --target run ingested, for the report.
 struct HandoffOutcome {

@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <cstring>
 #include <exception>
 #include <fstream>
 #include <istream>
@@ -99,7 +100,16 @@ HeaderDeclaration scanComments(const std::vector<std::string>& comments) {
             }
             out.version = Version{*major, *minor};
         } else if (tokens[0] == kProducerComment && tokens.size() > 1) {
-            out.producer = comment.substr(comment.find(tokens[1]));
+            // Take everything after the key, not the first occurrence of the
+            // first token: searching the whole line finds the label inside the
+            // key itself whenever the label is a substring of it (producer "a"
+            // matched the "a" in "cyber_handoff_producer", yielding
+            // "andoff_producer a"). The label may contain spaces, so it runs to
+            // the end of the comment.
+            const std::size_t after =
+                comment.find(kProducerComment) + std::strlen(kProducerComment);
+            const std::size_t start = comment.find_first_not_of(" \t", after);
+            out.producer = start == std::string::npos ? std::string() : comment.substr(start);
         }
     }
     return out;
