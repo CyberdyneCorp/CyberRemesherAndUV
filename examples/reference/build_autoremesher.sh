@@ -13,11 +13,31 @@ BUILD="$SRC/headless-build"
 BIN="$BUILD/autoremesher_cli"
 HARNESS="$DIR/autoremesher_harness.cpp"
 
-if [ -x "$BIN" ] && [ "$BIN" -nt "$HARNESS" ]; then echo "$BIN"; exit 0; fi
-
-if [ ! -d "$SRC/src" ]; then
-  git clone --depth 1 https://github.com/huxingyi/autoremesher.git "$SRC" >&2
+# The vendored sources are pinned: autoremesher.pin (shared with
+# cmake/QuadCoverSolver.cmake) records the exact commit, because different
+# upstream revisions produce different — and in one case nondeterministic —
+# field solvers. Verify the pin BEFORE the cached-binary shortcut below, which
+# only mtime-compares against the harness, not the vendored sources.
+PIN="$(tr -d '[:space:]' < "$DIR/autoremesher.pin")"
+fetch_pin() {
+  git -C "$SRC" fetch --depth 1 origin "$PIN" >&2
+  git -C "$SRC" checkout --force --detach FETCH_HEAD >&2
+}
+if [ ! -d "$SRC/.git" ]; then
+  echo "autoremesher: fetching pinned commit $PIN" >&2
+  git init -q "$SRC"
+  git -C "$SRC" remote add origin https://github.com/huxingyi/autoremesher.git
+  fetch_pin
+elif [ "$(git -C "$SRC" rev-parse HEAD 2>/dev/null || echo none)" != "$PIN" ]; then
+  echo "autoremesher: STALE checkout ($(git -C "$SRC" rev-parse HEAD 2>/dev/null || echo unknown)) — re-fetching pin $PIN" >&2
+  fetch_pin
 fi
+
+# The cached binary is valid only if it was linked from the pinned sources
+# ($BUILD/.pin stamp, written after a successful link) — the checkout may have
+# been moved by cmake/QuadCoverSolver.cmake without going through this script.
+if [ -x "$BIN" ] && [ "$BIN" -nt "$HARNESS" ] \
+   && [ "$(cat "$BUILD/.pin" 2>/dev/null)" = "$PIN" ]; then echo "$BIN"; exit 0; fi
 
 mkdir -p "$BUILD"
 cd "$SRC"
@@ -73,5 +93,6 @@ for s in "${SRCS[@]}" "$HARNESS"; do
 done
 g++ -O2 -fopenmp -pthread "${OBJS[@]}" -o "$BIN" -ltbb -lz -ldl -lm 2>>"$BUILD/errors.log" || {
   echo "link failed:" >&2; tail -30 "$BUILD/errors.log" >&2; exit 1; }
+echo "$PIN" > "$BUILD/.pin"
 
 echo "$BIN"

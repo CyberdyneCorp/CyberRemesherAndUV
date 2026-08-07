@@ -372,6 +372,20 @@
 
 ### Changed
 
+- **The vendored AutoRemesher/Geogram sources are now pinned to commit
+  `b43dc827edd5d39db2f2c925e1b16d5b33ec8388`.** Both fetch sites
+  (`cmake/QuadCoverSolver.cmake` and `examples/reference/build_autoremesher.sh`)
+  used to `git clone --depth 1` upstream HEAD, so the quad-cover field solver —
+  which every benchmark number flows through — depended on when the checkout
+  happened. This was not hypothetical: a stale checkout
+  (`e2d9b6f4`) produced a solver that was nondeterministic on the bench sphere
+  (696/810 quads across identical runs) while the current upstream commit is
+  deterministic (622 quads, 17 singularities, five identical runs). The commit
+  now lives in one place, `examples/reference/autoremesher.pin`, read by both
+  consumers; the sources are fetched as a shallow fetch of that exact SHA, and
+  a checkout found at any other commit is loudly re-fetched to the pin instead
+  of silently building the wrong solver.
+
 - **`CyberSoftTransformReport.moved` now counts DISTINCT vertices for the
   weighted relax too, not per-iteration writes.** It already meant distinct
   vertices for `cyber_retopo_selection_transform`, but

@@ -8,6 +8,49 @@
 # This target must NOT inherit the main tree's strict C++20 warning flags: Geogram
 # is C++14 and warns heavily. It is built at C++14 with -w, exactly mirroring the
 # shell script's flags/includes/defines. cyber_set_warnings is never called on it.
+
+# Ensure the vendored AutoRemesher checkout at ${_ar} sits at the exact commit
+# recorded in examples/reference/autoremesher.pin (shared with
+# build_autoremesher.sh). Every benchmark number flows through this field
+# solver, so an unpinned or stale checkout is an unpinned benchmark: the two
+# revisions seen in the wild produce different, and in one case
+# nondeterministic, solvers. Fetches the pinned commit into a fresh checkout,
+# or force-resets a checkout found at any other commit.
+function(cyber_fetch_pinned_autoremesher _ar _pin)
+    set(_url "https://github.com/huxingyi/autoremesher.git")
+    if(NOT EXISTS "${_ar}/.git")
+        message(STATUS "cyber_quadcover_solver: fetching AutoRemesher ${_pin} into ${_ar}")
+        execute_process(COMMAND git init -q "${_ar}" RESULT_VARIABLE _rc)
+        if(_rc EQUAL 0)
+            execute_process(COMMAND git -C "${_ar}" remote add origin "${_url}"
+                            RESULT_VARIABLE _rc)
+        endif()
+    else()
+        execute_process(COMMAND git -C "${_ar}" rev-parse HEAD
+                        OUTPUT_VARIABLE _head OUTPUT_STRIP_TRAILING_WHITESPACE
+                        ERROR_QUIET RESULT_VARIABLE _rc)
+        if(_rc EQUAL 0 AND _head STREQUAL _pin)
+            return()
+        endif()
+        message(WARNING "cyber_quadcover_solver: vendored AutoRemesher checkout at "
+                        "'${_head}' does not match pin ${_pin} — re-fetching the pinned "
+                        "commit (a stale checkout builds a DIFFERENT field solver)")
+        set(_rc 0)
+    endif()
+    if(_rc EQUAL 0)
+        execute_process(COMMAND git -C "${_ar}" fetch --depth 1 origin "${_pin}"
+                        RESULT_VARIABLE _rc)
+    endif()
+    if(_rc EQUAL 0)
+        execute_process(COMMAND git -C "${_ar}" checkout --force --detach FETCH_HEAD
+                        RESULT_VARIABLE _rc)
+    endif()
+    if(NOT _rc EQUAL 0)
+        message(FATAL_ERROR "cyber_quadcover_solver: failed to fetch AutoRemesher at "
+                            "pinned commit ${_pin}")
+    endif()
+endfunction()
+
 function(cyber_add_quadcover_solver)
     set(_ref "${PROJECT_SOURCE_DIR}/examples/reference")
     set(_ar "${_ref}/autoremesher-src")
@@ -26,18 +69,13 @@ function(cyber_add_quadcover_solver)
         return()
     endif()
 
-    # The AutoRemesher/Geogram sources are vendored on demand by the reference
-    # build script (git clone). Fetch them here too so a clean checkout can
-    # configure with -DCYBER_WITH_QUADCOVER=ON without a separate manual step.
-    if(NOT EXISTS "${_ar}/autoremesher.pro")
-        message(STATUS "cyber_quadcover_solver: cloning AutoRemesher sources into ${_ar}")
-        execute_process(
-            COMMAND git clone --depth 1 https://github.com/huxingyi/autoremesher.git "${_ar}"
-            RESULT_VARIABLE _clone_rc)
-        if(NOT _clone_rc EQUAL 0)
-            message(FATAL_ERROR "cyber_quadcover_solver: failed to clone AutoRemesher sources")
-        endif()
-    endif()
+    # The AutoRemesher/Geogram sources are vendored on demand at the exact
+    # commit recorded in autoremesher.pin (single source of truth, shared with
+    # build_autoremesher.sh), so a clean checkout can configure with
+    # -DCYBER_WITH_QUADCOVER=ON and always builds the same field solver.
+    file(READ "${_ref}/autoremesher.pin" _pin)
+    string(STRIP "${_pin}" _pin)
+    cyber_fetch_pinned_autoremesher("${_ar}" "${_pin}")
 
     # Parse the SOURCES the .pro lists, keeping only the Qt-free core the harness
     # compiles (geogram subset + AutoRemesher + isotropicremesher). This is the
