@@ -162,11 +162,13 @@ def quad_quality(mesh: MeshData) -> dict:
             deviations.append(abs(math.degrees(math.acos(cosine)) - 90.0))
             lengths.append(float(n1))
     if not deviations:
-        return {"angle_dev_mean": 180.0, "angle_dev_p95": 180.0, "edge_length_cv": math.inf}
+        return {"angle_dev_mean": 180.0, "angle_dev_median": 180.0,
+                "angle_dev_p95": 180.0, "edge_length_cv": math.inf}
     dev = np.asarray(deviations)
     lens = np.asarray(lengths)
     return {
         "angle_dev_mean": float(dev.mean()),
+        "angle_dev_median": float(np.median(dev)),
         "angle_dev_p95": float(np.quantile(dev, 0.95)),
         "edge_length_cv": float(lens.std() / lens.mean()) if lens.mean() > 0 else math.inf,
     }
