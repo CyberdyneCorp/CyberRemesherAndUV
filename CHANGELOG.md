@@ -419,6 +419,24 @@
 
 ### Fixed
 
+- **The native seamless solve left fractional seam translations on crease-heavy
+  meshes (sharp-cube residual 0.493).** The reduced MIQ elimination can make a
+  seam translation or crease lattice offset DEPENDENT on a continuous free —
+  canonically a cone position `x` entering a seam loop as `t = (I - R^rho)·x`
+  with `|det(I - R^{±1})| = 2` — and the greedy rounding schedule only pinned
+  the independent integers, so those translations stayed at whatever fraction
+  the Dirichlet optimum chose and the map was not an integer grid across those
+  seams. Such continuous frees now join the rounding schedule on their joint
+  sub-integer lattice (step `1/lcm(|integer coeffs|)`, half-integer for the
+  `±1`-cone case), pinned by the same scheduler; reductions that were already
+  integer-exact produce no lattice frees, and the output is byte-identical
+  there (verified: box_sharp, cylinder, cube, sphere, torus, spot native runs).
+  The sharp-cube unit gate `seamlessUvResidual < 1e-3` now passes, and fandisk
+  (the one corpus mesh with violations) improves at every density 400–3000:
+  singularities 61/86/80/112/99 → 46/46/40/48/39, angle_dev_mean and
+  edge_length_cv down across the board, feature recall 4/5 densities up,
+  count-matched within 2.4%.
+
 - **A pinned vertex was moved by a weighted transform through every binding.**
   `cyber_capi.h` documented, for that exact block, "a vertex whose weight is 0
   (and any pinned vertex) is not moved", and the engine's `transformWeighted()`

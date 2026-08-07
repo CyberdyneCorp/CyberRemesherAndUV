@@ -2042,6 +2042,36 @@ int solveSeamlessReduced(accel::IBackend& backend, std::size_t nCut,
     const std::vector<char>& isPivot = red.isPivot;
     const std::vector<Row>& pivotExpr = red.pivotExpr;
 
+    // Joint-lattice closure of the surviving integrality violations: a pivoted
+    // (dependent) seam translation or crease offset whose expression reaches a
+    // CONTINUOUS free evaluates to an integer only if that free lands on a
+    // sub-integer lattice. The canonical case is a cone position x entering a
+    // seam loop as t = (I - R^rho) x with |det(I - R^{+-1})| = 2: the two
+    // translations are 2x (+ integers), so x must sit on the HALF-integer
+    // lattice — which the plain greedy schedule (integers only) never enforces,
+    // leaving those seams at a fractional translation (sharp-cube residual
+    // 0.493). Promote every such continuous free into the rounding schedule
+    // with lattice step 1/lcm(|integer coeffs on it|); the greedy scheduler
+    // below then pins it exactly like an integer, scaled. Reductions that are
+    // already integer-exact produce no lattice frees, so the schedule (and the
+    // output) is unchanged on those meshes.
+    std::vector<long> latticeDen(nUv, 0);
+    for (std::size_t j = nUv; j < N; ++j) {
+        if (!isPivot[j]) {
+            continue;
+        }
+        for (const auto& [c, cw] : pivotExpr[j]) {
+            if (c >= nUv || std::abs(cw - std::round(cw)) > 1e-6) {
+                continue;  // integer free, or a non-integer coeff this closure cannot fix
+            }
+            const long a = std::labs(std::lround(cw));
+            if (a == 0) {
+                continue;
+            }
+            latticeDen[c] = latticeDen[c] == 0 ? a : std::lcm(latticeDen[c], a);
+        }
+    }
+
     // Independent variables -> reduced index; classify integer (translation) frees for rounding.
     std::vector<std::size_t> freeIx(N, kInvalidIndex);
     std::vector<std::size_t> intFree;  // reduced indices of independent integer translations
@@ -2053,6 +2083,19 @@ int solveSeamlessReduced(accel::IBackend& backend, std::size_t nCut,
                 intFree.push_back(freeIx[j]);
             }
         }
+    }
+    // Lattice-constrained continuous frees join the rounding schedule after the
+    // true integers (ordinals < nTrueInt stay valid for the Bi-MDF paths, which
+    // treat lattice frees as continuous). intScale[k] is the lattice multiplier:
+    // pin w to round(w * scale) / scale; exactly 1 for the true integers.
+    const std::size_t nTrueInt = intFree.size();
+    std::vector<double> intScale(nTrueInt, 1.0);
+    for (std::size_t j = 0; j < nUv; ++j) {
+        if (isPivot[j] || latticeDen[j] == 0) {
+            continue;
+        }
+        intFree.push_back(freeIx[j]);
+        intScale.push_back(static_cast<double>(latticeDen[j]));
     }
 
     // Reduction map on the UV block only: Tuv (nUv x W) and its transpose Tt (W x nUv).
@@ -2697,8 +2740,8 @@ int solveSeamlessReduced(accel::IBackend& backend, std::size_t nCut,
         // for the back-substitution and the post-solve deviation report).
         if (tmesh.ok) {
             std::vector<std::size_t> ordinalOf(W, kInvalidIndex);
-            for (std::size_t k = 0; k < intFree.size(); ++k) {
-                ordinalOf[intFree[k]] = k;
+            for (std::size_t k = 0; k < nTrueInt; ++k) {
+                ordinalOf[intFree[k]] = k;  // lattice frees stay continuous to the flow
             }
             bimdfArcRows.resize(tmesh.arcs.size());
             for (std::size_t a = 0; a < tmesh.arcs.size(); ++a) {
@@ -3167,10 +3210,14 @@ int solveSeamlessReduced(accel::IBackend& backend, std::size_t nCut,
         if (cancel != nullptr && cancel->isCancelled()) {
             break;
         }
-        // Pin every still-free integer that is already confidently near an integer.
+        // Pin every still-free integer that is already confidently near an integer
+        // (near its lattice, for the lattice-scaled continuous frees: the pin and
+        // the confidence both act on the SCALED value, so scale 1 is bit-identical
+        // to the historical integer arithmetic).
         const auto pin = [&](std::size_t k) {
             const std::size_t ri = intFree[k];
-            w[ri] = static_cast<float>(clampInt(static_cast<double>(w[ri])));
+            const double s = intScale[k];
+            w[ri] = static_cast<float>(clampInt(static_cast<double>(w[ri]) * s) / s);
             mask[ri] = 0;
             intPinned[k] = 1;
             --remaining;
@@ -3181,7 +3228,7 @@ int solveSeamlessReduced(accel::IBackend& backend, std::size_t nCut,
             if (intPinned[k]) {
                 continue;
             }
-            const double val = static_cast<double>(w[intFree[k]]);
+            const double val = static_cast<double>(w[intFree[k]]) * intScale[k];
             const double f = std::abs(val - std::round(val));
             if (f <= kConfident) {
                 pin(k);
@@ -3238,6 +3285,32 @@ int solveSeamlessReduced(accel::IBackend& backend, std::size_t nCut,
         v[i] = zUv[nCut + i];
     }
 
+    // CYBER_QC_SEAM_DUMP: integrality audit of the final map — every seam whose
+    // realized translation is off the integer lattice, with its rho / feature
+    // flag / side-A UV (the diagnostic that located the joint-lattice defect).
+    if (std::getenv("CYBER_QC_SEAM_DUMP") != nullptr) {
+        for (std::size_t e = 0; e < nSeam; ++e) {
+            const SeamRef& s = seams[e];
+            double cxu, cxv, cyu, cyv;
+            rotCoeffs(s.rho, cxu, cxv, cyu, cyv);
+            const auto tOf = [&](std::size_t pA, std::size_t pB, double& tx, double& ty) {
+                tx = static_cast<double>(u[pB]) - (cxu * u[pA] + cxv * v[pA]);
+                ty = static_cast<double>(v[pB]) - (cyu * u[pA] + cyv * v[pA]);
+            };
+            double txA, tyA, txB, tyB;
+            tOf(s.aA, s.aB, txA, tyA);
+            tOf(s.bA, s.bB, txB, tyB);
+            const auto fr = [](double x) { return std::abs(x - std::round(x)); };
+            const double worst = std::max(std::max(fr(txA), fr(tyA)), std::max(fr(txB), fr(tyB)));
+            if (worst > 1e-3) {
+                std::fprintf(stderr,
+                             "[qc-seam] e=%zu rho=%d feat=%d pinAxis=%d tA=(%.4f,%.4f) "
+                             "tB=(%.4f,%.4f) uvA=(%.4f,%.4f) frac=%.4f\n",
+                             e, s.rho, s.feature ? 1 : 0, s.pinAxis, txA, tyA, txB, tyB,
+                             static_cast<double>(u[s.aA]), static_cast<double>(v[s.aA]), worst);
+            }
+        }
+    }
     if (dbg) {
         std::fprintf(stderr,
                      "[qc] reduced: nCut=%zu seams=%zu vars=%zu free=%zu intFree=%zu "
