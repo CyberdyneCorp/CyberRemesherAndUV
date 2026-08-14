@@ -442,6 +442,20 @@ TEST_CASE("commit arms a resume marker and dropping it leaves committed seams in
         CHECK(path.segment(0).vertices.back() == VertexId{gridVertex(kCols - 1, 4)});
     }
 
+    SUBCASE("re-adding the resume vertex changes nothing") {
+        // The armed marker is the effective last waypoint, so this is a repeat
+        // and must not seed the pending path on its way to returning false.
+        CHECK_FALSE(path.addWaypoint(path.resumeMarker()));
+        CHECK(path.waypointCount() == 0);
+        CHECK(path.segmentCount() == 0);
+        CHECK(path.hasResumeMarker());
+
+        // The next real waypoint still resumes from the committed end.
+        REQUIRE(path.addWaypoint(VertexId{gridVertex(kCols - 1, 4)}));
+        CHECK(path.waypointCount() == 2);
+        CHECK(path.waypoints().front() == to);
+    }
+
     SUBCASE("dropping the marker starts a fresh path and changes no committed seam") {
         path.dropResumeMarker();
         CHECK_FALSE(path.hasResumeMarker());

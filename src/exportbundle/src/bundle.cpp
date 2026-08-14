@@ -77,6 +77,18 @@ bool ensureUvs(Mesh& low, BundleResult& result) {
     return true;
 }
 
+// Whether a map path stays under the caller's output directory. The file name
+// comes from the preset's namingPattern, which is DATA from a possibly
+// third-party file, so containment is checked before anything is written. The
+// test is purely lexical: no filesystem access, so it holds for a directory
+// that does not exist yet and does not depend on symlink resolution.
+bool isInsideDirectory(const std::filesystem::path& directory, const std::filesystem::path& path) {
+    const std::filesystem::path base =
+        (directory.empty() ? std::filesystem::path(".") : directory).lexically_normal();
+    const std::filesystem::path relative = path.lexically_normal().lexically_relative(base);
+    return !relative.empty() && *relative.begin() != "..";
+}
+
 // Applies the preset's conventions to a freshly baked map and writes it.
 bool writeMap(const ExportPreset& preset, const PresetMapEntry& entry, bake::Image image,
               const std::filesystem::path& path, BundleResult& result) {
@@ -98,9 +110,23 @@ bool writeMap(const ExportPreset& preset, const PresetMapEntry& entry, bake::Ima
         }
     }
 
+    const std::string ext =
+        path.has_extension() ? path.extension().string().substr(1) : std::string();
+    if (!ext.empty() && ext != preset.textureFormat) {
+        result.warnings.push_back(std::string("map '") + io::presetMapName(entry.map) +
+                                  "' is named '." + ext + "' but the preset writes " +
+                                  preset.textureFormat + "; writing " + preset.textureFormat);
+    }
+
     const int width = image.width;
     const int height = image.height;
-    if (!imageio::saveImage(path.string(), image)) {
+    // The preset, not the file name, picks the container: the extension-
+    // dispatching saveImage() overload would otherwise switch the encoder
+    // behind the color-space policy chosen just above, writing sRGB bytes into
+    // a float EXR or clamping a float map into 8-bit PNG.
+    const imageio::ImageFormat format =
+        preset.textureFormat == "exr" ? imageio::ImageFormat::Exr : imageio::ImageFormat::Png;
+    if (!imageio::saveImage(path.string(), image, format)) {
         result.error = "cannot write map '" + path.string() + "'";
         return false;
     }
@@ -172,6 +198,12 @@ BundleResult writeBundle(Mesh& low, const Mesh& high, const BundleParams& params
         }
         const std::filesystem::path path =
             directory / io::presetMapFileName(preset, entry, basename);
+        if (!isInsideDirectory(directory, path)) {
+            result.error = "map '" + path.string() +
+                           "' resolves outside the output directory; check the preset's "
+                           "namingPattern and the basename";
+            return result;
+        }
         if (!writeMap(preset, entry, std::move(baked.image), path, result)) {
             return result;
         }

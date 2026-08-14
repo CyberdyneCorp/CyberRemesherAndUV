@@ -150,6 +150,14 @@ Result<ColorSpace> parseColorSpace(const std::string& text, std::string_view ori
                       ": colorSpace must be \"linear\" or \"srgb\", found \"" + text + "\"");
 }
 
+// A map suffix is substituted into the file NAME, so it has to stay a name: a
+// separator or a ".." would move the map out of the caller's output directory
+// exactly like an escaping namingPattern does.
+bool isFileNameToken(const std::string& text) {
+    return text != ".." && text.find('/') == std::string::npos &&
+           text.find('\\') == std::string::npos;
+}
+
 // Reads the "maps" array. Each entry is either a bare map name or an object
 // with `map` plus optional `colorSpace` / `suffix`.
 Result<std::vector<PresetMapEntry>> parseMaps(const json& node, std::string_view origin) {
@@ -170,9 +178,17 @@ Result<std::vector<PresetMapEntry>> parseMaps(const json& node, std::string_view
             }
             mapName = item["map"].get<std::string>();
             if (item.contains("colorSpace")) {
+                if (!item["colorSpace"].is_string()) {
+                    return parseError(std::string(origin) +
+                                      ": a \"maps\" entry's \"colorSpace\" must be a string");
+                }
                 colorSpaceText = item["colorSpace"].get<std::string>();
             }
             if (item.contains("suffix")) {
+                if (!item["suffix"].is_string()) {
+                    return parseError(std::string(origin) +
+                                      ": a \"maps\" entry's \"suffix\" must be a string");
+                }
                 suffix = item["suffix"].get<std::string>();
             }
         } else {
@@ -196,11 +212,59 @@ Result<std::vector<PresetMapEntry>> parseMaps(const json& node, std::string_view
             entry.colorSpace = space.value();
         }
         if (suffix.has_value()) {
+            if (!isFileNameToken(*suffix)) {
+                return parseError(std::string(origin) + ": map suffix \"" + *suffix +
+                                  "\" must be a plain file-name fragment");
+            }
             entry.suffix = *suffix;
         }
         maps.push_back(std::move(entry));
     }
     return maps;
+}
+
+// Optional string field. Absent leaves `out` at its default; present but
+// wrong-typed is a ParseError naming the field, because parsePreset's contract
+// is to REPORT malformed content, not to throw a json exception through a
+// caller that only checks Result::ok().
+std::optional<Error> readString(const json& root, const char* key, std::string_view origin,
+                                std::string& out) {
+    if (!root.contains(key)) {
+        return std::nullopt;
+    }
+    if (!root[key].is_string()) {
+        return parseError(std::string(origin) + ": \"" + key + "\" must be a string");
+    }
+    out = root[key].get<std::string>();
+    return std::nullopt;
+}
+
+std::optional<Error> readInt(const json& root, const char* key, std::string_view origin, int& out) {
+    if (!root.contains(key)) {
+        return std::nullopt;
+    }
+    if (!root[key].is_number_integer()) {
+        return parseError(std::string(origin) + ": \"" + key + "\" must be an integer");
+    }
+    out = root[key].get<int>();
+    return std::nullopt;
+}
+
+// A naming pattern names a file INSIDE the caller's output directory. An
+// absolute pattern or one with a `..` component makes a preset FILE decide
+// where the engine writes, so a downloaded preset could overwrite anything the
+// process can reach; the pattern is data, never a destination.
+bool patternEscapesOutputDirectory(const std::string& pattern) {
+    const std::filesystem::path path(pattern);
+    if (path.is_absolute() || path.has_root_name() || path.has_root_directory()) {
+        return true;
+    }
+    for (const std::filesystem::path& part : path) {
+        if (part == "..") {
+            return true;
+        }
+    }
+    return false;
 }
 
 void replaceAll(std::string& text, std::string_view token, std::string_view value) {
@@ -293,49 +357,60 @@ Result<ExportPreset> parsePreset(std::string_view json_text, std::string_view or
     }
     preset.name = root["name"].get<std::string>();
 
-    if (root.contains("meshFormat")) {
-        preset.meshFormat = root["meshFormat"].get<std::string>();
+    if (const std::optional<Error> bad =
+            readString(root, "meshFormat", origin, preset.meshFormat)) {
+        return *bad;
     }
     if (!isSupportedMeshFormat(preset.meshFormat)) {
         return Error{ErrorCode::UnsupportedFormat,
                      std::string(origin) + ": unsupported meshFormat \"" + preset.meshFormat +
                          "\" (obj, ply, stl, gltf, glb)"};
     }
-    if (root.contains("textureFormat")) {
-        preset.textureFormat = root["textureFormat"].get<std::string>();
+    if (const std::optional<Error> bad =
+            readString(root, "textureFormat", origin, preset.textureFormat)) {
+        return *bad;
     }
     if (preset.textureFormat != "png" && preset.textureFormat != "exr") {
         return Error{ErrorCode::UnsupportedFormat, std::string(origin) +
                                                        ": unsupported textureFormat \"" +
                                                        preset.textureFormat + "\" (png, exr)"};
     }
-    if (root.contains("namingPattern")) {
-        preset.namingPattern = root["namingPattern"].get<std::string>();
+    if (const std::optional<Error> bad =
+            readString(root, "namingPattern", origin, preset.namingPattern)) {
+        return *bad;
     }
     if (preset.namingPattern.find("{map}") == std::string::npos) {
         return parseError(std::string(origin) +
                           ": namingPattern must contain {map}, or every map would "
                           "overwrite the previous one");
     }
+    if (patternEscapesOutputDirectory(preset.namingPattern)) {
+        return parseError(std::string(origin) + ": namingPattern \"" + preset.namingPattern +
+                          "\" must be a relative name inside the output directory (no leading "
+                          "\"/\" and no \"..\")");
+    }
     if (root.contains("normalGreen")) {
-        const Result<GreenChannel> green =
-            parseGreen(root["normalGreen"].get<std::string>(), origin);
+        std::string greenText;
+        if (const std::optional<Error> bad = readString(root, "normalGreen", origin, greenText)) {
+            return *bad;
+        }
+        const Result<GreenChannel> green = parseGreen(greenText, origin);
         if (!green.ok()) {
             return green.error();
         }
         preset.normalGreen = green.value();
     }
-    if (root.contains("resolution")) {
-        preset.resolution = root["resolution"].get<int>();
-        if (preset.resolution <= 0) {
-            return parseError(std::string(origin) + ": resolution must be positive");
-        }
+    if (const std::optional<Error> bad = readInt(root, "resolution", origin, preset.resolution)) {
+        return *bad;
     }
-    if (root.contains("units")) {
-        preset.units = root["units"].get<std::string>();
+    if (preset.resolution <= 0) {
+        return parseError(std::string(origin) + ": resolution must be positive");
     }
-    if (root.contains("upAxis")) {
-        preset.upAxis = root["upAxis"].get<std::string>();
+    if (const std::optional<Error> bad = readString(root, "units", origin, preset.units)) {
+        return *bad;
+    }
+    if (const std::optional<Error> bad = readString(root, "upAxis", origin, preset.upAxis)) {
+        return *bad;
     }
     if (!root.contains("maps")) {
         return parseError(std::string(origin) + ": missing \"maps\"");

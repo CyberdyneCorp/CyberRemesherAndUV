@@ -48,6 +48,11 @@ json handle(BridgeSession& session, const json& req) {
         for (const json& g : req.at("guides")) {
             WireGuide guide;
             for (const json& p : g.at("points")) {
+                // operator[](size_type) on a const array node is unchecked, so
+                // the shape has to be validated before the components are read.
+                if (!p.is_array() || p.size() != 3) {
+                    return error("push_guides: each point must be [x, y, z]");
+                }
                 guide.points.push_back(p[0].get<float>());
                 guide.points.push_back(p[1].get<float>());
                 guide.points.push_back(p[2].get<float>());

@@ -4,6 +4,7 @@
 
 #include <filesystem>
 #include <fstream>
+#include <string>
 
 #include "cyber/core/io.hpp"
 #include "cyber/core/mesh.hpp"
@@ -140,6 +141,106 @@ TEST_CASE("corrupt glTF is a typed ParseError (spec: mesh-io corrupt input)") {
     REQUIRE(!result.ok());
     REQUIRE(result.error().code == io::ErrorCode::ParseError);
     // Document unchanged is the caller's guarantee; importer returns no mesh.
+}
+
+// One-triangle glTF whose buffer is exactly 48 bytes: 3 VEC3 float positions
+// followed by 3 uint32 indices. Malformed variants below are made by rewriting
+// a single field, so the rest of the document stays valid and tinygltf parses.
+namespace {
+
+constexpr const char* kTriangleGltf = R"({
+  "asset": {"version": "2.0"},
+  "scenes": [{"nodes": [0]}],
+  "nodes": [{"mesh": 0}],
+  "meshes": [{"primitives": [{"attributes": {"POSITION": 0}, "indices": 1, "mode": 4}]}],
+  "accessors": [
+    {"bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3"},
+    {"bufferView": 1, "componentType": 5125, "count": 3, "type": "SCALAR"}
+  ],
+  "bufferViews": [
+    {"buffer": 0, "byteOffset": 0, "byteLength": 36},
+    {"buffer": 0, "byteOffset": 36, "byteLength": 12}
+  ],
+  "buffers": [{"byteLength": 48, "uri": "data:application/octet-stream;base64,AAAAAAAAAAAAAAAAAACAPwAAAAAAAAAAAAAAAAAAgD8AAAAAAAAAAAEAAAACAAAA"}]
+})";
+
+fs::path writeGltf(const char* name, const std::string& find, const std::string& replace) {
+    std::string doc = kTriangleGltf;
+    if (!find.empty()) {
+        const std::size_t at = doc.find(find);
+        REQUIRE(at != std::string::npos);
+        doc.replace(at, find.size(), replace);
+    }
+    const fs::path path = tempDir() / name;
+    std::ofstream f(path, std::ios::trunc);
+    f << doc;
+    return path;
+}
+
+}  // namespace
+
+TEST_CASE("hand-written one-triangle glTF imports (control for the malformed cases)") {
+    auto result = io::importMesh(writeGltf("triangle.gltf", "", ""));
+    REQUIRE(result.ok());
+    REQUIRE(result.value().mesh.faceCount() == 1);
+    REQUIRE(result.value().mesh.vertexCount() == 3);
+}
+
+TEST_CASE("glTF with an out-of-range accessor index is a typed ParseError, not a crash") {
+    // POSITION names accessor 99 against a two-accessor document.
+    auto result =
+        io::importMesh(writeGltf("bad_attr_index.gltf", R"("POSITION": 0)", R"("POSITION": 99)"));
+    REQUIRE(!result.ok());
+    REQUIRE(result.error().code == io::ErrorCode::ParseError);
+}
+
+TEST_CASE("glTF accessor with no bufferView is a typed ParseError, not a crash") {
+    // tinygltf leaves the omitted "bufferView" at -1.
+    auto result =
+        io::importMesh(writeGltf("no_bufferview.gltf", R"({"bufferView": 0, "componentType": 5126)",
+                                 R"({"componentType": 5126)"));
+    REQUIRE(!result.ok());
+    REQUIRE(result.error().code == io::ErrorCode::ParseError);
+}
+
+TEST_CASE("glTF bufferView pointing at a missing buffer is a typed ParseError, not a crash") {
+    auto result =
+        io::importMesh(writeGltf("bad_buffer_index.gltf", R"({"buffer": 0, "byteOffset": 0)",
+                                 R"({"buffer": 7, "byteOffset": 0)"));
+    REQUIRE(!result.ok());
+    REQUIRE(result.error().code == io::ErrorCode::ParseError);
+}
+
+TEST_CASE("glTF attribute accessor over-declaring count is a typed ParseError, not an over-read") {
+    // count claims 5M vertices behind a 36-byte bufferView.
+    auto result =
+        io::importMesh(writeGltf("huge_position_count.gltf", R"("count": 3, "type": "VEC3")",
+                                 R"("count": 5000000, "type": "VEC3")"));
+    REQUIRE(!result.ok());
+    REQUIRE(result.error().code == io::ErrorCode::ParseError);
+}
+
+TEST_CASE("glTF index accessor over-declaring count is a typed ParseError, not an over-read") {
+    auto result =
+        io::importMesh(writeGltf("huge_index_count.gltf", R"("count": 3, "type": "SCALAR")",
+                                 R"("count": 5000000, "type": "SCALAR")"));
+    REQUIRE(!result.ok());
+    REQUIRE(result.error().code == io::ErrorCode::ParseError);
+}
+
+TEST_CASE("glTF accessor whose byteOffset walks past the bufferView is a typed ParseError") {
+    auto result = io::importMesh(
+        writeGltf("bad_byte_offset.gltf", R"({"bufferView": 0, "componentType": 5126)",
+                  R"({"bufferView": 0, "byteOffset": 32, "componentType": 5126)"));
+    REQUIRE(!result.ok());
+    REQUIRE(result.error().code == io::ErrorCode::ParseError);
+}
+
+TEST_CASE("glTF SCALAR POSITION accessor is rejected rather than read out of stride") {
+    auto result = io::importMesh(writeGltf("scalar_position.gltf", R"("count": 3, "type": "VEC3")",
+                                           R"("count": 3, "type": "SCALAR")"));
+    REQUIRE(!result.ok());
+    REQUIRE(result.error().code == io::ErrorCode::ParseError);
 }
 
 TEST_CASE("corrupt PLY is a typed ParseError") {

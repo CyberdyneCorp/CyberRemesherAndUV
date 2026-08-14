@@ -1,10 +1,10 @@
 """ctypes binding layer for the CyberRemesher C ABI (`capi` module).
 
 This module mirrors the contract published in ``cyber_capi.h`` and shipped as
-``libcyber_capi_shared.so`` / ``.dylib`` / ``cyber_capi_shared.dll``. No C++
-type crosses the boundary: opaque handles are ``void*``, everything else is a
-plain C scalar, struct or function pointer, and errors travel as status codes
-plus a thread-local ``cyber_last_error()`` string.
+``libcyber_capi.so`` / ``.dylib`` / ``cyber_capi.dll``. No C++ type crosses the
+boundary: opaque handles are ``void*``, everything else is a plain C scalar,
+struct or function pointer, and errors travel as status codes plus a
+thread-local ``cyber_last_error()`` string.
 
 Importing this module never dlopens anything. The shared library is located and
 loaded lazily on the first :func:`get_lib` call, so ``import cyberremesh`` works
@@ -15,6 +15,7 @@ actual remesh until the library is present).
 from __future__ import annotations
 
 import ctypes
+import ctypes.util
 import os
 import sys
 from ctypes import (
@@ -352,14 +353,55 @@ class CyberFieldEvaluator(Structure):
 # Library discovery
 # ---------------------------------------------------------------------------
 
+# SOVERSION is the project's major version (capi/CMakeLists.txt), which is what
+# an install leaves next to the unversioned developer symlink.
+_SOVERSION = 0
+
 
 def _lib_filenames() -> List[str]:
-    """Platform-appropriate shared-library file names, most specific first."""
+    """Platform-appropriate shared-library file names, most specific first.
+
+    The build sets ``OUTPUT_NAME cyber_capi`` (capi/CMakeLists.txt), so the real
+    artifact is ``libcyber_capi.*``; the versioned soname is listed too because
+    an install may ship only that. The ``*_shared`` names are kept as trailing
+    fallbacks for anything that bundled the target name verbatim.
+    """
     if sys.platform == "darwin":
-        return ["libcyber_capi_shared.dylib", "libcyber_capi_shared.so"]
+        return [
+            "libcyber_capi.dylib",
+            "libcyber_capi.{0}.dylib".format(_SOVERSION),
+            "libcyber_capi_shared.dylib",
+            "libcyber_capi_shared.so",
+        ]
     if sys.platform.startswith("win"):
-        return ["cyber_capi_shared.dll", "libcyber_capi_shared.dll"]
-    return ["libcyber_capi_shared.so"]
+        return ["cyber_capi.dll", "libcyber_capi.dll",
+                "cyber_capi_shared.dll", "libcyber_capi_shared.dll"]
+    return [
+        "libcyber_capi.so",
+        "libcyber_capi.so.{0}".format(_SOVERSION),
+        "libcyber_capi_shared.so",
+    ]
+
+
+def _build_tree_dirs(base: str) -> List[str]:
+    """The directories inside one build tree that may hold the library.
+
+    ``capi`` is where the module's own output lands; the extra pass over the
+    tree's immediate subdirectories covers CMake presets, whose ``binaryDir``
+    is ``build/<preset>`` (CMakePresets.json), so the library sits at
+    ``build/<preset>/capi``.
+    """
+    leaves = ("capi", os.path.join("src", "capi"), "lib", "bin")
+    dirs = [base] + [os.path.join(base, leaf) for leaf in leaves]
+    try:
+        entries = sorted(os.listdir(base))
+    except OSError:  # no such build tree, or not readable
+        return dirs
+    for entry in entries:
+        preset = os.path.join(base, entry)
+        if os.path.isdir(preset):
+            dirs.extend(os.path.join(preset, leaf) for leaf in leaves)
+    return dirs
 
 
 def _candidate_dirs() -> List[str]:
@@ -379,12 +421,7 @@ def _candidate_dirs() -> List[str]:
         if not root or root == os.path.dirname(root):
             break
         for build in ("build", "out", "cmake-build-debug", "cmake-build-release"):
-            base = os.path.join(root, build)
-            dirs.append(base)
-            # capi module output typically lands under its source subtree.
-            dirs.append(os.path.join(base, "src", "capi"))
-            dirs.append(os.path.join(base, "lib"))
-            dirs.append(os.path.join(base, "bin"))
+            dirs.extend(_build_tree_dirs(os.path.join(root, build)))
 
     return dirs
 
@@ -396,8 +433,11 @@ def find_library_path() -> Optional[str]:
       1. ``CYBER_CAPI_LIB`` env var (a full path, or a directory containing it).
       2. The package directory (bundled wheel).
       3. Common in-tree build directories relative to the repo root.
+      4. The platform loader search path, for a system-installed library — this
+         step may return a bare file name rather than a path, which is what
+         :func:`ctypes.CDLL` wants anyway.
 
-    This performs filesystem probing only; it never dlopens the library.
+    This never dlopens the library.
     """
     names = _lib_filenames()
 
@@ -417,7 +457,7 @@ def find_library_path() -> Optional[str]:
             if os.path.isfile(candidate):
                 return os.path.abspath(candidate)
 
-    return None
+    return ctypes.util.find_library("cyber_capi")
 
 
 # ---------------------------------------------------------------------------

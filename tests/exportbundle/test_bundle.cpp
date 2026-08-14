@@ -1,7 +1,10 @@
 #include <doctest.h>
 
 #include <algorithm>
+#include <array>
 #include <filesystem>
+#include <fstream>
+#include <ios>
 #include <string>
 #include <vector>
 
@@ -190,6 +193,68 @@ TEST_CASE("a mesh-format mismatch warns but honors the explicit output path") {
     REQUIRE(fs::exists(dir / "hero.obj"));
     REQUIRE(result.warnings.size() == 1);
     REQUIRE(result.warnings[0].find("glb") != std::string::npos);
+    fs::remove_all(dir);
+}
+
+TEST_CASE("a naming pattern that escapes the output directory is refused") {
+    // Regression: the joined path was written with no containment check, so an
+    // absolute pattern (or one climbing with "..") from a third-party preset
+    // file wrote every map outside the caller's chosen directory — and the
+    // bundle reported ok, listing the escaped paths as part of it. parsePreset
+    // rejects such a pattern now; this pins the writer, which also sees presets
+    // built in C++ that never went through the parser.
+    const fs::path dir = testDir("escape");
+    const fs::path outside = fs::temp_directory_path() / "cyber_bundle_escapee_normal.png";
+    fs::remove(outside);
+
+    io::ExportPreset preset = smallPreset("t", io::GreenChannel::PlusY);
+    preset.maps = {io::PresetMapEntry{io::PresetMap::Normal, io::ColorSpace::Linear, "normal"}};
+    preset.namingPattern =
+        (fs::temp_directory_path() / "cyber_bundle_escapee_{map}.{ext}").string();
+
+    Mesh low = makeSurface(0.0f);
+    const Mesh high = makeSurface(0.02f);
+    const bundle::BundleResult result = bundle::writeBundle(low, high, paramsFor(preset, dir));
+    REQUIRE_FALSE(result.ok);
+    REQUIRE_FALSE(result.error.empty());
+    REQUIRE_FALSE(fs::exists(outside));
+    // The escaped path must not be reported as part of the bundle either.
+    REQUIRE(kindsOf(result) == std::vector<std::string>{"mesh"});
+
+    // "..' climbs out just as effectively and must fail the same way.
+    preset.namingPattern = "../cyber_bundle_escapee_{map}.{ext}";
+    Mesh low2 = makeSurface(0.0f);
+    REQUIRE_FALSE(bundle::writeBundle(low2, high, paramsFor(preset, dir)).ok);
+    REQUIRE_FALSE(fs::exists(dir.parent_path() / "cyber_bundle_escapee_normal.png"));
+    fs::remove_all(dir);
+}
+
+TEST_CASE("the container follows the preset's textureFormat, not the file name") {
+    // Regression: the map was handed to the extension-dispatching saveImage(),
+    // so a pattern without (or contradicting) {ext} silently picked a different
+    // container than the color-space policy just applied assumed — 8-bit
+    // tonemapped PNG data under an "exr" preset, or gamma-encoded values inside
+    // a float EXR under a "png" one.
+    const fs::path dir = testDir("container");
+    Mesh low = makeSurface(0.0f);
+    const Mesh high = makeSurface(0.02f);
+
+    io::ExportPreset preset = smallPreset("t", io::GreenChannel::PlusY);
+    preset.textureFormat = "exr";
+    preset.namingPattern = "{basename}_{map}";  // no extension to dispatch on
+    preset.maps = {io::PresetMapEntry{io::PresetMap::Normal, io::ColorSpace::Linear, "normal"}};
+
+    const bundle::BundleResult result = bundle::writeBundle(low, high, paramsFor(preset, dir));
+    REQUIRE(result.ok);
+    const fs::path written = dir / "hero_normal";
+    REQUIRE(fs::exists(written));
+
+    std::ifstream file(written, std::ios::binary);
+    REQUIRE(file.good());
+    std::array<unsigned char, 4> magic{};
+    file.read(reinterpret_cast<char*>(magic.data()), static_cast<std::streamsize>(magic.size()));
+    // OpenEXR's magic (0x01312f76, little-endian) — a PNG would start 0x89 P N G.
+    REQUIRE(magic == std::array<unsigned char, 4>{0x76, 0x2f, 0x31, 0x01});
     fs::remove_all(dir);
 }
 

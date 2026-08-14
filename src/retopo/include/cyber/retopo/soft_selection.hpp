@@ -28,10 +28,29 @@
 // Weights are indexed by raw vertex id, so any op that REASSIGNS ids (see the
 // element-id stability note in cyber_capi.h — subdivide rebuilds the mesh)
 // orphans a stored selection; callers drop it exactly where they drop their
-// other id-keyed annotations. Header-only and inline, like the other actions.
+// other id-keyed annotations. Deleting ops recycle ids instead of retiring
+// them, so callers run dropDeadWeights after anything that can free a vertex.
+// Header-only and inline, like the other actions.
 namespace cyber::retopo {
 
 // ---- weight container ------------------------------------------------------
+
+// Zeroes every weight whose vertex is not live in `mesh`, plus every slot past
+// the mesh's vertex capacity. Vertex ids are RECYCLED from the mesh's free
+// list, so a weight left on a dead id is inherited by the next vertex created
+// in that slot and the weighted ops would move brand-new geometry the user
+// never selected.
+inline void dropDeadWeights(const Mesh& mesh, std::span<float> weights) {
+    const std::size_t covered = std::min(weights.size(), mesh.vertexCapacity());
+    for (std::size_t i = 0; i < covered; ++i) {
+        if (!mesh.isAlive(VertexId{static_cast<Index>(i)})) {
+            weights[i] = 0.0f;
+        }
+    }
+    for (std::size_t i = covered; i < weights.size(); ++i) {
+        weights[i] = 0.0f;
+    }
+}
 
 // Per-vertex weights in [0,1], indexed by VertexId, sized lazily to the mesh's
 // vertex capacity. Vertices past the stored end read as 0.
@@ -62,6 +81,10 @@ public:
 
     // Zeroes every weight, keeping the allocated size.
     void clear() { std::fill(m_weights.begin(), m_weights.end(), 0.0f); }
+
+    // Unselects every vertex that is no longer live, so a recycled vertex id
+    // starts at weight 0 (see dropDeadWeights).
+    void dropDead(const Mesh& mesh) { dropDeadWeights(mesh, m_weights); }
 
     [[nodiscard]] std::span<const float> weights() const { return m_weights; }
     [[nodiscard]] std::size_t size() const { return m_weights.size(); }
@@ -213,11 +236,21 @@ struct PaintDab {
     float pressure = 1.0f;
 };
 
+// A dab whose center or pressure is non-finite covers NO region: every distance
+// against it is NaN, so `d < radius` is false for every vertex — which is why
+// the coverage tests below are written that way round. Such a sample (a
+// viewport ray-miss unprojects to NaN) is dropped, never painted: the NaN it
+// would write is sanitized to 0, which would silently erase the whole field.
+[[nodiscard]] inline bool isUsableDab(const PaintDab& dab) {
+    return std::isfinite(dab.center.x) && std::isfinite(dab.center.y) &&
+           std::isfinite(dab.center.z) && std::isfinite(dab.pressure);
+}
+
 // Accumulates one dab into the selection: covered weights gain (or, in subtract
 // mode, lose) pressure * falloff, saturating at 1 and bottoming out at 0.
 inline void paintSelection(const Mesh& mesh, SoftSelection& selection, const PaintDab& dab,
                            const PaintBrush& brush) {
-    if (brush.radius <= 0.0f) {
+    if (brush.radius <= 0.0f || !isUsableDab(dab)) {
         return;
     }
     selection.resizeFor(mesh);
@@ -227,7 +260,7 @@ inline void paintSelection(const Mesh& mesh, SoftSelection& selection, const Pai
             continue;
         }
         const float d = length(mesh.position(v) - dab.center);
-        if (d >= brush.radius) {
+        if (!(d < brush.radius)) {
             continue;
         }
         const float amount = dab.pressure * applyFalloff(brush.falloff, 1.0f - d / brush.radius);
@@ -244,13 +277,28 @@ inline void paintSelectionStroke(const Mesh& mesh, SoftSelection& selection,
     if (dabs.empty() || brush.radius <= 0.0f) {
         return;
     }
-    Vec3 lo = dabs.front().center;
-    Vec3 hi = dabs.front().center;
+    // The bounds are taken over the usable dabs only: one NaN coordinate would
+    // otherwise poison lo/hi and let every vertex through the box test.
+    Vec3 lo{};
+    Vec3 hi{};
+    bool bounded = false;
     for (const PaintDab& dab : dabs) {
+        if (!isUsableDab(dab)) {
+            continue;
+        }
+        if (!bounded) {
+            lo = dab.center;
+            hi = dab.center;
+            bounded = true;
+            continue;
+        }
         lo = Vec3{std::min(lo.x, dab.center.x), std::min(lo.y, dab.center.y),
                   std::min(lo.z, dab.center.z)};
         hi = Vec3{std::max(hi.x, dab.center.x), std::max(hi.y, dab.center.y),
                   std::max(hi.z, dab.center.z)};
+    }
+    if (!bounded) {
+        return;
     }
     selection.resizeFor(mesh);
     for (Index i = 0; i < mesh.vertexCapacity(); ++i) {
@@ -265,8 +313,11 @@ inline void paintSelectionStroke(const Mesh& mesh, SoftSelection& selection,
         }
         float w = selection.weight(v);
         for (const PaintDab& dab : dabs) {
+            if (!isUsableDab(dab)) {
+                continue;
+            }
             const float d = length(p - dab.center);
-            if (d >= brush.radius) {
+            if (!(d < brush.radius)) {
                 continue;
             }
             const float amount =

@@ -23,7 +23,8 @@
       "license": "MIT",
       "path": "happly",
       "url": "https://github.com/nmwsharp/happly",
-      "usedBy": "mesh-io PLY import/export"
+      "usedBy": "mesh-io PLY import/export",
+      "localPatches": "Truncated/short data sections throw instead of spinning at EOF or reading past the token vector — search happly.h for \"CYBER LOCAL PATCH\" and re-apply on re-vendor"
     },
     {
       "name": "tinygltf",

@@ -138,6 +138,67 @@ TEST_CASE("malformed content is rejected") {
         io::ErrorCode::UnsupportedFormat);
 }
 
+TEST_CASE("a wrong-typed field is a typed error, not a thrown json exception") {
+    // Regression: the optional fields were read with get<T>() straight after a
+    // contains() check, so a wrong type escaped as nlohmann::json::type_error
+    // out of a function documented to report malformed content through Result.
+    // A consumer following that contract has no catch handler and terminates.
+    struct Case {
+        const char* body;
+        const char* field;
+    };
+    const std::vector<Case> cases = {
+        {R"("maps":["normal"],"resolution":"2048")", "resolution"},
+        {R"("maps":["normal"],"resolution":512.5)", "resolution"},
+        {R"("maps":["normal"],"meshFormat":7)", "meshFormat"},
+        {R"("maps":["normal"],"textureFormat":1)", "textureFormat"},
+        {R"("maps":["normal"],"namingPattern":5)", "namingPattern"},
+        {R"("maps":["normal"],"normalGreen":[1])", "normalGreen"},
+        {R"("maps":["normal"],"units":{})", "units"},
+        {R"("maps":["normal"],"upAxis":2)", "upAxis"},
+        {R"("maps":[{"map":"normal","colorSpace":3}])", "colorSpace"},
+        {R"("maps":[{"map":"normal","suffix":3}])", "suffix"},
+    };
+    for (const Case& c : cases) {
+        INFO("field: " << c.field);
+        const auto result = io::parsePreset(presetJson(c.body));
+        REQUIRE_FALSE(result.ok());
+        REQUIRE(result.error().code == io::ErrorCode::ParseError);
+        // The message has to name the offending field, or the author is left
+        // guessing which line of their preset is wrong.
+        REQUIRE(result.error().message.find(c.field) != std::string::npos);
+    }
+}
+
+TEST_CASE("a naming pattern cannot escape the output directory") {
+    // Regression: the pattern was validated only for {map}, so a preset FILE
+    // chose where the engine wrote — an absolute pattern redirected every map
+    // to a path of the preset author's choosing, and ".." climbed out of the
+    // caller's --output directory. A pattern is a name, never a destination.
+    const auto absolute = io::parsePreset(
+        presetJson(R"("maps":["normal"],"namingPattern":"/tmp/pwned_{map}.{ext}")"));
+    REQUIRE_FALSE(absolute.ok());
+    REQUIRE(absolute.error().code == io::ErrorCode::ParseError);
+    REQUIRE(absolute.error().message.find("namingPattern") != std::string::npos);
+
+    const auto climbing =
+        io::parsePreset(presetJson(R"("maps":["normal"],"namingPattern":"../../{map}.{ext}")"));
+    REQUIRE_FALSE(climbing.ok());
+    REQUIRE(climbing.error().code == io::ErrorCode::ParseError);
+
+    // A map suffix is substituted into the same file name, so it escapes the
+    // same way if left unchecked.
+    const auto suffix =
+        io::parsePreset(presetJson(R"("maps":[{"map":"normal","suffix":"../../evil"}])"));
+    REQUIRE_FALSE(suffix.ok());
+    REQUIRE(suffix.error().code == io::ErrorCode::ParseError);
+
+    // A relative subdirectory is still a legal name inside the output.
+    REQUIRE(io::parsePreset(
+                presetJson(R"("maps":["normal"],"namingPattern":"maps/{basename}_{map}.{ext}")"))
+                .ok());
+}
+
 // ---- resolution and naming ---------------------------------------------
 
 TEST_CASE("resolvePreset prefers a built-in name and lists them when unknown") {

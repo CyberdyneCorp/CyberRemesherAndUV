@@ -113,6 +113,19 @@ if(Python3_FOUND)
     add_test(NAME swift_abi_parity
         COMMAND ${Python3_EXECUTABLE}
                 ${CMAKE_CURRENT_SOURCE_DIR}/packaging/test_swift_abi_parity.py)
+
+    # Build-description regressions the C++ suite cannot see: the default
+    # -Werror configuration, the CAPI/retopo option dependency, and the
+    # exported surface of the shared C ABI. Given the built library it also
+    # checks the real symbol table; without it, the source-level checks run.
+    add_test(NAME build_hygiene
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/packaging/test_build_hygiene.py)
+    set_tests_properties(build_hygiene PROPERTIES TIMEOUT 300)
+    if(TARGET cyber_capi_shared)
+        set_tests_properties(build_hygiene PROPERTIES
+            ENVIRONMENT "CYBER_CAPI_LIB=$<TARGET_FILE:cyber_capi_shared>")
+    endif()
 endif()
 
 if(CYBER_BUILD_CLI AND Python3_FOUND)

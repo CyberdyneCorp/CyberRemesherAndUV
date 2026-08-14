@@ -1,5 +1,7 @@
 #include <doctest.h>
 
+#include <cmath>
+#include <limits>
 #include <vector>
 
 #include "cyber/bake/bake.hpp"
@@ -103,6 +105,61 @@ TEST_CASE("normal-map padding is the flat normal, and survives a DirectX green f
     CHECK(r.image.at(px, py, 2) == doctest::Approx(1.0f));
     // g -> 1 - g leaves it unchanged, so both conventions ship the same padding.
     CHECK(1.0f - r.image.at(px, py, 1) == doctest::Approx(r.image.at(px, py, 1)));
+}
+
+TEST_CASE("padding is each map's neutral value, never black") {
+    // Regression: only the normal map pre-filled a neutral padding, so cavity
+    // and AO shipped 0 (maximum concavity / full occlusion) and curvature
+    // shipped 0 (maximum concavity) in the gutters. Without a coverage mask,
+    // mip generation and dilation bleed that black inward at every chart
+    // border — a phantom dark crease in the multiply slot, a ring in AO.
+    const Mesh low = makePlane(0, 0, 0.5f, 0, 0.5f, /*uv=*/true, false);  // a UV corner only
+    const Mesh high = makePlane(0, 0, 0.5f, 0, 0.5f, false, false);
+    bake::BakeParams p = params32();
+    p.aoSamples = 8;
+
+    struct Case {
+        bake::BakeMap map;
+        float padding;
+    };
+    const std::vector<Case> cases = {
+        {bake::BakeMap::Curvature, 0.5f},         // mid-gray: no curvature
+        {bake::BakeMap::Cavity, 1.0f},            // white: no concavity
+        {bake::BakeMap::AmbientOcclusion, 1.0f},  // fully open
+        {bake::BakeMap::Displacement, 0.0f},      // zero height already IS neutral
+    };
+    for (const Case& c : cases) {
+        CAPTURE(static_cast<int>(c.map));
+        const bake::BakeResult r = bake::bake(low, high, c.map, p);
+        REQUIRE_FALSE(r.image.pixels.empty());
+        REQUIRE(r.texelsCovered > 0);  // the layout really is partial, not empty
+        // Far outside the covered corner, and again just past its border: the
+        // padding equals what the flat covered texels read, so the border is
+        // continuous under a filter that ignores coverage.
+        CHECK(r.image.at(r.image.width - 1, 0, 0) == doctest::Approx(c.padding));
+        CHECK(r.image.at(r.image.width - 1, r.image.height - 1, 0) == doctest::Approx(c.padding));
+    }
+}
+
+TEST_CASE("a non-finite UV cannot poison the baked image") {
+    // Regression: the inside test is a `>` comparison on an expression a NaN UV
+    // makes NaN, and `NaN > eps` is false — so the texel was ACCEPTED rather
+    // than rejected and the bbox of the triangle's remaining finite corners was
+    // written as NaN. A glTF TEXCOORD_0 accessor holding a NaN float reaches
+    // the rasterizer verbatim.
+    Mesh low = makePlane(0, 0, 1, 0, 1, /*uv=*/true, false);
+    std::vector<Vec2>* uv = low.cornerAttributes().find<Vec2>("uv");
+    REQUIRE(uv != nullptr);
+    (*uv)[1] = {std::numeric_limits<float>::quiet_NaN(), std::numeric_limits<float>::quiet_NaN()};
+
+    const Mesh high = makePlane(0, 0, 1, 0, 1, false, false);
+    const bake::BakeResult r = bake::bake(low, high, bake::BakeMap::Position, params32());
+    for (const float v : r.image.pixels) {
+        REQUIRE(std::isfinite(v));
+    }
+    // Only the sub-triangle carrying the NaN corner is dropped, so the rest of
+    // the layout still bakes — the guard rejects, it does not empty the map.
+    REQUIRE(r.texelsCovered > 0);
 }
 
 TEST_CASE("displacement bake measures height of the target above the surface") {

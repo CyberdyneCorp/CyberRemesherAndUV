@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <exception>
 #include <filesystem>
@@ -1349,6 +1350,18 @@ cyber::retopo::PinSet makePinSet(const uint32_t* pinned, size_t pinned_count) {
     return pins;
 }
 
+// Unselects the vertices an op has just killed, in the live field and in every
+// saved slot. Vertex ids are recycled from the mesh's free list, so a weight
+// left on a dead id would be inherited by the next vertex created in that slot
+// — a brand-new vertex born selected, then dragged by the weighted
+// transform/relax. Costs nothing until a selection actually exists.
+void dropDeadSelectionWeights(CyberMesh* mesh) {
+    mesh->selection.dropDead(mesh->mesh);
+    for (auto& slot : mesh->selectionSlots) {
+        cyber::retopo::dropDeadWeights(mesh->mesh, slot.second);
+    }
+}
+
 // Shared prologue/epilogue for the editing ops: argument checks, exception
 // containment, and render-cache invalidation. The cache is dropped on
 // success AND when an exception escapes the body: an engine op can throw
@@ -1367,17 +1380,21 @@ CyberStatus runMeshEdit(CyberMesh* mesh, const char* name, Body body) {
     try {
         const CyberStatus status = body();
         if (status == CYBER_OK) {
+            dropDeadSelectionWeights(mesh);
             invalidateRenderCache(mesh);
             clearError();
         }
         return status;
     } catch (const std::exception& e) {
         // The op may have partially mutated the mesh before throwing —
-        // never serve a pre-mutation cache over a mutated mesh.
+        // never serve a pre-mutation cache, or a weight on a freed vertex,
+        // over a mutated mesh.
+        dropDeadSelectionWeights(mesh);
         invalidateRenderCache(mesh);
         setError(std::string(name) + ": " + e.what());
         return CYBER_ERR_RUNTIME;
     } catch (...) {
+        dropDeadSelectionWeights(mesh);
         invalidateRenderCache(mesh);
         setError(std::string(name) + ": unknown error");
         return CYBER_ERR_RUNTIME;
@@ -2517,6 +2534,13 @@ CyberStatus cyber_retopo_selection_paint(CyberMesh* mesh, const float center[3],
             setError("cyber_retopo_selection_paint: null center or radius <= 0");
             return CYBER_ERR_INVALID_ARG;
         }
+        // A ray-miss unprojection hands back NaN: report the dropped sample
+        // instead of silently doing nothing.
+        if (!std::isfinite(center[0]) || !std::isfinite(center[1]) || !std::isfinite(center[2]) ||
+            !std::isfinite(pressure)) {
+            setError("cyber_retopo_selection_paint: non-finite center or pressure");
+            return CYBER_ERR_INVALID_ARG;
+        }
         const cyber::retopo::PaintBrush brush{radius, subtract != 0, toFalloff(falloff)};
         cyber::retopo::paintSelection(mesh->mesh, mesh->selection, {toVec3(center), pressure},
                                       brush);
@@ -2693,6 +2717,12 @@ CyberStatus cyber_retopo_selection_relax(CyberMesh* mesh, float strength, int it
                                          const CyberSnapper* snapper, float resnap_epsilon,
                                          CyberSoftTransformReport* out_report) {
     return runMeshEdit(mesh, "cyber_retopo_selection_relax", [&] {
+        // Same range gate as cyber_retopo_relax: an unvalidated NaN strength
+        // reaches every selected vertex position through the sweep.
+        if (!(strength >= 0.0f && strength <= 1.0f)) {
+            setError("cyber_retopo_selection_relax: strength must be in [0,1]");
+            return CYBER_ERR_INVALID_PARAM;
+        }
         cyber::retopo::RelaxParams params;
         params.strength = strength;
         params.iterations = iterations;

@@ -879,10 +879,18 @@ class Mesh:
     ) -> None:
         """Accumulate a whole gesture: ``(x, y, z, pressure)`` samples."""
         flat = [float(v) for sample in samples for v in sample]
+        # The C side reads exactly 4 floats per sample from a pointer whose
+        # length is implied, so a narrower sample would be read past the end of
+        # this buffer. Checked here, where the real length is still known.
+        if len(flat) % 4 != 0:
+            raise ValueError(
+                "paint_selection_stroke: samples must be (x, y, z, pressure), "
+                "got {0} floats".format(len(flat))
+            )
         buf = (ctypes.c_float * len(flat))(*flat)
         _check(
             _ffi.get_lib().cyber_retopo_selection_paint_stroke(
-                self.handle, buf, len(samples), float(radius),
+                self.handle, buf, len(flat) // 4, float(radius),
                 1 if subtract else 0, int(falloff),
             )
         )
@@ -1338,10 +1346,19 @@ def remesh(
         c_guides = (_ffi.CyberFlowGuide * len(guides or []))()
         for i, guide in enumerate(guides or []):
             flat = [float(c) for point in guide.points for c in point]
+            point_count = len(guide.points)
+            # The C ABI reads 3 * point_count floats through a pointer with an
+            # implied length, so a point that is not (x, y, z) would be read
+            # past the end of this buffer. Rejected here, not in C.
+            if len(flat) != 3 * point_count:
+                raise ValueError(
+                    "remesh: guide {0} needs 3 components per point (x, y, z), "
+                    "got {1} floats for {2} points".format(i, len(flat), point_count)
+                )
             buf = (ctypes.c_float * len(flat))(*flat)
             keepalive.append(buf)
             c_guides[i].points = ctypes.cast(buf, ctypes.POINTER(ctypes.c_float))
-            c_guides[i].point_count = len(guide.points)
+            c_guides[i].point_count = point_count
             c_guides[i].strength = float(guide.strength)
             c_guides[i].radius = float(guide.radius)
         c_guidance = _ffi.CyberGuidance()

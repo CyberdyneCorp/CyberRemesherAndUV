@@ -195,6 +195,32 @@ fs::path writeGltfHandoffFile(const std::string& name, const Mesh& mesh, int maj
     return path;
 }
 
+// A handoff PLY header whose element counts the caller controls, so a test can
+// declare more geometry than it then writes. `faceFirst` emits the face element
+// ahead of the vertex one — the order in which an over-declared vertex count
+// used to sail through as invented geometry.
+std::string handoffHeader(const std::string& format, std::size_t vertexCount,
+                          std::size_t faceCount, bool faceFirst = false) {
+    const std::string vertex = "element vertex " + std::to_string(vertexCount) +
+                               "\nproperty float x\nproperty float y\nproperty float z\n"
+                               "property float nx\nproperty float ny\nproperty float nz\n"
+                               "property uchar red\nproperty uchar green\nproperty uchar blue\n"
+                               "property float material_mix\n";
+    const std::string face = "element face " + std::to_string(faceCount) +
+                             "\nproperty list uchar int vertex_indices\n";
+    std::string out = "ply\nformat " + format + " 1.0\ncomment cyber_sculpt_handoff 1 0\n";
+    out += faceFirst ? face + vertex : vertex + face;
+    out += "end_header\n";
+    return out;
+}
+
+template <typename T>
+void appendLittleEndian(std::string& bytes, T value) {
+    std::array<char, sizeof(T)> raw{};
+    std::memcpy(raw.data(), &value, sizeof(T));
+    bytes.append(raw.data(), raw.size());
+}
+
 }  // namespace
 
 TEST_CASE("a producer label that also occurs inside the comment key is read whole") {
@@ -537,6 +563,80 @@ TEST_CASE("a handoff triangle with a repeated vertex index is reported, not drop
     CHECK(bufferResult.value().mesh.faceCount() == 12);
     CHECK(bufferResult.value().droppedFaces == 1);
     CHECK(!bufferResult.value().warnings.empty());
+}
+
+TEST_CASE("a handoff declaring more vertices than the file holds is rejected, not allocated") {
+    std::string text = handoffHeader("ascii", 1000000, 1);
+    text += "0 0 0 0 0 1 255 0 0 0.5\n1 0 0 0 0 1 0 255 0 0.5\n0 1 0 0 0 1 0 0 255 0.5\n3 0 1 2\n";
+    const fs::path path = writeHandoffFile("overdeclared.ply", text);
+
+    const auto result = handoff::readFile(path);
+    REQUIRE(!result.ok());
+    CHECK(result.error().code == io::ErrorCode::ParseError);
+    CHECK(result.error().message.find("declares") != std::string::npos);
+}
+
+TEST_CASE("an over-declared binary handoff cannot pass off vertices the file never carried") {
+    // The face element first: the vertex count is then the last thing read, and
+    // an over-declared one used to load as fabricated origin vertices.
+    std::string text = handoffHeader("binary_little_endian", 1000000, 1, true);
+    appendLittleEndian<unsigned char>(text, 3);
+    for (std::int32_t i = 0; i < 3; ++i) {
+        appendLittleEndian<std::int32_t>(text, i);
+    }
+    for (int v = 0; v < 3; ++v) {
+        for (int c = 0; c < 6; ++c) {
+            appendLittleEndian<float>(text, 0.0f);
+        }
+        for (int c = 0; c < 3; ++c) {
+            appendLittleEndian<unsigned char>(text, 255);
+        }
+        appendLittleEndian<float>(text, 0.5f);
+    }
+    const fs::path path = writeHandoffFile("overdeclared_binary.ply", text);
+
+    const auto result = handoff::readFile(path);
+    REQUIRE(!result.ok());
+    CHECK(result.error().code == io::ErrorCode::ParseError);
+}
+
+TEST_CASE("a truncated ASCII data section fails instead of spinning at end of file") {
+    // Long-form values so the payload clears the header's minimum byte cost:
+    // the truncation has to be caught while parsing, not by the size check.
+    const std::string line = "0.00000000000 0.00000000000 0.00000000000 0.00000000000 "
+                             "0.00000000000 1.00000000000 255 0 0 0.50000000000\n";
+    std::string text = handoffHeader("ascii", 3, 1);
+    text += line + line;  // two of the three declared vertices, and no face line
+    const fs::path path = writeHandoffFile("truncated.ply", text);
+
+    const auto result = handoff::readFile(path);
+    REQUIRE(!result.ok());
+    CHECK(result.error().code == io::ErrorCode::ParseError);
+}
+
+TEST_CASE("an ASCII data line carrying fewer values than the element declares is rejected") {
+    // Four values for ten declared properties, padded so the file clears the
+    // minimum byte cost and the short line itself is what gets caught.
+    const std::string line = "0.0000000000000000 0.0000000000000000 0.0000000000000000 "
+                             "0.0000000000000000\n";
+    std::string text = handoffHeader("ascii", 3, 1);
+    text += line + line + line + "3 0 1 2\n";
+    const fs::path path = writeHandoffFile("shortline.ply", text);
+
+    const auto result = handoff::readFile(path);
+    REQUIRE(!result.ok());
+    CHECK(result.error().code == io::ErrorCode::ParseError);
+}
+
+TEST_CASE("a face list declaring more indices than its line carries is rejected") {
+    std::string text = handoffHeader("ascii", 3, 1);
+    text += "0 0 0 0 0 1 255 0 0 0.5\n1 0 0 0 0 1 0 255 0 0.5\n0 1 0 0 0 1 0 0 255 0.5\n";
+    text += "9 0 1 2\n";
+    const fs::path path = writeHandoffFile("listoverrun.ply", text);
+
+    const auto result = handoff::readFile(path);
+    REQUIRE(!result.ok());
+    CHECK(result.error().code == io::ErrorCode::ParseError);
 }
 
 TEST_CASE("a rejected stream handoff names the stream, not a file") {

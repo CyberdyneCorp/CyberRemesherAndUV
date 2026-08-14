@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <string>
 #include <system_error>
 #include <vector>
@@ -367,6 +368,131 @@ TEST_CASE("capi soft relax reports distinct vertices, not per-iteration writes")
     cyber_snapper_free(snapper);
     cyber_mesh_free(edit);
     cyber_mesh_free(target);
+}
+
+// Regression: vertex ids are recycled from the mesh's free list, so the weight
+// of an erased vertex was still in the field when the next create_face handed
+// that id to a brand-new vertex — the weighted transform then dragged geometry
+// the user had never selected, and the saved slot resurrected it after a load.
+TEST_CASE("capi soft selection: an erased vertex cannot pass its weight to a new one") {
+    CyberMesh* edit = cyber_mesh_create();
+    REQUIRE(edit != nullptr);
+    const float quad[12] = {0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f,
+                            1.0f, 1.0f, 0.0f, 0.0f, 1.0f, 0.0f};
+    uint32_t face = 0;
+    REQUIRE(cyber_retopo_create_face(edit, quad, 4, nullptr, &face) == CYBER_OK);
+
+    const float centre[3] = {0.5f, 0.5f, 0.0f};
+    REQUIRE(cyber_retopo_selection_sphere(edit, centre, 3.0f, CYBER_FALLOFF_SMOOTH) == CYBER_OK);
+    REQUIRE(cyber_retopo_selection_save(edit, "quad") == CYBER_OK);
+    std::vector<float> selected(cyber_retopo_selection_copy_weights(edit, nullptr, 0));
+    cyber_retopo_selection_copy_weights(edit, selected.data(), selected.size());
+    REQUIRE(selected.size() == 4u);
+    for (const float w : selected) {
+        REQUIRE(w > 0.0f);
+    }
+
+    size_t removed = 0;
+    REQUIRE(cyber_retopo_erase(edit, centre, 1.0f, 1.0f, &removed) == CYBER_OK);
+    REQUIRE(removed == 1u);
+    REQUIRE(cyber_mesh_vertex_count(edit) == 0u);
+
+    // The four freed ids come straight back to this quad, a hundred units away.
+    const float faraway[12] = {100.0f, 100.0f, 0.0f, 101.0f, 100.0f, 0.0f,
+                               101.0f, 101.0f, 0.0f, 100.0f, 101.0f, 0.0f};
+    REQUIRE(cyber_retopo_create_face(edit, faraway, 4, nullptr, &face) == CYBER_OK);
+    std::vector<float> reused(cyber_retopo_selection_copy_weights(edit, nullptr, 0));
+    cyber_retopo_selection_copy_weights(edit, reused.data(), reused.size());
+    for (const float w : reused) {
+        REQUIRE(w == 0.0f);
+    }
+
+    const std::vector<float> before = positionsOf(edit);
+    const float xf[12] = {1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 10.0f};
+    CyberSoftTransformReport report{};
+    REQUIRE(cyber_retopo_selection_transform(edit, xf, nullptr, 0.0f, &report) == CYBER_OK);
+    REQUIRE(report.moved == 0u);
+    REQUIRE(positionsOf(edit) == before);
+
+    // The persisted slot must be swept too, or a load brings the ghost back.
+    REQUIRE(cyber_retopo_selection_load(edit, "quad") == CYBER_OK);
+    REQUIRE(cyber_retopo_selection_transform(edit, xf, nullptr, 0.0f, &report) == CYBER_OK);
+    REQUIRE(report.moved == 0u);
+    REQUIRE(positionsOf(edit) == before);
+
+    cyber_mesh_free(edit);
+}
+
+// Regression: cyber_retopo_selection_relax copied `strength` into RelaxParams
+// unvalidated while its sibling cyber_retopo_relax rejects anything outside
+// [0,1], so a NaN slider value NaN'd every selected vertex and returned
+// CYBER_OK with a plausible moved count.
+TEST_CASE("capi soft relax rejects an out-of-range strength like the plain relax does") {
+    CyberMesh* edit = makeGridMesh(5, 5, 0.0f);
+    const float centre[3] = {2.0f, 2.0f, 0.0f};
+    REQUIRE(cyber_retopo_selection_sphere(edit, centre, 3.0f, CYBER_FALLOFF_SMOOTH) == CYBER_OK);
+    const std::vector<float> before = positionsOf(edit);
+
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    const float bad[] = {nan, 2.0f, -1.0f};
+    CyberSoftTransformReport report{};
+    for (const float strength : bad) {
+        REQUIRE(cyber_retopo_selection_relax(edit, strength, 4, nullptr, 0, nullptr, 0.0f,
+                                             &report) == CYBER_ERR_INVALID_PARAM);
+        REQUIRE(positionsOf(edit) == before);  // bit-identical, like the sibling
+    }
+
+    // The accepted range still relaxes.
+    REQUIRE(cyber_retopo_selection_relax(edit, 0.5f, 1, nullptr, 0, nullptr, 0.0f, &report) ==
+            CYBER_OK);
+
+    cyber_mesh_free(edit);
+}
+
+// Regression: the brush's coverage test was `d >= radius`, false for a NaN
+// distance, so a dab with a non-finite center covered every vertex whatever the
+// radius and the sanitized NaN zeroed the whole painted field — with CYBER_OK.
+TEST_CASE("capi soft selection: a non-finite paint dab is refused, never applied") {
+    CyberMesh* edit = makeGridMesh(9, 3, 0.0f);
+    const float centre[3] = {4.0f, 1.0f, 0.0f};
+    REQUIRE(cyber_retopo_selection_paint(edit, centre, 2.5f, 1.0f, 0, CYBER_FALLOFF_SMOOTH) ==
+            CYBER_OK);
+    const size_t n = cyber_retopo_selection_copy_weights(edit, nullptr, 0);
+    std::vector<float> painted(n);
+    cyber_retopo_selection_copy_weights(edit, painted.data(), painted.size());
+    bool anyPainted = false;
+    for (const float w : painted) {
+        anyPainted = anyPainted || w > 0.0f;
+    }
+    REQUIRE(anyPainted);
+
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    const float nowhere[3] = {nan, nan, nan};
+    std::vector<float> after(n);
+    // A 0.5 radius can touch at most one vertex of a unit grid, so a wiped
+    // field could only have come from the NaN.
+    REQUIRE(cyber_retopo_selection_paint(edit, nowhere, 0.5f, 1.0f, 0, CYBER_FALLOFF_SMOOTH) ==
+            CYBER_ERR_INVALID_ARG);
+    cyber_retopo_selection_copy_weights(edit, after.data(), after.size());
+    REQUIRE(after == painted);
+    REQUIRE(cyber_retopo_selection_paint(edit, centre, 0.5f, nan, 0, CYBER_FALLOFF_SMOOTH) ==
+            CYBER_ERR_INVALID_ARG);
+    cyber_retopo_selection_copy_weights(edit, after.data(), after.size());
+    REQUIRE(after == painted);
+
+    // One bad sample only drops itself: the rest of the stroke still paints.
+    const float stroke[8] = {nan, nan, nan, 1.0f, 3.0f, 1.0f, 0.0f, 0.5f};
+    REQUIRE(cyber_retopo_selection_paint_stroke(edit, stroke, 2, 2.5f, 0, CYBER_FALLOFF_SMOOTH) ==
+            CYBER_OK);
+    cyber_retopo_selection_copy_weights(edit, after.data(), after.size());
+    bool grew = false;
+    for (size_t i = 0; i < n; ++i) {
+        REQUIRE(after[i] >= painted[i]);
+        grew = grew || after[i] > painted[i];
+    }
+    REQUIRE(grew);
+
+    cyber_mesh_free(edit);
 }
 
 // Regression (binding-gap report, item 2): there was no in-memory way to

@@ -936,7 +936,12 @@ CyberStatus cyber_retopo_triangulate(CyberMesh* mesh, size_t* out_faces);
  * ELEMENT-ID STABILITY (see the block above): weights are indexed by vertex
  * id, so cyber_retopo_subdivide clears the selection and every saved slot
  * along with the other id-keyed handle state. Triangulate preserves vertex
- * ids and therefore preserves the selection. */
+ * ids and therefore preserves the selection. Ids of DELETED vertices are
+ * recycled by the next op that creates one (erase, delete_faces,
+ * dissolve_edges, merge_vertices free them), so the selection and every
+ * saved slot are unselected at those ids as the op completes: a weight can
+ * never be inherited by unrelated new geometry. Caller-side annotations
+ * keyed on vertex ids need the same treatment across deleting ops. */
 
 /* Editable falloff curves. All map 0 -> 0 and 1 -> 1 monotonically, so the
  * curve changes how a gradient feels, not where it starts or ends.
@@ -999,15 +1004,18 @@ CyberStatus cyber_retopo_selection_sphere(CyberMesh* mesh, const float center[3]
 
 /* Paint one brush dab: covered weights gain `pressure` * falloff, or lose
  * it when `subtract` is non-zero, saturating at 1 and bottoming out at 0.
- * Fails with CYBER_ERR_INVALID_ARG on a null center or radius <= 0. */
+ * Fails with CYBER_ERR_INVALID_ARG (selection unchanged) on a null center,
+ * radius <= 0, or a non-finite center coordinate or pressure — a dab that
+ * describes no region is dropped, never applied. */
 CyberStatus cyber_retopo_selection_paint(CyberMesh* mesh, const float center[3], float radius,
                                          float pressure, int subtract, CyberFalloff falloff);
 
 /* Paint a whole gesture in one call: `samples_xyzp` holds `sample_count`
  * quadruplets (x, y, z, pressure) along the stroke, all sharing one brush.
  * Equivalent to calling _paint once per sample but rejects the vertices no
- * sample can reach up front. Fails with CYBER_ERR_INVALID_ARG on a null or
- * empty sample list or radius <= 0. */
+ * sample can reach up front. Samples with a non-finite coordinate or
+ * pressure are skipped; the rest of the stroke still paints. Fails with
+ * CYBER_ERR_INVALID_ARG on a null or empty sample list or radius <= 0. */
 CyberStatus cyber_retopo_selection_paint_stroke(CyberMesh* mesh, const float* samples_xyzp,
                                                 size_t sample_count, float radius, int subtract,
                                                 CyberFalloff falloff);
@@ -1077,7 +1085,9 @@ CyberStatus cyber_retopo_selection_transform_pinned(CyberMesh* mesh, const float
 /* Weighted relax: the ordinary relax sweep (auto-pinned grid corners,
  * tangential projection, in-pass re-snap) with the per-vertex blend
  * additionally scaled by the selection weight. `pinned` may be NULL.
- * *out_report may be NULL. */
+ * *out_report may be NULL. `strength` must be in [0,1] — same gate as
+ * cyber_retopo_relax; anything else (NaN included) fails with
+ * CYBER_ERR_INVALID_PARAM and leaves the mesh untouched. */
 CyberStatus cyber_retopo_selection_relax(CyberMesh* mesh, float strength, int iterations,
                                          const uint32_t* pinned, size_t pinned_count,
                                          const CyberSnapper* snapper, float resnap_epsilon,

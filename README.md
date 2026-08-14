@@ -123,8 +123,12 @@ built-in:
 A preset declaring a schema version this engine does not support is rejected by
 name, and a field the engine does not recognise is an error rather than a silent
 drop — a preset that quietly loses the field you added is worse than one that
-refuses to load. The JSON report records the effective preset and every file
-produced.
+refuses to load. A wrong-typed field is reported the same way, naming the field.
+`namingPattern` (and a map's `suffix`) names a file *inside* `--output`'s
+directory: an absolute path or one climbing with `..` is refused, so a preset
+file you downloaded cannot choose where the engine writes. The container follows
+the preset's `textureFormat`, not the file name. The JSON report records the
+effective preset and every file produced.
 
 The same thing from Python, without the CLI (C ABI: `cyber_export_preset_*` and
 `cyber_export_bundle_write`):

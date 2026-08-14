@@ -151,6 +151,10 @@ Vec3 faceTangent(Vec3 p0, Vec3 p1, Vec3 p2, Vec2 uv0, Vec2 uv1, Vec2 uv2, Vec3 n
     return tangentFrame(p0, p1, p2, uv0, uv1, uv2, n).tangent;
 }
 
+bool isFinite(Vec2 v) { return std::isfinite(v.x) && std::isfinite(v.y); }
+
+bool isFinite(Vec3 v) { return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z); }
+
 // One texel to shade: pixel coord plus the interpolated low-poly frame.
 struct Texel {
     int px = 0;
@@ -188,6 +192,16 @@ std::vector<Texel> rasterize(const Mesh& mesh, const std::vector<Vec3>& vnormals
                 nrm[static_cast<std::size_t>(k)] = vnormals[v.value];
                 uv[static_cast<std::size_t>(k)] = uvByLoop[tri[static_cast<std::size_t>(k)].value];
             }
+            // A non-finite corner (a glTF TEXCOORD_0 accessor holding NaN, say)
+            // poisons the whole sub-triangle: fmin/fmax silently ignore NaN, so
+            // the bbox below collapses to the finite corners, and the inside
+            // test is a `>` comparison that a NaN passes — every texel in that
+            // bbox would be accepted and written as NaN.
+            if (!isFinite(uv[0]) || !isFinite(uv[1]) || !isFinite(uv[2]) || !isFinite(pos[0]) ||
+                !isFinite(pos[1]) || !isFinite(pos[2])) {
+                continue;
+            }
+
             const Vec3 tangent = faceTangent(pos[0], pos[1], pos[2], uv[0], uv[1], uv[2],
                                              normalized(nrm[0] + nrm[1] + nrm[2]));
 
@@ -333,6 +347,27 @@ float encodeCurvature(float curvature, float range, bool cavityOnly) {
         return 0.5f;
     }
     return 0.5f + 0.5f * std::clamp(curvature / range, -1.0f, 1.0f);
+}
+
+// The value an UNCOVERED texel carries, per map. Zero is not neutral for most
+// maps: it bleeds into the surface under dilation or mip generation as a
+// phantom crease (curvature/cavity) or an occlusion ring (AO), and for Normal a
+// DirectX preset's green flip would turn (0,0,0) into pure green, so one bake
+// shipped two different paddings depending on the target app. Each value is
+// what a missed cage ray already writes for that map, which is what makes the
+// padding continuous with the covered texels at a chart border.
+std::array<float, 3> neutralPadding(BakeMap map) {
+    switch (map) {
+        case BakeMap::Normal:
+            return {0.5f, 0.5f, 1.0f};  // flat tangent normal, invariant under the green flip
+        case BakeMap::Curvature:
+            return {0.5f, 0.0f, 0.0f};   // encodeCurvature(0, range, false), range-independent
+        case BakeMap::Cavity:            // no concavity
+        case BakeMap::AmbientOcclusion:  // fully open
+            return {1.0f, 0.0f, 0.0f};
+        default:
+            return {};  // Displacement, Position, Color: zero already IS the neutral value
+    }
 }
 
 // Which maps an attached field evaluator can serve. The other three
@@ -600,18 +635,11 @@ BakeResult bake(const Mesh& lowPoly, const Mesh& highPoly, BakeMap map, const Ba
         rasterize(lowPoly, lowNormals, *uvs, params.width, params.height);
     result.texelsCovered = texels.size();
     result.image = makeImage(params.width, params.height, channelsFor(map));
-    if (map == BakeMap::Normal) {
-        // Uncovered texels must carry the FLAT tangent normal, not zero. Black
-        // is not a normal: it bleeds garbage into the surface under dilation or
-        // mip generation, and a DirectX preset's green flip turns (0,0,0) into
-        // pure green (0,1,0), so the same bake shipped two different paddings
-        // depending on the target app. (0.5,0.5,1) is what a missed cage ray
-        // already writes, and it is invariant under the green flip.
-        for (int y = 0; y < result.image.height; ++y) {
-            for (int x = 0; x < result.image.width; ++x) {
-                result.image.at(x, y, 0) = 0.5f;
-                result.image.at(x, y, 1) = 0.5f;
-                result.image.at(x, y, 2) = 1.0f;
+    const std::array<float, 3> padding = neutralPadding(map);
+    for (int y = 0; y < result.image.height; ++y) {
+        for (int x = 0; x < result.image.width; ++x) {
+            for (int c = 0; c < result.image.channels; ++c) {
+                result.image.at(x, y, c) = padding[static_cast<std::size_t>(c)];
             }
         }
     }

@@ -221,6 +221,33 @@ TEST_CASE("guidance transport: guides and density round-trip and clear with the 
         REQUIRE(session.guides().empty());
     }
 
+    SUBCASE("a short guide point is rejected on its shape, not read out of bounds") {
+        // A point with fewer than three components used to reach nlohmann's
+        // unchecked const operator[], which indexes the underlying vector past
+        // its end. The reply must be the shape rejection, so requiring the
+        // exact message is what pins the check: whatever the out-of-range read
+        // happened to produce could never name the point shape.
+        const std::string shape = "each point must be";
+        const char* const malformed[] = {
+            R"({"type":"push_guides","guides":[{"points":[[1.0]],"radius":0.1}]})",
+            R"({"type":"push_guides","guides":[{"points":[[0,0,0],[1,0]],"radius":0.1}]})",
+            R"({"type":"push_guides","guides":[{"points":[3.0],"radius":0.1}]})",
+        };
+        for (const char* const request : malformed) {
+            const std::string reply = net::processRequest(session, request);
+            CHECK(reply.find("error") != std::string::npos);
+            CHECK(reply.find(shape) != std::string::npos);
+            CHECK(session.guides().empty());
+        }
+
+        // A well-formed payload still goes through untouched.
+        REQUIRE(net::processRequest(
+                    session,
+                    R"({"type":"push_guides","guides":[{"points":[[0,0,0],[1,0,0]],"radius":0.1}]})")
+                    .find("\"ok\"") != std::string::npos);
+        CHECK(session.guides().size() == 1);
+    }
+
     SUBCASE("clear_scene drops guidance with the Target it was drawn on") {
         (void)net::processRequest(
             session,

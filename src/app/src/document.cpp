@@ -233,6 +233,13 @@ std::optional<Document> Document::load(std::span<const std::uint8_t> bytes) {
         if (!r.ok()) {
             return std::nullopt;
         }
+        // Reject the declared length before narrowing it: a 64-bit length that
+        // exceeds the file cannot name a real section, and the cast to size_t
+        // would otherwise truncate it into a plausible one where size_t is
+        // narrower than 64 bits.
+        if (length > r.remaining()) {
+            return std::nullopt;
+        }
         ByteReader section = r.sub(static_cast<std::size_t>(length));
         if (!r.ok()) {
             return std::nullopt;

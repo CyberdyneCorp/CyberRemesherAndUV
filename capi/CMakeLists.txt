@@ -82,6 +82,23 @@ if(CYBER_BUILD_CAPI_SHARED)
         CYBER_CAPI_VERSION_PATCH=${PROJECT_VERSION_PATCH})
     cyber_set_warnings(cyber_capi_shared)
 
+    # Export only the cyber_* C ABI. Without this the ~4000 vendored
+    # Geogram/stb/tinygltf definitions linked in from the static archives stay
+    # globally visible and are subject to ELF interposition inside a host
+    # process (a DCC) that carries its own copy of the same third-party code.
+    if(APPLE)
+        target_link_options(cyber_capi_shared PRIVATE
+            "-Wl,-exported_symbols_list,${CMAKE_CURRENT_SOURCE_DIR}/cyber_capi.symbols")
+        set_property(TARGET cyber_capi_shared APPEND PROPERTY
+            LINK_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/cyber_capi.symbols")
+    elseif(UNIX)
+        target_link_options(cyber_capi_shared PRIVATE
+            "-Wl,--version-script,${CMAKE_CURRENT_SOURCE_DIR}/cyber_capi.map"
+            "-Wl,--exclude-libs,ALL")
+        set_property(TARGET cyber_capi_shared APPEND PROPERTY
+            LINK_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/cyber_capi.map")
+    endif()
+
     # Install the self-contained C ABI + header so downstream projects can
     # find_package(CyberRemesher CONFIG) and link cyber::capi. (The C++ core and
     # the optional Geogram solver are PRIVATE-linked into the .so, so the export

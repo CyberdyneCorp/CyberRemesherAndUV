@@ -10,6 +10,7 @@
 #include <fstream>
 #include <istream>
 #include <iterator>
+#include <limits>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -115,10 +116,11 @@ HeaderDeclaration scanComments(const std::vector<std::string>& comments) {
     return out;
 }
 
-// The PLY header as raw text, up to and including "end_header". Scanned before
-// happly parses anything so a bad version can never build a partial Target.
-std::vector<std::string> headerComments(std::string_view bytes) {
-    std::vector<std::string> comments;
+// The PLY header as raw text lines, up to and including "end_header". Scanned
+// before happly parses anything so a bad version can never build a partial
+// Target. `payloadStart` (out) lands on the first byte of the data section.
+std::vector<std::string> headerLines(std::string_view bytes, std::size_t& payloadStart) {
+    std::vector<std::string> lines;
     std::size_t pos = 0;
     while (pos < bytes.size()) {
         std::size_t eol = bytes.find('\n', pos);
@@ -129,19 +131,159 @@ std::vector<std::string> headerComments(std::string_view bytes) {
         if (!line.empty() && line.back() == '\r') {
             line.remove_suffix(1);
         }
-        pos = eol + 1;
-        if (line.rfind("comment", 0) == 0) {
-            std::string_view rest = line.substr(7);
-            while (!rest.empty() && (rest.front() == ' ' || rest.front() == '\t')) {
-                rest.remove_prefix(1);
-            }
-            comments.emplace_back(rest);
-        }
+        pos = std::min(eol + 1, bytes.size());
+        lines.emplace_back(line);
         if (line == "end_header") {
             break;
         }
     }
+    payloadStart = pos;
+    return lines;
+}
+
+std::vector<std::string> headerComments(const std::vector<std::string>& lines) {
+    std::vector<std::string> comments;
+    for (const std::string& line : lines) {
+        if (line.rfind("comment", 0) != 0) {
+            continue;
+        }
+        std::string_view rest = std::string_view(line).substr(7);
+        while (!rest.empty() && (rest.front() == ' ' || rest.front() == '\t')) {
+            rest.remove_prefix(1);
+        }
+        comments.emplace_back(rest);
+    }
     return comments;
+}
+
+constexpr std::size_t kSizeMax = std::numeric_limits<std::size_t>::max();
+
+std::size_t saturatingAdd(std::size_t a, std::size_t b) {
+    return a > kSizeMax - b ? kSizeMax : a + b;
+}
+
+std::size_t saturatingMul(std::size_t a, std::size_t b) {
+    if (a == 0 || b == 0) {
+        return 0;
+    }
+    return a > kSizeMax / b ? kSizeMax : a * b;
+}
+
+// Width of a PLY scalar type, or 0 for anything the format does not define —
+// which makes the element uncostable rather than guessed at.
+std::size_t plyTypeBytes(const std::string& type) {
+    if (type == "char" || type == "uchar" || type == "int8" || type == "uint8") {
+        return 1;
+    }
+    if (type == "short" || type == "ushort" || type == "int16" || type == "uint16") {
+        return 2;
+    }
+    if (type == "int" || type == "uint" || type == "int32" || type == "uint32" ||
+        type == "float" || type == "float32") {
+        return 4;
+    }
+    if (type == "double" || type == "float64") {
+        return 8;
+    }
+    return 0;
+}
+
+// A declared element count is attacker-controlled: one too large to represent
+// is a demand nothing can satisfy, not a reason to stop checking.
+std::optional<std::size_t> parseCount(const std::string& text) {
+    if (text.empty()) {
+        return std::nullopt;
+    }
+    for (const char c : text) {
+        if (std::isdigit(static_cast<unsigned char>(c)) == 0) {
+            return std::nullopt;
+        }
+    }
+    try {
+        return static_cast<std::size_t>(std::stoull(text));
+    } catch (const std::out_of_range&) {
+        return kSizeMax;
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
+}
+
+// One element exactly as the header declares it, before any data is read.
+struct ElementDemand {
+    std::size_t count = 0;
+    std::size_t properties = 0;
+    std::size_t binaryBytes = 0;
+    bool costable = true;
+};
+
+// The smallest data section one entry could occupy: an ASCII entry needs at
+// least one character per property plus the separators between them; a binary
+// entry costs its declared types, a list charged only for its count field
+// because it may carry no values at all.
+std::size_t entryFloor(const ElementDemand& elem, bool binary) {
+    if (binary) {
+        return elem.binaryBytes;
+    }
+    return elem.properties == 0 ? 0 : 2 * elem.properties - 1;
+}
+
+void addProperty(ElementDemand& elem, const std::vector<std::string>& tokens) {
+    ++elem.properties;
+    const bool isList = tokens.size() > 1 && tokens[1] == "list";
+    const std::size_t typeIndex = isList ? 2 : 1;
+    const std::size_t bytes = tokens.size() > typeIndex ? plyTypeBytes(tokens[typeIndex]) : 0;
+    if (bytes == 0) {
+        elem.costable = false;
+        return;
+    }
+    elem.binaryBytes = saturatingAdd(elem.binaryBytes, bytes);
+}
+
+struct PayloadFloor {
+    bool costable = true;
+    std::size_t bytes = 0;
+};
+
+// How many data bytes the header's element counts promise, at an absolute
+// minimum. Anything the header expresses that cannot be costed drops the check
+// rather than inventing a bound.
+PayloadFloor declaredPayloadFloor(const std::vector<std::string>& lines) {
+    PayloadFloor out;
+    bool binary = false;
+    bool haveElement = false;
+    ElementDemand current;
+    const auto flush = [&]() {
+        if (!haveElement) {
+            return;
+        }
+        if (!current.costable) {
+            out.costable = false;
+            return;
+        }
+        out.bytes =
+            saturatingAdd(out.bytes, saturatingMul(current.count, entryFloor(current, binary)));
+    };
+    for (const std::string& line : lines) {
+        const std::vector<std::string> tokens = tokenize(line);
+        if (tokens.empty()) {
+            continue;
+        }
+        if (tokens[0] == "format") {
+            binary = tokens.size() > 1 && tokens[1] != "ascii";
+        } else if (tokens[0] == "element") {
+            flush();
+            current = ElementDemand{};
+            haveElement = true;
+            const std::optional<std::size_t> count =
+                tokens.size() > 2 ? parseCount(tokens[2]) : std::nullopt;
+            current.count = count.value_or(0);
+            current.costable = count.has_value();
+        } else if (tokens[0] == "property" && haveElement) {
+            addProperty(current, tokens);
+        }
+    }
+    flush();
+    return out;
 }
 
 void computeBounds(Handoff& out) {
@@ -291,7 +433,9 @@ Result<Handoff> readPlyBytes(std::string_view bytes, std::string_view origin) {
     // Version FIRST, straight off the header text: an incompatible handoff must
     // be rejected on its contract before a single vertex exists, whatever else
     // is wrong with the payload.
-    const HeaderDeclaration header = scanComments(headerComments(bytes));
+    std::size_t payloadStart = 0;
+    const std::vector<std::string> lines = headerLines(bytes, payloadStart);
+    const HeaderDeclaration header = scanComments(headerComments(lines));
     if (!header.found) {
         return Error{ErrorCode::UnsupportedFormat,
                      std::string(origin) + ": not a sculpt handoff (no \"comment " +
@@ -304,6 +448,20 @@ Result<Handoff> readPlyBytes(std::string_view bytes, std::string_view origin) {
     }
     if (!versionSupported(header.version)) {
         return versionRejection(origin, header.version);
+    }
+
+    // The declared element counts drive happly's reservation and are filled
+    // entry by entry whatever the file holds, so a header promising more data
+    // than follows it is rejected before a byte is allocated for it — otherwise
+    // a few hundred bytes buy multi-gigabyte allocations, and a truncated
+    // payload becomes vertices the producer never sent.
+    const PayloadFloor demand = declaredPayloadFloor(lines);
+    const std::size_t available = bytes.size() - payloadStart;
+    if (demand.costable && demand.bytes > available) {
+        return Error{ErrorCode::ParseError,
+                     std::string(origin) + ": handoff header declares at least " +
+                         std::to_string(demand.bytes) + " byte(s) of element data but only " +
+                         std::to_string(available) + " follow the header"};
     }
 
     try {

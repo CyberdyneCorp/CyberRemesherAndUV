@@ -101,6 +101,9 @@ public:
         if (!ensure(len)) {
             return {};
         }
+        if (len == 0) {
+            return {};  // &m_data[m_pos] is out of range when the cursor is at the end
+        }
         std::string s(reinterpret_cast<const char*>(&m_data[m_pos]), len);
         m_pos += len;
         return s;
@@ -119,7 +122,11 @@ public:
 
 private:
     [[nodiscard]] bool ensure(std::size_t n) {
-        if (!m_ok || m_pos + n > m_data.size()) {
+        // Subtract rather than add: `m_pos + n` wraps for an attacker-supplied
+        // n near 2^64 and would let the read escape the buffer. `m_pos` never
+        // passes `m_data.size()` (it only advances after a successful ensure),
+        // so the subtraction cannot underflow.
+        if (!m_ok || n > m_data.size() - m_pos) {
             m_ok = false;
             return false;
         }

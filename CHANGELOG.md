@@ -412,13 +412,68 @@
   schema the engine does not support. The C ABI maps it to `CYBER_ERR_IO` like
   the other I/O codes, so no C client behaviour changes.
 - `cmake/CompilerWarnings.cmake` gained `CYBER_WARNINGS_AS_ERRORS` (default
-  `ON`, so CI is unchanged). Toolchains newer than CI's emit diagnostics of
-  their own — GCC 13 raises a known `-Wstringop-overflow` false positive from
-  inside libstdc++ — and there was previously no way to build the tree locally
-  to look at them.
+  `ON`, so CI is unchanged) as an escape hatch for an unforeseen toolchain
+  diagnostic. It is no longer needed for the known one: the GCC 12/13
+  `-Wstringop-overflow` false positive from inside libstdc++ is suppressed at
+  its single call site instead (see Fixed), so the default configuration builds
+  on Ubuntu 24.04 with warnings still enforced everywhere else.
+- `libcyber_capi` now exports only its `cyber_*` C ABI (a linker version script
+  on ELF, `-exported_symbols_list` on Mach-O). The ~4000 vendored
+  Geogram/stb/tinygltf/tinyobj/AutoRemesher definitions linked in from the
+  static archives were globally visible and therefore open to ELF
+  interposition, which matters precisely where this library is meant to run:
+  inside a DCC process that carries its own copy of the same third-party code.
+  No `cyber_*` entry point changed.
 
 ### Fixed
 
+- **Soft-selection weights were resurrected on recycled vertex ids.** Vertex
+  ids come back off the mesh's free list, so the weight of a vertex removed by
+  `cyber_retopo_erase` / `_delete_faces` / `_dissolve_edges` /
+  `_merge_vertices` was still in the field when the next `_create_face` handed
+  that id to a brand-new vertex: the new geometry was born selected and
+  `cyber_retopo_selection_transform` / `_relax` silently dragged it (a quad
+  authored at z = 0 landed at z = 8.6), and the saved slots carried the ghost
+  through a document save/load. Every mutating op now unselects the ids it
+  killed, in the live field and in every named slot
+  (`cyber::retopo::dropDeadWeights`).
+- **A non-finite paint dab wiped the whole selection instead of being
+  ignored.** The brush's coverage test was `d >= radius`, which is false for a
+  NaN distance, so a dab with a non-finite center or pressure — a viewport
+  ray-miss unprojects to NaN — "covered" every vertex whatever the radius, and
+  the resulting NaN was sanitized to 0 on the way into the field. The coverage
+  test is now NaN-safe, such a dab is dropped (skipped per sample inside a
+  stroke, so the rest of the gesture still paints), and
+  `cyber_retopo_selection_paint` reports it with `CYBER_ERR_INVALID_ARG`.
+- **`cyber_retopo_selection_relax` accepted a strength its sibling rejects.**
+  The value went into `RelaxParams` unvalidated while `cyber_retopo_relax`
+  gates it on `[0,1]`, so a NaN slider value NaN'd every selected vertex
+  position and still returned `CYBER_OK` with a plausible `moved` count. It now
+  fails with `CYBER_ERR_INVALID_PARAM` and leaves the mesh untouched.
+- **The default configuration could not build on GCC 13 / Ubuntu 24.04.** With
+  `CYBER_WARNINGS_AS_ERRORS=ON` (the default) exactly one translation unit
+  failed, on a libstdc++ `-Wstringop-overflow` false positive inlined from a
+  `vector::insert` range append in `reverseCuthillMcKee`. The only escape was
+  disabling warning enforcement for the whole tree. Suppressed at that one
+  statement instead, guarded on `__GNUC__ >= 12 && !__clang__`, so nothing else
+  loses the diagnostic.
+- **`push_guides` read past the end of a short guide point.** Each point's
+  components were taken with nlohmann's `operator[](size_type)`, which is
+  unchecked on a `const` array node, so a point with fewer than three entries
+  indexed past the underlying vector — and because nothing threw, the bridge's
+  `try`/`catch` could not turn it into an error reply. Point shape is now
+  validated before the components are read.
+- **`SeamPath::addWaypoint` mutated the path on a rejected add.** With the
+  resume marker armed and no pending waypoints, re-adding the resume vertex
+  seeded the marker *before* the duplicate check, so the call returned `false`
+  (`cyber_seam_path_add_waypoint` -> 0) while `waypointCount()` went 0 -> 1,
+  against the header's "changing nothing" contract. The repeat check now runs
+  against the marker as the effective last waypoint.
+- **`-DCYBER_BUILD_RETOPO=OFF` configured cleanly and then failed at the final
+  link** with `cannot find -lcyber_retopo`: capi links `cyber_retopo`
+  unconditionally, and CMake demotes the never-added target to a raw link flag.
+  The combination is now rejected at configure time with a message naming both
+  options.
 - **The native seamless solve left fractional seam translations on crease-heavy
   meshes (sharp-cube residual 0.493).** The reduced MIQ elimination can make a
   seam translation or crease lattice offset DEPENDENT on a continuous free —

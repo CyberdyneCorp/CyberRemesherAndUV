@@ -15,6 +15,7 @@ Behaviour:
 """
 
 import os
+import re
 import sys
 import tempfile
 
@@ -22,6 +23,10 @@ import tempfile
 _PKG_PARENT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if _PKG_PARENT not in sys.path:
     sys.path.insert(0, _PKG_PARENT)
+
+_REPO = os.path.dirname(  # <repo>/python/cyberremesh/tests -> <repo>
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+)
 
 import cyberremesh
 from cyberremesh import CyberError, Mesh, RemeshParams, remesh
@@ -52,6 +57,34 @@ def _check_import_contract():
     assert hasattr(cyberremesh, "remesh")
     assert hasattr(cyberremesh, "CyberError")
     assert issubclass(CyberError, RuntimeError)
+
+
+def _check_library_discovery():
+    """Regression: ``_lib_filenames()`` only listed ``libcyber_capi_shared.*``,
+    a name the build never emits (capi/CMakeLists.txt sets ``OUTPUT_NAME
+    cyber_capi``), and the probed directories never included
+    ``build/<preset>/capi`` where the CMake presets put it — so every documented
+    search step except ``CYBER_CAPI_LIB`` was dead, and CTest injecting that env
+    var hid it. Needs no shared library, so it runs everywhere."""
+    from cyberremesh import _ffi
+
+    with open(os.path.join(_REPO, "capi", "CMakeLists.txt")) as fh:
+        output_name = re.search(r"OUTPUT_NAME\s+(\S+)", fh.read()).group(1)
+    names = _ffi._lib_filenames()
+    assert any(output_name in name for name in names), (output_name, names)
+
+    # Drop the env var CTest sets and prove auto-discovery finds the same
+    # in-tree build on its own.
+    env = os.environ.pop("CYBER_CAPI_LIB", None)
+    try:
+        found = _ffi.find_library_path()
+    finally:
+        if env is not None:
+            os.environ["CYBER_CAPI_LIB"] = env
+    if env and os.path.isfile(env):
+        assert found is not None, "auto-discovery missed the built library"
+    print("PASS: library discovery covers {0} ({1})".format(
+        output_name, "resolved" if found else "no build tree present"))
 
 
 def _run_remesh():
@@ -109,6 +142,34 @@ def _run_quad_method():
         raise AssertionError("expected ValueError for unknown quad_method")
 
 
+def _run_guide_point_arity():
+    # Regression: the guide packing sized its ctypes buffer from the flattened
+    # points but reported point_count = len(guide.points), so a 2-component
+    # point made the C ABI read 3 * point_count floats past the buffer and
+    # place the guide at a world position built from heap bytes.
+    from cyberremesh import FlowGuide
+
+    tmpdir = tempfile.mkdtemp(prefix="cyberremesh_guide_")
+    obj_path = os.path.join(tmpdir, "cube.obj")
+    with open(obj_path, "w") as fh:
+        fh.write(_CUBE_OBJ)
+
+    with Mesh.load_obj(obj_path) as mesh:
+        bad = FlowGuide(points=[(0.0, 0.0), (1.0, 1.0)], radius=0.1)
+        try:
+            remesh(mesh, RemeshParams(target_quad_count=200), guides=[bad])
+        except ValueError as exc:
+            assert "3 components per point" in str(exc), exc
+        else:
+            raise AssertionError("expected ValueError for a 2-component guide point")
+
+        good = FlowGuide(points=[(-0.5, 0.0, 0.0), (0.5, 0.0, 0.0)], radius=0.5)
+        result = remesh(mesh, RemeshParams(target_quad_count=200), guides=[good])
+        with result:
+            assert result.stats.quads > 0, result.stats
+    print("PASS: guide point arity checked in the binding")
+
+
 def _quads_in(path):
     quads = 0
     with open(path) as fh:
@@ -120,6 +181,7 @@ def _quads_in(path):
 
 def main():
     _check_import_contract()
+    _check_library_discovery()
 
     if not cyberremesh.is_available():
         print("SKIP: cyber_capi shared library not loadable "
@@ -129,6 +191,7 @@ def main():
     print("cyberremesh engine version: {0}".format(cyberremesh.version()))
     _run_remesh()
     _run_quad_method()
+    _run_guide_point_arity()
     return 0
 
 

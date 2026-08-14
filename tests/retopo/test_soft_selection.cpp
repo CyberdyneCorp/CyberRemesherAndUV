@@ -297,6 +297,94 @@ TEST_CASE("the stroke route paints the same region as the per-dab route") {
     CHECK(anyPainted);
 }
 
+// Regression: the coverage test was `if (d >= brush.radius) continue;`, which
+// is FALSE when d is NaN, so a dab with a non-finite center or pressure
+// "covered" every vertex whatever the radius. The NaN amount was then
+// sanitized to 0 on the way into the field — one stray dab (a viewport
+// ray-miss unprojects to NaN) silently erased the whole painted selection.
+TEST_CASE("a dab that describes no region cannot wipe the painted field") {
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    const Mesh mesh = makeGrid(9, 3);
+    const retopo::PaintBrush brush{2.5f, false, retopo::Falloff::Smooth};
+
+    retopo::SoftSelection selection;
+    retopo::paintSelection(mesh, selection, {{4.0f, 1.0f, 0.0f}, 1.0f}, brush);
+    const std::vector<float> painted(selection.weights().begin(), selection.weights().end());
+    REQUIRE(painted[9 + 4] > 0.0f);
+
+    // A radius of 0.5 can physically touch at most one vertex, so a wipe is
+    // unmistakable.
+    const retopo::PaintBrush pinBrush{0.5f, false, retopo::Falloff::Smooth};
+    retopo::paintSelection(mesh, selection, {{nan, nan, nan}, 1.0f}, pinBrush);
+    retopo::paintSelection(mesh, selection, {{4.0f, 1.0f, 0.0f}, nan}, pinBrush);
+    const std::vector<float> afterDabs(selection.weights().begin(), selection.weights().end());
+    CHECK(afterDabs == painted);
+
+    // A bad first sample must not poison the stroke's bounding box either: the
+    // good sample still paints and nothing else changes.
+    retopo::SoftSelection stroke;
+    const std::vector<retopo::PaintDab> mixed = {{{nan, nan, nan}, 1.0f},
+                                                 {{4.0f, 1.0f, 0.0f}, 1.0f}};
+    retopo::paintSelectionStroke(mesh, stroke, mixed, brush);
+    REQUIRE(stroke.size() == painted.size());
+    for (std::size_t i = 0; i < painted.size(); ++i) {
+        CHECK(stroke.weights()[i] == doctest::Approx(painted[i]));
+    }
+
+    // Nothing but non-finite samples means nothing to paint.
+    retopo::SoftSelection none;
+    retopo::paintSelection(mesh, none, {{4.0f, 1.0f, 0.0f}, 1.0f}, brush);
+    const std::vector<retopo::PaintDab> allBad = {{{nan, 0.0f, 0.0f}, 1.0f}};
+    retopo::paintSelectionStroke(mesh, none, allBad, brush);
+    for (std::size_t i = 0; i < painted.size(); ++i) {
+        CHECK(none.weights()[i] == doctest::Approx(painted[i]));
+    }
+}
+
+// Regression: vertex ids are recycled from the mesh's free list, so a weight
+// left on a vertex that died was inherited by the next vertex created in that
+// slot — brand-new geometry born selected and dragged by the weighted
+// transform.
+TEST_CASE("a recycled vertex id starts unselected") {
+    Mesh mesh = makeGrid(2, 2);  // one quad, vertex ids 0..3
+    retopo::SoftSelection selection;
+    selection.resizeFor(mesh);
+    for (Index i = 0; i < mesh.vertexCapacity(); ++i) {
+        selection.setWeight(VertexId{i}, 1.0f);
+    }
+
+    mesh.removeFace(cyber::FaceId{0});
+    for (Index i = 0; i < mesh.vertexCapacity(); ++i) {
+        const VertexId v{i};
+        if (mesh.isAlive(v) && mesh.vertexEdges(v).empty()) {
+            mesh.removeIsolatedVertex(v);
+        }
+    }
+    REQUIRE(mesh.vertexCount() == 0u);
+
+    selection.dropDead(mesh);
+    for (const float w : selection.weights()) {
+        CHECK(w == 0.0f);
+    }
+
+    const VertexId reused = mesh.addVertex(Vec3{100.0f, 100.0f, 0.0f});
+    CHECK(selection.weight(reused) == 0.0f);
+    retopo::Affine move;
+    move.translation = Vec3{0.0f, 0.0f, 10.0f};
+    retopo::transformWeighted(mesh, selection, move, nullptr, nullptr);
+    CHECK(mesh.position(reused).z == 0.0f);
+
+    // Weights past the mesh's capacity belong to no vertex at all: a caller
+    // that pushed in an oversized field must not have it land on the next
+    // vertices the mesh grows into.
+    std::vector<float> oversized(mesh.vertexCapacity() + 4u, 1.0f);
+    retopo::dropDeadWeights(mesh, oversized);
+    for (std::size_t i = 0; i < oversized.size(); ++i) {
+        const bool alive = mesh.isAlive(VertexId{static_cast<Index>(i)});
+        CHECK(oversized[i] == (alive ? 1.0f : 0.0f));
+    }
+}
+
 // ---- selection operations --------------------------------------------------
 
 TEST_CASE("clear and invert reshape the whole weight field") {

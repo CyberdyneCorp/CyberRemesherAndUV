@@ -152,6 +152,12 @@ def check_commit_resume_drop(mesh) -> None:
         assert path.waypoints() == []
         assert path.resume_marker == vid(3, ROWS - 1)
 
+        # Re-adding the resume vertex is a repeat: it must change nothing, not
+        # seed the pending path on its way to reporting failure.
+        assert not path.add_waypoint(path.resume_marker)
+        assert path.waypoints() == []
+        assert path.resume_marker == vid(3, ROWS - 1)
+
         # Resume: the next waypoint continues from the last committed point.
         assert path.add_waypoint(vid(0, ROWS - 1))
         assert path.waypoints()[0] == vid(3, ROWS - 1)

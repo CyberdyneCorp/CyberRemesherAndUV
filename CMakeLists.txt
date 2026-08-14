@@ -41,6 +41,17 @@ option(CYBER_WITH_QUADCOVER "Build the in-process QuadCover seamless-UV solver" 
 # default so normal builds stay dependency-free.
 option(CYBER_WITH_SCIPP "Build the min-cost-flow integer quadrangulator (vendored NumPP+SciPP)" OFF)
 
+# capi/src/capi.cpp includes cyber/retopo/* unconditionally and links
+# cyber_retopo, so the combination is not buildable. Caught here, because CMake
+# would otherwise demote the missing target to a raw `-lcyber_retopo` and only
+# fail at the very end of the build, in the link step.
+if(CYBER_BUILD_CAPI AND NOT CYBER_BUILD_RETOPO)
+    message(FATAL_ERROR
+        "CYBER_BUILD_CAPI requires CYBER_BUILD_RETOPO (the C ABI wraps the "
+        "retopology toolset). Configure with -DCYBER_BUILD_CAPI=OFF to build "
+        "without it.")
+endif()
+
 include(cmake/CompilerWarnings.cmake)
 
 if(CYBER_WITH_QUADCOVER)

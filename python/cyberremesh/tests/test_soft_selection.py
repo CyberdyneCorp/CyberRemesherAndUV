@@ -188,6 +188,36 @@ def check_paint_accumulates_and_subtracts(mesh) -> None:
     assert stroked == twice, "stroke route diverged from the per-dab route"
 
 
+def check_stroke_rejects_bad_sample_width(mesh) -> None:
+    """Regression: ``paint_selection_stroke`` sized its ctypes buffer from the
+    flattened samples but passed ``len(samples)`` as the count, so xyz triples
+    made the C loop read 4 floats per sample past the end of the buffer and
+    paint from heap garbage. The width is now checked in the binding."""
+    mesh.clear_selection()
+    for bad in ([(1.0, 1.0, 0.0), (2.0, 1.0, 0.0), (3.0, 1.0, 0.0)],
+                [(1.0, 1.0, 0.0, 1.0), (2.0, 1.0)]):
+        try:
+            mesh.paint_selection_stroke(bad, radius=1.0)
+        except ValueError as exc:
+            assert "x, y, z, pressure" in str(exc), exc
+        else:
+            raise AssertionError("expected ValueError for samples {0}".format(bad))
+    assert set(mesh.selection_weights()) == {0.0}, "rejected stroke still painted"
+
+    # An empty gesture keeps reaching the engine's own rejection, unchanged.
+    try:
+        mesh.paint_selection_stroke([], radius=1.0)
+    except cyberremesh.CyberError as exc:
+        assert "empty stroke" in str(exc), exc
+    else:
+        raise AssertionError("expected the engine to reject an empty stroke")
+
+    # The well-formed shape still paints.
+    mesh.paint_selection_stroke([(4.0, 1.0, 0.0, 1.0)], radius=2.5)
+    assert max(mesh.selection_weights()) > 0.0
+    mesh.clear_selection()
+
+
 def check_selection_ops(mesh) -> None:
     """Clear / invert / expand / contract / smooth and the named slots."""
     mesh.clear_selection()
@@ -285,6 +315,7 @@ def main() -> int:
         with Mesh.load_obj(edit_obj.name) as mesh:
             check_line_gradient(mesh)
             check_paint_accumulates_and_subtracts(mesh)
+            check_stroke_rejects_bad_sample_width(mesh)
             check_selection_ops(mesh)
             check_transform_honours_pins(mesh)
             check_document_round_trip(mesh)

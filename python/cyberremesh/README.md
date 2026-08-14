@@ -3,8 +3,8 @@
 Python bindings for the **CyberRemesher** quad-remeshing engine.
 
 These are thin, Pythonic `ctypes` bindings over the engine's versioned C ABI
-(the `capi` module, shipped as `libcyber_capi_shared.so` / `.dylib` /
-`cyber_capi_shared.dll`). No C++ type crosses the boundary — opaque handles,
+(the `capi` module, shipped as `libcyber_capi.so` / `.dylib` /
+`cyber_capi.dll`). No C++ type crosses the boundary — opaque handles,
 plain C structs, status codes and C function-pointer callbacks only.
 
 Importing the package never loads the shared library; that happens lazily on
@@ -24,7 +24,9 @@ At first use the loader searches, in order:
 
 1. `CYBER_CAPI_LIB` — a full path to the shared library, or a directory holding it.
 2. The installed package directory (a wheel bundles the library alongside).
-3. Conventional in-tree build directories (`build/`, `out/`, `cmake-build-*`) relative to the repo root.
+3. Conventional in-tree build directories (`build/`, `out/`, `cmake-build-*`) relative to the
+   repo root, including the per-preset trees CMake presets create (`build/<preset>/capi`).
+4. The platform loader search path, for a system-installed library (`cmake --install`).
 
 ## Usage
 

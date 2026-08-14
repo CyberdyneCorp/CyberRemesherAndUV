@@ -252,6 +252,40 @@ TEST_CASE("document load rejects an absurd vertex/face count without crashing") 
     }
 }
 
+// Regression: the section length is an attacker-controlled u64. A value near
+// 2^64 used to wrap the reader's `m_pos + n` bounds check, so `sub()` handed
+// readMesh a span far longer than the file and every subsequent read walked off
+// the end of the heap block.
+TEST_CASE("document load rejects a section length that wraps the bounds check") {
+    std::vector<std::uint8_t> forged;
+    const auto appendU32 = [&forged](std::uint32_t v) {
+        for (std::size_t i = 0; i < 4; ++i) {
+            forged.push_back(static_cast<std::uint8_t>((v >> (i * 8)) & 0xFFu));
+        }
+    };
+    const auto appendU64 = [&forged](std::uint64_t v) {
+        for (std::size_t i = 0; i < 8; ++i) {
+            forged.push_back(static_cast<std::uint8_t>((v >> (i * 8)) & 0xFFu));
+        }
+    };
+
+    appendU32(app::Document::kMagic);
+    appendU32(app::Document::kFormatVersion);
+    appendU32(1u);  // one section
+    appendU32(2u);  // SectionId::EditMesh
+    // 2^64 - 24: the cursor sits at byte 24, so cursor + length wraps to 0.
+    appendU64(~std::uint64_t{0} - 23u);
+    appendU32(1000u);  // vertexCount the over-long span would have accepted
+    REQUIRE(forged.size() == 28u);
+
+    CHECK_FALSE(app::Document::load(forged).has_value());
+
+    // A length that merely overruns the file, without wrapping, is rejected too.
+    writeU32(forged, 16, 0xFFFFFFFFu);
+    writeU32(forged, 20, 0u);
+    CHECK_FALSE(app::Document::load(forged).has_value());
+}
+
 TEST_CASE("autosave fires only when dirty") {
     app::Document doc;
     doc.editMesh = makeQuadMesh();

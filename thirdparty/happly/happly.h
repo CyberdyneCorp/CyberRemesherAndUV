@@ -475,6 +475,14 @@ public:
     iss >> count;
     currEntry++;
 
+    // CYBER LOCAL PATCH (keep on re-vendor): a list whose declared count outruns the values on
+    // the line used to read (and resize) past the token vector.
+    if (count > tokens.size() - currEntry) {
+      throw std::runtime_error("PLY parser: list property " + name + " declares " +
+                               std::to_string(count) + " values but the data line carries " +
+                               std::to_string(tokens.size() - currEntry));
+    }
+
     size_t currSize = flattenedData.size();
     size_t afterSize = currSize + count;
     flattenedData.resize(afterSize);
@@ -1859,14 +1867,30 @@ private:
         // Some .ply files seem to include empty lines before the start of property data (though this is not specified
         // in the format description). We attempt to recover and parse such files by skipping any empty lines.
         if (!elem.properties.empty()) { // if the element has no properties, the line _should_ be blank, presumably
-          while (line.empty()) { // skip lines until we hit something nonempty
+          // CYBER LOCAL PATCH (keep on re-vendor): the skip loop had no stream test, so a
+          // truncated data section spun here forever at EOF; end the file with an exception instead.
+          while (line.empty() && inStream.good()) { // skip lines until we hit something nonempty
             std::getline(inStream, line);
+          }
+          if (line.empty()) {
+            throw std::runtime_error("PLY parser: file ended before element " + elem.name +
+                                     " delivered its declared " + std::to_string(elem.count) +
+                                     " entries");
           }
         }
 
         vector<string> tokens = tokenSplit(line);
         size_t iTok = 0;
         for (size_t iP = 0; iP < elem.properties.size(); iP++) {
+          // CYBER LOCAL PATCH (keep on re-vendor): parseNext indexes the token vector without
+          // bounds-checking, so a line carrying fewer values than the element declares properties
+          // read past the end of the allocation.
+          if (iTok >= tokens.size()) {
+            throw std::runtime_error("PLY parser: element " + elem.name +
+                                     " data line has fewer values than the element declares "
+                                     "properties: " +
+                                     line);
+          }
           elem.properties[iP]->parseNext(tokens, iTok);
         }
       }
@@ -1902,6 +1926,13 @@ private:
         for (size_t iP = 0; iP < elem.properties.size(); iP++) {
           elem.properties[iP]->readNext(inStream);
         }
+        // CYBER LOCAL PATCH (keep on re-vendor): a failed read leaves the entry value-initialized,
+        // so a truncated payload used to become geometry the file never carried.
+        if (!inStream) {
+          throw std::runtime_error("PLY parser: file ended before element " + elem.name +
+                                   " delivered its declared " + std::to_string(elem.count) +
+                                   " entries");
+        }
       }
     }
   }
@@ -1934,6 +1965,13 @@ private:
       for (size_t iEntry = 0; iEntry < elem.count; iEntry++) {
         for (size_t iP = 0; iP < elem.properties.size(); iP++) {
           elem.properties[iP]->readNextBigEndian(inStream);
+        }
+        // CYBER LOCAL PATCH (keep on re-vendor): see parseBinary — a truncated payload must fail
+        // rather than fabricate value-initialized entries.
+        if (!inStream) {
+          throw std::runtime_error("PLY parser: file ended before element " + elem.name +
+                                   " delivered its declared " + std::to_string(elem.count) +
+                                   " entries");
         }
       }
     }
