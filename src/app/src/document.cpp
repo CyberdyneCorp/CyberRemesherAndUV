@@ -2,7 +2,9 @@
 
 #include <cstddef>
 #include <map>
+#include <optional>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -15,6 +17,8 @@ enum class SectionId : std::uint32_t {
     Parameters = 3,
     BakeState = 4,
     SoftSelections = 5,
+    TargetExtras = 6,
+    EditMeshExtras = 7,
 };
 
 std::vector<std::uint8_t> serializeMesh(const Mesh& mesh) {
@@ -207,6 +211,282 @@ std::optional<std::map<std::string, std::vector<float>>> readSelections(ByteRead
     return slots;
 }
 
+// ---- mesh attributes and feature edges (sections 6/7) ----------------------
+// Attribute columns are keyed by element id, but a mesh is written through
+// toIndexed, which drops dead elements and renumbers the survivors. Rows are
+// written in that same compacted order — vertices by id, faces by id, corners
+// in each face's loop order — so `load` puts every row back on the element
+// fromIndexed rebuilt from it. Edges have no place in the indexed form, so an
+// edge row is stored as the compacted vertex pair it spans (plus its feature
+// flag) and resolved with edgeBetween on load.
+
+constexpr std::uint8_t kColumnFloat = 0;
+constexpr std::uint8_t kColumnInt32 = 1;
+constexpr std::uint8_t kColumnVec2 = 2;
+constexpr std::uint8_t kColumnVec3 = 3;
+constexpr std::uint8_t kColumnVec4 = 4;
+
+// Element id standing for "this row has no element in the rebuilt mesh".
+constexpr std::size_t kNoElement = static_cast<std::size_t>(-1);
+
+template <typename T>
+constexpr std::uint8_t columnTag() {
+    if constexpr (std::is_same_v<T, float>) {
+        return kColumnFloat;
+    } else if constexpr (std::is_same_v<T, std::int32_t>) {
+        return kColumnInt32;
+    } else if constexpr (std::is_same_v<T, Vec2>) {
+        return kColumnVec2;
+    } else if constexpr (std::is_same_v<T, Vec3>) {
+        return kColumnVec3;
+    } else {
+        return kColumnVec4;
+    }
+}
+
+template <typename T>
+constexpr std::size_t columnValueBytes() {
+    if constexpr (std::is_same_v<T, Vec2>) {
+        return 8;
+    } else if constexpr (std::is_same_v<T, Vec3>) {
+        return 12;
+    } else if constexpr (std::is_same_v<T, Vec4>) {
+        return 16;
+    } else {
+        return 4;
+    }
+}
+
+void writeValue(ByteWriter& w, float v) { w.f32(v); }
+void writeValue(ByteWriter& w, std::int32_t v) { w.i32(v); }
+void writeValue(ByteWriter& w, Vec2 v) {
+    w.f32(v.x);
+    w.f32(v.y);
+}
+void writeValue(ByteWriter& w, Vec3 v) {
+    w.f32(v.x);
+    w.f32(v.y);
+    w.f32(v.z);
+}
+void writeValue(ByteWriter& w, Vec4 v) {
+    w.f32(v.x);
+    w.f32(v.y);
+    w.f32(v.z);
+    w.f32(v.w);
+}
+
+template <typename T>
+T readValue(ByteReader& r) {
+    if constexpr (std::is_same_v<T, float>) {
+        return r.f32();
+    } else if constexpr (std::is_same_v<T, std::int32_t>) {
+        return r.i32();
+    } else {
+        T v{};
+        v.x = r.f32();
+        v.y = r.f32();
+        if constexpr (!std::is_same_v<T, Vec2>) {
+            v.z = r.f32();
+        }
+        if constexpr (std::is_same_v<T, Vec4>) {
+            v.w = r.f32();
+        }
+        return v;
+    }
+}
+
+// `order[k]` is the element id whose row is written at position k.
+template <typename T>
+void writeColumn(ByteWriter& w, const std::string& name, const std::vector<T>& values,
+                 const std::vector<std::size_t>& order) {
+    w.str(name);
+    w.u8(columnTag<T>());
+    w.u32(static_cast<std::uint32_t>(order.size()));
+    for (const std::size_t id : order) {
+        writeValue(w, id < values.size() ? values[id] : T{});
+    }
+}
+
+void writeAttributeSet(ByteWriter& w, const AttributeSet& attrs,
+                       const std::vector<std::size_t>& order) {
+    w.u32(static_cast<std::uint32_t>(attrs.columnCount()));
+    attrs.forEachColumn(
+        [&](const std::string& name, const auto& values) { writeColumn(w, name, values, order); });
+}
+
+template <typename T>
+bool readColumn(ByteReader& r, AttributeSet& attrs, const std::string& name,
+                const std::vector<std::size_t>& order) {
+    // A column always carries one row per element of the mesh it was written
+    // with. Demanding that keeps a forged file from declaring many columns of
+    // few bytes each: every column now costs its rows on the wire, so the
+    // memory a load can be made to allocate stays proportional to the file.
+    const std::uint32_t rows = r.u32();
+    if (!r.ok() || rows != order.size() || rows > r.remaining() / columnValueBytes<T>()) {
+        return false;
+    }
+    std::vector<T>& column = attrs.create<T>(name);
+    for (std::uint32_t i = 0; i < rows; ++i) {
+        const T value = readValue<T>(r);
+        if (order[i] < column.size()) {
+            column[order[i]] = value;
+        }
+    }
+    return r.ok();
+}
+
+bool readColumnOfTag(ByteReader& r, AttributeSet& attrs, const std::string& name,
+                     std::uint8_t tag, const std::vector<std::size_t>& order) {
+    switch (tag) {
+        case kColumnFloat:
+            return readColumn<float>(r, attrs, name, order);
+        case kColumnInt32:
+            return readColumn<std::int32_t>(r, attrs, name, order);
+        case kColumnVec2:
+            return readColumn<Vec2>(r, attrs, name, order);
+        case kColumnVec3:
+            return readColumn<Vec3>(r, attrs, name, order);
+        case kColumnVec4:
+            return readColumn<Vec4>(r, attrs, name, order);
+        default:
+            return false;
+    }
+}
+
+bool readAttributeSet(ByteReader& r, AttributeSet& attrs, const std::vector<std::size_t>& order) {
+    const std::uint32_t columns = r.u32();
+    // Each column costs at least a 4-byte name length, a 1-byte type tag and a
+    // 4-byte row count, so a count past that bound cannot be honest.
+    if (!r.ok() || columns > r.remaining() / 9u) {
+        return false;
+    }
+    for (std::uint32_t i = 0; i < columns; ++i) {
+        const std::string name = r.str();
+        const std::uint8_t tag = r.u8();
+        if (!r.ok() || !readColumnOfTag(r, attrs, name, tag, order)) {
+            return false;
+        }
+    }
+    return r.ok();
+}
+
+// Element ids in the order toIndexed exports them.
+struct ElementOrder {
+    std::vector<std::size_t> vertices;
+    std::vector<std::size_t> faces;
+    std::vector<std::size_t> corners;
+};
+
+ElementOrder compactOrder(const Mesh& mesh) {
+    ElementOrder order;
+    order.vertices.reserve(mesh.vertexCount());
+    for (std::size_t i = 0; i < mesh.vertexCapacity(); ++i) {
+        if (mesh.isAlive(VertexId{static_cast<Index>(i)})) {
+            order.vertices.push_back(i);
+        }
+    }
+    order.faces.reserve(mesh.faceCount());
+    for (std::size_t i = 0; i < mesh.faceCapacity(); ++i) {
+        const FaceId face{static_cast<Index>(i)};
+        if (!mesh.isAlive(face)) {
+            continue;
+        }
+        order.faces.push_back(i);
+        for (const LoopId loop : mesh.faceLoops(face)) {
+            order.corners.push_back(loop.value);
+        }
+    }
+    return order;
+}
+
+// Edges worth persisting: the tagged ones always, plus every alive edge once
+// the mesh carries edge columns (their rows are keyed to this same list).
+std::vector<std::size_t> persistedEdges(const Mesh& mesh) {
+    const bool all = mesh.edgeAttributes().columnCount() > 0;
+    std::vector<std::size_t> ids;
+    for (std::size_t i = 0; i < mesh.edgeCapacity(); ++i) {
+        const EdgeId edge{static_cast<Index>(i)};
+        if (mesh.isAlive(edge) && (all || mesh.isFeatureEdge(edge))) {
+            ids.push_back(i);
+        }
+    }
+    return ids;
+}
+
+bool hasMeshExtras(const Mesh& mesh) {
+    const std::size_t columns = mesh.vertexAttributes().columnCount() +
+                                mesh.edgeAttributes().columnCount() +
+                                mesh.faceAttributes().columnCount() +
+                                mesh.cornerAttributes().columnCount();
+    return columns > 0 || !persistedEdges(mesh).empty();
+}
+
+std::vector<std::uint8_t> serializeMeshExtras(const Mesh& mesh) {
+    const ElementOrder order = compactOrder(mesh);
+    std::vector<Index> compactVertex(mesh.vertexCapacity(), kInvalidIndex);
+    for (std::size_t k = 0; k < order.vertices.size(); ++k) {
+        compactVertex[order.vertices[k]] = static_cast<Index>(k);
+    }
+
+    ByteWriter w;
+    writeAttributeSet(w, mesh.vertexAttributes(), order.vertices);
+    writeAttributeSet(w, mesh.faceAttributes(), order.faces);
+    writeAttributeSet(w, mesh.cornerAttributes(), order.corners);
+
+    const std::vector<std::size_t> edges = persistedEdges(mesh);
+    w.u32(static_cast<std::uint32_t>(edges.size()));
+    for (const std::size_t id : edges) {
+        const EdgeId edge{static_cast<Index>(id)};
+        const auto [v0, v1] = mesh.edgeVertices(edge);
+        w.u32(compactVertex[v0.value]);
+        w.u32(compactVertex[v1.value]);
+        w.u8(mesh.isFeatureEdge(edge) ? 1u : 0u);
+    }
+    writeAttributeSet(w, mesh.edgeAttributes(), edges);
+    return w.take();
+}
+
+// Reads the edge records onto `mesh` and returns the edge id each row belongs
+// to (kNoElement when the pair names no edge of the rebuilt mesh).
+std::optional<std::vector<std::size_t>> readEdgeRecords(ByteReader& r, Mesh& mesh) {
+    const std::uint32_t count = r.u32();
+    if (!r.ok() || count > r.remaining() / 9u) {  // two 4-byte ids + 1-byte flag each
+        return std::nullopt;
+    }
+    std::vector<std::size_t> ids;
+    ids.reserve(count);
+    for (std::uint32_t i = 0; i < count; ++i) {
+        const Index a = r.u32();
+        const Index b = r.u32();
+        const bool feature = r.u8() != 0;
+        if (!r.ok()) {
+            return std::nullopt;
+        }
+        const EdgeId edge = mesh.edgeBetween(VertexId{a}, VertexId{b});
+        if (!edge.valid()) {
+            ids.push_back(kNoElement);
+            continue;
+        }
+        mesh.setFeatureEdge(edge, feature);
+        ids.push_back(edge.value);
+    }
+    return ids;
+}
+
+bool readMeshExtras(ByteReader& r, Mesh& mesh) {
+    const ElementOrder order = compactOrder(mesh);
+    if (!readAttributeSet(r, mesh.vertexAttributes(), order.vertices) ||
+        !readAttributeSet(r, mesh.faceAttributes(), order.faces) ||
+        !readAttributeSet(r, mesh.cornerAttributes(), order.corners)) {
+        return false;
+    }
+    const auto edges = readEdgeRecords(r, mesh);
+    if (!edges) {
+        return false;
+    }
+    return readAttributeSet(r, mesh.edgeAttributes(), *edges);
+}
+
 void writeSection(ByteWriter& w, SectionId id, const std::vector<std::uint8_t>& payload) {
     w.u32(static_cast<std::uint32_t>(id));
     w.u64(static_cast<std::uint64_t>(payload.size()));
@@ -234,18 +514,28 @@ bool sameParams(const remesh::Parameters& a, const remesh::Parameters& b) {
 std::vector<std::uint8_t> Document::save() const {
     // Optional sections are written only when they carry data, so a document
     // that uses none of them is byte-identical to what earlier builds wrote.
-    const bool hasSelections = !softSelections.empty();
+    std::vector<std::pair<SectionId, std::vector<std::uint8_t>>> sections;
+    sections.emplace_back(SectionId::Target, serializeMesh(target));
+    sections.emplace_back(SectionId::EditMesh, serializeMesh(editMesh));
+    sections.emplace_back(SectionId::Parameters, serializeParams(params));
+    sections.emplace_back(SectionId::BakeState, serializeBake(bake));
+    if (!softSelections.empty()) {
+        sections.emplace_back(SectionId::SoftSelections,
+                              serializeSelections(compactSelections(editMesh, softSelections)));
+    }
+    if (hasMeshExtras(target)) {
+        sections.emplace_back(SectionId::TargetExtras, serializeMeshExtras(target));
+    }
+    if (hasMeshExtras(editMesh)) {
+        sections.emplace_back(SectionId::EditMeshExtras, serializeMeshExtras(editMesh));
+    }
+
     ByteWriter w;
     w.u32(kMagic);
     w.u32(kFormatVersion);
-    w.u32(hasSelections ? 5u : 4u);  // section count
-    writeSection(w, SectionId::Target, serializeMesh(target));
-    writeSection(w, SectionId::EditMesh, serializeMesh(editMesh));
-    writeSection(w, SectionId::Parameters, serializeParams(params));
-    writeSection(w, SectionId::BakeState, serializeBake(bake));
-    if (hasSelections) {
-        writeSection(w, SectionId::SoftSelections,
-                     serializeSelections(compactSelections(editMesh, softSelections)));
+    w.u32(static_cast<std::uint32_t>(sections.size()));
+    for (const auto& [id, payload] : sections) {
+        writeSection(w, id, payload);
     }
     return w.take();
 }
@@ -314,6 +604,16 @@ std::optional<Document> Document::load(std::span<const std::uint8_t> bytes) {
                 doc.softSelections = std::move(*slots);
                 break;
             }
+            case SectionId::TargetExtras:
+                if (!readMeshExtras(section, doc.target)) {
+                    return std::nullopt;
+                }
+                break;
+            case SectionId::EditMeshExtras:
+                if (!readMeshExtras(section, doc.editMesh)) {
+                    return std::nullopt;
+                }
+                break;
             default:
                 break;  // unknown section: skipped by its length
         }

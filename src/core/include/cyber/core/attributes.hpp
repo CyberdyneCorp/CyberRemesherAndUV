@@ -190,6 +190,16 @@ public:
         return out;
     }
 
+    // Visits every column as (name, const std::vector<T>&) in name order.
+    // Lets a serializer write whatever columns a mesh happens to carry without
+    // knowing their names or types up front.
+    template <typename Fn>
+    void forEachColumn(const Fn& fn) const {
+        for (const auto& [name, column] : m_columns) {
+            std::visit([&](const auto& vec) { fn(name, vec); }, column);
+        }
+    }
+
     template <typename Fn>
     void forEachColumnPaired(AttributeSet& other, const Fn& fn) {
         for (auto& [name, column] : m_columns) {

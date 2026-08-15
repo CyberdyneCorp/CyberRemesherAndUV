@@ -39,6 +39,7 @@
 #endif
 
 #include <geogram/basic/common.h>
+#include <geogram/bibliography/bibliography.h>
 
 #include <AutoRemesher/AutoRemesher>
 #include <AutoRemesher/Vector2>
@@ -262,6 +263,43 @@ class ConsoleSilencer {
     const bool engaged_;
 };
 
+// Geogram's citation registry is a process-global vector<CitationRecord> that
+// geo_cite() appends to with no dedup and no cap — once per spatial sort inside
+// the solve, so the record count tracks the solver's work, not the call count.
+// The list is consumed only by Biblio::terminate() under the `biblio` CmdLine
+// argument, which this build never declares, and GEO::terminate() is never
+// called here (see the header note), so every record a solve appends would stay
+// resident for the life of the host process: a farm worker or DCC plugin doing
+// thousands of remeshes grows monotonically, and no consumer can reclaim it
+// (the shared library exports no GEO symbol). So we drop the records ourselves.
+//
+// cite() and reset_citations() both touch that vector unsynchronized, so the
+// clear must happen when NO solve is in flight: same outermost-only discipline
+// as the console filters, with its own depth because that one is skipped
+// entirely under CYBER_QC_VERBOSE.
+std::mutex& citationMutex() {
+    static std::mutex mutex;
+    return mutex;
+}
+
+std::size_t g_citationDepth = 0;  // guarded by citationMutex()
+
+class CitationReclaimer {
+  public:
+    CitationReclaimer() {
+        const std::lock_guard<std::mutex> lock(citationMutex());
+        ++g_citationDepth;
+    }
+    ~CitationReclaimer() {
+        const std::lock_guard<std::mutex> lock(citationMutex());
+        if (--g_citationDepth == 0) {
+            GEO::Biblio::reset_citations();
+        }
+    }
+    CitationReclaimer(const CitationReclaimer&) = delete;
+    CitationReclaimer& operator=(const CitationReclaimer&) = delete;
+};
+
 }  // namespace
 
 SeamlessSolveResult solveSeamlessUv(const std::vector<std::array<double, 3>>& verts,
@@ -275,6 +313,9 @@ SeamlessSolveResult solveSeamlessUv(const std::vector<std::array<double, 3>>& ve
     // Covers the whole solve INCLUDING Geogram's own start-up logging.
     const ConsoleSilencer silence;
     ensureGeogramInitialized();
+    // After initialize(): Biblio::initialize() cites too, and this must outlive
+    // every geo_cite the solve below reaches.
+    const CitationReclaimer citations;
 
     std::vector<AutoRemesher::Vector3> arVerts;
     arVerts.reserve(verts.size());

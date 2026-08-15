@@ -2099,10 +2099,11 @@ int solveSeamlessReduced(accel::IBackend& backend, std::size_t nCut,
     }
 
     // Reduction map on the UV block only: Tuv (nUv x W) and its transpose Tt (W x nUv).
-    const auto buildCsr = [](std::size_t nr,
+    const auto buildCsr = [](std::size_t nr, std::size_t nc,
                              const std::vector<std::vector<std::pair<std::size_t, double>>>& r) {
         accel::SparseMatrix m;
         m.rows = nr;
+        m.cols = nc;
         m.rowStart.reserve(nr + 1);
         m.rowStart.push_back(0);
         for (std::size_t i = 0; i < nr; ++i) {
@@ -2126,12 +2127,13 @@ int solveSeamlessReduced(accel::IBackend& backend, std::size_t nCut,
             }
         }
     }
-    const accel::SparseMatrix Tuv = buildCsr(nUv, tuvRows);
-    const accel::SparseMatrix Tt = buildCsr(W, ttRows);
+    const accel::SparseMatrix Tuv = buildCsr(nUv, W, tuvRows);
+    const accel::SparseMatrix Tt = buildCsr(W, nUv, ttRows);
 
     // L2 = blkdiag(L, L) over the UV block, from the unpinned cotan rows.
     accel::SparseMatrix L2;
     L2.rows = nUv;
+    L2.cols = nUv;
     L2.rowStart.reserve(nUv + 1);
     L2.rowStart.push_back(0);
     for (std::size_t half = 0; half < 2; ++half) {
@@ -2175,6 +2177,7 @@ int solveSeamlessReduced(accel::IBackend& backend, std::size_t nCut,
         std::vector<double> mVal;
         buildReducedOperator(nCut, rows, tuvRows, ttRows, W, mStart, mCol, mVal);
         fusedM.rows = W;
+        fusedM.cols = W;
         fusedM.rowStart = std::move(mStart);
         fusedM.colIndex = std::move(mCol);
         fusedM.value.assign(mVal.begin(), mVal.end());
@@ -3664,6 +3667,7 @@ Parameterization solveParameterizationImpl(const Mesh& mesh, const SeamlessSetup
     // every ARAP re-solve (only the RHS rotates).
     accel::SparseMatrix A;
     A.rows = nCut;
+    A.cols = nCut;
     A.rowStart.reserve(nCut + 1);
     A.rowStart.push_back(0);
     for (std::size_t i = 0; i < nCut; ++i) {

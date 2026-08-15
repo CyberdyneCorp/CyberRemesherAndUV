@@ -1,8 +1,11 @@
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdint>
 #include <limits>
 #include <mutex>
+#include <thread>
+#include <vector>
 
 #include "cyber/accel/backend.hpp"
 #include "cyber/core/bvh.hpp"
@@ -12,6 +15,78 @@
 // These live on the base class so every backend inherits a correct version and
 // GPU backends only override the ones they accelerate.
 namespace cyber::accel {
+
+namespace {
+
+// Shortest range worth handing to worker threads at all. Spawning and joining
+// std::threads costs far more than a loop of a few dozen items — the failure
+// mode IBackend::spmvCsr already guards against with its nnz threshold. Kept
+// deliberately low: parallelFor cannot know the per-item cost, and a caller
+// whose items are expensive must not silently lose its workers. Chunking is
+// never observable either way — every primitive built on parallelFor writes only
+// the indices it was handed, so a serial run is byte-identical to a threaded
+// one.
+constexpr std::size_t kMinParallelItems = 64;
+
+// True while this thread is executing a parallelFor body. A parallelFor invoked
+// from inside another one runs inline instead of fanning out again: nesting
+// would multiply the thread count (the AO bake casts its rays from inside the
+// texel loop's own parallelFor). It is armed for the inline path too — a short
+// outer range still runs a parallelFor body, and leaving it unarmed there let
+// every nested call fan out per item.
+thread_local bool tInParallelRegion = false;
+
+class ParallelRegion {
+public:
+    ParallelRegion() : m_previous(tInParallelRegion) { tInParallelRegion = true; }
+    ~ParallelRegion() { tInParallelRegion = m_previous; }
+    ParallelRegion(const ParallelRegion&) = delete;
+    ParallelRegion& operator=(const ParallelRegion&) = delete;
+
+private:
+    bool m_previous;
+};
+
+std::size_t workerCount(std::size_t total) {
+    if (tInParallelRegion || total < kMinParallelItems) {
+        return 1;
+    }
+    const std::size_t hw = std::max<std::size_t>(1, std::thread::hardware_concurrency());
+    return std::min(hw, total);
+}
+
+}  // namespace
+
+void IBackend::parallelFor(std::size_t begin, std::size_t end,
+                           const std::function<void(std::size_t, std::size_t)>& fn) {
+    if (begin >= end) {
+        return;
+    }
+    const std::size_t total = end - begin;
+    const std::size_t workers = workerCount(total);
+    if (workers == 1) {
+        const ParallelRegion region;
+        fn(begin, end);
+        return;
+    }
+    const std::size_t chunk = (total + workers - 1) / workers;
+    std::vector<std::thread> threads;
+    threads.reserve(workers);
+    for (std::size_t w = 0; w < workers; ++w) {
+        const std::size_t lo = begin + w * chunk;
+        const std::size_t hi = std::min(end, lo + chunk);
+        if (lo >= hi) {
+            break;
+        }
+        threads.emplace_back([&fn, lo, hi] {
+            tInParallelRegion = true;
+            fn(lo, hi);
+        });
+    }
+    for (auto& t : threads) {
+        t.join();
+    }
+}
 
 void IBackend::axpy(float alpha, const float* x, float* y, std::size_t n) {
     parallelFor(0, n, [alpha, x, y](std::size_t lo, std::size_t hi) {
@@ -35,8 +110,8 @@ float IBackend::dot(const float* x, const float* y, std::size_t n) {
     return static_cast<float>(total);
 }
 
-void IBackend::spmvCsr(std::size_t rows, const std::size_t* rowStart, const std::size_t* colIndex,
-                       const float* value, const float* x, float* y) {
+void IBackend::spmvCsr(std::size_t rows, std::size_t /*cols*/, const std::size_t* rowStart,
+                       const std::size_t* colIndex, const float* value, const float* x, float* y) {
     // spmvCsr runs once per CG iteration; on the small operators the native seamless
     // solve produces (~1e3 rows), spawning+joining ~hardware_concurrency std::threads
     // per call costs far more than the row loop (measured: taskset -c 0 matches the
@@ -101,7 +176,43 @@ bool rayIntersectsBox(Vec3 origin, Vec3 invDir, Vec3 lo, Vec3 hi, float maxT) {
     return tmin <= tmax;
 }
 
-// Moller-Trumbore, front and back faces both hit; returns t >= 0 or -1 on miss.
+// Lexicographic order on raw coordinates — a total order used only to pick a
+// canonical evaluation order for a shared edge, never for geometry.
+bool lexLess(Vec3 p, Vec3 q) {
+    if (p.x != q.x) {
+        return p.x < q.x;
+    }
+    if (p.y != q.y) {
+        return p.y < q.y;
+    }
+    return p.z < q.z;
+}
+
+// Signed volume of (ray, edge p->q) with p and q already translated by the ray
+// origin: positive when the ray passes the edge on one side, negative on the
+// other, zero exactly on it.
+//
+// Evaluated in a canonical vertex order and negated afterwards, so the two
+// triangles sharing an edge evaluate the SAME expression on the SAME floats and
+// get bitwise identical magnitudes with exactly opposite signs. That is what
+// makes the inside test watertight: at most one of the two can reject a ray
+// crossing their shared edge. Evaluating dot(dir, cross(p, q)) and
+// dot(dir, cross(q, p)) instead leaves the two rounded independently, and both
+// can land marginally on the reject side — the leak that shows up as isolated
+// unoccluded texels in an AO bake.
+float edgeVolume(Vec3 dir, Vec3 p, Vec3 q) {
+    const bool swapped = lexLess(q, p);
+    const Vec3 lo = swapped ? q : p;
+    const Vec3 hi = swapped ? p : q;
+    const float volume = dot(dir, cross(lo, hi));
+    return swapped ? -volume : volume;
+}
+
+// Watertight inside test (canonical edge volumes) with the Moller-Trumbore
+// distance; front and back faces both hit. Returns t >= 0 or -1 on miss. The
+// inside test is equivalent to Moller-Trumbore's u/v rejections in exact
+// arithmetic, so accepted rays keep the same t bit for bit; only rays within
+// rounding distance of an edge change verdict.
 float rayTriangle(Vec3 origin, Vec3 dir, Vec3 a, Vec3 b, Vec3 c) {
     constexpr float kEpsilon = 1e-9f;
     const Vec3 ab = b - a;
@@ -111,18 +222,20 @@ float rayTriangle(Vec3 origin, Vec3 dir, Vec3 a, Vec3 b, Vec3 c) {
     if (std::fabs(det) < kEpsilon) {
         return -1.0f;
     }
-    const float invDet = 1.0f / det;
+    const Vec3 oa = a - origin;
+    const Vec3 ob = b - origin;
+    const Vec3 oc = c - origin;
+    const float eab = edgeVolume(dir, oa, ob);
+    const float ebc = edgeVolume(dir, ob, oc);
+    const float eca = edgeVolume(dir, oc, oa);
+    const bool inside = (eab >= 0.0f && ebc >= 0.0f && eca >= 0.0f) ||
+                        (eab <= 0.0f && ebc <= 0.0f && eca <= 0.0f);
+    if (!inside) {
+        return -1.0f;
+    }
     const Vec3 tvec = origin - a;
-    const float u = dot(tvec, pvec) * invDet;
-    if (u < 0.0f || u > 1.0f) {
-        return -1.0f;
-    }
     const Vec3 qvec = cross(tvec, ab);
-    const float v = dot(dir, qvec) * invDet;
-    if (v < 0.0f || u + v > 1.0f) {
-        return -1.0f;
-    }
-    const float t = dot(ac, qvec) * invDet;
+    const float t = dot(ac, qvec) * (1.0f / det);
     return t < 0.0f ? -1.0f : t;
 }
 

@@ -3,6 +3,7 @@
 #include <exception>
 #include <json.hpp>
 
+#include "json_read.hpp"
 #include "mesh_json.hpp"
 
 namespace cyber::net {
@@ -141,7 +142,7 @@ json handle(BridgeSession& session, const json& req) {
         return json{{"type", "symmetry"}, {"axis", sym.axis}, {"enabled", sym.enabled}};
     }
     if (type == "query_changed") {
-        const std::uint64_t marker = req.value("marker", std::uint64_t{0});
+        const std::uint64_t marker = detail::readUnsigned(req, "marker", std::uint64_t{0});
         const std::uint64_t rev = session.editMeshRevision();
         return json{{"type", "changed"}, {"changed", rev != marker}, {"revision", rev}};
     }
@@ -180,7 +181,7 @@ std::string processHandshake(const std::string& helloJson, bool& accept) {
                                   {"reason", "expected hello"},
                                   {"serverProtocol", kProtocolVersion}});
         }
-        const std::uint32_t clientProtocol = j.value("protocol", std::uint32_t{0});
+        const std::uint32_t clientProtocol = detail::readUnsigned(j, "protocol", std::uint32_t{0});
         if (clientProtocol != kProtocolVersion) {
             return dumpReply(json{{"type", "reject"},
                                   {"reason", "incompatible protocol version"},

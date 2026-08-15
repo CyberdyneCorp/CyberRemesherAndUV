@@ -22,3 +22,12 @@ numpy = ["numpy>=1.20"]
 
 [tool.setuptools]
 packages = ["cyberremesh"]
+
+# The wheel is not pure Python: `packaging/publish/stage_native_lib.py` copies the
+# freshly built C ABI shared library into the package directory before the wheel is
+# built, and `_ffi.find_library_path` looks for it there first. Without this glob
+# setuptools silently drops the library and emits a `py3-none-any` wheel that can
+# import but never run (and that cibuildwheel then rejects). setup.py forces the
+# platform tag so auditwheel/delocate/cibuildwheel see a binary wheel.
+[tool.setuptools.package-data]
+cyberremesh = ["*.so", "*.so.*", "*.dylib", "*.dll", "*.pyd"]

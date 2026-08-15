@@ -488,10 +488,19 @@ int cyber_mesh_vertex_position(const CyberMesh* mesh, uint32_t vertex, float out
  * count) — the Build Quad/Build Triangle edge-drag semantics dispatch on
  * whether the picked boundary edge borders a quad or a triangle (task
  * 4.1). Fills out_faces/out_sizes (either may be NULL) in deterministic
- * (radial) order. Returns the adjacent live face count (0-2 for manifold
- * meshes), or -1 when the mesh is NULL or the edge id is not alive. */
+ * (radial) order. Returns the number of entries WRITTEN — never more than
+ * the 2 the out arrays hold, so the returned count is always a safe loop
+ * bound — or -1 when the mesh is NULL or the edge id is not alive. A
+ * non-manifold edge (3+ faces, which the engine supports and tags) reports
+ * 2 here and its true valence through cyber_mesh_edge_face_count. */
 int cyber_mesh_edge_faces(const CyberMesh* mesh, uint32_t edge, uint32_t out_faces[2],
                           size_t out_sizes[2]);
+
+/* True number of live faces adjacent to a live edge, unclamped: 0 for a
+ * wire edge, 1 on a boundary, 2 on a manifold interior edge, 3+ on a
+ * non-manifold one. Returns -1 when the mesh is NULL or the edge id is not
+ * alive. */
+int cyber_mesh_edge_face_count(const CyberMesh* mesh, uint32_t edge);
 
 /* Shortest edge path between two live vertices (Dijkstra over live edges,
  * Euclidean weights; deterministic — Path Distribute's "closest path
@@ -1149,6 +1158,10 @@ CyberStatus cyber_retopo_selection_relax(CyberMesh* mesh, float strength, int it
  * document is only meaningful with the EditMesh it was saved with. Store both
  * or neither.
  *
+ * MESH DATA CARRIED: both meshes persist with their attribute columns (corner
+ * UVs and normals, vertex colours) and their feature-edge tags, so a document
+ * reloaded next session is the one that was saved rather than bare geometry.
+ *
  * BUILD GATE: implemented only when the application-shell library is in the
  * build (-DCYBER_BUILD_APP=ON, the default). The declarations always exist so
  * the ABI is stable; without the module every call fails with
@@ -1385,10 +1398,12 @@ CyberStatus cyber_image_save_png(const CyberImage* image, const char* path);
  * cyber_seam_set_free. */
 typedef struct CyberSeamSet CyberSeamSet;
 
-/* Opaque pending seam path (wraps cyber::uv::SeamPath). SNAPSHOT SEMANTICS,
- * as for CyberSnapper: it references the mesh it was created from and caches
- * vertex ids against it, so recreate it if that mesh is edited. Free with
- * cyber_seam_path_free. */
+/* Opaque pending seam path (wraps cyber::uv::SeamPath). BORROWED MESH — this
+ * is NOT the copying snapshot CyberSnapper takes: the path holds a reference
+ * to the mesh handle it was created from, so that handle MUST outlive the
+ * path (free the path first, and root the mesh in any garbage-collected
+ * binding). It also caches vertex ids against that mesh, so recreate the path
+ * if the mesh is edited. Free with cyber_seam_path_free. */
 typedef struct CyberSeamPath CyberSeamPath;
 
 /* Per-unit-length routing multipliers (POD mirror of
@@ -1429,7 +1444,10 @@ CyberStatus cyber_seam_set_mark(CyberSeamSet* seams, uint32_t edge);
 CyberStatus cyber_seam_set_erase(CyberSeamSet* seams, uint32_t edge);
 
 /* --- pending path --- */
-/* Creates a path over `mesh`; `options` may be NULL (defaults). */
+/* Creates a path over `mesh`; `options` may be NULL (defaults). The path
+ * BORROWS `mesh`: every later call on the handle reads it, so `mesh` must
+ * still be alive then — cyber_mesh_free on it before cyber_seam_path_free is
+ * a use-after-free. */
 CyberStatus cyber_seam_path_create(const CyberMesh* mesh, const CyberSeamPathOptions* options,
                                    CyberSeamPath** out);
 void cyber_seam_path_free(CyberSeamPath* path);

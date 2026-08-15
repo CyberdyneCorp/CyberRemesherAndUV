@@ -84,8 +84,42 @@ jobs:
           fi
           echo "matrix={\"include\":${include}}" >> "$GITHUB_OUTPUT" 
 
-  package:
+  # Gate: publish nothing that has not passed the suite ON THE TAGGED COMMIT.
+  # Tag pushes are not covered by branch protection, so a tag on a commit that
+  # never went through a green PR used to go straight to packaging and publish —
+  # none of the packaging scripts runs ctest. This job is the missing check;
+  # `package` needs it.
+  test:
     needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: lukka/get-cmake@latest
+      - name: Install the vendored field solver's dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libtbb-dev
+      # The Linux leg must test the configuration the Linux package SHIPS —
+      # packaging/linux/appimage.sh requires the vendored Geogram field, so this
+      # is the only leg that compiles and exercises the CYBER_HAVE_QUADCOVER
+      # branches before a release goes out.
+      - name: Configure (cpu-headless)
+        shell: bash
+        env:
+          EXTRA: ${{ runner.os == 'Linux' && '-DCYBER_REQUIRE_QUADCOVER=ON' || '' }}
+        run: cmake --preset cpu-headless ${EXTRA}
+      - name: Build
+        run: cmake --build --preset cpu-headless
+      - name: Test
+        run: ctest --preset cpu-headless
+
+  package:
+    needs: [version, test]
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.version.outputs.matrix) }}
@@ -104,7 +138,11 @@ jobs:
         if: runner.os == 'Linux' && startsWith(matrix.target, 'linux')
         run: |
           sudo apt-get update
-          sudo apt-get install -y libfuse2 desktop-file-utils
+          # libtbb-dev is what decides whether the shipped Linux artifact carries
+          # the vendored Geogram field or the native fallback. Installing it
+          # explicitly (with CYBER_REQUIRE_QUADCOVER below) makes that a choice
+          # rather than a property of whatever the runner image happens to ship.
+          sudo apt-get install -y libfuse2 desktop-file-utils libtbb-dev
           curl -fsSL -o /usr/local/bin/appimagetool \
             https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage
           chmod +x /usr/local/bin/appimagetool

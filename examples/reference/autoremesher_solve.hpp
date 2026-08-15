@@ -41,7 +41,10 @@ struct SeamlessSolveResult {
 // thread while a solve runs still reaches the buffer the host installed. (The one
 // exception is a host thread that is itself a task-pool or OpenMP worker, which
 // cannot be told apart from the solver's own.) Set CYBER_QC_VERBOSE to let the
-// vendored solver's progress traces through.
+// vendored solver's progress traces through. It also retains nothing per call in
+// Geogram's process-global state: the citation records geo_cite() appends during
+// a solve are dropped when the last concurrent solve returns, so a host that
+// remeshes for hours does not grow.
 SeamlessSolveResult solveSeamlessUv(const std::vector<std::array<double, 3>>& verts,
                                     const std::vector<std::array<std::size_t, 3>>& tris,
                                     long targetQuads, double scaling, double adaptivity);

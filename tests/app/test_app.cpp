@@ -47,6 +47,85 @@ Mesh makeTriMesh() {
     return Mesh::fromIndexed(positions, faces);
 }
 
+// ---- attribute painting, keyed to positions so ids may be renumbered -------
+
+Vec2 uvFor(Vec3 p) { return Vec2{p.x, p.y}; }
+Vec3 colorFor(Vec3 p) { return Vec3{p.x, p.y, 0.5f}; }
+
+// One column of every element kind that survives compaction by position:
+// vertex colours and corner UVs derived from the vertex position, plus a face
+// tag numbered in face order.
+void paintAttributes(Mesh& mesh) {
+    auto& colors = mesh.vertexAttributes().create<Vec3>("color");
+    for (std::size_t i = 0; i < mesh.vertexCapacity(); ++i) {
+        const cyber::VertexId v{static_cast<Index>(i)};
+        if (mesh.isAlive(v)) {
+            colors[i] = colorFor(mesh.position(v));
+        }
+    }
+    auto& uvs = mesh.cornerAttributes().create<Vec2>("uv");
+    auto& tags = mesh.faceAttributes().create<std::int32_t>("mat");
+    for (std::size_t i = 0; i < mesh.faceCapacity(); ++i) {
+        const cyber::FaceId f{static_cast<Index>(i)};
+        if (!mesh.isAlive(f)) {
+            continue;
+        }
+        tags[i] = static_cast<std::int32_t>(i) + 1;
+        for (const cyber::LoopId l : mesh.faceLoops(f)) {
+            uvs[l.value] = uvFor(mesh.position(mesh.loopVertex(l)));
+        }
+    }
+}
+
+cyber::VertexId vertexAt(const Mesh& mesh, Vec3 p) {
+    for (std::size_t i = 0; i < mesh.vertexCapacity(); ++i) {
+        const cyber::VertexId v{static_cast<Index>(i)};
+        if (mesh.isAlive(v) && mesh.position(v) == p) {
+            return v;
+        }
+    }
+    return {};
+}
+
+cyber::EdgeId edgeAt(const Mesh& mesh, Vec3 a, Vec3 b) {
+    return mesh.edgeBetween(vertexAt(mesh, a), vertexAt(mesh, b));
+}
+
+std::size_t featureEdgeCount(const Mesh& mesh) {
+    std::size_t count = 0;
+    for (std::size_t i = 0; i < mesh.edgeCapacity(); ++i) {
+        const cyber::EdgeId e{static_cast<Index>(i)};
+        if (mesh.isAlive(e) && mesh.isFeatureEdge(e)) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+// Checks the persisted columns against the positions they were derived from,
+// which operator== cannot do: it compares meshes structurally by design.
+void checkPaintedAttributes(const Mesh& mesh) {
+    const auto* colors = mesh.vertexAttributes().find<Vec3>("color");
+    REQUIRE(colors != nullptr);
+    for (std::size_t i = 0; i < mesh.vertexCapacity(); ++i) {
+        const cyber::VertexId v{static_cast<Index>(i)};
+        if (mesh.isAlive(v)) {
+            CHECK((*colors)[i] == colorFor(mesh.position(v)));
+        }
+    }
+    const auto* uvs = mesh.cornerAttributes().find<Vec2>("uv");
+    REQUIRE(uvs != nullptr);
+    for (std::size_t i = 0; i < mesh.faceCapacity(); ++i) {
+        const cyber::FaceId f{static_cast<Index>(i)};
+        if (!mesh.isAlive(f)) {
+            continue;
+        }
+        for (const cyber::LoopId l : mesh.faceLoops(f)) {
+            CHECK((*uvs)[l.value] == uvFor(mesh.position(mesh.loopVertex(l))));
+        }
+    }
+}
+
 // ---- little-endian probes into a saved document container ------------------
 
 std::uint32_t readU32(const std::vector<std::uint8_t>& bytes, std::size_t at) {
@@ -188,6 +267,133 @@ TEST_CASE("soft-selection slots follow the compacted ids across a deleted vertex
         CHECK(got == doctest::Approx(wanted ? 1.0f : 0.0f));
     }
     CHECK(*loaded == doc);
+}
+
+// ---- mesh attributes and feature edges -------------------------------------
+
+// Regression: save() serialised positions and face indices only, so every
+// attribute column (corner UVs, vertex colours) and every feature-edge tag was
+// dropped by a save/load round trip while the in-memory document kept them —
+// the loss showed up only after reloading, with no error on any call. The check
+// must look at what is persisted, since operator== compares meshes structurally.
+TEST_CASE("mesh attributes and feature edges survive a document round trip") {
+    app::Document doc;
+    doc.target = makeTriMesh();
+    doc.editMesh = makeGridMesh();
+    paintAttributes(doc.editMesh);
+    auto& creases = doc.editMesh.edgeAttributes().create<std::int32_t>("crease");
+    const cyber::EdgeId tagged =
+        edgeAt(doc.editMesh, Vec3{0.0f, 0.0f, 0.0f}, Vec3{1.0f, 0.0f, 0.0f});
+    REQUIRE(tagged.valid());
+    doc.editMesh.setFeatureEdge(tagged, true);
+    creases[tagged.value] = 7;
+
+    const std::vector<std::uint8_t> buffer = doc.save();
+    // Append-only: the attribute section takes the next unused id and is
+    // emitted only for the mesh that carries data (the target has none).
+    CHECK(sectionIds(buffer) == std::vector<std::uint32_t>{1u, 2u, 3u, 4u, 7u});
+    CHECK(readU32(buffer, 4) == app::Document::kFormatVersion);
+
+    const auto loaded = app::Document::load(buffer);
+    REQUIRE(loaded.has_value());
+    const Mesh& mesh = loaded->editMesh;
+    checkPaintedAttributes(mesh);
+
+    const auto* tags = mesh.faceAttributes().find<std::int32_t>("mat");
+    REQUIRE(tags != nullptr);
+    for (std::size_t i = 0; i < mesh.faceCount(); ++i) {
+        CHECK((*tags)[i] == static_cast<std::int32_t>(i) + 1);
+    }
+
+    const cyber::EdgeId reloaded = edgeAt(mesh, Vec3{0.0f, 0.0f, 0.0f}, Vec3{1.0f, 0.0f, 0.0f});
+    REQUIRE(reloaded.valid());
+    CHECK(mesh.isFeatureEdge(reloaded));
+    CHECK(featureEdgeCount(mesh) == 1);  // and no other edge came back tagged
+    const auto* loadedCreases = mesh.edgeAttributes().find<std::int32_t>("crease");
+    REQUIRE(loadedCreases != nullptr);
+    CHECK((*loadedCreases)[reloaded.value] == 7);
+}
+
+// The rows are keyed by element id, but the mesh travels through toIndexed,
+// which drops dead elements and renumbers the survivors — so the columns are
+// persisted in that same compacted order and must land back on the elements
+// holding the positions they were painted on.
+TEST_CASE("attribute rows follow the compacted ids across a deleted face") {
+    app::Document doc;
+    doc.editMesh = makeGridMesh();
+    doc.editMesh.removeFace(cyber::FaceId{0});
+    REQUIRE(doc.editMesh.removeIsolatedVertex(cyber::VertexId{0}));
+    paintAttributes(doc.editMesh);
+    const cyber::EdgeId tagged =
+        edgeAt(doc.editMesh, Vec3{1.0f, 2.0f, 0.0f}, Vec3{2.0f, 2.0f, 0.0f});
+    REQUIRE(tagged.valid());
+    doc.editMesh.setFeatureEdge(tagged, true);
+
+    const auto loaded = app::Document::load(doc.save());
+    REQUIRE(loaded.has_value());
+    const Mesh& mesh = loaded->editMesh;
+    REQUIRE(mesh.vertexCount() == 8);
+    REQUIRE(mesh.faceCount() == 3);
+    checkPaintedAttributes(mesh);
+
+    // Face 0 was removed, so the survivors keep their tags 2, 3, 4 in order.
+    const auto* tags = mesh.faceAttributes().find<std::int32_t>("mat");
+    REQUIRE(tags != nullptr);
+    CHECK(std::vector<std::int32_t>(tags->begin(), tags->begin() + 3) ==
+          std::vector<std::int32_t>{2, 3, 4});
+
+    const cyber::EdgeId reloaded = edgeAt(mesh, Vec3{1.0f, 2.0f, 0.0f}, Vec3{2.0f, 2.0f, 0.0f});
+    REQUIRE(reloaded.valid());
+    CHECK(mesh.isFeatureEdge(reloaded));
+    CHECK(featureEdgeCount(mesh) == 1);
+}
+
+// Corner rows are linearised face by face, so a mesh of mixed arity is the
+// case that catches an off-by-one in that walk.
+TEST_CASE("corner attributes survive faces of mixed arity") {
+    const std::vector<Vec3> positions = {{0.0f, 0.0f, 0.0f}, {1.0f, 0.0f, 0.0f},
+                                         {2.0f, 0.0f, 0.0f}, {3.0f, 0.0f, 0.0f},
+                                         {0.0f, 1.0f, 0.0f}, {1.0f, 1.0f, 0.0f},
+                                         {2.0f, 1.0f, 0.0f}, {3.0f, 1.0f, 0.0f}};
+    const std::vector<std::vector<Index>> faces = {{0, 1, 5}, {1, 2, 6, 5}, {2, 3, 7, 6, 5}};
+
+    app::Document doc;
+    doc.editMesh = Mesh::fromIndexed(positions, faces);
+    paintAttributes(doc.editMesh);
+
+    const auto loaded = app::Document::load(doc.save());
+    REQUIRE(loaded.has_value());
+    REQUIRE(loaded->editMesh.faceCount() == 3);
+    checkPaintedAttributes(loaded->editMesh);
+}
+
+TEST_CASE("document load rejects absurd attribute counts without crashing") {
+    app::Document doc;
+    doc.editMesh = makeGridMesh();
+    paintAttributes(doc.editMesh);
+
+    const std::vector<std::uint8_t> buffer = doc.save();
+    const std::size_t offset = sectionOffset(buffer, 7u);
+    REQUIRE(offset != buffer.size());
+    const std::size_t payload = offset + 12u;  // section id u32 + length u64
+
+    std::vector<std::uint8_t> badColumns = buffer;
+    writeU32(badColumns, payload, 0xFFFFFFFFu);  // vertex column count
+    CHECK_FALSE(app::Document::load(badColumns).has_value());
+
+    // payload = [colCount u32][name len u32]["color"][type tag u8][rowCount u32]
+    const std::size_t rowCount = payload + 4u + 4u + 5u + 1u;
+    std::vector<std::uint8_t> badRows = buffer;
+    writeU32(badRows, rowCount, 0xFFFFFFFFu);
+    CHECK_FALSE(app::Document::load(badRows).has_value());
+
+    // A column carries one row per element, and a short one is refused rather
+    // than accepted: otherwise a small file could declare a great many columns
+    // costing 9 bytes each and make the load allocate a full-length column for
+    // every one of them.
+    std::vector<std::uint8_t> shortRows = buffer;
+    writeU32(shortRows, rowCount, 0u);
+    CHECK_FALSE(app::Document::load(shortRows).has_value());
 }
 
 // The slot section is append-only: it is emitted only when slots exist, so a
@@ -426,6 +632,35 @@ TEST_CASE("journal metadata round-trips through the byte writer") {
     CHECK(meta->redo.size() == 1);
     CHECK(meta->undo == stack.metadata().undo);
     CHECK(meta->redo == stack.metadata().redo);
+}
+
+// Regression: readEntries reserved an entry count taken straight off the wire,
+// so a 4-byte journal asked std::vector for ~171 GB and the uncaught
+// std::bad_alloc aborted the process. Counts are now validated against the
+// bytes left, and a truncated journal yields nullopt instead of a partial one.
+TEST_CASE("journal load rejects a corrupt entry count without allocating") {
+    const std::vector<std::uint8_t> countOnly = {0xFFu, 0xFFu, 0xFFu, 0xFFu};
+    app::ByteReader huge(countOnly);
+    CHECK_FALSE(app::UndoStack::loadMetadata(huge).has_value());
+
+    int value = 0;
+    app::UndoStack stack(1000);
+    stack.push(std::make_unique<AddValueCommand>(&value, 1, std::size_t{16}));
+    stack.push(std::make_unique<AddValueCommand>(&value, 1, std::size_t{16}));
+    app::ByteWriter w;
+    stack.serializeMetadata(w);
+
+    // More entries claimed than the buffer could ever hold.
+    std::vector<std::uint8_t> inflated = w.data();
+    writeU32(inflated, 0, 1000u);
+    app::ByteReader inflatedReader(inflated);
+    CHECK_FALSE(app::UndoStack::loadMetadata(inflatedReader).has_value());
+
+    // Truncated mid-entry: rejected rather than returning a partial snapshot.
+    std::vector<std::uint8_t> truncated = w.data();
+    truncated.resize(8);
+    app::ByteReader truncatedReader(truncated);
+    CHECK_FALSE(app::UndoStack::loadMetadata(truncatedReader).has_value());
 }
 
 TEST_CASE("double-tap recognizer fires on close, quick taps") {

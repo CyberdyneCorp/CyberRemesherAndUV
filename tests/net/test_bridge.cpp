@@ -75,6 +75,19 @@ void disarmForeignAllocationFailure() { g_failForeignAlloc.store(false, std::mem
 
 bool foreignAllocationFailed() { return g_foreignAllocFailed.load(std::memory_order_acquire); }
 
+// Reads one framed message off `fd`; false on disconnect or read timeout.
+bool readFrame(int fd, net::FrameDecoder& decoder, std::string& out) {
+    char buffer[512];
+    while (!decoder.next(out)) {
+        const ssize_t n = ::recv(fd, buffer, sizeof(buffer), 0);
+        if (n <= 0) {
+            return false;
+        }
+        decoder.feed(buffer, static_cast<std::size_t>(n));
+    }
+    return true;
+}
+
 // Minimal raw connection to the bridge. BridgeClient only ever sends
 // well-formed requests, so putting arbitrary bytes on the wire needs its own
 // socket. Reads are timeout-bounded so a regression fails instead of hanging.
@@ -116,20 +129,96 @@ public:
     // One framed reply; empty on disconnect or read timeout.
     std::string receive() {
         std::string out;
-        char buffer[512];
-        while (!m_decoder.next(out)) {
-            const ssize_t n = ::recv(m_fd, buffer, sizeof(buffer), 0);
-            if (n <= 0) {
-                return {};
-            }
-            m_decoder.feed(buffer, static_cast<std::size_t>(n));
-        }
-        return out;
+        return readFrame(m_fd, m_decoder, out) ? out : std::string{};
     }
 
 private:
     int m_fd = -1;
     net::FrameDecoder m_decoder;
+};
+
+// Bridge server stand-in that answers with canned replies. BridgeClient trusts
+// whatever the server sends, so reaching its reply-decoding paths needs a
+// server that is non-conforming on purpose. The first reply answers the
+// handshake and the rest are consumed in order, the last one repeating. Every
+// read is timeout-bounded so a regression fails instead of hanging.
+class StubServer {
+public:
+    StubServer(std::string handshakeReply, std::vector<std::string> replies)
+        : m_handshake(std::move(handshakeReply)), m_replies(std::move(replies)) {
+        m_listenFd = ::socket(AF_INET, SOCK_STREAM, 0);
+        if (m_listenFd < 0) {
+            return;
+        }
+        timeval timeout{};
+        timeout.tv_sec = 5;
+        ::setsockopt(m_listenFd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+        sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_port = 0;  // ephemeral
+        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        socklen_t addrLen = static_cast<socklen_t>(sizeof(addr));
+        if (::bind(m_listenFd, reinterpret_cast<sockaddr*>(&addr), addrLen) != 0 ||
+            ::listen(m_listenFd, 1) != 0 ||
+            ::getsockname(m_listenFd, reinterpret_cast<sockaddr*>(&addr), &addrLen) != 0) {
+            ::close(m_listenFd);
+            m_listenFd = -1;
+            return;
+        }
+        m_port = ntohs(addr.sin_port);
+        m_thread = std::thread([this] { serve(); });
+    }
+    ~StubServer() {
+        if (m_listenFd >= 0) {
+            ::shutdown(m_listenFd, SHUT_RDWR);
+        }
+        if (m_thread.joinable()) {
+            m_thread.join();
+        }
+        if (m_listenFd >= 0) {
+            ::close(m_listenFd);
+        }
+    }
+    StubServer(const StubServer&) = delete;
+    StubServer& operator=(const StubServer&) = delete;
+
+    [[nodiscard]] std::uint16_t port() const { return m_port; }
+
+private:
+    void serve() {
+        const int fd = ::accept(m_listenFd, nullptr, nullptr);
+        if (fd < 0) {
+            return;
+        }
+        timeval timeout{};
+        timeout.tv_sec = 5;
+        ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+        net::FrameDecoder decoder;
+        std::string request;
+        std::size_t next = 0;
+        bool handshake = true;
+        while (!m_replies.empty() && readFrame(fd, decoder, request)) {
+            const std::string* reply = &m_handshake;
+            if (!handshake) {
+                if (next >= m_replies.size()) {
+                    next = m_replies.size() - 1;  // the last reply repeats
+                }
+                reply = &m_replies[next++];
+            }
+            handshake = false;
+            const std::string frame = net::encodeFrame(*reply);
+            if (::send(fd, frame.data(), frame.size(), MSG_NOSIGNAL) < 0) {
+                break;
+            }
+        }
+        ::close(fd);
+    }
+
+    int m_listenFd = -1;
+    std::uint16_t m_port = 0;
+    std::string m_handshake;
+    std::vector<std::string> m_replies;
+    std::thread m_thread;
 };
 
 net::WireMesh sampleMesh() {
@@ -459,6 +548,141 @@ TEST_CASE("an allocation failure on the accept thread drops the connection, not 
     REQUIRE(client.ping());
     client.close();
     server.stop();
+}
+
+TEST_CASE("a non-conforming server reply is a protocol error, not a throw out of the client") {
+    // Every reply below is well-formed JSON that merely omits or retypes a
+    // field. The client read them with unchecked at()/get<T>()/value() outside
+    // any catch, so the nlohmann exception unwound out of an API documented to
+    // report a protocol error as `false` (client.hpp) and terminated the host.
+    const std::string welcome = R"({"type":"welcome","protocol":1,"app":"stub"})";
+
+    SUBCASE("a handshake rejection whose reason is not a string") {
+        StubServer stub(R"({"type":"reject","reason":42})", {R"({"type":"ok"})"});
+        net::BridgeClient client;
+        CHECK_FALSE(client.connect(stub.port()));
+        CHECK(client.handshakeError() == "handshake failed");
+        CHECK_FALSE(client.connected());
+    }
+
+    SUBCASE("a reply whose type is not a string at all") {
+        StubServer stub(R"({"type":42})", {R"({"type":"ok"})"});
+        net::BridgeClient client;
+        CHECK_FALSE(client.connect(stub.port()));
+    }
+
+    SUBCASE("pull_target without the mesh the client reads") {
+        StubServer stub(welcome, {R"({"type":"target","present":true})"});
+        net::BridgeClient client;
+        REQUIRE(client.connect(stub.port()));
+        net::WireMesh mesh;
+        bool present = false;
+        CHECK_FALSE(client.pullTarget(mesh, present));
+        client.close();
+    }
+
+    SUBCASE("pull_editmesh with a retyped mesh member") {
+        StubServer stub(welcome, {R"({"type":"editmesh","mesh":{"positions":"nope"}})"});
+        net::BridgeClient client;
+        REQUIRE(client.connect(stub.port()));
+        net::WireMesh mesh;
+        CHECK_FALSE(client.pullEditMesh(mesh));
+        CHECK(mesh.positions.empty());
+        client.close();
+    }
+
+    SUBCASE("poll_presses with non-string ids yields no presses") {
+        StubServer stub(welcome, {R"({"type":"presses","ids":[1,2]})"});
+        net::BridgeClient client;
+        REQUIRE(client.connect(stub.port()));
+        CHECK(client.pollPresses().empty());
+        client.close();
+    }
+
+    SUBCASE("get_camera with a short pose array") {
+        StubServer stub(welcome, {R"({"type":"camera","pose":{"position":[0,0]}})"});
+        net::BridgeClient client;
+        REQUIRE(client.connect(stub.port()));
+        net::CameraPose pose;
+        CHECK_FALSE(client.getCamera(pose));
+        CHECK(pose.fovDegrees == doctest::Approx(45.0f));  // left untouched
+        client.close();
+    }
+
+    SUBCASE("query_symmetry with retyped fields") {
+        StubServer stub(welcome, {R"({"type":"symmetry","axis":7,"enabled":"yes"})"});
+        net::BridgeClient client;
+        REQUIRE(client.connect(stub.port()));
+        net::SymmetryState symmetry;
+        CHECK_FALSE(client.querySymmetry(symmetry));
+        client.close();
+    }
+
+    SUBCASE("a reply that is not an object at all") {
+        StubServer stub(welcome, {"[1,2,3]"});
+        net::BridgeClient client;
+        REQUIRE(client.connect(stub.port()));
+        CHECK_FALSE(client.ping());
+        client.close();
+    }
+
+    SUBCASE("query_changed with an out-of-range float revision") {
+        // Converting it would be UB, so it reads as the default instead.
+        StubServer stub(welcome, {R"({"type":"changed","changed":true,"revision":1e64})"});
+        net::BridgeClient client;
+        REQUIRE(client.connect(stub.port()));
+        bool changed = false;
+        std::uint64_t revision = 7;
+        CHECK(client.queryChanged(0, changed, revision));
+        CHECK(changed);
+        CHECK(revision == 0);
+        client.close();
+    }
+}
+
+TEST_CASE("a non-UTF-8 string from the caller is answered, not a throw out of the client") {
+    net::BridgeSession session;
+    net::BridgeServer server(session);
+    REQUIRE(server.start(0));
+
+    net::BridgeClient client;
+    REQUIRE(client.connect(server.port()));
+    // A Latin-1 label or message from the host used to make dump() throw
+    // type_error.316 out of a call documented to report errors as `false`.
+    const std::string rawByte(1, static_cast<char>(0xff));
+    CHECK(client.showMessage("caption " + rawByte));
+    CHECK(client.addAction("id" + rawByte, "label" + rawByte));
+    CHECK(client.ping());  // the connection survives it
+    client.close();
+    server.stop();
+}
+
+TEST_CASE("a number where the protocol expects an unsigned integer is refused, not cast") {
+    // nlohmann converts with a plain static_cast, which is undefined behaviour
+    // for a float outside the target's range. Both sites are reachable from an
+    // unauthenticated peer, the handshake one before any version check.
+    bool accept = true;
+    const std::string huge = net::processHandshake(R"({"type":"hello","protocol":1e64})", accept);
+    CHECK_FALSE(accept);
+    CHECK(huge.find("reject") != std::string::npos);
+    CHECK(huge.find("\"clientProtocol\":0") != std::string::npos);  // read as absent, not cast
+
+    accept = true;
+    const std::string negative = net::processHandshake(R"({"type":"hello","protocol":-5})", accept);
+    CHECK_FALSE(accept);
+    CHECK(negative.find("reject") != std::string::npos);
+
+    net::BridgeSession session;
+    const std::string changed =
+        net::processRequest(session, R"({"type":"query_changed","marker":1e64})");
+    // The marker defaults to 0 and a fresh session's revision is also 0.
+    CHECK(changed.find("\"changed\":false") != std::string::npos);
+    CHECK(changed.find("\"revision\":0") != std::string::npos);
+
+    // An in-range marker still round-trips.
+    session.setEditMesh(sampleMesh());
+    const std::string real = net::processRequest(session, R"({"type":"query_changed","marker":1})");
+    CHECK(real.find("\"changed\":false") != std::string::npos);
 }
 
 TEST_CASE("guidance transport: guides and density round-trip and clear with the scene") {

@@ -460,6 +460,7 @@ void transportSmooth(const Mesh& mesh, const std::vector<FaceId>& faces,
 
     accel::SparseMatrix mat;
     mat.rows = 2 * nf;
+    mat.cols = 2 * nf;
     mat.rowStart.reserve(2 * nf + 1);
     mat.rowStart.push_back(0);
     for (const auto& row : rows) {

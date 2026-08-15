@@ -71,7 +71,39 @@ bool rayIntersectsBox(Vec3 origin, Vec3 invDir, Vec3 lo, Vec3 hi, float maxT) {
     return tmin <= tmax;
 }
 
-// Moller-Trumbore, front and back faces both hit.
+// Lexicographic order on raw coordinates — a total order used only to pick a
+// canonical evaluation order for a shared edge, never for geometry.
+bool lexLess(Vec3 p, Vec3 q) {
+    if (p.x != q.x) {
+        return p.x < q.x;
+    }
+    if (p.y != q.y) {
+        return p.y < q.y;
+    }
+    return p.z < q.z;
+}
+
+// Signed volume of (ray, edge p->q) with p and q already translated by the ray
+// origin. Evaluated in a canonical vertex order and negated afterwards, so the
+// two triangles sharing an edge evaluate the SAME expression on the SAME floats
+// and get bitwise identical magnitudes with exactly opposite signs — at most one
+// of them can reject a ray crossing their shared edge. Mirrors the accel
+// backends' copy (backend_primitives.cpp and the CUDA/OpenCL kernels), which
+// the parity tests pin to this one.
+float edgeVolume(Vec3 dir, Vec3 p, Vec3 q) {
+    const bool swapped = lexLess(q, p);
+    const Vec3 lo = swapped ? q : p;
+    const Vec3 hi = swapped ? p : q;
+    const float volume = dot(dir, cross(lo, hi));
+    return swapped ? -volume : volume;
+}
+
+// Watertight inside test with the Moller-Trumbore distance; front and back faces
+// both hit. The inside test is equivalent to Moller-Trumbore's u/v rejections in
+// exact arithmetic, so accepted rays keep the same t bit for bit; only rays
+// within rounding distance of an edge change verdict — where the strict u/v
+// rejections could make BOTH adjacent triangles miss and a ray leak through a
+// closed surface.
 std::optional<float> rayTriangle(Vec3 origin, Vec3 dir, Vec3 a, Vec3 b, Vec3 c) {
     constexpr float kEpsilon = 1e-9f;
     const Vec3 ab = b - a;
@@ -81,18 +113,20 @@ std::optional<float> rayTriangle(Vec3 origin, Vec3 dir, Vec3 a, Vec3 b, Vec3 c) 
     if (std::fabs(det) < kEpsilon) {
         return std::nullopt;
     }
-    const float invDet = 1.0f / det;
+    const Vec3 oa = a - origin;
+    const Vec3 ob = b - origin;
+    const Vec3 oc = c - origin;
+    const float eab = edgeVolume(dir, oa, ob);
+    const float ebc = edgeVolume(dir, ob, oc);
+    const float eca = edgeVolume(dir, oc, oa);
+    const bool inside = (eab >= 0.0f && ebc >= 0.0f && eca >= 0.0f) ||
+                        (eab <= 0.0f && ebc <= 0.0f && eca <= 0.0f);
+    if (!inside) {
+        return std::nullopt;
+    }
     const Vec3 tvec = origin - a;
-    const float u = dot(tvec, pvec) * invDet;
-    if (u < 0.0f || u > 1.0f) {
-        return std::nullopt;
-    }
     const Vec3 qvec = cross(tvec, ab);
-    const float v = dot(dir, qvec) * invDet;
-    if (v < 0.0f || u + v > 1.0f) {
-        return std::nullopt;
-    }
-    const float t = dot(ac, qvec) * invDet;
+    const float t = dot(ac, qvec) * (1.0f / det);
     if (t < 0.0f) {
         return std::nullopt;
     }

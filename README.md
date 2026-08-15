@@ -30,8 +30,13 @@ Every strategy feeds a pure-quad path (subdivision + surface-projected relaxatio
 for a 100%-quad result. `examples/10_vs_reference.py` and `examples/11_benchmark.py`
 score the output side-by-side against QuadriFlow and AutoRemesher — e.g. the
 stanford-bunny at ~3000 quads: median **83° / 3% irregular** vs QuadriFlow's
-82° / 4% and AutoRemesher's 74° / 13%. GPL sources (AutoRemesher, its QuadCover/CoMISo path) were
-idea references only, never copied — see [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
+82° / 4% and AutoRemesher's 74° / 13%. AutoRemesher (MIT) and the Geogram subset
+(BSD-3-Clause) it carries are fetched on demand and compiled into the shipped
+binaries as the optional QuadCover field solver; the Instant Meshes extraction
+stage is a clean-room reimplementation with no code copied. Every licence and
+copyright notice is reproduced in
+[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md), which ships inside each
+release artifact.
 
 ### Automatic UV atlas
 
@@ -252,7 +257,9 @@ Stage by stage:
    the host's console and leaves the host's signal/terminate/new handlers and
    `LC_NUMERIC` untouched. Silencing it never silences the host: what the host
    itself logs to `std::cout`/`std::cerr` while a solve runs still gets through.
-   `CYBER_QC_VERBOSE` lets the solver's progress traces through too.
+   `CYBER_QC_VERBOSE` lets the solver's progress traces through too. It also
+   retains nothing per call in Geogram's process-global state, so a farm worker or
+   DCC plugin can remesh for hours without growing.
 2. **Seamless UV.** The solver builds a smooth cross field, cuts the surface along
    seams, and solves for a UV parametrization whose transitions across those seams
    are rotations by multiples of 90° plus integer translations. That "seamless"
@@ -380,7 +387,10 @@ target_link_libraries(your_app PRIVATE cyber::capi)   # + #include <cyber_capi.h
 
 The `cyber::capi` target carries the include path and links the versioned
 `libcyber_capi.so`; the C++ core, quadrangulator, UV, and the in-process Geogram
-solver are all baked into it, so the package has no transitive dependencies. In
+solver are all baked into it, so the package exports no transitive *targets* —
+`find_package` needs nothing else. The library itself still has the run-time
+dependencies its build gave it (with the vendored field: `libgomp`, `libtbb`,
+`libz`, `libstdc++`); `ldd` on the installed `.so` lists them. In
 the same build tree, `add_subdirectory()` also exposes the `cyber::*` targets
 (`cyber::core`, `cyber::uv`, …). Python bindings live in `python/cyberremesh/`.
 
@@ -388,4 +398,11 @@ the same build tree, `add_subdirectory()` also exposes the `cyber::*` targets
 
 - Specs first: medium/large changes go through OpenSpec (`openspec list`).
 - `python3 tools/license_audit.py` — dependency license gate (permissive only).
-- `.clang-format` / `.clang-tidy` are enforced in CI.
+  It covers the vendored trees outside `thirdparty/` too, and fails when anything
+  linked into a shipped binary is missing from `THIRD_PARTY_NOTICES.md`.
+- `.clang-format` is enforced in CI (`ci.yml`, pinned to clang-format 18).
+  `.clang-tidy` configures editors and local runs; it is **not** a merge gate.
+- `.github/workflows/hardening.yml` — nightly (and manually triggerable)
+  ASan/UBSan, TSan and libFuzzer lanes. The cheap half, replaying the checked-in
+  corpus under `tests/fuzz/corpus`, runs on every CI leg as the
+  `fuzz_corpus_replay` ctest case.

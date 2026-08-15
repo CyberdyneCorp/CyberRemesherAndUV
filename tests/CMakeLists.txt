@@ -57,6 +57,10 @@ endif()
 if(TARGET cyber_capi)
     target_sources(cyber_tests PRIVATE capi/test_capi.cpp)
     target_link_libraries(cyber_tests PRIVATE cyber_capi)
+    # Some ABI promises live only in the header's prose (handle lifetimes), so
+    # the capi cases read it and gate on what it says.
+    target_compile_definitions(cyber_tests PRIVATE
+        CYBER_CAPI_HEADER_PATH="${PROJECT_SOURCE_DIR}/capi/include/cyber_capi.h")
 endif()
 if(TARGET cyber_app)
     target_sources(cyber_tests PRIVATE app/test_app.cpp)
@@ -87,6 +91,12 @@ if(TARGET cyber_bakecage)
     target_sources(cyber_tests PRIVATE bakecage/test_bakecage.cpp)
     target_link_libraries(cyber_tests PRIVATE cyber_bakecage)
 endif()
+# The vendored Geogram field solver owns the process-global state the host-hygiene
+# cases guard, so the one that names a Geogram symbol compiles only when that
+# solver is actually in the link.
+if(TARGET cyber_quadcover_solver)
+    target_compile_definitions(cyber_tests PRIVATE CYBER_TESTS_HAVE_QUADCOVER)
+endif()
 # Min-cost-flow integer layout (M1): the SciPP-linkage self-test builds only when
 # the vendored SciPP is enabled (cyber_quadrangulate carries scipp::scipp then).
 if(CYBER_WITH_SCIPP)
@@ -96,6 +106,44 @@ endif()
 cyber_set_warnings(cyber_tests)
 
 add_test(NAME unit COMMAND cyber_tests)
+
+# Fuzz harnesses over the untrusted-input surface, plus the replay of their
+# checked-in seed corpus (tests/fuzz). The campaigns that hardened these parsers
+# left no harness and no corpus behind, so nothing they found could regress-test
+# anything. The replay binary needs no clang and no libFuzzer, runs everywhere
+# and is bounded, so it is an ordinary ctest case; a real campaign is
+# -DCYBER_BUILD_FUZZERS=ON with clang (see tests/fuzz/README.md).
+if(TARGET cyber_imageio)
+    add_executable(cyber_fuzz_replay
+        fuzz/replay_main.cpp
+        fuzz/temp_input.cpp
+        fuzz/fuzz_png.cpp
+        fuzz/fuzz_mesh_io.cpp)
+    target_include_directories(cyber_fuzz_replay PRIVATE fuzz)
+    target_link_libraries(cyber_fuzz_replay PRIVATE cyber_core cyber_imageio)
+    cyber_set_warnings(cyber_fuzz_replay)
+
+    add_test(NAME fuzz_corpus_replay
+        COMMAND cyber_fuzz_replay ${CMAKE_CURRENT_SOURCE_DIR}/fuzz/corpus)
+    set_tests_properties(fuzz_corpus_replay PROPERTIES TIMEOUT 120)
+
+    option(CYBER_BUILD_FUZZERS "Build the libFuzzer targets (needs clang)" OFF)
+    if(CYBER_BUILD_FUZZERS)
+        foreach(_target png meshIo)
+            add_executable(cyber_fuzz_${_target}
+                fuzz/libfuzzer_entry.cpp
+                fuzz/temp_input.cpp
+                fuzz/fuzz_png.cpp
+                fuzz/fuzz_mesh_io.cpp)
+            target_include_directories(cyber_fuzz_${_target} PRIVATE fuzz)
+            target_compile_definitions(cyber_fuzz_${_target} PRIVATE
+                CYBER_FUZZ_TARGET=cyber::fuzz::${_target})
+            target_compile_options(cyber_fuzz_${_target} PRIVATE -fsanitize=fuzzer-no-link)
+            target_link_options(cyber_fuzz_${_target} PRIVATE -fsanitize=fuzzer)
+            target_link_libraries(cyber_fuzz_${_target} PRIVATE cyber_core cyber_imageio)
+        endforeach()
+    endif()
+endif()
 
 find_package(Python3 COMPONENTS Interpreter)
 
@@ -126,6 +174,17 @@ if(Python3_FOUND)
         set_tests_properties(build_hygiene PROPERTIES
             ENVIRONMENT "CYBER_CAPI_LIB=$<TARGET_FILE:cyber_capi_shared>")
     endif()
+
+    # Release-lane regressions: the wheel that carried no engine, the licence gate
+    # that could not see the vendored Geogram tree, the release that published
+    # without running the suite, the AppImage that bundled no libraries, and the
+    # missing sanitizer/fuzz machinery. All of it lived in YAML and shell, where
+    # no test could reach it. Pure text/file parsing plus one exercise of the
+    # wheel staging script, so it runs in every configuration.
+    add_test(NAME release_gates
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/packaging/test_release_gates.py)
+    set_tests_properties(release_gates PROPERTIES TIMEOUT 120)
 endif()
 
 if(CYBER_BUILD_CLI AND Python3_FOUND)
@@ -156,6 +215,14 @@ if(TARGET cyberbridge-server AND Python3_FOUND)
         COMMAND ${Python3_EXECUTABLE}
                 ${CMAKE_CURRENT_SOURCE_DIR}/../python/tests/test_integration.py
                 $<TARGET_FILE:cyberbridge-server>)
+endif()
+
+# Reply-limit regression for the Python client. Drives it against a stub server
+# on loopback, so it needs only an interpreter — no bridge binary.
+if(Python3_FOUND)
+    add_test(NAME bridge_python_limits
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/../python/tests/test_client_limits.py)
 endif()
 
 # Python ctypes bindings over the C ABI shared library. A skip (lib not loadable)

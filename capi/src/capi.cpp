@@ -128,6 +128,26 @@ std::string& errorSlot() {
 void setError(std::string message) { errorSlot() = std::move(message); }
 void clearError() { errorSlot().clear(); }
 
+// Exception containment for the entry points that are NOT routed through
+// runMeshEdit / runDocumentOp / runSelectionOp: any body that allocates can
+// throw (std::bad_alloc, and std::length_error for a count a binding
+// marshalled wrong), and no exception may unwind across the C boundary — see
+// the note at the top of this file. On a throw the call reports `fallback` and
+// leaves the reason in the thread-local error slot; the success path is
+// untouched, so a valid call behaves exactly as it did without the guard.
+template <typename T, typename Body>
+T guarded(const char* name, T fallback, Body body) {
+    try {
+        return body();
+    } catch (const std::exception& e) {
+        setError(std::string(name) + ": " + e.what());
+        return fallback;
+    } catch (...) {
+        setError(std::string(name) + ": unknown error");
+        return fallback;
+    }
+}
+
 CyberStatus mapIoError(const cyber::io::Error& error) {
     setError(error.message);
     switch (error.code) {
@@ -468,12 +488,22 @@ CyberStatus cyber_remesh_guided(const CyberMesh* in, const CyberRemeshParams* pa
         return remeshShared(in, params, nullptr, progress, cancel, warning, user, out);
     }
     cyber::remesh::Guidance converted;
-    if (!toGuidance(*guidance, converted)) {
+    // toGuidance allocates from caller-supplied counts (a count marshalled as a
+    // signed -1 arrives here as SIZE_MAX), so the conversion is guarded: a
+    // count the allocator refuses is an argument error, never an abort.
+    const CyberStatus conversion =
+        guarded("cyber_remesh_guided", CYBER_ERR_INVALID_ARG, [&]() -> CyberStatus {
+            if (!toGuidance(*guidance, converted)) {
+                setError("cyber_remesh_guided: guidance array pointer/count mismatch");
+                return CYBER_ERR_INVALID_ARG;
+            }
+            return CYBER_OK;
+        });
+    if (conversion != CYBER_OK) {
         if (out != nullptr) {
             *out = nullptr;
         }
-        setError("cyber_remesh_guided: guidance array pointer/count mismatch");
-        return CYBER_ERR_INVALID_ARG;
+        return conversion;
     }
     return remeshShared(in, params, converted.empty() ? nullptr : &converted, progress, cancel,
                         warning, user, out);
@@ -575,8 +605,21 @@ CyberStatus cyber_uv_atlas([[maybe_unused]] CyberMesh* mesh,
             out->droppedCharts = r.droppedCharts;
             out->packedBoxArea = r.packedBoxArea;
         }
+        if (!r.ok) {
+            // An empty error slot is the header's definition of success, so a
+            // failure always names what went wrong: the report fields separate
+            // "nothing to unwrap" from a chart the unwrap could not handle.
+            setError(r.chartCount == 0 && r.droppedCharts == 0
+                         ? std::string("cyber_uv_atlas: no chart could be built (the mesh has "
+                                       "no faces, or none survived seam splitting)")
+                         : "cyber_uv_atlas: unwrap failed (" + std::to_string(r.chartCount) +
+                               " chart(s) packed, " + std::to_string(r.droppedCharts) +
+                               " dropped); a chart could not be parameterized or packed — "
+                               "check for non-finite vertex positions and degenerate faces");
+            return CYBER_ERR_RUNTIME;
+        }
         clearError();
-        return r.ok ? CYBER_OK : CYBER_ERR_RUNTIME;
+        return CYBER_OK;
     } catch (const std::exception& e) {
         setError(std::string("cyber_uv_atlas: ") + e.what());
         return CYBER_ERR_RUNTIME;
@@ -1220,17 +1263,32 @@ int cyber_mesh_edge_faces(const CyberMesh* mesh, uint32_t edge, uint32_t out_fac
     if (mesh == nullptr || !mesh->mesh.isAlive(cyber::EdgeId{edge})) {
         return -1;
     }
-    const std::vector<cyber::FaceId> faces = mesh->mesh.edgeFaces(cyber::EdgeId{edge});
-    const size_t n = std::min<size_t>(faces.size(), 2);
-    for (size_t i = 0; i < n; ++i) {
-        if (out_faces != nullptr) {
-            out_faces[i] = faces[i].value;
+    return guarded("cyber_mesh_edge_faces", -1, [&] {
+        const std::vector<cyber::FaceId> faces = mesh->mesh.edgeFaces(cyber::EdgeId{edge});
+        // The signature declares two-element buffers, so the count reported is
+        // the count WRITTEN: a non-manifold edge (3+ faces) must never send a
+        // caller looping past the arrays its own prototype told it to size.
+        // cyber_mesh_edge_face_count reports the true valence.
+        const size_t n = std::min<size_t>(faces.size(), 2);
+        for (size_t i = 0; i < n; ++i) {
+            if (out_faces != nullptr) {
+                out_faces[i] = faces[i].value;
+            }
+            if (out_sizes != nullptr) {
+                out_sizes[i] = mesh->mesh.faceVertices(faces[i]).size();
+            }
         }
-        if (out_sizes != nullptr) {
-            out_sizes[i] = mesh->mesh.faceVertices(faces[i]).size();
-        }
+        return static_cast<int>(n);
+    });
+}
+
+int cyber_mesh_edge_face_count(const CyberMesh* mesh, uint32_t edge) {
+    if (mesh == nullptr || !mesh->mesh.isAlive(cyber::EdgeId{edge})) {
+        return -1;
     }
-    return static_cast<int>(faces.size());
+    return guarded("cyber_mesh_edge_face_count", -1, [&] {
+        return static_cast<int>(mesh->mesh.edgeFaces(cyber::EdgeId{edge}).size());
+    });
 }
 
 size_t cyber_mesh_shortest_vertex_path(const CyberMesh* mesh, uint32_t from, uint32_t to,
@@ -1238,15 +1296,17 @@ size_t cyber_mesh_shortest_vertex_path(const CyberMesh* mesh, uint32_t from, uin
     if (mesh == nullptr) {
         return 0;
     }
-    const std::vector<cyber::VertexId> path =
-        cyber::retopo::shortestVertexPath(mesh->mesh, cyber::VertexId{from}, cyber::VertexId{to});
-    if (out_vertices != nullptr) {
-        const size_t n = std::min(path.size(), max_vertices);
-        for (size_t i = 0; i < n; ++i) {
-            out_vertices[i] = path[i].value;
+    return guarded("cyber_mesh_shortest_vertex_path", size_t{0}, [&] {
+        const std::vector<cyber::VertexId> path = cyber::retopo::shortestVertexPath(
+            mesh->mesh, cyber::VertexId{from}, cyber::VertexId{to});
+        if (out_vertices != nullptr) {
+            const size_t n = std::min(path.size(), max_vertices);
+            for (size_t i = 0; i < n; ++i) {
+                out_vertices[i] = path[i].value;
+            }
         }
-    }
-    return path.size();
+        return path.size();
+    });
 }
 
 size_t cyber_mesh_boundary_loop(const CyberMesh* mesh, uint32_t edge, uint32_t* out_vertices,
@@ -1257,18 +1317,20 @@ size_t cyber_mesh_boundary_loop(const CyberMesh* mesh, uint32_t edge, uint32_t* 
     if (mesh == nullptr) {
         return 0;
     }
-    const cyber::retopo::BoundaryChain chain =
-        cyber::retopo::boundaryChain(mesh->mesh, cyber::EdgeId{edge});
-    if (out_closed != nullptr) {
-        *out_closed = chain.closed ? 1 : 0;
-    }
-    if (out_vertices != nullptr) {
-        const size_t n = std::min(chain.vertices.size(), max_vertices);
-        for (size_t i = 0; i < n; ++i) {
-            out_vertices[i] = chain.vertices[i].value;
+    return guarded("cyber_mesh_boundary_loop", size_t{0}, [&] {
+        const cyber::retopo::BoundaryChain chain =
+            cyber::retopo::boundaryChain(mesh->mesh, cyber::EdgeId{edge});
+        if (out_closed != nullptr) {
+            *out_closed = chain.closed ? 1 : 0;
         }
-    }
-    return chain.vertices.size();
+        if (out_vertices != nullptr) {
+            const size_t n = std::min(chain.vertices.size(), max_vertices);
+            for (size_t i = 0; i < n; ++i) {
+                out_vertices[i] = chain.vertices[i].value;
+            }
+        }
+        return chain.vertices.size();
+    });
 }
 
 // ---- quad-loop topology queries (retopology phase 3, task 3.4) -------------
@@ -1294,8 +1356,10 @@ size_t cyber_mesh_edge_loop(const CyberMesh* mesh, uint32_t edge, uint32_t* out_
     if (mesh == nullptr) {
         return 0;
     }
-    return copyEdgeIds(cyber::retopo::edgeLoopFrom(mesh->mesh, cyber::EdgeId{edge}), out_edges,
-                       max_edges);
+    return guarded("cyber_mesh_edge_loop", size_t{0}, [&] {
+        return copyEdgeIds(cyber::retopo::edgeLoopFrom(mesh->mesh, cyber::EdgeId{edge}), out_edges,
+                           max_edges);
+    });
 }
 
 size_t cyber_mesh_quad_ring(const CyberMesh* mesh, uint32_t edge, uint32_t* out_edges,
@@ -1306,12 +1370,14 @@ size_t cyber_mesh_quad_ring(const CyberMesh* mesh, uint32_t edge, uint32_t* out_
     if (mesh == nullptr) {
         return 0;
     }
-    const cyber::retopo::QuadRing ring =
-        cyber::retopo::quadRingFromEdge(mesh->mesh, cyber::EdgeId{edge});
-    if (out_closed != nullptr) {
-        *out_closed = ring.closed ? 1 : 0;
-    }
-    return copyEdgeIds(ring.edges, out_edges, max_edges);
+    return guarded("cyber_mesh_quad_ring", size_t{0}, [&] {
+        const cyber::retopo::QuadRing ring =
+            cyber::retopo::quadRingFromEdge(mesh->mesh, cyber::EdgeId{edge});
+        if (out_closed != nullptr) {
+            *out_closed = ring.closed ? 1 : 0;
+        }
+        return copyEdgeIds(ring.edges, out_edges, max_edges);
+    });
 }
 
 // ---- loop metrics (retopology phase 4, task 4.3) --------------------------
@@ -1326,24 +1392,26 @@ CyberStatus cyber_mesh_loop_metrics(const CyberMesh* mesh, uint32_t edge,
     out_metrics->endpoint_a = CYBER_INVALID_ID;
     out_metrics->endpoint_b = CYBER_INVALID_ID;
 
-    const cyber::retopo::EdgeLoopMetrics metrics = cyber::retopo::measureEdgeLoop(
-        mesh->mesh, cyber::EdgeId{edge}, snapper == nullptr ? nullptr : &snapper->snapper);
+    return guarded("cyber_mesh_loop_metrics", CYBER_ERR_RUNTIME, [&] {
+        const cyber::retopo::EdgeLoopMetrics metrics = cyber::retopo::measureEdgeLoop(
+            mesh->mesh, cyber::EdgeId{edge}, snapper == nullptr ? nullptr : &snapper->snapper);
 
-    out_metrics->edge_count = static_cast<uint32_t>(metrics.edgeCount);
-    out_metrics->vertex_count = static_cast<uint32_t>(metrics.vertexCount);
-    out_metrics->closed = metrics.closed ? 1 : 0;
-    out_metrics->length = metrics.length;
-    if (metrics.endpoints.has_value()) {
-        out_metrics->has_endpoints = 1;
-        out_metrics->endpoint_a = metrics.endpoints->first.value;
-        out_metrics->endpoint_b = metrics.endpoints->second.value;
-    }
-    out_metrics->boundary_edge_count = static_cast<uint32_t>(metrics.boundaryEdgeCount);
-    out_metrics->snap_measured = metrics.snapMeasured ? 1 : 0;
-    out_metrics->snapped_vertex_count = static_cast<uint32_t>(metrics.snappedVertexCount);
-    out_metrics->max_snap_distance = metrics.maxSnapDistance;
-    clearError();
-    return CYBER_OK;
+        out_metrics->edge_count = static_cast<uint32_t>(metrics.edgeCount);
+        out_metrics->vertex_count = static_cast<uint32_t>(metrics.vertexCount);
+        out_metrics->closed = metrics.closed ? 1 : 0;
+        out_metrics->length = metrics.length;
+        if (metrics.endpoints.has_value()) {
+            out_metrics->has_endpoints = 1;
+            out_metrics->endpoint_a = metrics.endpoints->first.value;
+            out_metrics->endpoint_b = metrics.endpoints->second.value;
+        }
+        out_metrics->boundary_edge_count = static_cast<uint32_t>(metrics.boundaryEdgeCount);
+        out_metrics->snap_measured = metrics.snapMeasured ? 1 : 0;
+        out_metrics->snapped_vertex_count = static_cast<uint32_t>(metrics.snappedVertexCount);
+        out_metrics->max_snap_distance = metrics.maxSnapDistance;
+        clearError();
+        return CYBER_OK;
+    });
 }
 
 // ---- mesh editing (retopology phase 3, task 3.3) ---------------------------
@@ -2942,12 +3010,15 @@ size_t cyber_document_save(const CyberDocument* doc, uint8_t* out, size_t capaci
     if (doc == nullptr) {
         return 0;
     }
-    const std::vector<std::uint8_t>& bytes = doc->serialized();
-    if (out != nullptr) {
-        const size_t n = std::min(bytes.size(), capacity);
-        std::copy_n(bytes.begin(), n, out);
-    }
-    return bytes.size();
+    // serialized() builds the payload lazily, so it allocates.
+    return guarded("cyber_document_save", size_t{0}, [&] {
+        const std::vector<std::uint8_t>& bytes = doc->serialized();
+        if (out != nullptr) {
+            const size_t n = std::min(bytes.size(), capacity);
+            std::copy_n(bytes.begin(), n, out);
+        }
+        return bytes.size();
+    });
 }
 
 CyberDocument* cyber_document_load(const uint8_t* bytes, size_t count) {
@@ -2988,6 +3059,10 @@ CyberStatus cyber_document_save_file(const CyberDocument* doc, const char* path)
         }
         file.write(reinterpret_cast<const char*>(bytes.data()),
                    static_cast<std::streamsize>(bytes.size()));
+        // close() flushes the filebuf and latches failbit if that flush fails,
+        // so a full disk or an over-quota mount is reported here instead of
+        // being lost in the destructor after the caller was told it saved.
+        file.close();
         if (!file) {
             setError(std::string("cyber_document_save_file: write failed for '") + path + "'");
             return CYBER_ERR_IO;
@@ -3472,8 +3547,10 @@ struct CyberSeamSet {
 };
 
 struct CyberSeamPath {
-    // The mesh outlives the path by contract (snapshot semantics, documented
-    // in cyber_capi.h), so holding the reference inside is safe.
+    // The path BORROWS the mesh — cyber::uv::SeamPath keeps a raw pointer to
+    // it — so the CyberMesh handle must outlive this one. That requirement is
+    // stated on cyber_seam_path_create in cyber_capi.h; it is not the copying
+    // snapshot CyberSnapper takes.
     explicit CyberSeamPath(const cyber::Mesh& mesh, const cyber::uv::SeamCostOptions& options)
         : path(mesh, options) {}
     cyber::uv::SeamPath path;
@@ -3581,7 +3658,8 @@ size_t cyber_seam_set_edges([[maybe_unused]] const CyberSeamSet* seams,
     if (seams == nullptr) {
         return 0;
     }
-    return copyEdgeIds(seams->seams.edges(), out_edges, max_edges);
+    return guarded("cyber_seam_set_edges", size_t{0},
+                   [&] { return copyEdgeIds(seams->seams.edges(), out_edges, max_edges); });
 #else
     return 0;
 #endif
@@ -3594,9 +3672,11 @@ CyberStatus cyber_seam_set_mark([[maybe_unused]] CyberSeamSet* seams,
         setError("cyber_seam_set_mark: invalid argument");
         return CYBER_ERR_INVALID_ARG;
     }
-    seams->seams.mark(cyber::EdgeId{edge});
-    clearError();
-    return CYBER_OK;
+    return guarded("cyber_seam_set_mark", CYBER_ERR_RUNTIME, [&] {
+        seams->seams.mark(cyber::EdgeId{edge});
+        clearError();
+        return CYBER_OK;
+    });
 #else
     setError("cyber_seam_set_mark: engine built without the UV module (CYBER_BUILD_UV=OFF)");
     return CYBER_ERR_RUNTIME;
@@ -3610,9 +3690,11 @@ CyberStatus cyber_seam_set_erase([[maybe_unused]] CyberSeamSet* seams,
         setError("cyber_seam_set_erase: invalid argument");
         return CYBER_ERR_INVALID_ARG;
     }
-    seams->seams.erase(cyber::EdgeId{edge});
-    clearError();
-    return CYBER_OK;
+    return guarded("cyber_seam_set_erase", CYBER_ERR_RUNTIME, [&] {
+        seams->seams.erase(cyber::EdgeId{edge});
+        clearError();
+        return CYBER_OK;
+    });
 #else
     setError("cyber_seam_set_erase: engine built without the UV module (CYBER_BUILD_UV=OFF)");
     return CYBER_ERR_RUNTIME;
@@ -3651,7 +3733,11 @@ void cyber_seam_path_free([[maybe_unused]] CyberSeamPath* path) {
 int cyber_seam_path_add_waypoint([[maybe_unused]] CyberSeamPath* path,
                                  [[maybe_unused]] uint32_t vertex) {
 #ifdef CYBER_CAPI_WITH_UV
-    return path != nullptr && path->path.addWaypoint(cyber::VertexId{vertex}) ? 1 : 0;
+    if (path == nullptr) {
+        return 0;
+    }
+    return guarded("cyber_seam_path_add_waypoint", 0,
+                   [&] { return path->path.addWaypoint(cyber::VertexId{vertex}) ? 1 : 0; });
 #else
     return 0;
 #endif
@@ -3660,7 +3746,11 @@ int cyber_seam_path_add_waypoint([[maybe_unused]] CyberSeamPath* path,
 int cyber_seam_path_move_waypoint([[maybe_unused]] CyberSeamPath* path,
                                   [[maybe_unused]] size_t index, [[maybe_unused]] uint32_t vertex) {
 #ifdef CYBER_CAPI_WITH_UV
-    return path != nullptr && path->path.moveWaypoint(index, cyber::VertexId{vertex}) ? 1 : 0;
+    if (path == nullptr) {
+        return 0;
+    }
+    return guarded("cyber_seam_path_move_waypoint", 0,
+                   [&] { return path->path.moveWaypoint(index, cyber::VertexId{vertex}) ? 1 : 0; });
 #else
     return 0;
 #endif
@@ -3674,7 +3764,9 @@ int cyber_seam_path_move_waypoint_to([[maybe_unused]] CyberSeamPath* path,
     if (path == nullptr || position == nullptr) {
         return 0;
     }
-    return path->path.moveWaypointTo(index, toVec3(position), radius) ? 1 : 0;
+    return guarded("cyber_seam_path_move_waypoint_to", 0, [&] {
+        return path->path.moveWaypointTo(index, toVec3(position), radius) ? 1 : 0;
+    });
 #else
     return 0;
 #endif
@@ -3683,7 +3775,11 @@ int cyber_seam_path_move_waypoint_to([[maybe_unused]] CyberSeamPath* path,
 int cyber_seam_path_remove_waypoint([[maybe_unused]] CyberSeamPath* path,
                                     [[maybe_unused]] size_t index) {
 #ifdef CYBER_CAPI_WITH_UV
-    return path != nullptr && path->path.removeWaypoint(index) ? 1 : 0;
+    if (path == nullptr) {
+        return 0;
+    }
+    return guarded("cyber_seam_path_remove_waypoint", 0,
+                   [&] { return path->path.removeWaypoint(index) ? 1 : 0; });
 #else
     return 0;
 #endif
@@ -3767,7 +3863,9 @@ size_t cyber_seam_path_vertices([[maybe_unused]] const CyberSeamPath* path,
     if (path == nullptr) {
         return 0;
     }
-    return copyVertexIds(path->path.vertices(), out_vertices, max_vertices);
+    return guarded("cyber_seam_path_vertices", size_t{0}, [&] {
+        return copyVertexIds(path->path.vertices(), out_vertices, max_vertices);
+    });
 #else
     return 0;
 #endif
@@ -3780,7 +3878,8 @@ size_t cyber_seam_path_edges([[maybe_unused]] const CyberSeamPath* path,
     if (path == nullptr) {
         return 0;
     }
-    return copyEdgeIds(path->path.pendingEdges(), out_edges, max_edges);
+    return guarded("cyber_seam_path_edges", size_t{0},
+                   [&] { return copyEdgeIds(path->path.pendingEdges(), out_edges, max_edges); });
 #else
     return 0;
 #endif
@@ -3794,8 +3893,10 @@ size_t cyber_seam_path_commit([[maybe_unused]] CyberSeamPath* path,
     if (path == nullptr || seams == nullptr) {
         return 0;
     }
-    const cyber::uv::SeamCommit record = path->path.commit(seams->seams);
-    return copyEdgeIds(record.markedEdges, out_edges, max_edges);
+    return guarded("cyber_seam_path_commit", size_t{0}, [&] {
+        const cyber::uv::SeamCommit record = path->path.commit(seams->seams);
+        return copyEdgeIds(record.markedEdges, out_edges, max_edges);
+    });
 #else
     return 0;
 #endif
@@ -4119,11 +4220,17 @@ const std::vector<std::string>& builtinPresetNameList() {
 
 }  // namespace
 
-size_t cyber_export_preset_builtin_count(void) { return builtinPresetNameList().size(); }
+size_t cyber_export_preset_builtin_count(void) {
+    // The name list is built on first use, so both accessors can allocate.
+    return guarded("cyber_export_preset_builtin_count", size_t{0},
+                   [] { return builtinPresetNameList().size(); });
+}
 
 const char* cyber_export_preset_builtin_name(size_t index) {
-    const std::vector<std::string>& names = builtinPresetNameList();
-    return index < names.size() ? names[index].c_str() : nullptr;
+    return guarded("cyber_export_preset_builtin_name", static_cast<const char*>(nullptr), [&] {
+        const std::vector<std::string>& names = builtinPresetNameList();
+        return index < names.size() ? names[index].c_str() : nullptr;
+    });
 }
 
 CyberStatus cyber_export_preset_resolve(const char* name_or_path, CyberExportPreset** out) {
@@ -4204,20 +4311,22 @@ const char* cyber_export_preset_map_file_name(const CyberExportPreset* preset, s
         setError("cyber_export_preset_map_file_name: null preset or index out of range");
         return nullptr;
     }
-    expanded = cyber::io::presetMapFileName(preset->preset, preset->preset.maps[index],
-                                            basename != nullptr ? basename : "");
-    if (expanded.empty()) {
-        // presetMapFileName refusing a name that would leave the output directory.
-        // "" is not a file name, and a caller checking only for NULL would join it
-        // and address the directory itself, so the refusal is reported as NULL.
-        setError(std::string("cyber_export_preset_map_file_name: map '") +
-                 cyber::io::presetMapName(preset->preset.maps[index].map) +
-                 "' names a file outside the output directory; check the preset's "
-                 "namingPattern, name and suffixes, and the basename");
-        return nullptr;
-    }
-    clearError();
-    return expanded.c_str();
+    return guarded("cyber_export_preset_map_file_name", static_cast<const char*>(nullptr), [&] {
+        expanded = cyber::io::presetMapFileName(preset->preset, preset->preset.maps[index],
+                                                basename != nullptr ? basename : "");
+        if (expanded.empty()) {
+            // presetMapFileName refusing a name that would leave the output directory.
+            // "" is not a file name, and a caller checking only for NULL would join it
+            // and address the directory itself, so the refusal is reported as NULL.
+            setError(std::string("cyber_export_preset_map_file_name: map '") +
+                     cyber::io::presetMapName(preset->preset.maps[index].map) +
+                     "' names a file outside the output directory; check the preset's "
+                     "namingPattern, name and suffixes, and the basename");
+            return static_cast<const char*>(nullptr);
+        }
+        clearError();
+        return expanded.c_str();
+    });
 }
 
 CyberStatus cyber_export_preset_set_resolution(CyberExportPreset* preset, int resolution) {

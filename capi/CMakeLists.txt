@@ -86,7 +86,20 @@ if(CYBER_BUILD_CAPI_SHARED)
     # Geogram/stb/tinygltf definitions linked in from the static archives stay
     # globally visible and are subject to ELF interposition inside a host
     # process (a DCC) that carries its own copy of the same third-party code.
-    if(APPLE)
+    #
+    # Windows is the third platform and had no export control at all: MSVC
+    # exports nothing without __declspec(dllexport), so cyber_capi.dll came out
+    # with an empty export table and produced no import library — the install
+    # step then had no cyber_capi.lib and a C consumer got unresolved externals.
+    # WINDOWS_EXPORT_ALL_SYMBOLS restores exactly what the shipped MinGW lane
+    # already relies on (its linker auto-exports). The narrow export list the
+    # other two platforms use is not needed here: PE resolves imports per-DLL,
+    # so a host process carrying its own Geogram cannot interpose on ours the
+    # way ELF's flat namespace allows.
+    if(WIN32)
+        set_target_properties(cyber_capi_shared PROPERTIES
+            WINDOWS_EXPORT_ALL_SYMBOLS ON)
+    elseif(APPLE)
         target_link_options(cyber_capi_shared PRIVATE
             "-Wl,-exported_symbols_list,${CMAKE_CURRENT_SOURCE_DIR}/cyber_capi.symbols")
         set_property(TARGET cyber_capi_shared APPEND PROPERTY

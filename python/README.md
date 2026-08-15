@@ -39,4 +39,6 @@ python -m cyberbridge --port 5140 pull-editmesh out.obj
 4-byte big-endian length prefix + UTF-8 JSON payload. Every connection opens
 with a version handshake (`hello` → `welcome`/`reject`). The full command set
 and wire schema are defined in `src/net` (C++ server + reference client); this
-package mirrors it exactly.
+package mirrors it exactly, including the 256 MiB ceiling on a single message
+(`cyberbridge.MAX_MESSAGE_BYTES`): a reply that declares more than that is
+refused with a `BridgeError` before any of it is buffered.

@@ -22,6 +22,14 @@
 #include <csignal>
 #endif
 
+// mallinfo2() (glibc 2.33+) is how the per-call retention case reads the live
+// heap; without it that case cannot measure and is compiled out.
+#if defined(CYBER_TESTS_HAVE_QUADCOVER) && defined(__GLIBC__) && \
+    (__GLIBC__ > 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ >= 33))
+#include <malloc.h>
+#define CYBER_TESTS_HAVE_MALLINFO2 1
+#endif
+
 #include "cyber/core/mesh.hpp"
 #include "cyber/quadrangulate/quadcover_extractor.hpp"
 
@@ -353,6 +361,13 @@ bool sameDisposition(const struct sigaction& a, const struct sigaction& b) {
 }
 #endif
 
+#ifdef CYBER_TESTS_HAVE_MALLINFO2
+// Bytes the process holds in in-use main-arena blocks. Freed memory drops out of
+// it whether or not the allocator hands the pages back, which is what makes it a
+// RETENTION measure rather than an RSS reading.
+std::size_t liveHeapBytes() { return mallinfo2().uordblks; }
+#endif
+
 }  // namespace
 
 // Host-process hygiene. The vendored Geogram/AutoRemesher solver behind the default
@@ -451,6 +466,58 @@ TEST_CASE("quad-cover seamless UV silences the solver without silencing the host
     CHECK(residue.empty());                               // and no solver chatter leaked
     CHECK(errText.empty());
 }
+
+#ifdef CYBER_TESTS_HAVE_MALLINFO2
+// Declared by hand instead of including <geogram/bibliography/bibliography.h>:
+// the strict C++20 test build deliberately never sees the vendored C++14 headers
+// (that isolation is the whole point of the cyber_quadcover_solver target).
+namespace GEO::Biblio {
+void cite(const char* ref, const char* file, int line, const char* function, const char* info);
+}  // namespace GEO::Biblio
+
+// The third process-global Geogram takeover: its citation registry is a static
+// vector that geo_cite() appends to with no dedup and no cap, once per spatial
+// sort inside a solve, and nothing in this tree ever consumed or cleared it — so
+// a host that remeshes for hours kept every record of every solve, invisible to
+// LeakSanitizer because the memory stays reachable from the static. A solve must
+// leave the registry as empty as it found it.
+//
+// Measured through the registry's OWN records rather than the solve's total heap
+// churn: each iteration seeds a known, large number of citations before solving,
+// so the leak this guards against is ~2 MB per iteration while the rest of a
+// solve's per-call residue is a few kB. Bounded by construction — kIters solves
+// of a small sphere, and the unfixed peak is ~40 MB, so a regression fails on the
+// assertion instead of exhausting CI.
+TEST_CASE("quad-cover seamless UV leaves no citation records behind") {
+    const Mesh sphere = makeSphere(8, 10);
+    const std::string info(256, 'x');  // big enough that each record is heap, not SSO
+    constexpr int kIters = 20;
+    constexpr int kWarmIters = 10;  // by here every one-shot cache is populated
+    constexpr int kCitesPerIter = 4000;
+    constexpr std::size_t kAllowedGrowth = std::size_t{4} << 20;
+
+    // cite() reads Geogram's CmdLine, so the runtime has to be up before the
+    // first record: one solve is what brings it up (GEO::initialize()).
+    REQUIRE(remesh::computeSeamlessUv(sphere, 0.3f).valid);
+
+    std::size_t warm = 0;
+    std::size_t last = 0;
+    for (int i = 1; i <= kIters; ++i) {
+        for (int c = 0; c < kCitesPerIter; ++c) {
+            GEO::Biblio::cite("CYBER:RETENTION", "test_quadcover_extractor.cpp", __LINE__,
+                              "citationRetention()", info.c_str());
+        }
+        const remesh::SeamlessUv uv = remesh::computeSeamlessUv(sphere, 0.3f);
+        REQUIRE(uv.valid);  // a declined solve would never reach the reclaimer
+        if (i == kWarmIters) {
+            warm = liveHeapBytes();
+        }
+        last = liveHeapBytes();
+    }
+    REQUIRE(warm > 0);
+    CHECK(last < warm + kAllowedGrowth);
+}
+#endif  // CYBER_TESTS_HAVE_MALLINFO2
 
 // Milestone 2 PRIMARY checkpoint: the isoline tracer on a flat integer-grid UV must
 // recover a clean N x N quad grid. This exercises the tracer core deterministically

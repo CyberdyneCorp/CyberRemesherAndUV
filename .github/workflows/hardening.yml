@@ -1,0 +1,137 @@
+# Sanitizer and fuzz lanes.
+#
+# These are the gates that keep the hardening work from rotting: without them the
+# memory-safety and concurrency fixes are guarded only by ordinary doctest
+# assertions on a build with no sanitizer in it, and the fuzz campaigns leave
+# nothing behind that can regress-test anything.
+#
+# Deliberately NOT on every push/PR: an ASan+UBSan Debug build of the whole tree
+# (with the ~102 vendored Geogram TUs on one leg) plus a TSan build plus two
+# libFuzzer campaigns is far too much wall-clock for a PR gate. Nightly and
+# manually triggerable is the right frequency — the cheap half of the fuzz work,
+# replaying the checked-in corpus, is an ordinary ctest case (`fuzz_corpus_replay`)
+# and therefore already runs on every ci.yml leg.
+name: hardening
+
+on:
+  schedule:
+    - cron: "17 3 * * *"   # nightly, 03:17 UTC
+  workflow_dispatch:
+    inputs:
+      fuzz_seconds:
+        description: "Per-target libFuzzer budget in seconds"
+        required: false
+        default: "300"
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  # ASan + UBSan over the full suite. Two configurations, because the sanitizer
+  # preset builds a DIFFERENT quadrangulator from the one that ships: the shipped
+  # `cpu-headless` preset sets CYBER_WITH_QUADCOVER=ON, so without the second leg
+  # the CYBER_HAVE_QUADCOVER branches never see a sanitizer at all.
+  address-undefined:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: portable
+            quadcover: "OFF"
+            asan_options: ""
+          - name: vendored-field
+            quadcover: "ON"
+            # Geogram allocates process-lifetime singletons it never frees, so the
+            # leak checker reports the vendored library rather than our code. The
+            # use-after-free / OOB detectors this leg exists for stay on.
+            asan_options: "detect_leaks=0"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: lukka/get-cmake@latest
+      - name: Install the vendored field solver's dependencies
+        if: matrix.quadcover == 'ON'
+        run: sudo apt-get update && sudo apt-get install -y libtbb-dev
+      # CYBER_REQUIRE_QUADCOVER on the vendored leg: without it a runner image
+      # that drops OpenMP or TBB would silently build the portable fallback
+      # twice and this leg would cover nothing it is here to cover.
+      - name: Configure (cpu-headless-debug, ASan+UBSan)
+        run: |
+          cmake --preset cpu-headless-debug \
+            -DCYBER_WITH_QUADCOVER=${{ matrix.quadcover }} \
+            -DCYBER_REQUIRE_QUADCOVER=${{ matrix.quadcover }}
+      - name: Build
+        run: cmake --build --preset cpu-headless-debug
+      - name: Test
+        env:
+          ASAN_OPTIONS: ${{ matrix.asan_options }}
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: ctest --preset cpu-headless-debug --output-on-failure
+
+  # TSan over the bridge server and the threaded solver paths. The BridgeServer
+  # stop/accept race closed in the third hardening round is only observable here;
+  # no other lane could re-detect it.
+  thread:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: lukka/get-cmake@latest
+      - name: Configure (TSan)
+        run: |
+          cmake -S . -B build/tsan -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_CXX_FLAGS="-fsanitize=thread -fno-omit-frame-pointer -g" \
+            -DCYBER_WITH_QUADCOVER=OFF
+      - name: Build
+        run: cmake --build build/tsan
+      - name: Test
+        env:
+          TSAN_OPTIONS: halt_on_error=1:second_deadlock_stack=1
+        run: ctest --test-dir build/tsan --output-on-failure -R 'unit|bridge|fuzz_corpus_replay'
+
+  # A real campaign, seeded from tests/fuzz/corpus. Short by design: this lane
+  # exists to keep the harnesses building and to find shallow regressions, not to
+  # rediscover what an 18-million-execution run already found — that job is done
+  # by replaying the corpus, which every CI leg does.
+  fuzz:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: lukka/get-cmake@latest
+      - name: Configure (clang, libFuzzer + ASan/UBSan)
+        env:
+          CC: clang
+          CXX: clang++
+        run: |
+          cmake -S . -B build/fuzz -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCYBER_BUILD_FUZZERS=ON -DCYBER_WITH_QUADCOVER=OFF \
+            -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined,fuzzer-no-link -fno-omit-frame-pointer -g"
+      - name: Build
+        run: cmake --build build/fuzz --target cyber_fuzz_png cyber_fuzz_meshIo
+      - name: Campaign
+        env:
+          BUDGET: ${{ inputs.fuzz_seconds || '300' }}
+        run: |
+          set -euo pipefail
+          mkdir -p findings
+          for target in png meshIo; do
+            case "${target}" in
+              png) corpus=tests/fuzz/corpus/png ;;
+              *)   corpus=tests/fuzz/corpus/mesh ;;
+            esac
+            ./build/fuzz/tests/cyber_fuzz_${target} "${corpus}" \
+              -max_total_time="${BUDGET}" -max_len=65536 -artifact_prefix=findings/
+          done
+      - name: Upload findings
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-findings
+          path: findings/
+          if-no-files-found: ignore

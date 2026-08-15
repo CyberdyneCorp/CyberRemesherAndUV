@@ -91,9 +91,13 @@ void sort(IBackend& /*backend*/, Buffer<T>& buffer, Less less) {
 }
 
 // Compressed sparse row matrix, the shape the frame-field and Laplacian
-// solvers hand to spmv (task 5.8).
+// solvers hand to spmv (task 5.8). Rectangular matrices are ordinary here — the
+// seamless solver's reduction operators are nUv x W and W x nUv — so `cols`
+// must be set alongside `rows`; it is the only bound a GPU backend has on how
+// much of x it may stage.
 struct SparseMatrix {
     std::size_t rows = 0;
+    std::size_t cols = 0;
     std::vector<std::size_t> rowStart;  // size rows + 1
     std::vector<std::size_t> colIndex;  // size nnz
     std::vector<float> value;           // size nnz
@@ -105,7 +109,12 @@ struct SparseMatrix {
 inline void spmv(IBackend& backend, const SparseMatrix& a, const Buffer<float>& x,
                  Buffer<float>& y) {
     y.resize(a.rows);
-    backend.spmvCsr(a.rows, a.rowStart.data(), a.colIndex.data(), a.value.data(), x.data(),
+    // x's length is the hard bound on what any backend may read; a matrix left
+    // without an explicit column count is taken to span the whole vector rather
+    // than the row count, which for a rectangular matrix would either truncate
+    // the device copy or over-read the caller's buffer.
+    const std::size_t cols = a.cols > 0 ? std::min(a.cols, x.size()) : x.size();
+    backend.spmvCsr(a.rows, cols, a.rowStart.data(), a.colIndex.data(), a.value.data(), x.data(),
                     y.data());
 }
 

@@ -13,7 +13,10 @@ it lives in the build description rather than in code:
   end with `cannot find -lcyber_retopo`, because capi links a target that was
   never added.
 * the shared C ABI used to export ~4000 vendored Geogram/stb symbols, which a
-  host process carrying its own copy can interpose on.
+  host process carrying its own copy can interpose on. Export control has to
+  exist on all three platforms and the binary check has to work on all three
+  object formats: `nm -D` is ELF-only, so the macOS export list was asserted by
+  nothing at all, and Windows had no mechanism whatsoever.
 * the module CMakeLists used to reach the vendored headers through
   `${CMAKE_SOURCE_DIR}`, which under `add_subdirectory()` points at the
   CONSUMER's source root, so every include path was wrong and nothing compiled.
@@ -113,33 +116,93 @@ def test_capi_requires_retopo_at_configure_time() -> None:
              f"configure failed before the option check: {output.strip()[-200:]}")
 
 
-def test_capi_shared_exports_only_the_c_abi() -> None:
-    """The .so must not export the statically linked third-party symbols."""
-    script = REPO / "capi/cyber_capi.map"
-    check("capi/cyber_capi.map exists", script.is_file())
-    if script.is_file():
-        text = script.read_text(encoding="utf-8")
+def test_export_control_exists_on_every_platform() -> None:
+    """Each of the three platforms must control what the shared C ABI exports.
+
+    ELF and Mach-O narrow the export set to `cyber_*`; PE cannot be interposed
+    per-symbol the way ELF's flat namespace allows, so there the requirement is
+    only that SOMETHING exports the ABI — MSVC exports nothing at all without it,
+    which yields an empty export table and no import library.
+    """
+    cmake = (REPO / "capi/CMakeLists.txt").read_text(encoding="utf-8")
+
+    version_script = REPO / "capi/cyber_capi.map"
+    check("capi/cyber_capi.map exists", version_script.is_file())
+    if version_script.is_file():
+        text = version_script.read_text(encoding="utf-8")
         check("the version script exports cyber_* only",
               "cyber_*;" in text and re.search(r"local:\s*\*;", text) is not None)
-    check("the shared target applies the version script",
-          "--version-script" in (REPO / "capi/CMakeLists.txt").read_text(encoding="utf-8"))
+    check("the shared target applies the version script (ELF)",
+          "--version-script" in cmake)
 
+    # The Mach-O export list was added with the version script but nothing ever
+    # asserted it, so an edit that re-exported the vendored Geogram symbols into
+    # a DCC host process would have gone unnoticed on macOS.
+    symbols = REPO / "capi/cyber_capi.symbols"
+    check("capi/cyber_capi.symbols exists", symbols.is_file())
+    if symbols.is_file():
+        listed = [ln.strip() for ln in symbols.read_text(encoding="utf-8").splitlines()
+                  if ln.strip() and not ln.startswith("#")]
+        check("the Mach-O list exports _cyber_* only",
+              listed == ["_cyber_*"], f"lists {listed}")
+    check("the shared target applies the Mach-O export list",
+          "-exported_symbols_list" in cmake)
+
+    check("the shared target controls exports on Windows",
+          "WINDOWS_EXPORT_ALL_SYMBOLS" in cmake or "dllexport" in cmake or ".def" in cmake,
+          "MSVC exports nothing without one: empty export table, no import library")
+
+
+def _exported_symbols(nm: str, lib: str) -> "tuple[list[str], str] | None":
+    """(symbol names, object format) for `lib`, or None when nm cannot read it.
+
+    `nm -D` is ELF-only: on Mach-O llvm-nm reports "no dynamic symbol table" and
+    exits nonzero, and cctools nm rejects -D outright, so the ELF invocation used
+    to make the whole check skip itself on macOS.
+    """
+    attempts = (
+        ([nm, "-D", "--defined-only", lib], "elf"),
+        ([nm, "-gU", lib], "macho"),          # global, defined; Mach-O prefixes with _
+    )
+    for argv, fmt in attempts:
+        proc = subprocess.run(argv, capture_output=True, text=True, check=False)
+        if proc.returncode != 0:
+            continue
+        names = [ln.split()[-1] for ln in proc.stdout.splitlines() if ln.strip()]
+        if fmt == "macho":
+            names = [n[1:] if n.startswith("_") else n for n in names]
+        if names:
+            return names, fmt
+    return None
+
+
+def test_capi_shared_exports_only_the_c_abi() -> None:
+    """The built library must not export the statically linked third-party symbols."""
+    name = "libcyber_capi exports only cyber_*"
     lib = os.environ.get("CYBER_CAPI_LIB")
     nm = shutil.which("nm")
     if not lib or not Path(lib).is_file() or nm is None:
-        skip("libcyber_capi exports only cyber_*", "built library or nm unavailable")
+        skip(name, "built library or nm unavailable")
         return
-    proc = subprocess.run([nm, "-D", "--defined-only", lib],
-                          capture_output=True, text=True, check=False)
-    if proc.returncode != 0:
-        skip("libcyber_capi exports only cyber_*", "nm could not read the library")
+    if lib.lower().endswith(".dll"):
+        # WINDOWS_EXPORT_ALL_SYMBOLS exports everything by design (see above), so
+        # only the presence of the ABI is meaningful here.
+        found = _exported_symbols(nm, lib)
+        check("cyber_capi.dll exports the C ABI",
+              found is not None and any(s.startswith("cyber_") for s in found[0]),
+              "empty export table — no dllexport and no WINDOWS_EXPORT_ALL_SYMBOLS")
         return
-    exported = [ln.split()[-1] for ln in proc.stdout.splitlines() if ln.strip()]
+
+    found = _exported_symbols(nm, lib)
+    if found is None:
+        skip(name, "nm could not read the library in any supported format")
+        return
+    exported, fmt = found
     stray = sorted({s for s in exported if not s.startswith("cyber_")})
-    check("libcyber_capi exports only cyber_*", not stray,
+    check(f"{name} ({fmt})", not stray,
           f"{len(stray)} foreign symbol(s), e.g. {', '.join(stray[:5])}")
     check("libcyber_capi still exports the C ABI", len(exported) > 0,
-          "nothing exported at all — the version script is too strict")
+          "nothing exported at all — the export list is too strict")
 
 
 def _project_cmake_files() -> "list[Path]":
@@ -221,6 +284,7 @@ def main() -> int:
     test_warnings_as_errors_default_on()
     test_stringop_overflow_suppressed_at_its_site()
     test_capi_requires_retopo_at_configure_time()
+    test_export_control_exists_on_every_platform()
     test_capi_shared_exports_only_the_c_abi()
     test_no_root_scoped_path_variables()
     test_add_subdirectory_consumption_resolves_paths()

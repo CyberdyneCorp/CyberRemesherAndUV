@@ -14,15 +14,32 @@
 
 #include <CL/opencl.hpp>
 #include <algorithm>
+#include <cstdio>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
 #include "cyber/accel/backend.hpp"
+#include "cyber/accel/detail/bvh_residency.hpp"
 
 namespace cyber::accel {
 
 namespace {
+
+// A device failure must degrade, never escape: CL_HPP_ENABLE_EXCEPTIONS turns
+// every OpenCL error into a cl::Error, and an allocation or enqueue failure
+// deep inside a CG iteration would otherwise be thrown through the solver.
+// Each primitive catches it, reports once and completes on the CPU reference
+// (compute-acceleration spec: "fall back to CPU automatically when a GPU
+// backend fails at runtime ... never crashing or producing partial results").
+void reportFallback(const char* primitive, const char* what) {
+    static std::once_flag once;
+    std::call_once(once, [primitive, what] {
+        std::fprintf(stderr, "[accel] OpenCL %s failed (%s); falling back to the CPU reference\n",
+                     primitive, what);
+    });
+}
 
 // index_t mirrors std::size_t (8 bytes) so the CSR index buffers upload
 // verbatim; the host guarantees the platform is 64-bit.
@@ -93,20 +110,39 @@ bool rayBox(float3 o, float3 inv, float3 lo, float3 hi, float maxT) {
     return tmin <= tmax;
 }
 
+// Watertight edge test, mirroring the CPU reference: evaluated in a canonical
+// vertex order so the two triangles sharing an edge see bitwise opposite values
+// and at most one of them can reject a ray crossing it.
+bool lexLess3(float3 p, float3 q) {
+    if (p.x != q.x) return p.x < q.x;
+    if (p.y != q.y) return p.y < q.y;
+    return p.z < q.z;
+}
+
+float edgeVolume(float3 dir, float3 p, float3 q) {
+    bool swapped = lexLess3(q, p);
+    float3 lo = swapped ? q : p;
+    float3 hi = swapped ? p : q;
+    float volume = dot(dir, cross(lo, hi));
+    return swapped ? -volume : volume;
+}
+
 float rayTri(float3 o, float3 dir, float3 a, float3 b, float3 c) {
     const float kEps = 1e-9f;
     float3 ab = b - a; float3 ac = c - a;
     float3 pvec = cross(dir, ac);
     float det = dot(ab, pvec);
     if (fabs(det) < kEps) return -1.0f;
-    float invDet = 1.0f / det;
+    float3 oa = a - o; float3 ob = b - o; float3 oc = c - o;
+    float eab = edgeVolume(dir, oa, ob);
+    float ebc = edgeVolume(dir, ob, oc);
+    float eca = edgeVolume(dir, oc, oa);
+    bool inside = (eab >= 0.0f && ebc >= 0.0f && eca >= 0.0f) ||
+                  (eab <= 0.0f && ebc <= 0.0f && eca <= 0.0f);
+    if (!inside) return -1.0f;
     float3 tvec = o - a;
-    float u = dot(tvec, pvec) * invDet;
-    if (u < 0.0f || u > 1.0f) return -1.0f;
     float3 qvec = cross(tvec, ab);
-    float v = dot(dir, qvec) * invDet;
-    if (v < 0.0f || u + v > 1.0f) return -1.0f;
-    float t = dot(ac, qvec) * invDet;
+    float t = dot(ac, qvec) * (1.0f / det);
     return t < 0.0f ? -1.0f : t;
 }
 
@@ -219,57 +255,75 @@ public:
         return "OpenCL (" + m_device.getInfo<CL_DEVICE_NAME>() + ")";
     }
 
-    // Arbitrary host callables cannot cross to the device; the generic
-    // parallelFor stays on the host. Accelerated work goes through the typed
-    // kernels below (spec: "irregular work remains on CPU").
-    void parallelFor(std::size_t begin, std::size_t end,
-                     const std::function<void(std::size_t, std::size_t)>& fn) override {
-        if (begin < end) {
-            fn(begin, end);
-        }
-    }
+    // parallelFor is the base class's host worker pool and is not overridden:
+    // arbitrary host callables cannot cross to the device, and running the
+    // range inline would single-thread every CPU-side loop in the library
+    // whenever this backend is selected. Accelerated work goes through the
+    // typed kernels below (spec: "irregular work remains on CPU").
+    //
+    // Those kernels are therefore reachable from several host worker threads at
+    // once (the AO bake queries from inside its texel loop), so each takes
+    // m_deviceMutex: one command queue, one resident BVH, one call at a time.
 
     void axpy(float alpha, const float* x, float* y, std::size_t n) override {
         if (n == 0) {
             return;
         }
-        const std::size_t bytes = n * sizeof(float);
-        cl::Buffer bx(m_context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, bytes,
-                      const_cast<float*>(x));
-        cl::Buffer by(m_context, CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR, bytes, y);
-        cl::Kernel kernel(m_program, "axpy");
-        kernel.setArg(0, alpha);
-        kernel.setArg(1, bx);
-        kernel.setArg(2, by);
-        m_queue.enqueueNDRangeKernel(kernel, cl::NullRange, cl::NDRange(n));
-        m_queue.enqueueReadBuffer(by, CL_TRUE, 0, bytes, y);
+        try {
+            const std::lock_guard<std::mutex> lock(m_deviceMutex);
+            const std::size_t bytes = n * sizeof(float);
+            cl::Buffer bx(m_context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, bytes,
+                          const_cast<float*>(x));
+            cl::Buffer by(m_context, CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR, bytes, y);
+            cl::Kernel kernel(m_program, "axpy");
+            kernel.setArg(0, alpha);
+            kernel.setArg(1, bx);
+            kernel.setArg(2, by);
+            m_queue.enqueueNDRangeKernel(kernel, cl::NullRange, cl::NDRange(n));
+            m_queue.enqueueReadBuffer(by, CL_TRUE, 0, bytes, y);
+        } catch (const cl::Error& error) {
+            reportFallback("axpy", error.what());
+            IBackend::axpy(alpha, x, y, n);
+        }
     }
 
-    void spmvCsr(std::size_t rows, const std::size_t* rowStart, const std::size_t* colIndex,
-                 const float* value, const float* x, float* y) override {
+    void spmvCsr(std::size_t rows, std::size_t cols, const std::size_t* rowStart,
+                 const std::size_t* colIndex, const float* value, const float* x,
+                 float* y) override {
         if (rows == 0) {
             return;
         }
-        const std::size_t nnz = rowStart[rows];
-        // Widest dimension referenced by any column index is `rows`.
-        cl::Buffer bRowStart(m_context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
-                             (rows + 1) * sizeof(std::size_t), const_cast<std::size_t*>(rowStart));
-        cl::Buffer bColIndex(m_context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
-                             nnz * sizeof(std::size_t), const_cast<std::size_t*>(colIndex));
-        cl::Buffer bValue(m_context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, nnz * sizeof(float),
-                          const_cast<float*>(value));
-        cl::Buffer bx(m_context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, rows * sizeof(float),
-                      const_cast<float*>(x));
-        cl::Buffer by(m_context, CL_MEM_WRITE_ONLY, rows * sizeof(float));
-        cl::Kernel kernel(m_program, "spmv");
-        kernel.setArg(0, static_cast<cl_ulong>(rows));
-        kernel.setArg(1, bRowStart);
-        kernel.setArg(2, bColIndex);
-        kernel.setArg(3, bValue);
-        kernel.setArg(4, bx);
-        kernel.setArg(5, by);
-        m_queue.enqueueNDRangeKernel(kernel, cl::NullRange, cl::NDRange(rows));
-        m_queue.enqueueReadBuffer(by, CL_TRUE, 0, rows * sizeof(float), y);
+        try {
+            const std::lock_guard<std::mutex> lock(m_deviceMutex);
+            const std::size_t nnz = rowStart[rows];
+            cl::Buffer bRowStart(m_context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                                 (rows + 1) * sizeof(std::size_t),
+                                 const_cast<std::size_t*>(rowStart));
+            cl::Buffer bColIndex(m_context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                                 nnz * sizeof(std::size_t), const_cast<std::size_t*>(colIndex));
+            cl::Buffer bValue(m_context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                              nnz * sizeof(float), const_cast<float*>(value));
+            // x is indexed by column, so it is `cols` long — NOT `rows`: the
+            // seamless solver's reduction operators are rectangular, and sizing
+            // this by the row count either truncates the device copy (wide
+            // matrices read past the buffer) or over-reads the caller's host
+            // vector (tall matrices).
+            cl::Buffer bx(m_context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, cols * sizeof(float),
+                          const_cast<float*>(x));
+            cl::Buffer by(m_context, CL_MEM_WRITE_ONLY, rows * sizeof(float));
+            cl::Kernel kernel(m_program, "spmv");
+            kernel.setArg(0, static_cast<cl_ulong>(rows));
+            kernel.setArg(1, bRowStart);
+            kernel.setArg(2, bColIndex);
+            kernel.setArg(3, bValue);
+            kernel.setArg(4, bx);
+            kernel.setArg(5, by);
+            m_queue.enqueueNDRangeKernel(kernel, cl::NullRange, cl::NDRange(rows));
+            m_queue.enqueueReadBuffer(by, CL_TRUE, 0, rows * sizeof(float), y);
+        } catch (const cl::Error& error) {
+            reportFallback("spmvCsr", error.what());
+            IBackend::spmvCsr(rows, cols, rowStart, colIndex, value, x, y);
+        }
     }
 
     void closestPointsBvh(const FlatBvhNode* nodes, std::size_t nodeCount, const FlatBvhTri* tris,
@@ -282,29 +336,28 @@ public:
             std::fill(outXYZ, outXYZ + n * 3, 0.0f);
             return;
         }
-        std::vector<float> bounds;
-        std::vector<cl_uint> meta;
-        std::vector<float> triV;
-        std::vector<cl_uint> triFace;
-        packBvh(nodes, nodeCount, tris, triCount, bounds, meta, triV, triFace);
+        try {
+            const std::lock_guard<std::mutex> lock(m_deviceMutex);
+            ensureBvhResident(nodes, nodeCount, tris, triCount);
+            cl::Buffer bQ(m_context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, n * 3 * sizeof(float),
+                          const_cast<float*>(queriesXYZ));
+            cl::Buffer bOut(m_context, CL_MEM_WRITE_ONLY, n * 3 * sizeof(float));
 
-        cl::Buffer bBounds = readBuffer(bounds);
-        cl::Buffer bMeta = readBuffer(meta);
-        cl::Buffer bTriV = readBuffer(triV);
-        cl::Buffer bQ(m_context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, n * 3 * sizeof(float),
-                      const_cast<float*>(queriesXYZ));
-        cl::Buffer bOut(m_context, CL_MEM_WRITE_ONLY, n * 3 * sizeof(float));
-
-        cl::Kernel kernel(m_program, "closest_bvh");
-        kernel.setArg(0, static_cast<cl_uint>(nodeCount));
-        kernel.setArg(1, bBounds);
-        kernel.setArg(2, bMeta);
-        kernel.setArg(3, bTriV);
-        kernel.setArg(4, bQ);
-        kernel.setArg(5, static_cast<cl_uint>(n));
-        kernel.setArg(6, bOut);
-        m_queue.enqueueNDRangeKernel(kernel, cl::NullRange, cl::NDRange(n));
-        m_queue.enqueueReadBuffer(bOut, CL_TRUE, 0, n * 3 * sizeof(float), outXYZ);
+            cl::Kernel kernel(m_program, "closest_bvh");
+            kernel.setArg(0, static_cast<cl_uint>(nodeCount));
+            kernel.setArg(1, m_bounds);
+            kernel.setArg(2, m_meta);
+            kernel.setArg(3, m_triV);
+            kernel.setArg(4, bQ);
+            kernel.setArg(5, static_cast<cl_uint>(n));
+            kernel.setArg(6, bOut);
+            m_queue.enqueueNDRangeKernel(kernel, cl::NullRange, cl::NDRange(n));
+            m_queue.enqueueReadBuffer(bOut, CL_TRUE, 0, n * 3 * sizeof(float), outXYZ);
+        } catch (const cl::Error& error) {
+            reportFallback("closestPointsBvh", error.what());
+            dropResidentBvh();
+            IBackend::closestPointsBvh(nodes, nodeCount, tris, triCount, queriesXYZ, n, outXYZ);
+        }
     }
 
     void raycastBvh(const FlatBvhNode* nodes, std::size_t nodeCount, const FlatBvhTri* tris,
@@ -318,40 +371,70 @@ public:
             std::fill(outFace, outFace + n, -1);
             return;
         }
+        try {
+            const std::lock_guard<std::mutex> lock(m_deviceMutex);
+            ensureBvhResident(nodes, nodeCount, tris, triCount);
+            cl::Buffer bO(m_context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, n * 3 * sizeof(float),
+                          const_cast<float*>(originsXYZ));
+            cl::Buffer bD(m_context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, n * 3 * sizeof(float),
+                          const_cast<float*>(dirsXYZ));
+            cl::Buffer bHit(m_context, CL_MEM_WRITE_ONLY, n * 3 * sizeof(float));
+            cl::Buffer bOutFace(m_context, CL_MEM_WRITE_ONLY, n * sizeof(int));
+
+            cl::Kernel kernel(m_program, "raycast_bvh");
+            kernel.setArg(0, static_cast<cl_uint>(nodeCount));
+            kernel.setArg(1, m_bounds);
+            kernel.setArg(2, m_meta);
+            kernel.setArg(3, m_triV);
+            kernel.setArg(4, m_triFace);
+            kernel.setArg(5, bO);
+            kernel.setArg(6, bD);
+            kernel.setArg(7, static_cast<cl_uint>(n));
+            kernel.setArg(8, bHit);
+            kernel.setArg(9, bOutFace);
+            m_queue.enqueueNDRangeKernel(kernel, cl::NullRange, cl::NDRange(n));
+            m_queue.enqueueReadBuffer(bHit, CL_TRUE, 0, n * 3 * sizeof(float), outHitXYZ);
+            m_queue.enqueueReadBuffer(bOutFace, CL_TRUE, 0, n * sizeof(int), outFace);
+        } catch (const cl::Error& error) {
+            reportFallback("raycastBvh", error.what());
+            dropResidentBvh();
+            IBackend::raycastBvh(nodes, nodeCount, tris, triCount, originsXYZ, dirsXYZ, n,
+                                 outHitXYZ, outFace);
+        }
+    }
+
+private:
+    // Keeps the last-queried BVH on the device. The AO bake issues one query
+    // per texel against the same hierarchy, so repacking and re-uploading here
+    // made bake cost O(texels x target triangles) — the host side already
+    // hoists its flatten() out of the loop for the same reason.
+    void ensureBvhResident(const FlatBvhNode* nodes, std::size_t nodeCount, const FlatBvhTri* tris,
+                           std::size_t triCount) {
+        const detail::BvhResidencyKey key =
+            detail::makeBvhResidencyKey(nodes, nodeCount, tris, triCount);
+        if (m_bvhResident && key == m_bvhKey) {
+            return;
+        }
         std::vector<float> bounds;
         std::vector<cl_uint> meta;
         std::vector<float> triV;
         std::vector<cl_uint> triFace;
         packBvh(nodes, nodeCount, tris, triCount, bounds, meta, triV, triFace);
-
-        cl::Buffer bBounds = readBuffer(bounds);
-        cl::Buffer bMeta = readBuffer(meta);
-        cl::Buffer bTriV = readBuffer(triV);
-        cl::Buffer bFace = readBuffer(triFace);
-        cl::Buffer bO(m_context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, n * 3 * sizeof(float),
-                      const_cast<float*>(originsXYZ));
-        cl::Buffer bD(m_context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, n * 3 * sizeof(float),
-                      const_cast<float*>(dirsXYZ));
-        cl::Buffer bHit(m_context, CL_MEM_WRITE_ONLY, n * 3 * sizeof(float));
-        cl::Buffer bOutFace(m_context, CL_MEM_WRITE_ONLY, n * sizeof(int));
-
-        cl::Kernel kernel(m_program, "raycast_bvh");
-        kernel.setArg(0, static_cast<cl_uint>(nodeCount));
-        kernel.setArg(1, bBounds);
-        kernel.setArg(2, bMeta);
-        kernel.setArg(3, bTriV);
-        kernel.setArg(4, bFace);
-        kernel.setArg(5, bO);
-        kernel.setArg(6, bD);
-        kernel.setArg(7, static_cast<cl_uint>(n));
-        kernel.setArg(8, bHit);
-        kernel.setArg(9, bOutFace);
-        m_queue.enqueueNDRangeKernel(kernel, cl::NullRange, cl::NDRange(n));
-        m_queue.enqueueReadBuffer(bHit, CL_TRUE, 0, n * 3 * sizeof(float), outHitXYZ);
-        m_queue.enqueueReadBuffer(bOutFace, CL_TRUE, 0, n * sizeof(int), outFace);
+        m_bounds = readBuffer(bounds);
+        m_meta = readBuffer(meta);
+        m_triV = readBuffer(triV);
+        m_triFace = readBuffer(triFace);
+        m_bvhKey = key;
+        m_bvhResident = true;
     }
 
-private:
+    // Called from the catch handlers, where the try block's lock has already
+    // been released by unwinding, so it takes the mutex itself.
+    void dropResidentBvh() {
+        const std::lock_guard<std::mutex> lock(m_deviceMutex);
+        m_bvhResident = false;
+    }
+
     // Repacks the flat BVH into scalar arrays matching the kernel layout.
     static void packBvh(const FlatBvhNode* nodes, std::size_t nodeCount, const FlatBvhTri* tris,
                         std::size_t triCount, std::vector<float>& bounds,
@@ -397,6 +480,14 @@ private:
     cl::Context m_context;
     cl::Program m_program;
     cl::CommandQueue m_queue;
+
+    std::mutex m_deviceMutex;
+    detail::BvhResidencyKey m_bvhKey;
+    bool m_bvhResident = false;
+    cl::Buffer m_bounds;
+    cl::Buffer m_meta;
+    cl::Buffer m_triV;
+    cl::Buffer m_triFace;
 };
 
 }  // namespace

@@ -23,7 +23,10 @@ pip install "./python/cyberremesh[numpy]"   # optional ndarray helpers
 At first use the loader searches, in order:
 
 1. `CYBER_CAPI_LIB` — a full path to the shared library, or a directory holding it.
-2. The installed package directory (a wheel bundles the library alongside).
+2. The installed package directory. A published wheel carries the library here —
+   `packaging/publish/stage_native_lib.py` copies it in before the wheel is built,
+   and `pyproject.toml`'s `package-data` glob keeps it. A wheel built without that
+   step is pure Python and reaches this step with nothing to find.
 3. Conventional in-tree build directories (`build/`, `out/`, `cmake-build-*`) relative to the
    repo root, including the per-preset trees CMake presets create (`build/<preset>/capi`).
    This step is a developer convenience and applies only when the package genuinely sits
@@ -108,9 +111,10 @@ RemeshParams(target_quad_count=5000, pure_quads=True, quad_method="instant-meshe
 
 ## Tests
 
-`tests/test_api.py` runs as a plain script. It skips (exit 0) when the native
-library is absent, so it is safe in an environment where the `capi` module has
-not been built:
+`tests/test_api.py` runs as a plain script. When the native library is absent it
+exits **77** — CTest's `SKIP_RETURN_CODE`, which `tests/CMakeLists.txt` sets — so
+the run shows as "Skipped" rather than a vacuous pass. Treat 0 as pass, 77 as
+skip and anything else as failure:
 
 ```sh
 python python/cyberremesh/tests/test_api.py

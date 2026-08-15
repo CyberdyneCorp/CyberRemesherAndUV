@@ -13,7 +13,10 @@
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 
+#include <algorithm>
+#include <cstring>
 #include <memory>
+#include <mutex>
 #include <string>
 
 #include "cyber/accel/backend.hpp"
@@ -61,15 +64,16 @@ public:
         return "Metal (" + std::string([[m_device name] UTF8String]) + ")";
     }
 
-    void parallelFor(std::size_t begin, std::size_t end,
-                     const std::function<void(std::size_t, std::size_t)>& fn) override {
-        if (begin < end) {
-            fn(begin, end);
-        }
-    }
+    // parallelFor is the base class's host worker pool and is not overridden:
+    // host callables cannot cross to the device, and running the range inline
+    // would single-thread every CPU-side loop in the library whenever this
+    // backend is selected — including the BVH queries below, which this backend
+    // leaves to the (threaded) CPU reference. The typed kernels serialize on
+    // m_deviceMutex because those host workers can reach them concurrently.
 
     void axpy(float alpha, const float* x, float* y, std::size_t n) override {
         if (n == 0) return;
+        const std::lock_guard<std::mutex> lock(m_deviceMutex);
         const std::size_t bytes = n * sizeof(float);
         id<MTLBuffer> bx = [m_device newBufferWithBytes:x length:bytes options:0];
         id<MTLBuffer> by = [m_device newBufferWithBytes:y length:bytes options:0];
@@ -87,9 +91,11 @@ public:
         std::memcpy(y, [by contents], bytes);
     }
 
-    void spmvCsr(std::size_t rows, const std::size_t* rowStart, const std::size_t* colIndex,
-                 const float* value, const float* x, float* y) override {
+    void spmvCsr(std::size_t rows, std::size_t cols, const std::size_t* rowStart,
+                 const std::size_t* colIndex, const float* value, const float* x,
+                 float* y) override {
         if (rows == 0) return;
+        const std::lock_guard<std::mutex> lock(m_deviceMutex);
         const std::size_t nnz = rowStart[rows];
         id<MTLBuffer> bRowStart = [m_device newBufferWithBytes:rowStart
                                                         length:(rows + 1) * sizeof(std::size_t)
@@ -98,7 +104,12 @@ public:
                                                         length:nnz * sizeof(std::size_t)
                                                        options:0];
         id<MTLBuffer> bValue = [m_device newBufferWithBytes:value length:nnz * sizeof(float) options:0];
-        id<MTLBuffer> bx = [m_device newBufferWithBytes:x length:rows * sizeof(float) options:0];
+        // x is indexed by column, so it is `cols` long — NOT `rows`: the
+        // seamless solver's reduction operators are rectangular, and sizing
+        // this by the row count either truncates the device copy (wide matrices
+        // read past the buffer) or over-reads the caller's host vector (tall
+        // matrices).
+        id<MTLBuffer> bx = [m_device newBufferWithBytes:x length:cols * sizeof(float) options:0];
         id<MTLBuffer> by = [m_device newBufferWithLength:rows * sizeof(float) options:0];
         id<MTLComputePipelineState> pipeline = pipelineFor(@"spmv");
         id<MTLCommandBuffer> cmd = [m_queue commandBuffer];
@@ -133,6 +144,7 @@ private:
     id<MTLDevice> m_device;
     id<MTLCommandQueue> m_queue;
     id<MTLLibrary> m_library;
+    std::mutex m_deviceMutex;
 };
 
 }  // namespace

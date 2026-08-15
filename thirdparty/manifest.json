@@ -7,7 +7,8 @@
       "license": "MIT",
       "path": "doctest",
       "url": "https://github.com/doctest/doctest",
-      "usedBy": "tests"
+      "usedBy": "tests",
+      "redistributed": false
     },
     {
       "name": "tinyobjloader",
@@ -15,7 +16,8 @@
       "license": "MIT",
       "path": "tinyobjloader",
       "url": "https://github.com/tinyobjloader/tinyobjloader",
-      "usedBy": "mesh-io OBJ import"
+      "usedBy": "mesh-io OBJ import",
+      "redistributed": true
     },
     {
       "name": "happly",
@@ -24,6 +26,7 @@
       "path": "happly",
       "url": "https://github.com/nmwsharp/happly",
       "usedBy": "mesh-io PLY import/export",
+      "redistributed": true,
       "localPatches": "Truncated/short data sections throw instead of spinning at EOF or reading past the token vector; an element declaring entries but no properties is rejected instead of looping to its declared count; binary list properties grow in bounded steps so a forged list count cannot commit memory the stream has no bytes for — search happly.h for \"CYBER LOCAL PATCH\" and re-apply on re-vendor"
     },
     {
@@ -32,14 +35,86 @@
       "license": "MIT",
       "path": "tinygltf",
       "url": "https://github.com/syoyo/tinygltf",
-      "usedBy": "mesh-io glTF 2.0 import/export (bundles nlohmann json.hpp, MIT)"
+      "usedBy": "mesh-io glTF 2.0 import/export",
+      "redistributed": true
+    },
+    {
+      "name": "nlohmann/json",
+      "version": "3.10.4",
+      "license": "MIT",
+      "path": "tinygltf",
+      "url": "https://github.com/nlohmann/json",
+      "usedBy": "bundled by tinygltf as thirdparty/tinygltf/json.hpp",
+      "redistributed": true
+    }
+  ],
+  "vendoredOnDemand": [
+    {
+      "name": "AutoRemesher",
+      "version": "pinned by examples/reference/autoremesher.pin",
+      "license": "MIT",
+      "path": "examples/reference/autoremesher-src",
+      "licenseFile": "LICENSE",
+      "url": "https://github.com/huxingyi/autoremesher",
+      "usedBy": "quadrangulate — in-process QuadCover field solver (-DCYBER_WITH_QUADCOVER=ON)",
+      "redistributed": true
+    },
+    {
+      "name": "Geogram",
+      "version": "1.8.3",
+      "license": "BSD-3-Clause",
+      "path": "examples/reference/autoremesher-src/thirdparty/geogram/geogram-1.8.3",
+      "licenseFile": "LICENSE",
+      "url": "https://github.com/BrunoLevy/geogram",
+      "usedBy": "quadrangulate — QuadCover field solver (geogram + exploragram/hexdom subset)",
+      "quadcoverSubtree": "geogram",
+      "redistributed": true
+    },
+    {
+      "name": "libMeshb",
+      "version": "bundled with Geogram 1.8.3",
+      "license": "MIT",
+      "path": "examples/reference/autoremesher-src/thirdparty/geogram/geogram-1.8.3/src/lib/geogram/third_party/libMeshb",
+      "licenseFile": "LICENSE.txt",
+      "url": "https://github.com/LoicMarechal/libMeshb",
+      "usedBy": "compiled as part of the Geogram subset",
+      "redistributed": true
+    },
+    {
+      "name": "RPly",
+      "version": "bundled with Geogram 1.8.3",
+      "license": "MIT",
+      "path": "examples/reference/autoremesher-src/thirdparty/geogram/geogram-1.8.3/src/lib/geogram/third_party/rply",
+      "licenseFile": "LICENSE",
+      "url": "https://w3.impa.br/~diego/software/rply/",
+      "usedBy": "compiled as part of the Geogram subset",
+      "redistributed": true
+    },
+    {
+      "name": "isotropicremesher",
+      "version": "bundled with AutoRemesher",
+      "license": "MIT",
+      "path": "examples/reference/autoremesher-src/thirdparty/isotropicremesher",
+      "licenseFile": "LICENSE",
+      "url": "https://github.com/huxingyi/autoremesher",
+      "usedBy": "quadrangulate — isotropic pre-remesh inside the QuadCover solver",
+      "quadcoverSubtree": "isotropicremesher",
+      "redistributed": true
+    },
+    {
+      "name": "Eigen",
+      "version": "3.3.7",
+      "license": "MPL-2.0",
+      "path": "examples/reference/autoremesher-src/thirdparty/eigen",
+      "licenseFile": "COPYING.MPL2",
+      "url": "https://eigen.tuxfamily.org",
+      "usedBy": "quadrangulate — header-only linear algebra inside the QuadCover solver",
+      "quadcoverSubtree": "eigen",
+      "redistributed": true
     }
   ],
   "planned": [
-    { "name": "eigen", "license": "MPL-2.0", "usedBy": "core (solver math, task 5.4)" },
-    { "name": "tinygltf", "license": "MIT", "usedBy": "mesh-io (task 3.2)" },
     { "name": "stb", "license": "MIT", "usedBy": "mesh-io image output (task 3.4)" },
-    { "name": "miniz", "license": "MIT", "usedBy": "mesh-io ZIP packaging (task 3.4)" },
-    { "name": "geogram (exploragram slice)", "license": "BSD-3-Clause", "usedBy": "parameterizer port (task 5.4)" }
+    { "name": "miniz", "license": "MIT", "usedBy": "mesh-io ZIP packaging (task 3.4)" }
   ]
 }

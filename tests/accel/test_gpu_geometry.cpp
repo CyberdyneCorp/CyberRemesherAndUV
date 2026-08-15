@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "cyber/accel/backend.hpp"
+#include "cyber/accel/detail/bvh_residency.hpp"
 #include "cyber/core/bvh.hpp"
 #include "cyber/core/math.hpp"
 #include "cyber/core/mesh.hpp"
@@ -169,4 +170,98 @@ TEST_CASE("flattened-BVH closest point and raycast match the CPU reference on ev
             }
         }
     }
+}
+
+TEST_CASE("no ray through a shared edge is rejected by both adjacent triangles") {
+    // Regression: the ray/triangle test rejected u/v strictly at 0 and 1 with no
+    // edge-ownership rule, so rounding could make BOTH triangles sharing an edge
+    // reject the same ray and a ray that geometrically crosses a closed surface
+    // report a miss — isolated wrong texels in an AO bake. The inside test now
+    // evaluates each edge in a canonical vertex order, so the two triangles see
+    // bitwise opposite values and at most one of them can reject.
+    //
+    // Deliberately irregular coordinates: axis-aligned vertices make too many of
+    // the intermediate products exact and hide the leak.
+    const Vec3 a{-0.7331f, 0.1129f, 0.4517f};
+    const Vec3 b{0.6217f, -0.3384f, 0.2903f};
+    const Vec3 c{0.1873f, 0.8821f, -0.5119f};
+    const Vec3 d{-0.2447f, -0.9013f, -0.3761f};
+    // Consistent winding across the shared edge a-b.
+    const std::vector<Vec3> points{a, b, c, d};
+    const std::vector<std::vector<Index>> faces{{0, 1, 2}, {1, 0, 3}};
+    Mesh mesh = Mesh::fromIndexed(points, faces);
+    const Bvh bvh(mesh);
+    REQUIRE(bvh.triangleCount() == 2);
+    const FlatBvh flat = bvh.flatten();
+
+    constexpr std::size_t rays = 200'000;  // bounded: seconds at most, never unbounded
+    std::vector<float> origins(rays * 3);
+    std::vector<float> dirs(rays * 3);
+    const Vec3 normal = cyber::normalized(cyber::cross(b - a, c - a));
+    std::mt19937 rng(7);
+    std::uniform_real_distribution<float> along(0.05f, 0.95f);
+    std::uniform_real_distribution<float> height(0.5f, 2.0f);
+    for (std::size_t i = 0; i < rays; ++i) {
+        const Vec3 target = a + (b - a) * along(rng);  // exactly on the shared edge
+        const Vec3 origin = target + normal * height(rng);
+        const Vec3 dir = cyber::normalized(target - origin);
+        origins[i * 3] = origin.x;
+        origins[i * 3 + 1] = origin.y;
+        origins[i * 3 + 2] = origin.z;
+        dirs[i * 3] = dir.x;
+        dirs[i * 3 + 1] = dir.y;
+        dirs[i * 3 + 2] = dir.z;
+    }
+
+    const auto backend = accel::defaultBackend();
+    std::vector<float> hit(rays * 3);
+    std::vector<int> face(rays);
+    backend->raycastBvh(flat.nodes.data(), flat.nodes.size(), flat.tris.data(), flat.tris.size(),
+                        origins.data(), dirs.data(), rays, hit.data(), face.data());
+    std::size_t leaks = 0;
+    for (std::size_t i = 0; i < rays; ++i) {
+        if (face[i] < 0) {
+            ++leaks;
+        }
+    }
+    CAPTURE(leaks);
+    REQUIRE(leaks == 0);
+}
+
+TEST_CASE("BVH residency key distinguishes a recycled buffer from a re-query") {
+    // GPU backends keep the last-queried BVH resident instead of re-uploading it
+    // per call (the AO bake queries once per texel). Keying on addresses and
+    // sizes alone would serve a stale hierarchy when a freed FlatBvh's storage
+    // is reused at the same address with the same counts, so the key also
+    // carries a constant-time content fingerprint.
+    namespace detail = cyber::accel::detail;
+    Mesh mesh = makeSphere(6, 8);
+    const Bvh bvh(mesh);
+    FlatBvh flat = bvh.flatten();
+    REQUIRE(!flat.tris.empty());
+
+    const auto key = detail::makeBvhResidencyKey(flat.nodes.data(), flat.nodes.size(),
+                                                 flat.tris.data(), flat.tris.size());
+    REQUIRE(key == detail::makeBvhResidencyKey(flat.nodes.data(), flat.nodes.size(),
+                                               flat.tris.data(), flat.tris.size()));
+
+    // Same addresses and counts, different contents: must miss.
+    flat.tris.front().a[0] += 1.0f;
+    REQUIRE(key != detail::makeBvhResidencyKey(flat.nodes.data(), flat.nodes.size(),
+                                               flat.tris.data(), flat.tris.size()));
+    flat.tris.front().a[0] -= 1.0f;
+    REQUIRE(key == detail::makeBvhResidencyKey(flat.nodes.data(), flat.nodes.size(),
+                                               flat.tris.data(), flat.tris.size()));
+    flat.tris.back().c[2] += 1.0f;
+    REQUIRE(key != detail::makeBvhResidencyKey(flat.nodes.data(), flat.nodes.size(),
+                                               flat.tris.data(), flat.tris.size()));
+    flat.tris.back().c[2] -= 1.0f;
+
+    // A shorter view of the same arrays is a different BVH.
+    REQUIRE(key != detail::makeBvhResidencyKey(flat.nodes.data(), flat.nodes.size(),
+                                               flat.tris.data(), flat.tris.size() - 1));
+    // An empty BVH keys consistently rather than reading through null.
+    const auto empty = detail::makeBvhResidencyKey(nullptr, 0, nullptr, 0);
+    REQUIRE(empty == detail::makeBvhResidencyKey(nullptr, 0, nullptr, 0));
+    REQUIRE(empty != key);
 }

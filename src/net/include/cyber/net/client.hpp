@@ -12,6 +12,11 @@ namespace cyber::net {
 // Reference C++ client for the bridge protocol. Mirrors the Python client and
 // backs the in-process integration tests. Every call is a synchronous
 // request/response; a false return means a transport or protocol error.
+//
+// The server is not trusted: a reply that is malformed, of the wrong type, or
+// missing/retyping a field the call reads is a protocol error like any other —
+// it reports false (pollPresses reports an empty vector) and never throws into
+// the host application.
 class BridgeClient {
 public:
     BridgeClient();

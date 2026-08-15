@@ -23,15 +23,27 @@ public:
     [[nodiscard]] virtual BackendKind kind() const = 0;
     [[nodiscard]] virtual std::string deviceName() const = 0;
 
-    // Invokes fn(begin..end) partitioned across workers. Blocks until done.
-    // The partition is an implementation detail — fn must write only the indices
-    // it is handed — and a backend is free to run the range on the calling
-    // thread when it is too short to pay for a fan-out, or when the call is
-    // nested inside another parallelFor. Callers therefore have to place the
-    // parallelism where the work is: a range of a few dozen cheap items is
-    // faster serial than threaded.
+    // Invokes fn(begin..end) partitioned across host worker threads. Blocks
+    // until done. The partition is an implementation detail — fn must write only
+    // the indices it is handed — and the range runs on the calling thread when
+    // it is too short to pay for a fan-out, or when the call is nested inside
+    // another parallelFor. Callers therefore have to place the parallelism where
+    // the work is: a range of a few dozen cheap items is faster serial than
+    // threaded.
+    //
+    // The base class implements this as a host worker pool and every backend —
+    // GPU included — inherits it: fn is an arbitrary host callable that cannot
+    // cross to a device, so this is the library's only host loop primitive. A
+    // device backend accelerates by overriding the typed kernels below, NEVER by
+    // replacing this; each GPU backend that ran the range inline single-threaded
+    // the AO texel loop, the solver's per-variable loop and the base-class BVH
+    // traversal for the whole process. Overriding is reserved for decorators
+    // that delegate (the bake tests observe ranges that way).
+    //
+    // Consequence for device backends: the typed kernels below are reachable
+    // from several host worker threads at once, so they must be thread-safe.
     virtual void parallelFor(std::size_t begin, std::size_t end,
-                             const std::function<void(std::size_t, std::size_t)>& fn) = 0;
+                             const std::function<void(std::size_t, std::size_t)>& fn);
 
     // Accelerated numeric primitives (compute-acceleration spec "hot spots":
     // solver matrix-vector products and the dense vector ops around them).
@@ -45,10 +57,14 @@ public:
     virtual void axpy(float alpha, const float* x, float* y, std::size_t n);
     // Sum of x[i] * y[i].
     [[nodiscard]] virtual float dot(const float* x, const float* y, std::size_t n);
-    // y = A * x for a CSR matrix A with `rows` rows (rowStart has rows + 1
-    // entries; colIndex/value have nnz entries).
-    virtual void spmvCsr(std::size_t rows, const std::size_t* rowStart, const std::size_t* colIndex,
-                         const float* value, const float* x, float* y);
+    // y = A * x for a CSR matrix A with `rows` rows and `cols` columns
+    // (rowStart has rows + 1 entries; colIndex/value have nnz entries; x has
+    // `cols` entries and y has `rows`). A is NOT assumed square — the seamless
+    // solver's reduction operators are genuinely rectangular — so `cols` is the
+    // only bound a backend may use when staging a device copy of x. Every
+    // colIndex must be < cols.
+    virtual void spmvCsr(std::size_t rows, std::size_t cols, const std::size_t* rowStart,
+                         const std::size_t* colIndex, const float* value, const float* x, float* y);
 
     // Batched geometry queries over a flattened BVH (roadmap 4.6/5.8/11.1), so
     // baking and surface projection run on the GPU. Inputs are host pointers to
@@ -57,6 +73,12 @@ public:
     // iterative fixed-stack traversal. The base class provides the CPU
     // reference (host stack traversal), which defines correct results and is
     // what the parity tests hold GPU overrides to.
+    //
+    // A device backend MAY keep the last-queried BVH resident across calls,
+    // identified by the array addresses, their sizes and a content fingerprint
+    // (detail::BvhResidencyKey) — otherwise a per-texel bake re-uploads the
+    // whole mesh per texel. Callers must therefore not mutate node/triangle
+    // arrays in place between queries; hand over a rebuilt snapshot instead.
 
     // outXYZ[i] = closest point on the BVH surface to queriesXYZ[i]
     // (queriesXYZ / outXYZ are 3*n contiguous floats). Empty BVH -> {0,0,0}.
@@ -73,11 +95,21 @@ public:
 };
 
 // Enumerates available backends, best first (Metal/CUDA > OpenCL > CPU).
-// The CPU backend is always the last entry.
+// The CPU backend is always the last entry. Probing a device is expensive
+// (the OpenCL maker compiles its kernel source), so the list is built once and
+// the same instances are handed out on every call.
 [[nodiscard]] std::vector<std::shared_ptr<IBackend>> availableBackends();
 
+// The GPU backend kinds this build was compiled with, whether or not their
+// device is present at runtime. Lets a caller — the parity tests above all —
+// tell "no GPU compiled in" apart from "GPU compiled in but not detected",
+// which are the same empty result in availableBackends().
+[[nodiscard]] std::vector<BackendKind> compiledBackendKinds();
+
 // The process-wide default backend (first of availableBackends unless
-// overridden by setDefaultBackend).
+// overridden by setDefaultBackend, or by the CYBER_BACKEND environment
+// variable — "cpu", "cuda", "metal" or "opencl" — which is the support escape
+// hatch for a consumer that cannot rebuild the library).
 [[nodiscard]] std::shared_ptr<IBackend> defaultBackend();
 void setDefaultBackend(std::shared_ptr<IBackend> backend);
 

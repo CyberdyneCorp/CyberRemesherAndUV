@@ -33,10 +33,24 @@ contend for one trigger:
 
 ## PyPI (Python bindings)
 
-Wheels are built with [`cibuildwheel`](https://cibuildwheel.pypa.io) so the
-native `cyber_capi` shared library the ctypes layer (`cyberremesh/_ffi.py`)
-loads is compiled once per wheel platform (`CIBW_BEFORE_ALL`) and shipped inside
-the wheel. Matrix:
+Wheels are built with [`cibuildwheel`](https://cibuildwheel.pypa.io). Three
+things have to line up for the native `cyber_capi` library the ctypes layer
+(`cyberremesh/_ffi.py`) loads to actually be inside the wheel, and the lane used
+to do only the first:
+
+1. `CIBW_BEFORE_ALL` builds it, from an **absolute** source dir — before-all runs
+   with the cwd set to `package-dir` (`python/cyberremesh`), which has no
+   `CMakeLists.txt`;
+2. `packaging/publish/stage_native_lib.py` copies it into
+   `python/cyberremesh/cyberremesh/` under its plain name, which
+   `[tool.setuptools.package-data]` then keeps;
+3. `setup.py` declares the distribution non-pure, so the wheel gets a platform
+   tag and auditwheel/delocate (and cibuildwheel's own check) see a binary wheel
+   rather than a `py3-none-any` one.
+
+`CIBW_TEST_COMMAND` calls `cyberremesh.version()`, not just `import cyberremesh`:
+importing the package deliberately dlopens nothing, so an import-only check
+passes on a wheel with no engine in it. Matrix:
 
 | Platform | Arch(s) |
 |----------|---------|

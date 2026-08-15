@@ -26,6 +26,10 @@
 // their length prefix) keep loading new files. That is also why kFormatVersion
 // does NOT move for an added section — `load` rejects version > kFormatVersion,
 // so bumping it would make older binaries refuse files they can in fact read.
+//
+// Sections in id order: 1 Target mesh, 2 EditMesh, 3 Parameters, 4 BakeState,
+// 5 soft-selection slots, 6/7 the attribute columns and feature-edge tags of
+// the target and the edit mesh (both optional, see the note on save()).
 namespace cyber::app {
 
 // Persisted in the document byte container, so values are append-only: an
@@ -85,6 +89,12 @@ public:
     std::map<std::string, std::vector<float>> softSelections;
 
     // ---- serialization (task 8.1) -------------------------------------
+    // Both meshes persist with their attribute columns (corner UVs and
+    // normals, vertex colours, whatever else a column set carries) and their
+    // feature-edge tags, so a reloaded document is the one that was saved
+    // rather than bare positions and face indices. Columns are keyed by
+    // element id, so they are written in the compacted order the mesh itself
+    // is written in and restored onto the elements rebuilt from it.
     [[nodiscard]] std::vector<std::uint8_t> save() const;
     [[nodiscard]] static std::optional<Document> load(std::span<const std::uint8_t> bytes);
 

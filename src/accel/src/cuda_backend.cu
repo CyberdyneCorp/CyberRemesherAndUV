@@ -11,15 +11,43 @@
 #include <cuda_runtime.h>
 
 #include <algorithm>
+#include <cstdio>
 #include <memory>
+#include <mutex>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "cyber/accel/backend.hpp"
+#include "cyber/accel/detail/bvh_residency.hpp"
 
 namespace cyber::accel {
 
 namespace {
+
+// A device failure must degrade, never go unnoticed: an unchecked cudaMalloc or
+// launch failure returns normally with the caller's output buffer UNTOUCHED and
+// leaves the context in a sticky error state, so every later CUDA call in the
+// process fails too. Each primitive checks every status, reports once, clears
+// the sticky error and completes on the CPU reference (compute-acceleration
+// spec: "fall back to CPU automatically when a GPU backend fails at runtime ...
+// never crashing or producing partial results").
+void reportFallback(const char* primitive, const char* what) {
+    static std::once_flag once;
+    std::call_once(once, [primitive, what] {
+        std::fprintf(stderr, "[accel] CUDA %s failed (%s); falling back to the CPU reference\n",
+                     primitive, what);
+    });
+}
+
+bool cudaOk(cudaError_t status, const char* primitive) {
+    if (status == cudaSuccess) {
+        return true;
+    }
+    reportFallback(primitive, cudaGetErrorString(status));
+    cudaGetLastError();  // clear the sticky error so later calls can succeed
+    return false;
+}
 
 __global__ void axpyKernel(float alpha, const float* x, float* y, std::size_t n) {
     const std::size_t i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -124,6 +152,27 @@ __device__ inline bool rayBox(float3 o, float3 inv, float3 lo, float3 hi, float 
     return tmin <= tmax;
 }
 
+// Watertight edge test, mirroring the CPU reference: evaluated in a canonical
+// vertex order so the two triangles sharing an edge see bitwise opposite values
+// and at most one of them can reject a ray crossing it.
+__device__ inline bool lexLess3(float3 p, float3 q) {
+    if (p.x != q.x) {
+        return p.x < q.x;
+    }
+    if (p.y != q.y) {
+        return p.y < q.y;
+    }
+    return p.z < q.z;
+}
+
+__device__ inline float edgeVolume(float3 dir, float3 p, float3 q) {
+    const bool swapped = lexLess3(q, p);
+    const float3 lo = swapped ? q : p;
+    const float3 hi = swapped ? p : q;
+    const float volume = d3(dir, cross3(lo, hi));
+    return swapped ? -volume : volume;
+}
+
 __device__ inline float rayTri(float3 o, float3 dir, float3 a, float3 b, float3 c) {
     const float kEpsilon = 1e-9f;
     const float3 ab = b - a;
@@ -133,18 +182,20 @@ __device__ inline float rayTri(float3 o, float3 dir, float3 a, float3 b, float3 
     if (fabsf(det) < kEpsilon) {
         return -1.0f;
     }
-    const float invDet = 1.0f / det;
+    const float3 oa = a - o;
+    const float3 ob = b - o;
+    const float3 oc = c - o;
+    const float eab = edgeVolume(dir, oa, ob);
+    const float ebc = edgeVolume(dir, ob, oc);
+    const float eca = edgeVolume(dir, oc, oa);
+    const bool inside = (eab >= 0.0f && ebc >= 0.0f && eca >= 0.0f) ||
+                        (eab <= 0.0f && ebc <= 0.0f && eca <= 0.0f);
+    if (!inside) {
+        return -1.0f;
+    }
     const float3 tvec = o - a;
-    const float u = d3(tvec, pvec) * invDet;
-    if (u < 0.0f || u > 1.0f) {
-        return -1.0f;
-    }
     const float3 qvec = cross3(tvec, ab);
-    const float v = d3(dir, qvec) * invDet;
-    if (v < 0.0f || u + v > 1.0f) {
-        return -1.0f;
-    }
-    const float t = d3(ac, qvec) * invDet;
+    const float t = d3(ac, qvec) * (1.0f / det);
     return t < 0.0f ? -1.0f : t;
 }
 
@@ -235,17 +286,38 @@ __global__ void raycastKernel(const FlatBvhNode* nodes, const FlatBvhTri* tris,
 }
 
 // Minimal owning device-pointer helper so kernel launches stay exception-safe.
+// It records the allocation status instead of discarding it: a failed cudaMalloc
+// otherwise leaves a null pointer that the following memcpy and launch happily
+// use, producing a silently untouched output buffer.
 template <class T>
 class DevicePtr {
 public:
-    explicit DevicePtr(std::size_t count) { cudaMalloc(&m_ptr, count * sizeof(T)); }
+    DevicePtr() = default;
+    explicit DevicePtr(std::size_t count) {
+        if (count > 0) {
+            m_status = cudaMalloc(&m_ptr, count * sizeof(T));
+        }
+    }
     ~DevicePtr() { cudaFree(m_ptr); }
     DevicePtr(const DevicePtr&) = delete;
     DevicePtr& operator=(const DevicePtr&) = delete;
+    DevicePtr(DevicePtr&& other) noexcept
+        : m_ptr(std::exchange(other.m_ptr, nullptr)),
+          m_status(std::exchange(other.m_status, cudaSuccess)) {}
+    DevicePtr& operator=(DevicePtr&& other) noexcept {
+        if (this != &other) {
+            cudaFree(m_ptr);
+            m_ptr = std::exchange(other.m_ptr, nullptr);
+            m_status = std::exchange(other.m_status, cudaSuccess);
+        }
+        return *this;
+    }
     [[nodiscard]] T* get() const { return m_ptr; }
+    [[nodiscard]] bool ok(const char* primitive) const { return cudaOk(m_status, primitive); }
 
 private:
     T* m_ptr = nullptr;
+    cudaError_t m_status = cudaSuccess;
 };
 
 class CudaBackend final : public IBackend {
@@ -255,46 +327,32 @@ public:
     [[nodiscard]] BackendKind kind() const override { return BackendKind::Cuda; }
     [[nodiscard]] std::string deviceName() const override { return "CUDA (" + m_name + ")"; }
 
-    // Host callables cannot cross to the device; generic parallelFor stays on
-    // the host. Accelerated work runs through the typed kernels below.
-    void parallelFor(std::size_t begin, std::size_t end,
-                     const std::function<void(std::size_t, std::size_t)>& fn) override {
-        if (begin < end) {
-            fn(begin, end);
-        }
-    }
+    // parallelFor is the base class's host worker pool and is not overridden:
+    // host callables cannot cross to the device, and running the range inline
+    // would single-thread every CPU-side loop in the library whenever this
+    // backend is selected. Accelerated work runs through the typed kernels
+    // below, which are reachable from several host worker threads at once (the
+    // AO bake queries from inside its texel loop) and therefore serialize on
+    // m_deviceMutex: one resident BVH, one launch at a time.
 
     void axpy(float alpha, const float* x, float* y, std::size_t n) override {
         if (n == 0) {
             return;
         }
-        DevicePtr<float> dx(n), dy(n);
-        cudaMemcpy(dx.get(), x, n * sizeof(float), cudaMemcpyHostToDevice);
-        cudaMemcpy(dy.get(), y, n * sizeof(float), cudaMemcpyHostToDevice);
-        const unsigned block = 256;
-        const unsigned grid = static_cast<unsigned>((n + block - 1) / block);
-        axpyKernel<<<grid, block>>>(alpha, dx.get(), dy.get(), n);
-        cudaMemcpy(y, dy.get(), n * sizeof(float), cudaMemcpyDeviceToHost);
+        if (!deviceAxpy(alpha, x, y, n)) {
+            IBackend::axpy(alpha, x, y, n);
+        }
     }
 
-    void spmvCsr(std::size_t rows, const std::size_t* rowStart, const std::size_t* colIndex,
-                 const float* value, const float* x, float* y) override {
+    void spmvCsr(std::size_t rows, std::size_t cols, const std::size_t* rowStart,
+                 const std::size_t* colIndex, const float* value, const float* x,
+                 float* y) override {
         if (rows == 0) {
             return;
         }
-        const std::size_t nnz = rowStart[rows];
-        DevicePtr<std::size_t> dRowStart(rows + 1), dColIndex(nnz);
-        DevicePtr<float> dValue(nnz), dx(rows), dy(rows);
-        cudaMemcpy(dRowStart.get(), rowStart, (rows + 1) * sizeof(std::size_t),
-                   cudaMemcpyHostToDevice);
-        cudaMemcpy(dColIndex.get(), colIndex, nnz * sizeof(std::size_t), cudaMemcpyHostToDevice);
-        cudaMemcpy(dValue.get(), value, nnz * sizeof(float), cudaMemcpyHostToDevice);
-        cudaMemcpy(dx.get(), x, rows * sizeof(float), cudaMemcpyHostToDevice);
-        const unsigned block = 256;
-        const unsigned grid = static_cast<unsigned>((rows + block - 1) / block);
-        spmvKernel<<<grid, block>>>(rows, dRowStart.get(), dColIndex.get(), dValue.get(), dx.get(),
-                                    dy.get());
-        cudaMemcpy(y, dy.get(), rows * sizeof(float), cudaMemcpyDeviceToHost);
+        if (!deviceSpmv(rows, cols, rowStart, colIndex, value, x, y)) {
+            IBackend::spmvCsr(rows, cols, rowStart, colIndex, value, x, y);
+        }
     }
 
     void closestPointsBvh(const FlatBvhNode* nodes, std::size_t nodeCount, const FlatBvhTri* tris,
@@ -307,18 +365,9 @@ public:
             std::fill(outXYZ, outXYZ + n * 3, 0.0f);
             return;
         }
-        DevicePtr<FlatBvhNode> dNodes(nodeCount);
-        DevicePtr<FlatBvhTri> dTris(triCount > 0 ? triCount : 1);
-        DevicePtr<float> dQ(n * 3), dOut(n * 3);
-        cudaMemcpy(dNodes.get(), nodes, nodeCount * sizeof(FlatBvhNode), cudaMemcpyHostToDevice);
-        if (triCount > 0) {
-            cudaMemcpy(dTris.get(), tris, triCount * sizeof(FlatBvhTri), cudaMemcpyHostToDevice);
+        if (!deviceClosest(nodes, nodeCount, tris, triCount, queriesXYZ, n, outXYZ)) {
+            IBackend::closestPointsBvh(nodes, nodeCount, tris, triCount, queriesXYZ, n, outXYZ);
         }
-        cudaMemcpy(dQ.get(), queriesXYZ, n * 3 * sizeof(float), cudaMemcpyHostToDevice);
-        const unsigned block = 128;
-        const unsigned grid = static_cast<unsigned>((n + block - 1) / block);
-        closestKernel<<<grid, block>>>(dNodes.get(), dTris.get(), dQ.get(), n, dOut.get());
-        cudaMemcpy(outXYZ, dOut.get(), n * 3 * sizeof(float), cudaMemcpyDeviceToHost);
     }
 
     void raycastBvh(const FlatBvhNode* nodes, std::size_t nodeCount, const FlatBvhTri* tris,
@@ -332,26 +381,172 @@ public:
             std::fill(outFace, outFace + n, -1);
             return;
         }
-        DevicePtr<FlatBvhNode> dNodes(nodeCount);
-        DevicePtr<FlatBvhTri> dTris(triCount > 0 ? triCount : 1);
-        DevicePtr<float> dO(n * 3), dD(n * 3), dHit(n * 3);
-        DevicePtr<int> dFace(n);
-        cudaMemcpy(dNodes.get(), nodes, nodeCount * sizeof(FlatBvhNode), cudaMemcpyHostToDevice);
-        if (triCount > 0) {
-            cudaMemcpy(dTris.get(), tris, triCount * sizeof(FlatBvhTri), cudaMemcpyHostToDevice);
+        if (!deviceRaycast(nodes, nodeCount, tris, triCount, originsXYZ, dirsXYZ, n, outHitXYZ,
+                           outFace)) {
+            IBackend::raycastBvh(nodes, nodeCount, tris, triCount, originsXYZ, dirsXYZ, n,
+                                 outHitXYZ, outFace);
         }
-        cudaMemcpy(dO.get(), originsXYZ, n * 3 * sizeof(float), cudaMemcpyHostToDevice);
-        cudaMemcpy(dD.get(), dirsXYZ, n * 3 * sizeof(float), cudaMemcpyHostToDevice);
-        const unsigned block = 128;
-        const unsigned grid = static_cast<unsigned>((n + block - 1) / block);
-        raycastKernel<<<grid, block>>>(dNodes.get(), dTris.get(), dO.get(), dD.get(), n, dHit.get(),
-                                       dFace.get());
-        cudaMemcpy(outHitXYZ, dHit.get(), n * 3 * sizeof(float), cudaMemcpyDeviceToHost);
-        cudaMemcpy(outFace, dFace.get(), n * sizeof(int), cudaMemcpyDeviceToHost);
     }
 
 private:
+    // Each device* returns false the moment any status is bad, leaving the
+    // caller's output untouched for the CPU reference to fill in.
+    bool deviceAxpy(float alpha, const float* x, float* y, std::size_t n) {
+        static constexpr const char* kName = "axpy";
+        const std::lock_guard<std::mutex> lock(m_deviceMutex);
+        DevicePtr<float> dx(n), dy(n);
+        if (!dx.ok(kName) || !dy.ok(kName)) {
+            return false;
+        }
+        if (!cudaOk(cudaMemcpy(dx.get(), x, n * sizeof(float), cudaMemcpyHostToDevice), kName) ||
+            !cudaOk(cudaMemcpy(dy.get(), y, n * sizeof(float), cudaMemcpyHostToDevice), kName)) {
+            return false;
+        }
+        const unsigned block = 256;
+        const unsigned grid = static_cast<unsigned>((n + block - 1) / block);
+        axpyKernel<<<grid, block>>>(alpha, dx.get(), dy.get(), n);
+        if (!cudaOk(cudaGetLastError(), kName)) {
+            return false;
+        }
+        return cudaOk(cudaMemcpy(y, dy.get(), n * sizeof(float), cudaMemcpyDeviceToHost), kName);
+    }
+
+    bool deviceSpmv(std::size_t rows, std::size_t cols, const std::size_t* rowStart,
+                    const std::size_t* colIndex, const float* value, const float* x, float* y) {
+        static constexpr const char* kName = "spmvCsr";
+        const std::lock_guard<std::mutex> lock(m_deviceMutex);
+        const std::size_t nnz = rowStart[rows];
+        DevicePtr<std::size_t> dRowStart(rows + 1), dColIndex(nnz);
+        // x is indexed by column, so it is `cols` long — NOT `rows`: the
+        // seamless solver's reduction operators are rectangular, and sizing
+        // this by the row count either truncates the device copy (wide matrices
+        // read past the buffer) or over-reads the caller's host vector (tall
+        // matrices).
+        DevicePtr<float> dValue(nnz), dx(cols), dy(rows);
+        if (!dRowStart.ok(kName) || !dColIndex.ok(kName) || !dValue.ok(kName) || !dx.ok(kName) ||
+            !dy.ok(kName)) {
+            return false;
+        }
+        if (!cudaOk(cudaMemcpy(dRowStart.get(), rowStart, (rows + 1) * sizeof(std::size_t),
+                               cudaMemcpyHostToDevice),
+                    kName) ||
+            !cudaOk(cudaMemcpy(dColIndex.get(), colIndex, nnz * sizeof(std::size_t),
+                               cudaMemcpyHostToDevice),
+                    kName) ||
+            !cudaOk(cudaMemcpy(dValue.get(), value, nnz * sizeof(float), cudaMemcpyHostToDevice),
+                    kName) ||
+            !cudaOk(cudaMemcpy(dx.get(), x, cols * sizeof(float), cudaMemcpyHostToDevice), kName)) {
+            return false;
+        }
+        const unsigned block = 256;
+        const unsigned grid = static_cast<unsigned>((rows + block - 1) / block);
+        spmvKernel<<<grid, block>>>(rows, dRowStart.get(), dColIndex.get(), dValue.get(), dx.get(),
+                                    dy.get());
+        if (!cudaOk(cudaGetLastError(), kName)) {
+            return false;
+        }
+        return cudaOk(cudaMemcpy(y, dy.get(), rows * sizeof(float), cudaMemcpyDeviceToHost), kName);
+    }
+
+    bool deviceClosest(const FlatBvhNode* nodes, std::size_t nodeCount, const FlatBvhTri* tris,
+                       std::size_t triCount, const float* queriesXYZ, std::size_t n,
+                       float* outXYZ) {
+        static constexpr const char* kName = "closestPointsBvh";
+        const std::lock_guard<std::mutex> lock(m_deviceMutex);
+        if (!ensureBvhResident(nodes, nodeCount, tris, triCount, kName)) {
+            return false;
+        }
+        DevicePtr<float> dQ(n * 3), dOut(n * 3);
+        if (!dQ.ok(kName) || !dOut.ok(kName)) {
+            return false;
+        }
+        if (!cudaOk(cudaMemcpy(dQ.get(), queriesXYZ, n * 3 * sizeof(float), cudaMemcpyHostToDevice),
+                    kName)) {
+            return false;
+        }
+        const unsigned block = 128;
+        const unsigned grid = static_cast<unsigned>((n + block - 1) / block);
+        closestKernel<<<grid, block>>>(m_dNodes.get(), m_dTris.get(), dQ.get(), n, dOut.get());
+        if (!cudaOk(cudaGetLastError(), kName)) {
+            return false;
+        }
+        return cudaOk(
+            cudaMemcpy(outXYZ, dOut.get(), n * 3 * sizeof(float), cudaMemcpyDeviceToHost), kName);
+    }
+
+    bool deviceRaycast(const FlatBvhNode* nodes, std::size_t nodeCount, const FlatBvhTri* tris,
+                       std::size_t triCount, const float* originsXYZ, const float* dirsXYZ,
+                       std::size_t n, float* outHitXYZ, int* outFace) {
+        static constexpr const char* kName = "raycastBvh";
+        const std::lock_guard<std::mutex> lock(m_deviceMutex);
+        if (!ensureBvhResident(nodes, nodeCount, tris, triCount, kName)) {
+            return false;
+        }
+        DevicePtr<float> dO(n * 3), dD(n * 3), dHit(n * 3);
+        DevicePtr<int> dFace(n);
+        if (!dO.ok(kName) || !dD.ok(kName) || !dHit.ok(kName) || !dFace.ok(kName)) {
+            return false;
+        }
+        if (!cudaOk(cudaMemcpy(dO.get(), originsXYZ, n * 3 * sizeof(float), cudaMemcpyHostToDevice),
+                    kName) ||
+            !cudaOk(cudaMemcpy(dD.get(), dirsXYZ, n * 3 * sizeof(float), cudaMemcpyHostToDevice),
+                    kName)) {
+            return false;
+        }
+        const unsigned block = 128;
+        const unsigned grid = static_cast<unsigned>((n + block - 1) / block);
+        raycastKernel<<<grid, block>>>(m_dNodes.get(), m_dTris.get(), dO.get(), dD.get(), n,
+                                       dHit.get(), dFace.get());
+        if (!cudaOk(cudaGetLastError(), kName)) {
+            return false;
+        }
+        return cudaOk(cudaMemcpy(outHitXYZ, dHit.get(), n * 3 * sizeof(float),
+                                 cudaMemcpyDeviceToHost),
+                      kName) &&
+               cudaOk(cudaMemcpy(outFace, dFace.get(), n * sizeof(int), cudaMemcpyDeviceToHost),
+                      kName);
+    }
+
+    // Keeps the last-queried BVH on the device. The AO bake issues one query
+    // per texel against the same hierarchy, so re-uploading here made bake cost
+    // O(texels x target triangles) — the host side already hoists its flatten()
+    // out of the loop for the same reason.
+    bool ensureBvhResident(const FlatBvhNode* nodes, std::size_t nodeCount, const FlatBvhTri* tris,
+                           std::size_t triCount, const char* primitive) {
+        const detail::BvhResidencyKey key =
+            detail::makeBvhResidencyKey(nodes, nodeCount, tris, triCount);
+        if (m_bvhResident && key == m_bvhKey) {
+            return true;
+        }
+        m_bvhResident = false;
+        DevicePtr<FlatBvhNode> dNodes(nodeCount);
+        DevicePtr<FlatBvhTri> dTris(triCount > 0 ? triCount : 1);
+        if (!dNodes.ok(primitive) || !dTris.ok(primitive)) {
+            return false;
+        }
+        if (!cudaOk(cudaMemcpy(dNodes.get(), nodes, nodeCount * sizeof(FlatBvhNode),
+                               cudaMemcpyHostToDevice),
+                    primitive)) {
+            return false;
+        }
+        if (triCount > 0 && !cudaOk(cudaMemcpy(dTris.get(), tris, triCount * sizeof(FlatBvhTri),
+                                               cudaMemcpyHostToDevice),
+                                    primitive)) {
+            return false;
+        }
+        m_dNodes = std::move(dNodes);
+        m_dTris = std::move(dTris);
+        m_bvhKey = key;
+        m_bvhResident = true;
+        return true;
+    }
+
     std::string m_name;
+    std::mutex m_deviceMutex;
+    detail::BvhResidencyKey m_bvhKey;
+    bool m_bvhResident = false;
+    DevicePtr<FlatBvhNode> m_dNodes;
+    DevicePtr<FlatBvhTri> m_dTris;
 };
 
 }  // namespace

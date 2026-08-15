@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <limits>
 #include <string>
 #include <system_error>
@@ -796,6 +797,120 @@ TEST_CASE("capi resolves an edge id to its endpoint positions") {
     cyber_mesh_free(mesh);
 }
 
+namespace {
+
+// Three triangles sharing the edge (v0, v1): an ordinary non-manifold fan,
+// the shape the engine tags rather than rejects.
+std::filesystem::path writeNonManifoldFanObj() {
+    const std::filesystem::path path =
+        std::filesystem::temp_directory_path() / "cyber_capi_fan.obj";
+    std::ofstream out(path);
+    out << "v 0 0 0\n"
+           "v 1 0 0\n"
+           "v 0 1 0\n"
+           "v 0 -1 0\n"
+           "v 0 0 1\n"
+           "f 1 2 3\n"
+           "f 2 1 4\n"
+           "f 1 2 5\n";
+    return path;
+}
+
+}  // namespace
+
+// Regression: the count reported here is a loop bound for the caller, and the
+// prototype declares two-element arrays — so a non-manifold edge must not send
+// that loop past the end of the buffers the signature asked for.
+TEST_CASE("capi edge faces never reports more entries than its out arrays hold") {
+    const std::filesystem::path objPath = writeNonManifoldFanObj();
+    CyberMesh* mesh = nullptr;
+    REQUIRE(cyber_mesh_load_obj(objPath.string().c_str(), &mesh) == CYBER_OK);
+
+    uint32_t nonManifold = CYBER_INVALID_ID;
+    for (uint32_t edge = 0; edge < 32u; ++edge) {
+        if (cyber_mesh_edge_face_count(mesh, edge) >= 3) {
+            nonManifold = edge;
+            break;
+        }
+    }
+    REQUIRE(nonManifold != CYBER_INVALID_ID);
+    CHECK(cyber_mesh_edge_face_count(mesh, nonManifold) == 3);
+
+    // Sentinels one past the declared extents: nothing may be written there,
+    // and the return must not invite the caller to read them.
+    constexpr uint32_t kFaceGuard = 0xABCDEFu;
+    constexpr size_t kSizeGuard = 12345u;
+    uint32_t faces[3] = {kFaceGuard, kFaceGuard, kFaceGuard};
+    size_t sizes[3] = {kSizeGuard, kSizeGuard, kSizeGuard};
+    const int written = cyber_mesh_edge_faces(mesh, nonManifold, faces, sizes);
+    CHECK(written == 2);
+    CHECK(faces[2] == kFaceGuard);
+    CHECK(sizes[2] == kSizeGuard);
+    for (int i = 0; i < written; ++i) {
+        CHECK(faces[static_cast<size_t>(i)] != kFaceGuard);
+        CHECK(sizes[static_cast<size_t>(i)] == 3u);
+    }
+
+    // Manifold and boundary edges are unaffected: written count == true count.
+    for (uint32_t edge = 0; edge < 32u; ++edge) {
+        const int total = cyber_mesh_edge_face_count(mesh, edge);
+        if (total < 0 || total > 2) {
+            continue;
+        }
+        CHECK(cyber_mesh_edge_faces(mesh, edge, faces, sizes) == total);
+    }
+
+    CHECK(cyber_mesh_edge_face_count(mesh, 100000u) == -1);
+    CHECK(cyber_mesh_edge_face_count(nullptr, 0u) == -1);
+    CHECK(cyber_mesh_edge_faces(mesh, 100000u, faces, sizes) == -1);
+
+    cyber_mesh_free(mesh);
+    std::error_code ec;
+    std::filesystem::remove(objPath, ec);
+}
+
+// Regression: cyber_uv_atlas cleared the error slot and then returned a
+// failure status, and the header defines an empty slot as "the last call
+// succeeded" — a failure must always carry a message.
+TEST_CASE("capi uv atlas failure always leaves a message in the error slot") {
+    CyberMesh* empty = cyber_mesh_create();
+    REQUIRE(empty != nullptr);
+    CyberAtlasResult result{};
+    const CyberStatus status = cyber_uv_atlas(empty, nullptr, &result);
+    CHECK(status != CYBER_OK);
+    CHECK(std::string(cyber_last_error()).find("cyber_uv_atlas") != std::string::npos);
+    cyber_mesh_free(empty);
+}
+
+#ifdef CYBER_CAPI_HEADER_PATH
+// Regression: the header advertised "SNAPSHOT SEMANTICS, as for CyberSnapper"
+// for a handle that BORROWS the mesh, so a binding author following the
+// CyberSnapper analogy releases the mesh first and gets a use-after-free.
+// CyberSnapper really does copy; CyberSeamPath must document the borrow.
+TEST_CASE("capi header documents the seam path's borrowed mesh lifetime") {
+    std::ifstream header(CYBER_CAPI_HEADER_PATH);
+    REQUIRE(header.good());
+    const std::string text((std::istreambuf_iterator<char>(header)),
+                           std::istreambuf_iterator<char>());
+
+    const size_t decl = text.find("typedef struct CyberSeamPath CyberSeamPath;");
+    REQUIRE(decl != std::string::npos);
+    const size_t blockStart = text.rfind("/*", decl);
+    REQUIRE(blockStart != std::string::npos);
+    const std::string block = text.substr(blockStart, decl - blockStart);
+
+    CHECK(block.find("as for CyberSnapper") == std::string::npos);
+    CHECK(block.find("SNAPSHOT SEMANTICS") == std::string::npos);
+    CHECK(block.find("outlive") != std::string::npos);
+
+    const size_t create = text.find("CyberStatus cyber_seam_path_create(");
+    REQUIRE(create != std::string::npos);
+    const size_t createDoc = text.rfind("/*", create);
+    REQUIRE(createDoc != std::string::npos);
+    CHECK(text.substr(createDoc, create - createDoc).find("BORROWS") != std::string::npos);
+}
+#endif  // CYBER_CAPI_HEADER_PATH
+
 TEST_CASE("capi seam path: route, edit, commit, resume, drop") {
     // 7 x 5 flat lattice; vertex ids follow the row-major lattice order.
     constexpr int kCols = 7;
@@ -970,6 +1085,50 @@ TEST_CASE("cyber_remesh_guided rejects an unusable guide and allocates nothing")
     CHECK(status == CYBER_ERR_INVALID_PARAM);
     CHECK(out == nullptr);
     CHECK_FALSE(warnings.empty());  // the rejection is LOUD
+    cyber_mesh_free(input);
+    std::error_code ec;
+    std::filesystem::remove(objPath, ec);
+}
+
+// Regression: toGuidance allocates straight from the caller's counts, so a
+// count a binding marshalled from a signed -1 (SIZE_MAX here) threw
+// std::length_error out of an extern "C" function and std::terminate took the
+// host down. The ABI reports it as an argument error instead. Bounded by
+// construction: the allocator refuses the request without reserving anything.
+TEST_CASE("cyber_remesh_guided reports an impossible guidance count instead of aborting") {
+    std::filesystem::path objPath;
+    CyberMesh* input = makeCapiBox(objPath);
+    REQUIRE(input != nullptr);
+    CyberRemeshParams params{};
+    cyber_default_params(&params);
+    params.targetQuads = 200;
+
+    const float density[8] = {1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f};
+    CyberGuidance guidance{};
+    guidance.vertex_density = density;
+    guidance.vertex_density_count = std::numeric_limits<size_t>::max();
+
+    CyberMesh* out = reinterpret_cast<CyberMesh*>(0x1);  // must be overwritten with null
+    CHECK(cyber_remesh_guided(input, &params, &guidance, nullptr, nullptr, nullptr, nullptr,
+                              &out) == CYBER_ERR_INVALID_ARG);
+    CHECK(out == nullptr);
+    CHECK(std::string(cyber_last_error()).find("cyber_remesh_guided") != std::string::npos);
+
+    // Same trap one level down, in a flow guide's point count.
+    const float points[6] = {0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f};
+    CyberFlowGuide guide{};
+    guide.points = points;
+    guide.point_count = std::numeric_limits<size_t>::max();
+    guide.strength = 1.0f;
+    guide.radius = 0.5f;
+    CyberGuidance pointy{};
+    pointy.guides = &guide;
+    pointy.guide_count = 1;
+    out = reinterpret_cast<CyberMesh*>(0x1);
+    CHECK(cyber_remesh_guided(input, &params, &pointy, nullptr, nullptr, nullptr, nullptr, &out) ==
+          CYBER_ERR_INVALID_ARG);
+    CHECK(out == nullptr);
+
     cyber_mesh_free(input);
     std::error_code ec;
     std::filesystem::remove(objPath, ec);
@@ -1755,4 +1914,37 @@ TEST_CASE("capi document survives a file round trip and rejects a foreign buffer
     std::error_code ec;
     std::filesystem::remove(path, ec);
 }
+
+// Regression: the stream state was tested while the bytes were still in the
+// filebuf, so a device that rejects the write at flush time (a full disk, an
+// over-quota mount) reported CYBER_OK for a file that never landed — and the
+// shell cleared its unsaved-changes indicator over lost work.
+TEST_CASE("capi document save reports a write the device never accepted") {
+    // /dev/full accepts the open and swallows small writes into the buffer;
+    // the ENOSPC only surfaces when that buffer is flushed.
+    const std::filesystem::path full("/dev/full");
+    if (!std::filesystem::exists(full)) {
+        MESSAGE("/dev/full unavailable on this platform");
+        return;
+    }
+    CyberMesh* edit = makeGridMesh(4, 4, 0.0f);
+    CyberDocument* doc = cyber_document_create();
+    REQUIRE(doc != nullptr);
+    REQUIRE(cyber_document_set_edit_mesh(doc, edit) == CYBER_OK);
+
+    CHECK(cyber_document_save_file(doc, "/dev/full") == CYBER_ERR_IO);
+    CHECK(std::string(cyber_last_error()).find("/dev/full") != std::string::npos);
+
+    // A writable path still succeeds, byte for byte.
+    const std::filesystem::path path =
+        std::filesystem::temp_directory_path() / "cyber_capi_full_probe.cydc";
+    REQUIRE(cyber_document_save_file(doc, path.string().c_str()) == CYBER_OK);
+    CHECK(std::filesystem::file_size(path) > 0u);
+
+    cyber_document_free(doc);
+    cyber_mesh_free(edit);
+    std::error_code ec;
+    std::filesystem::remove(path, ec);
+}
+
 #endif  // CYBER_TESTS_HAVE_APP
