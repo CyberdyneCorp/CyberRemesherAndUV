@@ -15,6 +15,14 @@ using nlohmann::json;
 
 json error(const std::string& message) { return json{{"type", "error"}, {"message", message}}; }
 
+// Every reply leaves through here. dump() throws type_error.316 when a string
+// in the reply is not valid UTF-8, and a throw on the connection thread ends
+// the host process, so the replacing handler is what keeps the reply path
+// total. Valid UTF-8 dumps byte-identically to a plain dump().
+std::string dumpReply(const json& reply) {
+    return reply.dump(-1, ' ', false, json::error_handler_t::replace);
+}
+
 json handle(BridgeSession& session, const json& req) {
     const std::string type = req.at("type").get<std::string>();
 
@@ -168,35 +176,34 @@ std::string processHandshake(const std::string& helloJson, bool& accept) {
     try {
         const json j = json::parse(helloJson);
         if (j.value("type", std::string{}) != "hello") {
-            return json{{"type", "reject"},
-                        {"reason", "expected hello"},
-                        {"serverProtocol", kProtocolVersion}}
-                .dump();
+            return dumpReply(json{{"type", "reject"},
+                                  {"reason", "expected hello"},
+                                  {"serverProtocol", kProtocolVersion}});
         }
         const std::uint32_t clientProtocol = j.value("protocol", std::uint32_t{0});
         if (clientProtocol != kProtocolVersion) {
-            return json{{"type", "reject"},
-                        {"reason", "incompatible protocol version"},
-                        {"serverProtocol", kProtocolVersion},
-                        {"clientProtocol", clientProtocol}}
-                .dump();
+            return dumpReply(json{{"type", "reject"},
+                                  {"reason", "incompatible protocol version"},
+                                  {"serverProtocol", kProtocolVersion},
+                                  {"clientProtocol", clientProtocol}});
         }
         accept = true;
-        return json{{"type", "welcome"}, {"protocol", kProtocolVersion}, {"app", "CyberRemesher"}}
-            .dump();
-    } catch (const std::exception& e) {
-        return json{{"type", "reject"},
-                    {"reason", std::string("bad handshake: ") + e.what()},
-                    {"serverProtocol", kProtocolVersion}}
-            .dump();
+        return dumpReply(
+            json{{"type", "welcome"}, {"protocol", kProtocolVersion}, {"app", "CyberRemesher"}});
+    } catch (const std::exception&) {
+        // e.what() is deliberately not echoed: a parse error quotes the
+        // offending input verbatim, which would copy raw peer bytes into the
+        // reply.
+        return dumpReply(json{
+            {"type", "reject"}, {"reason", "bad handshake"}, {"serverProtocol", kProtocolVersion}});
     }
 }
 
 std::string processRequest(BridgeSession& session, const std::string& requestJson) {
     try {
-        return handle(session, json::parse(requestJson)).dump();
-    } catch (const std::exception& e) {
-        return error(std::string("bad request: ") + e.what()).dump();
+        return dumpReply(handle(session, json::parse(requestJson)));
+    } catch (const std::exception&) {
+        return dumpReply(error("bad request"));  // peer bytes stay out of the reply
     }
 }
 

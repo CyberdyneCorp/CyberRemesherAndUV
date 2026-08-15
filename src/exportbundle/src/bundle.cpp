@@ -196,8 +196,17 @@ BundleResult writeBundle(Mesh& low, const Mesh& high, const BundleParams& params
                            io::presetMapName(entry.map) + "'";
             return result;
         }
-        const std::filesystem::path path =
-            directory / io::presetMapFileName(preset, entry, basename);
+        // An empty expansion is presetMapFileName refusing a name that would
+        // leave the output directory; joining it would write the directory
+        // itself, so it is an error here and not a path.
+        const std::string fileName = io::presetMapFileName(preset, entry, basename);
+        if (fileName.empty()) {
+            result.error = std::string("map '") + io::presetMapName(entry.map) +
+                           "' names a file outside the output directory; check the preset's "
+                           "namingPattern, name and suffixes, and the basename";
+            return result;
+        }
+        const std::filesystem::path path = directory / fileName;
         if (!isInsideDirectory(directory, path)) {
             result.error = "map '" + path.string() +
                            "' resolves outside the output directory; check the preset's "

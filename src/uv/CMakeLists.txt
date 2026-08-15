@@ -13,6 +13,6 @@ target_link_libraries(cyber_uv PUBLIC cyber_core)
 # Take retopo's include dir WITHOUT a link: both headers are header-only and
 # core-only, src/uv is configured BEFORE src/retopo, and CYBER_BUILD_RETOPO can
 # be OFF — the same precedent as cyber_bake's use of <cyber/imageio/load.hpp>.
-target_include_directories(cyber_uv PUBLIC ${CMAKE_SOURCE_DIR}/src/retopo/include)
+target_include_directories(cyber_uv PUBLIC ${PROJECT_SOURCE_DIR}/src/retopo/include)
 
 cyber_set_warnings(cyber_uv)

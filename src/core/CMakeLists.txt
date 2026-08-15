@@ -19,9 +19,9 @@ add_library(cyber_core STATIC
 )
 
 target_include_directories(cyber_core SYSTEM PRIVATE
-    ${CMAKE_SOURCE_DIR}/thirdparty/tinyobjloader
-    ${CMAKE_SOURCE_DIR}/thirdparty/happly
-    ${CMAKE_SOURCE_DIR}/thirdparty/tinygltf)
+    ${PROJECT_SOURCE_DIR}/thirdparty/tinyobjloader
+    ${PROJECT_SOURCE_DIR}/thirdparty/happly
+    ${PROJECT_SOURCE_DIR}/thirdparty/tinygltf)
 add_library(cyber::core ALIAS cyber_core)
 
 target_include_directories(cyber_core PUBLIC include)

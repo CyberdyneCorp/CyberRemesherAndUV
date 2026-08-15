@@ -9,6 +9,6 @@ target_include_directories(cyber_handoff PUBLIC include)
 # module inherits a dependency on any sculpting engine.
 target_link_libraries(cyber_handoff PUBLIC cyber_core)
 target_include_directories(cyber_handoff SYSTEM PRIVATE
-    ${CMAKE_SOURCE_DIR}/thirdparty/happly)
+    ${PROJECT_SOURCE_DIR}/thirdparty/happly)
 
 cyber_set_warnings(cyber_handoff)

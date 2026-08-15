@@ -33,6 +33,11 @@ struct SeamlessSolveResult {
 // setGradientAdaptivity. GEO::initialize() runs exactly once per process
 // (thread-safe) and GEO::terminate() is never called. Returns ok == false on any
 // failure (remesh() false, empty output, or a mismatched UV/triangle count).
+//
+// Host-process contract: the call leaves the process's signal dispositions,
+// std::terminate handler, std::new_handler and LC_NUMERIC exactly as it found
+// them, and writes nothing to std::cout/std::cerr. Set CYBER_QC_VERBOSE to let
+// the vendored solver's progress traces through.
 SeamlessSolveResult solveSeamlessUv(const std::vector<std::array<double, 3>>& verts,
                                     const std::vector<std::array<std::size_t, 3>>& tris,
                                     long targetQuads, double scaling, double adaptivity);

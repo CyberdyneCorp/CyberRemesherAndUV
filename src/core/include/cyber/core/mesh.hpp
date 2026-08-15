@@ -160,6 +160,10 @@ public:
     [[nodiscard]] std::vector<std::vector<FaceId>> islands() const;
 
     // ---- attributes -----------------------------------------------------
+    // One column set per element kind, each row indexed by element id. Ids of
+    // deleted elements are recycled, and a recycled id's row is cleared as it
+    // is handed out, so a new element starts from column defaults rather than
+    // inheriting the dead element's values.
     AttributeSet& vertexAttributes() { return m_vertexAttrs; }
     AttributeSet& edgeAttributes() { return m_edgeAttrs; }
     AttributeSet& faceAttributes() { return m_faceAttrs; }

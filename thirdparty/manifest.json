@@ -24,7 +24,7 @@
       "path": "happly",
       "url": "https://github.com/nmwsharp/happly",
       "usedBy": "mesh-io PLY import/export",
-      "localPatches": "Truncated/short data sections throw instead of spinning at EOF or reading past the token vector — search happly.h for \"CYBER LOCAL PATCH\" and re-apply on re-vendor"
+      "localPatches": "Truncated/short data sections throw instead of spinning at EOF or reading past the token vector; an element declaring entries but no properties is rejected instead of looping to its declared count; binary list properties grow in bounded steps so a forged list count cannot commit memory the stream has no bytes for — search happly.h for \"CYBER LOCAL PATCH\" and re-apply on re-vendor"
     },
     {
       "name": "tinygltf",

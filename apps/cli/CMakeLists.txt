@@ -15,6 +15,6 @@ if(TARGET cyber_exportbundle)
 endif()
 # nlohmann json.hpp (vendored with tinygltf, MIT) for the JSON report.
 target_include_directories(cyberremesh SYSTEM PRIVATE
-    ${CMAKE_SOURCE_DIR}/thirdparty/tinygltf)
+    ${PROJECT_SOURCE_DIR}/thirdparty/tinygltf)
 
 cyber_set_warnings(cyberremesh)

@@ -14,11 +14,15 @@ it lives in the build description rather than in code:
   never added.
 * the shared C ABI used to export ~4000 vendored Geogram/stb symbols, which a
   host process carrying its own copy can interpose on.
+* the module CMakeLists used to reach the vendored headers through
+  `${CMAKE_SOURCE_DIR}`, which under `add_subdirectory()` points at the
+  CONSUMER's source root, so every include path was wrong and nothing compiled.
 
 Mostly file parsing so it runs everywhere; the configure and exported-symbol
 checks skip themselves when cmake / nm / the built library are unavailable.
 """
 
+import json
 import os
 import re
 import shutil
@@ -28,6 +32,10 @@ import tempfile
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
+
+# Trees that are not ours to police: vendored sources, build outputs, and the
+# Android shell, which declares its own project() and is configured standalone.
+SKIPPED_DIRS = ("thirdparty", "build", "examples/reference", "apps/mobile")
 
 FAILURES: "list[str]" = []
 
@@ -134,12 +142,88 @@ def test_capi_shared_exports_only_the_c_abi() -> None:
           "nothing exported at all — the version script is too strict")
 
 
+def _project_cmake_files() -> "list[Path]":
+    """Every CMake script this project owns, vendored trees excluded."""
+    found = (list(REPO.rglob("CMakeLists.txt")) + list(REPO.rglob("*.cmake"))
+             + list(REPO.rglob("*.cmake.in")))
+    ours = []
+    for path in sorted(found):
+        rel = path.relative_to(REPO).as_posix()
+        if any(rel == d or rel.startswith(d + "/") for d in SKIPPED_DIRS):
+            continue
+        ours.append(path)
+    return ours
+
+
+def test_no_root_scoped_path_variables() -> None:
+    """Modules must locate this tree via PROJECT_*, never CMAKE_SOURCE_DIR.
+
+    Under `add_subdirectory()` CMAKE_SOURCE_DIR / CMAKE_BINARY_DIR are the
+    CONSUMER's roots, so every path built from them lands outside this repo.
+    """
+    offenders = []
+    for path in _project_cmake_files():
+        if path == REPO / "CMakeLists.txt":
+            continue  # the top-level file is the one place they are equivalent
+        text = path.read_text(encoding="utf-8")
+        for var in ("CMAKE_SOURCE_DIR", "CMAKE_BINARY_DIR"):
+            if "${" + var + "}" in text:
+                offenders.append(f"{path.relative_to(REPO)}:{var}")
+    check("no module uses CMAKE_SOURCE_DIR/CMAKE_BINARY_DIR", not offenders,
+          f"use PROJECT_/CMAKE_CURRENT_ instead: {', '.join(offenders)}")
+
+
+def test_add_subdirectory_consumption_resolves_paths() -> None:
+    """A parent project embedding this tree must get valid include paths.
+
+    Configure only — the regression is visible in compile_commands.json, where
+    the vendored header dirs pointed at the parent's source root and so did not
+    exist. Building the whole tree here would be far too slow.
+    """
+    name = "add_subdirectory include paths exist"
+    cmake = shutil.which("cmake")
+    if cmake is None:
+        skip(name, "cmake not on PATH")
+        return
+    with tempfile.TemporaryDirectory() as tmp:
+        parent = Path(tmp) / "parent"
+        parent.mkdir()
+        (parent / "CMakeLists.txt").write_text(
+            "cmake_minimum_required(VERSION 3.24)\n"
+            "project(CyberConsumerProbe LANGUAGES CXX)\n"
+            f"add_subdirectory({REPO.as_posix()} cyberremesher)\n",
+            encoding="utf-8")
+        build = Path(tmp) / "b"
+        proc = subprocess.run(
+            [cmake, "-S", str(parent), "-B", str(build),
+             "-DCYBER_BUILD_TESTS=ON", "-DCYBER_WITH_QUADCOVER=OFF"],
+            capture_output=True, text=True, check=False)
+        db = build / "compile_commands.json"
+        if proc.returncode != 0 or not db.is_file():
+            output = (proc.stdout + proc.stderr).strip()[-200:]
+            skip(name, f"parent configure produced no compile database: {output}")
+            return
+        entries = json.loads(db.read_text(encoding="utf-8"))
+
+    missing = set()
+    for entry in entries:
+        command = entry.get("command") or " ".join(entry.get("arguments", []))
+        for inc in re.findall(r"-(?:isystem|I)\s*(\S+)", command):
+            if not Path(inc).is_dir():
+                missing.add(inc)
+    check(name, not missing,
+          f"{len(missing)} include dir(s) outside this tree, "
+          f"e.g. {', '.join(sorted(missing)[:3])}")
+
+
 def main() -> int:
     print(f"build hygiene (repo: {REPO})")
     test_warnings_as_errors_default_on()
     test_stringop_overflow_suppressed_at_its_site()
     test_capi_requires_retopo_at_configure_time()
     test_capi_shared_exports_only_the_c_abi()
+    test_no_root_scoped_path_variables()
+    test_add_subdirectory_consumption_resolves_paths()
 
     if FAILURES:
         print(f"\n{len(FAILURES)} failure(s): {', '.join(FAILURES)}")

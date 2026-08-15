@@ -132,3 +132,40 @@ TEST_CASE("batched raycast matches per-ray BVH traversal") {
     REQUIRE(out[0]->point.z == doctest::Approx(0.0f));
     REQUIRE_FALSE(out[1].has_value());  // misses the unit quad
 }
+
+TEST_CASE("queries against a pre-flattened BVH match the Bvh overloads") {
+    // The Bvh overloads copy every node and triangle per call, so a caller that
+    // queries the same BVH repeatedly (the AO bake, once per texel) has to
+    // flatten once and reuse the result. The two forms must agree exactly.
+    Mesh mesh = makeQuadPlane();
+    const Bvh bvh(mesh);
+    const cyber::FlatBvh flat = bvh.flatten();
+    auto backend = accel::defaultBackend();
+
+    accel::Buffer<Vec3> queries{{0.3f, 0.3f, 1.0f}, {0.8f, 0.1f, -2.0f}, {2.0f, 2.0f, 0.0f}};
+    accel::Buffer<Vec3> viaBvh;
+    accel::Buffer<Vec3> viaFlat;
+    accel::closestPoints(*backend, bvh, queries, viaBvh);
+    accel::closestPoints(*backend, flat, queries, viaFlat);
+    REQUIRE(viaFlat.size() == viaBvh.size());
+    for (std::size_t i = 0; i < viaBvh.size(); ++i) {
+        REQUIRE(viaFlat[i].x == viaBvh[i].x);
+        REQUIRE(viaFlat[i].y == viaBvh[i].y);
+        REQUIRE(viaFlat[i].z == viaBvh[i].z);
+    }
+
+    accel::Buffer<Vec3> origins{{0.3f, 0.3f, 1.0f}, {5.0f, 5.0f, 1.0f}};
+    accel::Buffer<Vec3> directions{{0, 0, -1}, {0, 0, -1}};
+    accel::Buffer<std::optional<Bvh::RayHit>> hitsViaBvh;
+    accel::Buffer<std::optional<Bvh::RayHit>> hitsViaFlat;
+    accel::raycast(*backend, bvh, origins, directions, hitsViaBvh);
+    accel::raycast(*backend, flat, origins, directions, hitsViaFlat);
+    REQUIRE(hitsViaFlat.size() == hitsViaBvh.size());
+    for (std::size_t i = 0; i < hitsViaBvh.size(); ++i) {
+        REQUIRE(hitsViaFlat[i].has_value() == hitsViaBvh[i].has_value());
+        if (hitsViaBvh[i].has_value()) {
+            REQUIRE(hitsViaFlat[i]->t == hitsViaBvh[i]->t);
+            REQUIRE(hitsViaFlat[i]->face.value == hitsViaBvh[i]->face.value);
+        }
+    }
+}

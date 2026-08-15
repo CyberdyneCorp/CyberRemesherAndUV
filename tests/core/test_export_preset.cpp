@@ -199,6 +199,53 @@ TEST_CASE("a naming pattern cannot escape the output directory") {
                 .ok());
 }
 
+TEST_CASE("a preset name cannot escape the output directory through {preset}") {
+    // Regression: the traversal gate ran on the RAW namingPattern, so a preset
+    // whose pattern was a legal relative name smuggled the escape in through
+    // the "name" field that {preset} expands — the parse succeeded and the
+    // public file-name accessor handed a climbing path to the host.
+    const auto climbing = io::parsePreset(
+        R"({"schemaVersion":1,"name":"../../../tmp/pwned","maps":["normal"],)"
+        R"("namingPattern":"{preset}_{map}.{ext}"})");
+    REQUIRE_FALSE(climbing.ok());
+    REQUIRE(climbing.error().code == io::ErrorCode::ParseError);
+    REQUIRE(climbing.error().message.find("name") != std::string::npos);
+
+    const auto absolute =
+        io::parsePreset(R"({"schemaVersion":1,"name":"/tmp/pwned","maps":["normal"]})");
+    REQUIRE_FALSE(absolute.ok());
+    REQUIRE(absolute.error().code == io::ErrorCode::ParseError);
+
+    // Names that merely contain dots or dashes are ordinary names.
+    REQUIRE(io::parsePreset(R"({"schemaVersion":1,"name":"studio-v1.2","maps":["normal"]})").ok());
+}
+
+TEST_CASE("an expanded map file name that escapes the output directory is refused") {
+    // The containment check lives on the expansion, not on one token, so a
+    // value arriving through ANY token — including a caller-supplied basename
+    // that never passes through the parser — is refused with an empty name.
+    io::ExportPreset preset = *io::builtinPreset("blender");
+    REQUIRE(io::presetMapFileName(preset, preset.maps[0], "hero") == "hero_normal.png");
+    REQUIRE(io::presetMapFileName(preset, preset.maps[0], "../../hero").empty());
+    REQUIRE(io::presetMapFileName(preset, preset.maps[0], "/tmp/hero").empty());
+
+    // Presets built in C++ never went through parsePreset, so the same escape
+    // is possible through the name and the suffix.
+    preset.namingPattern = "{preset}_{map}.{ext}";
+    preset.name = "../../../tmp/pwned";
+    REQUIRE(io::presetMapFileName(preset, preset.maps[0], "hero").empty());
+
+    preset.name = "blender";
+    preset.namingPattern = "{map}.{ext}";
+    io::PresetMapEntry entry = preset.maps[0];
+    entry.suffix = "../../evil";
+    REQUIRE(io::presetMapFileName(preset, entry, "hero").empty());
+
+    // A subdirectory inside the output directory is still a legal expansion.
+    preset.namingPattern = "{preset}/{basename}_{map}.{ext}";
+    REQUIRE(io::presetMapFileName(preset, preset.maps[0], "hero") == "blender/hero_normal.png");
+}
+
 // ---- resolution and naming ---------------------------------------------
 
 TEST_CASE("resolvePreset prefers a built-in name and lists them when unknown") {

@@ -102,8 +102,9 @@ struct CyberRenderCache {
 // from geometry alone), plus overlay render state (task 3.4): hidden faces
 // and tagged edges filter/augment the render cache without touching the
 // topology — stable element ids are unaffected. Both survive render-cache
-// invalidation (they live on the handle, not in the cache) and reference
-// stable ids, so dead ids are simply skipped at cache-build time.
+// invalidation (they live on the handle, not in the cache). Every one of
+// these tables is keyed on element ids, which the mesh RECYCLES, so each is
+// swept of dead ids after an edit (see dropDeadHandleState).
 struct CyberMesh {
     cyber::Mesh mesh;
     std::optional<cyber::remesh::Statistics> stats;
@@ -1350,16 +1351,23 @@ cyber::retopo::PinSet makePinSet(const uint32_t* pinned, size_t pinned_count) {
     return pins;
 }
 
-// Unselects the vertices an op has just killed, in the live field and in every
-// saved slot. Vertex ids are recycled from the mesh's free list, so a weight
-// left on a dead id would be inherited by the next vertex created in that slot
-// — a brand-new vertex born selected, then dragged by the weighted
-// transform/relax. Costs nothing until a selection actually exists.
-void dropDeadSelectionWeights(CyberMesh* mesh) {
-    mesh->selection.dropDead(mesh->mesh);
+// Drops from EVERY id-keyed table on the handle the entries an op has just
+// killed: the live weight field, each saved slot, the hidden-face set and the
+// tagged-edge list. Element ids are recycled from the mesh's free lists, so an
+// entry left on a dead id is inherited by the next element created in that
+// slot — a brand-new vertex born selected (then dragged by the weighted
+// transform/relax), a brand-new face born hidden, a brand-new edge born
+// tagged. Costs nothing until one of the tables is non-empty.
+void dropDeadHandleState(CyberMesh* mesh) {
+    const cyber::Mesh& m = mesh->mesh;
+    mesh->selection.dropDead(m);
     for (auto& slot : mesh->selectionSlots) {
-        cyber::retopo::dropDeadWeights(mesh->mesh, slot.second);
+        cyber::retopo::dropDeadWeights(m, slot.second);
     }
+    std::erase_if(mesh->hiddenFaces,
+                  [&m](std::uint32_t id) { return !m.isAlive(cyber::FaceId{id}); });
+    std::erase_if(mesh->taggedEdges,
+                  [&m](std::uint32_t id) { return !m.isAlive(cyber::EdgeId{id}); });
 }
 
 // Shared prologue/epilogue for the editing ops: argument checks, exception
@@ -1380,7 +1388,7 @@ CyberStatus runMeshEdit(CyberMesh* mesh, const char* name, Body body) {
     try {
         const CyberStatus status = body();
         if (status == CYBER_OK) {
-            dropDeadSelectionWeights(mesh);
+            dropDeadHandleState(mesh);
             invalidateRenderCache(mesh);
             clearError();
         }
@@ -1389,12 +1397,12 @@ CyberStatus runMeshEdit(CyberMesh* mesh, const char* name, Body body) {
         // The op may have partially mutated the mesh before throwing —
         // never serve a pre-mutation cache, or a weight on a freed vertex,
         // over a mutated mesh.
-        dropDeadSelectionWeights(mesh);
+        dropDeadHandleState(mesh);
         invalidateRenderCache(mesh);
         setError(std::string(name) + ": " + e.what());
         return CYBER_ERR_RUNTIME;
     } catch (...) {
-        dropDeadSelectionWeights(mesh);
+        dropDeadHandleState(mesh);
         invalidateRenderCache(mesh);
         setError(std::string(name) + ": unknown error");
         return CYBER_ERR_RUNTIME;
@@ -3997,11 +4005,13 @@ CyberStatus cyber_bake_field(const CyberMesh* low, const CyberMesh* high, CyberB
 
 CyberStatus cyber_conform(CyberMesh* edit, const CyberMesh* new_target, float threshold,
                           CyberConformReport* report, uint32_t* out_flagged, size_t max_flagged) {
-    if (edit == nullptr || new_target == nullptr) {
-        setError("cyber_conform: null argument");
-        return CYBER_ERR_INVALID_ARG;
-    }
-    try {
+    // Moves every live vertex of the EditMesh, so it goes through runMeshEdit
+    // for the render-cache invalidation the zero-copy accessors rely on.
+    return runMeshEdit(edit, "cyber_conform", [&]() -> CyberStatus {
+        if (new_target == nullptr) {
+            setError("cyber_conform: null argument");
+            return CYBER_ERR_INVALID_ARG;
+        }
         const cyber::retopo::SurfaceSnapper snapper(new_target->mesh);
         if (snapper.empty()) {
             setError("cyber_conform: the new Target has no faces");
@@ -4018,15 +4028,8 @@ CyberStatus cyber_conform(CyberMesh* edit, const CyberMesh* new_target, float th
             report->flaggedCount = result.flagged.size();
         }
         copyVertexIds(result.flagged, out_flagged, max_flagged);
-        clearError();
         return CYBER_OK;
-    } catch (const std::exception& e) {
-        setError(std::string("cyber_conform: ") + e.what());
-        return CYBER_ERR_RUNTIME;
-    } catch (...) {
-        setError("cyber_conform: unknown error");
-        return CYBER_ERR_RUNTIME;
-    }
+    });
 }
 
 /* ---- named export presets (mesh-io) ----------------------------------- */

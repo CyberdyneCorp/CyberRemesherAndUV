@@ -1,5 +1,5 @@
 add_library(cyber_doctest INTERFACE)
-target_include_directories(cyber_doctest SYSTEM INTERFACE ${CMAKE_SOURCE_DIR}/thirdparty/doctest)
+target_include_directories(cyber_doctest SYSTEM INTERFACE ${PROJECT_SOURCE_DIR}/thirdparty/doctest)
 
 add_executable(cyber_tests
     main.cpp
@@ -142,9 +142,9 @@ if(CYBER_BUILD_CLI AND Python3_FOUND)
         OUTPUT_QUIET ERROR_QUIET)
     if(CYBER_BENCH_DEPS_MISSING EQUAL 0)
         add_test(NAME bench
-            COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/bench/bench.py
+            COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tools/bench/bench.py
                     check --cyber-binary $<TARGET_FILE:cyberremesh>
-                    --cache-dir ${CMAKE_BINARY_DIR}/bench-cache)
+                    --cache-dir ${PROJECT_BINARY_DIR}/bench-cache)
         set_tests_properties(bench PROPERTIES TIMEOUT 900)
     else()
         message(STATUS "bench test skipped: python3 lacks numpy/scipy")
@@ -178,7 +178,8 @@ if(TARGET cyber_capi_shared AND Python3_FOUND)
     foreach(_pyt test_api test_golden test_document_invariants test_bake test_uv_atlas
                  test_hole_fill_policy test_open_surface_cleanup
                  test_cad_density_robustness test_soft_selection test_seam_path
-                 test_handoff test_mesh_state test_export_presets)
+                 test_handoff test_mesh_state test_export_presets
+                 test_library_lookup test_host_process_hygiene)
         add_test(NAME python_${_pyt}
             COMMAND ${Python3_EXECUTABLE} ${_pydir}/${_pyt}.py)
         set_tests_properties(python_${_pyt} PROPERTIES

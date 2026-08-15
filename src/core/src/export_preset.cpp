@@ -150,9 +150,10 @@ Result<ColorSpace> parseColorSpace(const std::string& text, std::string_view ori
                       ": colorSpace must be \"linear\" or \"srgb\", found \"" + text + "\"");
 }
 
-// A map suffix is substituted into the file NAME, so it has to stay a name: a
-// separator or a ".." would move the map out of the caller's output directory
-// exactly like an escaping namingPattern does.
+// A value substituted into the file NAME has to stay a name: a separator or a
+// ".." would move the map out of the caller's output directory exactly like an
+// escaping namingPattern does. Applies to every preset field the pattern can
+// expand -- a map suffix and the preset's own name.
 bool isFileNameToken(const std::string& text) {
     return text != ".." && text.find('/') == std::string::npos &&
            text.find('\\') == std::string::npos;
@@ -250,12 +251,14 @@ std::optional<Error> readInt(const json& root, const char* key, std::string_view
     return std::nullopt;
 }
 
-// A naming pattern names a file INSIDE the caller's output directory. An
-// absolute pattern or one with a `..` component makes a preset FILE decide
-// where the engine writes, so a downloaded preset could overwrite anything the
-// process can reach; the pattern is data, never a destination.
-bool patternEscapesOutputDirectory(const std::string& pattern) {
-    const std::filesystem::path path(pattern);
+// A map file name lives INSIDE the caller's output directory. An absolute name
+// or one with a `..` component makes a preset FILE decide where the engine
+// writes, so a downloaded preset could overwrite anything the process can
+// reach; a preset names files, never destinations. Checked both on the raw
+// pattern (so a bad preset fails at parse, where the error is actionable) and
+// on the fully expanded name (so no token can smuggle a separator past it).
+bool escapesOutputDirectory(const std::string& name) {
+    const std::filesystem::path path(name);
     if (path.is_absolute() || path.has_root_name() || path.has_root_directory()) {
         return true;
     }
@@ -356,6 +359,13 @@ Result<ExportPreset> parsePreset(std::string_view json_text, std::string_view or
         return parseError(std::string(origin) + ": missing string \"name\"");
     }
     preset.name = root["name"].get<std::string>();
+    // The name is substituted for {preset} in the naming pattern, so it is a
+    // file-name fragment on the same terms as a map suffix.
+    if (!isFileNameToken(preset.name)) {
+        return parseError(std::string(origin) + ": \"name\" \"" + preset.name +
+                          "\" must be a plain file-name fragment (it is substituted for "
+                          "{preset} in the naming pattern)");
+    }
 
     if (const std::optional<Error> bad =
             readString(root, "meshFormat", origin, preset.meshFormat)) {
@@ -384,7 +394,7 @@ Result<ExportPreset> parsePreset(std::string_view json_text, std::string_view or
                           ": namingPattern must contain {map}, or every map would "
                           "overwrite the previous one");
     }
-    if (patternEscapesOutputDirectory(preset.namingPattern)) {
+    if (escapesOutputDirectory(preset.namingPattern)) {
         return parseError(std::string(origin) + ": namingPattern \"" + preset.namingPattern +
                           "\" must be a relative name inside the output directory (no leading "
                           "\"/\" and no \"..\")");
@@ -456,6 +466,14 @@ std::string presetMapFileName(const ExportPreset& preset, const PresetMapEntry& 
     replaceAll(name, "{map}", suffix);
     replaceAll(name, "{preset}", preset.name);
     replaceAll(name, "{ext}", preset.textureFormat);
+    // Containment is decided on the EXPANDED name, not per token: every token
+    // ({basename}, {map}, {preset}, {ext}) substitutes text from a preset file
+    // or a caller, so gating them one by one leaves the next token added here
+    // open. An escaping expansion yields no name at all -- callers treat the
+    // empty string as a refusal rather than joining it to their directory.
+    if (escapesOutputDirectory(name)) {
+        return {};
+    }
     return name;
 }
 

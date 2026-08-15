@@ -497,10 +497,29 @@ public:
   }
 
   /**
-   * @brief (binary reading) Copy the next value of this property from a stream of bits.
+   * @brief (binary reading) CYBER LOCAL PATCH (keep on re-vendor): append `count` values from the
+   * stream, growing the storage in bounded steps so a declared count read out of the data section
+   * cannot commit memory the stream has no bytes for. Returns the new size of flattenedData, which
+   * for a list the stream can supply in full is the old size plus `count`. A short read leaves the
+   * stream failed, which the per-entry check in parseBinary/parseBinaryBigEndian reports.
    *
    * @param stream Stream to read from.
+   * @param count Number of values the list declares.
    */
+  size_t readListValues(std::istream& stream, size_t count) {
+    const size_t stepValues = sizeof(T) >= 4096 ? 1 : 4096 / sizeof(T);
+    size_t haveRead = 0;
+    while (haveRead < count && stream) {
+      size_t step = count - haveRead;
+      if (step > stepValues) step = stepValues;
+      size_t at = flattenedData.size();
+      flattenedData.resize(at + step);
+      stream.read((char*)&flattenedData[at], static_cast<std::streamsize>(step * sizeof(T)));
+      haveRead += step;
+    }
+    return flattenedData.size();
+  }
+
   virtual void readNext(std::istream& stream) override {
 
     // Read the size of the list
@@ -508,12 +527,10 @@ public:
     stream.read(((char*)&count), listCountBytes);
 
     // Read list elements
-    size_t currSize = flattenedData.size();
-    size_t afterSize = currSize + count;
-    flattenedData.resize(afterSize);
-    if (count > 0) {
-      stream.read((char*)&flattenedData[currSize], count * sizeof(T));
-    }
+    // CYBER LOCAL PATCH (keep on re-vendor): the count is read straight out of the data section,
+    // so resizing to it up front let a 4-byte field commit gigabytes for a file a few hundred
+    // bytes long. readListValues grows in bounded steps instead.
+    size_t afterSize = readListValues(stream, count);
     flattenedIndexStart.emplace_back(afterSize);
   }
 
@@ -536,12 +553,10 @@ public:
     }
 
     // Read list elements
+    // CYBER LOCAL PATCH (keep on re-vendor): see readNext — the declared count is untrusted, so
+    // the storage is grown in bounded steps rather than committed before anything is read.
     size_t currSize = flattenedData.size();
-    size_t afterSize = currSize + count;
-    flattenedData.resize(afterSize);
-    if (count > 0) {
-      stream.read((char*)&flattenedData[currSize], count * sizeof(T));
-    }
+    size_t afterSize = readListValues(stream, count);
     flattenedIndexStart.emplace_back(afterSize);
 
     // Swap endian order of list elements
@@ -1839,6 +1854,20 @@ private:
   }
 
   /**
+   * @brief CYBER LOCAL PATCH (keep on re-vendor): reject an element that declares entries but no
+   * properties. Such an entry can hold no data in any of the three formats, so reading one makes
+   * no progress and the per-entry loops used to spin for the whole declared count.
+   *
+   * @param elem
+   */
+  static void throwIfPropertyless(const Element& elem) {
+    if (elem.properties.empty() && elem.count > 0) {
+      throw std::runtime_error("PLY parser: element " + elem.name + " declares " +
+                               std::to_string(elem.count) + " entries but no properties");
+    }
+  }
+
+  /**
    * @brief Read the actual data for a file, in ASCII
    *
    * @param inStream
@@ -1855,6 +1884,11 @@ private:
       if (verbose) {
         std::cout << "  - Processing element: " << elem.name << std::endl;
       }
+
+      // CYBER LOCAL PATCH (keep on re-vendor): an element with no properties carries no data, so
+      // the entry loop below makes no progress on the stream — a declared count then spun for as
+      // many iterations as the header asked for, up to 2^64.
+      throwIfPropertyless(elem);
 
       for (size_t iP = 0; iP < elem.properties.size(); iP++) {
         elem.properties[iP]->reserve(elem.count);
@@ -1919,6 +1953,10 @@ private:
         std::cout << "  - Processing element: " << elem.name << std::endl;
       }
 
+      // CYBER LOCAL PATCH (keep on re-vendor): see parseASCII — a property-less element reads
+      // nothing, so a nonzero count is malformed rather than a loop to run to its end.
+      throwIfPropertyless(elem);
+
       for (size_t iP = 0; iP < elem.properties.size(); iP++) {
         elem.properties[iP]->reserve(elem.count);
       }
@@ -1958,6 +1996,10 @@ private:
       if (verbose) {
         std::cout << "  - Processing element: " << elem.name << std::endl;
       }
+
+      // CYBER LOCAL PATCH (keep on re-vendor): see parseASCII — a property-less element reads
+      // nothing, so a nonzero count is malformed rather than a loop to run to its end.
+      throwIfPropertyless(elem);
 
       for (size_t iP = 0; iP < elem.properties.size(); iP++) {
         elem.properties[iP]->reserve(elem.count);

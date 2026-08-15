@@ -17,6 +17,7 @@ from __future__ import annotations
 import ctypes
 import ctypes.util
 import os
+import stat
 import sys
 from ctypes import (
     CFUNCTYPE,
@@ -404,6 +405,44 @@ def _build_tree_dirs(base: str) -> List[str]:
     return dirs
 
 
+def _is_trusted_dir(path: str) -> bool:
+    """True when ``path`` exists and no other local user can write into it.
+
+    The build-tree probe hands whatever it finds straight to ``dlopen``, whose
+    ELF constructors run before any name or version check, so a directory that
+    is world-writable or belongs to somebody else must never be searched.
+    Windows has no cheap equivalent of this check, so it is POSIX-only.
+    """
+    try:
+        info = os.stat(path)
+    except OSError:  # missing, or not readable
+        return False
+    if os.name != "posix":
+        return True
+    if info.st_mode & stat.S_IWOTH:
+        return False
+    return info.st_uid in (os.getuid(), 0)
+
+
+def _source_tree_root(start: str) -> Optional[str]:
+    """The checkout of THIS project containing ``start``, or ``None``.
+
+    Only an ancestor that actually carries this repo's markers counts, so an
+    installed package never picks up a ``build/`` directory that merely happens
+    to sit above it (a venv under a shared /tmp, a CI scratch tree).
+    """
+    root = start
+    for _ in range(6):
+        root = os.path.dirname(root)
+        if not root or root == os.path.dirname(root):
+            return None
+        markers = (os.path.join(root, "CMakeLists.txt"),
+                   os.path.join(root, "capi", "include", "cyber_capi.h"))
+        if all(os.path.isfile(m) for m in markers):
+            return root if _is_trusted_dir(root) else None
+    return None
+
+
 def _candidate_dirs() -> List[str]:
     """Directories to probe for the shared library, in priority order."""
     dirs: List[str] = []
@@ -412,16 +451,15 @@ def _candidate_dirs() -> List[str]:
     # 1. The package directory itself (a wheel bundles the lib alongside).
     dirs.append(here)
 
-    # 2. Walk up toward the repo root, checking conventional build trees. The
-    #    package lives at <repo>/python/cyberremesh/cyberremesh, so the repo
-    #    root is three levels up in a source checkout.
-    root = here
-    for _ in range(6):
-        root = os.path.dirname(root)
-        if not root or root == os.path.dirname(root):
-            break
+    # 2. Conventional build trees of the surrounding source checkout, when the
+    #    package really is inside one (at <repo>/python/cyberremesh/cyberremesh)
+    #    and that checkout is ours. Each build dir is re-checked, so a
+    #    world-writable one inside an otherwise trusted tree is still skipped.
+    root = _source_tree_root(here)
+    if root is not None:
         for build in ("build", "out", "cmake-build-debug", "cmake-build-release"):
-            dirs.extend(_build_tree_dirs(os.path.join(root, build)))
+            dirs.extend(d for d in _build_tree_dirs(os.path.join(root, build))
+                        if _is_trusted_dir(d))
 
     return dirs
 
@@ -432,7 +470,10 @@ def find_library_path() -> Optional[str]:
     Search order:
       1. ``CYBER_CAPI_LIB`` env var (a full path, or a directory containing it).
       2. The package directory (bundled wheel).
-      3. Common in-tree build directories relative to the repo root.
+      3. Common build directories of the source checkout the package sits in —
+         only when an ancestor really is a checkout of this project and is not
+         writable by other users. An installed package therefore never picks up
+         a build tree that merely happens to sit above it.
       4. The platform loader search path, for a system-installed library — this
          step may return a bare file name rather than a path, which is what
          :func:`ctypes.CDLL` wants anyway.

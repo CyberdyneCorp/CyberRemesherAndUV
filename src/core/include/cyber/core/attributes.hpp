@@ -23,10 +23,16 @@ public:
     using Column = std::variant<std::vector<float>, std::vector<std::int32_t>, std::vector<Vec2>,
                                 std::vector<Vec3>, std::vector<Vec4>>;
 
+    // Look the column up BEFORE building the default: passing std::vector<T>(m_size)
+    // as an argument would allocate and zero-fill a whole column on every call, even
+    // when the column already exists — turning a create()-per-element loop into
+    // O(n^2). Behaviour is otherwise identical to the try_emplace form.
     template <typename T>
     std::vector<T>& create(const std::string& name) {
-        auto [it, inserted] = m_columns.try_emplace(name, std::vector<T>(m_size));
-        if (!inserted && !std::holds_alternative<std::vector<T>>(it->second)) {
+        auto it = m_columns.find(name);
+        if (it == m_columns.end()) {
+            it = m_columns.emplace(name, std::vector<T>(m_size)).first;
+        } else if (!std::holds_alternative<std::vector<T>>(it->second)) {
             it->second = std::vector<T>(m_size);
         }
         return std::get<std::vector<T>>(it->second);
@@ -77,6 +83,20 @@ public:
                     } else {
                         vec[dst] = lerp(vec[a], vec[b], t);
                     }
+                },
+                column);
+        }
+    }
+
+    // Value-initialises one element's row in every column. The mesh calls this
+    // when it hands out an id recycled from a free list, so a new element
+    // never inherits the dead one's values.
+    void reset(std::size_t i) {
+        for (auto& [name, column] : m_columns) {
+            std::visit(
+                [i](auto& vec) {
+                    using T = typename std::decay_t<decltype(vec)>::value_type;
+                    vec[i] = T{};
                 },
                 column);
         }

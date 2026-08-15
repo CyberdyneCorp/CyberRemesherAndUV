@@ -7,10 +7,12 @@
 #include <unistd.h>
 
 #include <atomic>
+#include <condition_variable>
+#include <cstddef>
 #include <mutex>
+#include <system_error>
 #include <thread>
 #include <unordered_set>
-#include <vector>
 
 #include "cyber/net/message.hpp"
 #include "cyber/net/session.hpp"
@@ -21,6 +23,10 @@ namespace cyber::net {
 struct BridgeServer::Impl {
     explicit Impl(BridgeSession& s) : session(s) {}
 
+    // One handler thread per connection, so concurrency is bounded: past this
+    // the connection is closed immediately instead of spawning another stack.
+    static constexpr std::size_t kMaxConnections = 64;
+
     BridgeSession& session;
     int listenFd = -1;
     std::uint16_t boundPort = 0;
@@ -28,10 +34,11 @@ struct BridgeServer::Impl {
     std::thread acceptThread;
 
     std::mutex connMutex;
-    std::vector<std::thread> handlers;
+    std::condition_variable allHandlersDone;
+    std::size_t activeHandlers = 0;
     std::unordered_set<int> connFds;
 
-    void handle(int fd) {
+    void serve(int fd) {
         FrameDecoder decoder;
         std::string request;
 
@@ -48,10 +55,53 @@ struct BridgeServer::Impl {
                 }
             }
         }
+    }
+
+    void handle(int fd) {
+        try {
+            serve(fd);
+        } catch (...) {
+            // This is the top of a connection thread: anything escaping here
+            // would call std::terminate, so one bad connection would take the
+            // host application down with it.
+        }
 
         const std::lock_guard<std::mutex> lock(connMutex);
         connFds.erase(fd);
         ::close(fd);
+        --activeHandlers;
+        // Signalled while holding the lock: stop() may be waiting to tear this
+        // object down the moment the count reaches zero, and it can only wake
+        // once this thread's last access to it (the unlock below) is done.
+        allHandlersDone.notify_all();
+    }
+
+    // Starts the handler for an accepted connection. Returns false when the
+    // connection cannot be served — over the cap, or the OS refused another
+    // thread — so the caller just closes the fd; an uncaught std::system_error
+    // from the std::thread constructor would otherwise abort the process.
+    bool spawnHandler(int fd) {
+        {
+            const std::lock_guard<std::mutex> lock(connMutex);
+            if (activeHandlers >= kMaxConnections) {
+                return false;
+            }
+            connFds.insert(fd);
+            ++activeHandlers;
+        }
+        try {
+            // Detached rather than collected: a joinable thread keeps its ~8 MB
+            // stack mapped until it is joined, which leaked once per
+            // connection. stop() waits on the count instead.
+            std::thread([this, fd] { handle(fd); }).detach();
+            return true;
+        } catch (const std::system_error&) {
+            const std::lock_guard<std::mutex> lock(connMutex);
+            connFds.erase(fd);
+            --activeHandlers;
+            allHandlersDone.notify_all();
+            return false;
+        }
     }
 
     void acceptLoop() {
@@ -67,9 +117,9 @@ struct BridgeServer::Impl {
             if (fd < 0) {
                 continue;
             }
-            const std::lock_guard<std::mutex> lock(connMutex);
-            connFds.insert(fd);
-            handlers.emplace_back([this, fd] { handle(fd); });
+            if (!spawnHandler(fd)) {
+                ::close(fd);
+            }
         }
     }
 };
@@ -123,19 +173,14 @@ void BridgeServer::stop() {
     if (m->acceptThread.joinable()) {
         m->acceptThread.join();
     }
-    // Unblock any handler parked in recv, then join them all.
+    // Unblock any handler parked in recv, then wait for them all to finish.
     {
-        const std::lock_guard<std::mutex> lock(m->connMutex);
+        std::unique_lock<std::mutex> lock(m->connMutex);
         for (const int fd : m->connFds) {
             ::shutdown(fd, SHUT_RDWR);
         }
+        m->allHandlersDone.wait(lock, [this] { return m->activeHandlers == 0; });
     }
-    for (std::thread& t : m->handlers) {
-        if (t.joinable()) {
-            t.join();
-        }
-    }
-    m->handlers.clear();
     m->connFds.clear();
     m->boundPort = 0;
 }

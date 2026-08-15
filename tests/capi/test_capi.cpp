@@ -423,6 +423,80 @@ TEST_CASE("capi soft selection: an erased vertex cannot pass its weight to a new
     cyber_mesh_free(edit);
 }
 
+// Regression: the weight sweep above covered only ONE of the handle's id-keyed
+// tables. Face ids are recycled the same way, so the hidden set still held the
+// deleted face's id when create_face handed it out again — the face the artist
+// had just drawn was born hidden and never appeared, with CYBER_OK throughout.
+TEST_CASE("capi overlays: a deleted face cannot pass its hidden flag to a new one") {
+    CyberMesh* mesh = cyber_mesh_create();
+    REQUIRE(mesh != nullptr);
+    const float first[12] = {0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f,
+                             1.0f, 1.0f, 0.0f, 0.0f, 1.0f, 0.0f};
+    const float second[12] = {2.0f, 0.0f, 0.0f, 3.0f, 0.0f, 0.0f,
+                              3.0f, 1.0f, 0.0f, 2.0f, 1.0f, 0.0f};
+    uint32_t a = 0, b = 0;
+    REQUIRE(cyber_retopo_create_face(mesh, first, 4, nullptr, &a) == CYBER_OK);
+    REQUIRE(cyber_retopo_create_face(mesh, second, 4, nullptr, &b) == CYBER_OK);
+
+    size_t indices = 0;
+    REQUIRE(cyber_mesh_triangle_indices_ptr(mesh, &indices) != nullptr);
+    REQUIRE(indices == 12u);  // two quads, fan-triangulated
+
+    REQUIRE(cyber_mesh_set_hidden_faces(mesh, &b, 1) == CYBER_OK);
+    cyber_mesh_triangle_indices_ptr(mesh, &indices);
+    REQUIRE(indices == 6u);
+
+    size_t removed = 0;
+    REQUIRE(cyber_retopo_delete_faces(mesh, &b, 1, &removed) == CYBER_OK);
+    REQUIRE(removed == 1u);
+    REQUIRE(cyber_mesh_hidden_face_count(mesh) == 0u);  // the dead id is swept
+
+    // The freed face id comes straight back to a face somewhere else entirely.
+    const float third[12] = {5.0f, 0.0f, 0.0f, 6.0f, 0.0f, 0.0f,
+                             6.0f, 1.0f, 0.0f, 5.0f, 1.0f, 0.0f};
+    uint32_t c = 0;
+    REQUIRE(cyber_retopo_create_face(mesh, third, 4, nullptr, &c) == CYBER_OK);
+    REQUIRE(c == b);  // the id really is recycled
+    cyber_mesh_triangle_indices_ptr(mesh, &indices);
+    REQUIRE(indices == 12u);
+    REQUIRE(cyber_mesh_hidden_face_count(mesh) == 0u);
+
+    cyber_mesh_free(mesh);
+}
+
+// Regression: same class on the edge-keyed table — a tag left on a deleted
+// edge id resurfaced as a seam over the brand-new edge that inherited the id.
+TEST_CASE("capi overlays: a deleted edge cannot pass its tag to a new one") {
+    CyberMesh* mesh = cyber_mesh_create();
+    REQUIRE(mesh != nullptr);
+    const float quad[12] = {0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f,
+                            1.0f, 1.0f, 0.0f, 0.0f, 1.0f, 0.0f};
+    uint32_t face = 0;
+    REQUIRE(cyber_retopo_create_face(mesh, quad, 4, nullptr, &face) == CYBER_OK);
+
+    const uint32_t tagged[1] = {0u};
+    REQUIRE(cyber_mesh_set_tagged_edges(mesh, tagged, 1) == CYBER_OK);
+    size_t count = 0;
+    REQUIRE(cyber_mesh_tagged_edge_indices_ptr(mesh, &count) != nullptr);
+    REQUIRE(count == 2u);
+
+    size_t removed = 0;
+    REQUIRE(cyber_retopo_delete_faces(mesh, &face, 1, &removed) == CYBER_OK);
+    REQUIRE(removed == 1u);
+    REQUIRE(cyber_mesh_vertex_count(mesh) == 0u);
+
+    // A quad drawn a hundred units away reuses the freed edge ids, id 0 among
+    // them: nothing here was ever tagged, so nothing may render as a seam.
+    const float faraway[12] = {100.0f, 100.0f, 0.0f, 101.0f, 100.0f, 0.0f,
+                               101.0f, 101.0f, 0.0f, 100.0f, 101.0f, 0.0f};
+    REQUIRE(cyber_retopo_create_face(mesh, faraway, 4, nullptr, &face) == CYBER_OK);
+    count = 1;
+    REQUIRE(cyber_mesh_tagged_edge_indices_ptr(mesh, &count) == nullptr);
+    REQUIRE(count == 0u);
+
+    cyber_mesh_free(mesh);
+}
+
 // Regression: cyber_retopo_selection_relax copied `strength` into RelaxParams
 // unvalidated while its sibling cyber_retopo_relax rejects anything outside
 // [0,1], so a NaN slider value NaN'd every selected vertex and returned
@@ -994,6 +1068,41 @@ TEST_CASE("capi conform re-snaps onto a new Target and reports max/RMS deviation
     std::error_code ec;
     std::filesystem::remove(editPath, ec);
     std::filesystem::remove(targetPath, ec);
+}
+
+// Regression: cyber_conform moves every live vertex but ran outside
+// runMeshEdit, so it never invalidated the render cache. A renderer that
+// correctly re-fetched the zero-copy views after the call still drew the
+// un-conformed mesh, and never self-corrected until some unrelated
+// cyber_retopo_* op happened to run.
+TEST_CASE("capi conform invalidates the zero-copy render views") {
+    CyberMesh* target = makeGridMesh(3, 3, 1.0f);
+    CyberMesh* edit = makeGridMesh(3, 3, 0.0f);
+
+    // Build the cache BEFORE the conform, the way a renderer would.
+    size_t count = 0;
+    const float* stale = cyber_mesh_positions_ptr(edit, &count);
+    REQUIRE(stale != nullptr);
+    REQUIRE(count == cyber_mesh_vertex_count(edit) * 3u);
+
+    CyberConformReport report{};
+    REQUIRE(cyber_conform(edit, target, /*threshold=*/0.1f, &report, nullptr, 0) == CYBER_OK);
+    REQUIRE(report.movedVertices > 0u);
+
+    const float* fresh = cyber_mesh_positions_ptr(edit, &count);
+    REQUIRE(fresh != nullptr);
+    const std::vector<float> rendered(fresh, fresh + count);
+    REQUIRE(rendered == positionsOf(edit));  // the views agree with the geometry
+    for (size_t i = 2; i < rendered.size(); i += 3) {
+        CHECK(rendered[i] == doctest::Approx(1.0f));
+    }
+
+    // The null-argument contract is unchanged.
+    REQUIRE(cyber_conform(nullptr, target, 0.1f, &report, nullptr, 0) == CYBER_ERR_INVALID_ARG);
+    REQUIRE(cyber_conform(edit, nullptr, 0.1f, &report, nullptr, 0) == CYBER_ERR_INVALID_ARG);
+
+    cyber_mesh_free(edit);
+    cyber_mesh_free(target);
 }
 
 // ---- named export presets ---------------------------------------------------

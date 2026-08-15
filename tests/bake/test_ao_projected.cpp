@@ -1,19 +1,30 @@
 #include <doctest.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <cstddef>
+#include <functional>
+#include <memory>
+#include <mutex>
 #include <set>
+#include <string>
+#include <utility>
 #include <vector>
 
+#include "cyber/accel/backend.hpp"
 #include "cyber/bake/bake.hpp"
 #include "cyber/core/mesh.hpp"
+#include "cyber/core/progress.hpp"
 
+using cyber::CancelToken;
 using cyber::FaceId;
 using cyber::Index;
 using cyber::LoopId;
 using cyber::Mesh;
 using cyber::Vec2;
 using cyber::Vec3;
+namespace accel = cyber::accel;
 namespace bake = cyber::bake;
 
 namespace {
@@ -114,6 +125,80 @@ float aoAt(const bake::Image& img, float u, float v) {
     return img.at(px, py, 0);
 }
 
+// Flat target over [0,1]^2 at z=0, subdivided into n x n quads: the same
+// geometry lowPlane() bakes against, at an arbitrary triangle count.
+Mesh densePlane(int n) {
+    std::vector<Vec3> p;
+    const float step = 1.0f / static_cast<float>(n);
+    for (int y = 0; y <= n; ++y) {
+        for (int x = 0; x <= n; ++x) {
+            p.push_back({static_cast<float>(x) * step, static_cast<float>(y) * step, 0.0f});
+        }
+    }
+    const auto vertexAt = [n](int x, int y) { return static_cast<Index>(y * (n + 1) + x); };
+    std::vector<std::vector<Index>> f;
+    for (int y = 0; y < n; ++y) {
+        for (int x = 0; x < n; ++x) {
+            f.push_back(
+                {vertexAt(x, y), vertexAt(x + 1, y), vertexAt(x + 1, y + 1), vertexAt(x, y + 1)});
+        }
+    }
+    return Mesh::fromIndexed(p, f);
+}
+
+// Backend that records the ranges a bake hands to parallelFor and delegates the
+// work to the CPU reference, so a test can see WHERE the parallelism sits.
+class RecordingBackend final : public accel::IBackend {
+public:
+    explicit RecordingBackend(std::shared_ptr<accel::IBackend> inner) : m_inner(std::move(inner)) {}
+
+    [[nodiscard]] accel::BackendKind kind() const override { return m_inner->kind(); }
+    [[nodiscard]] std::string deviceName() const override { return m_inner->deviceName(); }
+
+    void parallelFor(std::size_t begin, std::size_t end,
+                     const std::function<void(std::size_t, std::size_t)>& fn) override {
+        {
+            const std::lock_guard<std::mutex> lock(m_mutex);
+            m_ranges.push_back(end - begin);
+        }
+        m_inner->parallelFor(begin, end, fn);
+    }
+
+    [[nodiscard]] std::vector<std::size_t> ranges() const {
+        const std::lock_guard<std::mutex> lock(m_mutex);
+        return m_ranges;
+    }
+
+private:
+    std::shared_ptr<accel::IBackend> m_inner;
+    mutable std::mutex m_mutex;
+    std::vector<std::size_t> m_ranges;
+};
+
+// Installs a process-wide backend for the duration of a test.
+class ScopedBackend {
+public:
+    explicit ScopedBackend(std::shared_ptr<accel::IBackend> backend)
+        : m_previous(accel::defaultBackend()) {
+        accel::setDefaultBackend(std::move(backend));
+    }
+    ~ScopedBackend() { accel::setDefaultBackend(m_previous); }
+    ScopedBackend(const ScopedBackend&) = delete;
+    ScopedBackend& operator=(const ScopedBackend&) = delete;
+
+private:
+    std::shared_ptr<accel::IBackend> m_previous;
+};
+
+// Wall-clock milliseconds of one AO bake.
+long long aoBakeMs(const Mesh& low, const Mesh& high, const bake::BakeParams& p) {
+    const auto start = std::chrono::steady_clock::now();
+    const bake::BakeResult r = bake::bake(low, high, bake::BakeMap::AmbientOcclusion, p);
+    const auto elapsed = std::chrono::steady_clock::now() - start;
+    REQUIRE(r.texelsCovered > 0);
+    return std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
+}
+
 bake::BakeParams aoParams() {
     bake::BakeParams p;
     p.width = 64;
@@ -181,6 +266,61 @@ TEST_CASE("AO dithers instead of banding, and the default budget spans 8-bit") {
     // RNG, so a re-bake is bit-identical.
     const bake::BakeResult again = bake::bake(low, high, bake::BakeMap::AmbientOcclusion, p);
     CHECK(fine.image.pixels == again.image.pixels);
+}
+
+TEST_CASE("AO bake threads over the texel loop, not once per texel") {
+    // Regression: the bake fired accel::raycast per texel and every call fanned
+    // out ~hardware_concurrency threads for its handful of rays. The fan-out
+    // dwarfed the rays it served (measured 3.0 s vs 61 ms for a 128x128 AO bake
+    // of spot.obj), so the parallelism has to live on the texel loop and the
+    // per-texel ray batch has to stay serial.
+    auto recorder = std::make_shared<RecordingBackend>(accel::defaultBackend());
+    const ScopedBackend installed(recorder);
+
+    const Mesh low = lowPlane();
+    const Mesh high = highWithRidge();
+    const bake::BakeResult r = bake::bake(low, high, bake::BakeMap::AmbientOcclusion, aoParams());
+    REQUIRE(r.texelsCovered > 1000);
+
+    const std::vector<std::size_t> ranges = recorder->ranges();
+    REQUIRE(!ranges.empty());
+    const std::size_t spanningTexels =
+        static_cast<std::size_t>(std::count(ranges.begin(), ranges.end(), r.texelsCovered));
+    CHECK(spanningTexels == 1);
+    // Anything else parallelFor sees is the per-texel ray batch, which is far
+    // shorter than the texel loop.
+    CHECK(*std::max_element(ranges.begin(), ranges.end()) == r.texelsCovered);
+}
+
+TEST_CASE("AO bake cost does not scale with Target triangle count") {
+    // Regression: accel::raycast flattened the whole BVH on every call, so each
+    // texel re-copied every node and triangle of the Target and bake time grew
+    // linearly with Target density — the one axis a bake should be flat in.
+    // Same layout, same rays, two Targets ~4 orders of magnitude apart in
+    // triangle count: 3 ms vs 15 ms with the BVH flattened once, 4 ms vs 460 ms
+    // with the per-call flatten restored. The bound is loose enough that only
+    // the linear-in-triangles regression trips it.
+    bake::BakeParams p = aoParams();
+    p.aoSamples = 16;  // the copy, not the rays, is what this measures
+
+    const Mesh low = lowPlane();
+    const Mesh light = lowPlane();      // 2 triangles
+    const Mesh heavy = densePlane(96);  // 9216 quads -> ~18k triangles
+
+    const long long lightMs = aoBakeMs(low, light, p);
+    const long long heavyMs = aoBakeMs(low, heavy, p);
+    CHECK(heavyMs < 12 * lightMs + 100);
+}
+
+TEST_CASE("AO bake honors cooperative cancellation") {
+    // AO shades its texels in parallel; a cancelled bake still has to report it.
+    const Mesh low = lowPlane();
+    const Mesh high = highWithRidge();
+    CancelToken cancel;
+    cancel.requestCancel();
+    const bake::BakeResult r =
+        bake::bake(low, high, bake::BakeMap::AmbientOcclusion, aoParams(), nullptr, &cancel);
+    REQUIRE(r.cancelled);
 }
 
 TEST_CASE("AO self-occlusion of a flat mesh against itself stays open") {

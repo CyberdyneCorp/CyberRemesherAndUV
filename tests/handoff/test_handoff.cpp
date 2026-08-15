@@ -2,13 +2,19 @@
 #include <doctest.h>
 
 #include <array>
+#include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <functional>
+#include <future>
 #include <iterator>
+#include <memory>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "cyber/core/io.hpp"
@@ -219,6 +225,26 @@ void appendLittleEndian(std::string& bytes, T value) {
     std::array<char, sizeof(T)> raw{};
     std::memcpy(raw.data(), &value, sizeof(T));
     bytes.append(raw.data(), raw.size());
+}
+
+// Runs `work` on its own thread and reports whether it finished inside the
+// budget, so a read that spins on malformed input fails the assertion instead
+// of hanging the suite. The stuck thread is detached and dies with the process,
+// so it must own everything it touches.
+bool finishesWithin(std::chrono::milliseconds budget, std::function<void()> work) {
+    auto done = std::make_shared<std::promise<void>>();
+    std::future<void> ready = done->get_future();
+    std::thread worker([done, work]() {
+        work();
+        done->set_value();
+    });
+    const bool finished = ready.wait_for(budget) == std::future_status::ready;
+    if (finished) {
+        worker.join();
+    } else {
+        worker.detach();
+    }
+    return finished;
 }
 
 }  // namespace
@@ -637,6 +663,39 @@ TEST_CASE("a face list declaring more indices than its line carries is rejected"
     const auto result = handoff::readFile(path);
     REQUIRE(!result.ok());
     CHECK(result.error().code == io::ErrorCode::ParseError);
+}
+
+TEST_CASE("a handoff element with no properties is charged for its entries, not admitted free") {
+    // A property-less element carries no data, so the demand guard scored it at
+    // zero and let the header declare 2^64-1 entries the payload never backs —
+    // which the reader then tried to walk one by one.
+    const std::string text = "ply\nformat ascii 1.0\ncomment cyber_sculpt_handoff 1 0\n"
+                             "element zzz 18446744073709551615\nend_header\n";
+    const fs::path path = writeHandoffFile("propertyless.ply", text);
+
+    auto rejected = std::make_shared<std::atomic<bool>>(false);
+    const bool finished = finishesWithin(std::chrono::seconds(10), [path, rejected]() {
+        const auto result = handoff::readFile(path);
+        rejected->store(!result.ok() && result.error().code == io::ErrorCode::ParseError);
+    });
+    REQUIRE(finished);
+    CHECK(rejected->load());
+}
+
+TEST_CASE("a handoff header the guard cannot size is rejected, not waved through") {
+    // An element the guard cannot cost used to switch the size check off for the
+    // whole file rather than fail it, so one unsizable element bought every
+    // other element in the header an unchecked declaration.
+    const Fixture fixture = makeBoxFixture();
+    std::string text = writeHandoffText(fixture.vertices, fixture.triangles, 1, 0);
+    const std::size_t at = text.find("end_header");
+    text.insert(at, "element gizmo -4\nproperty float q\n");
+    const fs::path path = writeHandoffFile("uncostable.ply", text);
+
+    const auto result = handoff::readFile(path);
+    REQUIRE(!result.ok());
+    CHECK(result.error().code == io::ErrorCode::ParseError);
+    CHECK(result.error().message.find("cannot size") != std::string::npos);
 }
 
 TEST_CASE("a rejected stream handoff names the stream, not a file") {

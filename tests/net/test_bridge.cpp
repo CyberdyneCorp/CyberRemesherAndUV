@@ -1,6 +1,12 @@
 #include <doctest.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <sys/time.h>
+#include <unistd.h>
 
 #include <cstdint>
+#include <fstream>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -13,6 +19,78 @@
 namespace net = cyber::net;
 
 namespace {
+
+// Address space in kB from /proc/self/status, or 0 where it is unavailable
+// (non-Linux POSIX). Used to observe per-connection leaks.
+std::size_t virtualMemoryKb() {
+    std::ifstream status("/proc/self/status");
+    std::string key;
+    while (status >> key) {
+        if (key == "VmSize:") {
+            std::size_t kb = 0;
+            return (status >> kb) ? kb : 0;
+        }
+        status.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
+    }
+    return 0;
+}
+
+// Minimal raw connection to the bridge. BridgeClient only ever sends
+// well-formed requests, so putting arbitrary bytes on the wire needs its own
+// socket. Reads are timeout-bounded so a regression fails instead of hanging.
+class RawConnection {
+public:
+    explicit RawConnection(std::uint16_t port) {
+        m_fd = ::socket(AF_INET, SOCK_STREAM, 0);
+        if (m_fd < 0) {
+            return;
+        }
+        timeval timeout{};
+        timeout.tv_sec = 5;
+        ::setsockopt(m_fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+        sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_port = htons(port);
+        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        if (::connect(m_fd, reinterpret_cast<sockaddr*>(&addr),
+                      static_cast<socklen_t>(sizeof(addr))) != 0) {
+            ::close(m_fd);
+            m_fd = -1;
+        }
+    }
+    ~RawConnection() {
+        if (m_fd >= 0) {
+            ::close(m_fd);
+        }
+    }
+    RawConnection(const RawConnection&) = delete;
+    RawConnection& operator=(const RawConnection&) = delete;
+
+    [[nodiscard]] bool ok() const { return m_fd >= 0; }
+
+    bool send(const std::string& payload) {
+        const std::string frame = net::encodeFrame(payload);
+        return ::send(m_fd, frame.data(), frame.size(), 0) == static_cast<ssize_t>(frame.size());
+    }
+
+    // One framed reply; empty on disconnect or read timeout.
+    std::string receive() {
+        std::string out;
+        char buffer[512];
+        while (!m_decoder.next(out)) {
+            const ssize_t n = ::recv(m_fd, buffer, sizeof(buffer), 0);
+            if (n <= 0) {
+                return {};
+            }
+            m_decoder.feed(buffer, static_cast<std::size_t>(n));
+        }
+        return out;
+    }
+
+private:
+    int m_fd = -1;
+    net::FrameDecoder m_decoder;
+};
 
 net::WireMesh sampleMesh() {
     net::WireMesh m;
@@ -72,6 +150,21 @@ TEST_CASE("processRequest never throws on malformed or unknown input") {
     REQUIRE(net::processRequest(session, "not json").find("error") != std::string::npos);
     REQUIRE(net::processRequest(session, R"({"type":"nope"})").find("error") != std::string::npos);
     REQUIRE(net::processRequest(session, R"({"type":"ping"})").find("pong") != std::string::npos);
+
+    // A byte that is not valid UTF-8 — a lone 0xFF, or a Latin-1 string field
+    // from the DCC. The parse error quotes the offending input, so echoing
+    // e.what() into the reply left invalid UTF-8 in it and dump() threw
+    // type_error.316 out of a function documented never to throw.
+    const std::string rawByte(1, static_cast<char>(0xff));
+    REQUIRE(net::processRequest(session, rawByte).find("error") != std::string::npos);
+    REQUIRE(net::processRequest(session, R"({"type":"message","text":")" + rawByte + R"("})")
+                .find("error") != std::string::npos);
+    REQUIRE(net::processRequest(session, R"({"type":"nope)" + rawByte + R"("})").find("error") !=
+            std::string::npos);
+
+    bool accept = true;
+    REQUIRE(net::processHandshake(rawByte, accept).find("reject") != std::string::npos);
+    REQUIRE_FALSE(accept);
 }
 
 TEST_CASE("server is off by default and reports no port") {
@@ -176,6 +269,64 @@ TEST_CASE("a client speaking the wrong version is refused") {
     const std::string reply = net::processHandshake(R"({"type":"hello","protocol":2})", accept);
     REQUIRE_FALSE(accept);
     REQUIRE(reply.find("reject") != std::string::npos);
+    server.stop();
+}
+
+TEST_CASE("a non-UTF-8 payload on the wire is answered, not fatal to the server") {
+    net::BridgeSession session;
+    net::BridgeServer server(session);
+    REQUIRE(server.start(0));
+
+    RawConnection conn(server.port());
+    REQUIRE(conn.ok());
+    REQUIRE(conn.send(R"({"type":"hello","protocol":1})"));
+    REQUIRE(conn.receive().find("welcome") != std::string::npos);
+
+    // The reply used to carry this byte back, and the throw from dump() had
+    // nothing to catch it on the handler thread: the whole host process died.
+    const std::string rawByte(1, static_cast<char>(0xff));
+    REQUIRE(conn.send(R"({"type":"message","text":")" + rawByte + R"("})"));
+    REQUIRE(conn.receive().find("error") != std::string::npos);
+
+    // Both the connection and the server survive it.
+    REQUIRE(conn.send(R"({"type":"ping"})"));
+    REQUIRE(conn.receive().find("pong") != std::string::npos);
+
+    net::BridgeClient client;
+    REQUIRE(client.connect(server.port()));
+    REQUIRE(client.ping());
+    client.close();
+    server.stop();
+}
+
+TEST_CASE("sequential connections do not accumulate handler threads") {
+    net::BridgeSession session;
+    net::BridgeServer server(session);
+    REQUIRE(server.start(0));
+
+    // First connection pays one-off allocations that are not per-connection.
+    {
+        net::BridgeClient warmup;
+        REQUIRE(warmup.connect(server.port()));
+        REQUIRE(warmup.ping());
+        warmup.close();
+    }
+
+    const std::size_t before = virtualMemoryKb();
+    constexpr int kConnections = 128;
+    for (int i = 0; i < kConnections; ++i) {
+        net::BridgeClient client;
+        REQUIRE(client.connect(server.port()));
+        REQUIRE(client.ping());
+        client.close();
+    }
+
+    if (before != 0) {
+        // Handler threads were kept joinable until stop(), so each connection
+        // pinned its ~8 MB stack: these 128 grew the address space by ~1 GB.
+        // Reaped handlers hand their stacks back for reuse.
+        CHECK(virtualMemoryKb() < before + std::size_t{128} * 1024u);  // 128 MB of slack
+    }
     server.stop();
 }
 

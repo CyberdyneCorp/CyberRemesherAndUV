@@ -172,6 +172,39 @@ def main() -> int:
     check("clamped run exit 0", r.returncode == 0, r.stderr)
     check("clamp warning printed", "clamped" in r.stderr, r.stderr)
 
+    # The clamp must be real, not cosmetic: an out-of-range --adaptivity used to
+    # drive the quad-cover solve unclamped (a different mesh from --adaptivity 1)
+    # while the warning said it had been clamped and the report echoed the raw
+    # value. Both runs write to the SAME path so the exporter's `mtllib` line,
+    # which names the output, cannot make identical meshes compare unequal.
+    r = run("--input", str(sphere), "--output", str(out), "--target-quads", "300",
+            "--adaptivity", "7", "--report", str(report))
+    check("out-of-range adaptivity exit 0", r.returncode == 0, r.stderr)
+    check("out-of-range adaptivity warns", "clamped" in r.stderr, r.stderr)
+    clamped_mesh = out.read_bytes()
+    data = json.loads(report.read_text())
+    check("report records the post-clamp adaptivity", data["parameters"]["adaptivity"] == 1.0,
+          str(data["parameters"]))
+    check("report keeps the clamp warning",
+          any("adaptivity" in w for w in data["warnings"]), str(data["warnings"]))
+    r = run("--input", str(sphere), "--output", str(out), "--target-quads", "300",
+            "--adaptivity", "1", "--quiet")
+    check("out-of-range adaptivity reproduces the in-range mesh",
+          r.returncode == 0 and out.read_bytes() == clamped_mesh, r.stderr)
+
+    # Same for --sharp-edge, which reaches the solve on the same route.
+    r = run("--input", str(sphere), "--output", str(out), "--target-quads", "300",
+            "--sharp-edge", "5", "--report", str(report))
+    check("out-of-range sharp-edge exit 0", r.returncode == 0, r.stderr)
+    clamped_mesh = out.read_bytes()
+    data = json.loads(report.read_text())
+    check("report records the post-clamp sharp edge", data["parameters"]["sharpEdgeDegrees"] == 30.0,
+          str(data["parameters"]))
+    r = run("--input", str(sphere), "--output", str(out), "--target-quads", "300",
+            "--sharp-edge", "30", "--quiet")
+    check("out-of-range sharp-edge reproduces the in-range mesh",
+          r.returncode == 0 and out.read_bytes() == clamped_mesh, r.stderr)
+
     # Pure quads through the CLI.
     r = run("--input", str(sphere), "--output", str(out), "--target-quads", "300",
             "--pure-quads", "--report", str(report), "--quiet")

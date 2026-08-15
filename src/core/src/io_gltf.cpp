@@ -257,6 +257,17 @@ Result<ImportedMesh> importGltf(const std::filesystem::path& path,
             const AccessorReader* const uv = uvReader ? &*uvReader : nullptr;
             const AccessorReader* const normal = normalReader ? &*normalReader : nullptr;
 
+            // Create the corner columns ONCE per primitive, like the OBJ reader
+            // (io_obj.cpp): calling create() per triangle instead rebuilds a
+            // size-m_size temporary every time — O(triangles * corners) = O(n^2).
+            // The columns live in a node-based map, so these pointers stay valid
+            // while addFace grows the columns below.
+            std::vector<Vec2>* uvColumn =
+                uv != nullptr ? &out.mesh.cornerAttributes().create<Vec2>(kUvAttribute) : nullptr;
+            std::vector<Vec3>* normalColumn =
+                normal != nullptr ? &out.mesh.cornerAttributes().create<Vec3>(kNormalAttribute)
+                                  : nullptr;
+
             for (std::size_t t = 0; t + 2 < indices.size(); t += 3) {
                 const std::uint32_t i0 = indices[t], i1 = indices[t + 1], i2 = indices[t + 2];
                 if (i0 >= ids.size() || i1 >= ids.size() || i2 >= ids.size()) {
@@ -272,7 +283,7 @@ Result<ImportedMesh> importGltf(const std::filesystem::path& path,
                     const std::vector<LoopId> loops = out.mesh.faceLoops(f);
                     const std::uint32_t corner[3] = {i0, i1, i2};
                     if (uv != nullptr) {
-                        auto& uvs = out.mesh.cornerAttributes().create<Vec2>(kUvAttribute);
+                        auto& uvs = *uvColumn;
                         for (int c = 0; c < 3; ++c) {
                             // An attribute accessor may declare fewer elements than POSITION.
                             const std::size_t src = corner[c];
@@ -284,7 +295,7 @@ Result<ImportedMesh> importGltf(const std::filesystem::path& path,
                         }
                     }
                     if (normal != nullptr) {
-                        auto& normals = out.mesh.cornerAttributes().create<Vec3>(kNormalAttribute);
+                        auto& normals = *normalColumn;
                         for (int c = 0; c < 3; ++c) {
                             const std::size_t src = corner[c];
                             if (src >= normal->count()) {

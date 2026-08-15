@@ -1,11 +1,23 @@
 #include <doctest.h>
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstddef>
+#include <cstdlib>
+#include <exception>
+#include <iostream>
 #include <map>
+#include <new>
+#include <sstream>
+#include <streambuf>
+#include <string>
 #include <utility>
 #include <vector>
+
+#ifndef _WIN32
+#include <csignal>
+#endif
 
 #include "cyber/core/mesh.hpp"
 #include "cyber/quadrangulate/quadcover_extractor.hpp"
@@ -265,6 +277,108 @@ TEST_CASE("quad-cover M1: harness seamless UV has zero integer-jump residual") {
     CHECK(remesh::seamlessUvResidual(uv) < 1e-3);  // seamless by construction
 }
 
+namespace {
+
+// Captures everything the guarded scope writes to std::cout / std::cerr.
+class ConsoleCapture {
+  public:
+    ConsoleCapture()
+        : savedOut_(std::cout.rdbuf(out_.rdbuf())), savedErr_(std::cerr.rdbuf(err_.rdbuf())) {}
+    ~ConsoleCapture() {
+        std::cout.rdbuf(savedOut_);
+        std::cerr.rdbuf(savedErr_);
+    }
+    ConsoleCapture(const ConsoleCapture&) = delete;
+    ConsoleCapture& operator=(const ConsoleCapture&) = delete;
+    std::string out() const { return out_.str(); }
+    std::string err() const { return err_.str(); }
+
+  private:
+    std::ostringstream out_;
+    std::ostringstream err_;
+    std::streambuf* savedOut_;
+    std::streambuf* savedErr_;
+};
+
+#ifndef _WIN32
+// The process-global state the vendored Geogram solver used to take over.
+const int kWatchedSignals[] = {SIGSEGV, SIGILL, SIGBUS, SIGFPE, SIGINT};
+
+struct HostState {
+    std::array<struct sigaction, sizeof(kWatchedSignals) / sizeof(kWatchedSignals[0])> signals{};
+    std::terminate_handler terminate = nullptr;
+    std::new_handler newHandler = nullptr;
+    std::string lcNumeric;
+};
+
+HostState snapshotHostState() {
+    HostState state;
+    for (std::size_t i = 0; i < state.signals.size(); ++i) {
+        ::sigaction(kWatchedSignals[i], nullptr, &state.signals[i]);
+    }
+    state.terminate = std::get_terminate();
+    state.newHandler = std::get_new_handler();
+    const char* lc = std::getenv("LC_NUMERIC");
+    state.lcNumeric = lc != nullptr ? lc : "";
+    return state;
+}
+
+bool sameDisposition(const struct sigaction& a, const struct sigaction& b) {
+    if (a.sa_flags != b.sa_flags) {
+        return false;
+    }
+    return (a.sa_flags & SA_SIGINFO) != 0 ? a.sa_sigaction == b.sa_sigaction
+                                          : a.sa_handler == b.sa_handler;
+}
+#endif
+
+}  // namespace
+
+// Host-process hygiene. The vendored Geogram/AutoRemesher solver behind the default
+// quad-cover path used to hijack the host's SIGSEGV/SIGILL/SIGBUS/SIGFPE handlers,
+// reset SIGINT, replace std::terminate and std::new_handler, rewrite LC_NUMERIC and
+// trace hundreds of lines to std::cerr — a DCC plugin lost its crash reporter and got
+// spammed the moment a user remeshed. A solve must leave every one of those exactly as
+// it found it. (The handler half only bites on the FIRST solve in a process, so the
+// fresh-process check lives in python/cyberremesh/tests/test_host_process_hygiene.py;
+// the console half is per-call and is what this case guards everywhere.)
+TEST_CASE("quad-cover seamless UV leaves the host's console and handlers alone") {
+    const Mesh sphere = makeSphere();
+#ifndef _WIN32
+    const char* lcBefore = std::getenv("LC_NUMERIC");
+    const std::string lcRestore = lcBefore != nullptr ? lcBefore : "";
+    ::setenv("LC_NUMERIC", "en_US.UTF-8", 1);  // sentinel: a rewrite must be visible
+    const HostState before = snapshotHostState();
+#endif
+
+    std::string outText;
+    std::string errText;
+    {
+        const ConsoleCapture capture;
+        const remesh::SeamlessUv uv = remesh::computeSeamlessUv(sphere, 0.15f);
+        outText = capture.out();
+        errText = capture.err();
+        CHECK(uv.triangles.size() == uv.triangleUv.size());
+    }
+    CHECK(errText.empty());
+    CHECK(outText.empty());
+
+#ifndef _WIN32
+    const HostState after = snapshotHostState();
+    for (std::size_t i = 0; i < before.signals.size(); ++i) {
+        CHECK(sameDisposition(before.signals[i], after.signals[i]));
+    }
+    CHECK(before.terminate == after.terminate);
+    CHECK(before.newHandler == after.newHandler);
+    CHECK(after.lcNumeric == "en_US.UTF-8");
+    if (lcRestore.empty()) {
+        ::unsetenv("LC_NUMERIC");
+    } else {
+        ::setenv("LC_NUMERIC", lcRestore.c_str(), 1);
+    }
+#endif
+}
+
 // Milestone 2 PRIMARY checkpoint: the isoline tracer on a flat integer-grid UV must
 // recover a clean N x N quad grid. This exercises the tracer core deterministically
 // (no external harness): extractConnections -> extractEdges -> extractMesh must find
@@ -517,6 +631,39 @@ TEST_CASE("quad-cover hole-fill policy: loops longer than holeFillMaxBoundary st
     const remesh::IsolineQuadMesh none = remesh::extractIsolineQuads(dummy, uv, 0);
     CHECK(none.quads.size() == open.quads.size());
     CHECK(boundaryEdgeCount(rebuildMesh(none)) == 8);
+}
+
+// The factory clamps its construction arguments to the documented parameter
+// ranges (remeshing-parameters spec, "Validation at every entry point"): these
+// values drive the solve directly and never pass through remesh()'s validation,
+// so an out-of-range adaptivity used to produce a mesh that no in-range run
+// could reproduce while the caller reported it as clamped.
+TEST_CASE("quad-cover quadrangulator clamps out-of-range construction parameters") {
+    auto outOfRange = remesh::makeQuadCoverQuadrangulator(40, 7.0f, 64, 90.0f);
+    auto atMaximum = remesh::makeQuadCoverQuadrangulator(40, 1.0f, 64, 90.0f);
+    REQUIRE(outOfRange != nullptr);
+    REQUIRE(atMaximum != nullptr);
+
+    Mesh clamped = makeSphere();
+    Mesh maximum = makeSphere();
+    const auto a = outOfRange->quadrangulate(clamped, 0.15f, nullptr, nullptr);
+    const auto b = atMaximum->quadrangulate(maximum, 0.15f, nullptr, nullptr);
+
+    REQUIRE(a.success == b.success);
+    REQUIRE(aliveFaces(clamped) == aliveFaces(maximum));
+    REQUIRE(clamped.vertexCount() == maximum.vertexCount());
+    // One aggregated check: a per-vertex assertion would flood the log.
+    float maxDelta = 0.0f;
+    for (Index i = 0; i < clamped.vertexCapacity(); ++i) {
+        if (!clamped.isAlive(VertexId{i})) {
+            continue;
+        }
+        const Vec3 p = clamped.position(VertexId{i});
+        const Vec3 q = maximum.position(VertexId{i});
+        maxDelta =
+            std::max({maxDelta, std::abs(p.x - q.x), std::abs(p.y - q.y), std::abs(p.z - q.z)});
+    }
+    CHECK(maxDelta == doctest::Approx(0.0f));
 }
 
 // Cooperative cancellation (remeshing-pipeline spec): a cancelled token makes the

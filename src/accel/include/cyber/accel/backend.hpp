@@ -24,6 +24,12 @@ public:
     [[nodiscard]] virtual std::string deviceName() const = 0;
 
     // Invokes fn(begin..end) partitioned across workers. Blocks until done.
+    // The partition is an implementation detail — fn must write only the indices
+    // it is handed — and a backend is free to run the range on the calling
+    // thread when it is too short to pay for a fan-out, or when the call is
+    // nested inside another parallelFor. Callers therefore have to place the
+    // parallelism where the work is: a range of a few dozen cheap items is
+    // faster serial than threaded.
     virtual void parallelFor(std::size_t begin, std::size_t end,
                              const std::function<void(std::size_t, std::size_t)>& fn) = 0;
 

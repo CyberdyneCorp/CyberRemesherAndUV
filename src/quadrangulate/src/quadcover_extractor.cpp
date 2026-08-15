@@ -31,6 +31,7 @@
 #include "cyber/core/isotropic.hpp"
 #include "cyber/core/math.hpp"
 #include "cyber/core/reference_surface.hpp"
+#include "cyber/core/remesh_params.hpp"
 #include "cyber/quadrangulate/position_field.hpp"
 #include "cyber/quadrangulate/seamless_solver.hpp"
 
@@ -3705,8 +3706,18 @@ private:
 std::unique_ptr<IQuadrangulator> makeQuadCoverQuadrangulator(int fieldIterations, float adaptivity,
                                                              int holeFillMaxBoundary,
                                                              float featureDegrees) {
-    return std::make_unique<QuadCoverQuadrangulator>(fieldIterations, adaptivity,
-                                                     holeFillMaxBoundary, featureDegrees);
+    // Clamp here, not just at the call site: these arguments drive the solve
+    // directly (they never pass through remesh()'s validation), so an entry
+    // point handing over an out-of-range value would run unclamped while the
+    // pipeline reports it as clamped. Reuse validate() so the ranges stay in
+    // one place (remeshing-parameters spec, "Validation at every entry point").
+    Parameters raw;
+    raw.adaptivity = adaptivity;
+    raw.holeFillMaxBoundary = holeFillMaxBoundary;
+    raw.sharpEdgeDegrees = featureDegrees;
+    const Parameters clamped = validate(raw).params;
+    return std::make_unique<QuadCoverQuadrangulator>(
+        fieldIterations, clamped.adaptivity, clamped.holeFillMaxBoundary, clamped.sharpEdgeDegrees);
 }
 
 bool quadCoverAvailable() {

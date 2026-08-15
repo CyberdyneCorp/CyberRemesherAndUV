@@ -1,3 +1,18 @@
+Metadata-Version: 2.4
+Name: cyberremesh
+Version: 0.5.0
+Summary: Python bindings for the CyberRemesher quad-remeshing engine (ctypes over the C ABI)
+Author: Cyberdyne Corp
+License: MIT
+Keywords: retopology,remeshing,quad,uv,ctypes
+Classifier: Programming Language :: Python :: 3
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Topic :: Multimedia :: Graphics :: 3D Modeling
+Requires-Python: >=3.8
+Description-Content-Type: text/markdown
+Provides-Extra: numpy
+Requires-Dist: numpy>=1.20; extra == "numpy"
+
 # cyberremesh
 
 Python bindings for the **CyberRemesher** quad-remeshing engine.
@@ -26,12 +41,6 @@ At first use the loader searches, in order:
 2. The installed package directory (a wheel bundles the library alongside).
 3. Conventional in-tree build directories (`build/`, `out/`, `cmake-build-*`) relative to the
    repo root, including the per-preset trees CMake presets create (`build/<preset>/capi`).
-   This step is a developer convenience and applies only when the package genuinely sits
-   inside a checkout of this project — an ancestor must carry `CMakeLists.txt` and
-   `capi/include/cyber_capi.h`, and neither it nor the build directory may be world-writable
-   or owned by another user. An installed package (venv, `/opt`, a CI scratch tree) therefore
-   never loads a build tree that merely happens to sit above it; use `CYBER_CAPI_LIB` to point
-   at a library outside a checkout.
 4. The platform loader search path, for a system-installed library (`cmake --install`).
 
 ## Usage

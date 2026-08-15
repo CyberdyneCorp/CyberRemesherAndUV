@@ -11,7 +11,7 @@
 # dependency-free.
 function(cyber_add_scipp)
     set(_vendor "${PROJECT_SOURCE_DIR}/examples/reference/scipp-src")
-    set(_prefix "${CMAKE_BINARY_DIR}/scipp-install")
+    set(_prefix "${PROJECT_BINARY_DIR}/scipp-install")
     set(_numpp "${_vendor}/NumPP")
     set(_scipp "${_vendor}/SciPP")
 

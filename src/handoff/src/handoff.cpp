@@ -219,12 +219,17 @@ struct ElementDemand {
 // The smallest data section one entry could occupy: an ASCII entry needs at
 // least one character per property plus the separators between them; a binary
 // entry costs its declared types, a list charged only for its count field
-// because it may carry no values at all.
+// because it may carry no values at all. An element with no properties can
+// carry no data at all, so an entry of one still costs a byte — scoring it free
+// let a header declare unbounded entries the payload never has to back.
 std::size_t entryFloor(const ElementDemand& elem, bool binary) {
+    if (elem.properties == 0) {
+        return 1;
+    }
     if (binary) {
         return elem.binaryBytes;
     }
-    return elem.properties == 0 ? 0 : 2 * elem.properties - 1;
+    return 2 * elem.properties - 1;
 }
 
 void addProperty(ElementDemand& elem, const std::vector<std::string>& tokens) {
@@ -457,7 +462,16 @@ Result<Handoff> readPlyBytes(std::string_view bytes, std::string_view origin) {
     // payload becomes vertices the producer never sent.
     const PayloadFloor demand = declaredPayloadFloor(lines);
     const std::size_t available = bytes.size() - payloadStart;
-    if (demand.costable && demand.bytes > available) {
+    // A header this engine cannot cost (an unknown property type, a count that
+    // is not a number) is rejected rather than allowed to switch the check off
+    // for the whole file — the profile has no such element to lose.
+    if (!demand.costable) {
+        return Error{ErrorCode::ParseError,
+                     std::string(origin) +
+                         ": handoff header declares an element this engine cannot size (a "
+                         "non-numeric element count or an unknown property type)"};
+    }
+    if (demand.bytes > available) {
         return Error{ErrorCode::ParseError,
                      std::string(origin) + ": handoff header declares at least " +
                          std::to_string(demand.bytes) + " byte(s) of element data but only " +

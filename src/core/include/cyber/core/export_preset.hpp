@@ -97,7 +97,11 @@ struct ExportPreset {
 // error listing the built-ins.
 [[nodiscard]] Result<ExportPreset> resolvePreset(const std::string& nameOrPath);
 
-// Expands `preset.namingPattern` for one map entry.
+// Expands `preset.namingPattern` for one map entry. The result is always a
+// relative name inside the caller's output directory: an expansion that would
+// escape it -- an absolute or ".."-climbing value arriving through ANY token,
+// including a caller-supplied `basename` -- yields an empty string, which
+// callers must treat as a refusal rather than as a file name.
 [[nodiscard]] std::string presetMapFileName(const ExportPreset& preset, const PresetMapEntry& entry,
                                             std::string_view basename);
 

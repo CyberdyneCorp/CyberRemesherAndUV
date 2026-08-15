@@ -14,7 +14,9 @@ python python/cyberremesh/tests/test_document_invariants.py
 |------|---------|--------|
 | `test_api.py` | — | Import contract + a single load/remesh/save smoke run. |
 | `test_golden.py` | 13.3 | Golden baselines through the bindings: quad-dominant output, determinism across two runs, vertex/face counts within a band. Mirrors the C++ golden suite via Python. |
+| `test_library_lookup.py` | — | Where the loader may look for `libcyber_capi`: an in-checkout build tree is still found, a library planted in an ancestor of an *installed* package is not. Needs no shared library. |
 | `test_document_invariants.py` | 13.3 | Mesh lifecycle round-trip (load→save→reload counts equal), monotonic progress reaching ~1.0, cancel raising `CANCELLED`, and NumPy `positions` shape/dtype. |
+| `test_host_process_hygiene.py` | — | Host-process manners in a FRESH process: one default remesh must not touch the process's SIGSEGV/SIGILL/SIGBUS/SIGFPE/SIGINT handlers or `LC_NUMERIC`, and must write nothing to the host's stderr. |
 
 ## Capability-coverage gate (CI intent)
 

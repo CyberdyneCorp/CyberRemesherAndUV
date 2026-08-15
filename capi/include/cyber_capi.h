@@ -322,7 +322,8 @@ size_t cyber_mesh_copy_edge_indices(const CyberMesh* mesh, uint32_t* out, size_t
  * LIFETIME: a returned pointer remains valid until the mesh handle is
  * mutated by any mutating C API call or released with
  * cyber_mesh_free/cyber_mesh_destroy, whichever comes first. The mutating
- * entry points are the cyber_retopo_* editing ops below; every one of them
+ * entry points are the cyber_retopo_* editing ops below plus
+ * cyber_mesh_set_positions and cyber_conform; every one of them
  * invalidates the render cache, so pointer views obtained before the call
  * are dead afterwards and must be re-fetched (the next accessor rebuilds
  * the cache lazily). The compacted vertex ORDER also changes when vertices
@@ -347,7 +348,9 @@ const float* cyber_mesh_colors_ptr(const CyberMesh* mesh, size_t* out_count);
  * element ids (spatial queries and editing ops still see hidden faces),
  * but every setter invalidates the render cache and its pointer views, so
  * the next accessor rebuilds filtered buffers. Ids reference stable
- * elements; ids that are dead at build time are skipped silently. */
+ * elements; ids that are dead at build time are skipped silently, and an
+ * id an editing op kills is dropped from these tables as the op completes,
+ * so a recycled id is never born hidden or tagged. */
 
 /* Stable ids of every live face, in id order (the universe the visibility
  * gestures complement against — "invert visibility" hides exactly the
@@ -362,8 +365,10 @@ size_t cyber_mesh_live_faces(const CyberMesh* mesh, uint32_t* out_faces, size_t 
  * compacted position/color streams. */
 CyberStatus cyber_mesh_set_hidden_faces(CyberMesh* mesh, const uint32_t* faces, size_t face_count);
 
-/* Number of face ids currently in the hidden set (dead ids included until
- * the next set call — the set stores ids verbatim). 0 for NULL. */
+/* Number of face ids currently in the hidden set. Ids killed by an editing
+ * op are dropped as that op completes (see ELEMENT-ID STABILITY), so the
+ * count only ever covers ids that were live at the last mutation. 0 for
+ * NULL. */
 size_t cyber_mesh_hidden_face_count(const CyberMesh* mesh);
 
 /* Replaces the tagged-edge list (edges may be NULL when edge_count is 0 —
@@ -939,9 +944,11 @@ CyberStatus cyber_retopo_triangulate(CyberMesh* mesh, size_t* out_faces);
  * ids and therefore preserves the selection. Ids of DELETED vertices are
  * recycled by the next op that creates one (erase, delete_faces,
  * dissolve_edges, merge_vertices free them), so the selection and every
- * saved slot are unselected at those ids as the op completes: a weight can
- * never be inherited by unrelated new geometry. Caller-side annotations
- * keyed on vertex ids need the same treatment across deleting ops. */
+ * saved slot are unselected at those ids as the op completes — as are the
+ * hidden-face set and the tagged-edge list on their own ids: no id-keyed
+ * handle state can be inherited by unrelated new geometry. Caller-side
+ * annotations keyed on element ids need the same treatment across deleting
+ * ops. */
 
 /* Editable falloff curves. All map 0 -> 0 and 1 -> 1 monotonically, so the
  * curve changes how a gradient feels, not where it starts or ends.

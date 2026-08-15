@@ -229,6 +229,39 @@ TEST_CASE("a naming pattern that escapes the output directory is refused") {
     fs::remove_all(dir);
 }
 
+TEST_CASE("a preset name or basename that escapes through a token is refused") {
+    // The parse-time gate ran on the RAW namingPattern, so an escape could
+    // arrive through a token it expands instead — the preset's own name via
+    // {preset}, or the caller's basename. Expansion now refuses such a name,
+    // and the writer must report that refusal rather than join an empty name
+    // to the output directory (which would "write" the directory itself).
+    const fs::path dir = testDir("token_escape");
+    const fs::path outside = dir.parent_path() / "cyber_bundle_token_escapee_normal.png";
+    fs::remove(outside);
+
+    io::ExportPreset preset = smallPreset("../cyber_bundle_token_escapee", io::GreenChannel::PlusY);
+    preset.maps = {io::PresetMapEntry{io::PresetMap::Normal, io::ColorSpace::Linear, "normal"}};
+    preset.namingPattern = "{preset}_{map}.{ext}";
+
+    Mesh low = makeSurface(0.0f);
+    const Mesh high = makeSurface(0.02f);
+    const bundle::BundleResult result = bundle::writeBundle(low, high, paramsFor(preset, dir));
+    REQUIRE_FALSE(result.ok);
+    REQUIRE_FALSE(result.error.empty());
+    REQUIRE_FALSE(fs::exists(outside));
+    REQUIRE(kindsOf(result) == std::vector<std::string>{"mesh"});
+
+    // The caller-supplied basename is the other token that reaches the path.
+    preset.name = "t";
+    preset.namingPattern = "{basename}_{map}.{ext}";
+    bundle::BundleParams params = paramsFor(preset, dir);
+    params.basename = "../cyber_bundle_token_escapee";
+    Mesh low2 = makeSurface(0.0f);
+    REQUIRE_FALSE(bundle::writeBundle(low2, high, params).ok);
+    REQUIRE_FALSE(fs::exists(outside));
+    fs::remove_all(dir);
+}
+
 TEST_CASE("the container follows the preset's textureFormat, not the file name") {
     // Regression: the map was handed to the extension-dispatching saveImage(),
     // so a pattern without (or contradicting) {ext} silently picked a different

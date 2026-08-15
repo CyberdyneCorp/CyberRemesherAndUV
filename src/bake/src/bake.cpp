@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <optional>
@@ -390,8 +391,9 @@ bool fieldSupports(BakeMap map) {
 // cage ray normal/displacement use, then fire the hemisphere from the HIGH-poly
 // hit so occlusion captures the high-poly's crevices, not the low-poly's smooth
 // surface. Falls back to the low-poly frame when the projection misses the cage.
-float aoOpennessFromMesh(const Bvh& bvh, const Mesh& highPoly, const std::vector<Vec3>& highNormals,
-                         const Texel& tx, const BakeParams& params, accel::IBackend& backend) {
+float aoOpennessFromMesh(const Bvh& bvh, const FlatBvh& flat, const Mesh& highPoly,
+                         const std::vector<Vec3>& highNormals, const Texel& tx,
+                         const BakeParams& params, accel::IBackend& backend) {
     const Vec3 projOrigin = tx.position + tx.normal * params.cageDistance;
     const std::optional<Bvh::RayHit> proj = bvh.raycast(projOrigin, tx.normal * -1.0f);
     const bool projValid = proj.has_value() && proj->t <= 2.0f * params.cageDistance;
@@ -411,7 +413,7 @@ float aoOpennessFromMesh(const Bvh& bvh, const Mesh& highPoly, const std::vector
                           rot, aoTangent, aoBitangent, aoNormal);
     }
     accel::Buffer<std::optional<Bvh::RayHit>> hits;
-    accel::raycast(backend, bvh, origins, dirs, hits);
+    accel::raycast(backend, flat, origins, dirs, hits);
     int occluded = 0;
     for (std::size_t k = 0; k < hits.size(); ++k) {
         if (hits[k].has_value() && hits[k]->t <= params.aoRadius) {
@@ -419,6 +421,45 @@ float aoOpennessFromMesh(const Bvh& bvh, const Mesh& highPoly, const std::vector
         }
     }
     return 1.0f - static_cast<float>(occluded) / static_cast<float>(params.aoSamples);
+}
+
+// The AO shading pass. Openness is the only per-texel work in the bake heavy
+// enough to be worth threads, so the parallelism lives HERE, over texels: a
+// texel's own ray batch is a few dozen items, far too short to pay for a
+// fan-out of its own (it used to spawn and join one set of workers per texel).
+// Results go to a scratch vector and reach the image afterwards in texel order,
+// so overlapping texels keep last-write-wins and the map is bit-identical to a
+// serial bake.
+void shadeAmbientOcclusion(BakeResult& result, const std::vector<Texel>& texels,
+                           const Mesh& highPoly, const Bvh& bvh,
+                           const std::vector<Vec3>& highNormals, const BakeParams& params,
+                           const CancelToken* cancel) {
+    // Flattened once for the whole pass: FlatBvh is a full copy of every node
+    // and triangle, so rebuilding it per texel made the bake cost linear in the
+    // Target's triangle count — the one axis a bake should be flat in.
+    const FlatBvh flat = bvh.flatten();
+    auto& backend = *accel::defaultBackend();
+    std::vector<float> openness(texels.size(), 0.0f);
+    std::atomic<bool> cancelled{false};
+    backend.parallelFor(0, texels.size(), [&](std::size_t lo, std::size_t hi) {
+        for (std::size_t i = lo; i < hi; ++i) {
+            // Offset by `lo` so every chunk polls its first texel: a chunk can
+            // be shorter than the stride.
+            if (cancel != nullptr && (i - lo) % kCancelStride == 0 && cancel->isCancelled()) {
+                cancelled.store(true, std::memory_order_relaxed);
+                return;
+            }
+            openness[i] =
+                aoOpennessFromMesh(bvh, flat, highPoly, highNormals, texels[i], params, backend);
+        }
+    });
+    if (cancelled.load(std::memory_order_relaxed)) {
+        result.cancelled = true;
+        return;
+    }
+    for (std::size_t i = 0; i < texels.size(); ++i) {
+        result.image.at(texels[i].px, texels[i].py, 0) = openness[i];
+    }
 }
 
 // The raycast shading pass. Its arithmetic is deliberately untouched by the
@@ -429,6 +470,10 @@ void shadeFromMesh(BakeResult& result, const std::vector<Texel>& texels, const M
                    BakeMap map, const BakeParams& params, const CancelToken* cancel) {
     const Bvh bvh(highPoly);
     const std::vector<Vec3> highNormals = vertexNormals(highPoly);
+    if (map == BakeMap::AmbientOcclusion) {
+        shadeAmbientOcclusion(result, texels, highPoly, bvh, highNormals, params, cancel);
+        return;
+    }
     const auto* colors = highPoly.vertexAttributes().find<Vec3>(io::kColorAttribute);
     const auto* highUvs = highPoly.cornerAttributes().find<Vec2>(io::kUvAttribute);
     // Texture color source is only usable when a texture and Target UVs both
@@ -450,20 +495,12 @@ void shadeFromMesh(BakeResult& result, const std::vector<Texel>& texels, const M
                                                       : curvatureScale(highCurvature, highAreas);
     }
 
-    auto& backend = *accel::defaultBackend();
-
     for (std::size_t i = 0; i < texels.size(); ++i) {
         if (cancel != nullptr && i % kCancelStride == 0 && cancel->isCancelled()) {
             result.cancelled = true;
             return;
         }
         const Texel& tx = texels[i];
-
-        if (map == BakeMap::AmbientOcclusion) {
-            result.image.at(tx.px, tx.py, 0) =
-                aoOpennessFromMesh(bvh, highPoly, highNormals, tx, params, backend);
-            continue;
-        }
 
         // Primary projection ray from the cage inward along the surface normal.
         const Vec3 origin = tx.position + tx.normal * params.cageDistance;

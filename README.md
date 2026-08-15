@@ -124,10 +124,12 @@ A preset declaring a schema version this engine does not support is rejected by
 name, and a field the engine does not recognise is an error rather than a silent
 drop — a preset that quietly loses the field you added is worse than one that
 refuses to load. A wrong-typed field is reported the same way, naming the field.
-`namingPattern` (and a map's `suffix`) names a file *inside* `--output`'s
-directory: an absolute path or one climbing with `..` is refused, so a preset
-file you downloaded cannot choose where the engine writes. The container follows
-the preset's `textureFormat`, not the file name. The JSON report records the
+`namingPattern` (and a map's `suffix`, and the preset `name` that `{preset}`
+expands to) names a file *inside* `--output`'s directory: an absolute path or
+one climbing with `..` is refused, and so is any expansion of the pattern that
+would leave that directory — including through the caller's basename — so a
+preset file you downloaded cannot choose where the engine writes. The container
+follows the preset's `textureFormat`, not the file name. The JSON report records the
 effective preset and every file produced.
 
 The same thing from Python, without the CLI (C ABI: `cyber_export_preset_*` and
@@ -245,7 +247,10 @@ Stage by stage:
    the hard edges); everything else goes to the vendored in-process Geogram
    QuadCover field first, which wins on organic geometry. Either side falls back to
    the other, so a decline is never a failure. `CYBER_QC_NO_ROUTE` disables the
-   routing, `CYBER_QC_DEBUG` traces the decision.
+   routing, `CYBER_QC_DEBUG` traces the decision. The vendored solver is silent by
+   default — it is a library inside someone else's process, so it writes nothing to
+   the host's console and leaves the host's signal/terminate/new handlers and
+   `LC_NUMERIC` untouched; `CYBER_QC_VERBOSE` lets its progress traces through.
 2. **Seamless UV.** The solver builds a smooth cross field, cuts the surface along
    seams, and solves for a UV parametrization whose transitions across those seams
    are rotations by multiples of 90° plus integer translations. That "seamless"

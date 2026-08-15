@@ -725,6 +725,19 @@ int runCli(int argc, char** argv) {
     }
     std::signal(SIGINT, onSigint);
 
+    // Clamp the parameters HERE, not only inside remesh(): the quadrangulator
+    // factory below and the --report parameters block read options.params
+    // directly, so without this an out-of-range --adaptivity / --sharp-edge /
+    // --hole-fill would drive the run and be reported verbatim while the CLI
+    // printed a clamp warning (cli-headless spec: the report records the
+    // effective, post-clamp parameters). Fatal (non-finite) values are left
+    // untouched so remesh() still rejects the run the way it always has.
+    const remesh::ValidatedParameters validatedParams = remesh::validate(options.params);
+    const bool paramsClampedHere = validatedParams.ok();
+    if (paramsClampedHere) {
+        options.params = validatedParams.params;
+    }
+
     // Resolve the preset BEFORE the remesh: an unknown preset is an argument
     // error, and making the user wait through a full solve to learn they typo'd
     // a name would be the opposite of loud.
@@ -888,9 +901,16 @@ int runCli(int argc, char** argv) {
         method == "quad-cover" ? remesh::QuadrangulatorFactory(
                                      []() { return remesh::makeFieldAlignedQuadrangulator(); })
                                : remesh::QuadrangulatorFactory{};
-    const remesh::PipelineResult result =
+    remesh::PipelineResult result =
         remesh::remesh(source.mesh, options.params, &sink, &cancel, makeQuadrangulator,
                        fallbackFactory, rawGuidance.empty() ? nullptr : &rawGuidance);
+    // remesh() re-validated an already-clamped copy and therefore found nothing
+    // to warn about; carry the clamps found above so the console warnings and
+    // the report's warnings[] still name them.
+    if (paramsClampedHere) {
+        result.parameterIssues.insert(result.parameterIssues.begin(),
+                                      validatedParams.issues.begin(), validatedParams.issues.end());
+    }
     if (showProgress) {
         std::printf("\r");
     }
