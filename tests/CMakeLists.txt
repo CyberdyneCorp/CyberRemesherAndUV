@@ -73,6 +73,7 @@ endif()
 if(TARGET cyber_uv)
     target_sources(cyber_tests PRIVATE uv/test_uv.cpp uv/test_uv_clone.cpp
                                         uv/test_seam_path.cpp
+                                        uv/test_rejection_memo.cpp
                                         handoff/test_handoff_pipeline.cpp)
     target_link_libraries(cyber_tests PRIVATE cyber_uv)
 endif()

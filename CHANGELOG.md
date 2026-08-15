@@ -24,6 +24,10 @@ is listed; this is the index, not the account.
 - Meshes at coordinates far from the origin now terminate under a resolution
   floor and a face budget instead of exhausting memory; meshes at ordinary
   coordinates are byte-identical. *(Hardened)*
+- The CLI clamps `--sharp-edge` and `--adaptivity` to their documented ranges
+  instead of warning that it clamped them and then running the raw value, so a
+  `--sharp-edge` below 30° now produces different topology than it used to.
+  *(Hardened)*
 
 **Different numbers in a report**
 
@@ -971,12 +975,19 @@ gaps of its own.
 
 #### What was verified, and how
 
-- **Tests:** 430 → 519 cases and 132 831 → 141 278 assertions across the four
-  rounds; ctest 21/21 → 26/26. Every fix carries a regression test that fails
+- **Tests:** 430 → 545 cases and 132 831 → 144 863 assertions across the six
+  rounds; ctest 20/20 → 26/26. Every fix carries a regression test that fails
   without it.
 - **Sanitizers:** the whole suite is free of ASan, UBSan, TSan and LeakSanitizer
-  reports in project code across three passes, with the leak checker validated
-  against a deliberate-leak canary.
+  reports in project code, re-established at the final tree state across nine
+  full runs — ASan+UBSan+LSan with the vendored field solver both on and off,
+  and TSan on the CPU and against both CUDA and OpenCL — with the leak checker
+  validated against a deliberate-leak canary.
+- **No change to the product:** every mesh output is byte-identical to the
+  pre-hardening baseline across 120 remesh runs, 28 preset/bake bundles and 67
+  direct UV-atlas dumps. The differences that do exist each trace to a fix
+  listed above: neutral map padding, the CLI `--sharp-edge` / `--adaptivity`
+  clamp, and the GPU BVH residency identity.
 - **Fuzzing:** `src/imageio` survived 18.6M executions under ASan/UBSan with no
   crash, hang or leak; the mesh decoders have checked-in corpora and replay on
   every CI leg.

@@ -500,6 +500,16 @@ TEST_CASE("quad-cover seamless UV leaves no citation records behind") {
     // first record: one solve is what brings it up (GEO::initialize()).
     REQUIRE(remesh::computeSeamlessUv(sphere, 0.3f).valid);
 
+    // A sanitizer replaces the allocator wholesale, so glibc's main arena stays
+    // empty and mallinfo2 reports 0 for every field. There is nothing to measure
+    // then — the retention this case guards is real, but only a build running on
+    // glibc's own allocator can see it, so say so rather than failing the
+    // sanitizer lane on an instrument that is not connected.
+    if (liveHeapBytes() == 0) {
+        MESSAGE("skipped: the allocator is replaced (sanitizer build), mallinfo2 reads 0");
+        return;
+    }
+
     std::size_t warm = 0;
     std::size_t last = 0;
     for (int i = 1; i <= kIters; ++i) {
