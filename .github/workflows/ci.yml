@@ -130,6 +130,23 @@ jobs:
       - name: Compile the Metal backend
         run: cmake --build build/metal --target cyber_accel_metal
 
+  # The viewport renderer is off in cpu-headless and the only presets that turn it
+  # on are macos-metal (not built here) and ios/android (which set
+  # CYBER_BUILD_TESTS=OFF), so tests/render/ compiled on no lane at all — the
+  # GestureRecognizer regression test included. One Linux leg with the module on
+  # is enough to keep them honest; the renderer itself is headless-buildable.
+  render-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: lukka/get-cmake@latest
+      - name: Configure (cpu-headless + renderer)
+        run: cmake --preset cpu-headless -B build/render -DCYBER_BUILD_RENDER=ON
+      - name: Build
+        run: cmake --build build/render -j 4
+      - name: Test
+        run: ctest --test-dir build/render --output-on-failure
+
   build-test:
     strategy:
       fail-fast: false
