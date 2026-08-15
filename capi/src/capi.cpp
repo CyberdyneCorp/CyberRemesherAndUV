@@ -685,12 +685,16 @@ void cyber_default_atlas_params(CyberAtlasParams* params) {
 #endif
 }
 
-CyberStatus cyber_uv_atlas([[maybe_unused]] CyberMesh* mesh,
-                           [[maybe_unused]] const CyberAtlasParams* params,
-                           [[maybe_unused]] CyberAtlasResult* out) {
 #ifdef CYBER_CAPI_WITH_UV
+namespace {
+
+// Shared body of cyber_uv_atlas and its cancellable twin; `name` is the entry
+// point the caller used, so the error slot names the function it called.
+CyberStatus runUvAtlas(const char* name, CyberMesh* mesh, const CyberAtlasParams* params,
+                       CyberAtlasResult* out, cyber::ProgressSink* progress,
+                       const cyber::CancelToken* cancel) {
     if (mesh == nullptr) {
-        setError("cyber_uv_atlas: null mesh");
+        setError(std::string(name) + ": null mesh");
         return CYBER_ERR_INVALID_ARG;
     }
     try {
@@ -703,7 +707,13 @@ CyberStatus cyber_uv_atlas([[maybe_unused]] CyberMesh* mesh,
             opts.mergeCharts = params->mergeCharts != 0;
             opts.maxChartDistortion = params->maxChartDistortion;
         }
-        const cyber::uv::AtlasResult r = cyber::uv::unwrapAtlas(mesh->mesh, opts);
+        const cyber::uv::AtlasResult r = cyber::uv::unwrapAtlas(mesh->mesh, opts, progress, cancel);
+        if (r.cancelled) {
+            // The engine observes a cancel before it writes a single UV, so the
+            // mesh the caller handed in is untouched and can simply be re-used.
+            setError(std::string(name) + ": cancelled");
+            return CYBER_ERR_CANCELLED;
+        }
         if (out != nullptr) {
             out->chartCount = r.chartCount;
             out->seamEdges = r.seamEdges;
@@ -721,9 +731,9 @@ CyberStatus cyber_uv_atlas([[maybe_unused]] CyberMesh* mesh,
             // failure always names what went wrong: the report fields separate
             // "nothing to unwrap" from a chart the unwrap could not handle.
             setError(r.chartCount == 0 && r.droppedCharts == 0
-                         ? std::string("cyber_uv_atlas: no chart could be built (the mesh has "
-                                       "no faces, or none survived seam splitting)")
-                         : "cyber_uv_atlas: unwrap failed (" + std::to_string(r.chartCount) +
+                         ? std::string(name) + ": no chart could be built (the mesh has "
+                                               "no faces, or none survived seam splitting)"
+                         : std::string(name) + ": unwrap failed (" + std::to_string(r.chartCount) +
                                " chart(s) packed, " + std::to_string(r.droppedCharts) +
                                " dropped); a chart could not be parameterized or packed — "
                                "check for non-finite vertex positions and degenerate faces");
@@ -732,14 +742,43 @@ CyberStatus cyber_uv_atlas([[maybe_unused]] CyberMesh* mesh,
         clearError();
         return CYBER_OK;
     } catch (const std::exception& e) {
-        setError(std::string("cyber_uv_atlas: ") + e.what());
+        setError(std::string(name) + ": " + e.what());
         return CYBER_ERR_RUNTIME;
     } catch (...) {
-        setError("cyber_uv_atlas: unknown error");
+        setError(std::string(name) + ": unknown error");
         return CYBER_ERR_RUNTIME;
     }
+}
+
+}  // namespace
+#endif
+
+CyberStatus cyber_uv_atlas([[maybe_unused]] CyberMesh* mesh,
+                           [[maybe_unused]] const CyberAtlasParams* params,
+                           [[maybe_unused]] CyberAtlasResult* out) {
+#ifdef CYBER_CAPI_WITH_UV
+    return runUvAtlas("cyber_uv_atlas", mesh, params, out, nullptr, nullptr);
 #else
     setError("cyber_uv_atlas: engine built without the UV module (CYBER_BUILD_UV=OFF)");
+    return CYBER_ERR_RUNTIME;
+#endif
+}
+
+CyberStatus cyber_uv_atlas_cancellable([[maybe_unused]] CyberMesh* mesh,
+                                       [[maybe_unused]] const CyberAtlasParams* params,
+                                       [[maybe_unused]] CyberProgressCb progress,
+                                       [[maybe_unused]] CyberCancelCb cancel,
+                                       [[maybe_unused]] void* user,
+                                       [[maybe_unused]] CyberAtlasResult* out) {
+#ifdef CYBER_CAPI_WITH_UV
+    const cyber::CancelToken token;
+    // The atlas polls the token directly between chart-merge trials, so a host
+    // that supplies only a cancel callback (no progress) is still heard.
+    token.setPoll([cancel, user]() { return cancel != nullptr && cancel(user) != 0; });
+    cyber::ProgressSink sink = makeSink(progress, cancel, user, token);
+    return runUvAtlas("cyber_uv_atlas_cancellable", mesh, params, out, &sink, &token);
+#else
+    setError("cyber_uv_atlas_cancellable: engine built without the UV module (CYBER_BUILD_UV=OFF)");
     return CYBER_ERR_RUNTIME;
 #endif
 }

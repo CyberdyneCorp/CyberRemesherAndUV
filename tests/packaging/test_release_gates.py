@@ -231,6 +231,49 @@ def test_a_sanitizer_lane_exists() -> None:
     check("it is not on every push", "schedule:" in text and "workflow_dispatch:" in text)
 
 
+def test_a_lane_compiles_every_gpu_backend() -> None:
+    """Regression: every lane built cpu-headless, where the GPU options are OFF.
+
+    cuda_backend.cu, opencl_backend.cpp and metal_backend.mm were therefore never
+    compiled by this repository, so a GPU fix could be reverted with CI green, and
+    the compute-acceleration spec's parity-lane requirement had nothing behind it.
+    """
+    ci = read(".github/workflows/ci.yml")
+    for option in ("CYBER_ENABLE_CUDA", "CYBER_ENABLE_OPENCL", "CYBER_ENABLE_METAL"):
+        check(f"a CI lane configures {option}", option in ci,
+              "the backend's translation unit is never fed to a compiler")
+    check("the CUDA/OpenCL lane installs a toolkit and the OpenCL C++ headers",
+          "nvidia-cuda-toolkit" in ci and "opencl-clhpp-headers" in ci)
+    check("it builds the backend targets by name",
+          "cyber_accel_cuda" in ci and "cyber_accel_opencl" in ci and
+          "cyber_accel_metal" in ci)
+
+    # The hardware half. A hosted runner has no device, and a CPU OpenCL ICD does
+    # not stand in for one (the backend takes CL_DEVICE_TYPE_GPU devices only), so
+    # the real parity lane has to be opt-in on a runner that owns the hardware.
+    hardening = read(".github/workflows/hardening.yml")
+    check("a hardware parity lane exists", "gpu-parity:" in hardening)
+    check("it is opt-in on a runner label rather than queued at a hosted runner",
+          "gpu_runner" in hardening and "if: inputs.gpu_runner != ''" in hardening)
+    check("it runs the suite against the compiled-in backends",
+          "CYBER_ENABLE_CUDA=ON" in hardening and "ctest --test-dir build/gpu-parity" in hardening)
+
+
+def test_abi_behaviour_changes_are_in_the_changelog() -> None:
+    """Regression: `cyber_mesh_edge_faces` changed its return contract on a
+    released ABI (entries written, clamped to 2, instead of the true valence) and
+    the change was recorded only in header prose — nothing told a binding author
+    to move a non-manifold test to the new `cyber_mesh_edge_face_count`."""
+    changelog = read("CHANGELOG.md")
+    header = read("capi/include/cyber_capi.h")
+    unreleased = changelog.split("## 0.2.5")[0]
+    check("cyber_mesh_edge_face_count is declared", "cyber_mesh_edge_face_count" in header)
+    check("the new entry point is in the changelog",
+          "cyber_mesh_edge_face_count" in unreleased)
+    check("the changed return contract is in the changelog",
+          "cyber_mesh_edge_faces" in unreleased)
+
+
 def test_fuzz_harnesses_and_corpus_are_checked_in() -> None:
     fuzz = REPO / "tests/fuzz"
     for target in ("fuzz_png.cpp", "fuzz_mesh_io.cpp", "replay_main.cpp",
@@ -284,6 +327,8 @@ def main() -> int:
     test_release_chooses_its_field_solver()
     test_appimage_bundles_its_runtime_dependencies()
     test_a_sanitizer_lane_exists()
+    test_a_lane_compiles_every_gpu_backend()
+    test_abi_behaviour_changes_are_in_the_changelog()
     test_fuzz_harnesses_and_corpus_are_checked_in()
     test_documented_gates_exist()
 

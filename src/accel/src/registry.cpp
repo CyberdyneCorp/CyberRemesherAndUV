@@ -3,6 +3,7 @@
 #include <mutex>
 
 #include "cyber/accel/backend.hpp"
+#include "cyber/accel/detail/fallback_report.hpp"
 
 namespace cyber::accel {
 
@@ -81,6 +82,8 @@ std::shared_ptr<IBackend> backendFromEnvironment() {
 }  // namespace
 
 std::vector<std::shared_ptr<IBackend>> availableBackends() { return backendList(); }
+
+std::size_t gpuFallbackCount() { return detail::fallbackEventCount(); }
 
 std::vector<BackendKind> compiledBackendKinds() {
     std::vector<BackendKind> kinds;

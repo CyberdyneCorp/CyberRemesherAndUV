@@ -48,13 +48,19 @@ Selecting a GPU backend SHALL NOT degrade any CPU-side work: the library's host-
 - **THEN** the per-query cost SHALL be independent of the BVH's size once it is resident, rather than growing with the triangle count
 
 ### Requirement: Backend parity testing
-Every primitive SHALL have automated parity tests running the CPU backend against each available GPU backend on randomized inputs, asserting agreement within documented per-primitive tolerances. Parity tests SHALL run in CI on at least Metal and CUDA hardware lanes.
+Every primitive SHALL have automated parity tests running the CPU backend against each available GPU backend on randomized inputs, asserting agreement within documented per-primitive tolerances.
+
+CI SHALL at minimum COMPILE every GPU backend on every change, so a backend cannot be broken by a change no lane builds. Parity itself needs a device, which hosted runners do not have and a CPU OpenCL ICD does not supply (the OpenCL backend takes GPU-type devices only): the parity run SHALL therefore exist as a lane that can be pointed at a runner that owns the hardware, and the distinction between the compile gate and the hardware lane SHALL be stated where each is defined rather than left for a reader to infer.
 
 A parity test SHALL be incapable of passing vacuously. It SHALL compare the CPU backend against every OTHER compiled-in backend and SHALL fail — not skip silently — when a backend the build compiled in is not exercised. Its generated inputs SHALL cover the shapes the engine actually dispatches, in particular non-square sparse matrices in both orientations, since the seamless solver's transfer operators are rectangular and a square-only generator hides a whole class of indexing defect.
 
 #### Scenario: Parity gate
 - **WHEN** a change causes a GPU primitive to diverge from CPU beyond tolerance
 - **THEN** CI SHALL fail identifying the primitive, backend, and observed error
+
+#### Scenario: A backend nobody compiles
+- **WHEN** a change breaks a GPU backend's translation unit
+- **THEN** an ordinary CI run SHALL fail on the compile, without needing a device
 
 #### Scenario: A self-comparison is not parity
 - **WHEN** the parity suite runs in a configuration where a compiled-in backend is unavailable, or where the only backend it would compare is the CPU backend itself

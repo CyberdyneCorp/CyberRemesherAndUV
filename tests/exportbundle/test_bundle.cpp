@@ -262,6 +262,31 @@ TEST_CASE("a preset name or basename that escapes through a token is refused") {
     fs::remove_all(dir);
 }
 
+TEST_CASE("two maps sharing a file name are refused instead of silently overwritten") {
+    // Regression: the writer recomputed the path per entry with no memory of
+    // what it had already written, so two entries expanding to one name left a
+    // single file holding the LAST bake while result.files listed that path
+    // twice, under two different kinds. A consumer reading the report then
+    // binds the wrong map. parsePreset rejects such a preset file now; this
+    // pins the writer, which also sees presets built in C++.
+    const fs::path dir = testDir("collision");
+    io::ExportPreset preset = smallPreset("t", io::GreenChannel::PlusY);
+    preset.maps = {
+        io::PresetMapEntry{io::PresetMap::Normal, io::ColorSpace::Linear, "n"},
+        io::PresetMapEntry{io::PresetMap::Curvature, io::ColorSpace::Linear, "n"},
+    };
+
+    Mesh low = makeSurface(0.0f);
+    const Mesh high = makeSurface(0.02f);
+    const bundle::BundleResult result = bundle::writeBundle(low, high, paramsFor(preset, dir));
+    REQUIRE_FALSE(result.ok);
+    REQUIRE(result.error.find("hero_n.png") != std::string::npos);
+    // The report carries the mesh and the ONE map actually written, never two
+    // rows claiming one path.
+    REQUIRE(kindsOf(result) == std::vector<std::string>{"mesh", "normal"});
+    fs::remove_all(dir);
+}
+
 TEST_CASE("the container follows the preset's textureFormat, not the file name") {
     // Regression: the map was handed to the extension-dispatching saveImage(),
     // so a pattern without (or contradicting) {ext} silently picked a different
@@ -302,5 +327,29 @@ TEST_CASE("bundling honors cooperative cancellation") {
         low, high, paramsFor(smallPreset("t", io::GreenChannel::PlusY), dir), nullptr, &cancel);
     REQUIRE(result.cancelled);
     REQUIRE_FALSE(result.ok);
+    fs::remove_all(dir);
+}
+
+// Regression: the token was consulted only in the per-map loop, so the unwrap a
+// UV-less low-poly triggers — routinely the longest phase of the whole call, and
+// unbounded on a large mesh — ran to completion first and wrote both the UVs and
+// the mesh file before the cancel was noticed.
+TEST_CASE("cancellation reaches the unwrap, not just the bakes") {
+    const fs::path dir = testDir("cancel_unwrap");
+    Mesh low = makeSurface(0.0f);
+    const Mesh high = makeSurface(0.02f);
+    REQUIRE(low.cornerAttributes().find<cyber::Vec2>(io::kUvAttribute) == nullptr);
+    CancelToken cancel;
+    cancel.requestCancel();
+
+    const bundle::BundleResult result = bundle::writeBundle(
+        low, high, paramsFor(smallPreset("t", io::GreenChannel::PlusY), dir), nullptr, &cancel);
+    REQUIRE(result.cancelled);
+    REQUIRE_FALSE(result.unwrapped);
+    // Nothing was unwrapped and nothing was written: not the UVs on the
+    // caller's mesh, not the mesh file the unwrap used to precede.
+    REQUIRE(low.cornerAttributes().find<cyber::Vec2>(io::kUvAttribute) == nullptr);
+    REQUIRE(result.files.empty());
+    REQUIRE_FALSE(fs::exists(dir / "hero.obj"));
     fs::remove_all(dir);
 }

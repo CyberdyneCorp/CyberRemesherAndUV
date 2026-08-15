@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <limits>
 
 namespace cyber {
@@ -305,7 +306,14 @@ std::optional<Bvh::RayHit> Bvh::raycast(Vec3 origin, Vec3 direction, float maxDi
 }
 
 FlatBvh Bvh::flatten() const {
+    // Process-wide, never reused: consumers key device residency on it, so two
+    // snapshots must never share a serial even when the allocator hands the
+    // second one the first one's freed storage. Starts at 1 — 0 means
+    // "not produced by flatten()".
+    static std::atomic<std::uint64_t> nextSerial{1};
+
     FlatBvh flat;
+    flat.serial = nextSerial.fetch_add(1, std::memory_order_relaxed);
     flat.nodes.reserve(m_nodes.size());
     for (const Node& node : m_nodes) {
         FlatBvhNode out{};

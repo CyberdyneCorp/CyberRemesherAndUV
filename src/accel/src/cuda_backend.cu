@@ -20,6 +20,7 @@
 
 #include "cyber/accel/backend.hpp"
 #include "cyber/accel/detail/bvh_residency.hpp"
+#include "cyber/accel/detail/fallback_report.hpp"
 
 namespace cyber::accel {
 
@@ -33,11 +34,7 @@ namespace {
 // spec: "fall back to CPU automatically when a GPU backend fails at runtime ...
 // never crashing or producing partial results").
 void reportFallback(const char* primitive, const char* what) {
-    static std::once_flag once;
-    std::call_once(once, [primitive, what] {
-        std::fprintf(stderr, "[accel] CUDA %s failed (%s); falling back to the CPU reference\n",
-                     primitive, what);
-    });
+    detail::reportFallbackOnce("CUDA", primitive, what);
 }
 
 bool cudaOk(cudaError_t status, const char* primitive) {
@@ -355,36 +352,32 @@ public:
         }
     }
 
-    void closestPointsBvh(const FlatBvhNode* nodes, std::size_t nodeCount, const FlatBvhTri* tris,
-                          std::size_t triCount, const float* queriesXYZ, std::size_t n,
+    void closestPointsBvh(const FlatBvh& flat, const float* queriesXYZ, std::size_t n,
                           float* outXYZ) override {
         if (n == 0) {
             return;
         }
-        if (nodeCount == 0) {
+        if (flat.nodes.empty()) {
             std::fill(outXYZ, outXYZ + n * 3, 0.0f);
             return;
         }
-        if (!deviceClosest(nodes, nodeCount, tris, triCount, queriesXYZ, n, outXYZ)) {
-            IBackend::closestPointsBvh(nodes, nodeCount, tris, triCount, queriesXYZ, n, outXYZ);
+        if (!deviceClosest(flat, queriesXYZ, n, outXYZ)) {
+            IBackend::closestPointsBvh(flat, queriesXYZ, n, outXYZ);
         }
     }
 
-    void raycastBvh(const FlatBvhNode* nodes, std::size_t nodeCount, const FlatBvhTri* tris,
-                    std::size_t triCount, const float* originsXYZ, const float* dirsXYZ,
+    void raycastBvh(const FlatBvh& flat, const float* originsXYZ, const float* dirsXYZ,
                     std::size_t n, float* outHitXYZ, int* outFace) override {
         if (n == 0) {
             return;
         }
-        if (nodeCount == 0) {
+        if (flat.nodes.empty()) {
             std::fill(outHitXYZ, outHitXYZ + n * 3, 0.0f);
             std::fill(outFace, outFace + n, -1);
             return;
         }
-        if (!deviceRaycast(nodes, nodeCount, tris, triCount, originsXYZ, dirsXYZ, n, outHitXYZ,
-                           outFace)) {
-            IBackend::raycastBvh(nodes, nodeCount, tris, triCount, originsXYZ, dirsXYZ, n,
-                                 outHitXYZ, outFace);
+        if (!deviceRaycast(flat, originsXYZ, dirsXYZ, n, outHitXYZ, outFace)) {
+            IBackend::raycastBvh(flat, originsXYZ, dirsXYZ, n, outHitXYZ, outFace);
         }
     }
 
@@ -448,12 +441,10 @@ private:
         return cudaOk(cudaMemcpy(y, dy.get(), rows * sizeof(float), cudaMemcpyDeviceToHost), kName);
     }
 
-    bool deviceClosest(const FlatBvhNode* nodes, std::size_t nodeCount, const FlatBvhTri* tris,
-                       std::size_t triCount, const float* queriesXYZ, std::size_t n,
-                       float* outXYZ) {
+    bool deviceClosest(const FlatBvh& flat, const float* queriesXYZ, std::size_t n, float* outXYZ) {
         static constexpr const char* kName = "closestPointsBvh";
         const std::lock_guard<std::mutex> lock(m_deviceMutex);
-        if (!ensureBvhResident(nodes, nodeCount, tris, triCount, kName)) {
+        if (!ensureBvhResident(flat, kName)) {
             return false;
         }
         DevicePtr<float> dQ(n * 3), dOut(n * 3);
@@ -474,12 +465,11 @@ private:
             cudaMemcpy(outXYZ, dOut.get(), n * 3 * sizeof(float), cudaMemcpyDeviceToHost), kName);
     }
 
-    bool deviceRaycast(const FlatBvhNode* nodes, std::size_t nodeCount, const FlatBvhTri* tris,
-                       std::size_t triCount, const float* originsXYZ, const float* dirsXYZ,
+    bool deviceRaycast(const FlatBvh& flat, const float* originsXYZ, const float* dirsXYZ,
                        std::size_t n, float* outHitXYZ, int* outFace) {
         static constexpr const char* kName = "raycastBvh";
         const std::lock_guard<std::mutex> lock(m_deviceMutex);
-        if (!ensureBvhResident(nodes, nodeCount, tris, triCount, kName)) {
+        if (!ensureBvhResident(flat, kName)) {
             return false;
         }
         DevicePtr<float> dO(n * 3), dD(n * 3), dHit(n * 3);
@@ -511,27 +501,28 @@ private:
     // per texel against the same hierarchy, so re-uploading here made bake cost
     // O(texels x target triangles) — the host side already hoists its flatten()
     // out of the loop for the same reason.
-    bool ensureBvhResident(const FlatBvhNode* nodes, std::size_t nodeCount, const FlatBvhTri* tris,
-                           std::size_t triCount, const char* primitive) {
-        const detail::BvhResidencyKey key =
-            detail::makeBvhResidencyKey(nodes, nodeCount, tris, triCount);
-        if (m_bvhResident && key == m_bvhKey) {
+    bool ensureBvhResident(const FlatBvh& flat, const char* primitive) {
+        const detail::BvhResidencyKey key = detail::makeBvhResidencyKey(flat);
+        if (m_bvhResident && detail::namesResidentBvh(m_bvhKey, key)) {
             return true;
         }
         m_bvhResident = false;
+        const std::size_t nodeCount = flat.nodes.size();
+        const std::size_t triCount = flat.tris.size();
         DevicePtr<FlatBvhNode> dNodes(nodeCount);
         DevicePtr<FlatBvhTri> dTris(triCount > 0 ? triCount : 1);
         if (!dNodes.ok(primitive) || !dTris.ok(primitive)) {
             return false;
         }
-        if (!cudaOk(cudaMemcpy(dNodes.get(), nodes, nodeCount * sizeof(FlatBvhNode),
+        if (!cudaOk(cudaMemcpy(dNodes.get(), flat.nodes.data(), nodeCount * sizeof(FlatBvhNode),
                                cudaMemcpyHostToDevice),
                     primitive)) {
             return false;
         }
-        if (triCount > 0 && !cudaOk(cudaMemcpy(dTris.get(), tris, triCount * sizeof(FlatBvhTri),
-                                               cudaMemcpyHostToDevice),
-                                    primitive)) {
+        if (triCount > 0 &&
+            !cudaOk(cudaMemcpy(dTris.get(), flat.tris.data(), triCount * sizeof(FlatBvhTri),
+                               cudaMemcpyHostToDevice),
+                    primitive)) {
             return false;
         }
         m_dNodes = std::move(dNodes);

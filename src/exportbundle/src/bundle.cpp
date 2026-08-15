@@ -1,6 +1,7 @@
 #include "cyber/exportbundle/bundle.hpp"
 
 #include <optional>
+#include <unordered_set>
 
 #include "cyber/bake/bake.hpp"
 #include "cyber/core/io.hpp"
@@ -62,11 +63,20 @@ void encodeSrgb(bake::Image& image) {
     }
 }
 
-bool ensureUvs(Mesh& low, BundleResult& result) {
+bool ensureUvs(Mesh& low, BundleResult& result, const CancelToken* cancel) {
     if (low.cornerAttributes().find<Vec2>(io::kUvAttribute) != nullptr) {
         return true;
     }
-    const uv::AtlasResult atlas = uv::unwrapAtlas(low);
+    // The unwrap is routinely the longest phase of the whole bundle (its chart
+    // merge trial-unwraps candidate chart unions), so the caller's token has to
+    // reach it — otherwise the cancel this module advertises cannot touch the
+    // one phase a user would most want to abort. It is left out of the progress
+    // channel on purpose: the map loop below owns [0,1] of that sink.
+    const uv::AtlasResult atlas = uv::unwrapAtlas(low, {}, nullptr, cancel);
+    if (atlas.cancelled) {
+        result.cancelled = true;
+        return false;
+    }
     if (!atlas.ok) {
         result.error = "the low-poly carries no UVs and automatic unwrapping failed";
         return false;
@@ -151,7 +161,7 @@ BundleResult writeBundle(Mesh& low, const Mesh& high, const BundleParams& params
                                   "'; writing '." + meshExt + "' as given");
     }
 
-    if (!ensureUvs(low, result)) {
+    if (!ensureUvs(low, result, cancel)) {
         return result;
     }
 
@@ -175,6 +185,10 @@ BundleResult writeBundle(Mesh& low, const Mesh& high, const BundleParams& params
 
     const auto total = static_cast<float>(preset.maps.size());
     float done = 0.0f;
+    // parsePreset refuses a preset file whose maps share a name; a preset built
+    // in code reaches here unchecked, and the damage is silent -- one file
+    // holding the last bake, two report rows claiming it under different kinds.
+    std::unordered_set<std::string> written;
     for (const PresetMapEntry& entry : preset.maps) {
         if (cancel != nullptr && cancel->isCancelled()) {
             result.cancelled = true;
@@ -211,6 +225,13 @@ BundleResult writeBundle(Mesh& low, const Mesh& high, const BundleParams& params
             result.error = "map '" + path.string() +
                            "' resolves outside the output directory; check the preset's "
                            "namingPattern and the basename";
+            return result;
+        }
+        if (!written.insert(path.string()).second) {
+            result.error = std::string("map '") + io::presetMapName(entry.map) +
+                           "' would overwrite '" + path.string() +
+                           "', already written by an earlier map; the preset's namingPattern "
+                           "and suffixes must give every map its own name";
             return result;
         }
         if (!writeMap(preset, entry, std::move(baked.image), path, result)) {

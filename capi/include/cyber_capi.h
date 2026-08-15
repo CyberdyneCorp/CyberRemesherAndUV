@@ -224,7 +224,12 @@ typedef struct CyberAtlasParams {
                                  * normal cone (fewer seams, same flatness) */
     float maxChartDistortion;   /* looser merge cap: keep merging while the
                                  * union's max conformal error stays <= this
-                                 * (0 disables the second pass) */
+                                 * (0 disables the second pass). NON-ZERO IS
+                                 * EXPENSIVE: the pass trial-unwraps candidate
+                                 * chart unions, which dominates the call and
+                                 * runs for minutes on meshes of tens of
+                                 * thousands of faces. 0 keeps it in the
+                                 * milliseconds. */
 } CyberAtlasParams;
 
 /* Aggregate atlas quality/packing report. */
@@ -253,6 +258,23 @@ void cyber_default_atlas_params(CyberAtlasParams* params);
  * `params` may be NULL (defaults); `out` may be NULL. Returns CYBER_ERR_RUNTIME
  * when the engine was built without the UV module. */
 CyberStatus cyber_uv_atlas(CyberMesh* mesh, const CyberAtlasParams* params, CyberAtlasResult* out);
+
+/* Same as cyber_uv_atlas, plus cooperative progress and cancellation.
+ *
+ * USE THIS ONE FROM ANY INTERACTIVE HOST. With the default params the atlas
+ * runs a chart-merge pass that trial-unwraps the union of candidate chart
+ * pairs (CyberAtlasParams.maxChartDistortion); on a mesh of tens of thousands
+ * of faces that pass runs for minutes, and cyber_uv_atlas offers no way out of
+ * it. Setting maxChartDistortion to 0 bounds the unwrap to milliseconds
+ * instead, at the cost of more charts.
+ *
+ * On a cooperative cancel the status is CYBER_ERR_CANCELLED and `mesh` IS
+ * LEFT EXACTLY AS IT WAS — cancellation is observed before any UV is written,
+ * so no partial atlas is ever handed back. Cancel latency is one trial unwrap.
+ * Either callback may be NULL; `user` is passed through to both. */
+CyberStatus cyber_uv_atlas_cancellable(CyberMesh* mesh, const CyberAtlasParams* params,
+                                       CyberProgressCb progress, CyberCancelCb cancel, void* user,
+                                       CyberAtlasResult* out);
 
 /* --- Accessors used by the language bindings (Python, Swift) ------------- */
 

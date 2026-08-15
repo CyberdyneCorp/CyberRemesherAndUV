@@ -81,6 +81,10 @@ The C ABI and Python bindings SHALL expose the automatic UV atlas so a caller ca
 - **WHEN** the engine is built without the UV module
 - **THEN** `cyber_uv_atlas` SHALL still be a declared, linkable symbol that returns a runtime error status (not a missing symbol), so binaries built against the header keep a stable ABI
 
+#### Scenario: The atlas is cancellable from a host
+- **WHEN** a host calls `cyber_uv_atlas_cancellable` with progress and cancel callbacks and its cancel callback returns non-zero
+- **THEN** the call SHALL return `CYBER_ERR_CANCELLED` and leave the mesh exactly as it was, and the header SHALL document that the default chart-merge cap is the expensive part of the call so a host knows why it needs the cancellable entry point
+
 ### Requirement: Mesh state duplication, write-back and element resolution
 The C ABI and Python bindings SHALL let a caller duplicate a mesh in memory, write vertex positions back, and resolve an element id to geometry, so before/after comparison, undo snapshots and overlay rendering are possible without leaving the process. A duplicate SHALL be lossless (no serialization round trip) and SHALL preserve element ids. Position write-back SHALL use the same compacted vertex order the position reader returns and SHALL reject a count that does not match the vertex count.
 
@@ -95,6 +99,10 @@ The C ABI and Python bindings SHALL let a caller duplicate a mesh in memory, wri
 #### Scenario: A committed seam is drawable
 - **WHEN** a caller commits a seam path and asks for the endpoints and positions of each committed edge id (C: `cyber_mesh_edge_endpoints` / `cyber_mesh_vertex_position`; Python: `Mesh.edge_endpoints` / `Mesh.vertex_position`)
 - **THEN** each live edge id SHALL resolve to its two vertex ids and each live vertex id to its position, and an id that is not alive SHALL report absence rather than a fabricated result
+
+#### Scenario: A fixed-size element query returns a safe loop bound
+- **WHEN** a caller asks for the faces adjacent to a non-manifold edge (3+ faces, which the engine supports and tags) through an entry point whose out arrays are of declared fixed size (C: `cyber_mesh_edge_faces`)
+- **THEN** the returned count SHALL be the number of entries WRITTEN, never larger than the declared array size, so the return value is always a safe bound for a loop over those arrays, and the element's true, unclamped count SHALL be reachable through a separate query (C: `cyber_mesh_edge_face_count`)
 
 ### Requirement: Weighted-edit reports count distinct vertices
 The weighted transform and weighted relax reports (C: `CyberSoftTransformReport` / Python: `SoftTransformReport`) SHALL report DISTINCT vertices in every field, never per-iteration writes, so a count can never exceed the mesh's vertex count. The C ABI header, the Python docstring and the Swift wrapper SHALL state the same meaning.

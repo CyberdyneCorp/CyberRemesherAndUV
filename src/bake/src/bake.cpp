@@ -371,6 +371,39 @@ std::array<float, 3> neutralPadding(BakeMap map) {
     }
 }
 
+// Every numeric parameter the requested bake actually reads must be in range
+// before a single ray is fired. aoSamples is the one that bites: openness is
+// `1 - occluded / aoSamples`, so a zero budget is 0/0 at EVERY covered texel and
+// the map ships as NaN — which the PNG writer's clamp flattens to solid black,
+// the exact inverse of AO's neutral white, with no diagnostic anywhere. The
+// distances are the same class: a non-finite cage or radius seeds rays that can
+// never hit anything, so the "bake" is a blank map dressed as a success.
+// Substituting a default instead would hide the caller's bug just as well as the
+// NaN did, so a degenerate value takes the same empty-image rejection the
+// width/height checks already take. Parameters the requested map never reads
+// stay unchecked: a bake that worked before still works.
+bool paramsUsable(BakeMap map, const BakeParams& params, bool useField) {
+    if (params.width <= 0 || params.height <= 0) {
+        return false;
+    }
+    if (!std::isfinite(params.cageDistance) || params.cageDistance < 0.0f) {
+        return false;
+    }
+    if (map == BakeMap::AmbientOcclusion) {
+        if (!std::isfinite(params.aoRadius) || params.aoRadius < 0.0f ||
+            !std::isfinite(params.aoBias)) {
+            return false;
+        }
+        // Only the raycast path spends a ray budget; the field path asks the
+        // evaluator for occlusion directly and never divides by it.
+        if (!useField && params.aoSamples <= 0) {
+            return false;
+        }
+    }
+    const bool curvatureMap = map == BakeMap::Curvature || map == BakeMap::Cavity;
+    return !curvatureMap || std::isfinite(params.curvatureRange);
+}
+
 // Which maps an attached field evaluator can serve. The other three
 // (Displacement, Position, Color) describe the Target MESH — a height above the
 // low-poly, a hit point, a vertex color — and have no field counterpart, so
@@ -662,7 +695,7 @@ BakeResult bake(const Mesh& lowPoly, const Mesh& highPoly, BakeMap map, const Ba
     // An evaluator makes the Target mesh optional, but only for the maps the
     // field can actually answer.
     const bool useField = params.field != nullptr && fieldSupports(map);
-    if (uvs == nullptr || params.width <= 0 || params.height <= 0 ||
+    if (uvs == nullptr || !paramsUsable(map, params, useField) ||
         (highPoly.faceCount() == 0 && !useField)) {
         return result;  // empty image: nothing to bake
     }

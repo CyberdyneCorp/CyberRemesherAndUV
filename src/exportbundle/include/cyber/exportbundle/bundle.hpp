@@ -54,7 +54,9 @@ struct BundleResult {
 
 // Writes the bundle. `low` is modified in place when it needs UVs: baking is
 // impossible without them, and requiring the caller to pre-unwrap would make
-// `--preset` useless on a freshly remeshed mesh.
+// `--preset` useless on a freshly remeshed mesh. `cancel` covers that unwrap as
+// well as the bakes, so the phase that dominates the wall clock on a UV-less
+// low-poly is interruptible; cancelling during it leaves `low` untouched.
 [[nodiscard]] BundleResult writeBundle(Mesh& low, const Mesh& high, const BundleParams& params,
                                        ProgressSink* progress = nullptr,
                                        const CancelToken* cancel = nullptr);

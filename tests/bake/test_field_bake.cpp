@@ -333,6 +333,24 @@ TEST_CASE("an AO bake through an evaluator carries the evaluator's occlusion") {
     CHECK(center(r.image, 0) == doctest::Approx(0.25f).epsilon(0.001));
 }
 
+TEST_CASE("an evaluator AO bake ignores the ray budget including an empty one") {
+    // The raycast path rejects aoSamples <= 0 because openness divides by it;
+    // the field path asks the evaluator for occlusion directly and never
+    // divides, so the range check must not reach across and fail this bake.
+    const Mesh low = makePlaneWithUv(0.0f);
+    const HalfOccludedField field;
+    bake::BakeParams params;
+    params.width = 16;
+    params.height = 16;
+    params.cageDistance = 0.1f;
+    params.aoSamples = 0;
+    params.field = &field;
+
+    const bake::BakeResult r = bake::bake(low, Mesh{}, bake::BakeMap::AmbientOcclusion, params);
+    REQUIRE(r.texelsCovered > 200);
+    CHECK(center(r.image, 0) == doctest::Approx(0.25f).epsilon(0.001));
+}
+
 TEST_CASE("a curvature bake through an evaluator reads the field's curvature") {
     // A sphere of radius r has mean curvature 1/r everywhere, so the map is
     // uniform and — being uniformly convex — saturates bright.

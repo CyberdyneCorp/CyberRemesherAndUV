@@ -128,7 +128,10 @@ built-in:
 A preset declaring a schema version this engine does not support is rejected by
 name, and a field the engine does not recognise is an error rather than a silent
 drop — a preset that quietly loses the field you added is worse than one that
-refuses to load. A wrong-typed field is reported the same way, naming the field.
+refuses to load. A wrong-typed field is reported the same way, naming the field. So are two maps
+that expand to the same file name — a repeated map, or a repeated `suffix` — and
+the error names both: one map would overwrite the other while the report still
+listed the file twice, under two kinds.
 `namingPattern` (and a map's `suffix`, and the preset `name` that `{preset}`
 expands to) names a file *inside* `--output`'s directory: an absolute path or
 one climbing with `..` is refused, and so is any expansion of the pattern that
@@ -356,15 +359,20 @@ substituted, so query first and offer a real choice.
 Two things worth knowing if you drive a GPU backend directly: the library's
 CPU-side parallel loops keep running on the worker pool whichever backend is
 selected (a GPU no longer serializes them), and the BVH is cached on the device
-keyed on a fingerprint — so between queries hand over a **rebuilt** BVH snapshot
+keyed on the snapshot's identity — every `Bvh::flatten()` stamps a serial the
+process never reuses — so between queries hand over a **rebuilt** BVH snapshot
 rather than mutating the node/triangle arrays you already passed. Every primitive
 has a CPU-versus-GPU parity test over square, wide and tall inputs; it fails
 rather than passes silently when a compiled-in backend is absent.
 
 **Verification status:** CUDA and OpenCL are exercised on real hardware — the
-full suite runs green with either selected as the default backend. Metal has a
-preset (`macos-metal`) but no CI lane compiles it and this project's own hardware
-cannot: treat the Metal backend as **unverified**.
+full suite runs green with either selected as the default backend — and CI's
+`gpu-backends-compile` lane builds both on every PR. A GitHub-hosted runner has
+no GPU, so that lane is a *compile* gate, not a parity gate; the parity run on
+real devices is `hardening.yml`'s `gpu-parity`, dispatched with the label of a
+self-hosted runner that has one. Metal has a preset (`macos-metal`) and a
+report-only macOS compile lane, but this project's own hardware cannot run it:
+treat the Metal backend as **unverified**.
 
 ## Environment variables
 
@@ -507,9 +515,14 @@ yourself.
 - `.clang-format` is enforced in CI (`ci.yml`, pinned to clang-format 18).
   `.clang-tidy` configures editors and local runs; it is **not** a merge gate.
 - `.github/workflows/hardening.yml` — nightly (and manually triggerable)
-  ASan/UBSan, TSan and libFuzzer lanes. The cheap half, replaying the checked-in
+  ASan/UBSan, TSan and libFuzzer lanes, plus the opt-in `gpu-parity` lane for a
+  self-hosted runner with a GPU. The cheap half, replaying the checked-in
   corpus under `tests/fuzz/corpus`, runs on every CI leg as the
   `fuzz_corpus_replay` ctest case.
+- The GPU backends are compiled on every PR (`ci.yml`: `gpu-backends-compile`
+  for CUDA + OpenCL, `gpu-metal-compile` report-only for Metal). Those lanes
+  catch build breakage only — a hosted runner has no device, and the parity case
+  fails rather than passes when a compiled-in backend is not exercised.
 - The packaging and release rules are tests, not prose: `build_hygiene` and
   `release_gates` (ctest, from `tests/packaging/`) assert that the release
   workflow runs the suite before publishing, that the wheel carries a native

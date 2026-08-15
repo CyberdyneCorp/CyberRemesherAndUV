@@ -99,3 +99,46 @@ TEST_CASE("empty mesh yields empty BVH") {
     REQUIRE(bvh.empty());
     REQUIRE(!bvh.raycast({0, 0, 0}, {1, 0, 0}).has_value());
 }
+
+TEST_CASE("no ray through a shared edge is rejected by both adjacent triangles") {
+    // Regression for the watertight ray/triangle test in src/core/src/bvh.cpp.
+    // Strict Moller-Trumbore u/v rejections let rounding make BOTH triangles
+    // sharing an edge miss the same ray, so a ray that geometrically crosses a
+    // closed surface reported a miss — isolated wrong texels wherever a bake
+    // cage ray crosses a shared edge (src/bake/src/bake.cpp calls this copy
+    // directly). The inside test now evaluates each edge in a canonical vertex
+    // order, so the two triangles see bitwise opposite values.
+    //
+    // The same bundle runs against the accel backends' copy of the test in
+    // tests/accel/test_gpu_geometry.cpp; the two cases must stay in step, as the
+    // rayTriangle implementations are mirrors of each other.
+    //
+    // Deliberately irregular coordinates: axis-aligned vertices make too many of
+    // the intermediate products exact and hide the leak.
+    const Vec3 a{-0.7331f, 0.1129f, 0.4517f};
+    const Vec3 b{0.6217f, -0.3384f, 0.2903f};
+    const Vec3 c{0.1873f, 0.8821f, -0.5119f};
+    const Vec3 d{-0.2447f, -0.9013f, -0.3761f};
+    // Consistent winding across the shared edge a-b.
+    const std::vector<Vec3> points{a, b, c, d};
+    const std::vector<std::vector<Index>> faces{{0, 1, 2}, {1, 0, 3}};
+    const Mesh mesh = Mesh::fromIndexed(points, faces);
+    const Bvh bvh(mesh);
+    REQUIRE(bvh.triangleCount() == 2);
+
+    constexpr std::size_t rays = 200'000;  // bounded: a second at most
+    const Vec3 normal = cyber::normalized(cyber::cross(b - a, c - a));
+    std::mt19937 rng(7);
+    std::uniform_real_distribution<float> along(0.05f, 0.95f);
+    std::uniform_real_distribution<float> height(0.5f, 2.0f);
+    std::size_t leaks = 0;
+    for (std::size_t i = 0; i < rays; ++i) {
+        const Vec3 target = a + (b - a) * along(rng);  // exactly on the shared edge
+        const Vec3 origin = target + normal * height(rng);
+        if (!bvh.raycast(origin, cyber::normalized(target - origin)).has_value()) {
+            ++leaks;
+        }
+    }
+    CAPTURE(leaks);
+    REQUIRE(leaks == 0);
+}

@@ -126,9 +126,8 @@ inline void spmv(IBackend& backend, const SparseMatrix& a, const Buffer<float>& 
 inline void closestPoints(IBackend& backend, const FlatBvh& flat, const Buffer<Vec3>& queries,
                           Buffer<Vec3>& out) {
     out.resize(queries.size());
-    backend.closestPointsBvh(flat.nodes.data(), flat.nodes.size(), flat.tris.data(),
-                             flat.tris.size(), reinterpret_cast<const float*>(queries.data()),
-                             queries.size(), reinterpret_cast<float*>(out.data()));
+    backend.closestPointsBvh(flat, reinterpret_cast<const float*>(queries.data()), queries.size(),
+                             reinterpret_cast<float*>(out.data()));
 }
 
 // Convenience overload that flattens `bvh` for this one call. Bvh::flatten()
@@ -152,8 +151,7 @@ inline void raycast(IBackend& backend, const FlatBvh& flat, const Buffer<Vec3>& 
     }
     std::vector<float> hitXYZ(n * 3);
     std::vector<int> faces(n);
-    backend.raycastBvh(flat.nodes.data(), flat.nodes.size(), flat.tris.data(), flat.tris.size(),
-                       reinterpret_cast<const float*>(origins.data()),
+    backend.raycastBvh(flat, reinterpret_cast<const float*>(origins.data()),
                        reinterpret_cast<const float*>(directions.data()), n, hitXYZ.data(),
                        faces.data());
     for (std::size_t i = 0; i < n; ++i) {

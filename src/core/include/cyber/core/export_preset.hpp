@@ -85,7 +85,9 @@ struct ExportPreset {
 // a schema version this engine does not support (naming both versions), and
 // with ErrorCode::ParseError on malformed or contradictory content. Unknown
 // fields are rejected rather than ignored: silently dropping a field that was
-// meant to change the output is exactly the failure mode this guards.
+// meant to change the output is exactly the failure mode this guards. So is a
+// preset whose maps do not all expand to distinct file names -- one map would
+// overwrite another while the export report still listed both.
 [[nodiscard]] Result<ExportPreset> parsePreset(std::string_view json,
                                                std::string_view originLabel = "<memory>");
 

@@ -34,6 +34,14 @@ struct FlatBvhTri {
 struct FlatBvh {
     std::vector<FlatBvhNode> nodes;
     std::vector<FlatBvhTri> tris;
+    // Identity of this snapshot, unique for the process: every Bvh::flatten()
+    // stamps a fresh value. A device backend that keeps the last snapshot
+    // resident (see the accel backend contract) needs an exact identity, and
+    // the array addresses are not one — a freed FlatBvh's storage comes back
+    // from the allocator at the same address, with the same counts, for the
+    // next mesh. 0 marks a snapshot not produced by flatten(), which no
+    // backend may treat as resident.
+    std::uint64_t serial = 0;
 };
 
 // Bounding volume hierarchy over the triangles of a mesh (n-gons are

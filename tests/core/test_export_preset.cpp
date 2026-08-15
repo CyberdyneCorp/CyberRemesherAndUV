@@ -170,6 +170,46 @@ TEST_CASE("a wrong-typed field is a typed error, not a thrown json exception") {
     }
 }
 
+TEST_CASE("two maps that expand to one file name are refused") {
+    // Regression: the maps array was validated entry by entry with no
+    // cross-entry check, so two entries sharing a name wrote ONE file holding
+    // the last bake while the bundle report listed it twice under two kinds —
+    // an automated material builder then binds curvature into the normal slot.
+    // This is the failure the missing-{map} rejection already guards against,
+    // reached through a repeated suffix instead of a pattern without the token.
+    const auto sharedSuffix = io::parsePreset(presetJson(
+        R"("maps":[{"map":"normal","suffix":"n"},{"map":"curvature","suffix":"n"}])"));
+    REQUIRE_FALSE(sharedSuffix.ok());
+    REQUIRE(sharedSuffix.error().code == io::ErrorCode::ParseError);
+    // The message has to name both offenders, or the author cannot tell which
+    // two of seven maps collided.
+    REQUIRE(sharedSuffix.error().message.find("normal") != std::string::npos);
+    REQUIRE(sharedSuffix.error().message.find("curvature") != std::string::npos);
+
+    // The same map twice collides on its default suffix.
+    REQUIRE_FALSE(io::parsePreset(presetJson(R"("maps":["ao","ao"])")).ok());
+    // ... and an explicit suffix that repeats a default one.
+    REQUIRE_FALSE(
+        io::parsePreset(presetJson(R"("maps":["ao",{"map":"cavity","suffix":"ao"}])")).ok());
+
+    // Distinct suffixes on the same map are distinct files, so they stand.
+    REQUIRE(io::parsePreset(presetJson(
+                                R"("maps":[{"map":"ao","suffix":"ao1"},)"
+                                R"({"map":"ao","suffix":"ao2"}])"))
+                .ok());
+    // Every built-in must satisfy the rule it now imposes on user presets.
+    for (const std::string& name : io::builtinPresetNames()) {
+        INFO("preset: " << name);
+        const io::ExportPreset preset = *io::builtinPreset(name);
+        std::vector<std::string> names;
+        for (const io::PresetMapEntry& entry : preset.maps) {
+            const std::string file = io::presetMapFileName(preset, entry, "hero");
+            REQUIRE(std::find(names.begin(), names.end(), file) == names.end());
+            names.push_back(file);
+        }
+    }
+}
+
 TEST_CASE("a naming pattern cannot escape the output directory") {
     // Regression: the pattern was validated only for {map}, so a preset FILE
     // chose where the engine wrote — an absolute pattern redirected every map

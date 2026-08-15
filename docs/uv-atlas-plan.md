@@ -32,6 +32,17 @@ from an arbitrary mesh to a packed UV atlas without a human drawing every seam.
      together (a cube's six faces → two flat three-face strips), cutting the chart
      count to xatlas levels while staying ~2× under its distortion.
 
+     **This pass is the atlas's cost.** Its accept predicate is a full LSCM solve
+     of the candidate union, driven to a fixpoint, so it dominates the call while
+     everything else runs in milliseconds: rocker-arm (20k faces) 8.6s,
+     stanford-bunny (69k faces) 5m23s. Rejections are memoized — a pair
+     stays rejected until one of its two charts grows, which is what keeps the
+     later rounds from re-solving the whole mesh — but the pass is still
+     superlinear in the face count. `maxChartDistortion = 0` disables it and puts
+     the whole atlas in the milliseconds at the cost of more charts, and
+     `unwrapAtlas` takes a `CancelToken` (C ABI: `cyber_uv_atlas_cancellable`) so
+     a host can abort it; the cancel is observed before any UV is written.
+
    `autoSeams` then marks the edges between the final charts as seams (mesh
    boundary edges are already island boundaries and are left unmarked).
 3. **Charts** — `computeIslands(mesh, seams)` re-derives the face partition from

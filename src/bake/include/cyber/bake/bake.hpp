@@ -57,25 +57,29 @@ struct ColorSource {
     const cyber::imageio::LoadedImage* texture = nullptr;
 };
 
+// Numeric members are range-checked by bake() against the ranges named below,
+// but only for the maps that read them: a value out of range is a degenerate
+// request and yields an empty image rather than a map of NaN.
 struct BakeParams {
-    int width = 512;
-    int height = 512;
+    int width = 512;   // > 0
+    int height = 512;  // > 0
     // Projection cage: rays start at (surface + normal*cageDistance) and cast
     // inward up to 2*cageDistance to find the Target (11.2 makes this a
-    // per-vertex editable cage; here it is a uniform distance).
+    // per-vertex editable cage; here it is a uniform distance). Finite, >= 0.
     float cageDistance = 0.1f;
     // Hemisphere rays per texel for AO. Binary visibility quantizes openness to
     // aoSamples+1 rungs, so a low budget ships a visibly stepped map even with
     // the per-texel sample rotation dithering it; 64 is the smallest default
-    // that reads as continuous in 8-bit.
+    // that reads as continuous in 8-bit. > 0 on the raycast path, which divides
+    // the occluded-ray count by it.
     int aoSamples = 64;
-    float aoRadius = 1.0f;    // an AO ray hit beyond this does not occlude
-    float aoBias = 1e-3f;     // start offset to avoid self-hits
+    float aoRadius = 1.0f;    // an AO ray hit beyond this does not occlude; finite, >= 0
+    float aoBias = 1e-3f;     // start offset to avoid self-hits; finite
     ColorSource colorSource;  // BakeMap::Color source (default: Target vertex colors)
     // Curvature magnitude (units 1/length) that saturates a Curvature/Cavity
     // bake to full white/black. 0 = auto: the 95th percentile of |curvature|
     // over the Target, which is scale-independent and keeps one pinched vertex
-    // from flattening the map to mid-gray.
+    // from flattening the map to mid-gray. Finite (a negative value is auto too).
     float curvatureRange = 0.0f;
     // Optional field evaluator (pipeline-bridge spec, "Field-sampled baking").
     // When set, Normal / AmbientOcclusion / Curvature / Cavity sample the field
@@ -95,7 +99,8 @@ struct BakeResult {
 
 // Bakes `map` from `highPoly` onto the per-corner "uv" layout of `lowPoly`.
 // `lowPoly` must carry a Vec2 "uv" corner attribute; missing UVs or a
-// degenerate request yield an empty (zero-size) image.
+// degenerate request — including a BakeParams member outside the range
+// documented above — yield an empty (zero-size) image.
 [[nodiscard]] BakeResult bake(const Mesh& lowPoly, const Mesh& highPoly, BakeMap map,
                               const BakeParams& params, ProgressSink* progress = nullptr,
                               const CancelToken* cancel = nullptr);

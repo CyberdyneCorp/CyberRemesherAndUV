@@ -41,10 +41,28 @@ is listed; this is the index, not the account.
   `cyber_remesh_guided`) are typed statuses. *(Hardened)*
 - Export presets can no longer name a file outside the output directory.
   *(Hardened)*
+- A preset whose maps do not all expand to distinct file names is refused when it
+  loads, naming both offenders, instead of writing one file and reporting two.
+  *(Hardened)*
 - Writes report failure when the flush fails, instead of after a buffered write.
   *(Hardened)*
 - `CyberBakeParams` gained a trailing field: recompile clients, and always
   initialise via `cyber_default_bake_params`. *(Changed)*
+- `cyber_mesh_edge_faces` returns the number of entries WRITTEN (at most 2, the
+  size its own prototype declares), not the edge's true face valence; read the
+  valence through the new `cyber_mesh_edge_face_count`. *(Hardened)*
+- The automatic UV atlas is interruptible: `uv::unwrapAtlas` and `uv::autoSeams`
+  take a trailing `ProgressSink*` / `const CancelToken*` (both defaulted, so
+  existing calls compile and behave unchanged), the new
+  `cyber_uv_atlas_cancellable` exposes them over the C ABI, and
+  `exportbundle::writeBundle` finally forwards its own token into the unwrap it
+  performs on a UV-less low-poly — the phase that dominated the call was the one
+  the advertised `CYBER_ERR_CANCELLED` could not reach. A cancel leaves the mesh
+  untouched. `AtlasResult` gained a `cancelled` flag. *(Hardened)*
+- `IBackend::closestPointsBvh` / `raycastBvh` take the `FlatBvh` snapshot instead
+  of loose node/triangle pointers, so a device backend can tell which snapshot it
+  is holding; a custom backend needs recompiling against the new signature.
+  *(Hardened)*
 
 **Different environment**
 
@@ -479,6 +497,21 @@ is listed; this is the index, not the account.
 
 ### Fixed
 
+- **The automatic UV atlas hung on ordinary assets, uninterruptibly.** The
+  default-on distortion merge (`AtlasOptions::maxChartDistortion = 0.10`) drives
+  a fixpoint over adjacent chart pairs whose accept predicate LSCM-unwraps the
+  *union* of the pair, and it forgot every rejection: each round re-ran the trial
+  unwrap for pairs whose charts had not changed since they were last turned down,
+  on charts that keep growing. Rejections are now stamped with the two charts'
+  versions and skipped while those versions hold, which cuts the trial unwraps
+  roughly in half and the wall clock by 1.6–4x on real models (rocker-arm 33.9s →
+  8.6s, cheburashka 5.7s → 2.1s, fandisk 13.3s → 5.2s, stanford-bunny 15m20s →
+  5m23s) with **byte-identical output** on all six models — the
+  skipped calls are exactly the ones whose answer was already known. The pass
+  remains inherently expensive at that scale, so it is now documented as such in
+  `atlas.hpp`, `cyber_capi.h` and `Mesh.unwrap_atlas`, `maxChartDistortion = 0`
+  is called out as the bounded path, and the whole unwrap became cancellable
+  (see *Upgrade notes*).
 - **Soft-selection weights were resurrected on recycled vertex ids.** Vertex
   ids come back off the mesh's free list, so the weight of a vertex removed by
   `cyber_retopo_erase` / `_delete_faces` / `_dissolve_edges` /
@@ -774,6 +807,19 @@ improvement with no visible contract change.
   the process-wide default backend — the support escape hatch for a consumer who
   can change neither the host application nor the library it loads. An unset or
   unrecognised value keeps the automatic best-first choice.
+- **`cyber_mesh_edge_faces` reports what it wrote, and the true valence moved to
+  a new call.** It returned `edgeFaces().size()`, so a non-manifold edge — which
+  the engine supports and tags — reported 3 or more while writing at most the 2
+  entries its own prototype declares the out arrays to hold; a caller that used
+  the return value as a loop bound, the obvious reading, walked off the end of
+  its own buffers. The count returned is now the count WRITTEN, and the
+  unclamped valence is available through the new **`cyber_mesh_edge_face_count`**
+  (0 for a wire edge, 1 on a boundary, 2 on a manifold interior edge, 3+ on a
+  non-manifold one; -1 for a NULL mesh or a dead edge). **Consequence:** a
+  non-manifold test written as `cyber_mesh_edge_faces(...) > 2` stops firing —
+  it can no longer return more than 2 — so move that test to
+  `cyber_mesh_edge_face_count`. Manifold meshes are unaffected: 0, 1 and 2 mean
+  exactly what they always did.
 - **The CLI clamps `--adaptivity` and `--sharp-edge` for real.** Both ran
   out-of-range values straight into the pipeline while printing a warning that
   said they had been clamped.

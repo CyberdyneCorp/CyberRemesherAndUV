@@ -22,6 +22,7 @@
 
 #include "cyber/accel/backend.hpp"
 #include "cyber/accel/detail/bvh_residency.hpp"
+#include "cyber/accel/detail/fallback_report.hpp"
 
 namespace cyber::accel {
 
@@ -34,11 +35,7 @@ namespace {
 // (compute-acceleration spec: "fall back to CPU automatically when a GPU
 // backend fails at runtime ... never crashing or producing partial results").
 void reportFallback(const char* primitive, const char* what) {
-    static std::once_flag once;
-    std::call_once(once, [primitive, what] {
-        std::fprintf(stderr, "[accel] OpenCL %s failed (%s); falling back to the CPU reference\n",
-                     primitive, what);
-    });
+    detail::reportFallbackOnce("OpenCL", primitive, what);
 }
 
 // index_t mirrors std::size_t (8 bytes) so the CSR index buffers upload
@@ -326,9 +323,9 @@ public:
         }
     }
 
-    void closestPointsBvh(const FlatBvhNode* nodes, std::size_t nodeCount, const FlatBvhTri* tris,
-                          std::size_t triCount, const float* queriesXYZ, std::size_t n,
+    void closestPointsBvh(const FlatBvh& flat, const float* queriesXYZ, std::size_t n,
                           float* outXYZ) override {
+        const std::size_t nodeCount = flat.nodes.size();
         if (n == 0) {
             return;
         }
@@ -338,7 +335,7 @@ public:
         }
         try {
             const std::lock_guard<std::mutex> lock(m_deviceMutex);
-            ensureBvhResident(nodes, nodeCount, tris, triCount);
+            ensureBvhResident(flat);
             cl::Buffer bQ(m_context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, n * 3 * sizeof(float),
                           const_cast<float*>(queriesXYZ));
             cl::Buffer bOut(m_context, CL_MEM_WRITE_ONLY, n * 3 * sizeof(float));
@@ -356,13 +353,13 @@ public:
         } catch (const cl::Error& error) {
             reportFallback("closestPointsBvh", error.what());
             dropResidentBvh();
-            IBackend::closestPointsBvh(nodes, nodeCount, tris, triCount, queriesXYZ, n, outXYZ);
+            IBackend::closestPointsBvh(flat, queriesXYZ, n, outXYZ);
         }
     }
 
-    void raycastBvh(const FlatBvhNode* nodes, std::size_t nodeCount, const FlatBvhTri* tris,
-                    std::size_t triCount, const float* originsXYZ, const float* dirsXYZ,
+    void raycastBvh(const FlatBvh& flat, const float* originsXYZ, const float* dirsXYZ,
                     std::size_t n, float* outHitXYZ, int* outFace) override {
+        const std::size_t nodeCount = flat.nodes.size();
         if (n == 0) {
             return;
         }
@@ -373,7 +370,7 @@ public:
         }
         try {
             const std::lock_guard<std::mutex> lock(m_deviceMutex);
-            ensureBvhResident(nodes, nodeCount, tris, triCount);
+            ensureBvhResident(flat);
             cl::Buffer bO(m_context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, n * 3 * sizeof(float),
                           const_cast<float*>(originsXYZ));
             cl::Buffer bD(m_context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, n * 3 * sizeof(float),
@@ -398,8 +395,7 @@ public:
         } catch (const cl::Error& error) {
             reportFallback("raycastBvh", error.what());
             dropResidentBvh();
-            IBackend::raycastBvh(nodes, nodeCount, tris, triCount, originsXYZ, dirsXYZ, n,
-                                 outHitXYZ, outFace);
+            IBackend::raycastBvh(flat, originsXYZ, dirsXYZ, n, outHitXYZ, outFace);
         }
     }
 
@@ -408,18 +404,17 @@ private:
     // per texel against the same hierarchy, so repacking and re-uploading here
     // made bake cost O(texels x target triangles) — the host side already
     // hoists its flatten() out of the loop for the same reason.
-    void ensureBvhResident(const FlatBvhNode* nodes, std::size_t nodeCount, const FlatBvhTri* tris,
-                           std::size_t triCount) {
-        const detail::BvhResidencyKey key =
-            detail::makeBvhResidencyKey(nodes, nodeCount, tris, triCount);
-        if (m_bvhResident && key == m_bvhKey) {
+    void ensureBvhResident(const FlatBvh& flat) {
+        const detail::BvhResidencyKey key = detail::makeBvhResidencyKey(flat);
+        if (m_bvhResident && detail::namesResidentBvh(m_bvhKey, key)) {
             return;
         }
         std::vector<float> bounds;
         std::vector<cl_uint> meta;
         std::vector<float> triV;
         std::vector<cl_uint> triFace;
-        packBvh(nodes, nodeCount, tris, triCount, bounds, meta, triV, triFace);
+        packBvh(flat.nodes.data(), flat.nodes.size(), flat.tris.data(), flat.tris.size(), bounds,
+                meta, triV, triFace);
         m_bounds = readBuffer(bounds);
         m_meta = readBuffer(meta);
         m_triV = readBuffer(triV);

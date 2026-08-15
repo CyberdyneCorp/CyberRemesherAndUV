@@ -205,6 +205,91 @@ TEST_CASE("ambient occlusion darkens under an occluder") {
     REQUIRE(center(rc.image, 0) < 0.3f);
 }
 
+TEST_CASE("an AO bake with no ray budget is rejected instead of baked as NaN") {
+    // Regression: aoSamples was never range-checked, so openness computed
+    // `1 - occluded / 0` = NaN at every covered texel and the bake reported
+    // success with texelsCovered > 0. NaN loses every ordered comparison, so
+    // the PNG writer's clamp turned the whole map into byte 0 — solid black,
+    // the inverse of AO's neutral white — and the caller was told nothing.
+    const Mesh low = makePlane(0, 0, 1, 0, 1, /*uv=*/true, false);
+    const Mesh high = makePlane(0, 0, 1, 0, 1, false, false);
+
+    bake::BakeParams p = params32();
+    p.aoSamples = 0;
+    const bake::BakeResult zero = bake::bake(low, high, bake::BakeMap::AmbientOcclusion, p);
+    CHECK(zero.image.pixels.empty());
+    CHECK(zero.texelsCovered == 0);
+
+    // A negative budget is the same caller bug one step further along: it used
+    // to reach the ray buffers as an enormous allocation.
+    p.aoSamples = -4;
+    CHECK(bake::bake(low, high, bake::BakeMap::AmbientOcclusion, p).image.pixels.empty());
+
+    // The boundary still bakes, and every float in it is finite.
+    p.aoSamples = 1;
+    const bake::BakeResult one = bake::bake(low, high, bake::BakeMap::AmbientOcclusion, p);
+    REQUIRE(one.texelsCovered > 0);
+    for (const float v : one.image.pixels) {
+        REQUIRE(std::isfinite(v));
+    }
+
+    // aoSamples belongs to AO alone: a map that never spends a ray budget is
+    // unaffected by a garbage one, exactly as before the check existed.
+    p.aoSamples = 0;
+    CHECK_FALSE(bake::bake(low, high, bake::BakeMap::Normal, p).image.pixels.empty());
+}
+
+TEST_CASE("a numeric bake parameter out of range yields an empty image") {
+    // Every member the requested map reads is checked, not just aoSamples: a
+    // non-finite distance seeds rays that can never hit anything, so the bake
+    // would ship a blank map dressed as a success.
+    const Mesh low = makePlane(0, 0, 1, 0, 1, /*uv=*/true, false);
+    const Mesh high = makePlane(0, 0, 1, 0, 1, false, false);
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    const float inf = std::numeric_limits<float>::infinity();
+
+    struct Case {
+        const char* what;
+        bake::BakeMap map;
+        bake::BakeParams params;
+    };
+    auto with = [](auto&& set) {
+        bake::BakeParams p = params32();
+        p.aoSamples = 8;
+        set(p);
+        return p;
+    };
+    const std::vector<Case> cases = {
+        {"cage NaN", bake::BakeMap::Normal, with([&](bake::BakeParams& p) { p.cageDistance = nan; })},
+        {"cage inf", bake::BakeMap::Normal, with([&](bake::BakeParams& p) { p.cageDistance = inf; })},
+        {"cage < 0", bake::BakeMap::Displacement,
+         with([](bake::BakeParams& p) { p.cageDistance = -0.1f; })},
+        {"aoRadius NaN", bake::BakeMap::AmbientOcclusion,
+         with([&](bake::BakeParams& p) { p.aoRadius = nan; })},
+        {"aoRadius < 0", bake::BakeMap::AmbientOcclusion,
+         with([](bake::BakeParams& p) { p.aoRadius = -1.0f; })},
+        {"aoBias NaN", bake::BakeMap::AmbientOcclusion,
+         with([&](bake::BakeParams& p) { p.aoBias = nan; })},
+        {"curvatureRange NaN", bake::BakeMap::Curvature,
+         with([&](bake::BakeParams& p) { p.curvatureRange = nan; })},
+    };
+    for (const Case& c : cases) {
+        INFO(c.what);
+        const bake::BakeResult r = bake::bake(low, high, c.map, c.params);
+        CHECK(r.image.pixels.empty());
+        CHECK(r.texelsCovered == 0);
+    }
+
+    // The values these cases perturb are all in range in params32(), so the
+    // control bakes — the check rejects a bad request, it does not reject bakes.
+    bake::BakeParams ok = params32();
+    ok.aoSamples = 8;
+    CHECK_FALSE(bake::bake(low, high, bake::BakeMap::AmbientOcclusion, ok).image.pixels.empty());
+    // A negative curvatureRange keeps its documented meaning (auto range).
+    ok.curvatureRange = -1.0f;
+    CHECK_FALSE(bake::bake(low, high, bake::BakeMap::Curvature, ok).image.pixels.empty());
+}
+
 TEST_CASE("bake honors cooperative cancellation") {
     const Mesh low = makePlane(0, 0, 1, 0, 1, true, false);
     const Mesh high = makePlane(0, 0, 1, 0, 1, false, false);

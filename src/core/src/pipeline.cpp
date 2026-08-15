@@ -14,6 +14,7 @@
 #include <thread>
 
 #include "cyber/core/bvh.hpp"
+#include "cyber/core/detail/parallel_chunks.hpp"
 #include "cyber/core/isotropic.hpp"
 #include "cyber/core/quadrangulate.hpp"
 #include "cyber/core/reference_surface.hpp"
@@ -285,27 +286,14 @@ Mesh orientFacesConsistently(const Mesh& mesh) {
 // The relax loops are per-vertex independent, so the split is byte-identical to the
 // serial loop; each thread does enough work (thousands of BVH projections) that the
 // spawn/join overhead is negligible (unlike the tiny per-CG-iter spmv).
+//
+// A throw from fn (a relax pass that runs out of memory, say) comes back on the
+// calling thread rather than terminating the process on a worker, so the C ABI
+// still turns it into a CyberStatus.
 template <typename Fn>
 void parallelVertexRange(std::size_t n, const Fn& fn) {
-    if (n == 0) {
-        return;
-    }
     const std::size_t hw = std::max<std::size_t>(1, std::thread::hardware_concurrency());
-    const std::size_t workers = std::min<std::size_t>(hw, n);
-    if (workers <= 1) {
-        fn(std::size_t{0}, n);
-        return;
-    }
-    const std::size_t chunk = (n + workers - 1) / workers;
-    std::vector<std::thread> threads;
-    threads.reserve(workers);
-    for (std::size_t lo = 0; lo < n; lo += chunk) {
-        const std::size_t hi = std::min(n, lo + chunk);
-        threads.emplace_back([&fn, lo, hi] { fn(lo, hi); });
-    }
-    for (auto& t : threads) {
-        t.join();
-    }
+    cyber::detail::forEachChunk(0, n, std::min<std::size_t>(hw, n), fn);
 }
 
 // Tangential Laplacian step for an interior vertex: move toward the 1-ring

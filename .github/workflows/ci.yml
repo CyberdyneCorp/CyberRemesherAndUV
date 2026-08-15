@@ -64,6 +64,72 @@ jobs:
             -Xcc -I"${GITHUB_WORKSPACE}/capi/include" \
             -Xlinker -L"${GITHUB_WORKSPACE}/build/swift/capi"
 
+  # The GPU backends, compiled. Every other lane builds cpu-headless, where
+  # CYBER_ENABLE_CUDA/OPENCL/METAL are all OFF, so cuda_backend.cu,
+  # opencl_backend.cpp and metal_backend.mm were never fed to a compiler by this
+  # repository at all — a GPU fix could be reverted and CI stayed green.
+  #
+  # What this job is: a COMPILE gate. A GitHub-hosted runner has no GPU, so it
+  # cannot be a parity gate. It deliberately does not run the suite: with a
+  # backend compiled in and no device present the parity case at
+  # tests/accel/test_gpu_parity.cpp fails BY DESIGN (a compiled-in backend that
+  # nothing exercised is a failure there, not a skip), which is the behaviour we
+  # want and not one a device-less runner can satisfy. Real parity needs real
+  # hardware: hardening.yml's `gpu-parity`, dispatched with the label of a
+  # self-hosted runner that has the device.
+  #
+  # An OpenCL CPU ICD (POCL) does NOT substitute for that: makeOpenClBackend
+  # accepts CL_DEVICE_TYPE_GPU devices only, so under POCL the backend stays
+  # unavailable and the parity case fails exactly as it does with no ICD at all.
+  # What the runner CAN honestly run is the degrade path — a binary with both
+  # backends compiled in must enumerate CPU and start on a machine with neither
+  # device — so that is the one execution step here.
+  gpu-backends-compile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: lukka/get-cmake@latest
+      - name: Install the CUDA toolkit and the OpenCL headers/loader
+        run: |
+          sudo apt-get update
+          # opencl-clhpp-headers carries CL/opencl.hpp, which the backend includes;
+          # the C headers alone are not enough. nvcc needs no device to compile.
+          sudo apt-get install -y nvidia-cuda-toolkit \
+            opencl-headers opencl-clhpp-headers ocl-icd-opencl-dev
+      - name: Configure (CUDA + OpenCL)
+        # Do NOT pin CMAKE_CUDA_HOST_COMPILER: the distro toolkit selects a host
+        # compiler its nvcc supports via /etc/nvcc.profile, and pointing nvcc at
+        # the image's default g++ trips its GNU version check instead.
+        run: |
+          cmake -S . -B build/gpu -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCYBER_ENABLE_CUDA=ON -DCYBER_ENABLE_OPENCL=ON
+      - name: Compile the backend translation units
+        run: cmake --build build/gpu --target cyber_accel_cuda cyber_accel_opencl
+      - name: Build everything that links them
+        run: cmake --build build/gpu
+      - name: Degrade path (no device on this runner)
+        run: |
+          set -euo pipefail
+          ./build/gpu/apps/cli/cyberremesh --list-backends
+          ./build/gpu/apps/cli/cyberremesh --version
+
+  # Metal can only be compiled on an Apple toolchain, and no lane has ever
+  # compiled it, so it reports rather than blocks: a PR should not be gated on a
+  # backend this repository has never built. Promote it to a blocking job (drop
+  # continue-on-error) once it has gone green.
+  gpu-metal-compile:
+    runs-on: macos-14
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: lukka/get-cmake@latest
+      - name: Configure (Metal)
+        run: |
+          cmake -S . -B build/metal -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCYBER_ENABLE_METAL=ON -DCYBER_BUILD_TESTS=OFF
+      - name: Compile the Metal backend
+        run: cmake --build build/metal --target cyber_accel_metal
+
   build-test:
     strategy:
       fail-fast: false

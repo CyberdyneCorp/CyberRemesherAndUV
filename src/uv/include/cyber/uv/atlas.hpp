@@ -4,6 +4,7 @@
 #include <vector>
 
 #include "cyber/core/mesh.hpp"
+#include "cyber/core/progress.hpp"
 #include "cyber/uv/packing.hpp"
 #include "cyber/uv/seams.hpp"
 #include "cyber/uv/unwrap.hpp"
@@ -32,6 +33,12 @@ struct AtlasOptions {
     // (angle) error at or below this cap. Spends distortion headroom to cut the
     // chart/seam count toward what aggressive reference packers achieve. 0
     // disables it (cone merge only). Only consulted when `mergeCharts` is true.
+    //
+    // COST: this pass trial-unwraps the union of candidate chart pairs, so it
+    // dominates the run — seconds to minutes on meshes of tens of thousands of
+    // faces, where the rest of the atlas takes milliseconds. Callers that need a
+    // bounded unwrap set this to 0; callers that keep it should pass a
+    // CancelToken to unwrapAtlas.
     float maxChartDistortion = 0.10f;
     // Rotate each chart to its minimum-area bounding rectangle before packing.
     // LSCM fixes orientation from its pinned corners, so charts otherwise land
@@ -46,6 +53,11 @@ struct AtlasResult {
     // pack succeeded. A mesh carrying a non-finite vertex position reports
     // ok=false instead of writing non-finite UVs into the atlas.
     bool ok = false;
+    // Set when the caller's CancelToken was tripped. The mesh is left exactly as
+    // it was: cancellation is only observed before any UV is written, so a
+    // cancelled run never leaves a half-written atlas behind. All other fields
+    // are meaningless then.
+    bool cancelled = false;
     // Charts that actually occupy area in the packed atlas.
     int chartCount = 0;
     // Charts the seams produced that cover nothing once packed: LSCM and the
@@ -77,11 +89,27 @@ struct AtlasResult {
 // between them (mesh boundary edges are already island boundaries and are not
 // marked). Exposed for interactive seam preview and for testing that
 // computeIslands reproduces the same partition.
-[[nodiscard]] SeamSet autoSeams(const Mesh& mesh, const AtlasOptions& options = {});
+//
+// `progress` reports the distortion merge pass (see AtlasOptions::
+// maxChartDistortion — the only pass whose cost is unbounded). `cancel` is
+// polled between that pass's trial unwraps; when it trips, the merges made so
+// far are DISCARDED and the returned seams are the ones the unmerged charts
+// imply, so a caller that cancels must check its own token rather than trust
+// the result.
+[[nodiscard]] SeamSet autoSeams(const Mesh& mesh, const AtlasOptions& options = {},
+                                ProgressSink* progress = nullptr,
+                                const CancelToken* cancel = nullptr);
 
 // Full automatic atlas: autoSeams -> computeIslands -> LSCM per chart (with a
 // planar-projection fallback for degenerate charts) -> pack -> write "uv".
 // Returns aggregate distortion and packing statistics.
-AtlasResult unwrapAtlas(Mesh& mesh, const AtlasOptions& options = {});
+//
+// The default options run the distortion merge pass, which is the expensive one
+// (see AtlasOptions::maxChartDistortion); pass a `cancel` token so a host can
+// abort it. Cancellation is observed before the mesh is written, so
+// AtlasResult::cancelled comes with an untouched mesh. Cancel latency is one
+// trial unwrap, not the whole pass.
+AtlasResult unwrapAtlas(Mesh& mesh, const AtlasOptions& options = {},
+                        ProgressSink* progress = nullptr, const CancelToken* cancel = nullptr);
 
 }  // namespace cyber::uv

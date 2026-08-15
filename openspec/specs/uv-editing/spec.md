@@ -61,6 +61,14 @@ In addition to the interactive editor (hand-drawn seams, gesture unwrap, manual/
 - **WHEN** chart merging is enabled
 - **THEN** the atlas SHALL first merge adjacent charts whose union stays within one normal cone (fewer seams with no rise in distortion), then optionally merge further while the combined conformal-plus-area distortion of the LSCM-unwrapped union stays at or below a caller-set cap (folding developable regions together to cut the chart count), and SHALL NOT merge charts that would fold or exceed the cap
 
+#### Scenario: The merge pass is bounded work, not unbounded work
+- **WHEN** the distortion-capped merge pass drives its fixpoint over adjacent chart pairs
+- **THEN** it SHALL NOT re-run the trial unwrap for a pair it already rejected while neither of the two charts has changed, so the cost of the pass tracks the merges it actually performs rather than the number of fixpoint rounds
+
+#### Scenario: A long unwrap is cancellable and observable
+- **WHEN** a caller supplies a cancellation token (and optionally a progress sink) to the automatic atlas and cancels it
+- **THEN** the atlas SHALL abort within one trial unwrap, SHALL report the run as cancelled, and SHALL leave the mesh exactly as it was — no partial atlas, no UV attribute the mesh did not already carry — and the export-bundle writer SHALL pass its own token into the unwrap it performs on a low-poly that carries no UVs
+
 #### Scenario: Charts are re-oriented before packing
 - **WHEN** chart re-orientation is enabled
 - **THEN** each chart SHALL be rotated to its minimum-area bounding rectangle before packing (a similarity that leaves conformal distortion and flip state unchanged), so the packer wastes less space and texel density rises

@@ -270,6 +270,37 @@ bool escapesOutputDirectory(const std::string& name) {
     return false;
 }
 
+// Every map has to expand to its OWN file name. Two entries landing on one
+// name leave a single file holding the last bake while the report still lists
+// both, one of them under the wrong kind -- the same failure the missing-{map}
+// check rejects, reached instead through a repeated map or a repeated suffix.
+// Decided on the expansion rather than on the suffix, because a suffix can
+// itself contain a pattern token. The basename is a placeholder: it is the same
+// for every entry, so it cannot decide whether two entries collide.
+std::optional<Error> findMapNameCollision(const ExportPreset& preset, std::string_view origin) {
+    std::vector<std::string> names;
+    names.reserve(preset.maps.size());
+    for (const PresetMapEntry& entry : preset.maps) {
+        // An empty expansion is presetMapFileName refusing a name that leaves
+        // the output directory; it is not a name, and it is reported against
+        // the real basename where the bundle is written.
+        names.push_back(presetMapFileName(preset, entry, "{basename}"));
+        if (names.back().empty()) {
+            continue;
+        }
+        for (std::size_t i = 0; i + 1 < names.size(); ++i) {
+            if (names[i] == names.back()) {
+                return parseError(std::string(origin) + ": maps \"" +
+                                  presetMapName(preset.maps[i].map) + "\" and \"" +
+                                  presetMapName(entry.map) + "\" both name \"" + names.back() +
+                                  "\"; give every map a distinct suffix, or one would overwrite "
+                                  "the other");
+            }
+        }
+    }
+    return std::nullopt;
+}
+
 void replaceAll(std::string& text, std::string_view token, std::string_view value) {
     for (std::size_t at = text.find(token); at != std::string::npos;
          at = text.find(token, at + value.size())) {
@@ -430,6 +461,9 @@ Result<ExportPreset> parsePreset(std::string_view json_text, std::string_view or
         return maps.error();
     }
     preset.maps = std::move(maps.value());
+    if (const std::optional<Error> collision = findMapNameCollision(preset, origin)) {
+        return *collision;
+    }
     return preset;
 }
 

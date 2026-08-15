@@ -23,6 +23,11 @@ on:
         required: false
         default: "300"
         type: string
+      gpu_runner:
+        description: "Label of a self-hosted runner that HAS a GPU; empty skips the hardware parity lane"
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: read
@@ -92,6 +97,36 @@ jobs:
         env:
           TSAN_OPTIONS: halt_on_error=1:second_deadlock_stack=1
         run: ctest --test-dir build/tsan --output-on-failure -R 'unit|bridge|fuzz_corpus_replay'
+
+  # The parity lane the compute-acceleration spec asks for: the CPU backend
+  # against every compiled-in GPU backend, on a machine that owns the device.
+  # No GitHub-hosted runner has one, and neither does a CPU OpenCL ICD count —
+  # the OpenCL backend takes CL_DEVICE_TYPE_GPU devices only — so this runs only
+  # when the workflow is dispatched with the label of a self-hosted runner that
+  # has the hardware. ci.yml's gpu-backends-compile stands in the rest of the
+  # time and can only catch build breakage, never a kernel that computes the
+  # wrong thing.
+  gpu-parity:
+    if: inputs.gpu_runner != ''
+    runs-on: ${{ inputs.gpu_runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: lukka/get-cmake@latest
+      - name: Configure (CUDA + OpenCL)
+        run: |
+          cmake -S . -B build/gpu-parity -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCYBER_ENABLE_CUDA=ON -DCYBER_ENABLE_OPENCL=ON
+      - name: Build
+        run: cmake --build build/gpu-parity
+      - name: Which backends the runner actually offers
+        run: ./build/gpu-parity/apps/cli/cyberremesh --list-backends
+      # The parity case fails — it does not skip — when a backend the build
+      # compiled in is not detected, so a runner that lost its device reports
+      # that rather than passing on a CPU-against-itself comparison.
+      - name: Parity suite
+        run: ctest --test-dir build/gpu-parity -R unit --output-on-failure
 
   # A real campaign, seeded from tests/fuzz/corpus. Short by design: this lane
   # exists to keep the harnesses building and to find shallow regressions, not to

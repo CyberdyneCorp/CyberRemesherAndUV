@@ -6,7 +6,7 @@
 #include <string>
 #include <vector>
 
-#include "cyber/core/bvh.hpp"  // FlatBvhNode / FlatBvhTri (accel depends on core)
+#include "cyber/core/bvh.hpp"  // FlatBvh (accel depends on core)
 
 namespace cyber::accel {
 
@@ -67,30 +67,32 @@ public:
                          const std::size_t* colIndex, const float* value, const float* x, float* y);
 
     // Batched geometry queries over a flattened BVH (roadmap 4.6/5.8/11.1), so
-    // baking and surface projection run on the GPU. Inputs are host pointers to
-    // the flat arrays from Bvh::flatten() plus packed xyz query streams; a GPU
-    // backend stages its own device copies, one thread per query doing an
-    // iterative fixed-stack traversal. The base class provides the CPU
-    // reference (host stack traversal), which defines correct results and is
-    // what the parity tests hold GPU overrides to.
+    // baking and surface projection run on the GPU. Inputs are a host-side
+    // Bvh::flatten() snapshot plus packed xyz query streams; a GPU backend
+    // stages its own device copies, one thread per query doing an iterative
+    // fixed-stack traversal. The base class provides the CPU reference (host
+    // stack traversal), which defines correct results and is what the parity
+    // tests hold GPU overrides to.
     //
-    // A device backend MAY keep the last-queried BVH resident across calls,
-    // identified by the array addresses, their sizes and a content fingerprint
-    // (detail::BvhResidencyKey) — otherwise a per-texel bake re-uploads the
-    // whole mesh per texel. Callers must therefore not mutate node/triangle
-    // arrays in place between queries; hand over a rebuilt snapshot instead.
+    // A device backend MAY keep the last-queried snapshot resident across calls
+    // — otherwise a per-texel bake re-uploads the whole mesh per texel — and
+    // identifies it by FlatBvh::serial together with the array addresses and
+    // sizes (detail::BvhResidencyKey). The whole snapshot is passed, rather than
+    // bare pointers, so that identity cannot be dropped at a call site: bare
+    // addresses recur once a snapshot is freed, and answering from the previous
+    // upload would then be silently wrong. Callers must still not mutate a
+    // snapshot's node/triangle arrays in place between queries; hand over a
+    // rebuilt snapshot instead, which carries a fresh serial.
 
     // outXYZ[i] = closest point on the BVH surface to queriesXYZ[i]
     // (queriesXYZ / outXYZ are 3*n contiguous floats). Empty BVH -> {0,0,0}.
-    virtual void closestPointsBvh(const FlatBvhNode* nodes, std::size_t nodeCount,
-                                  const FlatBvhTri* tris, std::size_t triCount,
-                                  const float* queriesXYZ, std::size_t n, float* outXYZ);
+    virtual void closestPointsBvh(const FlatBvh& flat, const float* queriesXYZ, std::size_t n,
+                                  float* outXYZ);
 
     // Casts n rays; outHitXYZ[i] holds the nearest hit point and outFace[i] the
     // owning FaceId::value, or outFace[i] = -1 on a miss (directions need not be
     // normalized; nearest positive t along the ray is kept).
-    virtual void raycastBvh(const FlatBvhNode* nodes, std::size_t nodeCount, const FlatBvhTri* tris,
-                            std::size_t triCount, const float* originsXYZ, const float* dirsXYZ,
+    virtual void raycastBvh(const FlatBvh& flat, const float* originsXYZ, const float* dirsXYZ,
                             std::size_t n, float* outHitXYZ, int* outFace);
 };
 
@@ -112,6 +114,14 @@ public:
 // hatch for a consumer that cannot rebuild the library).
 [[nodiscard]] std::shared_ptr<IBackend> defaultBackend();
 void setDefaultBackend(std::shared_ptr<IBackend> backend);
+
+// How many times a GPU backend has degraded to the CPU reference this process
+// (every backend, every primitive). Zero means every accelerated call ran where
+// it was configured to run; anything else means the run silently completed on
+// the CPU and the first occurrence of each backend/primitive pair was announced
+// on stderr. Results are correct either way — the CPU reference IS the fallback
+// — so this is observability, not an error channel.
+[[nodiscard]] std::size_t gpuFallbackCount();
 
 // User selection/override (compute-acceleration spec, "Runtime detection,
 // selection, and fallback"): return the first available backend of `kind`,

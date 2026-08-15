@@ -110,7 +110,11 @@ struct GestureConfig {
     // Below this two-finger spread change (fraction) motion counts as Pan,
     // otherwise Dolly.
     float dollyThreshold = 0.02f;
-    bool strictContactCount = true;  // reject frames with extra contacts
+    // Reject a frame whose surviving contacts are not exactly the previous
+    // frame's. Relaxed, a gesture is still classified only from contacts that
+    // were tracked last frame -- a contact with no previous position has no
+    // delta, so the frame reports GestureKind::None.
+    bool strictContactCount = true;
 };
 
 // Strict, stateful recognizer. "Strict contact count" means a gesture only

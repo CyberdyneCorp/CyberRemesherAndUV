@@ -753,6 +753,10 @@ int writeReport(const CliOptions& options, const remesh::PipelineResult& result,
     for (const auto& issue : result.parameterIssues) {
         report["warnings"].push_back(issue.message);
     }
+    // A run configured for a GPU backend that quietly finished on the CPU is
+    // otherwise indistinguishable from one that stayed on the GPU, which turns
+    // a 100x slowdown into an unexplained one.
+    report["gpuFallbacks"] = cyber::accel::gpuFallbackCount();
     report["failedIslands"] = nlohmann::json::array();
     for (const auto& diag : result.failedIslands) {
         report["failedIslands"].push_back({{"island", diag.islandIndex},

@@ -27,6 +27,7 @@ add_executable(cyber_tests
     core/test_io_formats.cpp
     core/test_io_obj.cpp
     core/test_isotropic.cpp
+    core/test_parallel_chunks.cpp
     core/test_pipeline.cpp
     core/test_pure_quad_quality.cpp
     core/test_reference_surface.cpp
@@ -81,6 +82,11 @@ if(TARGET cyber_exportbundle)
     # The C ABI's preset DATA half is testable everywhere; only its bundle
     # WRITER needs this module, so the matching capi cases are gated on it.
     target_compile_definitions(cyber_tests PRIVATE CYBER_TESTS_HAVE_EXPORTBUNDLE)
+endif()
+if(TARGET cyber_render)
+    target_sources(cyber_tests PRIVATE render/test_camera.cpp render/test_mesh_stream.cpp
+                                        render/test_overlays.cpp render/test_stage_preview.cpp)
+    target_link_libraries(cyber_tests PRIVATE cyber_render)
 endif()
 if(TARGET cyber_retopo)
     target_sources(cyber_tests PRIVATE retopo/test_retopo.cpp retopo/test_retopo_advanced.cpp

@@ -936,6 +936,38 @@ TEST_CASE("capi uv atlas failure always leaves a message in the error slot") {
     cyber_mesh_free(empty);
 }
 
+// Regression: the atlas's default chart-merge cap trial-unwraps candidate chart
+// unions and runs for minutes on ordinary assets, and cyber_uv_atlas gave a host
+// no way out of it. The cancellable entry point must actually stop, and must not
+// leave a half-written atlas behind.
+TEST_CASE("capi cancellable uv atlas aborts and leaves the mesh untouched") {
+    const std::filesystem::path objPath = writeCubeObj();
+    CyberMesh* mesh = nullptr;
+    REQUIRE(cyber_mesh_load_obj(objPath.string().c_str(), &mesh) == CYBER_OK);
+    REQUIRE(mesh != nullptr);
+
+    int calls = 0;
+    CyberAtlasResult result{};
+    const CyberStatus status = cyber_uv_atlas_cancellable(
+        mesh, nullptr, nullptr,
+        [](void* user) {
+            ++*static_cast<int*>(user);
+            return 1;
+        },
+        &calls, &result);
+    CHECK(status == CYBER_ERR_CANCELLED);
+    CHECK(calls > 0);
+    CHECK(std::string(cyber_last_error()).find("cancelled") != std::string::npos);
+    // Nothing was written, so the mesh still has no UVs and the atlas that runs
+    // afterwards on the same handle succeeds normally.
+    CHECK(cyber_uv_atlas(mesh, nullptr, &result) == CYBER_OK);
+    CHECK(result.chartCount > 0);
+
+    cyber_mesh_free(mesh);
+    std::error_code ec;
+    std::filesystem::remove(objPath, ec);
+}
+
 #ifdef CYBER_CAPI_HEADER_PATH
 // Regression: the header advertised "SNAPSHOT SEMANTICS, as for CyberSnapper"
 // for a handle that BORROWS the mesh, so a binding author following the

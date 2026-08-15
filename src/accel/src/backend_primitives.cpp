@@ -9,6 +9,7 @@
 
 #include "cyber/accel/backend.hpp"
 #include "cyber/core/bvh.hpp"
+#include "cyber/core/detail/parallel_chunks.hpp"
 #include "cyber/core/math.hpp"
 
 // CPU reference implementations of IBackend's accelerated numeric primitives.
@@ -62,30 +63,14 @@ void IBackend::parallelFor(std::size_t begin, std::size_t end,
     if (begin >= end) {
         return;
     }
-    const std::size_t total = end - begin;
-    const std::size_t workers = workerCount(total);
-    if (workers == 1) {
+    const std::size_t workers = workerCount(end - begin);
+    // A throw from fn arrives here on the calling thread (forEachChunk captures
+    // it and joins first), so the C ABI's handlers still convert it to a
+    // CyberStatus instead of the process dying on an unhandled worker exception.
+    cyber::detail::forEachChunk(begin, end, workers, [&fn](std::size_t lo, std::size_t hi) {
         const ParallelRegion region;
-        fn(begin, end);
-        return;
-    }
-    const std::size_t chunk = (total + workers - 1) / workers;
-    std::vector<std::thread> threads;
-    threads.reserve(workers);
-    for (std::size_t w = 0; w < workers; ++w) {
-        const std::size_t lo = begin + w * chunk;
-        const std::size_t hi = std::min(end, lo + chunk);
-        if (lo >= hi) {
-            break;
-        }
-        threads.emplace_back([&fn, lo, hi] {
-            tInParallelRegion = true;
-            fn(lo, hi);
-        });
-    }
-    for (auto& t : threads) {
-        t.join();
-    }
+        fn(lo, hi);
+    });
 }
 
 void IBackend::axpy(float alpha, const float* x, float* y, std::size_t n) {
@@ -243,9 +228,11 @@ Vec3 triVertex(const float (&v)[3]) { return {v[0], v[1], v[2]}; }
 
 }  // namespace
 
-void IBackend::closestPointsBvh(const FlatBvhNode* nodes, std::size_t nodeCount,
-                                const FlatBvhTri* tris, std::size_t /*triCount*/,
-                                const float* queriesXYZ, std::size_t n, float* outXYZ) {
+void IBackend::closestPointsBvh(const FlatBvh& flat, const float* queriesXYZ, std::size_t n,
+                                float* outXYZ) {
+    const FlatBvhNode* nodes = flat.nodes.data();
+    const std::size_t nodeCount = flat.nodes.size();
+    const FlatBvhTri* tris = flat.tris.data();
     parallelFor(0, n, [=](std::size_t lo, std::size_t hi) {
         for (std::size_t qi = lo; qi < hi; ++qi) {
             const Vec3 query{queriesXYZ[qi * 3], queriesXYZ[qi * 3 + 1], queriesXYZ[qi * 3 + 2]};
@@ -284,9 +271,11 @@ void IBackend::closestPointsBvh(const FlatBvhNode* nodes, std::size_t nodeCount,
     });
 }
 
-void IBackend::raycastBvh(const FlatBvhNode* nodes, std::size_t nodeCount, const FlatBvhTri* tris,
-                          std::size_t /*triCount*/, const float* originsXYZ, const float* dirsXYZ,
+void IBackend::raycastBvh(const FlatBvh& flat, const float* originsXYZ, const float* dirsXYZ,
                           std::size_t n, float* outHitXYZ, int* outFace) {
+    const FlatBvhNode* nodes = flat.nodes.data();
+    const std::size_t nodeCount = flat.nodes.size();
+    const FlatBvhTri* tris = flat.tris.data();
     parallelFor(0, n, [=](std::size_t lo, std::size_t hi) {
         for (std::size_t ri = lo; ri < hi; ++ri) {
             const Vec3 origin{originsXYZ[ri * 3], originsXYZ[ri * 3 + 1], originsXYZ[ri * 3 + 2]};

@@ -2,7 +2,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <limits>
+#include <string_view>
 #include <vector>
 
 #include "cyber/core/math.hpp"
@@ -78,6 +80,30 @@ Mesh makeGrid(int n) {
         for (int x = 0; x < n; ++x) {
             const Index b = static_cast<Index>(y) * stride + static_cast<Index>(x);
             f.push_back({b, b + 1, b + 1 + stride, b + stride});
+        }
+    }
+    return Mesh::fromIndexed(p, f);
+}
+
+// A closed quad sphere. Every face carries a different normal, so chart growth
+// fragments it and the distortion merge pass genuinely has to grind — unlike the
+// hand-built cubes and strips above, where it converges in one round.
+Mesh makeQuadSphere(int slices, int stacks) {
+    std::vector<Vec3> p;
+    std::vector<std::vector<Index>> f;
+    for (int j = 0; j <= stacks; ++j) {
+        const float v = cyber::kPi * static_cast<float>(j) / static_cast<float>(stacks);
+        for (int i = 0; i < slices; ++i) {
+            const float u = 2.0f * cyber::kPi * static_cast<float>(i) / static_cast<float>(slices);
+            p.push_back({std::sin(v) * std::cos(u), std::cos(v), std::sin(v) * std::sin(u)});
+        }
+    }
+    const auto id = [slices](int i, int j) {
+        return static_cast<Index>(j * slices + (i % slices));
+    };
+    for (int j = 0; j < stacks; ++j) {
+        for (int i = 0; i < slices; ++i) {
+            f.push_back({id(i, j), id(i, j + 1), id(i + 1, j + 1), id(i + 1, j)});
         }
     }
     return Mesh::fromIndexed(p, f);
@@ -387,6 +413,103 @@ TEST_CASE("distortion-bounded merge folds developable strips together") {
     coneOnly.maxChartDistortion = 0.0f;
     const uv::AtlasResult base = uv::unwrapAtlas(coneCube, coneOnly);
     REQUIRE(atlas.chartCount < base.chartCount);
+}
+
+// The distortion merge drives a fixpoint over adjacent chart pairs and its
+// accept predicate LSCM-unwraps the union of each candidate pair, so re-testing
+// a pair whose charts have not changed since it was rejected costs a full trial
+// unwrap for an answer already known. The four cases below pin the cost and the
+// escape hatch of that pass, which is on by default.
+
+TEST_CASE("the chart merge does not re-test pairs it already rejected") {
+    Mesh mesh = makeQuadSphere(40, 20);
+    int trials = 0;
+    const cyber::CancelToken token;
+    token.setPoll([&trials]() {
+        ++trials;
+        return false;
+    });
+    const uv::AtlasResult atlas = uv::unwrapAtlas(mesh, {}, nullptr, &token);
+    REQUIRE(atlas.ok);
+
+    // The token is polled once per merge trial (plus once after seaming), so
+    // `trials` counts the trial unwraps the merge passes ran. A fixpoint that
+    // forgets its rejections re-runs most of them on every round and needs 206
+    // here; remembering them needs 112. The bound sits between the two with
+    // room to spare on the remembering side.
+    REQUIRE(trials < 160);
+
+    // ...and it reaches exactly the partition the forgetful fixpoint reached:
+    // skipping a re-test can only skip an answer that was already known.
+    REQUIRE(atlas.chartCount == 8);
+    REQUIRE(atlas.seamEdges == 242);
+}
+
+TEST_CASE("a cancel token that never fires changes nothing about the atlas") {
+    Mesh plain = makeQuadSphere(24, 12);
+    const uv::AtlasResult expected = uv::unwrapAtlas(plain);
+
+    Mesh watched = makeQuadSphere(24, 12);
+    const cyber::CancelToken token;
+    token.setPoll([]() { return false; });
+    float lastProgress = -1.0f;
+    cyber::ProgressSink sink([&lastProgress](float p, std::string_view) {
+        REQUIRE(p >= lastProgress);  // the sink is monotonic
+        lastProgress = p;
+    });
+    const uv::AtlasResult observed = uv::unwrapAtlas(watched, {}, &sink, &token);
+
+    REQUIRE(observed.ok);
+    REQUIRE_FALSE(observed.cancelled);
+    REQUIRE(observed.chartCount == expected.chartCount);
+    REQUIRE(observed.seamEdges == expected.seamEdges);
+    REQUIRE(observed.maxAngleDistortion == expected.maxAngleDistortion);
+    REQUIRE(observed.packedArea == expected.packedArea);
+    REQUIRE(lastProgress == doctest::Approx(1.0f));
+
+    const std::vector<Vec2>* a = uv::uvColumn(plain);
+    const std::vector<Vec2>* b = uv::uvColumn(watched);
+    REQUIRE(a != nullptr);
+    REQUIRE(b != nullptr);
+    REQUIRE(a->size() == b->size());
+    for (std::size_t i = 0; i < a->size(); ++i) {
+        REQUIRE((*a)[i].x == (*b)[i].x);
+        REQUIRE((*a)[i].y == (*b)[i].y);
+    }
+}
+
+TEST_CASE("a cancelled unwrap leaves the mesh exactly as it was") {
+    Mesh mesh = makeQuadSphere(24, 12);
+    // Pre-existing UVs the caller would lose if a cancel wrote a partial atlas.
+    std::vector<Vec2>& before = uv::ensureUvColumn(mesh);
+    std::fill(before.begin(), before.end(), Vec2{0.25f, 0.75f});
+    const std::vector<Vec2> snapshot = before;
+
+    const cyber::CancelToken token;
+    token.requestCancel();
+    const uv::AtlasResult atlas = uv::unwrapAtlas(mesh, {}, nullptr, &token);
+
+    REQUIRE(atlas.cancelled);
+    REQUIRE_FALSE(atlas.ok);
+    REQUIRE(atlas.chartCount == 0);
+    const std::vector<Vec2>* after = uv::uvColumn(mesh);
+    REQUIRE(after != nullptr);
+    REQUIRE(*after == snapshot);
+}
+
+TEST_CASE("a cancel raised mid-merge aborts promptly instead of running to the end") {
+    Mesh mesh = makeQuadSphere(40, 20);
+    int polls = 0;
+    const cyber::CancelToken token;
+    token.setPoll([&polls]() { return ++polls > 5; });
+    const uv::AtlasResult atlas = uv::unwrapAtlas(mesh, {}, nullptr, &token);
+
+    REQUIRE(atlas.cancelled);
+    // The token latches on the sixth poll and the pass stops there; running the
+    // merge to its fixpoint would have taken over a hundred more trials.
+    REQUIRE(polls == 6);
+    // Nothing was written, so the mesh never grew a UV column.
+    REQUIRE(uv::uvColumn(mesh) == nullptr);
 }
 
 TEST_CASE("chart re-orientation tightens the cube atlas") {

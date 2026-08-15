@@ -806,6 +806,13 @@ class Mesh:
         them into the unit square and writes the per-corner ``uv`` attribute, so
         a subsequent :meth:`save_obj` emits ``vt`` / ``f v/vt``. Returns an
         :class:`AtlasResult` with distortion and packing statistics.
+
+        COST: with the default ``max_chart_distortion`` the atlas runs a chart
+        merge that trial-unwraps the union of candidate chart pairs. That pass
+        dominates the call and takes minutes on a mesh of tens of thousands of
+        faces; this binding cannot be interrupted while it runs. Set
+        ``AtlasParams(max_chart_distortion=0.0)`` to bound the unwrap to
+        milliseconds, at the cost of more charts.
         """
         if params is None:
             params = AtlasParams()

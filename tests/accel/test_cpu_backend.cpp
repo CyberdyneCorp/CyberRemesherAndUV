@@ -5,6 +5,7 @@
 #include <mutex>
 #include <numeric>
 #include <set>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
@@ -149,4 +150,51 @@ TEST_CASE("parallelFor with empty range is a no-op") {
     bool called = false;
     backend->parallelFor(5, 5, [&called](std::size_t, std::size_t) { called = true; });
     REQUIRE(!called);
+}
+
+TEST_CASE("an exception from a parallelFor body arrives on the calling thread") {
+    // Regression: worker lambdas were unguarded, so a throw from fn (a bake
+    // called with a nonsense sample count, an allocation failing under a memory
+    // limit) hit the default terminate handler on a worker and killed the whole
+    // host process — the C ABI's catch blocks never ran and no CyberStatus was
+    // ever returned. The exception now comes back on the caller after every
+    // worker has been joined.
+    auto backend = cyber::accel::defaultBackend();
+    constexpr std::size_t n = 100'000;
+    std::atomic<std::size_t> visited{0};
+    const auto body = [&visited](std::size_t lo, std::size_t hi) {
+        visited.fetch_add(hi - lo, std::memory_order_relaxed);
+        if (lo == 0) {
+            throw std::runtime_error("worker failure");
+        }
+    };
+
+    REQUIRE_THROWS_AS(backend->parallelFor(0, n, body), std::runtime_error);
+    // Every chunk still ran to completion (all threads joined before the
+    // rethrow), so nothing is left touching the caller's state afterwards.
+    REQUIRE(visited.load() == n);
+
+    // The backend is still usable: the failure is per call, not per process.
+    std::atomic<std::size_t> again{0};
+    backend->parallelFor(0, n, [&again](std::size_t lo, std::size_t hi) {
+        again.fetch_add(hi - lo, std::memory_order_relaxed);
+    });
+    REQUIRE(again.load() == n);
+}
+
+TEST_CASE("a nested parallelFor propagates its exception to the outer caller") {
+    // The nested call runs inline on a worker thread, so its throw has to
+    // travel through TWO fan-outs to reach the caller.
+    auto backend = cyber::accel::defaultBackend();
+    REQUIRE_THROWS_AS(backend->parallelFor(0, 100'000,
+                                           [&backend](std::size_t lo, std::size_t) {
+                                               if (lo != 0) {
+                                                   return;
+                                               }
+                                               backend->parallelFor(
+                                                   0, 8, [](std::size_t, std::size_t) {
+                                                       throw std::runtime_error("inner failure");
+                                                   });
+                                           }),
+                      std::runtime_error);
 }

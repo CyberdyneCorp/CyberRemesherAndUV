@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "cyber/accel/backend.hpp"
+#include "cyber/accel/detail/fallback_report.hpp"
 #include "cyber/accel/primitives.hpp"
 
 // Backend parity harness (compute-acceleration spec: "Every primitive SHALL
@@ -259,4 +260,27 @@ TEST_CASE("parity actually compared a GPU backend when one was compiled in") {
                         [kind](const auto& backend) { return backend->kind() == kind; });
         REQUIRE(present);
     }
+}
+
+TEST_CASE("a fallback is announced per primitive, not once per process") {
+    // Regression: each GPU backend held ONE function-local once_flag for all of
+    // its primitives, so a first spmv fallback permanently silenced a later,
+    // different raycast fallback — the operator saw a single stderr line for a
+    // run that had spent the rest of its time on the CPU. Announcement is keyed
+    // on (backend, primitive) now, and every event is counted so a host can see
+    // that the run did not stay on the device it asked for.
+    //
+    // Driven directly: forcing a real device failure would need a broken driver.
+    namespace detail = accel::detail;
+    const std::size_t before = accel::gpuFallbackCount();
+    const std::size_t announcedBefore = detail::fallbackLog().announced.size();
+
+    detail::reportFallbackOnce("TestBackend", "spmvCsr", "simulated");
+    detail::reportFallbackOnce("TestBackend", "spmvCsr", "simulated");  // silent, still counted
+    detail::reportFallbackOnce("TestBackend", "raycastBvh", "simulated");
+
+    REQUIRE(accel::gpuFallbackCount() == before + 3);
+    // Two distinct primitives announced, not one.
+    REQUIRE(detail::fallbackLog().announced.size() == announcedBefore + 2);
+    REQUIRE(detail::fallbackLog().announced.count("TestBackend raycastBvh") == 1);
 }
