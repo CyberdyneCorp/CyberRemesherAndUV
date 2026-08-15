@@ -113,23 +113,32 @@ public final class Mesh {
 
     /// Copies vertex positions out as a flat `x,y,z` buffer, in the engine's
     /// compacted order (live vertices in id order).
+    ///
+    /// This is the stream ``setPositions(_:)`` writes back, so it always covers
+    /// EVERY live vertex. The C ABI has a second, narrower "render vertex
+    /// order" that drops vertices used only by hidden faces; nothing in this
+    /// package can hide a face, so for a Swift-owned mesh the two orders are
+    /// the same and the buffers below pair with this one.
     public func positions() -> [Float] {
         copyFloats(cyber_mesh_copy_positions)
     }
 
-    /// Copies per-vertex unit normals out, in the same compacted order.
+    /// Copies per-vertex unit normals out, in the render vertex order — the
+    /// same order as ``positions()`` for a mesh built through this package.
     public func normals() -> [Float] {
         copyFloats(cyber_mesh_copy_normals)
     }
 
-    /// Copies the fan-triangulated index buffer out (3 per triangle, indexing
-    /// the compacted vertex order of ``positions()``).
+    /// Copies the fan-triangulated index buffer out (3 per triangle), indexing
+    /// the render vertex order — the same order as ``positions()`` for a mesh
+    /// built through this package.
     public func triangleIndices() -> [UInt32] {
         copyIndices(cyber_mesh_copy_triangle_indices)
     }
 
-    /// Copies the unique authored-edge index buffer out (2 per edge). A quad
-    /// contributes its 4 edges, never its triangulation diagonal.
+    /// Copies the unique authored-edge index buffer out (2 per edge), indexing
+    /// the same order as ``triangleIndices()``. A quad contributes its 4 edges,
+    /// never its triangulation diagonal.
     public func edgeIndices() -> [UInt32] {
         copyIndices(cyber_mesh_copy_edge_indices)
     }

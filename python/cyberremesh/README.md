@@ -63,7 +63,29 @@ result.save_obj("retopo.obj")
 `RemeshParams` mirrors `cyber::remesh::Parameters` field-for-field; the engine
 clamps out-of-range values and reports the clamps. Any non-OK C ABI status is
 raised as `CyberError`, carrying the numeric status and the engine's
-`cyber_last_error()` message.
+`cyber_last_error()` message — including failures that used to surface as a
+parser exception or a `MemoryError` (an oversized PNG, a malformed preset), which
+are now typed statuses on the way out.
+
+> **`sharp_edge_degrees` changed behaviour.** Until this release the C ABI
+> ignored it and the default quad-cover extractor always ran at 40°, so the
+> documented default of 90.0 never took effect from Python. It is now honoured.
+> If you were relying on the old output, pass `sharp_edge_degrees=40.0`
+> explicitly.
+
+### Choosing a compute backend
+
+The C ABI selects backends (`cyber_available_backends` / `cyber_set_backend` /
+`cyber_active_backend`), but **this package does not wrap those calls**. From
+Python, pick a backend with the `CYBER_BACKEND` environment variable
+(`cpu` | `metal` | `cuda` | `opencl`) before the first engine call, or use
+`cyberremesh --list-backends` / `--backend …` on the CLI. Unset means automatic
+best-first selection (Metal/CUDA > OpenCL > CPU), and every feature is correct on
+the CPU alone.
+
+```sh
+CYBER_BACKEND=cpu python my_script.py
+```
 
 ### Export presets
 

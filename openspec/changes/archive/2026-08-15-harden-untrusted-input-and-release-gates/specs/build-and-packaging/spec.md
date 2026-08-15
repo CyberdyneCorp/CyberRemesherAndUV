@@ -1,14 +1,6 @@
-# build-and-packaging Specification
+# build-and-packaging (delta)
 
-## Purpose
-TBD - created by archiving change bootstrap-v1-platform. Update Purpose after archive.
-## Requirements
-### Requirement: C++20 CMake build
-The project SHALL build with CMake (presets for every platform/backend combination) as strict C++20 with warnings-as-errors on the project's own code. The core engine SHALL compile with no GUI, GPU, or platform SDK present (CPU-only headless configuration).
-
-#### Scenario: Minimal configuration builds
-- **WHEN** the CPU-only headless preset is configured on a clean Linux container
-- **THEN** the core engine, CLI, and unit tests SHALL build and pass without any GPU SDK installed
+## MODIFIED Requirements
 
 ### Requirement: Permissive-license dependency policy
 All dependencies SHALL be permissively licensed (MIT/BSD/Apache-2.0/MPL-2.0 or equivalent). GPL/LGPL code SHALL NOT be linked. CI SHALL run an automated license audit of the dependency manifest and fail on violations. Third-party attributions SHALL ship in the About panel and packages.
@@ -57,20 +49,6 @@ Each artifact SHALL be self-sufficient on a stock target machine: a package SHAL
 - **WHEN** the Python publishing lane builds a wheel
 - **THEN** the native shared library SHALL be staged into the package before the wheel is built and SHALL be present in the built wheel
 
-### Requirement: Package smoke tests
-Each desktop package SHALL be smoke-tested from the packaged form (mounted DMG / extracted zip / AppImage): a CLI remesh of a reference model asserting a valid output file and exit code 0, plus an app-launch screenshot. Mobile artifacts SHALL at minimum boot in a simulator/emulator in CI.
-
-#### Scenario: Smoke failure blocks artifacts
-- **WHEN** the packaged CLI remesh exits nonzero
-- **THEN** the job SHALL fail and the package SHALL NOT be published
-
-### Requirement: Single version identity
-The semantic version SHALL originate from one source of truth, be embedded in binaries (`--version`, About panel), artifact filenames, and release tags, with no possibility of divergence.
-
-#### Scenario: Consistent version everywhere
-- **WHEN** release 1.2.0 artifacts are inspected
-- **THEN** binary version output, artifact names, and the release tag SHALL all read 1.2.0
-
 ### Requirement: Style and static analysis gates
 CI SHALL enforce clang-format on project code for every PR, with the formatter version pinned so the gate is reproducible; violations fail the job with the diff visible. The project SHALL additionally ship a clang-tidy configuration for editors and local runs. The documentation SHALL state which of these gates a merge and which advise: a claimed gate that does not exist is worse than an acknowledged absence, and the packaging test suite SHALL check that claim against the workflows.
 
@@ -81,4 +59,3 @@ CI SHALL enforce clang-format on project code for every PR, with the formatter v
 #### Scenario: Documented gates match the workflows
 - **WHEN** the README describes a CI gate
 - **THEN** a test SHALL verify that a workflow implements it, and SHALL fail when the documentation claims an analysis gate the workflows do not run
-

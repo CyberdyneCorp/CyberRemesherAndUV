@@ -200,6 +200,53 @@ TEST_CASE("skyline packing is tighter than shelf and stays valid") {
     }
 }
 
+TEST_CASE("packing never reports a non-finite placement as a successful pack") {
+    // Bounds2::valid() rejects a NaN box (comparisons against NaN are false)
+    // but NOT an infinite one, so an infinite island used to reach the
+    // strategies: the skyline path computed inf/inf = NaN and fed it to
+    // `static_cast<int>(std::ceil(...))` (undefined behaviour), and the shelf
+    // path emitted NaN placements alongside ok = true. Every real island must
+    // still pack, and every placement must be finite.
+    uv::Bounds2 good;
+    good.expand({0.0f, 0.0f});
+    good.expand({1.0f, 1.0f});
+    uv::Bounds2 infinite;
+    infinite.expand({0.0f, 0.0f});
+    infinite.expand({std::numeric_limits<float>::infinity(),
+                     std::numeric_limits<float>::infinity()});
+    uv::Bounds2 notANumber;
+    notANumber.expand({0.0f, 0.0f});
+    notANumber.expand({std::numeric_limits<float>::quiet_NaN(),
+                       std::numeric_limits<float>::quiet_NaN()});
+    const std::vector<uv::Bounds2> boxes = {good, infinite, notANumber, good};
+
+    for (const uv::PackStrategy strategy : {uv::PackStrategy::Shelf, uv::PackStrategy::Skyline}) {
+        uv::PackParams params;
+        params.strategy = strategy;
+        const uv::PackResult packed = uv::packBoxes(boxes, params);
+        REQUIRE(packed.ok);
+        REQUIRE(packed.islands.size() == boxes.size());
+        REQUIRE(std::isfinite(packed.scale));
+        for (const uv::PackedIsland& island : packed.islands) {
+            CHECK(std::isfinite(island.placed.mn.x));
+            CHECK(std::isfinite(island.placed.mn.y));
+            CHECK(std::isfinite(island.placed.mx.x));
+            CHECK(std::isfinite(island.placed.mx.y));
+        }
+        // The two real islands keep a real extent instead of collapsing.
+        CHECK(packed.islands[0].placed.size().x > 0.0f);
+        CHECK(packed.islands[3].placed.size().x > 0.0f);
+    }
+
+    // A non-finite margin is the same class of poison and is neutralized too.
+    uv::PackParams badMargin;
+    badMargin.margin = std::numeric_limits<float>::infinity();
+    const uv::PackResult packed = uv::packBoxes(std::vector<uv::Bounds2>{good, good}, badMargin);
+    REQUIRE(packed.ok);
+    CHECK(std::isfinite(packed.islands[0].placed.mx.x));
+    CHECK(packed.islands[0].placed.size().x > 0.0f);
+}
+
 TEST_CASE("packing preserves relative scale of unequal islands") {
     uv::Bounds2 small;
     small.expand({0, 0});

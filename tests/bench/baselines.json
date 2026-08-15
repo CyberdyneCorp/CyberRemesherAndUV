@@ -85,5 +85,6 @@
       "triangles": 0,
       "vertices": 616
     }
-  }
+  },
+  "solver": "native+geogram"
 }

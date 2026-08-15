@@ -165,6 +165,27 @@ def check_resolution_errors(tmpdir: str) -> None:
         # The suffix override is what {map} expands to, not the map's own name.
         assert preset.map_file_name(1, "head") == "head-occ-studio.png", \
             preset.map_file_name(1, "head")
+
+        # Two DIFFERENT refusals reach the same NULL return: an out-of-range
+        # index, and a basename whose expansion would leave the output
+        # directory. The binding used to report both as "map index out of
+        # range", which sent anyone hitting the second one looking at their
+        # loop counter instead of at their basename.
+        try:
+            preset.map_file_name(len(preset.maps), "head")
+        except cyberremesh.CyberError as exc:
+            assert "index" in str(exc), str(exc)
+        else:
+            raise AssertionError("an out-of-range map index must raise")
+
+        try:
+            preset.map_file_name(0, "../../escape")
+        except cyberremesh.CyberError as exc:
+            message = str(exc)
+            assert "index out of range" not in message, message
+            assert "outside the output directory" in message, message
+        else:
+            raise AssertionError("an escaping basename must raise")
     print("PASS presets: unknown name lists the built-ins, schema 99 raises "
           "IncompatibleVersionError, a user preset file resolves")
 

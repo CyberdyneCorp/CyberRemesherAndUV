@@ -267,11 +267,14 @@ Stage by stage:
 3. **Isoline extraction.** Tracing the integer isolines of that UV and intersecting
    them yields the quad mesh. Field singularities become the irregular vertices.
    A graph-cleanup pass then merges the redundant samples left along each isoline;
-   without it every cell traces as an n-gon. On a **closed** surface that pass runs
-   by default. On an **open** one it is still opt-in (`CYBER_QC_OPEN_CLEANUP`,
-   experimental) because it is only half-built: it no longer fills the surface's
-   own rim, but the graph simplification can still merge genuine boundary corners.
-   The win it is chasing is large — on an open paraboloid, median 50° → 80°.
+   without it every cell traces as an n-gon. It runs by default on **closed** and
+   **open** surfaces alike (opt out with `CYBER_QC_NO_OPEN_CLEANUP`). On an open
+   island it runs in a reduced form — hole filling only, with the graph
+   simplification skipped, because dissolving every valence-2 node there merges
+   legitimately-valence-2 isoline samples into long uneven quads. That is what
+   made it safe to enable: an open paraboloid at a ~900-quad request went from 92
+   faces at median 27° to ~1744 uniform quads at median 78°, edge-length CV 0.27,
+   and closed islands are byte-identical either way.
 4. **Pure-quad path.** The extracted mesh is relaxed onto the original surface
    (longer for the uniform quad-cover/integer bases, which tolerate it — see
    `CYBER_BASE_RELAX_ITERS`), subdivided 4× so any residual triangle or pentagon
@@ -323,6 +326,67 @@ Stage by stage:
 Source: `src/uv/src/atlas.cpp` (`greedyMergeCharts` is the shared fixpoint driver
 behind both merge passes).
 
+## Compute backends
+
+The engine dispatches its heavy primitives (parallel map/reduce/scan/sort, BVH
+build and traversal, sparse matrix–vector products, closest-point projection, ray
+casting) through one backend interface with four implementations: **CPU**
+(always compiled in, always present, and the definition of a correct result),
+**Metal**, **CUDA** and **OpenCL**. GPU backends are accelerators, never
+functional requirements — every feature completes on the CPU alone.
+
+Selection is automatic and best-first — **Metal/CUDA > OpenCL > CPU** — over the
+backends whose device is actually present; a compiled-in backend whose device is
+missing is skipped rather than failing the run. Three ways to override it:
+
+```sh
+cyberremesh --list-backends                 # what this build sees on this machine
+cyberremesh --backend opencl --input …      # pin one run
+CYBER_BACKEND=cpu  your_host_app            # pin the process, no rebuild needed
+```
+
+`CYBER_BACKEND` (`cpu` | `metal` | `cuda` | `opencl`) is the support escape hatch
+for a consumer who cannot change the host application at all; an unset or
+unrecognised value keeps the automatic choice. In-process, C++ callers use
+`cyber::accel::selectBackend(kind)` + `setDefaultBackend()`, and C callers
+`cyber_available_backends` / `cyber_set_backend` / `cyber_active_backend` — a
+kind this build or this machine does not have is refused rather than silently
+substituted, so query first and offer a real choice.
+
+Two things worth knowing if you drive a GPU backend directly: the library's
+CPU-side parallel loops keep running on the worker pool whichever backend is
+selected (a GPU no longer serializes them), and the BVH is cached on the device
+keyed on a fingerprint — so between queries hand over a **rebuilt** BVH snapshot
+rather than mutating the node/triangle arrays you already passed. Every primitive
+has a CPU-versus-GPU parity test over square, wide and tall inputs; it fails
+rather than passes silently when a compiled-in backend is absent.
+
+**Verification status:** CUDA and OpenCL are exercised on real hardware — the
+full suite runs green with either selected as the default backend. Metal has a
+preset (`macos-metal`) but no CI lane compiles it and this project's own hardware
+cannot: treat the Metal backend as **unverified**.
+
+## Environment variables
+
+Nothing here is required — the defaults are the supported configuration. These
+exist for support, debugging and experiments; a variable that is unset or holds
+an unrecognised value always means "default behaviour".
+
+| Variable | Effect |
+|---|---|
+| `CYBER_BACKEND` | Pins the process-wide compute backend: `cpu` \| `metal` \| `cuda` \| `opencl`. |
+| `CYBER_CAPI_LIB` | Full path (or directory) of the C ABI shared library the Python bindings should load. |
+| `CYBER_QC_VERBOSE` | Lets the vendored field solver's progress traces reach the console (silent by default). |
+| `CYBER_QC_DEBUG` | Traces the seamless-UV backend routing decision. |
+| `CYBER_QC_NO_ROUTE` | Disables crease-fraction routing; every island goes to the vendored solver first. |
+| `CYBER_QC_NO_NATIVE` | Disables the native seamless solve. Guidance cannot be honoured then, and the run reports it as unhonoured naming this variable. |
+| `CYBER_QC_NO_OPEN_CLEANUP` | Turns off the open-surface extraction cleanup (hole filling), restoring pre-0.2.5 behaviour on open surfaces. |
+| `CYBER_BASE_RELAX_ITERS` | Overrides the base-relax iteration count before subdivision. |
+
+`src/quadrangulate` carries a further set of `CYBER_QC_*` levers used by the
+benchmark and the plans in `docs/`; they are developer instrumentation, not part
+of the supported surface, and are documented at their call sites.
+
 ## Layout
 
 ```
@@ -363,6 +427,26 @@ ctest --preset cpu-headless
 Other presets: `cpu-headless-debug` (ASan/UBSan), `macos-metal`, `linux-cuda`,
 `windows-cuda`, `ios`, `android`.
 
+#### Supported toolchains
+
+The project's own code compiles with **warnings as errors** (`-Werror` /
+`/WX`) — that is the default, not a CI-only setting, and it is what the
+following are held to:
+
+| Toolchain | Status |
+|---|---|
+| GCC 13 (Ubuntu 24.04) | Builds and tests clean with `-Werror`; the default local and CI Linux lane. GCC 12 is covered by the same guarded suppression. |
+| AppleClang (Xcode 15.4) | CI builds and tests `cpu-headless`; also the Swift-package lane. |
+| MinGW GCC (windows-latest) | CI builds and tests `cpu-headless`, and is the shipped Windows lane. |
+| MSVC | The build files handle it (export table, warning flags) but **no CI lane compiles it** — treat as unverified. |
+
+One libstdc++ `-Wstringop-overflow` false positive on GCC 12/13 is suppressed at
+its single call site (`reverseCuthillMcKee`), guarded on `__GNUC__ >= 12 &&
+!__clang__`, so nothing else loses the diagnostic. If a toolchain newer than
+these raises a diagnostic of its own,
+`-DCYBER_WARNINGS_AS_ERRORS=OFF` is the escape hatch — it exists so you can look
+at the failure, not as a supported configuration.
+
 The `cpu-headless` preset requests `-DCYBER_WITH_QUADCOVER=ON`, which vendors and
 compiles an in-process Geogram QuadCover solver (~102 sources, a one-time build
 cost). That is the field that lets the default `quad-cover` quadrangulator **beat
@@ -373,6 +457,15 @@ seamless-UV solver** (a few degrees lower median, still fully functional and
 portable) — so `-DCYBER_WITH_QUADCOVER=ON` never hard-fails. Override with
 `-DCYBER_WITH_QUADCOVER=OFF` to skip it outright; mobile presets (`ios`/`android`)
 leave it off.
+
+That fallback is convenient and, for anything you intend to ship, dangerous: the
+field engine in the artifact would be inherited from whatever the build machine
+happened to have. `-DCYBER_REQUIRE_QUADCOVER=ON` turns the fallback into a
+configure error, which is what the release lanes set so a package cannot silently
+carry a different quadrangulator than the one the benchmarks measured. The
+vendored sources are pinned to the commit in
+`examples/reference/autoremesher.pin`, and a checkout found at any other commit
+is re-fetched rather than built.
 
 ### Use as a library
 
@@ -394,9 +487,20 @@ dependencies its build gave it (with the vendored field: `libgomp`, `libtbb`,
 the same build tree, `add_subdirectory()` also exposes the `cyber::*` targets
 (`cyber::core`, `cyber::uv`, …). Python bindings live in `python/cyberremesh/`.
 
+The shared library exports **only its `cyber_*` C ABI** — a linker version script
+on ELF, an exported-symbols list on Mach-O — so the ~4000 vendored
+Geogram/stb/tinygltf/tinyobj/AutoRemesher definitions linked in from the static
+archives are neither visible to nor interposable by a host process carrying its
+own copy of the same third-party code. Nothing but the documented header is
+reachable; if you were reaching a vendored symbol through this library, link it
+yourself.
+
 ## Development
 
 - Specs first: medium/large changes go through OpenSpec (`openspec list`).
+  `openspec validate --all --strict` runs as a CI job, so a malformed spec or
+  change delta fails the build; whether a spec still matches the code is a review
+  question, not something the validator can answer.
 - `python3 tools/license_audit.py` — dependency license gate (permissive only).
   It covers the vendored trees outside `thirdparty/` too, and fails when anything
   linked into a shipped binary is missing from `THIRD_PARTY_NOTICES.md`.
@@ -406,3 +510,9 @@ the same build tree, `add_subdirectory()` also exposes the `cyber::*` targets
   ASan/UBSan, TSan and libFuzzer lanes. The cheap half, replaying the checked-in
   corpus under `tests/fuzz/corpus`, runs on every CI leg as the
   `fuzz_corpus_replay` ctest case.
+- The packaging and release rules are tests, not prose: `build_hygiene` and
+  `release_gates` (ctest, from `tests/packaging/`) assert that the release
+  workflow runs the suite before publishing, that the wheel carries a native
+  library, that every compiled-in dependency appears in the notices file, and
+  that the version has one source of truth. `swift_abi_parity` fails when a Swift
+  source references a C symbol the header does not declare.

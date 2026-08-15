@@ -236,6 +236,26 @@ def test_no_root_scoped_path_variables() -> None:
           f"use PROJECT_/CMAKE_CURRENT_ instead: {', '.join(offenders)}")
 
 
+def test_no_orphaned_module_sources() -> None:
+    """Every source under src/ must be named by some CMakeLists.
+
+    A translation unit no target compiles is invisible to the whole suite: it
+    can name headers that no longer exist, and it can carry policy that reads
+    as live (`src/core/src/quad/quadcover.cpp` installed a process-global
+    Geogram logger setting that host-hygiene work had removed everywhere else,
+    while including a `quad/stages.hpp` that had already been deleted). Nothing
+    fails until someone adds the file back to a build.
+    """
+    referenced = "\n".join(p.read_text(encoding="utf-8") for p in _project_cmake_files())
+    orphans = []
+    for pattern in ("src/**/*.cpp", "src/**/*.mm", "src/**/*.cu"):
+        for path in sorted(REPO.glob(pattern)):
+            if path.name not in referenced:
+                orphans.append(path.relative_to(REPO).as_posix())
+    check("no orphaned source under src/", not orphans,
+          f"not compiled by any target: {', '.join(orphans)}")
+
+
 def test_add_subdirectory_consumption_resolves_paths() -> None:
     """A parent project embedding this tree must get valid include paths.
 
@@ -287,6 +307,7 @@ def main() -> int:
     test_export_control_exists_on_every_platform()
     test_capi_shared_exports_only_the_c_abi()
     test_no_root_scoped_path_variables()
+    test_no_orphaned_module_sources()
     test_add_subdirectory_consumption_resolves_paths()
 
     if FAILURES:

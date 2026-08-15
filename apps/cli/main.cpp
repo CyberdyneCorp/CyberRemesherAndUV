@@ -11,6 +11,7 @@
 #include <cstdio>
 #include <fstream>
 #include <iostream>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -73,9 +74,53 @@ struct CliOptions {
     int textureSize = 0;                    // 0 = the preset's own resolution
     int aoSamples = 0;                      // 0 = the bake default
     remesh::Parameters params;
+    std::string backend;  // empty = automatic best-first choice
     bool verbose = false;
     bool quiet = false;
 };
+
+// --backend <name> -> the compute backend to pin. Returns nullopt for a name
+// that is not one of the four kinds; an unavailable-but-spelled-correctly kind
+// is rejected separately, so "this build has no CUDA" reads differently from
+// "cuda is not a backend name".
+std::optional<cyber::accel::BackendKind> backendFromName(const std::string& name) {
+    if (name == "cpu") {
+        return cyber::accel::BackendKind::Cpu;
+    }
+    if (name == "metal") {
+        return cyber::accel::BackendKind::Metal;
+    }
+    if (name == "cuda") {
+        return cyber::accel::BackendKind::Cuda;
+    }
+    if (name == "opencl") {
+        return cyber::accel::BackendKind::OpenCl;
+    }
+    return std::nullopt;
+}
+
+// Pins the process-wide backend. Reports the failure itself (the caller only
+// needs the exit decision) because both failure modes want different advice.
+bool selectBackendByName(const std::string& name) {
+    const std::optional<cyber::accel::BackendKind> kind = backendFromName(name);
+    if (!kind) {
+        std::fprintf(stderr, "error: unknown --backend '%s' (cpu | metal | cuda | opencl)\n",
+                     name.c_str());
+        return false;
+    }
+    // selectBackend falls back to CPU for an absent kind, so asking for a GPU
+    // this build or machine does not have would silently run on the CPU.
+    const std::shared_ptr<cyber::accel::IBackend> backend = cyber::accel::selectBackend(*kind);
+    if (!backend || backend->kind() != *kind) {
+        std::fprintf(stderr,
+                     "error: backend '%s' is not available in this build or on this machine "
+                     "(--list-backends shows what is)\n",
+                     name.c_str());
+        return false;
+    }
+    cyber::accel::setDefaultBackend(backend);
+    return true;
+}
 
 void printUsage() {
     std::fprintf(stderr,
@@ -109,6 +154,8 @@ void printUsage() {
                  "  --ao-samples <int>       hemisphere rays per texel (default 64)\n"
                  "  --list-presets           print built-in export presets and exit\n"
                  "  --verbose | --quiet      diagnostic detail / errors only\n"
+                 "  --backend <name>         compute backend: cpu | metal | cuda |\n"
+                 "                           opencl (default: best available)\n"
                  "  --list-backends          print compute backends and exit\n"
                  "  --version                print version and exit\n");
 }
@@ -156,6 +203,11 @@ int parseArgs(int argc, char** argv, CliOptions& options, bool& exitEarly) {
         if (arg == "--version") {
             std::printf("cyberremesh %.*s\n", static_cast<int>(cyber::version().size()),
                         cyber::version().data());
+            // Two binaries of the same version can quadrangulate differently:
+            // the vendored Geogram quad_cover solve is a build option and is
+            // the route most meshes take. Print which one this binary carries
+            // so a quality report identifies its own solver.
+            std::printf("seamless-uv-solver %s\n", remesh::quadCoverSolverBuild().c_str());
             exitEarly = true;
             return kExitOk;
         }
@@ -290,6 +342,12 @@ int parseArgs(int argc, char** argv, CliOptions& options, bool& exitEarly) {
                 std::fprintf(stderr, "error: unknown patch policy '%s'\n", v->c_str());
                 return kExitArgs;
             }
+        } else if (arg == "--backend") {
+            const auto v = next("--backend");
+            if (!v) {
+                return kExitArgs;
+            }
+            options.backend = *v;
         } else if (arg == "--verbose") {
             options.verbose = true;
         } else if (arg == "--quiet") {
@@ -316,6 +374,11 @@ int parseArgs(int argc, char** argv, CliOptions& options, bool& exitEarly) {
     // its own rather than rejecting it.
     if (!options.bakeMaps.empty() && options.preset.empty()) {
         options.preset = "gltf-generic";
+    }
+    // Applied here rather than at the flag so the choice survives a repeated
+    // --backend and so an argument error still wins over a device probe.
+    if (!options.backend.empty() && !selectBackendByName(options.backend)) {
+        return kExitArgs;
     }
     return kExitOk;
 }

@@ -3728,4 +3728,12 @@ bool quadCoverAvailable() {
     return true;
 }
 
+std::string quadCoverSolverBuild() {
+#ifdef CYBER_HAVE_QUADCOVER
+    return "native+geogram";
+#else
+    return "native";
+#endif
+}
+
 }  // namespace cyber::remesh

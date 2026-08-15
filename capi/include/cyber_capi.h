@@ -49,6 +49,47 @@ const char* cyber_status_string(CyberStatus status);
  * valid until the next capi call on this thread. */
 const char* cyber_last_error(void);
 
+/* ---- compute backend ------------------------------------------------- */
+
+/* Compute backends the engine can run its accelerated primitives on. Which
+ * ones exist depends on how the library was BUILT (a CPU-only build compiles
+ * none of the device backends) and on what the machine has at RUNTIME.
+ * CYBER_BACKEND_AUTO is not a device: it is the automatic best-first choice,
+ * the state the process starts in. Appended in 0.6.0. */
+typedef enum CyberBackend {
+    CYBER_BACKEND_AUTO = 0,
+    CYBER_BACKEND_CPU = 1,
+    CYBER_BACKEND_METAL = 2,
+    CYBER_BACKEND_CUDA = 3,
+    CYBER_BACKEND_OPENCL = 4
+} CyberBackend;
+
+/* Fills `out` with the backends this build compiled in AND detected on this
+ * machine, best first, and returns their TOTAL count (which may exceed
+ * max_backends; pass out=NULL with max_backends=0 to query the count).
+ * CYBER_BACKEND_CPU is always present and always last, so the result is never
+ * empty. CYBER_BACKEND_AUTO is never reported — it is not a device. */
+size_t cyber_available_backends(CyberBackend* out, size_t max_backends);
+
+/* Selects the process-wide backend for every later call. CYBER_BACKEND_AUTO
+ * restores the automatic best-first choice (also honouring the CYBER_BACKEND
+ * environment variable). Selecting a backend this build or this machine does
+ * not have is reported as CYBER_ERR_INVALID_ARG and leaves the current
+ * selection untouched, so a host never silently runs somewhere it did not
+ * ask for; call cyber_available_backends first to offer a real choice.
+ *
+ * The selection is global, not per-handle: change it between operations, not
+ * while one is running on another thread. */
+CyberStatus cyber_set_backend(CyberBackend backend);
+
+/* The backend calls run on right now — a concrete device, never
+ * CYBER_BACKEND_AUTO, since AUTO always resolves to one. */
+CyberBackend cyber_active_backend(void);
+
+/* Human-readable name of the active backend's device ("CPU", the GPU model
+ * string, ...). Never NULL; valid until the next call on this thread. */
+const char* cyber_active_backend_name(void);
+
 /* ---- mesh I/O -------------------------------------------------------- */
 
 /* Loads a Wavefront OBJ. On success *out receives a newly allocated handle
@@ -831,7 +872,9 @@ CyberStatus cyber_retopo_draw_strip(CyberMesh* mesh, const float* path_xyz, size
  * vertices whose reprojection moved them by more than `resnap_epsilon`
  * (*out_resnapped) with the maximum such distance (*out_max_distance;
  * either may be NULL). Fails with CYBER_ERR_INVALID_ARG (mesh unchanged)
- * on an empty list, dead ids, or repeated vertices. */
+ * on an empty list, dead ids, or repeated vertices, and with
+ * CYBER_ERR_INVALID_PARAM on a non-finite component of `xf` — one NaN there
+ * reaches every listed vertex and a NaN position cannot be edited back. */
 CyberStatus cyber_retopo_transform_vertices(CyberMesh* mesh, const uint32_t* vertices, size_t count,
                                             const float xf[12], const CyberSnapper* snapper,
                                             float resnap_epsilon, size_t* out_resnapped,
@@ -1108,7 +1151,9 @@ const char* cyber_retopo_selection_slot_name(const CyberMesh* mesh, size_t index
  * layout as cyber_retopo_transform_vertices) per vertex scaled by its
  * selection weight, re-projecting onto the Target in the same pass when
  * `snapper` is non-NULL. *out_report may be NULL. Fails with
- * CYBER_ERR_INVALID_ARG (mesh unchanged) on a null transform. */
+ * CYBER_ERR_INVALID_ARG (mesh unchanged) on a null transform, and with
+ * CYBER_ERR_INVALID_PARAM on a non-finite component of `xf` — same gate as
+ * cyber_retopo_selection_relax's `strength`, for the same reason. */
 CyberStatus cyber_retopo_selection_transform(CyberMesh* mesh, const float xf[12],
                                              const CyberSnapper* snapper, float resnap_epsilon,
                                              CyberSoftTransformReport* out_report);
@@ -1120,7 +1165,8 @@ CyberStatus cyber_retopo_selection_transform(CyberMesh* mesh, const float xf[12]
  * `pinned_count` 0), which makes this exactly
  * cyber_retopo_selection_transform. Ids that are not live vertices are
  * harmless. Fails with CYBER_ERR_INVALID_ARG (mesh unchanged) on a null
- * transform, or on a null `pinned` with a non-zero count. */
+ * transform, or on a null `pinned` with a non-zero count, and with
+ * CYBER_ERR_INVALID_PARAM on a non-finite component of `xf`. */
 CyberStatus cyber_retopo_selection_transform_pinned(CyberMesh* mesh, const float xf[12],
                                                     const uint32_t* pinned, size_t pinned_count,
                                                     const CyberSnapper* snapper,

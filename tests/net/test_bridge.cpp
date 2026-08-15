@@ -24,6 +24,23 @@
 
 namespace net = cyber::net;
 
+// AddressSanitizer supplies its OWN global operator new/delete from libasan and
+// binds the calls made inside instrumented libstdc++ headers to them. A
+// replacement in this translation unit therefore does not replace anything
+// consistently: blocks travel from one implementation to the other and ASan
+// aborts the process with alloc-dealloc-mismatch — on doctest's own test
+// registry, before a single case runs, so the entire binary dies at startup and
+// the nightly sanitizer lane reports nothing at all. The allocation injector
+// below is compiled out under ASan and its one case skips itself.
+#if defined(__has_feature)
+#if __has_feature(address_sanitizer)
+#define CYBER_TEST_UNDER_ASAN 1
+#endif
+#endif
+#if defined(__SANITIZE_ADDRESS__)
+#define CYBER_TEST_UNDER_ASAN 1
+#endif
+
 namespace {
 
 // Address space in kB from /proc/self/status, or 0 where it is unavailable
@@ -56,6 +73,7 @@ std::size_t openFdCount() {
     return count;
 }
 
+#ifndef CYBER_TEST_UNDER_ASAN
 // One-shot heap-failure injector for threads other than the one that arms it.
 // The bridge's accept thread allocates where no test can reach — the connection
 // bookkeeping and the handler thread's own state — so this is how an exhausted
@@ -74,6 +92,7 @@ void armForeignAllocationFailure() {
 void disarmForeignAllocationFailure() { g_failForeignAlloc.store(false, std::memory_order_release); }
 
 bool foreignAllocationFailed() { return g_foreignAllocFailed.load(std::memory_order_acquire); }
+#endif  // CYBER_TEST_UNDER_ASAN
 
 // Reads one framed message off `fd`; false on disconnect or read timeout.
 bool readFrame(int fd, net::FrameDecoder& decoder, std::string& out) {
@@ -236,6 +255,15 @@ net::WireMesh sampleMesh() {
 // tests do not own. Without it armed this is the ordinary allocation path. The
 // size bound keeps the injection on the small bookkeeping allocations it is
 // aimed at, well away from any buffer another thread might take.
+//
+// The matching operator delete replacements are not optional: replacing only
+// operator new would leave blocks from std::malloc to be released by the
+// default operator delete, which agrees only because libstdc++'s default
+// happens to forward to std::free. Replacing the pair keeps malloc paired with
+// free. operator new[]/delete[] need no replacement — their defaults forward
+// to these. (Under ASan no replacement works at all; see CYBER_TEST_UNDER_ASAN
+// above.)
+#ifndef CYBER_TEST_UNDER_ASAN
 void* operator new(std::size_t size) {
     constexpr std::size_t kInjectableSize = 256;
     if (g_failForeignAlloc.load(std::memory_order_acquire) && size <= kInjectableSize &&
@@ -250,6 +278,21 @@ void* operator new(std::size_t size) {
     }
     return memory;
 }
+
+// GCC's -Wmismatched-new-delete analysis assumes the DEFAULT operator new
+// inside a replaced operator delete, so it reads `std::free` here as freeing a
+// `new`-allocated pointer. It is the replacement above that allocated it, with
+// std::malloc. Scoped to these two definitions.
+#if defined(__GNUC__) && !defined(__clang__) && __GNUC__ >= 11
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmismatched-new-delete"
+#endif
+void operator delete(void* memory) noexcept { std::free(memory); }
+void operator delete(void* memory, std::size_t) noexcept { std::free(memory); }
+#if defined(__GNUC__) && !defined(__clang__) && __GNUC__ >= 11
+#pragma GCC diagnostic pop
+#endif
+#endif  // CYBER_TEST_UNDER_ASAN
 
 TEST_CASE("frame codec round-trips and reassembles split reads") {
     const std::string payload = R"({"type":"ping"})";
@@ -524,6 +567,11 @@ TEST_CASE("stop() joins the accept thread and releases every descriptor it owned
 }
 
 TEST_CASE("an allocation failure on the accept thread drops the connection, not the process") {
+#ifdef CYBER_TEST_UNDER_ASAN
+    MESSAGE(
+        "SKIPPED: the injector replaces global operator new, which AddressSanitizer owns; the "
+        "case runs in every non-ASan configuration.");
+#else
     net::BridgeSession session;
     net::BridgeServer server(session);
     REQUIRE(server.start(0));
@@ -548,6 +596,7 @@ TEST_CASE("an allocation failure on the accept thread drops the connection, not 
     REQUIRE(client.ping());
     client.close();
     server.stop();
+#endif  // CYBER_TEST_UNDER_ASAN
 }
 
 TEST_CASE("a non-conforming server reply is a protocol error, not a throw out of the client") {

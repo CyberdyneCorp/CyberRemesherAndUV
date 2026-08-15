@@ -9,8 +9,10 @@ add_library(cyber_capi STATIC
 add_library(cyber::capi ALIAS cyber_capi)
 
 target_include_directories(cyber_capi PUBLIC include)
-target_link_libraries(cyber_capi PUBLIC cyber_core cyber_bake cyber_handoff cyber_imageio
-                                       cyber_quadrangulate cyber_retopo)
+# cyber_accel is named explicitly (not just inherited through cyber_quadrangulate)
+# because cyber_set_backend / cyber_available_backends call into it directly.
+target_link_libraries(cyber_capi PUBLIC cyber_accel cyber_core cyber_bake cyber_handoff
+                                       cyber_imageio cyber_quadrangulate cyber_retopo)
 
 # The UV atlas entry points (cyber_uv_atlas) are compiled in only when the UV
 # module is built; the symbols are always declared so the ABI stays stable.
@@ -56,8 +58,8 @@ if(CYBER_BUILD_CAPI_SHARED)
     target_include_directories(cyber_capi_shared PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
-    target_link_libraries(cyber_capi_shared PRIVATE cyber_core cyber_bake cyber_handoff cyber_imageio
-                                              cyber_quadrangulate cyber_retopo)
+    target_link_libraries(cyber_capi_shared PRIVATE cyber_accel cyber_core cyber_bake cyber_handoff
+                                              cyber_imageio cyber_quadrangulate cyber_retopo)
     if(TARGET cyber_uv)
         target_link_libraries(cyber_capi_shared PRIVATE cyber_uv)
         target_compile_definitions(cyber_capi_shared PRIVATE CYBER_CAPI_WITH_UV)

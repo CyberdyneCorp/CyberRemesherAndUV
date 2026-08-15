@@ -144,6 +144,29 @@ def _violates(kind: str, tolerance: float, direction: str,
     return abs(delta) / scale > tolerance
 
 
+# ctest's SKIP_RETURN_CODE: "this configuration is not the one the baselines
+# describe", which is neither a pass nor a regression.
+SKIP_EXIT = 77
+
+
+def solver_identity(cyber_binary: Path) -> str:
+    """The seamless-UV solver the binary carries, from `cyberremesh --version`.
+
+    Which solver a build routes to is a BUILD option (-DCYBER_WITH_QUADCOVER),
+    and the two produce genuinely different quads, so a baseline recorded on one
+    is not a gate on the other. Empty when the binary is too old to report it.
+    """
+    try:
+        out = subprocess.run([str(cyber_binary), "--version"], capture_output=True,
+                             text=True, timeout=60).stdout
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    for line in out.splitlines():
+        if line.startswith("seamless-uv-solver "):
+            return line.split(" ", 1)[1].strip()
+    return ""
+
+
 def check_against_baselines(results: list[dict]) -> int:
     baselines = json.loads(BASELINES.read_text())["results"]
     failures = 0
@@ -169,18 +192,19 @@ def check_against_baselines(results: list[dict]) -> int:
     return failures
 
 
-def record_baselines(results: list[dict]) -> None:
+def record_baselines(results: list[dict], solver: str) -> None:
     payload = {
         "comment": "Recorded by tools/bench/bench.py record on the generated "
                    "corpus. Regenerate deliberately after intentional solver "
                    "changes; the diff is the review artifact.",
+        "solver": solver,
         "results": {
             row["mesh"]: row["metrics"] for row in results if row.get("ok")
         },
     }
     BASELINES.parent.mkdir(parents=True, exist_ok=True)
     BASELINES.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
-    print(f"wrote {BASELINES} ({len(payload['results'])} meshes)")
+    print(f"wrote {BASELINES} ({len(payload['results'])} meshes, solver {solver})")
 
 
 def main() -> int:
@@ -225,13 +249,28 @@ def main() -> int:
         print("no solvers resolved", file=sys.stderr)
         return 2
 
+    # A `check` against baselines recorded on a DIFFERENT solver build is not a
+    # regression report — it is a comparison of two different algorithms, and it
+    # failed six metrics on every CYBER_WITH_QUADCOVER=OFF configuration
+    # (including the portable leg of the nightly sanitizer lane, which runs the
+    # whole ctest set). Skip instead, and say which build would be gated.
+    if args.command == "check":
+        recorded = json.loads(BASELINES.read_text()).get("solver", "")
+        current = solver_identity(args.cyber_binary)
+        if recorded and current and recorded != current:
+            print(f"bench check SKIPPED: baselines were recorded on the "
+                  f"'{recorded}' build, this binary is '{current}'. Configure "
+                  f"with the same -DCYBER_WITH_QUADCOVER setting to gate on "
+                  f"them, or re-record deliberately.")
+            return SKIP_EXIT
+
     results = benchmark(meshes, solvers, args.cache_dir / "out", args.samples,
                         args.timeout)
     if args.results:
         args.results.write_text(json.dumps(results, indent=2) + "\n")
 
     if args.command == "record":
-        record_baselines(results)
+        record_baselines(results, solver_identity(args.cyber_binary))
         return 0
     if args.command == "check":
         failures = check_against_baselines(results)

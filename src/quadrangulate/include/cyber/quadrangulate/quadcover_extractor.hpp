@@ -243,4 +243,12 @@ std::unique_ptr<IQuadrangulator> makeQuadCoverQuadrangulator(int fieldIterations
 // present, so a build without the solver still produces output.
 [[nodiscard]] bool quadCoverAvailable();
 
+// Which seamless-UV solvers THIS BUILD can route an island to. The native
+// solver is compiled in unconditionally; the vendored Geogram quad_cover solve
+// is linked only with -DCYBER_WITH_QUADCOVER=ON, and it is the route most
+// meshes actually take, so two binaries of the same version can produce
+// different quads. Reported by `cyberremesh --version` so a quality report
+// says which one produced it. Stable, machine-readable, no whitespace.
+[[nodiscard]] std::string quadCoverSolverBuild();
+
 }  // namespace cyber::remesh

@@ -62,6 +62,60 @@ TEST_CASE("capi version and status strings are well-formed") {
     REQUIRE(std::string(cyber_status_string(CYBER_ERR_INVALID_PARAM)).size() > 0);
 }
 
+TEST_CASE("capi backend selection reports what it actually selected") {
+    // The C ABI used to expose no backend selection at all: a host embedding
+    // libcyber_capi could only steer the engine with the CYBER_BACKEND
+    // environment variable, which has to be set before the first accelerated
+    // call and cannot be changed afterwards.
+    const size_t count = cyber_available_backends(nullptr, 0);
+    REQUIRE(count >= 1);  // the CPU backend is always present
+
+    std::vector<CyberBackend> backends(count, CYBER_BACKEND_AUTO);
+    REQUIRE(cyber_available_backends(backends.data(), backends.size()) == count);
+    REQUIRE(backends.back() == CYBER_BACKEND_CPU);  // always last, always there
+    for (const CyberBackend backend : backends) {
+        REQUIRE(backend != CYBER_BACKEND_AUTO);  // AUTO is not a device
+    }
+
+    // A short buffer fills what fits and still reports the true total.
+    CyberBackend first = CYBER_BACKEND_AUTO;
+    REQUIRE(cyber_available_backends(&first, 1) == count);
+    REQUIRE(first == backends.front());
+
+    // Every reported backend is selectable, and the selection is observable.
+    for (const CyberBackend backend : backends) {
+        REQUIRE(cyber_set_backend(backend) == CYBER_OK);
+        REQUIRE(cyber_active_backend() == backend);
+        REQUIRE(std::string(cyber_active_backend_name()).size() > 0);
+    }
+
+    // An absent backend is REFUSED, never silently downgraded to the CPU:
+    // selectBackend() falls back to CPU internally, so reporting CYBER_OK here
+    // would tell a host it is on the GPU while it runs on the CPU.
+    for (const CyberBackend absent : {CYBER_BACKEND_METAL, CYBER_BACKEND_CUDA,
+                                      CYBER_BACKEND_OPENCL}) {
+        if (std::find(backends.begin(), backends.end(), absent) != backends.end()) {
+            continue;
+        }
+        REQUIRE(cyber_set_backend(CYBER_BACKEND_CPU) == CYBER_OK);
+        REQUIRE(cyber_set_backend(absent) == CYBER_ERR_INVALID_ARG);
+        // The message first: every successful call clears the error slot.
+        REQUIRE(std::string(cyber_last_error()).find("not available") != std::string::npos);
+        REQUIRE(cyber_active_backend() == CYBER_BACKEND_CPU);  // selection untouched
+    }
+
+    // A value with no enumerator (a C caller passes an int) is rejected rather
+    // than mapped onto a device. 7 is the largest value the enum's underlying
+    // range admits, so the cast itself stays well-defined.
+    REQUIRE(cyber_set_backend(static_cast<CyberBackend>(7)) == CYBER_ERR_INVALID_ARG);
+
+    // AUTO restores the automatic choice, which always resolves to one of the
+    // available devices (which one depends on CYBER_BACKEND in the env).
+    REQUIRE(cyber_set_backend(CYBER_BACKEND_AUTO) == CYBER_OK);
+    REQUIRE(cyber_active_backend() != CYBER_BACKEND_AUTO);
+    REQUIRE(std::find(backends.begin(), backends.end(), cyber_active_backend()) != backends.end());
+}
+
 TEST_CASE("capi rejects null arguments") {
     CyberMesh* mesh = nullptr;
     REQUIRE(cyber_mesh_load_obj(nullptr, &mesh) == CYBER_ERR_INVALID_ARG);
@@ -1761,6 +1815,57 @@ TEST_CASE("capi weighted transform honours a pin on a high-weight vertex") {
     cyber_mesh_free(edit);
 }
 
+// Regression: the three transform entry points took the 12-float affine on
+// trust. A single NaN in it (a ray-miss unprojection, a gizmo divided by a
+// zero-length drag) reached EVERY vertex it was applied to and the call still
+// returned CYBER_OK — and a NaN position is terminal: no later edit restores
+// it, cyber_mesh_validate still reports the mesh well-formed, and the mesh
+// saves to disk that way. cyber_retopo_selection_relax already refused a NaN
+// `strength` on exactly these grounds; the transforms now match it.
+TEST_CASE("capi transforms refuse a non-finite affine instead of writing NaN positions") {
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    const float inf = std::numeric_limits<float>::infinity();
+    // Component 9 is the translation x; component 0 is a rotation term. Both
+    // reach every vertex, so both must be refused.
+    float xf[12] = {1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 3.0f, 0.0f, 0.0f};
+
+    for (const int component : {0, 9}) {
+        for (const float poison : {nan, inf}) {
+            CyberMesh* edit = makeGridMesh(4, 4, 0.0f);
+            const size_t vertices = cyber_mesh_vertex_count(edit);
+            const std::vector<float> full(vertices, 1.0f);
+            REQUIRE(cyber_retopo_selection_set_weights(edit, full.data(), full.size()) == CYBER_OK);
+            const std::vector<float> before = positionsOf(edit);
+
+            float bad[12];
+            std::copy(std::begin(xf), std::end(xf), std::begin(bad));
+            bad[component] = poison;
+
+            const uint32_t all[1] = {0u};
+            CHECK(cyber_retopo_selection_transform(edit, bad, nullptr, 0.0f, nullptr) ==
+                  CYBER_ERR_INVALID_PARAM);
+            CHECK(cyber_retopo_selection_transform_pinned(edit, bad, nullptr, 0, nullptr, 0.0f,
+                                                          nullptr) == CYBER_ERR_INVALID_PARAM);
+            CHECK(cyber_retopo_transform_vertices(edit, all, 1, bad, nullptr, 0.0f, nullptr,
+                                                  nullptr) == CYBER_ERR_INVALID_PARAM);
+            // Mesh unchanged, bit for bit.
+            CHECK(positionsOf(edit) == before);
+            cyber_mesh_free(edit);
+        }
+    }
+
+    // The same call with a finite affine still works, so the gate is not a
+    // blanket refusal.
+    CyberMesh* edit = makeGridMesh(4, 4, 0.0f);
+    const size_t vertices = cyber_mesh_vertex_count(edit);
+    const std::vector<float> full(vertices, 1.0f);
+    REQUIRE(cyber_retopo_selection_set_weights(edit, full.data(), full.size()) == CYBER_OK);
+    CyberSoftTransformReport report{};
+    REQUIRE(cyber_retopo_selection_transform(edit, xf, nullptr, 0.0f, &report) == CYBER_OK);
+    CHECK(report.moved == vertices);
+    cyber_mesh_free(edit);
+}
+
 // Documents the `moved` vs `resnapped` gap the 16_soft_selection figure showed
 // (193 moved, 180 re-snapped): `moved` counts WRITES, not displacements. A
 // vertex whose weight is positive but negligible blends to a target that rounds
@@ -1910,6 +2015,28 @@ TEST_CASE("capi document survives a file round trip and rejects a foreign buffer
     const uint8_t garbage[8] = {1, 2, 3, 4, 5, 6, 7, 8};
     CHECK(cyber_document_load(garbage, sizeof(garbage)) == nullptr);
     CHECK(cyber_document_load_file("/definitely/not/a/document.cydc") == nullptr);
+
+    // The overflow case, driven through the ABI a host actually calls rather
+    // than through Document::load directly (the engine-side case lives in
+    // tests/app/test_app.cpp). `cursor + length` used to wrap to 0 and pass the
+    // bounds check, so the reader walked off the end of the caller's buffer:
+    // an ASan heap-buffer-overflow reachable from any host that opens an
+    // untrusted .cydc.
+    std::vector<uint8_t> forged;
+    const auto appendU32 = [&forged](uint32_t v) {
+        for (size_t i = 0; i < 4; ++i) {
+            forged.push_back(static_cast<uint8_t>((v >> (i * 8)) & 0xFFu));
+        }
+    };
+    // kMagic ("CYDC"), kFormatVersion, one section, SectionId::EditMesh.
+    for (const uint32_t word : {0x43594443u, 1u, 1u, 2u}) {
+        appendU32(word);
+    }
+    appendU32(0xFFFFFFE8u);  // low half of 2^64 - 24: cursor is at byte 24
+    appendU32(0xFFFFFFFFu);  // high half
+    appendU32(1000u);        // the vertexCount an accepted span would have read
+    REQUIRE(forged.size() == 28u);
+    CHECK(cyber_document_load(forged.data(), forged.size()) == nullptr);
 
     std::error_code ec;
     std::filesystem::remove(path, ec);

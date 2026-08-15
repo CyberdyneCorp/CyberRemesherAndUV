@@ -131,6 +131,13 @@ def main() -> int:
     r = run("--version")
     check("version exit 0", r.returncode == 0)
     check("version non-empty", "cyberremesh 0." in r.stdout, r.stdout)
+    # Which seamless-UV solver this binary carries is a BUILD option that
+    # changes the quads, so a bug report has to be able to name it.
+    solver = [line.split(" ", 1)[1] for line in r.stdout.splitlines()
+              if line.startswith("seamless-uv-solver ")]
+    check("version names the seamless-uv solver", len(solver) == 1, r.stdout)
+    check("seamless-uv solver is a known build",
+          bool(solver) and solver[0] in ("native", "native+geogram"), r.stdout)
 
     # Success path with report (exit 0).
     r = run("--input", str(sphere), "--output", str(out), "--target-quads", "300",
@@ -212,6 +219,29 @@ def main() -> int:
     if report.exists():
         data = json.loads(report.read_text())
         check("pure quads: zero triangles", data["statistics"]["triangles"] == 0, str(data))
+
+    # --- compute backend selection --------------------------------------
+    # --list-backends could only ever be read, never acted on: the CLI had no
+    # way to pin a backend and the C++ selection API is not reachable from a
+    # shell, so CYBER_BACKEND in the environment was the only lever.
+    r = run("--list-backends")
+    check("list-backends exit 0", r.returncode == 0)
+    check("list-backends non-empty", bool(r.stdout.strip()), r.stdout)
+
+    backend_out = tmp / "backend.obj"
+    r = run("--input", str(sphere), "--output", str(backend_out), "--target-quads", "300",
+            "--backend", "cpu", "--quiet")
+    check("--backend cpu exit 0", r.returncode == 0, r.stderr)
+    check("--backend cpu wrote output", backend_out.exists())
+
+    # A name that is not a backend is an argument error that lists the real
+    # names, rather than a silent fall-through to whatever is default.
+    r = run("--input", str(sphere), "--output", str(out), "--backend", "gpu")
+    check("unknown backend exit 2", r.returncode == 2, str(r.returncode))
+    check("unknown backend lists names", "cpu" in r.stderr and "opencl" in r.stderr, r.stderr)
+
+    r = run("--backend")
+    check("--backend without a value exit 2", r.returncode == 2, str(r.returncode))
 
     # --- export presets ------------------------------------------------
     r = run("--list-presets")

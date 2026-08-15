@@ -194,7 +194,11 @@ if(CYBER_BUILD_CLI AND Python3_FOUND)
 
     # Benchmark regression check (tools/bench) — recorded-baseline gate over
     # the deterministic generated corpus. Needs numpy/scipy; skipped (not
-    # failed) where they are absent so bare CI runners stay green.
+    # failed) where they are absent so bare CI runners stay green. It skips
+    # itself the same way (CTest's SKIP code 77) when the binary carries a
+    # different seamless-UV solver than the baselines were recorded on: those
+    # numbers describe one solver, and comparing the other against them is not
+    # a regression report.
     execute_process(
         COMMAND ${Python3_EXECUTABLE} -c "import numpy, scipy"
         RESULT_VARIABLE CYBER_BENCH_DEPS_MISSING
@@ -204,7 +208,7 @@ if(CYBER_BUILD_CLI AND Python3_FOUND)
             COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tools/bench/bench.py
                     check --cyber-binary $<TARGET_FILE:cyberremesh>
                     --cache-dir ${PROJECT_BINARY_DIR}/bench-cache)
-        set_tests_properties(bench PROPERTIES TIMEOUT 900)
+        set_tests_properties(bench PROPERTIES TIMEOUT 900 SKIP_RETURN_CODE 77)
     else()
         message(STATUS "bench test skipped: python3 lacks numpy/scipy")
     endif()
@@ -239,8 +243,32 @@ if(TARGET cyber_capi_shared AND Python3_FOUND)
         ERROR_QUIET)
     get_filename_component(_toolchain_libstdcxx "${_toolchain_libstdcxx}" REALPATH)
     set(_py_test_env "CYBER_CAPI_LIB=$<TARGET_FILE:cyber_capi_shared>")
-    if(EXISTS "${_toolchain_libstdcxx}")
-        list(APPEND _py_test_env "LD_PRELOAD=${_toolchain_libstdcxx}")
+    set(_py_preload "${_toolchain_libstdcxx}")
+    if(NOT EXISTS "${_toolchain_libstdcxx}")
+        set(_py_preload "")
+    endif()
+    # Under AddressSanitizer the interpreter has to load the ASan runtime FIRST
+    # or ctypes aborts the moment it opens the library ("ASan runtime does not
+    # come first in initial library list") — which failed every one of these
+    # cases on the sanitizer lane, since it runs the whole ctest set. Preload
+    # the compiler's own runtime ahead of libstdc++, and turn the leak checker
+    # off for the interpreter's process: CPython retains by design, and the
+    # engine's own leaks are covered by the C++ suite in the same build.
+    string(TOUPPER "${CMAKE_BUILD_TYPE}" _cfg)
+    set(_cxx_flags "${CMAKE_CXX_FLAGS} ${CMAKE_CXX_FLAGS_${_cfg}}")
+    if(_cxx_flags MATCHES "-fsanitize=[A-Za-z,-]*address")
+        execute_process(
+            COMMAND ${CMAKE_CXX_COMPILER} -print-file-name=libasan.so
+            OUTPUT_VARIABLE _asan_runtime OUTPUT_STRIP_TRAILING_WHITESPACE
+            ERROR_QUIET)
+        get_filename_component(_asan_runtime "${_asan_runtime}" REALPATH)
+        if(EXISTS "${_asan_runtime}")
+            set(_py_preload "${_asan_runtime}:${_py_preload}")
+            list(APPEND _py_test_env "ASAN_OPTIONS=detect_leaks=0")
+        endif()
+    endif()
+    if(NOT _py_preload STREQUAL "")
+        list(APPEND _py_test_env "LD_PRELOAD=${_py_preload}")
     endif()
     foreach(_pyt test_api test_golden test_document_invariants test_bake test_uv_atlas
                  test_hole_fill_policy test_open_surface_cleanup

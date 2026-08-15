@@ -24,6 +24,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include "cyber/accel/backend.hpp"
 #include "cyber/bake/bake.hpp"
 #include "cyber/bake/field_evaluator.hpp"
 #include "cyber/core/export_preset.hpp"
@@ -231,6 +232,116 @@ const char* cyber_status_string(CyberStatus status) {
 }
 
 const char* cyber_last_error(void) { return errorSlot().c_str(); }
+
+namespace {
+
+CyberBackend toCBackend(cyber::accel::BackendKind kind) {
+    switch (kind) {
+        case cyber::accel::BackendKind::Cpu:
+            return CYBER_BACKEND_CPU;
+        case cyber::accel::BackendKind::Metal:
+            return CYBER_BACKEND_METAL;
+        case cyber::accel::BackendKind::Cuda:
+            return CYBER_BACKEND_CUDA;
+        case cyber::accel::BackendKind::OpenCl:
+            return CYBER_BACKEND_OPENCL;
+    }
+    return CYBER_BACKEND_CPU;
+}
+
+// nullopt for CYBER_BACKEND_AUTO and for any value outside the enum (a C
+// caller can pass an int).
+std::optional<cyber::accel::BackendKind> fromCBackend(CyberBackend backend) {
+    switch (backend) {
+        case CYBER_BACKEND_CPU:
+            return cyber::accel::BackendKind::Cpu;
+        case CYBER_BACKEND_METAL:
+            return cyber::accel::BackendKind::Metal;
+        case CYBER_BACKEND_CUDA:
+            return cyber::accel::BackendKind::Cuda;
+        case CYBER_BACKEND_OPENCL:
+            return cyber::accel::BackendKind::OpenCl;
+        case CYBER_BACKEND_AUTO:
+            break;
+    }
+    return std::nullopt;
+}
+
+const char* backendLabel(CyberBackend backend) {
+    switch (backend) {
+        case CYBER_BACKEND_AUTO:
+            return "auto";
+        case CYBER_BACKEND_CPU:
+            return "cpu";
+        case CYBER_BACKEND_METAL:
+            return "metal";
+        case CYBER_BACKEND_CUDA:
+            return "cuda";
+        case CYBER_BACKEND_OPENCL:
+            return "opencl";
+    }
+    return "unknown";
+}
+
+}  // namespace
+
+size_t cyber_available_backends(CyberBackend* out, size_t max_backends) {
+    return guarded("cyber_available_backends", static_cast<size_t>(0), [&] {
+        const auto backends = cyber::accel::availableBackends();
+        const size_t fill = out != nullptr ? std::min(max_backends, backends.size()) : 0;
+        for (size_t i = 0; i < fill; ++i) {
+            out[i] = toCBackend(backends[i]->kind());
+        }
+        clearError();
+        return backends.size();
+    });
+}
+
+CyberStatus cyber_set_backend(CyberBackend backend) {
+    return guarded("cyber_set_backend", CYBER_ERR_RUNTIME, [&]() -> CyberStatus {
+        const std::optional<cyber::accel::BackendKind> kind = fromCBackend(backend);
+        if (!kind) {
+            if (backend != CYBER_BACKEND_AUTO) {
+                setError(std::string("cyber_set_backend: unknown backend value ") +
+                         std::to_string(static_cast<int>(backend)));
+                return CYBER_ERR_INVALID_ARG;
+            }
+            // AUTO: drop the override; the next call re-resolves best-first.
+            cyber::accel::setDefaultBackend(nullptr);
+            clearError();
+            return CYBER_OK;
+        }
+        // selectBackend falls back to CPU for an absent kind, which would make
+        // "run on the GPU" silently mean "run on the CPU". Report it instead.
+        const std::shared_ptr<cyber::accel::IBackend> selected = cyber::accel::selectBackend(*kind);
+        if (!selected || selected->kind() != *kind) {
+            setError(std::string("cyber_set_backend: backend '") + backendLabel(backend) +
+                     "' is not available in this build or on this machine");
+            return CYBER_ERR_INVALID_ARG;
+        }
+        cyber::accel::setDefaultBackend(selected);
+        clearError();
+        return CYBER_OK;
+    });
+}
+
+CyberBackend cyber_active_backend(void) {
+    return guarded("cyber_active_backend", CYBER_BACKEND_CPU, [&] {
+        const std::shared_ptr<cyber::accel::IBackend> backend = cyber::accel::defaultBackend();
+        clearError();
+        return backend ? toCBackend(backend->kind()) : CYBER_BACKEND_CPU;
+    });
+}
+
+const char* cyber_active_backend_name(void) {
+    thread_local std::string name;
+    return guarded("cyber_active_backend_name", static_cast<const char*>(""), [&] {
+        const std::shared_ptr<cyber::accel::IBackend> backend = cyber::accel::defaultBackend();
+        name = backend ? backend->deviceName() : std::string("CPU");
+        clearError();
+        return name.c_str();
+    });
+}
 
 CyberStatus cyber_mesh_load_obj(const char* path, CyberMesh** out) {
     if (path == nullptr || out == nullptr) {
@@ -1092,6 +1203,20 @@ cyber::Vec3 toVec3(const float v[3]) { return {v[0], v[1], v[2]}; }
 // instead of letting it reach the geometry.
 bool isFinite3(const float v[3]) {
     return std::isfinite(v[0]) && std::isfinite(v[1]) && std::isfinite(v[2]);
+}
+
+// Same reasoning for the 12-float affine the transform entry points take: a
+// single NaN in it reaches EVERY vertex it is applied to, and a NaN position
+// is unrecoverable — no later edit can restore it and the mesh still reports
+// itself valid. cyber_retopo_selection_relax already refuses a NaN strength on
+// exactly these grounds; this closes the transform siblings to match.
+bool isFiniteAffine(const float xf[12]) {
+    for (int i = 0; i < 12; ++i) {
+        if (!std::isfinite(xf[i])) {
+            return false;
+        }
+    }
+    return true;
 }
 
 void writeVec3(float out[3], cyber::Vec3 v) {
@@ -2318,6 +2443,10 @@ CyberStatus cyber_retopo_transform_vertices(CyberMesh* mesh, const uint32_t* ver
             setError("cyber_retopo_transform_vertices: null/empty vertices or transform");
             return CYBER_ERR_INVALID_ARG;
         }
+        if (!isFiniteAffine(xf)) {
+            setError("cyber_retopo_transform_vertices: transform has a non-finite component");
+            return CYBER_ERR_INVALID_PARAM;
+        }
         std::vector<cyber::VertexId> ids;
         ids.reserve(count);
         std::unordered_set<uint32_t> seen;
@@ -2791,6 +2920,10 @@ CyberStatus selectionTransform(CyberMesh* mesh, const char* name, const float xf
         if (xf == nullptr) {
             setError(std::string(name) + ": null transform");
             return CYBER_ERR_INVALID_ARG;
+        }
+        if (!isFiniteAffine(xf)) {
+            setError(std::string(name) + ": transform has a non-finite component");
+            return CYBER_ERR_INVALID_PARAM;
         }
         if (pinned == nullptr && pinned_count != 0) {
             setError(std::string(name) + ": null pin list with a non-zero count");

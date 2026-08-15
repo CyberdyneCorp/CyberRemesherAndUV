@@ -1889,12 +1889,17 @@ class ExportPreset:
 
         Expanded by the engine, so the token rules never drift from what
         :func:`write_bundle` actually writes.
+
+        :raises CyberError: for an out-of-range index AND for a preset whose
+            naming pattern would place the file outside the output directory —
+            two different refusals, so the engine's own message is reported
+            rather than assuming the first.
         """
         raw = _ffi.get_lib().cyber_export_preset_map_file_name(
             self.handle, int(index), str(basename).encode("utf-8")
         )
         if not raw:
-            raise CyberError(_ffi.STATUS_ERROR, "map index out of range")
+            raise CyberError(_ffi.STATUS_ERROR, _last_error() or "map index out of range")
         return raw.decode("utf-8", "replace")
 
     def __repr__(self) -> str:

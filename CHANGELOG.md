@@ -5,6 +5,58 @@
 
 ## Unreleased
 
+### Upgrade notes
+
+Everything a consumer can notice, in one place. Each item is explained where it
+is listed; this is the index, not the account.
+
+**Different output from the same call**
+
+- `sharpEdgeDegrees` reaches the engine from the C ABI and the bindings for the
+  first time (it ran at 40° regardless before) — pass `40.0` to reproduce the old
+  topology. *(Hardened)*
+- Every AO bake produces different pixels, and `aoSamples` defaults to 64 rather
+  than 16 — pass `--ao-samples 16` for the old budget. *(Fixed)*
+- UV seam routing now follows convex creases; `convex_weight = 1.0` restores the
+  old routes. *(Fixed)*
+- The native seamless solve pins lattice-dependent seam translations, changing
+  crease-heavy output (fandisk improves at every density). *(Fixed)*
+- Meshes at coordinates far from the origin now terminate under a resolution
+  floor and a face budget instead of exhausting memory; meshes at ordinary
+  coordinates are byte-identical. *(Hardened)*
+
+**Different numbers in a report**
+
+- `AtlasResult::packedArea` is real geometry coverage, not the bounding-box
+  fraction (which is now `packedBoxArea`); `chartCount` excludes degenerate
+  islands, counted separately as `droppedCharts`. *(Fixed)*
+- `CyberSoftTransformReport.moved` counts distinct vertices for the weighted
+  relax too. *(Changed)*
+- `elapsedSeconds` now includes export. *(Changed)*
+
+**Different API behaviour**
+
+- Failures that used to escape as C++ exceptions (`nlohmann::type_error`,
+  `std::bad_alloc` from an oversized PNG, a solver throw through
+  `cyber_remesh_guided`) are typed statuses. *(Hardened)*
+- Export presets can no longer name a file outside the output directory.
+  *(Hardened)*
+- Writes report failure when the flush fails, instead of after a buffered write.
+  *(Hardened)*
+- `CyberBakeParams` gained a trailing field: recompile clients, and always
+  initialise via `cyber_default_bake_params`. *(Changed)*
+
+**Different environment**
+
+- The shared library exports only `cyber_*`; the vendored third-party symbols are
+  no longer visible. *(Changed / Hardened)*
+- The engine no longer touches the host's signal, terminate and new handlers,
+  `LC_NUMERIC`, or the `std::cout`/`std::cerr` buffers. *(Hardened)*
+- Documents carry a new optional attribute section (the format version is
+  deliberately unchanged, so both directions still load). *(Hardened)*
+- New environment variable `CYBER_BACKEND`; the Python loader no longer adopts a
+  build tree it does not own. *(Hardened)*
+
 ### Added
 
 - **Named soft-selection slots now persist with the document, end to end.**
@@ -584,6 +636,308 @@
   current Ubuntu: a signed/unsigned conversion in `bimdf_quantize.cpp`'s trail
   density counters and a lambda parameter shadowing an outer `b` in its T-join
   sort comparator. Neither changes behaviour.
+
+### Hardened — four adversarial rounds, 89 defects
+
+The authoring-track features above were built first and hardened afterwards, in
+four passes that each attacked a surface the previous one had not: the
+untrusted-input parsers under sanitizers, the network bridge over a real socket,
+the whole suite under ASan/UBSan/TSan/LSan with the image decoders fuzzed, and
+finally the GPU backends on real hardware plus the CI/release machinery. 89
+defects were closed, every one with a regression test that fails without the fix.
+Seven of the first round's fixes are recorded above under *Changed* and *Fixed*
+because they are ordinary defects in this release's own features; everything
+else is here.
+
+The one-line summary of why it matters: before this work, four decoders — the
+document container, OBJ, glTF and PLY — could be made to read outside their
+buffers from a public entry point, an ordinary mesh at site coordinates could
+exhaust host memory, a Latin-1 byte could terminate a host process from the
+network, and the first remesh rearranged the host's signal handlers,
+`std::terminate`, `std::new_handler`, `LC_NUMERIC` and the
+`std::cout`/`std::cerr` buffers.
+
+#### Behaviour changes you can notice
+
+Read this list before upgrading; everything else in this section is a strict
+improvement with no visible contract change.
+
+- **`sharpEdgeDegrees` now actually reaches the engine from the C ABI, Python
+  and Swift.** `cyber_remesh` built the default quad-cover extractor through
+  `makeQuadCoverQuadrangulator(...)` without passing the parameter, so the
+  extractor ran at the factory's `featureDegrees = 40` no matter what the caller
+  asked for, and `cyber_capi.h`'s own documented default of 90 could never take
+  effect. The CAD crease-pinning behaviour the parameter gates was therefore
+  unreachable from every binding. The CLI threaded it correctly, which is why
+  this went unnoticed. **Consequence:** a default remesh through the ABI or
+  Python now binds features at 90°, not 40°, so crease-heavy models come out
+  with different topology than the same call produced before. Pass
+  `sharpEdgeDegrees = 40.0f` (`sharp_edge_degrees=40.0`) to reproduce the old
+  output exactly.
+- **The isotropic stage now refuses splits it cannot resolve, and runs under a
+  face budget.** A radius-1 sphere at world `(5e5, 5e5, 5e5)` — a
+  centimetre-unit game world, a CAD part in site coordinates, a glTF scene with
+  a baked transform — grew without bound until `bad_alloc` or the OOM killer,
+  taking the host with it: `SplitPass` re-read its loop bound against the edge
+  array it was growing and never checked that a split made progress. At that
+  magnitude the re-triangulation diagonals quantize onto the same float grid, so
+  the pass keeps manufacturing fresh over-length diagonals — a limit cycle at
+  0.0765 / 0.1036 / 0.125 against a 0.054 target. Three guards now bound it: a
+  per-edge coordinate-resolution floor (`4 * maxAbs(coords) * FLT_EPSILON`, ~7
+  orders of magnitude below any target a mesh at ordinary coordinates asks for),
+  a midpoint-made-no-progress test that also rejects non-finite positions, and a
+  face budget (4× the count the finest allowed target implies) as the backstop.
+  **Consequence:** an input that used to die now completes; where the split rule
+  genuinely cannot converge, the result is a bounded, *under-refined* mesh rather
+  than an allocation failure. Meshes at ordinary coordinates are byte-identical
+  — verified across six models and three densities on both the quad-cover and
+  the greedy path.
+- **A preset can no longer choose where the engine writes.** `namingPattern`, a
+  map's `suffix`, and the preset `name` that `{preset}` expands to are validated
+  where the path is *formed*, so an absolute path, a `..` component, or any
+  expansion that would leave `--output`'s directory (including one arriving
+  through the caller's basename) is refused with an invalid-argument error
+  naming the offending field. Round 1 gated `namingPattern` only and the
+  `{preset}` token walked straight through it. **Consequence:** a preset that
+  deliberately wrote next to the output directory (`../maps/{basename}.png`) now
+  fails instead of writing; put the maps under the output directory, or point
+  `--output` at the directory you meant.
+- **Typed errors where an exception used to escape.** `parsePreset` threw a raw
+  `nlohmann::type_error` instead of the typed `Result` the rest of the io layer
+  returns; the PNG decoder had no output cap, so 1 MB of IDAT committed 1 GiB and
+  surfaced as `std::bad_alloc` rather than the typed error the API promises (the
+  inflate output is now bounded by the size the header itself implies);
+  `cyber_remesh_guided` let an exception unwind across the C boundary; and
+  `unwrapAtlas` / `lscmUnwrap` returned success while writing non-finite UVs into
+  every corner, which is now a failure. **Consequence:** a caller that wrapped
+  these in `try`/`catch` and treated "no exception" as success must check the
+  status code — the failures are still reported, just as `CyberStatus` /
+  `io::ErrorCode` / a Python exception type instead of whatever the parser threw.
+- **The document format gained an optional attribute section, and the version
+  did not move.** `Document::save` dropped every UV, vertex colour and
+  feature-edge tag: the round trip returned bare positions and face indices with
+  `CYBER_OK` throughout, so an application-shell autosave silently discarded UV
+  work (the existing test could not see it because `Document::operator==` is
+  deliberately structural-only). Sections 6 and 7 now carry the attribute columns
+  and feature-edge tags of the Target and the EditMesh. `kFormatVersion` stays at
+  1 **on purpose** — `load` rejects a version above its own, and unknown sections
+  are skipped by their length prefix, so bumping it would make older binaries
+  refuse files they can in fact read. **Consequence:** documents written by this
+  build are larger and are read correctly by older binaries (minus the new
+  sections); documents written by older binaries load unchanged.
+- **Soft-selection slots are re-keyed to the compacted vertex numbering on
+  save.** Serialization writes the mesh through `toIndexed`, which drops dead
+  vertices and renumbers the survivors, but the slots were written against the
+  live id space — so once the id space had a hole, every saved slot landed on the
+  wrong vertices on load. Silent corruption of painted work, which is worse than
+  a crash. **Consequence:** weights on dead ids no longer survive a round trip,
+  which is the point: they name vertices the reloaded mesh does not have.
+- **A write is not reported successful until the bytes reach the file.** The PNG
+  / EXR / ZIP writer and `cyber_document_save_file` returned success on a
+  buffered `write` and let the destructor swallow the flush failure, so a full
+  disk or an over-quota mount looked like a written file. Both now `close()`
+  explicitly and report the latched failure. **Consequence:** writes that were
+  silently truncated now fail loudly.
+- **The shared library exports only `cyber_*`.** See the *Changed* entry above
+  for the ELF/Mach-O half. Windows was the third platform and had *no* export
+  control at all: MSVC exports nothing without `__declspec(dllexport)`, so
+  `cyber_capi.dll` came out with an empty export table and produced no import
+  library — the install step then had no `cyber_capi.lib` and a C consumer got
+  unresolved externals. `WINDOWS_EXPORT_ALL_SYMBOLS` restores exactly what the
+  shipped MinGW lane already relied on. **Consequence:** on ELF, a host that was
+  reaching a vendored Geogram/stb/tinygltf symbol through our `.so` no longer
+  can; no `cyber_*` entry point changed.
+- **The library stops rearranging the host process.** The first remesh on the
+  default quad method replaced the host's `SIGSEGV`/`SIGILL`/`SIGBUS`/`SIGFPE`
+  handlers, reset `SIGINT`, replaced `std::terminate` and `std::new_handler`, and
+  `setenv`'d `LC_NUMERIC` — a DCC that installed a crash reporter lost it on the
+  first remesh. Geogram is now initialized with `GEOGRAM_NO_HANDLER` and
+  everything that flag does not cover is snapshotted and restored. One level up,
+  every solve repointed the host's `std::cout`/`std::cerr` stream buffers and
+  swallowed its concurrent logging; it no longer does. The FP exception mask is
+  deliberately *not* restored, and the reason is recorded at the call site.
+  **Consequence:** the vendored solver is silent by default (`--quiet` is
+  honoured; `CYBER_QC_VERBOSE` brings its progress traces back), and host logging
+  written during a solve now appears where the host put it.
+- **Selecting a GPU no longer serializes the CPU.** Every GPU backend overrode
+  `parallelFor` to run inline, so choosing CUDA/OpenCL/Metal made all of the
+  library's CPU-side parallel loops single-threaded. The worker pool moved to the
+  base class. Device work is serialized on a mutex, because the typed kernels are
+  now reachable from several host workers at once.
+- **The BVH is cached on the device, so the caller must not mutate it in
+  place.** `raycastBvh` / `closestPointsBvh` repacked and re-uploaded the whole
+  BVH on *every* call, and the AO bake calls them once per texel. Residency is
+  now keyed on a fingerprint. **Consequence:** hand over a rebuilt snapshot
+  rather than editing the node/triangle arrays you already passed — the contract
+  is stated in `cyber/accel/backend.hpp`.
+- **`CYBER_BACKEND=cpu|cuda|metal|opencl`** is a new environment override for
+  the process-wide default backend — the support escape hatch for a consumer who
+  can change neither the host application nor the library it loads. An unset or
+  unrecognised value keeps the automatic best-first choice.
+- **The CLI clamps `--adaptivity` and `--sharp-edge` for real.** Both ran
+  out-of-range values straight into the pipeline while printing a warning that
+  said they had been clamped.
+- **The Python loader no longer walks up into a build tree it does not own.** It
+  used to `dlopen` from any ancestor build directory; it now does so only when an
+  ancestor is genuinely a checkout of this project (`CMakeLists.txt` +
+  `capi/include/cyber_capi.h`) and neither it nor the build directory is
+  world-writable or owned by another user. **Consequence:** an installed package
+  in a venv, `/opt` or a CI scratch tree stops picking up a stray build tree; use
+  `CYBER_CAPI_LIB` to point at a library outside a checkout.
+
+#### Memory safety and untrusted input
+
+Every entry point that reads a file supplied by someone else was unhardened. Two
+were memory-unsafe with a proof-of-concept under a sanitizer, five more crashed
+or hung the ingest outright.
+
+- `ByteReader::ensure` bounds-checked with `m_pos + n > size()`, which wraps. A
+  28-byte forged document declaring a section length of 2^64−24 passed the guard,
+  produced a span of ~2^64 over a 28-byte allocation, and every subsequent read
+  walked the heap — reachable from the public `cyber_document_load_file`. The
+  check is now `n > size() - m_pos`, which cannot underflow given the class
+  invariant, and `Document::load` rejects a section longer than the bytes
+  remaining before narrowing it to `size_t`.
+- `importObj` bounds-checked the vertex index but not `texcoord_index` or
+  `normal_index`, and the vendored tinyobjloader only *warns* about a positive
+  out-of-range `vt`/`vn`: `f 1/60000000/1` segfaulted.
+- The glTF accessor/bufferView/buffer indices were used raw and the declared
+  count was never cross-checked against the decoded buffer; three ~460-byte files
+  each segfaulted.
+- A PLY handoff allocated on declared element counts with no check against the
+  payload; a truncated ASCII section hung forever, a short line read past the
+  token vector, and a forged list-property count committed 2.1 GB from 186 bytes.
+  The truncation guard was initially placed inside `if (!elem.properties.empty())`,
+  so an element declaring *zero* properties skipped it and spun to its declared
+  count — a 65-byte file hung `importMesh` and every handoff entry point forever,
+  reproduced on the shipping CLI and killed at 15 s. A property-less element can
+  carry no data in any format, so a nonzero count is now rejected in all three
+  parse paths.
+- The undo journal reserved on an attacker-controlled count, and `sampleBilinear`
+  cast a non-finite float to `int` in a public inline header.
+
+#### API and contract corrections
+
+- A recycled element id inherited the dead element's attribute row, so `flipEdge`
+  scrambled corner UVs instead of resetting them as its header documents; every
+  `alloc*` now clears the recycled row. The same class of bug resurrected hidden
+  faces and tagged edges on recycled ids, exactly as it did soft-selection
+  weights.
+- `cyber_conform` mutated positions without invalidating the render cache, so the
+  zero-copy buffers served stale geometry.
+- `CyberSeamPath` borrowed a mesh the header promised it snapshotted, and Python's
+  `SeamPath` held a borrowed `const Mesh*` without keeping the `Mesh` alive — a
+  use-after-free reachable from pure Python. Every other wrapper holding a
+  borrowed pointer was audited for the same gap.
+- `cyber_mesh_copy_positions` was the one copy accessor not visibility-filtered,
+  and four more header contracts disagreed with their implementations.
+- Two Python entry points set the element count from the caller's list while
+  flattening it unchecked, so C read past the ctypes buffer.
+- `add_subdirectory()` consumption was broken by `${CMAKE_SOURCE_DIR}`, and the
+  Python binding searched for a library filename the build never produces.
+
+#### The network bridge, the only remotely reachable surface
+
+- Any non-UTF-8 byte in a request made the error path interpolate it into the
+  reply through `e.what()`; the unguarded `dump()` then threw `type_error.316`,
+  escaped the connection thread and **terminated the host process**. No attacker
+  was needed — a client sending Latin-1 text did it. Replies now dump with a
+  replacing handler, peer bytes are never echoed back, and the connection handler
+  catches everything.
+- Connection threads were never reaped (~8 MB of address space per connection)
+  and a failed spawn aborted the server. `BridgeServer::stop` closed the listener
+  before joining the accept thread (caught by TSan).
+- The bridge **client** trusted the server the way round 2 stopped the server
+  trusting the client; the 256 MiB message ceiling is now enforced in both
+  directions and mirrored in Python as `cyberbridge.MAX_MESSAGE_BYTES`.
+
+#### Compute backends
+
+Verified on real hardware — this machine carries CUDA and OpenCL — not by
+inspection: the suite was run with the GPU as the default backend (518/518) and
+the rectangular parity case was proved to catch the defect by re-introducing it.
+
+- All three GPU backends sized and uploaded the `spmvCsr` x vector by ROW count,
+  but `accel::SparseMatrix` carried no column count and the seamless solver's
+  `Tuv` (nUv × W) and `Tt` (W × nUv) are genuinely rectangular. Wide matrices
+  indexed past the device buffer; tall ones over-read the **caller's** host
+  buffer, reproduced as a segfault against a guard page. Reachable on every GPU
+  preset, because those presets do not set `CYBER_WITH_QUADCOVER` and the native
+  solver is therefore the only route. The column count now travels through the
+  primitive.
+- The reason it survived: `test_gpu_parity` compared the CPU backend against
+  itself in every configuration CI builds, and its CSR generator could only emit
+  square matrices. It now sweeps square, wide and tall against every available
+  backend, and no longer passes silently when a compiled-in backend is absent.
+- `cuda_backend.cu` checked no CUDA status anywhere, so a failed allocation or
+  launch silently returned the caller's untouched buffer. The ray/triangle test
+  was not watertight at shared edges; `availableBackends()` rebuilt the context
+  and recompiled kernels on every call; the `CpuBackend` nesting guard was not
+  armed on the serial fast path; `metal_backend.mm` was missing two includes.
+- **Metal remains uncompilable here and is the one change made by inspection
+  alone.**
+
+#### Performance — output bit-identical, and verified so
+
+- The AO bake spawned and joined ~`hardware_concurrency` threads *per texel*.
+- `accel::raycast` deep-copied the whole BVH on every call, and the GPU path
+  re-uploaded it; device residency measured flat in triangle count where it
+  previously grew (OpenCL 1731 ms → 470 ms at 25k triangles).
+- glTF import was quadratic in triangle count with `TEXCOORD_0` or `NORMAL`, and
+  `addFace` was O(n²) in face arity.
+- The quad-cover path retained ~1.6 kB per island per call **forever** in
+  Geogram's process-global citation registry — reachable memory, so invisible to
+  LeakSanitizer, and exactly the profile that kills a long-running host. A farm
+  worker or DCC plugin can now remesh for hours without growing.
+- Net effect on the unit suite: 11.2 s → 5.1 s with the golden tests unchanged.
+
+#### Packaging, CI and licensing
+
+The release machinery is what keeps all of the above from rotting, and it had
+gaps of its own.
+
+- **The release workflow published binaries without running a single test.** The
+  packaging scripts never invoked ctest. A test job now gates the artifacts, and
+  its Linux leg tests the configuration the Linux package actually ships.
+- **The Python wheel contained no native library**, so the PyPI lane could not
+  produce a working wheel. `packaging/publish/stage_native_lib.py` stages it and
+  `pyproject.toml`'s `package-data` keeps it.
+- **AutoRemesher, Geogram and Eigen are compiled into shipped binaries but were
+  invisible to the license gate and absent from `THIRD_PARTY_NOTICES.md`** — MIT,
+  BSD-3-Clause and MPL-2.0 respectively, verified against the vendored LICENSE
+  files rather than from memory. `tools/license_audit.py` now covers the vendored
+  trees outside `thirdparty/` and fails when anything linked into a shipped
+  binary is missing from the notices file, which ships inside each artifact.
+- **Nothing re-ran the suite under a sanitizer and the fuzz campaigns left
+  nothing behind.** `.github/workflows/hardening.yml` is a nightly (and manually
+  triggerable) ASan/UBSan lane — run in *both* quadcover configurations, since
+  the sanitizer preset otherwise builds a different quadrangulator than ships —
+  plus TSan and libFuzzer. The fuzz harnesses and a seed corpus are checked in
+  under `tests/fuzz/`, and replaying that corpus runs as the ordinary
+  `fuzz_corpus_replay` ctest case on every CI leg.
+- Undeclared runtime dependencies on `libtbb`/`libgomp`/`libz`, and an AppImage
+  that bundled no libraries — the same class as the 0.2.3 Windows DLL bug. No
+  lane was guaranteed to compile the vendored solver, so a release could silently
+  ship the wrong field engine.
+- `-DCYBER_BUILD_RETOPO=OFF` is rejected at configure time instead of failing at
+  the final link (see *Fixed*), and the tree builds warning-clean under `-Werror`
+  on GCC 13 / Ubuntu 24.04.
+
+#### What was verified, and how
+
+- **Tests:** 430 → 519 cases and 132 831 → 141 278 assertions across the four
+  rounds; ctest 21/21 → 26/26. Every fix carries a regression test that fails
+  without it.
+- **Sanitizers:** the whole suite is free of ASan, UBSan, TSan and LeakSanitizer
+  reports in project code across three passes, with the leak checker validated
+  against a deliberate-leak canary.
+- **Fuzzing:** `src/imageio` survived 18.6M executions under ASan/UBSan with no
+  crash, hang or leak; the mesh decoders have checked-in corpora and replay on
+  every CI leg.
+- **GPU:** the full suite with the GPU as the default backend, 518/518, on CUDA
+  and OpenCL hardware.
+- **Not verified:** Metal (no Apple hardware here), and the MSVC lane has build
+  files but no CI job.
 
 ## 0.2.5
 

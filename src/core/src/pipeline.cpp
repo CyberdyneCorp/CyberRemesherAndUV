@@ -9,6 +9,7 @@
 #include <functional>
 #include <limits>
 #include <map>
+#include <optional>
 #include <queue>
 #include <thread>
 
@@ -37,6 +38,65 @@ double totalSurfaceArea(const Mesh& mesh) {
         }
     }
     return area;
+}
+
+// Largest |coordinate| anywhere on the mesh. float spacing at magnitude m is
+// m * FLT_EPSILON, so this is what decides whether a derived edge length is
+// representable at all.
+float maxAbsCoordinate(const Mesh& mesh) {
+    float maxAbs = 0.0f;
+    for (Index vi = 0; vi < mesh.vertexCapacity(); ++vi) {
+        const VertexId v{vi};
+        if (!mesh.isAlive(v)) {
+            continue;
+        }
+        const Vec3 p = mesh.position(v);
+        maxAbs = std::max({maxAbs, std::fabs(p.x), std::fabs(p.y), std::fabs(p.z)});
+    }
+    return maxAbs;
+}
+
+// The isotropic split pass refuses any split whose halves the float grid cannot
+// separate (isotropic.cpp, kMinResolvableSpacings), so a target edge length
+// below that floor cannot be honoured: the geometry is already quantized onto
+// a grid coarser than the request. That happens for a mesh parked far from the
+// world origin — a scan in UTM/site coordinates, a glTF scene with a baked
+// translation — and it used to be silent, the run simply coming back at
+// roughly the input density.
+//
+// Clamp-and-warn, the same contract validate() applies to every other
+// out-of-range parameter, and for a concrete reason beyond honesty: the
+// downstream quadrangulator does NOT share the float grid (the vendored
+// seamless solve works in double), so it accepted the un-honourable target and
+// tried to fit thousands of quads onto the handful of distinct positions the
+// coordinates can express. On a unit sphere at 1e7 that turned a 0.02 s run
+// into one still going after five minutes. Clamping asks every stage for the
+// density the coordinates can actually carry.
+constexpr float kMinResolvableSpacings = 4.0f;  // mirrors isotropic.cpp
+
+struct ResolvedEdgeLength {
+    float edgeLength = 0.0f;
+    std::optional<ParameterIssue> issue;
+};
+
+ResolvedEdgeLength resolveAgainstCoordinates(const Mesh& mesh, float targetEdgeLength) {
+    const float maxAbs = maxAbsCoordinate(mesh);
+    const float resolution =
+        kMinResolvableSpacings * maxAbs * std::numeric_limits<float>::epsilon();
+    // `resolution > 0` and `isfinite` also reject a mesh whose coordinates are
+    // NaN or infinite: there is no representable density to clamp to there, and
+    // substituting one would replace a coarse result with an unusable one.
+    if (!(targetEdgeLength <= resolution) || !(resolution > 0.0f) || !std::isfinite(resolution)) {
+        return {targetEdgeLength, std::nullopt};
+    }
+    char message[320];
+    std::snprintf(message, sizeof(message),
+                  "target edge length %.6g is below the %.6g float resolution of coordinates up "
+                  "to %.6g: the mesh is too far from the origin for the requested density. Using "
+                  "%.6g instead — move the mesh near the origin to get the density you asked for.",
+                  static_cast<double>(targetEdgeLength), static_cast<double>(resolution),
+                  static_cast<double>(maxAbs), static_cast<double>(resolution));
+    return {resolution, ParameterIssue{"targetQuadCount", message, false}};
 }
 
 // Extracts one island into a standalone mesh (local vertex indexing).
@@ -677,7 +737,14 @@ PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSi
         result.error = lengthResult.error;
         return result;
     }
-    result.stats.targetEdgeLength = lengthResult.edgeLength;
+    // Every later stage reads `effectiveEdgeLength`, so the reported statistic
+    // is the density that actually ran, not the one that was asked for.
+    const ResolvedEdgeLength resolved = resolveAgainstCoordinates(work, lengthResult.edgeLength);
+    const float effectiveEdgeLength = resolved.edgeLength;
+    result.stats.targetEdgeLength = effectiveEdgeLength;
+    if (resolved.issue) {
+        result.parameterIssues.push_back(*resolved.issue);
+    }
 
     // Stage 2: islands (face-complete, deterministic order — mesh-core spec).
     const auto islandFaces = work.islands();
@@ -716,7 +783,7 @@ PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSi
                                        IslandOutcome& oc) -> IsotropicStatus {
         const ReferenceSurface reference(m, params.smoothNormalDegrees);
         IsotropicOptions iso;
-        iso.targetEdgeLength = lengthResult.edgeLength;
+        iso.targetEdgeLength = effectiveEdgeLength;
         iso.adaptivity = params.adaptivity;
         iso.smoothNormalDegrees = params.smoothNormalDegrees;
         iso.density = guidanceField.get();  // null unless painted density was supplied
@@ -822,7 +889,7 @@ PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSi
             progress ? progress->subrange(progressBase + weight * 0.3f,
                                           progressBase + weight * 0.9f, "quadrangulate")
                      : ProgressSink{};
-        const auto quadOutcome = quad->quadrangulate(outcome.mesh, lengthResult.edgeLength,
+        const auto quadOutcome = quad->quadrangulate(outcome.mesh, effectiveEdgeLength,
                                                      progress ? &quadSink : nullptr, cancel);
         if (quadOutcome.cancelled) {
             result.status = RunStatus::Cancelled;
@@ -864,7 +931,7 @@ PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSi
                     }
                     audit.densityHonored = guidanceField->hasDensity();
                 }
-                const auto fbOutcome = fb->quadrangulate(outcome.mesh, lengthResult.edgeLength,
+                const auto fbOutcome = fb->quadrangulate(outcome.mesh, effectiveEdgeLength,
                                                          progress ? &quadSink : nullptr, cancel);
                 if (fbOutcome.cancelled) {
                     result.status = RunStatus::Cancelled;

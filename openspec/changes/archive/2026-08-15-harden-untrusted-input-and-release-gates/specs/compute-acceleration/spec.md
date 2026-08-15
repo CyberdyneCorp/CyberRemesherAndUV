@@ -1,21 +1,6 @@
-# compute-acceleration Specification
+# compute-acceleration (delta)
 
-## Purpose
-TBD - created by archiving change bootstrap-v1-platform. Update Purpose after archive.
-## Requirements
-### Requirement: Backend abstraction with mandatory CPU reference
-Compute-intensive engine work SHALL dispatch through a single backend abstraction exposing typed device buffers and a fixed primitive set (parallel map, reduce, scan, sort, BVH build/traverse, sparse matrix–vector multiply, closest-point projection, ray casting). A CPU backend SHALL always be compiled in, SHALL implement every primitive, and SHALL define correct results. GPU backends are optional accelerators, never functional requirements.
-
-#### Scenario: CPU-only machine runs everything
-- **WHEN** the application runs on hardware with no supported GPU
-- **THEN** every feature (remesh, snapping, baking) SHALL complete correctly on the CPU backend
-
-### Requirement: Supported GPU backends
-The system SHALL provide a Metal backend on Apple platforms (macOS, iPadOS/iOS) and a CUDA backend on NVIDIA hardware (Windows, Linux) as tier-1 backends, and an OpenCL 1.2+ backend (Windows, Linux, Android) as tier-2. Tier-2 absence SHALL degrade gracefully to CPU without feature loss.
-
-#### Scenario: Backend per platform
-- **WHEN** the application starts on an Apple-silicon Mac
-- **THEN** the Metal backend SHALL be available for selection and used by default for accelerated primitives
+## MODIFIED Requirements
 
 ### Requirement: Runtime detection, selection, and fallback
 At startup the system SHALL enumerate available backends with device names and capability info, select the best available by a documented priority (Metal/CUDA > OpenCL > CPU), allow the user to override the selection, and fall back to CPU automatically when a GPU backend fails at runtime (device lost, out of memory, compile error) — surfacing a warning, never crashing or producing partial results.
@@ -63,4 +48,3 @@ A parity test SHALL be incapable of passing vacuously. It SHALL compare the CPU 
 #### Scenario: Rectangular operands are covered
 - **WHEN** the sparse matrix–vector parity case runs
 - **THEN** it SHALL exercise square, wide (more columns than rows) and tall (more rows than columns) matrices, so a backend that sizes its operand buffers by row count is caught
-
