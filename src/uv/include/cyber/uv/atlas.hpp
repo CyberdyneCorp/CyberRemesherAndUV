@@ -42,6 +42,9 @@ struct AtlasOptions {
 };
 
 struct AtlasResult {
+    // True only when every chart was parameterized (with finite UVs) and the
+    // pack succeeded. A mesh carrying a non-finite vertex position reports
+    // ok=false instead of writing non-finite UVs into the atlas.
     bool ok = false;
     // Charts that actually occupy area in the packed atlas.
     int chartCount = 0;

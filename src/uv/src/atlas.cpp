@@ -313,7 +313,7 @@ UnwrapResult planarProject(const Mesh& mesh, std::span<const FaceId> island) {
         normal = normal + mesh.faceNormal(face);
     }
     normal = normalized(normal);
-    if (lengthSquared(normal) < 0.5f) {
+    if (!(lengthSquared(normal) >= 0.5f)) {  // also catches a non-finite normal
         normal = {0.0f, 0.0f, 1.0f};
     }
     // A tangent basis (t, b) orthogonal to the plane normal.
@@ -333,7 +333,10 @@ UnwrapResult planarProject(const Mesh& mesh, std::span<const FaceId> island) {
             out.uv.push_back({dot(p, t), dot(p, b)});
         }
     }
-    out.ok = out.vertices.size() >= 3;
+    // A non-finite position projects to a non-finite UV; the fallback reports
+    // failure rather than handing the chart back with an unusable layout.
+    out.ok = out.vertices.size() >= 3 &&
+             std::all_of(out.uv.begin(), out.uv.end(), [](Vec2 p) { return isFinite(p); });
     return out;
 }
 
@@ -487,6 +490,7 @@ AtlasResult unwrapAtlas(Mesh& mesh, const AtlasOptions& options) {
     }
 
     static_cast<void>(ensureUvColumn(mesh));
+    bool allParameterized = true;
     for (const std::vector<FaceId>& island : islands) {
         UnwrapResult unwrap = lscmUnwrap(mesh, island, options.unwrap);
         if (!unwrap.ok) {
@@ -497,6 +501,8 @@ AtlasResult unwrapAtlas(Mesh& mesh, const AtlasOptions& options) {
         }
         if (unwrap.ok) {
             writeIslandUv(mesh, island, unwrap);
+        } else {
+            allParameterized = false;
         }
     }
 
@@ -538,7 +544,9 @@ AtlasResult unwrapAtlas(Mesh& mesh, const AtlasOptions& options) {
     result.packedArea = packResult.usedArea;
     result.packedBoxArea = packResult.boxArea;
     result.texelDensity = packResult.texelDensity;
-    result.ok = packResult.ok;
+    // A chart neither LSCM nor the planar fallback could parameterize leaves its
+    // corners without UVs, so the atlas is incomplete however well it packed.
+    result.ok = packResult.ok && allParameterized;
 
     // An island whose UVs stayed degenerate (both LSCM and the planar fallback
     // failed, or the projection collapsed to a line) packs to a box with a zero

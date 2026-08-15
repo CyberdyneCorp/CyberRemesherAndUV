@@ -14,6 +14,7 @@ Two halves:
 """
 
 import os
+import pathlib
 import re
 import sys
 import tempfile
@@ -133,16 +134,19 @@ def check_document_round_trip(mesh) -> None:
             restored.load_selection("taper")
             assert restored.selection_weights() == saved
 
-    handle, path = tempfile.mkstemp(suffix=".cydc")
-    os.close(handle)
-    try:
-        with Document() as doc:
-            doc.set_edit_mesh(mesh)
-            doc.save_file(path)
-        with Document.load_file(path) as loaded:
-            assert loaded.selection_weights("taper") == saved
-    finally:
-        os.unlink(path)
+    # Regression: save_file/load_file used to call path.encode() directly, so a
+    # pathlib.Path raised AttributeError where every sibling path API took one.
+    for flavor in (str, pathlib.Path):
+        handle, path = tempfile.mkstemp(suffix=".cydc")
+        os.close(handle)
+        try:
+            with Document() as doc:
+                doc.set_edit_mesh(mesh)
+                doc.save_file(flavor(path))
+            with Document.load_file(flavor(path)) as loaded:
+                assert loaded.selection_weights("taper") == saved
+        finally:
+            os.unlink(path)
     mesh.clear_selection()
 
 

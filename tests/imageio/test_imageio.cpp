@@ -112,6 +112,24 @@ TEST_CASE("PNG rejects invalid arguments") {
     CHECK_FALSE(cyber::imageio::writePng(path, 1, 1, 3, nullptr));
 }
 
+TEST_CASE("writers report failure when the final flush cannot reach the device") {
+    // /dev/full accepts the open and swallows small writes into the stdio
+    // buffer; the ENOSPC only surfaces when that buffer is flushed. Anything
+    // smaller than the buffer must still be reported as a failed write.
+    const std::string full = "/dev/full";
+    if (!std::filesystem::exists(full)) {
+        return;
+    }
+    const std::array<std::uint8_t, 8 * 8 * 4> px{};
+    CHECK_FALSE(cyber::imageio::writePng(full, 8, 8, 4, px.data()));
+    const std::array<float, 8 * 8 * 3> fx{};
+    CHECK_FALSE(cyber::imageio::writeExr(full, 8, 8, 3, fx.data()));
+
+    cyber::imageio::ZipWriter zip;
+    zip.add("a.txt", Bytes{'h', 'i'});
+    CHECK_FALSE(zip.finish(full));
+}
+
 TEST_CASE("EXR has correct magic and version") {
     const std::string path = tempPath("cyber_imageio_test.exr");
     const std::array<float, 2 * 2 * 3> px = {

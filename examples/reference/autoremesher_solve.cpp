@@ -8,6 +8,7 @@
 // so we simply leave the runtime initialized for the life of the process.
 #include "autoremesher_solve.hpp"
 
+#include <atomic>
 #include <cstddef>
 #include <cstdlib>
 #include <exception>
@@ -19,6 +20,22 @@
 
 #ifndef _WIN32
 #include <csignal>
+#endif
+
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+
+// oneAPI TBB (2021+) moved its headers under <oneapi/tbb/>; the vendored solver
+// does the same dance for the headers it needs.
+#if defined(__has_include)
+#if __has_include(<oneapi/tbb/task_arena.h>)
+#include <oneapi/tbb/task_arena.h>
+#else
+#include <tbb/task_arena.h>
+#endif
+#else
+#include <tbb/task_arena.h>
 #endif
 
 #include <geogram/basic/common.h>
@@ -119,17 +136,73 @@ bool solverOutputWanted() {
     return wanted;
 }
 
-class NullBuffer : public std::streambuf {
+// Non-zero on a thread that is inside solveSeamlessUv.
+thread_local std::size_t t_solveDepth = 0;
+
+// std::cout/std::cerr are the HOST's streams: a solve may drop what the vendored
+// solver writes to them, never what the host writes. The solver runs on the
+// thread that called in plus the pool workers it farms the islands out to, so
+// those are the threads whose writes are dropped; a write from any other thread
+// is the host's own logging and is passed through untouched.
+//
+// Arena slot 0 belongs to whichever external thread owns the arena and stays
+// claimed after that thread's last TBB call, so only a worker slot (> 0)
+// identifies a thread the solver is running on.
+bool writingFromSolve() {
+    if (t_solveDepth != 0) {
+        return true;
+    }
+    if (tbb::this_task_arena::current_thread_index() > 0) {
+        return true;
+    }
+#ifdef _OPENMP
+    return omp_get_level() > 0;
+#else
+    return false;
+#endif
+}
+
+// Forwards the host's writes to the buffer the stream had; swallows the solver's.
+class SolveFilterBuffer : public std::streambuf {
+  public:
+    void setTarget(std::streambuf* target) { target_.store(target, std::memory_order_release); }
+
   protected:
-    int overflow(int c) override { return c; }
-    std::streamsize xsputn(const char*, std::streamsize n) override { return n; }
+    int overflow(int c) override {
+        std::streambuf* const target = passThroughTarget();
+        if (target == nullptr || c == traits_type::eof()) {
+            return traits_type::not_eof(c);
+        }
+        return target->sputc(static_cast<char>(c));
+    }
+    std::streamsize xsputn(const char* s, std::streamsize n) override {
+        std::streambuf* const target = passThroughTarget();
+        return target == nullptr ? n : target->sputn(s, n);
+    }
+    int sync() override {
+        std::streambuf* const target = passThroughTarget();
+        return target == nullptr ? 0 : target->pubsync();
+    }
+
+  private:
+    // The host's buffer for a host write, nullptr (drop) for a solver write.
+    std::streambuf* passThroughTarget() const {
+        return writingFromSolve() ? nullptr : target_.load(std::memory_order_acquire);
+    }
+
+    std::atomic<std::streambuf*> target_{nullptr};
 };
 
 // Deliberately leaked: std::cout/std::cerr must never be left pointing at a
-// destroyed sink if the process exits while a solve is running.
-std::streambuf& nullSink() {
-    static std::streambuf* sink = new NullBuffer();
-    return *sink;
+// destroyed filter if the process exits while a solve is running.
+SolveFilterBuffer& outFilter() {
+    static SolveFilterBuffer* filter = new SolveFilterBuffer();
+    return *filter;
+}
+
+SolveFilterBuffer& errFilter() {
+    static SolveFilterBuffer* filter = new SolveFilterBuffer();
+    return *filter;
 }
 
 std::mutex& consoleMutex() {
@@ -138,32 +211,47 @@ std::mutex& consoleMutex() {
 }
 
 // Guarded by consoleMutex(). std::cout/std::cerr are process globals, so
-// concurrent island solves share ONE redirection: only the outermost guard swaps
-// the buffers, and only the last one out puts the host's back.
+// concurrent island solves share ONE interposition: only the outermost guard
+// installs the filters, and only the last one out takes them back off.
 std::size_t g_consoleDepth = 0;
 std::streambuf* g_savedOut = nullptr;
 std::streambuf* g_savedErr = nullptr;
 
-// Points std::cout/std::cerr at a null sink for the duration of a solve.
+// Interposes a thread-aware filter on std::cout/std::cerr for the duration of a
+// solve, so the solver's chatter is dropped while the host keeps its console.
 class ConsoleSilencer {
   public:
     ConsoleSilencer() : engaged_(!solverOutputWanted()) {
+        ++t_solveDepth;
         if (!engaged_) {
             return;
         }
         const std::lock_guard<std::mutex> lock(consoleMutex());
         if (g_consoleDepth++ == 0) {
-            g_savedOut = std::cout.rdbuf(&nullSink());
-            g_savedErr = std::cerr.rdbuf(&nullSink());
+            g_savedOut = std::cout.rdbuf();
+            g_savedErr = std::cerr.rdbuf();
+            outFilter().setTarget(g_savedOut);
+            errFilter().setTarget(g_savedErr);
+            std::cout.rdbuf(&outFilter());
+            std::cerr.rdbuf(&errFilter());
         }
     }
     ~ConsoleSilencer() {
+        --t_solveDepth;
         if (!engaged_) {
             return;
         }
         const std::lock_guard<std::mutex> lock(consoleMutex());
-        if (--g_consoleDepth == 0) {
+        if (--g_consoleDepth != 0) {
+            return;
+        }
+        // Only un-interpose what is still ours: a host that redirected its own
+        // stream mid-solve owns it now, and writing our snapshot back would
+        // silently undo that.
+        if (std::cout.rdbuf() == &outFilter()) {
             std::cout.rdbuf(g_savedOut);
+        }
+        if (std::cerr.rdbuf() == &errFilter()) {
             std::cerr.rdbuf(g_savedErr);
         }
     }

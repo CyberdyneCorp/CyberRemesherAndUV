@@ -1,5 +1,6 @@
 #include <doctest.h>
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -23,6 +24,19 @@ Mesh makeQuadMesh() {
     const std::vector<Vec3> positions = {
         {0.0f, 0.0f, 0.0f}, {1.0f, 0.0f, 0.0f}, {1.0f, 1.0f, 0.0f}, {0.0f, 1.0f, 0.0f}};
     const std::vector<std::vector<Index>> faces = {{0, 1, 2, 3}};
+    return Mesh::fromIndexed(positions, faces);
+}
+
+// 3x3 vertex grid of four quads; vertex id of (x, y) is y * 3 + x.
+Mesh makeGridMesh() {
+    std::vector<Vec3> positions;
+    for (int y = 0; y < 3; ++y) {
+        for (int x = 0; x < 3; ++x) {
+            positions.push_back(Vec3{static_cast<float>(x), static_cast<float>(y), 0.0f});
+        }
+    }
+    const std::vector<std::vector<Index>> faces = {
+        {0, 1, 4, 3}, {1, 2, 5, 4}, {3, 4, 7, 6}, {4, 5, 8, 7}};
     return Mesh::fromIndexed(positions, faces);
 }
 
@@ -134,6 +148,46 @@ TEST_CASE("named soft selections round-trip through the document") {
     REQUIRE(loaded->softSelections.size() == 2);
     CHECK(loaded->softSelections.at("taper") == doc.softSelections.at("taper"));
     CHECK(loaded->softSelections.at("arm") == doc.softSelections.at("arm"));
+}
+
+// Regression: the mesh travels through toIndexed, which drops dead vertices and
+// renumbers the survivors, while slot weights are indexed by vertex id. Without
+// a matching rebase, a document saved after any deletion reloaded with every
+// weight shifted by the hole — silently selecting geometry the user never
+// painted. The weights must still sit on the same POSITIONS after the trip.
+TEST_CASE("soft-selection slots follow the compacted ids across a deleted vertex") {
+    app::Document doc;
+    doc.editMesh = makeGridMesh();
+    doc.editMesh.removeFace(cyber::FaceId{0});
+    REQUIRE(doc.editMesh.removeIsolatedVertex(cyber::VertexId{0}));
+    REQUIRE(doc.editMesh.vertexCount() == 8);
+    REQUIRE(doc.editMesh.vertexCapacity() == 9);  // id 0 is now a hole
+
+    // Paint the far corner block: ids 4, 5, 7, 8 = (1,1), (2,1), (1,2), (2,2).
+    const std::vector<Vec3> painted = {
+        {1.0f, 1.0f, 0.0f}, {2.0f, 1.0f, 0.0f}, {1.0f, 2.0f, 0.0f}, {2.0f, 2.0f, 0.0f}};
+    std::vector<float> weights(doc.editMesh.vertexCapacity(), 0.0f);
+    for (const Index id : {4u, 5u, 7u, 8u}) {
+        weights[id] = 1.0f;
+    }
+    doc.softSelections["region"] = weights;
+
+    const auto loaded = app::Document::load(doc.save());
+    REQUIRE(loaded.has_value());
+
+    std::vector<Vec3> positions;
+    std::vector<std::vector<Index>> faces;
+    loaded->editMesh.toIndexed(positions, faces);
+    const std::vector<float>& restored = loaded->softSelections.at("region");
+    CHECK(restored.size() == positions.size());  // one weight per live vertex
+
+    for (std::size_t i = 0; i < positions.size(); ++i) {
+        const bool wanted =
+            std::find(painted.begin(), painted.end(), positions[i]) != painted.end();
+        const float got = i < restored.size() ? restored[i] : 0.0f;
+        CHECK(got == doctest::Approx(wanted ? 1.0f : 0.0f));
+    }
+    CHECK(*loaded == doc);
 }
 
 // The slot section is append-only: it is emitted only when slots exist, so a

@@ -123,6 +123,41 @@ TEST_CASE("capi loads, remeshes and reports stats for a cube") {
     std::filesystem::remove(savePath, ec);
 }
 
+// Regression: the C ABI built the default quad-cover extractor without the
+// feature angle, so params.sharpEdgeDegrees never reached the parameterization
+// and every binding ran at the factory's 40 degrees — the ABI's own documented
+// default of 90 could not take effect, and two runs differing only in the knob
+// returned bit-identical geometry while the CLI's diverged.
+TEST_CASE("capi remesh honours sharpEdgeDegrees on the default quad-cover path") {
+    const std::filesystem::path objPath = writeCubeObj();
+    CyberMesh* input = nullptr;
+    REQUIRE(cyber_mesh_load_obj(objPath.string().c_str(), &input) == CYBER_OK);
+
+    const auto remeshAt = [input](float sharpDegrees) {
+        CyberRemeshParams params{};
+        cyber_default_params(&params);
+        params.targetQuads = 200;  // keep the unit test fast
+        params.sharpEdgeDegrees = sharpDegrees;
+        CyberMesh* output = nullptr;
+        REQUIRE(cyber_remesh(input, &params, nullptr, nullptr, nullptr, &output) == CYBER_OK);
+        REQUIRE(output != nullptr);
+        std::vector<float> positions(cyber_mesh_copy_positions(output, nullptr, 0));
+        cyber_mesh_copy_positions(output, positions.data(), positions.size());
+        cyber_mesh_free(output);
+        return positions;
+    };
+
+    // A cube's creases are features at 40 degrees and not at 90, so the two
+    // runs cannot agree unless the value is being dropped on the way in.
+    CHECK(remeshAt(40.0f) != remeshAt(90.0f));
+    // Same value twice is still deterministic (the knob, not run-to-run noise).
+    CHECK(remeshAt(40.0f) == remeshAt(40.0f));
+
+    cyber_mesh_free(input);
+    std::error_code ec;
+    std::filesystem::remove(objPath, ec);
+}
+
 namespace {
 // Two-triangle unit plane in z=0 with per-corner UVs (vt) — usable as both the
 // low-poly (needs UVs) and the coincident high-poly for a bake smoke test.
@@ -567,6 +602,116 @@ TEST_CASE("capi soft selection: a non-finite paint dab is refused, never applied
     REQUIRE(grew);
 
     cyber_mesh_free(edit);
+}
+
+// Regression: the paint dab got its non-finite gate, but the two region ops
+// that REPLACE the selection did not — `radius <= 0` and the zero-length test
+// are both false for NaN, so a ray-miss unprojection wiped the user's field and
+// returned CYBER_OK.
+TEST_CASE("capi soft selection: a non-finite line or sphere region is refused, never applied") {
+    CyberMesh* edit = makeGridMesh(9, 9, 0.0f);
+    const float centre[3] = {4.0f, 4.0f, 0.0f};
+    REQUIRE(cyber_retopo_selection_sphere(edit, centre, 3.0f, CYBER_FALLOFF_SMOOTH) == CYBER_OK);
+    const size_t n = cyber_retopo_selection_copy_weights(edit, nullptr, 0);
+    std::vector<float> selected(n);
+    cyber_retopo_selection_copy_weights(edit, selected.data(), selected.size());
+    bool anySelected = false;
+    for (const float w : selected) {
+        anySelected = anySelected || w > 0.0f;
+    }
+    REQUIRE(anySelected);
+
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    const float nowhere[3] = {nan, nan, nan};
+    const float end[3] = {8.0f, 4.0f, 0.0f};
+    const float viewDir[3] = {0.0f, 0.0f, 1.0f};
+    std::vector<float> after(n);
+    const auto weightsUnchanged = [&] {
+        cyber_retopo_selection_copy_weights(edit, after.data(), after.size());
+        return after == selected;
+    };
+
+    CHECK(cyber_retopo_selection_sphere(edit, nowhere, 3.0f, CYBER_FALLOFF_SMOOTH) ==
+          CYBER_ERR_INVALID_ARG);
+    CHECK(weightsUnchanged());
+    CHECK(cyber_retopo_selection_sphere(edit, centre, nan, CYBER_FALLOFF_SMOOTH) ==
+          CYBER_ERR_INVALID_ARG);
+    CHECK(weightsUnchanged());
+    CHECK(cyber_retopo_selection_line(edit, nowhere, end, viewDir, 0, 15.0f,
+                                      CYBER_FALLOFF_SMOOTH) == CYBER_ERR_INVALID_ARG);
+    CHECK(weightsUnchanged());
+    CHECK(cyber_retopo_selection_line(edit, centre, nowhere, viewDir, 0, 15.0f,
+                                      CYBER_FALLOFF_SMOOTH) == CYBER_ERR_INVALID_ARG);
+    CHECK(weightsUnchanged());
+    CHECK(cyber_retopo_selection_line(edit, centre, end, nowhere, 0, 15.0f,
+                                      CYBER_FALLOFF_SMOOTH) == CYBER_ERR_INVALID_ARG);
+    CHECK(weightsUnchanged());
+    // snap_degrees only steers the line when snapping is on, so only then is a
+    // non-finite value a refusal.
+    CHECK(cyber_retopo_selection_line(edit, centre, end, viewDir, 1, nan, CYBER_FALLOFF_SMOOTH) ==
+          CYBER_ERR_INVALID_ARG);
+    CHECK(weightsUnchanged());
+    CHECK(cyber_retopo_selection_line(edit, centre, end, viewDir, 0, nan, CYBER_FALLOFF_SMOOTH) ==
+          CYBER_OK);
+
+    cyber_mesh_free(edit);
+}
+
+// Regression: cyber_mesh_copy_positions keeps every live vertex (it is what
+// cyber_mesh_set_positions writes back) while the render buffers drop vertices
+// used only by hidden faces, so a renderer that took its positions from
+// copy_positions indexed the shorter compaction and sheared. The filtered
+// stream now has its own accessor.
+TEST_CASE("capi render positions follow the visibility filter that copy_positions does not") {
+    CyberMesh* mesh = makeGridMesh(3, 3, 0.0f);
+    const size_t vertexFloats = cyber_mesh_copy_positions(mesh, nullptr, 0);
+    REQUIRE(vertexFloats == 27u);  // 9 vertices
+    REQUIRE(cyber_mesh_copy_render_positions(mesh, nullptr, 0) == vertexFloats);
+
+    const uint32_t hidden[1] = {0u};
+    REQUIRE(cyber_mesh_set_hidden_faces(mesh, hidden, 1) == CYBER_OK);
+
+    // The corner vertex is used only by the hidden face: it leaves the render
+    // order, and every render stream shortens together.
+    const size_t renderFloats = cyber_mesh_copy_render_positions(mesh, nullptr, 0);
+    CHECK(renderFloats == vertexFloats - 3u);
+    CHECK(cyber_mesh_copy_normals(mesh, nullptr, 0) == renderFloats);
+    CHECK(cyber_mesh_copy_positions(mesh, nullptr, 0) == vertexFloats);  // set_positions' order
+
+    // ... and it is the very buffer the pointer view exposes.
+    std::vector<float> copied(renderFloats);
+    REQUIRE(cyber_mesh_copy_render_positions(mesh, copied.data(), copied.size()) == renderFloats);
+    size_t viewCount = 0;
+    const float* view = cyber_mesh_positions_ptr(mesh, &viewCount);
+    REQUIRE(view != nullptr);
+    REQUIRE(viewCount == renderFloats);
+    CHECK(std::equal(copied.begin(), copied.end(), view));
+
+    CHECK(cyber_mesh_copy_render_positions(nullptr, nullptr, 0) == 0u);
+
+    cyber_mesh_free(mesh);
+}
+
+// Regression: cyber_mesh_loop_metrics was the one status-returning entry point
+// that neither cleared the thread-local error on success nor set it on failure,
+// so a shell logging cyber_last_error() after it reported an unrelated older
+// failure — or nothing at all.
+TEST_CASE("capi loop metrics keeps the error slot in step with its status") {
+    CyberMesh* stale = nullptr;
+    REQUIRE(cyber_mesh_load_obj("/nonexistent/definitely/missing.obj", &stale) == CYBER_ERR_IO);
+    REQUIRE(std::string(cyber_last_error()).size() > 0);  // the unrelated message
+
+    CyberMesh* mesh = makeGridMesh(4, 4, 0.0f);
+    CyberLoopMetrics metrics{};
+    REQUIRE(cyber_mesh_loop_metrics(mesh, 0u, nullptr, &metrics) == CYBER_OK);
+    CHECK(std::string(cyber_last_error()).empty());
+
+    CHECK(cyber_mesh_loop_metrics(nullptr, 0u, nullptr, &metrics) == CYBER_ERR_INVALID_ARG);
+    CHECK(std::string(cyber_last_error()).find("loop_metrics") != std::string::npos);
+    CHECK(cyber_mesh_loop_metrics(mesh, 0u, nullptr, nullptr) == CYBER_ERR_INVALID_ARG);
+    CHECK(std::string(cyber_last_error()).find("loop_metrics") != std::string::npos);
+
+    cyber_mesh_free(mesh);
 }
 
 // Regression (binding-gap report, item 2): there was no in-memory way to
@@ -1213,6 +1358,31 @@ TEST_CASE("capi rejects an unknown preset name and an unsupported preset schema"
     std::error_code ec;
     std::filesystem::remove(future, ec);
     std::filesystem::remove(broken, ec);
+}
+
+// Regression: presetMapFileName signals a name that would leave the output
+// directory with an EMPTY string (tests/core/test_export_preset.cpp), and the C
+// entry point forwarded it verbatim — a caller checking the documented NULL saw
+// success and joined "" onto its output directory.
+TEST_CASE("capi reports a refused export map name as NULL, not an empty string") {
+    CyberExportPreset* preset = nullptr;
+    REQUIRE(cyber_export_preset_resolve("blender", &preset) == CYBER_OK);
+
+    const char* good = cyber_export_preset_map_file_name(preset, 0, "hero");
+    REQUIRE(good != nullptr);
+    CHECK(std::string(good) == "hero_normal.png");
+    CHECK(std::string(cyber_last_error()).empty());
+
+    for (const char* escaping : {"../../hero", "/tmp/hero"}) {
+        CHECK(cyber_export_preset_map_file_name(preset, 0, escaping) == nullptr);
+        CHECK(std::string(cyber_last_error()).find("outside the output directory") !=
+              std::string::npos);
+    }
+
+    CHECK(cyber_export_preset_map_file_name(preset, 9999u, "hero") == nullptr);
+    CHECK(cyber_export_preset_map_file_name(nullptr, 0, "hero") == nullptr);
+
+    cyber_export_preset_free(preset);
 }
 
 #ifdef CYBER_TESTS_HAVE_EXPORTBUNDLE

@@ -114,17 +114,26 @@
   against the real ABI but **was not compiled** — there is no Swift toolchain in
   this environment (`swift`/`swiftc` are absent) and the whole `swift/` package is
   already self-declared UNVERIFIED and excluded from headless CI. It carries the
-  package's standard UNVERIFIED banner. Note the rest of that package is written
-  against a *different* (README-described) ABI shape — e.g. it calls
-  `cyber_mesh_create_indexed` and `CYBER_STATUS_OK`, neither of which exists in
-  `cyber_capi.h`. `SoftSelection.swift` follows the real header, so it does not
-  inherit that divergence, but the package as a whole still would not compile.
+  package's standard UNVERIFIED banner.
 
-  **Not done:** "parity gate entries" — there is **no project-wide binding-parity
-  gate to register with**. I searched `src`, `tests`, `tools` and `.github`: no
-  parity script, no CI job, no pending-registration mechanism, despite the
-  engine-bindings spec describing one as if it exists. Instead I built a real,
-  runnable source-level gate for this change's surface
+  **Correction (superseded by `f5c23fb`).** An earlier revision of this note
+  claimed the rest of the package was written against a different,
+  README-described ABI — calling `cyber_mesh_create_indexed` and
+  `CYBER_STATUS_OK`. That is **false for this tree**: neither identifier appears
+  anywhere under `swift/`, `python/` or `capi/`, and every one of the ~60
+  `cyber_*`/`CYBER_*` symbols the Swift sources reference is declared in
+  `cyber_capi.h`. Re-checked by hand beyond what a textual gate can see —
+  argument order and types, pointer mutability, enum rawValue width, struct
+  field spellings, and handle ownership — with no divergence found. The package
+  remains uncompiled here only because there is no Swift toolchain in this
+  environment.
+
+  **Superseded:** this task also recorded that there was "no project-wide
+  binding-parity gate to register with". `f5c23fb` added one:
+  `tests/packaging/test_swift_abi_parity.py`, registered in ctest as
+  `swift_abi_parity`, which fails if a Swift source references a symbol absent
+  from `cyber_capi.h` or with a mismatched arity. The per-change gate below
+  still covers the Python side of this surface.
   (`python/cyberremesh/tests/test_soft_selection.py::check_parity`), registered it
   in ctest, and it fails loudly if a symbol is added to the header without being
   bound in `_ffi.py`, `api.py` and `SoftSelection.swift`.

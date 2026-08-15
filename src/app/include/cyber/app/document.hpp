@@ -74,6 +74,14 @@ public:
     // alone. Weights are indexed by EditMesh vertex id, so a command that
     // reassigns ids (subdivide) invalidates the slots along with every other
     // id-keyed annotation.
+    //
+    // Serialization reassigns ids too: the mesh is written compacted (dead
+    // vertices dropped, the alive ones renumbered 0..n-1), so `save` rebases
+    // the slots onto that same numbering and `load` returns them keyed to the
+    // dense id space `fromIndexed` rebuilds. Weights on dead ids do not
+    // survive a round trip, which is the point — they name vertices the
+    // reloaded mesh no longer has. The section layout is unchanged by this, so
+    // kFormatVersion still does not move (see the note above).
     std::map<std::string, std::vector<float>> softSelections;
 
     // ---- serialization (task 8.1) -------------------------------------

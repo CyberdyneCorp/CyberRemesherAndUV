@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdlib>
@@ -12,6 +14,7 @@
 #include <sstream>
 #include <streambuf>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -40,27 +43,27 @@ Mesh makeTwoTri() {
     return Mesh::fromIndexed(p, f);
 }
 
-// A closed UV sphere — a well-formed input for the seamless-UV solver.
-Mesh makeSphere(int rings = 16, int segments = 24) {
-    std::vector<Vec3> p;
-    p.push_back({0, 0, 1});
+// A closed UV sphere centred at (dx, 0, 0), appended to p/f.
+void appendSphere(std::vector<Vec3>& p, std::vector<std::vector<Index>>& f, float dx, int rings,
+                  int segments) {
+    const Index base = static_cast<Index>(p.size());
+    p.push_back({dx, 0, 1});
     for (int r = 1; r < rings; ++r) {
         const float phi = 3.14159265f * static_cast<float>(r) / static_cast<float>(rings);
         for (int s = 0; s < segments; ++s) {
             const float th =
                 2.0f * 3.14159265f * static_cast<float>(s) / static_cast<float>(segments);
-            p.push_back(
-                {std::sin(phi) * std::cos(th), std::sin(phi) * std::sin(th), std::cos(phi)});
+            p.push_back({dx + std::sin(phi) * std::cos(th), std::sin(phi) * std::sin(th),
+                         std::cos(phi)});
         }
     }
-    p.push_back({0, 0, -1});
+    p.push_back({dx, 0, -1});
     const Index south = static_cast<Index>(p.size() - 1);
     const auto ring = [&](int r, int s) {
-        return static_cast<Index>(1 + (r - 1) * segments + (s % segments));
+        return base + static_cast<Index>(1 + (r - 1) * segments + (s % segments));
     };
-    std::vector<std::vector<Index>> f;
     for (int s = 0; s < segments; ++s) {
-        f.push_back({0, ring(1, s), ring(1, s + 1)});
+        f.push_back({base, ring(1, s), ring(1, s + 1)});
     }
     for (int r = 1; r + 1 < rings; ++r) {
         for (int s = 0; s < segments; ++s) {
@@ -71,6 +74,24 @@ Mesh makeSphere(int rings = 16, int segments = 24) {
     for (int s = 0; s < segments; ++s) {
         f.push_back({south, ring(rings - 1, s + 1), ring(rings - 1, s)});
     }
+}
+
+// A closed UV sphere — a well-formed input for the seamless-UV solver.
+Mesh makeSphere(int rings = 16, int segments = 24) {
+    std::vector<Vec3> p;
+    std::vector<std::vector<Index>> f;
+    appendSphere(p, f, 0.0f, rings, segments);
+    return Mesh::fromIndexed(p, f);
+}
+
+// Two disjoint spheres. A two-island input, so the vendored solver parameterizes
+// the islands on its worker pool and traces its progress from THOSE threads, not
+// only from the thread that called in.
+Mesh makeSpherePair() {
+    std::vector<Vec3> p;
+    std::vector<std::vector<Index>> f;
+    appendSphere(p, f, 0.0f, 16, 24);
+    appendSphere(p, f, 4.0f, 16, 24);
     return Mesh::fromIndexed(p, f);
 }
 
@@ -377,6 +398,58 @@ TEST_CASE("quad-cover seamless UV leaves the host's console and handlers alone")
         ::setenv("LC_NUMERIC", lcRestore.c_str(), 1);
     }
 #endif
+}
+
+// The other half of the console contract: silencing the vendored solver must not
+// silence the HOST. The solve used to point the process-global std::cout/std::cerr
+// at a null sink for its whole duration, so an embedder logging from its own thread
+// lost every line for as long as a remesh ran. What the host writes must still reach
+// the buffer the host installed, while the solver's own chatter — traced from the
+// worker threads it farms the islands out to as well as from the calling thread —
+// still reaches nothing.
+TEST_CASE("quad-cover seamless UV silences the solver without silencing the host") {
+    const Mesh pair = makeSpherePair();  // two islands -> the solver's worker pool traces too
+    const std::string hostLine = "host-log-line\n";
+    constexpr int kMaxHostLines = 4000;  // bound: a regression must fail, never spin
+
+    std::atomic<bool> solving{true};
+    std::atomic<int> written{0};
+    std::string outText;
+    std::string errText;
+    {
+        const ConsoleCapture capture;
+        std::thread hostLogger([&] {
+            do {
+                std::cout << hostLine;
+                written.fetch_add(1);
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            } while (solving.load() && written.load() < kMaxHostLines);
+        });
+        const remesh::SeamlessUv uv = remesh::computeSeamlessUv(pair, 0.15f);
+        solving.store(false);
+        hostLogger.join();
+        outText = capture.out();
+        errText = capture.err();
+        CHECK(uv.triangles.size() == uv.triangleUv.size());
+    }
+
+    const int lines = written.load();
+    REQUIRE(lines > 0);
+    std::size_t delivered = 0;
+    std::string residue;
+    for (std::size_t at = 0; at < outText.size();) {
+        const std::size_t hit = outText.find(hostLine, at);
+        if (hit == std::string::npos) {
+            residue += outText.substr(at);
+            break;
+        }
+        residue += outText.substr(at, hit - at);
+        at = hit + hostLine.size();
+        ++delivered;
+    }
+    CHECK(delivered == static_cast<std::size_t>(lines));  // not one host line swallowed
+    CHECK(residue.empty());                               // and no solver chatter leaked
+    CHECK(errText.empty());
 }
 
 // Milestone 2 PRIMARY checkpoint: the isoline tracer on a flat integer-grid UV must

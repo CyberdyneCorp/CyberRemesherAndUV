@@ -24,6 +24,9 @@ public:
     // Binds 127.0.0.1:port (port 0 selects an ephemeral port) and starts
     // serving. Returns false if the socket could not be bound.
     bool start(std::uint16_t port = 0);
+
+    // Stops listening. Returns only once the accept thread and every connection
+    // handler have finished, so no socket the server owned outlives the call.
     void stop();
 
     [[nodiscard]] bool isListening() const;

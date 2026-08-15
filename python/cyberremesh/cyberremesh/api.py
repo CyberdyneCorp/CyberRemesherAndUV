@@ -503,11 +503,15 @@ class SeamPath(_Handle):
     edges. Waypoints stay editable until :meth:`commit`, which marks the route
     into a :class:`SeamSet` and arms :attr:`resume_marker`.
 
-    Snapshot semantics, as for :class:`Snapper`: the path references the mesh
-    it was built on, so recreate it if that mesh is edited.
+    Unlike :class:`Snapper`, which copies what it needs, the engine keeps a
+    BORROWED reference to the mesh: the mesh must outlive the path. The wrapper
+    holds that reference for you, so a path built from an otherwise unreferenced
+    mesh stays valid; closing the mesh by hand still invalidates the path, and
+    every path method then raises instead of reading freed memory. The path also
+    caches vertex ids, so recreate it if that mesh is edited.
     """
 
-    __slots__ = ()
+    __slots__ = ("_mesh",)
     _free_symbol = "cyber_seam_path_free"
 
     def __init__(self, mesh: "Mesh", params: Optional[SeamCostParams] = None):
@@ -519,6 +523,13 @@ class SeamPath(_Handle):
             )
         )
         self._handle = out.value
+        self._mesh = mesh
+
+    @property
+    def handle(self) -> int:
+        if self._mesh._handle is None:
+            raise ValueError("operation on a SeamPath whose Mesh was closed")
+        return super().handle
 
     # -- editing ------------------------------------------------------------
     def add_waypoint(self, vertex: int) -> bool:
@@ -1228,12 +1239,12 @@ class Document:
 
     def save_file(self, path: str) -> None:
         """Write the byte container to ``path``."""
-        _check(_ffi.get_lib().cyber_document_save_file(self.handle, path.encode("utf-8")))
+        _check(_ffi.get_lib().cyber_document_save_file(self.handle, str(path).encode("utf-8")))
 
     @staticmethod
     def load_file(path: str) -> "Document":
         """Read a document written by :meth:`save_file`."""
-        handle = _ffi.get_lib().cyber_document_load_file(path.encode("utf-8"))
+        handle = _ffi.get_lib().cyber_document_load_file(str(path).encode("utf-8"))
         if not handle:
             raise CyberError(_ffi.STATUS_ERROR, _last_error())
         return Document(handle=handle)

@@ -36,8 +36,12 @@ struct SeamlessSolveResult {
 //
 // Host-process contract: the call leaves the process's signal dispositions,
 // std::terminate handler, std::new_handler and LC_NUMERIC exactly as it found
-// them, and writes nothing to std::cout/std::cerr. Set CYBER_QC_VERBOSE to let
-// the vendored solver's progress traces through.
+// them, and writes nothing to std::cout/std::cerr. Silencing the vendored solver
+// does not silence the host: a write the host makes to those streams from its own
+// thread while a solve runs still reaches the buffer the host installed. (The one
+// exception is a host thread that is itself a task-pool or OpenMP worker, which
+// cannot be told apart from the solver's own.) Set CYBER_QC_VERBOSE to let the
+// vendored solver's progress traces through.
 SeamlessSolveResult solveSeamlessUv(const std::vector<std::array<double, 3>>& verts,
                                     const std::vector<std::array<std::size_t, 3>>& tris,
                                     long targetQuads, double scaling, double adaptivity);

@@ -250,7 +250,9 @@ Stage by stage:
    routing, `CYBER_QC_DEBUG` traces the decision. The vendored solver is silent by
    default — it is a library inside someone else's process, so it writes nothing to
    the host's console and leaves the host's signal/terminate/new handlers and
-   `LC_NUMERIC` untouched; `CYBER_QC_VERBOSE` lets its progress traces through.
+   `LC_NUMERIC` untouched. Silencing it never silences the host: what the host
+   itself logs to `std::cout`/`std::cerr` while a solve runs still gets through.
+   `CYBER_QC_VERBOSE` lets the solver's progress traces through too.
 2. **Seamless UV.** The solver builds a smooth cross field, cuts the surface along
    seams, and solves for a UV parametrization whose transitions across those seams
    are rotations by multiples of 90° plus integer translations. That "seamless"

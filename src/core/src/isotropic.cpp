@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <limits>
 #include <queue>
 #include <utility>
 #include <vector>
@@ -286,9 +287,32 @@ private:
     bool m_uniform = false;
 };
 
+// Finest edge the float grid can still express at coordinates of this
+// magnitude. Splitting below it cannot shorten anything: the midpoint and the
+// re-triangulation diagonals all quantize onto the same grid, so the element
+// count doubles while the edge lengths stay put. Measured on a unit sphere
+// translated to (5e5, 5e5, 5e5) — a centimetre-unit world or a baked CAD
+// transform — a 0.054 target grew the mesh past 400k faces inside a single
+// split pass and kept going to bad_alloc. maxAbs * FLT_EPSILON is one to two
+// ULP at that magnitude and the measured stalls started at 1.0 - 2.6 ULP, so
+// four of them clears every one with margin; it is still ~7 orders of magnitude
+// below any target a mesh at ordinary coordinates asks for, where the test
+// therefore never fires.
+constexpr float kMinResolvableSpacings = 4.0f;
+
+[[nodiscard]] float coordinateResolution(Vec3 p, Vec3 q) {
+    const float maxAbs = std::max({std::fabs(p.x), std::fabs(p.y), std::fabs(p.z), std::fabs(q.x),
+                                   std::fabs(q.y), std::fabs(q.z)});
+    return kMinResolvableSpacings * maxAbs * std::numeric_limits<float>::epsilon();
+}
+
 class SplitPass : public Pass {
 public:
-    using Pass::Pass;
+    // `maxFaces` bounds the pass (see faceBudget): the sweep below re-reads its
+    // loop bound against the edge array it is growing, so without a ceiling any
+    // input the split rule cannot converge on allocates until bad_alloc.
+    SplitPass(Mesh& mesh, const IsotropicOptions& options, std::size_t maxFaces)
+        : Pass(mesh, options), m_maxFaces(maxFaces) {}
 
     // Splits every edge longer than 4/3 of its local target (the field
     // sampled at the edge midpoint); each adjacent face (which becomes a quad
@@ -298,21 +322,28 @@ public:
         // New edges appear at the end of the index space; one sweep over the
         // starting capacity plus growth converges for this pass's purpose.
         for (Index i = 0; i < m_mesh.edgeCapacity(); ++i) {
-            if (cancel && i % kCancelStride == 0 && cancel->isCancelled()) {
-                return;
+            if (i % kCancelStride == 0) {
+                if (cancel && cancel->isCancelled()) {
+                    return;
+                }
+                if (m_mesh.faceCount() > m_maxFaces) {
+                    return;
+                }
             }
             const EdgeId e{i};
             if (!m_mesh.isAlive(e)) {
                 continue;
             }
             const auto [a, b] = m_mesh.edgeVertices(e);
+            const Vec3 pa = m_mesh.position(a);
+            const Vec3 pb = m_mesh.position(b);
             const float len = edgeLength(e);
             // No scale in [kMinScale, kMaxScale] could make this edge long —
             // skip the field query (a BVH lookup) entirely.
             if (len <= m_options.targetEdgeLength * kMinScale * kLongFactor) {
                 continue;
             }
-            const Vec3 mid = lerp(m_mesh.position(a), m_mesh.position(b), 0.5f);
+            const Vec3 mid = lerp(pa, pb, 0.5f);
             const float target = m_options.targetEdgeLength * field.at(mid);
             if (len <= target * kLongFactor) {
                 continue;
@@ -329,6 +360,16 @@ public:
             // diverge. Splitting only when both halves stay collapsible-band-or-longer
             // keeps the crease geometry exact and the density bounded.
             if (m_mesh.isFeatureEdge(e) && len < 2.0f * target * kShortFactor) {
+                continue;
+            }
+            // A split must make progress, and the loop bound above is re-read
+            // against the growing edge array, so a split that does not shorten
+            // anything is re-fed to this same pass forever. Refuse both ways it
+            // can fail to: an edge already at the float resolution of its
+            // coordinates, and a midpoint that rounded onto an endpoint (which
+            // also rejects non-finite positions, every comparison being false).
+            if (len <= coordinateResolution(pa, pb) ||
+                !(length(mid - pa) < len && length(mid - pb) < len)) {
                 continue;
             }
             const VertexId midVertex = m_mesh.splitEdge(e, 0.5f);
@@ -356,6 +397,8 @@ private:
             }
         }
     }
+
+    std::size_t m_maxFaces;
 };
 
 class CollapsePass : public Pass {
@@ -600,6 +643,39 @@ private:
     const ReferenceSurface& m_reference;
 };
 
+// Ceiling on the elements the split pass may produce. The scale field never
+// samples below kMinScale and a split leaves halves no shorter than 2/3 of the
+// local target, so a converging run settles well under the count the finest
+// allowed target implies — kBudgetSlack times that is unreachable for a
+// legitimate input and turns any residual non-convergence into an
+// under-refined mesh instead of an allocation failure.
+constexpr double kBudgetSlack = 4.0;
+
+[[nodiscard]] std::size_t faceBudget(const Mesh& mesh, float targetEdgeLength) {
+    constexpr std::size_t kUnbounded = std::numeric_limits<std::size_t>::max();
+    double area = 0.0;
+    for (Index fi = 0; fi < mesh.faceCapacity(); ++fi) {
+        const FaceId f{fi};
+        if (!mesh.isAlive(f)) {
+            continue;
+        }
+        const auto verts = mesh.faceVertices(f);
+        for (std::size_t i = 2; i < verts.size(); ++i) {
+            const Vec3 a = mesh.position(verts[0]);
+            const Vec3 b = mesh.position(verts[i - 1]);
+            const Vec3 c = mesh.position(verts[i]);
+            area += 0.5 * static_cast<double>(length(cross(b - a, c - a)));
+        }
+    }
+    const double finest = static_cast<double>(targetEdgeLength) * static_cast<double>(kMinScale);
+    constexpr double kEquilateralArea = 0.4330127;  // sqrt(3)/4
+    const double budget = kBudgetSlack * area / (kEquilateralArea * finest * finest);
+    if (!std::isfinite(budget) || budget >= static_cast<double>(kUnbounded)) {
+        return kUnbounded;
+    }
+    return static_cast<std::size_t>(budget) + mesh.faceCount();
+}
+
 }  // namespace
 
 IsotropicStatus isotropicRemesh(Mesh& mesh, const ReferenceSurface& reference,
@@ -619,6 +695,9 @@ IsotropicStatus isotropicRemesh(Mesh& mesh, const ReferenceSurface& reference,
     const ScaleField field(
         mesh, reference, options.adaptivity, options.targetEdgeLength,
         options.density != nullptr && options.density->hasDensity() ? options.density : nullptr);
+    // Measured once on the input: remeshing preserves surface area, so the
+    // ceiling holds for every iteration.
+    const std::size_t maxFaces = faceBudget(mesh, options.targetEdgeLength);
     long long tScale = 0, tSplit = 0, tCollapse = 0, tFlip = 0, tSmooth = 0;
     const auto ms = [](Clk::time_point a, Clk::time_point b) {
         return std::chrono::duration_cast<std::chrono::milliseconds>(b - a).count();
@@ -655,7 +734,7 @@ IsotropicStatus isotropicRemesh(Mesh& mesh, const ReferenceSurface& reference,
          ++iteration) {
         auto a = Clk::now();
         const std::size_t facesBeforeSplit = mesh.faceCount();
-        SplitPass(mesh, options).run(field, cancel);
+        SplitPass(mesh, options, maxFaces).run(field, cancel);
         splitStillGrowing = static_cast<float>(mesh.faceCount()) >
                             kSplitGrowthConverged * static_cast<float>(facesBeforeSplit);
         if (isoTime) {

@@ -88,13 +88,19 @@ preset from an unsupported schema raises `IncompatibleVersionError`.
 
 `quad_method` selects how triangles become quads:
 
-- `"field-aligned"` (default) — maximum-matching over a smoothed cross field.
+- `"quad-cover"` (default) — a QuadCover seamless-UV isoline extractor. Beats
+  QuadriFlow on both median quad angle and irregular-vertex count on 3 of the 5
+  corpus models (spot, rocker-arm, stanford-bunny), losing fandisk and
+  cheburashka, and stays manifold on flat CAD input where QuadriFlow tears.
+- `"field-aligned"` — maximum-matching over a smoothed cross field.
   Highest quad-dominance (~95%+ on clean input) with curvature-following flow.
 - `"instant-meshes"` — the Instant-Meshes-style **position-field extractor**
   (per-vertex 4-RoSy orientation + lattice position field, collapse, extract).
   More uniform, field-aligned edge flow with fewer, better-placed singularities;
   it matches QuadriFlow on edge-length uniformity. Best for organic/scanned
   surfaces where flow matters more than raw dominance.
+- `"integer"` — the experimental integer-parametrization extractor
+  (watertight/manifold; degrades at coarse target counts).
 
 ```python
 RemeshParams(target_quad_count=5000, pure_quads=True, quad_method="instant-meshes")

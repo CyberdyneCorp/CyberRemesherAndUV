@@ -29,6 +29,10 @@ struct BridgeServer::Impl {
 
     BridgeSession& session;
     int listenFd = -1;
+    // Self-pipe the accept thread also waits on, so stop() ends the wait at
+    // once without closing the listening socket out from under that thread.
+    int wakeReadFd = -1;
+    int wakeWriteFd = -1;
     std::uint16_t boundPort = 0;
     std::atomic<bool> running{false};
     std::thread acceptThread;
@@ -76,18 +80,31 @@ struct BridgeServer::Impl {
         allHandlersDone.notify_all();
     }
 
-    // Starts the handler for an accepted connection. Returns false when the
-    // connection cannot be served — over the cap, or the OS refused another
-    // thread — so the caller just closes the fd; an uncaught std::system_error
-    // from the std::thread constructor would otherwise abort the process.
-    bool spawnHandler(int fd) {
-        {
+    // Takes one of the bounded connection slots. False when the cap is reached
+    // or the bookkeeping allocation failed; nothing is reserved in either case,
+    // so the caller just closes the fd. The insert runs before the count is
+    // bumped, so a throw from it leaves the bookkeeping consistent.
+    bool reserveSlot(int fd) {
+        try {
             const std::lock_guard<std::mutex> lock(connMutex);
             if (activeHandlers >= kMaxConnections) {
                 return false;
             }
             connFds.insert(fd);
             ++activeHandlers;
+            return true;
+        } catch (...) {
+            return false;
+        }
+    }
+
+    // Starts the handler for an accepted connection. Returns false when the
+    // connection cannot be served — over the cap, or the OS refused another
+    // thread — so the caller just closes the fd; an exception escaping here
+    // would reach the top of the accept thread and abort the process.
+    bool spawnHandler(int fd) {
+        if (!reserveSlot(fd)) {
+            return false;
         }
         try {
             // Detached rather than collected: a joinable thread keeps its ~8 MB
@@ -95,7 +112,9 @@ struct BridgeServer::Impl {
             // connection. stop() waits on the count instead.
             std::thread([this, fd] { handle(fd); }).detach();
             return true;
-        } catch (const std::system_error&) {
+        } catch (...) {
+            // std::system_error when the OS refuses another thread, std::bad_alloc
+            // when its state cannot be allocated: either way the slot goes back.
             const std::lock_guard<std::mutex> lock(connMutex);
             connFds.erase(fd);
             --activeHandlers;
@@ -104,21 +123,46 @@ struct BridgeServer::Impl {
         }
     }
 
+    void acceptOnce() {
+        pollfd fds[2]{};
+        fds[0].fd = listenFd;
+        fds[0].events = POLLIN;
+        fds[1].fd = wakeReadFd;  // stop() writes here to end the wait immediately
+        fds[1].events = POLLIN;
+        const int ready = ::poll(fds, 2, 200);  // also wake periodically to re-check running
+        if (ready <= 0 || !running.load() || (fds[0].revents & POLLIN) == 0) {
+            return;
+        }
+        const int fd = ::accept(listenFd, nullptr, nullptr);
+        if (fd < 0) {
+            return;
+        }
+        if (!spawnHandler(fd)) {
+            ::close(fd);
+        }
+    }
+
     void acceptLoop() {
         while (running.load()) {
-            pollfd pfd{};
-            pfd.fd = listenFd;
-            pfd.events = POLLIN;
-            const int ready = ::poll(&pfd, 1, 200);  // wake periodically to re-check running
-            if (ready <= 0 || !running.load()) {
-                continue;
+            try {
+                acceptOnce();
+            } catch (...) {
+                // This is the top of the accept thread: anything escaping here
+                // — a std::bad_alloc from the handler bookkeeping, say — would
+                // call std::terminate and take the host application down. Drop
+                // the connection instead and keep listening.
             }
-            const int fd = ::accept(listenFd, nullptr, nullptr);
-            if (fd < 0) {
-                continue;
-            }
-            if (!spawnHandler(fd)) {
-                ::close(fd);
+        }
+    }
+
+    // Called only once the accept thread has been joined: until then it can
+    // still name these descriptors, and closing one hands its number back to
+    // the process while another thread is passing it to poll()/accept().
+    void closeDescriptors() {
+        for (int* fd : {&listenFd, &wakeReadFd, &wakeWriteFd}) {
+            if (*fd >= 0) {
+                ::close(*fd);
+                *fd = -1;
             }
         }
     }
@@ -149,6 +193,12 @@ bool BridgeServer::start(std::uint16_t port) {
         return false;
     }
 
+    int wake[2] = {-1, -1};
+    if (::pipe(wake) != 0) {
+        ::close(fd);
+        return false;
+    }
+
     sockaddr_in actual{};
     socklen_t len = sizeof(actual);
     if (::getsockname(fd, reinterpret_cast<sockaddr*>(&actual), &len) == 0) {
@@ -156,8 +206,19 @@ bool BridgeServer::start(std::uint16_t port) {
     }
 
     m->listenFd = fd;
+    m->wakeReadFd = wake[0];
+    m->wakeWriteFd = wake[1];
     m->running.store(true);
-    m->acceptThread = std::thread([this] { m->acceptLoop(); });
+    try {
+        m->acceptThread = std::thread([this] { m->acceptLoop(); });
+    } catch (...) {
+        // No accept thread means nothing would ever be served: report the
+        // failure instead of listening on a socket nobody reads.
+        m->running.store(false);
+        m->closeDescriptors();
+        m->boundPort = 0;
+        return false;
+    }
     return true;
 }
 
@@ -167,12 +228,18 @@ void BridgeServer::stop() {
     }
     if (m->listenFd >= 0) {
         ::shutdown(m->listenFd, SHUT_RDWR);
-        ::close(m->listenFd);
-        m->listenFd = -1;
+    }
+    if (m->wakeWriteFd >= 0) {
+        const char byte = 0;
+        const ssize_t written = ::write(m->wakeWriteFd, &byte, 1);
+        // A failed wake only costs the accept thread one poll timeout: it
+        // re-checks running on every pass.
+        static_cast<void>(written);
     }
     if (m->acceptThread.joinable()) {
         m->acceptThread.join();
     }
+    m->closeDescriptors();
     // Unblock any handler parked in recv, then wait for them all to finish.
     {
         std::unique_lock<std::mutex> lock(m->connMutex);

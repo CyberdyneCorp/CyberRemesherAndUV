@@ -134,6 +134,38 @@ BakeState readBake(ByteReader& r) {
     return b;
 }
 
+// Slot weights are indexed by EditMesh vertex id, but the mesh itself is
+// written through toIndexed, which drops dead vertices and renumbers the alive
+// ones 0..n-1. Rebase the slots onto that same numbering so both halves of the
+// container agree: on load, fromIndexed hands back exactly that dense id space,
+// so a weight lands on the vertex it was painted on. A mesh with no dead
+// vertices already IS its own compaction, so its slots are passed through
+// untouched and the bytes are unchanged.
+std::map<std::string, std::vector<float>> compactSelections(
+    const Mesh& mesh, const std::map<std::string, std::vector<float>>& slots) {
+    if (mesh.vertexCount() == mesh.vertexCapacity()) {
+        return slots;
+    }
+    std::vector<std::size_t> aliveIds;
+    aliveIds.reserve(mesh.vertexCount());
+    for (std::size_t i = 0; i < mesh.vertexCapacity(); ++i) {
+        if (mesh.isAlive(VertexId{static_cast<Index>(i)})) {
+            aliveIds.push_back(i);
+        }
+    }
+
+    std::map<std::string, std::vector<float>> compact;
+    for (const auto& [name, weights] : slots) {
+        std::vector<float> rebased;
+        rebased.reserve(aliveIds.size());
+        for (const std::size_t id : aliveIds) {
+            rebased.push_back(id < weights.size() ? weights[id] : 0.0f);
+        }
+        compact.emplace(name, std::move(rebased));
+    }
+    return compact;
+}
+
 std::vector<std::uint8_t> serializeSelections(
     const std::map<std::string, std::vector<float>>& slots) {
     ByteWriter w;
@@ -212,7 +244,8 @@ std::vector<std::uint8_t> Document::save() const {
     writeSection(w, SectionId::Parameters, serializeParams(params));
     writeSection(w, SectionId::BakeState, serializeBake(bake));
     if (hasSelections) {
-        writeSection(w, SectionId::SoftSelections, serializeSelections(softSelections));
+        writeSection(w, SectionId::SoftSelections,
+                     serializeSelections(compactSelections(editMesh, softSelections)));
     }
     return w.take();
 }
@@ -301,9 +334,12 @@ bool Document::autosaveIfDirty(const AutosaveSink& sink) {
 }
 
 bool operator==(const Document& a, const Document& b) {
+    // Slots are compared in the same compacted id space the meshes are, so a
+    // document still equals its own save->load round trip after a deletion.
     return sameMesh(a.target, b.target) && sameMesh(a.editMesh, b.editMesh) &&
            sameParams(a.params, b.params) && a.bake == b.bake &&
-           a.softSelections == b.softSelections;
+           compactSelections(a.editMesh, a.softSelections) ==
+               compactSelections(b.editMesh, b.softSelections);
 }
 
 }  // namespace cyber::app

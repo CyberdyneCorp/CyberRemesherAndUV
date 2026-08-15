@@ -325,8 +325,13 @@ CyberStatus remeshShared(const CyberMesh* in, const CyberRemeshParams* params,
         // itself or the parameter is silently ignored (remeshing-pipeline spec,
         // "Explicit cleanup policies").
         const int holeFillMaxBoundary = params->holeFillMaxBoundary;
-        const auto makeQuad =
-            [holeFillMaxBoundary](int method) -> std::unique_ptr<cyber::remesh::IQuadrangulator> {
+        // Same story for the feature angle: quad-cover binds sharp edges inside its own
+        // solve (feature seams + integer-pinned crease isolines), so sharpEdgeDegrees has
+        // to be handed to the extractor as well as to the pipeline's edge tagging, or the
+        // ABI runs at the factory default while the CLI honours the value.
+        const float sharpEdgeDegrees = params->sharpEdgeDegrees;
+        const auto makeQuad = [holeFillMaxBoundary, sharpEdgeDegrees](
+                                  int method) -> std::unique_ptr<cyber::remesh::IQuadrangulator> {
             if (method == CYBER_QUAD_INSTANT_MESHES) {
                 return cyber::remesh::makeInstantMeshesQuadrangulator();
             }
@@ -340,7 +345,8 @@ CyberStatus remeshShared(const CyberMesh* in, const CyberRemeshParams* params,
                 // variance (spot irr 2->6%, fandisk 3->15%), so — unlike the field/integer
                 // paths — it stays uniform-only here. The adaptivity knob remains available
                 // for experiments via makeQuadCoverQuadrangulator(iters, a) / CYBER_QC_ADAPT.
-                return cyber::remesh::makeQuadCoverQuadrangulator(40, 0.0f, holeFillMaxBoundary);
+                return cyber::remesh::makeQuadCoverQuadrangulator(40, 0.0f, holeFillMaxBoundary,
+                                                                  sharpEdgeDegrees);
             }
             return cyber::remesh::makeFieldAlignedQuadrangulator();
         };
@@ -660,8 +666,10 @@ bool isHiddenVertex(const CyberMesh& handle, cyber::VertexId v) {
     return true;
 }
 
-// Live, visible vertices in id order — the same compaction as
-// Mesh::toIndexed and cyber_mesh_copy_positions when nothing is hidden.
+// Live, visible vertices in id order — the render vertex order every cache
+// buffer shares (cyber_capi.h). It is the same compaction as Mesh::toIndexed
+// and cyber_mesh_copy_positions only while nothing is hidden, which is why
+// renderers read positions from cyber_mesh_copy_render_positions.
 // Fills cache.positions and returns the vertex-id → compact-index remap.
 std::vector<cyber::Index> compactVertices(const CyberMesh& handle, CyberRenderCache& cache) {
     const cyber::Mesh& m = handle.mesh;
@@ -874,6 +882,11 @@ const T* bufferView(const std::vector<T>* src, size_t* out_count) {
 
 }  // namespace
 
+size_t cyber_mesh_copy_render_positions(const CyberMesh* mesh, float* out, size_t max_floats) {
+    const CyberRenderCache* cache = ensureRenderCache(mesh);
+    return cache == nullptr ? 0 : copyBuffer(cache->positions, out, max_floats);
+}
+
 size_t cyber_mesh_triangle_count(const CyberMesh* mesh) {
     const CyberRenderCache* cache = ensureRenderCache(mesh);
     return cache == nullptr ? 0 : cache->indices.size() / 3;
@@ -1030,6 +1043,13 @@ struct CyberSnapper {
 namespace {
 
 cyber::Vec3 toVec3(const float v[3]) { return {v[0], v[1], v[2]}; }
+
+// A ray-miss unprojection hands back NaN, which slips through every `<= 0`
+// range guard: entry points that take a screen-derived point reject it here
+// instead of letting it reach the geometry.
+bool isFinite3(const float v[3]) {
+    return std::isfinite(v[0]) && std::isfinite(v[1]) && std::isfinite(v[2]);
+}
 
 void writeVec3(float out[3], cyber::Vec3 v) {
     if (out != nullptr) {
@@ -1299,6 +1319,7 @@ size_t cyber_mesh_quad_ring(const CyberMesh* mesh, uint32_t edge, uint32_t* out_
 CyberStatus cyber_mesh_loop_metrics(const CyberMesh* mesh, uint32_t edge,
                                     const CyberSnapper* snapper, CyberLoopMetrics* out_metrics) {
     if (mesh == nullptr || out_metrics == nullptr) {
+        setError("cyber_mesh_loop_metrics: null mesh or metrics output");
         return CYBER_ERR_INVALID_ARG;
     }
     *out_metrics = CyberLoopMetrics{};
@@ -1321,6 +1342,7 @@ CyberStatus cyber_mesh_loop_metrics(const CyberMesh* mesh, uint32_t edge,
     out_metrics->snap_measured = metrics.snapMeasured ? 1 : 0;
     out_metrics->snapped_vertex_count = static_cast<uint32_t>(metrics.snappedVertexCount);
     out_metrics->max_snap_distance = metrics.maxSnapDistance;
+    clearError();
     return CYBER_OK;
 }
 
@@ -2503,6 +2525,14 @@ CyberStatus cyber_retopo_selection_line(CyberMesh* mesh, const float anchor[3], 
             setError("cyber_retopo_selection_line: null anchor, end or view direction");
             return CYBER_ERR_INVALID_ARG;
         }
+        // The line REPLACES the selection, so a non-finite endpoint would wipe the
+        // user's field (the degenerate-length test below is false for NaN).
+        if (!isFinite3(anchor) || !isFinite3(end) || !isFinite3(view_dir) ||
+            (snap_angle != 0 && !std::isfinite(snap_degrees))) {
+            setError("cyber_retopo_selection_line: non-finite anchor, end, view direction or "
+                     "snap angle");
+            return CYBER_ERR_INVALID_ARG;
+        }
         cyber::retopo::LineRegion region;
         region.anchor = toVec3(anchor);
         region.end = toVec3(end);
@@ -2526,6 +2556,12 @@ CyberStatus cyber_retopo_selection_sphere(CyberMesh* mesh, const float center[3]
             setError("cyber_retopo_selection_sphere: null center or radius <= 0");
             return CYBER_ERR_INVALID_ARG;
         }
+        // Same as the line: the sphere replaces the selection, and `radius <= 0` is
+        // false for NaN.
+        if (!isFinite3(center) || !std::isfinite(radius)) {
+            setError("cyber_retopo_selection_sphere: non-finite center or radius");
+            return CYBER_ERR_INVALID_ARG;
+        }
         cyber::retopo::SphereRegion region;
         region.center = toVec3(center);
         region.radius = radius;
@@ -2544,8 +2580,7 @@ CyberStatus cyber_retopo_selection_paint(CyberMesh* mesh, const float center[3],
         }
         // A ray-miss unprojection hands back NaN: report the dropped sample
         // instead of silently doing nothing.
-        if (!std::isfinite(center[0]) || !std::isfinite(center[1]) || !std::isfinite(center[2]) ||
-            !std::isfinite(pressure)) {
+        if (!isFinite3(center) || !std::isfinite(pressure)) {
             setError("cyber_retopo_selection_paint: non-finite center or pressure");
             return CYBER_ERR_INVALID_ARG;
         }
@@ -4166,10 +4201,22 @@ const char* cyber_export_preset_map_file_name(const CyberExportPreset* preset, s
                                               const char* basename) {
     thread_local std::string expanded;
     if (preset == nullptr || index >= preset->preset.maps.size()) {
+        setError("cyber_export_preset_map_file_name: null preset or index out of range");
         return nullptr;
     }
     expanded = cyber::io::presetMapFileName(preset->preset, preset->preset.maps[index],
                                             basename != nullptr ? basename : "");
+    if (expanded.empty()) {
+        // presetMapFileName refusing a name that would leave the output directory.
+        // "" is not a file name, and a caller checking only for NULL would join it
+        // and address the directory itself, so the refusal is reported as NULL.
+        setError(std::string("cyber_export_preset_map_file_name: map '") +
+                 cyber::io::presetMapName(preset->preset.maps[index].map) +
+                 "' names a file outside the output directory; check the preset's "
+                 "namingPattern, name and suffixes, and the basename");
+        return nullptr;
+    }
+    clearError();
     return expanded.c_str();
 }
 

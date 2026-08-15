@@ -68,9 +68,11 @@ void cyber_mesh_free(CyberMesh* mesh);
 typedef struct CyberRemeshParams {
     int targetQuads;           /* desired output quad count */
     float edgeScale;           /* multiplier on the derived edge length */
-    float sharpEdgeDegrees;    /* dihedral threshold for feature edges */
+    float sharpEdgeDegrees;    /* dihedral threshold for feature edges: drives both
+                                * the isotropic stage and the parameterization */
     float smoothNormalDegrees; /* normal-smoothing angle */
-    float adaptivity;          /* 0 uniform .. 1 fully curvature-adaptive */
+    float adaptivity;          /* 0 uniform .. 1 fully curvature-adaptive; the
+                                * quad-cover extractor stays uniform by design */
     int pureQuads;             /* non-zero: forbid residual triangles */
     int holeFillMaxBoundary;   /* max boundary edges of holes to fill; 0 off */
     int quadMethod;            /* 0 = field-aligned matching,
@@ -236,7 +238,14 @@ size_t cyber_mesh_vertex_count(const CyberMesh* mesh);
 size_t cyber_mesh_face_count(const CyberMesh* mesh);
 /* Copies compacted vertex positions (x,y,z per vertex) into `out`, writing at
  * most `max_floats`; returns the number of floats written. Pass out=NULL to
- * query the required count (3 * vertex_count). */
+ * query the required count (3 * vertex_count).
+ *
+ * EVERY live vertex, in id order — this stream is NOT filtered by
+ * cyber_mesh_set_hidden_faces, because it is the one
+ * cyber_mesh_set_positions writes back. The render accessors below use the
+ * narrower RENDER VERTEX ORDER, which differs while anything is hidden; mixing
+ * the two silently pairs positions with the wrong vertices, so a renderer
+ * wants cyber_mesh_copy_render_positions instead. */
 size_t cyber_mesh_copy_positions(const CyberMesh* mesh, float* out, size_t max_floats);
 
 /* Writes vertex positions back, the exact inverse of
@@ -258,9 +267,14 @@ void cyber_remesh_params_default(CyberRemeshParams* params);
  *
  * Everything below reads from a per-handle compacted render cache built
  * lazily on first access:
- *   - vertices are compacted to the same deterministic order used by
- *     cyber_mesh_copy_positions (live vertices in id order), so positions,
- *     normals, colors and triangle indices are all mutually consistent;
+ *   - RENDER VERTEX ORDER: live, VISIBLE vertices in id order — a vertex
+ *     used exclusively by faces hidden with cyber_mesh_set_hidden_faces is
+ *     dropped. Positions, normals, colors, triangle and edge indices all
+ *     share it, so they are mutually consistent. It matches
+ *     cyber_mesh_copy_positions exactly while nothing is hidden, and is
+ *     shorter once something is: take the positions of this order from
+ *     cyber_mesh_copy_render_positions (or cyber_mesh_positions_ptr), never
+ *     from cyber_mesh_copy_positions;
  *   - faces are fan-triangulated deterministically around their first
  *     corner: a live face (v0 v1 ... vn-1), taken in id order, emits
  *     (v0,v1,v2), (v0,v2,v3), ... — an n-gon yields n-2 triangles, so a
@@ -270,18 +284,26 @@ void cyber_remesh_params_default(CyberRemeshParams* params);
  * These accessors are not thread-safe with each other on the same handle
  * (the first call builds the cache); serialize per-handle access. */
 
+/* Copies the positions of the RENDER VERTEX ORDER (x,y,z per visible
+ * vertex) into `out`, at most `max_floats`; returns the number of floats
+ * written. This is the position stream the buffers below index — the
+ * visibility-filtered sibling of cyber_mesh_copy_positions, which stays
+ * unfiltered for cyber_mesh_set_positions. Pass out=NULL to query the
+ * required count. */
+size_t cyber_mesh_copy_render_positions(const CyberMesh* mesh, float* out, size_t max_floats);
+
 /* Number of triangles the live faces fan-triangulate to (an n-gon counts
  * n-2). Returns 0 on NULL. */
 size_t cyber_mesh_triangle_count(const CyberMesh* mesh);
 
 /* Copies the triangulated index buffer (3 uint32 per triangle, indexing the
- * compacted vertex order of cyber_mesh_copy_positions) into `out`, writing
+ * render vertex order) into `out`, writing
  * whole triangles only, at most `max_indices` values; returns the number of
  * indices written. Pass out=NULL to query the required count
  * (3 * triangle_count). */
 size_t cyber_mesh_copy_triangle_indices(const CyberMesh* mesh, uint32_t* out, size_t max_indices);
 
-/* Copies per-vertex unit normals (x,y,z per vertex, compacted vertex order)
+/* Copies per-vertex unit normals (x,y,z per vertex, render vertex order)
  * into `out`, at most `max_floats`; returns the number of floats written.
  * When the mesh carries imported per-corner normals they are averaged per
  * vertex; otherwise normals are computed engine-side from face normals
@@ -293,7 +315,7 @@ size_t cyber_mesh_copy_normals(const CyberMesh* mesh, float* out, size_t max_flo
  * "v x y z r g b" polypaint data). */
 int cyber_mesh_has_colors(const CyberMesh* mesh);
 
-/* Copies per-vertex linear RGB colors (r,g,b per vertex, compacted vertex
+/* Copies per-vertex linear RGB colors (r,g,b per vertex, render vertex
  * order) into `out`, at most `max_floats`; returns the number of floats
  * written, or 0 when the mesh has no colors. Pass out=NULL to query the
  * required count (3 * vertex_count, or 0 without colors). */
@@ -307,7 +329,7 @@ size_t cyber_mesh_copy_colors(const CyberMesh* mesh, float* out, size_t max_floa
 size_t cyber_mesh_edge_count(const CyberMesh* mesh);
 
 /* Copies the unique-edge index buffer (2 uint32 per edge, indexing the
- * compacted vertex order of cyber_mesh_copy_positions) into `out`, writing
+ * render vertex order) into `out`, writing
  * whole edges only, at most `max_indices` values; returns the number of
  * indices written. Pass out=NULL to query the required count
  * (2 * edge_count). */
@@ -360,9 +382,11 @@ const float* cyber_mesh_colors_ptr(const CyberMesh* mesh, size_t* out_count);
 size_t cyber_mesh_live_faces(const CyberMesh* mesh, uint32_t* out_faces, size_t max_faces);
 
 /* Replaces the hidden-face set (faces may be NULL when face_count is 0 —
- * show all). Hidden faces are dropped from the triangle, edge, and normal
- * streams; vertices used exclusively by hidden faces are dropped from the
- * compacted position/color streams. */
+ * show all). Hidden faces are dropped from the triangle and edge streams,
+ * and vertices used exclusively by hidden faces leave the render vertex
+ * order, so the normal, color and cyber_mesh_copy_render_positions streams
+ * shorten with it. cyber_mesh_copy_positions is unaffected: it keeps every
+ * live vertex, for cyber_mesh_set_positions. */
 CyberStatus cyber_mesh_set_hidden_faces(CyberMesh* mesh, const uint32_t* faces, size_t face_count);
 
 /* Number of face ids currently in the hidden set. Ids killed by an editing
@@ -755,7 +779,8 @@ CyberStatus cyber_retopo_patch_clone(CyberMesh* mesh, const uint32_t* faces, siz
  * *out_new_faces (may be NULL) receives the number of new faces. Fails
  * with CYBER_ERR_INVALID_ARG (mesh unchanged) on chains shorter than 2,
  * dead/repeated vertices, consecutive vertices not joined by a live edge,
- * rings < 1, or a zero offset. */
+ * or a zero offset, and with CYBER_ERR_INVALID_PARAM on rings < 1 (the
+ * out-of-range-number code the other numeric knobs use). */
 CyberStatus cyber_retopo_extend_boundary_grid(CyberMesh* mesh, const uint32_t* chain, size_t count,
                                               int closed, const float offset[3], int rings,
                                               const CyberSnapper* snapper,
@@ -782,9 +807,10 @@ CyberStatus cyber_retopo_extend_boundary_fan(CyberMesh* mesh, const uint32_t* ch
  * flip rails); rail vertices snap to the Target when `snapper` is
  * non-NULL; winding is corrected against the start edge's face. Writes
  * the number of new faces to *out_new_faces (may be NULL). Fails with
- * CYBER_ERR_INVALID_ARG (mesh unchanged) on an empty path, width <= 0, a
- * degenerate view direction, or when start_a/start_b are dead or not
- * joined by a live BOUNDARY edge. */
+ * CYBER_ERR_INVALID_ARG (mesh unchanged) on an empty path, a degenerate
+ * view direction, or when start_a/start_b are dead or not joined by a
+ * live BOUNDARY edge, and with CYBER_ERR_INVALID_PARAM on width <= 0 (the
+ * out-of-range-number code the other numeric knobs use). */
 CyberStatus cyber_retopo_draw_strip(CyberMesh* mesh, const float* path_xyz, size_t point_count,
                                     float width, const float view_dir[3], uint32_t start_a,
                                     uint32_t start_b, const CyberSnapper* snapper,
@@ -997,15 +1023,18 @@ typedef struct CyberSoftTransformReport {
  * (15 is the shell default) measured IN THE VIEW PLANE — the plane
  * perpendicular to `view_dir`, the same screen-space convention
  * cyber_retopo_draw_strip and cyber_retopo_surface_cut use. Replaces the
- * current selection. Fails with CYBER_ERR_INVALID_ARG on a null argument
- * or a degenerate (zero-length) line. */
+ * current selection. Fails with CYBER_ERR_INVALID_ARG (selection
+ * unchanged) on a null argument, a degenerate (zero-length) line, or a
+ * non-finite anchor/end/view direction — or a non-finite `snap_degrees`
+ * when `snap_angle` is non-zero. */
 CyberStatus cyber_retopo_selection_line(CyberMesh* mesh, const float anchor[3], const float end[3],
                                         const float view_dir[3], int snap_angle, float snap_degrees,
                                         CyberFalloff falloff);
 
 /* Sphere region: weight 1 at `center` falling to 0 at `radius` along
  * `falloff`. Replaces the current selection. Fails with
- * CYBER_ERR_INVALID_ARG on a null center or radius <= 0. */
+ * CYBER_ERR_INVALID_ARG (selection unchanged) on a null center, radius
+ * <= 0, or a non-finite center coordinate or radius. */
 CyberStatus cyber_retopo_selection_sphere(CyberMesh* mesh, const float center[3], float radius,
                                           CyberFalloff falloff);
 
@@ -1642,7 +1671,10 @@ CyberStatus cyber_export_preset_map(const CyberExportPreset* preset, size_t inde
 /* The file name entry `index` produces for `basename`, with the naming
  * pattern's tokens expanded. Points into a thread-local buffer valid until the
  * next capi call on this thread (same contract as CyberHandoffInfo.producer).
- * NULL on a null preset or an out-of-range index. */
+ * NULL on a null preset, an out-of-range index, or an expansion REFUSED for
+ * leaving the output directory (an absolute or ".."-climbing value arriving
+ * through any token, `basename` included) — cyber_last_error() carries the
+ * reason. A NULL return is never a usable file name; never join it. */
 const char* cyber_export_preset_map_file_name(const CyberExportPreset* preset, size_t index,
                                               const char* basename);
 

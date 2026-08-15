@@ -1,6 +1,8 @@
 #include <doctest.h>
 
+#include <algorithm>
 #include <cmath>
+#include <limits>
 #include <vector>
 
 #include "cyber/core/math.hpp"
@@ -59,6 +61,34 @@ Mesh makeBentStrip(int quads, float degPerQuad) {
         f.push_back({b0, b1, b1 + 1, b0 + 1});
     }
     return Mesh::fromIndexed(p, f);
+}
+
+// Flat n x n quad grid in the z=0 plane: one chart with many faces, so a single
+// poisoned vertex still leaves plenty of well-formed triangles around it.
+Mesh makeGrid(int n) {
+    std::vector<Vec3> p;
+    std::vector<std::vector<Index>> f;
+    for (int y = 0; y <= n; ++y) {
+        for (int x = 0; x <= n; ++x) {
+            p.push_back({static_cast<float>(x), static_cast<float>(y), 0.0f});
+        }
+    }
+    const Index stride = static_cast<Index>(n + 1);
+    for (int y = 0; y < n; ++y) {
+        for (int x = 0; x < n; ++x) {
+            const Index b = static_cast<Index>(y) * stride + static_cast<Index>(x);
+            f.push_back({b, b + 1, b + 1 + stride, b + stride});
+        }
+    }
+    return Mesh::fromIndexed(p, f);
+}
+
+bool allUvFinite(const Mesh& mesh) {
+    const std::vector<Vec2>* column = uv::uvColumn(mesh);
+    if (column == nullptr) {
+        return true;
+    }
+    return std::all_of(column->begin(), column->end(), [](Vec2 p) { return uv::isFinite(p); });
 }
 
 std::vector<FaceId> aliveFaces(const Mesh& mesh) {
@@ -404,6 +434,36 @@ TEST_CASE("charts that never land are reported as dropped, not as charts") {
         }
     }
     REQUIRE(withArea == atlas.chartCount);
+}
+
+TEST_CASE("a non-finite vertex position is refused instead of unwrapping to non-finite UVs") {
+    // Control: the same grid without the poisoned vertex unwraps and packs.
+    Mesh clean = makeGrid(4);
+    const uv::AtlasResult cleanAtlas = uv::unwrapAtlas(clean);
+    REQUIRE(cleanAtlas.ok);
+    REQUIRE(cleanAtlas.chartCount == 1);
+    REQUIRE(allUvFinite(clean));
+
+    // NaN fails every ordered comparison and inf survives them, so both slipped
+    // past the degenerate-triangle and pin-length guards.
+    const float poison[] = {std::numeric_limits<float>::infinity(),
+                            std::numeric_limits<float>::quiet_NaN()};
+    for (const float value : poison) {
+        Mesh mesh = makeGrid(4);
+        const VertexId bad{7};
+        Vec3 p = mesh.position(bad);
+        p.z = value;
+        mesh.setPosition(bad, p);
+
+        // The solve must not claim success on an island it cannot parameterize.
+        REQUIRE_FALSE(uv::lscmUnwrap(mesh, aliveFaces(mesh)).ok);
+
+        // ...and the atlas must report that failure rather than write the
+        // non-finite values into the mesh's corners.
+        const uv::AtlasResult atlas = uv::unwrapAtlas(mesh);
+        REQUIRE_FALSE(atlas.ok);
+        REQUIRE(allUvFinite(mesh));
+    }
 }
 
 TEST_CASE("mirrored UVs are detected as a flipped island") {

@@ -179,6 +179,14 @@ UnwrapResult lscmUnwrap(const Mesh& mesh, std::span<const FaceId> island,
     if (topo.triangles.empty() || n < 3) {
         return result;
     }
+    // A non-finite position poisons everything downstream — the pin length, the
+    // triangle embedding and the conformal coefficients — and NaN silently
+    // passes the ordered guards below, so such an island is refused outright.
+    for (const VertexId v : topo.vertices) {
+        if (!isFinite(mesh.position(v))) {
+            return result;
+        }
+    }
 
     // Columns: [0, n) hold u, [n, 2n) hold v.
     const auto [pinA, pinB] = choosePins(mesh, topo);
@@ -232,8 +240,8 @@ UnwrapResult lscmUnwrap(const Mesh& mesh, std::span<const FaceId> island,
                           mesh.position(topo.vertices[tri.c]));
         const double dT = static_cast<double>(lt.p1.x) * static_cast<double>(lt.p2.y) -
                           static_cast<double>(lt.p2.x) * static_cast<double>(lt.p1.y);
-        if (dT <= 1e-20) {
-            continue;  // degenerate triangle contributes nothing
+        if (!(dT > 1e-20)) {
+            continue;  // degenerate (or non-finite) triangle contributes nothing
         }
         const double invSqrt = 1.0 / std::sqrt(dT);
 
@@ -279,6 +287,13 @@ UnwrapResult lscmUnwrap(const Mesh& mesh, std::span<const FaceId> island,
         const float u = pinned[uCol] ? pinnedUv[i].x : static_cast<float>(solution[freeCol[uCol]]);
         const float v = pinned[vCol] ? pinnedUv[i].y : static_cast<float>(solution[freeCol[vCol]]);
         result.uv[i] = {u, v};
+    }
+    // A solve that overflowed or diverged reports failure instead of handing
+    // back non-finite UVs that callers would write into the mesh.
+    if (!std::all_of(result.uv.begin(), result.uv.end(), [](Vec2 p) { return isFinite(p); })) {
+        result.vertices.clear();
+        result.uv.clear();
+        return result;
     }
     result.ok = true;
     return result;

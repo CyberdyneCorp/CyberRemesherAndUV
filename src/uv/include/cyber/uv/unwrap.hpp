@@ -31,7 +31,9 @@ struct UnwrapResult {
 
 // Unwraps `island` (a set of faces) into UV space. Faces of any arity are
 // fan-triangulated to build the conformal energy. Returns ok=false for a
-// degenerate island (fewer than one face or three distinct vertices).
+// degenerate island (fewer than one face or three distinct vertices), for an
+// island carrying a non-finite vertex position, and for a solve whose UVs come
+// out non-finite; ok=true guarantees every uv is finite.
 [[nodiscard]] UnwrapResult lscmUnwrap(const Mesh& mesh, std::span<const FaceId> island,
                                       const UnwrapOptions& options = {});
 

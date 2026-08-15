@@ -18,6 +18,15 @@ namespace cyber::uv {
 
 inline constexpr std::string_view kUvAttributeName = "uv";
 
+// True when every component is an ordinary finite number. NaN fails every
+// ordered comparison, so a single non-finite mesh position slips past the
+// `<`/`<=` guards in the unwrap and ends up written into the UV attribute;
+// these are the explicit checks that catch it.
+[[nodiscard]] inline bool isFinite(Vec2 v) { return std::isfinite(v.x) && std::isfinite(v.y); }
+[[nodiscard]] inline bool isFinite(Vec3 v) {
+    return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z);
+}
+
 // Axis-aligned 2D bounds used for island bounding boxes and packing.
 struct Bounds2 {
     Vec2 mn{std::numeric_limits<float>::max(), std::numeric_limits<float>::max()};

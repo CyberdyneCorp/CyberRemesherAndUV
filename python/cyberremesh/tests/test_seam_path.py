@@ -11,6 +11,7 @@ Two halves, mirroring test_soft_selection.py:
   when the shared library is not loadable.
 """
 
+import gc
 import os
 import re
 import sys
@@ -177,6 +178,38 @@ def check_commit_resume_drop(mesh) -> None:
         assert len(seams) == 0
 
 
+def check_mesh_outlives_path(obj_path: str) -> None:
+    """Regression: the engine borrows the mesh, so the path has to pin it.
+
+    A path built from an otherwise unreferenced mesh used to route through freed
+    memory (SIGSEGV on a large mesh, silently wrong routes on a small one), and
+    closing the mesh by hand has to raise rather than dereference it.
+    """
+    from cyberremesh import Mesh, SeamPath
+
+    groove = [vid(0, 2)] + [vid(x, 1) for x in range(COLS)] + [vid(COLS - 1, 2)]
+
+    with SeamPath(Mesh.load_obj(obj_path)) as path:
+        assert any(isinstance(r, Mesh) for r in gc.get_referents(path)), \
+            "SeamPath kept no reference to its Mesh"
+        gc.collect()
+        churn = [bytearray(4096) for _ in range(256)]  # reclaim any freed block
+        del churn
+        assert path.add_waypoint(vid(0, 2))
+        assert path.add_waypoint(vid(COLS - 1, 2))
+        assert path.vertices() == groove, path.vertices()
+
+    mesh = Mesh.load_obj(obj_path)
+    with SeamPath(mesh) as path:
+        mesh.close()
+        for call in (lambda: path.add_waypoint(vid(0, 2)), path.waypoint_count, path.edges):
+            try:
+                call()
+            except ValueError:
+                continue
+            raise AssertionError("a closed Mesh must invalidate the path")
+
+
 def main() -> int:
     check_parity()
 
@@ -195,6 +228,7 @@ def main() -> int:
             check_routes_the_groove(mesh)
             check_edit_is_local(mesh)
             check_commit_resume_drop(mesh)
+        check_mesh_outlives_path(obj.name)
     finally:
         os.unlink(obj.name)
     print("PASS seam path bindings")

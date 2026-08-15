@@ -1,6 +1,7 @@
 #include <doctest.h>
 
 #include <cmath>
+#include <cstddef>
 #include <map>
 #include <set>
 #include <utility>
@@ -335,4 +336,43 @@ TEST_CASE("isotropic remesh preserves a tagged crease network") {
     // protection did nothing.
     const auto [lostEdges, lostComps] = remeshWith(40.0f);
     CHECK(lostComps > keptComps);
+}
+
+// A mesh far from the world origin — a centimetre-unit game world, a CAD part in site
+// coordinates, a glTF scene with a baked transform — asks for a target edge length that is
+// only a few float ULP of its coordinates. Below that resolution a midpoint split cannot
+// shorten anything: the midpoint and the re-triangulation diagonals all quantize onto the
+// same grid. The split pass re-reads its loop bound against the edge array it is growing, so
+// it fed itself forever: an ordinary radius-1 sphere at (5e5, 5e5, 5e5) at 5000 target quads
+// grew past 400k faces inside the FIRST pass and ran on to std::bad_alloc (or the OOM killer).
+//
+// The token below caps the run so a regression fails this assertion instead of exhausting CI's
+// memory: the split pass polls it, so growth stops just past the cap and the status comes back
+// Cancelled rather than Success.
+TEST_CASE("a mesh far from the world origin terminates instead of splitting without bound") {
+    Mesh mesh = makeSphere(12, 18);
+    constexpr float kOffset = 5e5f;
+    for (Index i = 0; i < mesh.vertexCapacity(); ++i) {
+        const VertexId v{i};
+        if (mesh.isAlive(v)) {
+            mesh.setPosition(v, mesh.position(v) + Vec3{kOffset, kOffset, kOffset});
+        }
+    }
+    const remesh::ReferenceSurface reference(mesh, 0.0f);
+
+    constexpr std::size_t kFaceCap = 100'000;
+    const CancelToken budget;
+    budget.setPoll([&mesh] { return mesh.faceCount() > kFaceCap; });
+
+    remesh::IsotropicOptions options;
+    options.targetEdgeLength = 0.054f;  // what --target-quads 5000 derives for a unit sphere
+    options.iterations = 4;
+    const auto status = remesh::isotropicRemesh(mesh, reference, options, nullptr, &budget);
+    REQUIRE(status == remesh::IsotropicStatus::Success);
+    REQUIRE(mesh.faceCount() < kFaceCap);
+    REQUIRE(mesh.validate().empty());
+    // Still a usable remesh at the finest density those coordinates can express, not a
+    // stalled or collapsed one.
+    CHECK(mesh.faceCount() > 300);
+    CHECK(mesh.faceCount() < 20'000);
 }

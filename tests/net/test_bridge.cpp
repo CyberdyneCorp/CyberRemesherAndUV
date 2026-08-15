@@ -1,13 +1,19 @@
+#include <dirent.h>
 #include <doctest.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <unistd.h>
 
+#include <atomic>
+#include <chrono>
 #include <cstdint>
+#include <cstdlib>
 #include <fstream>
 #include <limits>
+#include <new>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "cyber/net/client.hpp"
@@ -34,6 +40,40 @@ std::size_t virtualMemoryKb() {
     }
     return 0;
 }
+
+// Open descriptors of this process, or 0 where /proc is unavailable (non-Linux
+// POSIX). Only the difference between two readings is meaningful.
+std::size_t openFdCount() {
+    DIR* dir = ::opendir("/proc/self/fd");
+    if (dir == nullptr) {
+        return 0;
+    }
+    std::size_t count = 0;
+    while (::readdir(dir) != nullptr) {
+        ++count;
+    }
+    ::closedir(dir);
+    return count;
+}
+
+// One-shot heap-failure injector for threads other than the one that arms it.
+// The bridge's accept thread allocates where no test can reach — the connection
+// bookkeeping and the handler thread's own state — so this is how an exhausted
+// address space is reproduced there. Inert until armed, and it disarms itself
+// on the first foreign allocation.
+std::atomic<bool> g_failForeignAlloc{false};
+std::atomic<bool> g_foreignAllocFailed{false};
+std::thread::id g_armingThread{};
+
+void armForeignAllocationFailure() {
+    g_armingThread = std::this_thread::get_id();
+    g_foreignAllocFailed.store(false, std::memory_order_relaxed);
+    g_failForeignAlloc.store(true, std::memory_order_release);
+}
+
+void disarmForeignAllocationFailure() { g_failForeignAlloc.store(false, std::memory_order_release); }
+
+bool foreignAllocationFailed() { return g_foreignAllocFailed.load(std::memory_order_acquire); }
 
 // Minimal raw connection to the bridge. BridgeClient only ever sends
 // well-formed requests, so putting arbitrary bytes on the wire needs its own
@@ -102,6 +142,25 @@ net::WireMesh sampleMesh() {
 }
 
 }  // namespace
+
+// Replaces the global allocator so the injector above can reach threads the
+// tests do not own. Without it armed this is the ordinary allocation path. The
+// size bound keeps the injection on the small bookkeeping allocations it is
+// aimed at, well away from any buffer another thread might take.
+void* operator new(std::size_t size) {
+    constexpr std::size_t kInjectableSize = 256;
+    if (g_failForeignAlloc.load(std::memory_order_acquire) && size <= kInjectableSize &&
+        std::this_thread::get_id() != g_armingThread) {
+        g_failForeignAlloc.store(false, std::memory_order_relaxed);
+        g_foreignAllocFailed.store(true, std::memory_order_release);
+        throw std::bad_alloc();
+    }
+    void* memory = std::malloc(size == 0 ? 1 : size);
+    if (memory == nullptr) {
+        throw std::bad_alloc();
+    }
+    return memory;
+}
 
 TEST_CASE("frame codec round-trips and reassembles split reads") {
     const std::string payload = R"({"type":"ping"})";
@@ -327,6 +386,78 @@ TEST_CASE("sequential connections do not accumulate handler threads") {
         // Reaped handlers hand their stacks back for reuse.
         CHECK(virtualMemoryKb() < before + std::size_t{128} * 1024u);  // 128 MB of slack
     }
+    server.stop();
+}
+
+TEST_CASE("stop() joins the accept thread and releases every descriptor it owned") {
+    net::BridgeSession session;
+    net::BridgeServer server(session);
+
+    // A first cycle pays one-off allocations and descriptors that are not
+    // per-cycle, so the counts below are read after it.
+    REQUIRE(server.start(0));
+    server.stop();
+
+    const std::size_t fdsBefore = openFdCount();
+    const auto begin = std::chrono::steady_clock::now();
+    constexpr int kCycles = 24;
+    for (int i = 0; i < kCycles; ++i) {
+        REQUIRE(server.start(0));
+        const std::uint16_t port = server.port();
+        REQUIRE(port != 0);
+        {
+            net::BridgeClient client;
+            REQUIRE(client.connect(port));
+            REQUIRE(client.ping());
+            client.close();
+        }
+        server.stop();
+        REQUIRE_FALSE(server.isListening());
+        // The listening socket is closed, not merely unattended.
+        RawConnection refused(port);
+        CHECK_FALSE(refused.ok());
+    }
+    const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                               std::chrono::steady_clock::now() - begin)
+                               .count();
+
+    if (fdsBefore != 0) {
+        // The listening socket used to be closed while the accept thread could
+        // still name it — a data race, and the number went back to the process
+        // mid-use. It now outlives that thread, so it (and the wake pipe that
+        // ends the thread's wait) must still be released on every cycle.
+        CHECK(openFdCount() == fdsBefore);
+    }
+    // Bounded so a shutdown that hangs on the join, or that waits out the
+    // accept loop's poll timeout on every cycle, fails here instead of
+    // stalling CI.
+    CHECK(elapsedMs < 3000);
+}
+
+TEST_CASE("an allocation failure on the accept thread drops the connection, not the process") {
+    net::BridgeSession session;
+    net::BridgeServer server(session);
+    REQUIRE(server.start(0));
+
+    // Fail the accept thread's next allocation — the connection bookkeeping, or
+    // the handler thread's state. Uncaught, it escaped the top of the accept
+    // thread and std::terminate took the whole host process down with it.
+    armForeignAllocationFailure();
+    RawConnection doomed(server.port());
+    for (int i = 0; i < 2000 && !foreignAllocationFailed(); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    disarmForeignAllocationFailure();
+    REQUIRE(doomed.ok());
+    REQUIRE(foreignAllocationFailed());  // bounded wait: the injection did fire
+
+    // That one connection is dropped and the server keeps serving.
+    CHECK(doomed.receive().empty());
+    REQUIRE(server.isListening());
+    net::BridgeClient client;
+    REQUIRE(client.connect(server.port()));
+    REQUIRE(client.ping());
+    client.close();
     server.stop();
 }
 
