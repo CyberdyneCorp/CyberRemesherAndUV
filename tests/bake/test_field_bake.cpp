@@ -240,14 +240,24 @@ TEST_CASE("bake without an evaluator reproduces the pre-bridge pixels") {
     // at every texel locked whole neighbourhoods onto the same k/aoSamples rung
     // and banded the map, so that pixel-for-pixel contract had to be broken on
     // purpose. Every other map still holds the pre-bridge bits.
+    //
+    // Normal, Curvature and Color were RE-captured when the BVH build moved from
+    // the object median to a binned SAH. This fixture's high-poly is a regular
+    // 21x21 grid split along the u == v diagonal, and the cage rays for texels
+    // (3,3) and (5,5) land EXACTLY on that shared diagonal — both adjacent
+    // triangles report the same t, so which one is named depends on the tree.
+    // Naming the other one moves those two texels by ONE ULP (measured
+    // max |delta| = 1.2e-7) because the value interpolates the same along the
+    // shared edge; the other 62 texels, and AO, Cavity, Displacement and
+    // Position everywhere, are unchanged bit for bit.
     const std::vector<Case> cases = {
-        {bake::BakeMap::Normal, 192, 0xaaf59aec8138d50eull},
+        {bake::BakeMap::Normal, 192, 0xa40268a897af49efull},
         {bake::BakeMap::AmbientOcclusion, 64, 0x1ab03f2993f16ba3ull},
-        {bake::BakeMap::Curvature, 64, 0xe0b4081bacc11bb3ull},
+        {bake::BakeMap::Curvature, 64, 0x581a35530fdd7092ull},
         {bake::BakeMap::Cavity, 64, 0xf099b3ccc9e3755full},
         {bake::BakeMap::Displacement, 64, 0x258044b372d77e53ull},
         {bake::BakeMap::Position, 192, 0xc502d243ae90602full},
-        {bake::BakeMap::Color, 192, 0x6bcc31b3c8f7f2b9ull},
+        {bake::BakeMap::Color, 192, 0x4d8538e2d94fcfeeull},
     };
     for (const Case& c : cases) {
         CAPTURE(static_cast<int>(c.map));

@@ -3,17 +3,25 @@
 the clamp-warning path, run against the real binary."""
 
 import json
+import os
+import shlex
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
 BINARY = Path(sys.argv[1]).resolve()
+# On a cross-build the binary is not this machine's ISA, so CTest passes the same
+# emulator it uses for native test commands (CMAKE_CROSSCOMPILING_EMULATOR) and
+# every launch goes through it. Empty on a native build.
+LAUNCHER = shlex.split(os.environ.get("CYBER_TEST_LAUNCHER", ""))
 FAILURES: list[str] = []
 
 
 def run(*args: str) -> subprocess.CompletedProcess:
-    return subprocess.run([str(BINARY), *args], capture_output=True, text=True, timeout=300)
+    return subprocess.run(
+        [*LAUNCHER, str(BINARY), *args], capture_output=True, text=True, timeout=300
+    )
 
 
 def check(name: str, condition: bool, detail: str = "") -> None:
@@ -499,7 +507,7 @@ def main() -> int:
     stdin_report = handoff_dir / "stdin.json"
     stdin_out = handoff_dir / "low_stdin.obj"
     with handoff.open("rb") as f:
-        r = subprocess.run([str(BINARY), "--target", "-", "--output", str(stdin_out),
+        r = subprocess.run([*LAUNCHER, str(BINARY), "--target", "-", "--output", str(stdin_out),
                             "--target-quads", "120", "--report", str(stdin_report), "--quiet"],
                            stdin=f, capture_output=True, text=True, timeout=300)
     check("stdin handoff exit 0", r.returncode == 0, r.stderr)

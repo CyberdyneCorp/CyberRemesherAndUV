@@ -8,6 +8,7 @@
 
 #include "cyber/core/math.hpp"
 #include "cyber/core/mesh.hpp"
+#include "cyber/retopo/adjacency.hpp"
 #include "cyber/retopo/build_tools.hpp"  // Affine
 #include "cyber/retopo/neighbors.hpp"
 #include "cyber/retopo/pins.hpp"
@@ -348,14 +349,16 @@ namespace detail {
 // One double-buffered morphological/diffusion sweep over the closed one-ring.
 // `combine(accumulator, neighbourWeight)` folds each neighbour into the running
 // value seeded with the vertex's own weight; `finish(value, ringSize)` turns the
-// accumulator into the new weight.
+// accumulator into the new weight. `adjacency` is the caller's prebuilt one-ring
+// table (see relaxSweep); nullptr gathers the rings from the mesh instead.
 template <typename Combine, typename Finish>
 inline void sweepSelection(const Mesh& mesh, SoftSelection& selection, int steps, Combine combine,
-                           Finish finish) {
+                           Finish finish, const MeshAdjacency* adjacency = nullptr) {
     if (steps <= 0) {
         return;
     }
     selection.resizeFor(mesh);
+    RingSource rings(mesh, adjacency);
     std::vector<float> next(selection.weights().begin(), selection.weights().end());
     for (int step = 0; step < steps; ++step) {
         for (Index i = 0; i < mesh.vertexCapacity(); ++i) {
@@ -366,7 +369,7 @@ inline void sweepSelection(const Mesh& mesh, SoftSelection& selection, int steps
                 continue;
             }
             float value = selection.weight(v);
-            const std::vector<VertexId> ring = oneRing(mesh, v);
+            const std::span<const VertexId> ring = rings.ring(v);
             for (const VertexId nb : ring) {
                 value = combine(value, selection.weight(nb));
             }
@@ -380,27 +383,31 @@ inline void sweepSelection(const Mesh& mesh, SoftSelection& selection, int steps
 
 // Grows the selection: each vertex takes the maximum of its closed one-ring,
 // repeated `steps` times.
-inline void expandSelection(const Mesh& mesh, SoftSelection& selection, int steps = 1) {
+inline void expandSelection(const Mesh& mesh, SoftSelection& selection, int steps = 1,
+                            const MeshAdjacency* adjacency = nullptr) {
     detail::sweepSelection(
         mesh, selection, steps, [](float a, float b) { return std::max(a, b); },
-        [](float value, std::size_t) { return value; });
+        [](float value, std::size_t) { return value; }, adjacency);
 }
 
 // Shrinks the selection: each vertex takes the minimum of its closed one-ring,
 // repeated `steps` times.
-inline void contractSelection(const Mesh& mesh, SoftSelection& selection, int steps = 1) {
+inline void contractSelection(const Mesh& mesh, SoftSelection& selection, int steps = 1,
+                              const MeshAdjacency* adjacency = nullptr) {
     detail::sweepSelection(
         mesh, selection, steps, [](float a, float b) { return std::min(a, b); },
-        [](float value, std::size_t) { return value; });
+        [](float value, std::size_t) { return value; }, adjacency);
 }
 
 // Softens the weight transition: each vertex takes the average of its closed
 // one-ring, repeated `steps` times (the shell's "smooth by 1 / 5 / 10" is just
 // this count). Positions are never touched.
-inline void smoothSelection(const Mesh& mesh, SoftSelection& selection, int steps = 1) {
+inline void smoothSelection(const Mesh& mesh, SoftSelection& selection, int steps = 1,
+                            const MeshAdjacency* adjacency = nullptr) {
     detail::sweepSelection(
         mesh, selection, steps, [](float a, float b) { return a + b; },
-        [](float value, std::size_t ring) { return value / static_cast<float>(ring + 1); });
+        [](float value, std::size_t ring) { return value / static_cast<float>(ring + 1); },
+        adjacency);
 }
 
 // ---- weighted transform / relax --------------------------------------------
@@ -448,9 +455,11 @@ inline ResnapReport transformWeighted(Mesh& mesh, const SoftSelection& selection
 // scaled by the selection weight. Zero-weight vertices are untouched.
 inline ResnapReport relaxWeighted(Mesh& mesh, const SoftSelection& selection,
                                   const RelaxParams& params, const SurfaceSnapper* snap = nullptr,
-                                  const PinSet* pins = nullptr, float resnapEpsilon = 0.0f) {
-    return detail::relaxSweep(mesh, params, pins, snap, resnapEpsilon,
-                              [&selection](VertexId v) { return selection.weight(v); });
+                                  const PinSet* pins = nullptr, float resnapEpsilon = 0.0f,
+                                  const MeshAdjacency* adjacency = nullptr) {
+    return detail::relaxSweep(
+        mesh, params, pins, snap, resnapEpsilon,
+        [&selection](VertexId v) { return selection.weight(v); }, adjacency);
 }
 
 }  // namespace cyber::retopo

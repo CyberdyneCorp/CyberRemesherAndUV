@@ -4,13 +4,13 @@
 #include <cstdint>
 #include <limits>
 #include <mutex>
-#include <thread>
 #include <vector>
 
 #include "cyber/accel/backend.hpp"
 #include "cyber/core/bvh.hpp"
 #include "cyber/core/detail/parallel_chunks.hpp"
 #include "cyber/core/math.hpp"
+#include "cyber/core/threading.hpp"
 
 // CPU reference implementations of IBackend's accelerated numeric primitives.
 // These live on the base class so every backend inherits a correct version and
@@ -52,8 +52,7 @@ std::size_t workerCount(std::size_t total) {
     if (tInParallelRegion || total < kMinParallelItems) {
         return 1;
     }
-    const std::size_t hw = std::max<std::size_t>(1, std::thread::hardware_concurrency());
-    return std::min(hw, total);
+    return cyber::workerThreadsFor(total);
 }
 
 }  // namespace

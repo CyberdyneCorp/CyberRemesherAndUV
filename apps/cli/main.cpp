@@ -5,7 +5,6 @@
 //   or empty result | 5 partial success (failed islands) | 6 output/report
 //   write failure | 130 cancelled (SIGINT).
 #include <atomic>
-#include <charconv>
 #include <chrono>
 #include <csignal>
 #include <cstdio>
@@ -39,6 +38,7 @@
 #include "cyber/quadrangulate/field_quadrangulator.hpp"
 #include "cyber/quadrangulate/position_field.hpp"
 #include "cyber/quadrangulate/quadcover_extractor.hpp"
+#include "parse_number.hpp"
 
 #ifdef CYBER_CLI_HAVE_PRESETS
 #include "cyber/exportbundle/bundle.hpp"
@@ -160,17 +160,7 @@ void printUsage() {
                  "  --version                print version and exit\n");
 }
 
-template <typename T>
-std::optional<T> parseNumber(const std::string& text) {
-    T value{};
-    const char* begin = text.data();
-    const char* end = begin + text.size();
-    const auto [ptr, ec] = std::from_chars(begin, end, value);
-    if (ec != std::errc{} || ptr != end) {
-        return std::nullopt;
-    }
-    return value;
-}
+using cyber::cli::parseNumber;
 
 // Returns exit code (kExitOk to continue) and fills options.
 int parseArgs(int argc, char** argv, CliOptions& options, bool& exitEarly) {

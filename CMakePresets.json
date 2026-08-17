@@ -57,28 +57,48 @@
       }
     },
     {
-      "name": "ios",
-      "displayName": "iPadOS/iOS (Metal, no CLI/tests)",
+      "name": "mobile-base",
+      "hidden": true,
       "inherits": "base",
+      "description": "Shared mobile settings. The local network bridge is POSIX sockets plus a server executable; an app links the C ABI directly and has no use for either, so it is off.",
+      "cacheVariables": {
+        "CYBER_BUILD_CLI": "OFF",
+        "CYBER_BUILD_TESTS": "OFF",
+        "CYBER_BUILD_RENDER": "ON",
+        "CYBER_BUILD_NET": "OFF"
+      }
+    },
+    {
+      "name": "ios",
+      "displayName": "iPadOS/iOS (Metal compute; renderer built without a GPU RHI)",
+      "description": "CYBER_RENDER_ENABLE_METAL stays off, so the renderer here is its headless half — the displayName used to claim a backend the preset never enabled.",
+      "inherits": "mobile-base",
       "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Darwin" },
       "cacheVariables": {
         "CMAKE_SYSTEM_NAME": "iOS",
-        "CYBER_ENABLE_METAL": "ON",
-        "CYBER_BUILD_RENDER": "ON",
-        "CYBER_BUILD_CLI": "OFF",
-        "CYBER_BUILD_TESTS": "OFF"
+        "CYBER_ENABLE_METAL": "ON"
       }
     },
     {
       "name": "android",
-      "displayName": "Android (Vulkan render, OpenCL where present)",
-      "inherits": "base",
+      "displayName": "Android (CPU backend; renderer built without a GPU RHI)",
+      "description": "The NDK ships no OpenCL, so the REQUIRED find_package(OpenCL) this preset used to ask for aborted its configure before any other setting was reached. Vulkan is likewise not enabled here (CYBER_RENDER_ENABLE_VULKAN needs the SDK).",
+      "inherits": "mobile-base",
       "cacheVariables": {
         "CMAKE_SYSTEM_NAME": "Android",
-        "CYBER_ENABLE_OPENCL": "ON",
-        "CYBER_BUILD_RENDER": "ON",
-        "CYBER_BUILD_CLI": "OFF",
-        "CYBER_BUILD_TESTS": "OFF"
+        "CYBER_ENABLE_OPENCL": "OFF"
+      }
+    },
+    {
+      "name": "linux-arm64-cross",
+      "displayName": "arm64 cross-build (glibc) — the whole suite, run under qemu",
+      "description": "The one lane that EXECUTES the engine on the mobile word size, alignment and (unsigned) char. Needs g++-aarch64-linux-gnu and qemu-user-static, nothing else.",
+      "inherits": "base",
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux" },
+      "toolchainFile": "${sourceDir}/cmake/toolchains/aarch64-linux-gnu.cmake",
+      "cacheVariables": {
+        "CYBER_BUILD_TESTS": "ON",
+        "CYBER_BUILD_CLI": "ON"
       }
     }
   ],
@@ -86,7 +106,8 @@
     { "name": "cpu-headless", "configurePreset": "cpu-headless" },
     { "name": "cpu-headless-debug", "configurePreset": "cpu-headless-debug" },
     { "name": "macos-metal", "configurePreset": "macos-metal" },
-    { "name": "linux-cuda", "configurePreset": "linux-cuda" }
+    { "name": "linux-cuda", "configurePreset": "linux-cuda" },
+    { "name": "linux-arm64-cross", "configurePreset": "linux-arm64-cross" }
   ],
   "testPresets": [
     {
@@ -102,6 +123,11 @@
     {
       "name": "linux-cuda",
       "configurePreset": "linux-cuda",
+      "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "linux-arm64-cross",
+      "configurePreset": "linux-arm64-cross",
       "output": { "outputOnFailure": true }
     }
   ]

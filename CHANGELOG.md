@@ -81,6 +81,54 @@ is listed; this is the index, not the account.
 
 ### Added
 
+- **The mobile targets build, and 64-bit ARM is now executed in CI.** Three
+  things blocked the platform the product actually ships on, and nothing
+  reported any of them. The `android` preset had **never configured**: it set
+  `CYBER_ENABLE_OPENCL=ON` and `src/accel/CMakeLists.txt` asked for
+  `find_package(OpenCL REQUIRED)`, while the NDK ships no OpenCL — the
+  configure died at that line before reaching any other setting in the preset.
+  `apps/cli/main.cpp` could not compile for either mobile target, because its
+  number parser instantiated `std::from_chars` for `float` and libc++ (the
+  standard library of both Apple platforms and the NDK) declares those
+  overloads **deleted**. And no lane ever ran the engine on aarch64, so no lane
+  could see a defect that depends on the mobile word size, alignment, `char`
+  signedness or floating-point contraction. Now: OpenCL is off for Android and
+  the `REQUIRED` is a message that names the NDK and the option that disables
+  it; both mobile presets drop the POSIX-socket network bridge an app has no
+  use for and their `displayName`s say what they really enable; the parser
+  keeps `std::from_chars` where it exists and reimposes its exact grammar over
+  `strtof`/`strtod` where it does not (`apps/cli/parse_number.hpp`, with
+  `tests/cli/test_parse_number.cpp` holding the two paths to the same
+  verdicts); and three CI lanes join the set — `arm64-cross` (cross-compiles
+  everything for aarch64 and **runs the suite** under `qemu-user`, via the new
+  `linux-arm64-cross` preset), `android-ndk` (configures and builds the preset
+  with the runner's NDK, CLI and suite included), and a reporting `ios-preset`.
+- **The Metal backend gets ARC, and stops being the one file nobody compiles.**
+  `cyber_accel_metal` was added without `enable_language(OBJCXX)`, so CMake fed
+  the `.mm` to the plain C++ driver and it never got ARC — every `newCommandQueue`,
+  `newBufferWith…`, `newFunctionWithName`, `newComputePipelineState…` and
+  `newLibraryWithSource` result leaked, on every dispatch. The target now
+  declares the language and compiles with `-fobjc-arc`. Separately, a new
+  ctest case `metal_objcxx_syntax` parses `metal_backend.mm` on **any** host —
+  clang handles Objective-C++ with `-fobjc-runtime=ios-13.0`, and
+  `tests/packaging/objcxx_stubs/` supplies declaration-only Metal/Foundation
+  headers with the SDK's exact signatures — under `-Wall -Wextra -Werror`. It
+  mutation-checks itself on every run: a deliberately mistyped selector must be
+  rejected, or the gate reports that it proves nothing.
+- **A host can now bound the engine's worker threads.** Both parallel loops
+  (the pipeline's per-vertex relax and accel's `IBackend::parallelFor`) read
+  `std::thread::hardware_concurrency()` directly, so an AO bake took every core
+  of a machine an interactive host was trying to share, and there was no
+  in-process way to ask for less. `cyber::setMaxWorkerThreads` /
+  `maxWorkerThreads` (`cyber/core/threading.hpp`) and the C ABI's
+  `cyber_set_max_worker_threads` / `cyber_max_worker_threads` cap it; 0 keeps
+  the old behaviour. It is an API and not an environment variable because a
+  host learns its budget while already running and multi-threaded. The cap
+  changes speed and CPU load only — the loops split a range into contiguous
+  chunks and each chunk writes only its own indices — and
+  `tests/core/test_threading.cpp` pins that by comparing a capped remesh
+  against an uncapped one vertex for vertex. The CPU backend's device name now
+  reports the effective count rather than the machine's.
 - **Named soft-selection slots now persist with the document, end to end.**
   The two halves existed and nothing connected them: `cyber::app::Document`
   serialized a `softSelections` map and the C ABI kept its own slot map on
@@ -500,6 +548,29 @@ is listed; this is the index, not the account.
   No `cyber_*` entry point changed.
 
 ### Fixed
+
+- **Baked maps came out with different pixels on arm64 — the architecture the
+  product ships on.** Six of the seven bake golden checksums failed on aarch64
+  while x86-64 CI stayed green, and the cause was fused-multiply-add contraction,
+  not the shading code: aarch64 has FMA in its baseline ISA so GCC/Clang contract
+  `a * b + c` at `-O2`, while a stock x86-64 build has no FMA instruction and
+  therefore cannot. That rounds a difference of products only once, so an
+  exactly-degenerate barycentric denominator or ray/triangle determinant stops
+  cancelling to zero and an inside test flips — a `spot.obj` bake lost two
+  covered texels outright, and every map's pixels moved. `-ffp-contract=off` is
+  now applied to every translation unit in the tree
+  (`cmake/FloatingPoint.cmake`), which makes bake output byte-identical across
+  x86-64 and aarch64 on all six sample models and closes the same latent hole on
+  x86-64, where `-march=native` reproduced the arm64 failures exactly.
+  Contraction cost nothing measurable to give up — neither a seven-map bake nor a
+  20k-quad remesh moved outside run-to-run noise on an FMA-capable build — and
+  x86-64 output is byte-identical to before the change (120 bake dumps, 5 remesh
+  runs, 8 preset/bake bundles). `tests/bake/test_bake_determinism.cpp` pins the
+  rule from inside the binary so a build that loses the flag says so instead of
+  leaving a checksum mismatch to be misread as a shading bug. Two narrower
+  cross-architecture divergences that this does *not* close (glibc `atan2f` in UV
+  chart re-orientation, and the remesh pipeline at large) are written up in
+  `docs/floating-point-determinism.md`.
 
 - **The automatic UV atlas hung on ordinary assets, uninterruptibly.** The
   default-on distortion merge (`AtlasOptions::maxChartDistortion = 0.10`) drives

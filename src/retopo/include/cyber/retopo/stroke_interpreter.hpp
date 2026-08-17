@@ -450,6 +450,62 @@ inline GridDetection detectGrid(const std::vector<Vec2>& p, int window, const Sh
     return out;
 }
 
+// Axis-aligned screen box, the cheap rejection test every mesh-resolver
+// query filters with before it evaluates its exact predicate. Rejection is
+// CONSERVATIVE by construction: `overlaps` answers true whenever a
+// coordinate is NaN (every comparison is false), and boxes grown for a pick
+// radius carry a slack far larger than the rounding of the distances they
+// stand in for, so no element the exact predicate would accept is ever
+// filtered out.
+struct Box2 {
+    Vec2 lo{};
+    Vec2 hi{};
+
+    [[nodiscard]] bool overlaps(const Box2& o) const {
+        return !(lo.x > o.hi.x || hi.x < o.lo.x || lo.y > o.hi.y || hi.y < o.lo.y);
+    }
+    // Negated comparisons, so a NaN coordinate answers "may contain" and the
+    // exact predicate — not the filter — decides what happens to it.
+    [[nodiscard]] bool mayContain(Vec2 p) const {
+        return !(p.x < lo.x || p.x > hi.x || p.y < lo.y || p.y > hi.y);
+    }
+    [[nodiscard]] Box2 grown(float radius) const {
+        // The slack absorbs the rounding difference between "distance to the
+        // box" and the exact distance the caller measures afterwards.
+        constexpr float kSlack = 1e-6f;
+        const float r = radius + kSlack;
+        return {{lo.x - r, lo.y - r}, {hi.x + r, hi.y + r}};
+    }
+};
+
+inline Box2 segmentBox(Vec2 a, Vec2 b) {
+    return {{std::fmin(a.x, b.x), std::fmin(a.y, b.y)}, {std::fmax(a.x, b.x), std::fmax(a.y, b.y)}};
+}
+
+inline Box2 polylineBox(const std::vector<Vec2>& points) {
+    if (points.empty()) {
+        return {};
+    }
+    Box2 box{points.front(), points.front()};
+    for (const Vec2 p : points) {
+        box.lo = {std::fmin(box.lo.x, p.x), std::fmin(box.lo.y, p.y)};
+        box.hi = {std::fmax(box.hi.x, p.x), std::fmax(box.hi.y, p.y)};
+    }
+    return box;
+}
+
+inline std::vector<Box2> segmentBoxes(const std::vector<Vec2>& polyline) {
+    std::vector<Box2> boxes;
+    if (polyline.size() < 2) {
+        return boxes;
+    }
+    boxes.reserve(polyline.size() - 1);
+    for (std::size_t i = 0; i + 1 < polyline.size(); ++i) {
+        boxes.push_back(segmentBox(polyline[i], polyline[i + 1]));
+    }
+    return boxes;
+}
+
 inline bool pointInPolygon(const std::vector<Vec2>& poly, Vec2 p) {
     bool inside = false;
     const std::size_t n = poly.size();
@@ -653,6 +709,8 @@ public:
     [[nodiscard]] std::optional<VertexId> nearestVertex(Vec2 p, float radius) const {
         std::optional<VertexId> best;
         float bestD2 = radius * radius;
+        // No box pre-test here: a squared distance is as cheap to compute as
+        // the four comparisons that would skip it.
         for (Index i = 0; i < m_mesh.vertexCapacity(); ++i) {
             const VertexId v{i};
             if (!m_mesh.isAlive(v) || !m_valid[i]) {
@@ -670,6 +728,7 @@ public:
     [[nodiscard]] std::optional<EdgeId> nearestEdge(Vec2 p, float radius) const {
         std::optional<EdgeId> best;
         float bestD2 = radius * radius;
+        const Box2 reach = Box2{p, p}.grown(radius);
         for (Index i = 0; i < m_mesh.edgeCapacity(); ++i) {
             const EdgeId e{i};
             if (!m_mesh.isAlive(e)) {
@@ -679,8 +738,12 @@ public:
             if (!m_valid[v0.value] || !m_valid[v1.value]) {
                 continue;
             }
-            const Vec2 q = closestOnSegment2(m_screen[v0.value], m_screen[v1.value], p);
-            const float d2 = length2(q - p);
+            const Vec2 a = m_screen[v0.value];
+            const Vec2 b = m_screen[v1.value];
+            if (!segmentBox(a, b).overlaps(reach)) {
+                continue;
+            }
+            const float d2 = length2(closestOnSegment2(a, b, p) - p);
             if (d2 < bestD2) {
                 bestD2 = d2;
                 best = e;
@@ -707,24 +770,21 @@ public:
     // deterministic edge-id order, each edge reported once.
     [[nodiscard]] std::vector<EdgeId> edgesCrossing(const std::vector<Vec2>& stroke) const {
         std::vector<EdgeId> crossed;
-        for (Index i = 0; i < m_mesh.edgeCapacity(); ++i) {
-            const EdgeId e{i};
-            if (!m_mesh.isAlive(e)) {
-                continue;
-            }
-            const auto [v0, v1] = m_mesh.edgeVertices(e);
-            if (!m_valid[v0.value] || !m_valid[v1.value]) {
-                continue;
-            }
-            const Vec2 a = m_screen[v0.value];
-            const Vec2 b = m_screen[v1.value];
-            for (std::size_t s = 0; s + 1 < stroke.size(); ++s) {
-                if (segmentsCross(a, b, stroke[s], stroke[s + 1])) {
+        // Two segments cross only where their boxes meet: the stroke's box
+        // rejects most edges outright, and the per-segment boxes reject the
+        // rest of the stroke for the edges that survive. Both are the same
+        // test the crossing itself implies, so the reported set is exactly
+        // the one a full pairwise scan finds.
+        const Box2 reach = polylineBox(stroke).grown(0.0f);
+        const std::vector<Box2> segments = segmentBoxes(stroke);
+        forEachProjectedEdge(reach, [&](EdgeId e, Vec2 a, Vec2 b, const Box2& box) {
+            for (std::size_t s = 0; s < segments.size(); ++s) {
+                if (segments[s].overlaps(box) && segmentsCross(a, b, stroke[s], stroke[s + 1])) {
                     crossed.push_back(e);
-                    break;
+                    return;
                 }
             }
-        }
+        });
         return crossed;
     }
 
@@ -733,37 +793,36 @@ public:
                                                 float radius) const {
         std::vector<EdgeId> near;
         const float r2 = radius * radius;
-        for (Index i = 0; i < m_mesh.edgeCapacity(); ++i) {
-            const EdgeId e{i};
-            if (!m_mesh.isAlive(e)) {
-                continue;
-            }
-            const auto [v0, v1] = m_mesh.edgeVertices(e);
-            if (!m_valid[v0.value] || !m_valid[v1.value]) {
-                continue;
-            }
-            const Vec2 a = m_screen[v0.value];
-            const Vec2 b = m_screen[v1.value];
+        const Box2 reach = polylineBox(stroke).grown(radius);
+        forEachProjectedEdge(reach, [&](EdgeId e, Vec2 a, Vec2 b, const Box2& box) {
+            const Box2 pick = box.grown(radius);
             for (const Vec2 s : stroke) {
-                if (length2(closestOnSegment2(a, b, s) - s) <= r2) {
+                if (pick.mayContain(s) && length2(closestOnSegment2(a, b, s) - s) <= r2) {
                     near.push_back(e);
-                    break;
+                    return;
                 }
             }
-        }
+        });
         return near;
     }
 
     // Live faces whose projected centroid lies inside the stroke polygon.
     [[nodiscard]] std::vector<FaceId> facesEnclosed(const std::vector<Vec2>& stroke) const {
         std::vector<FaceId> inside;
+        // A centroid outside the stroke's box is outside the stroke: no
+        // polygon edge spans its row (so no crossing toggles), and past
+        // either side every spanning edge toggles, which always cancels out
+        // around a closed ring. The box test therefore only skips centroids
+        // the ray cast would have rejected anyway — at a fraction of the
+        // cost, since the ray cast walks all 64 stroke samples.
+        const Box2 reach = polylineBox(stroke).grown(0.0f);
         for (Index i = 0; i < m_mesh.faceCapacity(); ++i) {
             const FaceId f{i};
             if (!m_mesh.isAlive(f)) {
                 continue;
             }
-            if (const std::optional<Vec2> c = faceScreenCentroid(f);
-                c && pointInPolygon(stroke, *c)) {
+            const std::optional<Vec2> c = faceScreenCentroid(f);
+            if (c && reach.mayContain(*c) && pointInPolygon(stroke, *c)) {
                 inside.push_back(f);
             }
         }
@@ -793,32 +852,63 @@ public:
             return 0.0f;
         }
         const float r2 = radius * radius;
+        const Box2 reach = polylineBox(stroke).grown(radius);
+        // Walked edge-first rather than sample-first: each sample only has to
+        // be within reach of SOME edge, so one pass that marks the samples it
+        // covers answers the same question as one scan of the mesh per
+        // sample, and it can stop as soon as every sample is accounted for.
+        std::vector<bool> covered(stroke.size(), false);
         std::size_t hits = 0;
-        for (const Vec2 s : stroke) {
-            bool near = false;
-            for (Index i = 0; i < m_mesh.edgeCapacity() && !near; ++i) {
-                const EdgeId e{i};
-                if (!m_mesh.isAlive(e)) {
+        forEachProjectedEdge(reach, [&](EdgeId, Vec2 a, Vec2 b, const Box2& box) {
+            if (hits == stroke.size()) {
+                return;
+            }
+            const Box2 pick = box.grown(radius);
+            for (std::size_t k = 0; k < stroke.size(); ++k) {
+                const Vec2 s = stroke[k];
+                if (covered[k] || !pick.mayContain(s)) {
                     continue;
                 }
-                const auto [v0, v1] = m_mesh.edgeVertices(e);
-                if (!m_valid[v0.value] || !m_valid[v1.value]) {
-                    continue;
+                if (length2(closestOnSegment2(a, b, s) - s) <= r2) {
+                    covered[k] = true;
+                    ++hits;
                 }
-                near =
-                    length2(closestOnSegment2(m_screen[v0.value], m_screen[v1.value], s) - s) <= r2;
             }
-            if (near) {
-                ++hits;
-            }
-        }
+        });
         return static_cast<float>(hits) / static_cast<float>(stroke.size());
     }
 
 private:
+    // Every projected edge whose screen box meets `reach`, in edge-id order,
+    // as (id, endpoint, endpoint, box).
+    template <typename Fn>
+    void forEachProjectedEdge(const Box2& reach, Fn&& fn) const {
+        for (Index i = 0; i < m_mesh.edgeCapacity(); ++i) {
+            const EdgeId e{i};
+            if (!m_mesh.isAlive(e)) {
+                continue;
+            }
+            const auto [v0, v1] = m_mesh.edgeVertices(e);
+            if (!m_valid[v0.value] || !m_valid[v1.value]) {
+                continue;
+            }
+            const Vec2 a = m_screen[v0.value];
+            const Vec2 b = m_screen[v1.value];
+            const Box2 box = segmentBox(a, b);
+            if (box.overlaps(reach)) {
+                fn(e, a, b, box);
+            }
+        }
+    }
+
+    // Face corners come from the loop cycle rather than faceVertices(), which
+    // is that same walk plus a second vector to carry the vertex ids: the
+    // face queries run over every face, so one allocation less per face is
+    // worth the extra hop through loopVertex.
     bool facePolygon(FaceId f, std::vector<Vec2>& out) const {
         out.clear();
-        for (const VertexId v : m_mesh.faceVertices(f)) {
+        for (const LoopId l : m_mesh.faceLoops(f)) {
+            const VertexId v = m_mesh.loopVertex(l);
             if (!m_valid[v.value]) {
                 return false;
             }
@@ -830,7 +920,8 @@ private:
     std::optional<Vec2> faceScreenCentroid(FaceId f) const {
         Vec2 acc{};
         int n = 0;
-        for (const VertexId v : m_mesh.faceVertices(f)) {
+        for (const LoopId l : m_mesh.faceLoops(f)) {
+            const VertexId v = m_mesh.loopVertex(l);
             if (!m_valid[v.value]) {
                 return std::nullopt;
             }

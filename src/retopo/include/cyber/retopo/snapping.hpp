@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <optional>
 #include <vector>
 
@@ -85,20 +86,46 @@ public:
     // Closest point on the Target surface to `query`.
     [[nodiscard]] SurfaceHit snapToSurface(Vec3 query) const;
 
-    // Nearest Target vertex within `radius`; nullopt if none is close enough.
+    // Nearest Target vertex within `radius` (inclusive); nullopt if none is
+    // close enough. Answered through a hierarchy over the Target's vertices, so
+    // the cost does not grow with the Target — a 4M-triangle Target used to cost
+    // a full scan per query, which no interactive frame budget survives.
+    //
+    // EXACT, not approximate: the pruning only discards subtrees that cannot
+    // hold a closer vertex, and among vertices at exactly the same distance the
+    // LOWEST VertexId wins, so the answer is the same one a scan in id order
+    // returns, bit for bit.
     [[nodiscard]] std::optional<VertexHit> snapToVertex(Vec3 query, float radius) const;
 
     // The underlying Target BVH, for callers that also need raycast picking
     // (viewport tap→surface queries) without building a second hierarchy.
     [[nodiscard]] const Bvh& bvh() const { return m_bvh; }
 
+    // Size of the vertex hierarchy snapToVertex answers from. Introspection for
+    // the test that pins the query to a hierarchy: a scan over the vertex table
+    // gives the same answers, so nothing else would notice it coming back.
+    [[nodiscard]] std::size_t vertexNodeCount() const { return m_vertexNodes.size(); }
+
 private:
     struct VertexRecord {
         VertexId id;
         Vec3 position;
     };
+    // Node of the Target's vertex hierarchy. Leaves cover m_vertices[first,
+    // first + count); internal nodes have their children at `first` and
+    // `first + 1` of m_vertexNodes. Points, not triangles, so a median split on
+    // the widest axis is well behaved and the bounds are exact.
+    struct VertexNode {
+        Vec3 boundsMin, boundsMax;
+        std::uint32_t first = 0;
+        std::uint32_t count = 0;  // 0 marks an internal node
+    };
+
+    void buildVertexNode(std::uint32_t node, std::uint32_t begin, std::uint32_t end);
+
     Bvh m_bvh;
     std::vector<VertexRecord> m_vertices;
+    std::vector<VertexNode> m_vertexNodes;
 };
 
 }  // namespace cyber::retopo

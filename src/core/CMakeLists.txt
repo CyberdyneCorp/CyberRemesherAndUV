@@ -15,6 +15,7 @@ add_library(cyber_core STATIC
     src/quadrangulate.cpp
     src/reference_surface.cpp
     src/remesh_params.cpp
+    src/threading.cpp
     src/version.cpp
 )
 

@@ -15,6 +15,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <limits>
 #include <map>
 #include <memory>
 #include <optional>
@@ -33,12 +34,14 @@
 #include "cyber/core/pipeline.hpp"
 #include "cyber/core/progress.hpp"
 #include "cyber/core/remesh_params.hpp"
+#include "cyber/core/threading.hpp"
 #include "cyber/handoff/handoff.hpp"
 #include "cyber/imageio/image.hpp"
 #include "cyber/quadrangulate/field_quadrangulator.hpp"
 #include "cyber/quadrangulate/position_field.hpp"
 #include "cyber/quadrangulate/quadcover_extractor.hpp"
 #include "cyber/retopo/actions.hpp"
+#include "cyber/retopo/adjacency.hpp"
 #include "cyber/retopo/boundary.hpp"
 #include "cyber/retopo/build_tools.hpp"
 #include "cyber/retopo/commands.hpp"
@@ -83,19 +86,32 @@
 #endif
 
 // Compacted render-ready buffers derived from a mesh handle (the
-// cyber_mesh_*_ptr / render-data accessors). Built lazily on first access;
-// the current C API never mutates an existing handle, so once built the
-// cache stays valid for the handle's lifetime (see the LIFETIME note in
-// cyber_capi.h — any future mutating entry point must reset `built`).
+// cyber_mesh_*_ptr / render-data accessors). Built lazily on first access and
+// dropped by the edits that can invalidate it (see EditScope below).
+//
+// The buffers fall into two classes, and telling them apart is what keeps an
+// interactive drag off the full rebuild path:
+//   - TOPOLOGY-DERIVED (`remap`, `indices`, `edges`, `tagged`, `colors`,
+//     `hasColors`): fixed by which elements are alive, how they are wired, and
+//     which are hidden or tagged. Moving a vertex cannot change any of them.
+//   - POSITION-DERIVED (`positions`, and `normals` whenever they come from the
+//     engine's face normals rather than an imported per-corner attribute):
+//     recomputed from the mesh, in the layout the remap already fixed.
+// A positions-only edit therefore keeps the whole cache and only marks the
+// second class stale; each is refreshed on the first accessor that reads it.
 struct CyberRenderCache {
+    std::vector<cyber::Index> remap;     // vertex id -> render index (or kInvalidIndex)
     std::vector<float> positions;        // x,y,z per vertex, compacted order
     std::vector<std::uint32_t> indices;  // 3 per triangle, deterministic fan
     std::vector<std::uint32_t> edges;    // 2 per unique undirected face edge
     std::vector<std::uint32_t> tagged;   // 2 per tagged visible edge
     std::vector<float> normals;          // x,y,z per vertex, unit length
     std::vector<float> colors;           // r,g,b per vertex; empty if none
+    std::size_t renderVertices = 0;      // entries in the render vertex order
     bool hasColors = false;
     bool built = false;
+    bool positionsStale = false;
+    bool normalsStale = false;
 };
 
 // Opaque handle definition: the mesh plus any statistics captured when the
@@ -117,6 +133,11 @@ struct CyberMesh {
     cyber::retopo::SoftSelection selection;
     std::map<std::string, std::vector<float>> selectionSlots;
     mutable CyberRenderCache render;  // lazy; see ensureRenderCache
+    // Flat one-ring / vertex->face table shared by the brush sweeps (Relax and
+    // the soft-selection expand/contract/smooth). Built lazily like the render
+    // cache and dropped by the same rule — both describe topology, so both
+    // survive a positions-only edit and both die on a structural one.
+    mutable cyber::retopo::MeshAdjacency adjacency;
 };
 
 namespace {
@@ -341,6 +362,24 @@ const char* cyber_active_backend_name(void) {
         clearError();
         return name.c_str();
     });
+}
+
+CyberStatus cyber_set_max_worker_threads(int max_threads) {
+    if (max_threads < 0) {
+        setError("cyber_set_max_worker_threads: max_threads must be >= 0");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    cyber::setMaxWorkerThreads(static_cast<std::size_t>(max_threads));
+    clearError();
+    return CYBER_OK;
+}
+
+int cyber_max_worker_threads(void) {
+    // The cap is whatever a host set through the call above, so it fits an int
+    // by construction; clamp anyway rather than wrap on a hostile value.
+    const std::size_t cap = cyber::maxWorkerThreads();
+    const std::size_t limit = static_cast<std::size_t>(std::numeric_limits<int>::max());
+    return static_cast<int>(std::min(cap, limit));
 }
 
 CyberStatus cyber_mesh_load_obj(const char* path, CyberMesh** out) {
@@ -863,24 +902,38 @@ bool isHiddenVertex(const CyberMesh& handle, cyber::VertexId v) {
 // buffer shares (cyber_capi.h). It is the same compaction as Mesh::toIndexed
 // and cyber_mesh_copy_positions only while nothing is hidden, which is why
 // renderers read positions from cyber_mesh_copy_render_positions.
-// Fills cache.positions and returns the vertex-id → compact-index remap.
-std::vector<cyber::Index> compactVertices(const CyberMesh& handle, CyberRenderCache& cache) {
+// Fills cache.remap (vertex id → compact index) and cache.renderVertices.
+void compactVertices(const CyberMesh& handle, CyberRenderCache& cache) {
     const cyber::Mesh& m = handle.mesh;
-    std::vector<cyber::Index> remap(m.vertexCapacity(), cyber::kInvalidIndex);
-    cache.positions.reserve(m.vertexCount() * 3);
+    cache.remap.assign(m.vertexCapacity(), cyber::kInvalidIndex);
     cyber::Index next = 0;
     for (cyber::Index i = 0; i < m.vertexCapacity(); ++i) {
         const cyber::VertexId v{i};
         if (!m.isAlive(v) || isHiddenVertex(handle, v)) {
             continue;
         }
-        remap[i] = next++;
-        const cyber::Vec3 p = m.position(v);
+        cache.remap[i] = next++;
+    }
+    cache.renderVertices = next;
+}
+
+// Fills the position buffer in the compaction the remap already fixed. Only
+// this and the normals depend on where the vertices are, so a positions-only
+// edit re-runs exactly these two and keeps everything else.
+void fillPositions(const CyberMesh& handle, CyberRenderCache& cache) {
+    const cyber::Mesh& m = handle.mesh;
+    cache.positions.clear();
+    cache.positions.reserve(cache.renderVertices * 3);
+    for (cyber::Index i = 0; i < m.vertexCapacity(); ++i) {
+        if (cache.remap[i] == cyber::kInvalidIndex) {
+            continue;
+        }
+        const cyber::Vec3 p = m.position(cyber::VertexId{i});
         cache.positions.push_back(p.x);
         cache.positions.push_back(p.y);
         cache.positions.push_back(p.z);
     }
-    return remap;
+    cache.positionsStale = false;
 }
 
 // Deterministic fan triangulation around each live face's first corner, in
@@ -987,6 +1040,7 @@ std::vector<cyber::Vec3> accumulateNormals(const CyberMesh& handle,
 // normal (isolated vertex, fully degenerate fan) gets (0,0,1) so the buffer
 // is always unit-length as documented.
 void finalizeNormals(const std::vector<cyber::Vec3>& acc, CyberRenderCache& cache) {
+    cache.normals.clear();
     cache.normals.reserve(acc.size() * 3);
     for (const cyber::Vec3& n : acc) {
         const float len = cyber::length(n);
@@ -1025,8 +1079,17 @@ void extractColors(const CyberMesh& handle, const std::vector<cyber::Index>& rem
     }
 }
 
-// Builds the handle's render cache once. Returns NULL when `mesh` is NULL or
-// the build failed (allocation failure must not cross the C boundary).
+// Recomputes the per-vertex normals into the cache's existing layout.
+void fillNormals(const CyberMesh& handle, CyberRenderCache& cache) {
+    finalizeNormals(accumulateNormals(handle, cache.remap, cache.renderVertices), cache);
+    cache.normalsStale = false;
+}
+
+// Builds the handle's topology-derived buffers, plus the position-derived ones
+// so a first access still hands back a complete cache. Returns NULL when `mesh`
+// is NULL or the build failed (allocation failure must not cross the C
+// boundary). The result may carry stale positions/normals — the accessors that
+// read those go through renderPositions/renderNormals below.
 const CyberRenderCache* ensureRenderCache(const CyberMesh* mesh) {
     if (mesh == nullptr) {
         return nullptr;
@@ -1036,18 +1099,99 @@ const CyberRenderCache* ensureRenderCache(const CyberMesh* mesh) {
         return &cache;
     }
     try {
-        const std::vector<cyber::Index> remap = compactVertices(*mesh, cache);
-        fanTriangulate(*mesh, remap, cache);
-        extractEdges(*mesh, remap, cache);
-        extractTaggedEdges(*mesh, remap, cache);
-        finalizeNormals(accumulateNormals(*mesh, remap, cache.positions.size() / 3), cache);
-        extractColors(*mesh, remap, cache);
+        compactVertices(*mesh, cache);
+        fillPositions(*mesh, cache);
+        fanTriangulate(*mesh, cache.remap, cache);
+        extractEdges(*mesh, cache.remap, cache);
+        extractTaggedEdges(*mesh, cache.remap, cache);
+        fillNormals(*mesh, cache);
+        extractColors(*mesh, cache.remap, cache);
         cache.built = true;
         return &cache;
     } catch (...) {
         cache = CyberRenderCache{};
         return nullptr;
     }
+}
+
+// ensureRenderCache plus a refresh of the position buffer if an edit moved
+// vertices since it was filled.
+const std::vector<float>* renderPositions(const CyberMesh* mesh) {
+    const CyberRenderCache* cache = ensureRenderCache(mesh);
+    if (cache == nullptr) {
+        return nullptr;
+    }
+    if (!cache->positionsStale) {
+        return &cache->positions;
+    }
+    try {
+        fillPositions(*mesh, mesh->render);
+    } catch (...) {
+        mesh->render = CyberRenderCache{};
+        return nullptr;
+    }
+    return &cache->positions;
+}
+
+// ensureRenderCache plus a refresh of the normal buffer if an edit moved
+// vertices since it was computed.
+const std::vector<float>* renderNormals(const CyberMesh* mesh) {
+    const CyberRenderCache* cache = ensureRenderCache(mesh);
+    if (cache == nullptr) {
+        return nullptr;
+    }
+    if (!cache->normalsStale) {
+        return &cache->normals;
+    }
+    try {
+        fillNormals(*mesh, mesh->render);
+    } catch (...) {
+        mesh->render = CyberRenderCache{};
+        return nullptr;
+    }
+    return &cache->normals;
+}
+
+// What an edit changed — the ONE rule both caches follow.
+//
+//   Positions — vertex positions and nothing else. Every element stays alive
+//     and wired as it was, so the render cache's compaction, index, wireframe,
+//     tag and colour buffers and the one-ring table all stay correct; only the
+//     position-derived render buffers are marked stale.
+//   Overlay — the render filters (hidden faces, tagged edges) changed. The mesh
+//     itself is untouched, so the adjacency table survives, but the render
+//     compaction it feeds does not.
+//   Topology — anything that can create, destroy or rewire an element. Both
+//     caches go.
+enum class EditScope { Positions, Overlay, Topology };
+
+void invalidateCaches(CyberMesh* mesh, EditScope scope) {
+    if (scope == EditScope::Positions) {
+        // Assigning a fresh cache would throw away buffers that are still
+        // correct; mark the two that are not and let the accessors refill.
+        mesh->render.positionsStale = true;
+        mesh->render.normalsStale = true;
+        return;
+    }
+    mesh->render = CyberRenderCache{};
+    if (scope == EditScope::Topology) {
+        mesh->adjacency.clear();
+    }
+}
+
+// The handle's one-ring / vertex->face table, built on first use after a
+// topology change. Returns NULL if it could not be built, which only costs the
+// caller the slower mesh-query path.
+const cyber::retopo::MeshAdjacency* ensureAdjacency(const CyberMesh* mesh) {
+    if (!mesh->adjacency.covers(mesh->mesh)) {
+        try {
+            mesh->adjacency.build(mesh->mesh);
+        } catch (...) {
+            mesh->adjacency.clear();
+            return nullptr;
+        }
+    }
+    return &mesh->adjacency;
 }
 
 // Query-or-copy helper shared by the copy accessors (out=NULL queries the
@@ -1076,8 +1220,8 @@ const T* bufferView(const std::vector<T>* src, size_t* out_count) {
 }  // namespace
 
 size_t cyber_mesh_copy_render_positions(const CyberMesh* mesh, float* out, size_t max_floats) {
-    const CyberRenderCache* cache = ensureRenderCache(mesh);
-    return cache == nullptr ? 0 : copyBuffer(cache->positions, out, max_floats);
+    const std::vector<float>* positions = renderPositions(mesh);
+    return positions == nullptr ? 0 : copyBuffer(*positions, out, max_floats);
 }
 
 size_t cyber_mesh_triangle_count(const CyberMesh* mesh) {
@@ -1110,8 +1254,8 @@ size_t cyber_mesh_copy_edge_indices(const CyberMesh* mesh, uint32_t* out, size_t
 }
 
 size_t cyber_mesh_copy_normals(const CyberMesh* mesh, float* out, size_t max_floats) {
-    const CyberRenderCache* cache = ensureRenderCache(mesh);
-    return cache == nullptr ? 0 : copyBuffer(cache->normals, out, max_floats);
+    const std::vector<float>* normals = renderNormals(mesh);
+    return normals == nullptr ? 0 : copyBuffer(*normals, out, max_floats);
 }
 
 int cyber_mesh_has_colors(const CyberMesh* mesh) {
@@ -1125,8 +1269,7 @@ size_t cyber_mesh_copy_colors(const CyberMesh* mesh, float* out, size_t max_floa
 }
 
 const float* cyber_mesh_positions_ptr(const CyberMesh* mesh, size_t* out_count) {
-    const CyberRenderCache* cache = ensureRenderCache(mesh);
-    return bufferView(cache == nullptr ? nullptr : &cache->positions, out_count);
+    return bufferView(renderPositions(mesh), out_count);
 }
 
 const uint32_t* cyber_mesh_triangle_indices_ptr(const CyberMesh* mesh, size_t* out_count) {
@@ -1140,8 +1283,7 @@ const uint32_t* cyber_mesh_edge_indices_ptr(const CyberMesh* mesh, size_t* out_c
 }
 
 const float* cyber_mesh_normals_ptr(const CyberMesh* mesh, size_t* out_count) {
-    const CyberRenderCache* cache = ensureRenderCache(mesh);
-    return bufferView(cache == nullptr ? nullptr : &cache->normals, out_count);
+    return bufferView(renderNormals(mesh), out_count);
 }
 
 const float* cyber_mesh_colors_ptr(const CyberMesh* mesh, size_t* out_count) {
@@ -1184,7 +1326,7 @@ CyberStatus cyber_mesh_set_hidden_faces(CyberMesh* mesh, const uint32_t* faces, 
             hidden.insert(faces[i]);
         }
         mesh->hiddenFaces = std::move(hidden);
-        mesh->render = CyberRenderCache{};
+        invalidateCaches(mesh, EditScope::Overlay);
         clearError();
         return CYBER_OK;
     } catch (...) {
@@ -1208,7 +1350,7 @@ CyberStatus cyber_mesh_set_tagged_edges(CyberMesh* mesh, const uint32_t* edges, 
         } else {
             mesh->taggedEdges.assign(edges, edges + edge_count);
         }
-        mesh->render = CyberRenderCache{};
+        invalidateCaches(mesh, EditScope::Overlay);
         clearError();
         return CYBER_OK;
     } catch (...) {
@@ -1580,16 +1722,13 @@ CyberStatus cyber_mesh_loop_metrics(const CyberMesh* mesh, uint32_t edge,
 
 // ---- mesh editing (retopology phase 3, task 3.3) ---------------------------
 //
-// Every mutating entry point here resets the handle's render cache (the
+// Every mutating entry point here invalidates the handle's caches (the
 // LIFETIME contract in cyber_capi.h): pointer views die on mutation and the
-// next render-data accessor rebuilds the cache lazily from the mutated mesh.
+// next render-data accessor refreshes what the edit could have changed.
+// Which ops declare which EditScope is the whole correctness question — see
+// runMeshEdit / runPositionEdit below.
 
 namespace {
-
-// Drops the (possibly built) render cache after a mutation. Assigning a
-// fresh value releases the old vectors, so stale geometry can never leak
-// into a rebuilt cache.
-void invalidateRenderCache(CyberMesh* mesh) { mesh->render = CyberRenderCache{}; }
 
 const cyber::retopo::SurfaceSnapper* snapperOf(const CyberSnapper* snapper) {
     return snapper == nullptr ? nullptr : &snapper->snapper;
@@ -1625,16 +1764,18 @@ void dropDeadHandleState(CyberMesh* mesh) {
 }
 
 // Shared prologue/epilogue for the editing ops: argument checks, exception
-// containment, and render-cache invalidation. The cache is dropped on
-// success AND when an exception escapes the body: an engine op can throw
-// after it already mutated topology/positions (std::bad_alloc, invariant
-// throws mid-operation), and keeping the pre-mutation cache would desync
-// the viewport from what payloadData() serializes until an unrelated
-// reload. Error STATUS returns deliberately do not invalidate: bodies
-// validate arguments before touching the mesh, so a status failure means
-// the mesh (its live element set) is unchanged.
+// containment, and cache invalidation at the declared scope. The caches are
+// invalidated on success AND when an exception escapes the body: an engine op
+// can throw after it already mutated topology/positions (std::bad_alloc,
+// invariant throws mid-operation), and keeping the pre-mutation cache would
+// desync the viewport from what payloadData() serializes until an unrelated
+// reload. A throw is always treated as EditScope::Topology, whatever the op
+// declared: a half-finished op has no scope worth trusting. Error STATUS
+// returns deliberately do not invalidate: bodies validate arguments before
+// touching the mesh, so a status failure means the mesh (its live element set)
+// is unchanged.
 template <typename Body>
-CyberStatus runMeshEdit(CyberMesh* mesh, const char* name, Body body) {
+CyberStatus runEdit(CyberMesh* mesh, const char* name, EditScope scope, Body body) {
     if (mesh == nullptr) {
         setError(std::string(name) + ": null mesh");
         return CYBER_ERR_INVALID_ARG;
@@ -1643,7 +1784,7 @@ CyberStatus runMeshEdit(CyberMesh* mesh, const char* name, Body body) {
         const CyberStatus status = body();
         if (status == CYBER_OK) {
             dropDeadHandleState(mesh);
-            invalidateRenderCache(mesh);
+            invalidateCaches(mesh, scope);
             clearError();
         }
         return status;
@@ -1652,15 +1793,32 @@ CyberStatus runMeshEdit(CyberMesh* mesh, const char* name, Body body) {
         // never serve a pre-mutation cache, or a weight on a freed vertex,
         // over a mutated mesh.
         dropDeadHandleState(mesh);
-        invalidateRenderCache(mesh);
+        invalidateCaches(mesh, EditScope::Topology);
         setError(std::string(name) + ": " + e.what());
         return CYBER_ERR_RUNTIME;
     } catch (...) {
         dropDeadHandleState(mesh);
-        invalidateRenderCache(mesh);
+        invalidateCaches(mesh, EditScope::Topology);
         setError(std::string(name) + ": unknown error");
         return CYBER_ERR_RUNTIME;
     }
+}
+
+// The default for an editing op: assume it can create, destroy or rewire
+// elements, and drop everything cached about the handle.
+template <typename Body>
+CyberStatus runMeshEdit(CyberMesh* mesh, const char* name, Body body) {
+    return runEdit(mesh, name, EditScope::Topology, body);
+}
+
+// For the ops whose ONLY effect is cyber::Mesh::setPosition on live vertices —
+// the interactive drag path. Declaring this is a promise about the body: no
+// element may be added, removed or rewired, because the index, wireframe and
+// adjacency structures the handle keeps are not rebuilt afterwards. Read the
+// engine action before adding a call site here.
+template <typename Body>
+CyberStatus runPositionEdit(CyberMesh* mesh, const char* name, Body body) {
+    return runEdit(mesh, name, EditScope::Positions, body);
 }
 
 }  // namespace
@@ -1677,8 +1835,8 @@ CyberStatus cyber_mesh_clone(const CyberMesh* mesh, CyberMesh** out) {
         return CYBER_ERR_INVALID_ARG;
     }
     try {
-        // Copies every id-keyed field of the handle; `render` is deliberately
-        // left default so the copy rebuilds its own cache on first access.
+        // Copies every id-keyed field of the handle; `render` and `adjacency`
+        // are deliberately left default so the copy builds its own on first use.
         auto copy = std::make_unique<CyberMesh>();
         copy->mesh = mesh->mesh;
         copy->stats = mesh->stats;
@@ -1699,7 +1857,7 @@ CyberStatus cyber_mesh_clone(const CyberMesh* mesh, CyberMesh** out) {
 }
 
 CyberStatus cyber_mesh_set_positions(CyberMesh* mesh, const float* positions, size_t float_count) {
-    return runMeshEdit(mesh, "cyber_mesh_set_positions", [&] {
+    return runPositionEdit(mesh, "cyber_mesh_set_positions", [&] {
         if (positions == nullptr && float_count != 0) {
             setError("cyber_mesh_set_positions: null positions");
             return CYBER_ERR_INVALID_ARG;
@@ -1773,7 +1931,7 @@ CyberStatus cyber_retopo_create_face(CyberMesh* mesh, const float* points_xyz, s
 
 CyberStatus cyber_retopo_tweak_vertex(CyberMesh* mesh, uint32_t vertex, const float target[3],
                                       const CyberSnapper* snapper) {
-    return runMeshEdit(mesh, "cyber_retopo_tweak_vertex", [&] {
+    return runPositionEdit(mesh, "cyber_retopo_tweak_vertex", [&] {
         if (target == nullptr || !mesh->mesh.isAlive(cyber::VertexId{vertex})) {
             setError("cyber_retopo_tweak_vertex: dead vertex or null target");
             return CYBER_ERR_INVALID_ARG;
@@ -1787,7 +1945,7 @@ CyberStatus cyber_retopo_tweak_vertex(CyberMesh* mesh, uint32_t vertex, const fl
 CyberStatus cyber_retopo_move(CyberMesh* mesh, uint32_t seed_vertex, const float displacement[3],
                               float radius, const uint32_t* pinned, size_t pinned_count,
                               const CyberSnapper* snapper) {
-    return runMeshEdit(mesh, "cyber_retopo_move", [&] {
+    return runPositionEdit(mesh, "cyber_retopo_move", [&] {
         if (displacement == nullptr || !mesh->mesh.isAlive(cyber::VertexId{seed_vertex})) {
             setError("cyber_retopo_move: dead seed vertex or null displacement");
             return CYBER_ERR_INVALID_ARG;
@@ -1809,7 +1967,7 @@ CyberStatus cyber_retopo_move(CyberMesh* mesh, uint32_t seed_vertex, const float
 CyberStatus cyber_retopo_relax(CyberMesh* mesh, const float center[3], float radius, float strength,
                                int iterations, int auto_pin_corners, const uint32_t* pinned,
                                size_t pinned_count, const CyberSnapper* snapper) {
-    return runMeshEdit(mesh, "cyber_retopo_relax", [&] {
+    return runPositionEdit(mesh, "cyber_retopo_relax", [&] {
         if (center == nullptr) {
             setError("cyber_retopo_relax: null center");
             return CYBER_ERR_INVALID_ARG;
@@ -1825,7 +1983,8 @@ CyberStatus cyber_retopo_relax(CyberMesh* mesh, const float center[3], float rad
         params.brushRadius = radius;
         params.autoPinCorners = auto_pin_corners != 0;
         const cyber::retopo::PinSet pins = makePinSet(pinned, pinned_count);
-        cyber::retopo::relax(mesh->mesh, params, &pins, snapperOf(snapper));
+        cyber::retopo::relax(mesh->mesh, params, &pins, snapperOf(snapper),
+                             ensureAdjacency(mesh));
         return CYBER_OK;
     });
 }
@@ -2174,7 +2333,7 @@ CyberStatus cyber_retopo_grow_boundary_edge(CyberMesh* mesh, uint32_t edge,
 
 CyberStatus cyber_retopo_distribute_path(CyberMesh* mesh, const uint32_t* vertices, size_t count,
                                          const CyberSnapper* snapper) {
-    return runMeshEdit(mesh, "cyber_retopo_distribute_path", [&] {
+    return runPositionEdit(mesh, "cyber_retopo_distribute_path", [&] {
         if (vertices == nullptr || count < 3) {
             setError("cyber_retopo_distribute_path: need an ordered chain of >= 3 vertices");
             return CYBER_ERR_INVALID_ARG;
@@ -2477,7 +2636,7 @@ CyberStatus cyber_retopo_transform_vertices(CyberMesh* mesh, const uint32_t* ver
                                             const float xf[12], const CyberSnapper* snapper,
                                             float resnap_epsilon, size_t* out_resnapped,
                                             float* out_max_distance) {
-    return runMeshEdit(mesh, "cyber_retopo_transform_vertices", [&] {
+    return runPositionEdit(mesh, "cyber_retopo_transform_vertices", [&] {
         if (vertices == nullptr || count == 0 || xf == nullptr) {
             setError("cyber_retopo_transform_vertices: null/empty vertices or transform");
             return CYBER_ERR_INVALID_ARG;
@@ -2554,7 +2713,7 @@ bool toSymmetry(const CyberSymmetry* in, cyber::retopo::Symmetry& out) {
 
 CyberStatus cyber_retopo_snap_symmetry_plane(CyberMesh* mesh, const CyberSymmetry* symmetry,
                                              size_t* out_snapped) {
-    return runMeshEdit(mesh, "cyber_retopo_snap_symmetry_plane", [&] {
+    return runPositionEdit(mesh, "cyber_retopo_snap_symmetry_plane", [&] {
         cyber::retopo::Symmetry sym;
         if (!toSymmetry(symmetry, sym)) {
             setError("cyber_retopo_snap_symmetry_plane: null or degenerate plane");
@@ -2615,7 +2774,7 @@ CyberStatus cyber_retopo_resymmetrize(CyberMesh* mesh, const CyberSymmetry* symm
 CyberStatus cyber_retopo_snap_all(CyberMesh* mesh, const CyberSnapper* snapper,
                                   const uint32_t* pinned, size_t pinned_count, size_t* out_moved,
                                   float* out_max_distance) {
-    return runMeshEdit(mesh, "cyber_retopo_snap_all", [&] {
+    return runPositionEdit(mesh, "cyber_retopo_snap_all", [&] {
         const cyber::retopo::SurfaceSnapper* snap = snapperOf(snapper);
         if (snap == nullptr || snap->empty()) {
             setError("cyber_retopo_snap_all: a non-empty Target snapper is required");
@@ -2863,21 +3022,21 @@ CyberStatus cyber_retopo_selection_invert(CyberMesh* mesh) {
 
 CyberStatus cyber_retopo_selection_expand(CyberMesh* mesh, int steps) {
     return runSelectionOp(mesh, "cyber_retopo_selection_expand", [&] {
-        cyber::retopo::expandSelection(mesh->mesh, mesh->selection, steps);
+        cyber::retopo::expandSelection(mesh->mesh, mesh->selection, steps, ensureAdjacency(mesh));
         return CYBER_OK;
     });
 }
 
 CyberStatus cyber_retopo_selection_contract(CyberMesh* mesh, int steps) {
     return runSelectionOp(mesh, "cyber_retopo_selection_contract", [&] {
-        cyber::retopo::contractSelection(mesh->mesh, mesh->selection, steps);
+        cyber::retopo::contractSelection(mesh->mesh, mesh->selection, steps, ensureAdjacency(mesh));
         return CYBER_OK;
     });
 }
 
 CyberStatus cyber_retopo_selection_smooth(CyberMesh* mesh, int steps) {
     return runSelectionOp(mesh, "cyber_retopo_selection_smooth", [&] {
-        cyber::retopo::smoothSelection(mesh->mesh, mesh->selection, steps);
+        cyber::retopo::smoothSelection(mesh->mesh, mesh->selection, steps, ensureAdjacency(mesh));
         return CYBER_OK;
     });
 }
@@ -2955,7 +3114,7 @@ CyberStatus selectionTransform(CyberMesh* mesh, const char* name, const float xf
                                const uint32_t* pinned, size_t pinned_count,
                                const CyberSnapper* snapper, float resnap_epsilon,
                                CyberSoftTransformReport* out_report) {
-    return runMeshEdit(mesh, name, [&] {
+    return runPositionEdit(mesh, name, [&] {
         if (xf == nullptr) {
             setError(std::string(name) + ": null transform");
             return CYBER_ERR_INVALID_ARG;
@@ -2999,7 +3158,7 @@ CyberStatus cyber_retopo_selection_relax(CyberMesh* mesh, float strength, int it
                                          const uint32_t* pinned, size_t pinned_count,
                                          const CyberSnapper* snapper, float resnap_epsilon,
                                          CyberSoftTransformReport* out_report) {
-    return runMeshEdit(mesh, "cyber_retopo_selection_relax", [&] {
+    return runPositionEdit(mesh, "cyber_retopo_selection_relax", [&] {
         // Same range gate as cyber_retopo_relax: an unvalidated NaN strength
         // reaches every selected vertex position through the sweep.
         if (!(strength >= 0.0f && strength <= 1.0f)) {
@@ -3011,8 +3170,10 @@ CyberStatus cyber_retopo_selection_relax(CyberMesh* mesh, float strength, int it
         params.iterations = iterations;
         const cyber::retopo::PinSet pins = makePinSet(pinned, pinned_count);
         const float eps = resnap_epsilon >= 0.0f ? resnap_epsilon : 0.0f;
-        fillReport(out_report, cyber::retopo::relaxWeighted(mesh->mesh, mesh->selection, params,
-                                                            snapperOf(snapper), &pins, eps));
+        fillReport(out_report,
+                   cyber::retopo::relaxWeighted(mesh->mesh, mesh->selection, params,
+                                                snapperOf(snapper), &pins, eps,
+                                                ensureAdjacency(mesh)));
         return CYBER_OK;
     });
 }
@@ -4315,7 +4476,7 @@ CyberStatus cyber_conform(CyberMesh* edit, const CyberMesh* new_target, float th
                           CyberConformReport* report, uint32_t* out_flagged, size_t max_flagged) {
     // Moves every live vertex of the EditMesh, so it goes through runMeshEdit
     // for the render-cache invalidation the zero-copy accessors rely on.
-    return runMeshEdit(edit, "cyber_conform", [&]() -> CyberStatus {
+    return runPositionEdit(edit, "cyber_conform", [&]() -> CyberStatus {
         if (new_target == nullptr) {
             setError("cyber_conform: null argument");
             return CYBER_ERR_INVALID_ARG;

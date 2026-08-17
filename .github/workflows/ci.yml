@@ -147,6 +147,82 @@ jobs:
       - name: Test
         run: ctest --test-dir build/render --output-on-failure
 
+  # The Android preset, configured and built. It had NEVER configured: the
+  # preset set CYBER_ENABLE_OPENCL=ON and src/accel/CMakeLists.txt asked for
+  # find_package(OpenCL REQUIRED), while the NDK ships no OpenCL at all — so
+  # the configure died before reaching any other setting in it, and nothing in
+  # CI noticed because nothing in CI ever ran it. The runner image already
+  # carries an NDK, so this costs one job and no download.
+  #
+  # It builds the CLI and the test suite as well as the library, deliberately:
+  # the NDK's standard library is libc++, whose floating-point std::from_chars
+  # overloads are DELETED, and that is exactly how apps/cli/main.cpp failed to
+  # compile here.
+  android-ndk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: lukka/get-cmake@latest
+      - name: Configure (android preset, arm64-v8a)
+        run: |
+          cmake --preset android \
+            -DCMAKE_TOOLCHAIN_FILE="${ANDROID_NDK_ROOT}/build/cmake/android.toolchain.cmake" \
+            -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-26 \
+            -DCYBER_BUILD_CLI=ON -DCYBER_BUILD_TESTS=ON
+      - name: Build
+        # Compile only: these binaries are arm64 Android, and this runner is
+        # neither. Executing the suite on this ISA is the arm64-cross lane's
+        # job; executing it on Bionic needs a device or an emulator.
+        run: cmake --build build/android -j 4
+
+  # The iPadOS/iOS preset, configured and built. Reports rather than blocks,
+  # like gpu-metal-compile above and for the same reason: no lane in this
+  # repository has ever configured it, so a pull request should not be the
+  # first thing gated on it. Drop continue-on-error once it has gone green.
+  ios-preset:
+    runs-on: macos-14
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: lukka/get-cmake@latest
+      - name: Configure (ios preset)
+        run: cmake --preset ios -DCMAKE_OSX_SYSROOT=iphoneos
+      - name: Build
+        run: cmake --build build/ios -j 4
+
+  # arm64, actually EXECUTED. Every other lane runs x86-64, and the shipping
+  # targets (iPadOS, Android) are neither: they differ in pointer-free struct
+  # padding, in alignment rules, in whether `char` is signed, and above all in
+  # floating point — an aarch64 compiler contracts a*b+c into a single FMA where
+  # x86-64 without -mfma cannot, so the same source computes different bits.
+  # None of that is visible to a compile-only check, and none of it is visible
+  # on x86 at all. This lane cross-compiles the whole library, CLI and test
+  # suite for aarch64 and runs the suite under qemu-user; it needs two apt
+  # packages and no device, so it can gate every pull request.
+  #
+  # It is not iOS and not Android — different libc (glibc, not Bionic or
+  # Apple's), no NDK, no Apple SDK. What it shares with them is the ISA, which
+  # is where the bugs x86 cannot see actually live.
+  arm64-cross:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: lukka/get-cmake@latest
+      - name: Install the aarch64 toolchain and the user-mode emulator
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y g++-aarch64-linux-gnu qemu-user-static
+      - name: Configure (arm64 cross)
+        # The preset's toolchain file points CMAKE_CROSSCOMPILING_EMULATOR at
+        # qemu, so ctest launches each binary through it — no binfmt, no root.
+        run: cmake --preset linux-arm64-cross
+      - name: Build (library + CLI + suite)
+        run: cmake --build --preset linux-arm64-cross -j 4
+      - name: Test (under qemu-aarch64)
+        # Emulated, so an order of magnitude slower than the native lane; the
+        # suite still finishes well inside the default job timeout.
+        run: ctest --preset linux-arm64-cross
+
   build-test:
     strategy:
       fail-fast: false

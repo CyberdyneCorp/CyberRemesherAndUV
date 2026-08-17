@@ -90,6 +90,30 @@ CyberBackend cyber_active_backend(void);
  * string, ...). Never NULL; valid until the next call on this thread. */
 const char* cyber_active_backend_name(void);
 
+/* ---- worker threads --------------------------------------------------- */
+
+/* Caps the worker threads any one parallel loop inside the engine may fan out
+ * to. 0 (the default) means no cap: the loops size themselves from the
+ * machine's hardware concurrency, which saturates every core — right for a
+ * batch run, wrong inside an interactive app, where an uncapped bake fights the
+ * host's own scheduler and drains a mobile device's battery.
+ *
+ * This is an API and not an environment variable because a host learns its
+ * thread budget while it is already running, and setenv() in a live
+ * multi-threaded process is not safe.
+ *
+ * Results do not depend on the cap: the loops split a range into contiguous
+ * chunks and each chunk writes only its own indices, so a capped run produces
+ * byte-identical output to an uncapped one. Only speed and CPU load change.
+ *
+ * Global, not per-handle, and safe to call from any thread at any time; loops
+ * already running keep the fan-out they started with. Negative values are
+ * rejected with CYBER_ERR_INVALID_ARG and leave the cap untouched. */
+CyberStatus cyber_set_max_worker_threads(int max_threads);
+
+/* The current cap, or 0 when none is set. */
+int cyber_max_worker_threads(void);
+
 /* ---- mesh I/O -------------------------------------------------------- */
 
 /* Loads a Wavefront OBJ. On success *out receives a newly allocated handle
@@ -410,12 +434,21 @@ size_t cyber_mesh_copy_edge_indices(const CyberMesh* mesh, uint32_t* out, size_t
  * entry points are the cyber_retopo_* editing ops below plus
  * cyber_mesh_set_positions and cyber_conform; every one of them
  * invalidates the render cache, so pointer views obtained before the call
- * are dead afterwards and must be re-fetched (the next accessor rebuilds
+ * are dead afterwards and must be re-fetched (the next accessor refreshes
  * the cache lazily). The compacted vertex ORDER also changes when vertices
  * are added or removed — anything keyed on compacted render indices is
  * stale after a mutation; address elements by their stable engine ids.
  * The pointers must not outlive the handle and must not be written
  * through.
+ *
+ * COST OF RE-FETCHING: an edit that only MOVES vertices — the drag path:
+ * cyber_mesh_set_positions, tweak/move/relax, transform_vertices,
+ * distribute_path, snap_all, snap_symmetry_plane, the weighted
+ * selection_transform/selection_relax, and cyber_conform — cannot change the
+ * render vertex order or any index buffer, so re-fetching after one only
+ * recomputes the positions and normals. Re-fetching after an edit that adds,
+ * removes or rewires elements rebuilds every buffer. Either way the rule for
+ * the caller is the same: re-fetch, never reuse.
  *
  * Each accessor stores the element count (floats / indices) in *out_count
  * (ignored when NULL) and returns NULL with *out_count = 0 when the mesh is

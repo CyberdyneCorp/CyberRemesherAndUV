@@ -11,13 +11,13 @@
 #include <map>
 #include <optional>
 #include <queue>
-#include <thread>
 
 #include "cyber/core/bvh.hpp"
 #include "cyber/core/detail/parallel_chunks.hpp"
 #include "cyber/core/isotropic.hpp"
 #include "cyber/core/quadrangulate.hpp"
 #include "cyber/core/reference_surface.hpp"
+#include "cyber/core/threading.hpp"
 
 namespace cyber::remesh {
 
@@ -282,7 +282,8 @@ Mesh orientFacesConsistently(const Mesh& mesh) {
     return Mesh::fromIndexed(pos, faces);
 }
 
-// Run fn over the vertex index range [0,n) split into hardware-concurrency chunks.
+// Run fn over the vertex index range [0,n) split into as many chunks as the host
+// allows workers (hardware concurrency unless cyber::setMaxWorkerThreads capped it).
 // The relax loops are per-vertex independent, so the split is byte-identical to the
 // serial loop; each thread does enough work (thousands of BVH projections) that the
 // spawn/join overhead is negligible (unlike the tiny per-CG-iter spmv).
@@ -292,8 +293,7 @@ Mesh orientFacesConsistently(const Mesh& mesh) {
 // still turns it into a CyberStatus.
 template <typename Fn>
 void parallelVertexRange(std::size_t n, const Fn& fn) {
-    const std::size_t hw = std::max<std::size_t>(1, std::thread::hardware_concurrency());
-    cyber::detail::forEachChunk(0, n, std::min<std::size_t>(hw, n), fn);
+    cyber::detail::forEachChunk(0, n, cyber::workerThreadsFor(n), fn);
 }
 
 // Tangential Laplacian step for an interior vertex: move toward the 1-ring

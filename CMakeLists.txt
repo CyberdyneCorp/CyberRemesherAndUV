@@ -54,6 +54,10 @@ endif()
 
 include(cmake/CompilerWarnings.cmake)
 
+# Before any target is created, so the rule reaches vendored code too.
+include(cmake/FloatingPoint.cmake)
+cyber_apply_fp_rules()
+
 if(CYBER_WITH_QUADCOVER)
     # The vendored Geogram subset includes ~11 C translation units; the base
     # project only enables CXX, so enable C for the isolated solver library.

@@ -116,6 +116,30 @@ TEST_CASE("capi backend selection reports what it actually selected") {
     REQUIRE(std::find(backends.begin(), backends.end(), cyber_active_backend()) != backends.end());
 }
 
+TEST_CASE("capi worker-thread cap round-trips and is reflected in the device name") {
+    // A host embedding libcyber_capi had no way at all to bound the engine's
+    // fan-out: both parallel loops read hardware_concurrency() directly, so an
+    // AO bake took every core an interactive app was trying to share.
+    REQUIRE(cyber_max_worker_threads() == 0);  // uncapped by default
+
+    REQUIRE(cyber_set_max_worker_threads(2) == CYBER_OK);
+    REQUIRE(cyber_max_worker_threads() == 2);
+    if (cyber_active_backend() == CYBER_BACKEND_CPU) {
+        // The CPU backend names the fan-out a loop would really get, so the cap
+        // has to show up there rather than the machine's core count.
+        REQUIRE(std::string(cyber_active_backend_name()).find("2 threads") != std::string::npos);
+    }
+
+    // Negative is refused and leaves the cap alone — a host must never end up
+    // with an unbounded engine because it passed a bad value.
+    REQUIRE(cyber_set_max_worker_threads(-1) == CYBER_ERR_INVALID_ARG);
+    REQUIRE(cyber_max_worker_threads() == 2);
+    REQUIRE(std::string(cyber_last_error()).size() > 0);
+
+    REQUIRE(cyber_set_max_worker_threads(0) == CYBER_OK);
+    REQUIRE(cyber_max_worker_threads() == 0);
+}
+
 TEST_CASE("capi rejects null arguments") {
     CyberMesh* mesh = nullptr;
     REQUIRE(cyber_mesh_load_obj(nullptr, &mesh) == CYBER_ERR_INVALID_ARG);

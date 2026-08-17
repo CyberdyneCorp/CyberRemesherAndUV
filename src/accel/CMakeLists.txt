@@ -19,8 +19,15 @@ cyber_set_warnings(cyber_accel)
 # device is absent, so linking them in never forces a GPU at runtime.
 
 if(CYBER_ENABLE_METAL)
-    # UNVERIFIED on non-Apple hosts; Objective-C++ + Metal.framework.
+    # Objective-C++. Without enable_language(OBJCXX) CMake hands the .mm file to
+    # the plain CXX driver, which compiles it WITHOUT ARC — and every +1 method
+    # the backend calls (newCommandQueue, newBufferWith*, newFunctionWithName,
+    # newComputePipelineState*, newLibraryWithSource) then leaks its object on
+    # every dispatch. src/render/CMakeLists.txt already declares the language;
+    # -fobjc-arc is what actually turns the ownership on.
+    enable_language(OBJCXX)
     add_library(cyber_accel_metal STATIC src/metal_backend.mm)
+    target_compile_options(cyber_accel_metal PRIVATE -fobjc-arc)
     target_link_libraries(cyber_accel_metal PUBLIC cyber_accel)
     target_link_libraries(cyber_accel_metal PUBLIC "-framework Metal" "-framework Foundation")
     target_link_libraries(cyber_accel PUBLIC cyber_accel_metal)
@@ -43,7 +50,19 @@ if(CYBER_ENABLE_CUDA)
 endif()
 
 if(CYBER_ENABLE_OPENCL)
-    find_package(OpenCL REQUIRED)
+    # Not REQUIRED: a bare find_package(OpenCL REQUIRED) aborts the configure
+    # with CMake's generic "could not find OpenCL", which is what an Android
+    # build hit — the NDK ships no OpenCL at all, and no amount of reading that
+    # message says so. Fail with the reason and the way out instead.
+    find_package(OpenCL)
+    if(NOT OpenCL_FOUND)
+        message(FATAL_ERROR
+            "CYBER_ENABLE_OPENCL=ON but no OpenCL SDK was found. Install the "
+            "headers and ICD loader (Debian/Ubuntu: opencl-headers "
+            "opencl-clhpp-headers ocl-icd-opencl-dev), or configure with "
+            "-DCYBER_ENABLE_OPENCL=OFF. The Android NDK ships no OpenCL, so "
+            "Android builds must leave it OFF.")
+    endif()
     add_library(cyber_accel_opencl STATIC src/opencl_backend.cpp)
     target_link_libraries(cyber_accel_opencl PUBLIC cyber_accel OpenCL::OpenCL)
     target_link_libraries(cyber_accel PUBLIC cyber_accel_opencl)

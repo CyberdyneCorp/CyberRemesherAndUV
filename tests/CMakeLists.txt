@@ -4,6 +4,7 @@ target_include_directories(cyber_doctest SYSTEM INTERFACE ${PROJECT_SOURCE_DIR}/
 add_executable(cyber_tests
     main.cpp
     bake/test_bake.cpp
+    bake/test_bake_determinism.cpp
     bake/test_curvature.cpp
     bake/test_tangent.cpp
     bake/test_ao_projected.cpp
@@ -35,7 +36,9 @@ add_executable(cyber_tests
     core/test_flow_guides_pipeline.cpp
     core/test_mesh.cpp
     core/test_mesh_property.cpp
+    core/test_threading.cpp
     core/test_version.cpp
+    cli/test_parse_number.cpp
     accel/test_cpu_backend.cpp
     accel/test_gpu_parity.cpp
     accel/test_gpu_geometry.cpp
@@ -43,6 +46,10 @@ add_executable(cyber_tests
 )
 target_link_libraries(cyber_tests PRIVATE cyber_accel cyber_bake cyber_handoff
                                           cyber_quadrangulate cyber_doctest)
+# cli/test_parse_number.cpp includes the CLI's header-only number parser. It is
+# NOT gated on CYBER_BUILD_CLI: the parser's fallback path exists for the mobile
+# presets, which are exactly the ones that build no CLI.
+target_include_directories(cyber_tests PRIVATE ${PROJECT_SOURCE_DIR}/apps/cli)
 if(TARGET cyber_net)
     target_sources(cyber_tests PRIVATE net/test_bridge.cpp)
     target_link_libraries(cyber_tests PRIVATE cyber_net)
@@ -56,7 +63,7 @@ if(TARGET cyber_imageio)
     target_link_libraries(cyber_tests PRIVATE cyber_imageio)
 endif()
 if(TARGET cyber_capi)
-    target_sources(cyber_tests PRIVATE capi/test_capi.cpp)
+    target_sources(cyber_tests PRIVATE capi/test_capi.cpp capi/test_capi_cache.cpp)
     target_link_libraries(cyber_tests PRIVATE cyber_capi)
     # Some ABI promises live only in the header's prose (handle lifetimes), so
     # the capi cases read it and gate on what it says.
@@ -91,7 +98,10 @@ if(TARGET cyber_render)
 endif()
 if(TARGET cyber_retopo)
     target_sources(cyber_tests PRIVATE retopo/test_retopo.cpp retopo/test_retopo_advanced.cpp
-                                        retopo/test_soft_selection.cpp retopo/test_conform.cpp)
+                                        retopo/test_soft_selection.cpp retopo/test_conform.cpp
+                                        retopo/test_adjacency.cpp
+                                        retopo/test_stroke_interpreter.cpp
+                                        retopo/test_vertex_snap.cpp)
     target_link_libraries(cyber_tests PRIVATE cyber_retopo)
 endif()
 if(TARGET cyber_bakecage)
@@ -154,6 +164,17 @@ endif()
 
 find_package(Python3 COMPONENTS Interpreter)
 
+# CTest prefixes a native test COMMAND with CMAKE_CROSSCOMPILING_EMULATOR by
+# itself, but the Python-driven cases launch the engine binaries THEMSELVES —
+# the command CTest sees is the interpreter, which is the host's. Hand them the
+# same emulator so `ctest` works on a cross-build (the arm64 lane) without
+# binfmt registration, i.e. without root. Empty on a native build.
+set(CYBER_TEST_LAUNCHER_ENV "")
+if(CMAKE_CROSSCOMPILING AND CMAKE_CROSSCOMPILING_EMULATOR)
+    string(REPLACE ";" " " _cyber_emulator "${CMAKE_CROSSCOMPILING_EMULATOR}")
+    set(CYBER_TEST_LAUNCHER_ENV "CYBER_TEST_LAUNCHER=${_cyber_emulator}")
+endif()
+
 # Single version identity (build-and-packaging spec). Pure file parsing, so it
 # needs no built target and runs in every configuration that has an interpreter.
 if(Python3_FOUND)
@@ -168,6 +189,17 @@ if(Python3_FOUND)
     add_test(NAME swift_abi_parity
         COMMAND ${Python3_EXECUTABLE}
                 ${CMAKE_CURRENT_SOURCE_DIR}/packaging/test_swift_abi_parity.py)
+
+    # Objective-C++ syntax gate for the Metal compute backend. Same idea as the
+    # Swift guard above: metal_backend.mm needs an Apple toolchain to build and
+    # the only lane that has one runs continue-on-error, so nothing compiled it
+    # at all. Clang parses Objective-C++ on any host; declaration-only
+    # Metal/Foundation stubs supply the rest. Skips (CTest code 77) where no
+    # suitable clang is installed.
+    add_test(NAME metal_objcxx_syntax
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/packaging/test_metal_syntax.py)
+    set_tests_properties(metal_objcxx_syntax PROPERTIES TIMEOUT 120 SKIP_RETURN_CODE 77)
 
     # Build-description regressions the C++ suite cannot see: the default
     # -Werror configuration, the CAPI/retopo option dependency, and the
@@ -198,6 +230,9 @@ if(CYBER_BUILD_CLI AND Python3_FOUND)
     add_test(NAME cli
         COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/cli/test_cli.py
                 $<TARGET_FILE:cyberremesh>)
+    if(CYBER_TEST_LAUNCHER_ENV)
+        set_tests_properties(cli PROPERTIES ENVIRONMENT "${CYBER_TEST_LAUNCHER_ENV}")
+    endif()
 
     # Benchmark regression check (tools/bench) — recorded-baseline gate over
     # the deterministic generated corpus. Needs numpy/scipy; skipped (not
@@ -210,7 +245,11 @@ if(CYBER_BUILD_CLI AND Python3_FOUND)
         COMMAND ${Python3_EXECUTABLE} -c "import numpy, scipy"
         RESULT_VARIABLE CYBER_BENCH_DEPS_MISSING
         OUTPUT_QUIET ERROR_QUIET)
-    if(CYBER_BENCH_DEPS_MISSING EQUAL 0)
+    if(CMAKE_CROSSCOMPILING)
+        # The baselines record wall-clock and quality for a NATIVE binary; the
+        # same binary under an instruction emulator reports neither honestly.
+        message(STATUS "bench test skipped: cross-build (timings under an emulator are not baselines)")
+    elseif(CYBER_BENCH_DEPS_MISSING EQUAL 0)
         add_test(NAME bench
             COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tools/bench/bench.py
                     check --cyber-binary $<TARGET_FILE:cyberremesh>
@@ -226,6 +265,9 @@ if(TARGET cyberbridge-server AND Python3_FOUND)
         COMMAND ${Python3_EXECUTABLE}
                 ${CMAKE_CURRENT_SOURCE_DIR}/../python/tests/test_integration.py
                 $<TARGET_FILE:cyberbridge-server>)
+    if(CYBER_TEST_LAUNCHER_ENV)
+        set_tests_properties(bridge_python PROPERTIES ENVIRONMENT "${CYBER_TEST_LAUNCHER_ENV}")
+    endif()
 endif()
 
 # Reply-limit regression for the Python client. Drives it against a stub server

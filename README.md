@@ -374,6 +374,29 @@ self-hosted runner that has one. Metal has a preset (`macos-metal`) and a
 report-only macOS compile lane, but this project's own hardware cannot run it:
 treat the Metal backend as **unverified**.
 
+### Bounding the worker threads
+
+The engine's parallel loops size themselves from the machine's hardware
+concurrency, which is right for a batch run and wrong inside an interactive
+app: an uncapped bake takes every core the host is trying to share, and on a
+tablet that fights the OS scheduler and drains the battery. A host caps it:
+
+```c
+cyber_set_max_worker_threads(4);   /* 0 (the default) means uncapped */
+```
+
+C++ callers use `cyber::setMaxWorkerThreads()` from `cyber/core/threading.hpp`.
+It is an API and not an environment variable on purpose — a host learns its
+thread budget while it is already running and multi-threaded, where `setenv`
+is not safe — and it is callable at any time from any thread; loops already
+running keep the fan-out they started with.
+
+The cap **cannot change a result**. The loops split a range into contiguous
+chunks and each chunk writes only its own indices, so a capped run is
+byte-identical to an uncapped one; only speed and CPU load move. That is what
+makes it safe to turn down mid-session, and it is pinned by a test that
+compares a capped remesh against an uncapped one vertex for vertex.
+
 ## Environment variables
 
 Nothing here is required — the defaults are the supported configuration. These
@@ -433,7 +456,25 @@ ctest --preset cpu-headless
 ```
 
 Other presets: `cpu-headless-debug` (ASan/UBSan), `macos-metal`, `linux-cuda`,
-`windows-cuda`, `ios`, `android`.
+`windows-cuda`, `ios`, `android`, `linux-arm64-cross`.
+
+The mobile presets need their platform toolchain file; `android` also wants an
+ABI and API level:
+
+```sh
+cmake --preset android \
+  -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_ROOT/build/cmake/android.toolchain.cmake" \
+  -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-26
+```
+
+`linux-arm64-cross` builds the whole tree — library, CLI and suite — for 64-bit
+ARM with `g++-aarch64-linux-gnu` and runs the suite under `qemu-user`, which is
+how CI executes the engine on the ISA the mobile targets ship on. It needs only
+`g++-aarch64-linux-gnu` and `qemu-user-static`; `ctest --preset
+linux-arm64-cross` launches each binary through the emulator on its own, so no
+binfmt registration and no root are involved. A toolchain unpacked somewhere
+other than `/usr` is reachable with `-DCYBER_AARCH64_SYSROOT=…` and
+`-DCYBER_QEMU_AARCH64=…`.
 
 #### Supported toolchains
 
