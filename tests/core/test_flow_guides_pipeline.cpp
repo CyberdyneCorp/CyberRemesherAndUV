@@ -11,6 +11,7 @@
 #include "cyber/core/pipeline.hpp"
 #include "cyber/quadrangulate/field_quadrangulator.hpp"
 #include "cyber/quadrangulate/quadcover_extractor.hpp"
+#include "support/scoped_env.hpp"
 
 using cyber::FaceId;
 using cyber::Index;
@@ -355,9 +356,9 @@ TEST_CASE("CYBER_QC_NO_NATIVE reports the dropped guidance instead of claiming i
     g.guides.push_back(guide);
 
     const auto quadCover = [] { return remesh::makeQuadCoverQuadrangulator(); };
-    setenv("CYBER_QC_NO_NATIVE", "1", 1);
+    cyber::test::setEnv("CYBER_QC_NO_NATIVE", "1");
     const auto result = remesh::remesh(plane, smallRun(300), nullptr, nullptr, quadCover, {}, &g);
-    unsetenv("CYBER_QC_NO_NATIVE");
+    cyber::test::unsetEnv("CYBER_QC_NO_NATIVE");
 
     REQUIRE(result.islandGuidance.size() == 1);
     const remesh::IslandGuidance& row = result.islandGuidance[0];

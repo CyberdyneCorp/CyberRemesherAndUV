@@ -50,6 +50,8 @@ target_link_libraries(cyber_tests PRIVATE cyber_accel cyber_bake cyber_handoff
 # NOT gated on CYBER_BUILD_CLI: the parser's fallback path exists for the mobile
 # presets, which are exactly the ones that build no CLI.
 target_include_directories(cyber_tests PRIVATE ${PROJECT_SOURCE_DIR}/apps/cli)
+# tests/support/: header-only helpers shared across the suite (portable setenv).
+target_include_directories(cyber_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests)
 if(TARGET cyber_net)
     target_sources(cyber_tests PRIVATE net/test_bridge.cpp)
     target_link_libraries(cyber_tests PRIVATE cyber_net)

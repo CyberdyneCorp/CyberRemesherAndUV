@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "../../src/quadrangulate/src/sparse_cholesky.hpp"
+#include "support/scoped_env.hpp"
 
 using cyber::remesh::SparseCholesky;
 
@@ -57,13 +58,13 @@ std::vector<double> multiply(const Csr& a, const std::vector<double>& x) {
 // solution; returns the factor size so callers can compare fill.
 std::size_t factorAndCheck(const Csr& a, const char* ordering) {
     if (ordering != nullptr) {
-        setenv("CYBER_QC_ORDERING", ordering, 1);
+        cyber::test::setEnv("CYBER_QC_ORDERING", ordering);
     } else {
-        unsetenv("CYBER_QC_ORDERING");
+        cyber::test::unsetEnv("CYBER_QC_ORDERING");
     }
     SparseCholesky chol;
     const bool ok = chol.factor(a.n, a.rowStart, a.colIndex, a.value);
-    unsetenv("CYBER_QC_ORDERING");
+    cyber::test::unsetEnv("CYBER_QC_ORDERING");
     REQUIRE(ok);
 
     std::vector<double> xTrue(a.n);
