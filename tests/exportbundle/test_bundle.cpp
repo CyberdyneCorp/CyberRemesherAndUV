@@ -307,10 +307,15 @@ TEST_CASE("the container follows the preset's textureFormat, not the file name")
     const fs::path written = dir / "hero_normal";
     REQUIRE(fs::exists(written));
 
-    std::ifstream file(written, std::ios::binary);
-    REQUIRE(file.good());
     std::array<unsigned char, 4> magic{};
-    file.read(reinterpret_cast<char*>(magic.data()), static_cast<std::streamsize>(magic.size()));
+    {
+        // Scoped so the handle is shut before remove_all: Windows refuses to
+        // delete a file that is still open, where POSIX happily unlinks it.
+        std::ifstream file(written, std::ios::binary);
+        REQUIRE(file.good());
+        file.read(reinterpret_cast<char*>(magic.data()),
+                  static_cast<std::streamsize>(magic.size()));
+    }
     // OpenEXR's magic (0x01312f76, little-endian) — a PNG would start 0x89 P N G.
     REQUIRE(magic == std::array<unsigned char, 4>{0x76, 0x2f, 0x31, 0x01});
     fs::remove_all(dir);
