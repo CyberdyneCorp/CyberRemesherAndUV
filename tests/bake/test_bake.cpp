@@ -260,8 +260,10 @@ TEST_CASE("a numeric bake parameter out of range yields an empty image") {
         return p;
     };
     const std::vector<Case> cases = {
-        {"cage NaN", bake::BakeMap::Normal, with([&](bake::BakeParams& p) { p.cageDistance = nan; })},
-        {"cage inf", bake::BakeMap::Normal, with([&](bake::BakeParams& p) { p.cageDistance = inf; })},
+        {"cage NaN", bake::BakeMap::Normal,
+         with([&](bake::BakeParams& p) { p.cageDistance = nan; })},
+        {"cage inf", bake::BakeMap::Normal,
+         with([&](bake::BakeParams& p) { p.cageDistance = inf; })},
         {"cage < 0", bake::BakeMap::Displacement,
          with([](bake::BakeParams& p) { p.cageDistance = -0.1f; })},
         {"aoRadius NaN", bake::BakeMap::AmbientOcclusion,

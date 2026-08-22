@@ -384,8 +384,7 @@ TEST_CASE("a recycled face or vertex id starts from attribute defaults") {
     REQUIRE(mesh.removeIsolatedVertex(c));
     const VertexId fresh = mesh.addVertex({0, 2, 0});
     REQUIRE(fresh.value == c.value);
-    REQUIRE((*mesh.vertexAttributes().find<float>("weight"))[fresh.value] ==
-            doctest::Approx(0.0f));
+    REQUIRE((*mesh.vertexAttributes().find<float>("weight"))[fresh.value] == doctest::Approx(0.0f));
 }
 
 // Regression: the duplicate-corner check was a nested scan over the corner
@@ -404,8 +403,8 @@ TEST_CASE("addFace validates a huge n-gon's corners without going quadratic") {
 
     const auto start = std::chrono::steady_clock::now();
     REQUIRE(mesh.addFace(ring).valid());
-    const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start)
-                               .count();
+    const double seconds =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
     CAPTURE(seconds);
     REQUIRE(seconds < 2.0);
 

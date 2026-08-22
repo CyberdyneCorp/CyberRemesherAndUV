@@ -127,8 +127,8 @@ std::optional<VertexHit> SurfaceSnapper::snapToVertex(Vec3 query, float radius) 
     };
     std::array<Entry, kVertexStack> stack{};
     std::size_t top = 0;
-    stack[top++] = {0, distanceSquaredToBox(query, m_vertexNodes[0].boundsMin,
-                                            m_vertexNodes[0].boundsMax)};
+    stack[top++] = {
+        0, distanceSquaredToBox(query, m_vertexNodes[0].boundsMin, m_vertexNodes[0].boundsMax)};
     while (top > 0) {
         const Entry entry = stack[--top];
         if (pruned(entry.distanceSquared)) {

@@ -335,8 +335,8 @@ bool readColumn(ByteReader& r, AttributeSet& attrs, const std::string& name,
     return r.ok();
 }
 
-bool readColumnOfTag(ByteReader& r, AttributeSet& attrs, const std::string& name,
-                     std::uint8_t tag, const std::vector<std::size_t>& order) {
+bool readColumnOfTag(ByteReader& r, AttributeSet& attrs, const std::string& name, std::uint8_t tag,
+                     const std::vector<std::size_t>& order) {
     switch (tag) {
         case kColumnFloat:
             return readColumn<float>(r, attrs, name, order);
@@ -414,10 +414,9 @@ std::vector<std::size_t> persistedEdges(const Mesh& mesh) {
 }
 
 bool hasMeshExtras(const Mesh& mesh) {
-    const std::size_t columns = mesh.vertexAttributes().columnCount() +
-                                mesh.edgeAttributes().columnCount() +
-                                mesh.faceAttributes().columnCount() +
-                                mesh.cornerAttributes().columnCount();
+    const std::size_t columns =
+        mesh.vertexAttributes().columnCount() + mesh.edgeAttributes().columnCount() +
+        mesh.faceAttributes().columnCount() + mesh.cornerAttributes().columnCount();
     return columns > 0 || !persistedEdges(mesh).empty();
 }
 

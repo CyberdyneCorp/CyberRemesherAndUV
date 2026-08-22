@@ -205,15 +205,15 @@ fs::path writeGltfHandoffFile(const std::string& name, const Mesh& mesh, int maj
 // declare more geometry than it then writes. `faceFirst` emits the face element
 // ahead of the vertex one — the order in which an over-declared vertex count
 // used to sail through as invented geometry.
-std::string handoffHeader(const std::string& format, std::size_t vertexCount,
-                          std::size_t faceCount, bool faceFirst = false) {
+std::string handoffHeader(const std::string& format, std::size_t vertexCount, std::size_t faceCount,
+                          bool faceFirst = false) {
     const std::string vertex = "element vertex " + std::to_string(vertexCount) +
                                "\nproperty float x\nproperty float y\nproperty float z\n"
                                "property float nx\nproperty float ny\nproperty float nz\n"
                                "property uchar red\nproperty uchar green\nproperty uchar blue\n"
                                "property float material_mix\n";
-    const std::string face = "element face " + std::to_string(faceCount) +
-                             "\nproperty list uchar int vertex_indices\n";
+    const std::string face =
+        "element face " + std::to_string(faceCount) + "\nproperty list uchar int vertex_indices\n";
     std::string out = "ply\nformat " + format + " 1.0\ncomment cyber_sculpt_handoff 1 0\n";
     out += faceFirst ? face + vertex : vertex + face;
     out += "end_header\n";
@@ -629,8 +629,9 @@ TEST_CASE("an over-declared binary handoff cannot pass off vertices the file nev
 TEST_CASE("a truncated ASCII data section fails instead of spinning at end of file") {
     // Long-form values so the payload clears the header's minimum byte cost:
     // the truncation has to be caught while parsing, not by the size check.
-    const std::string line = "0.00000000000 0.00000000000 0.00000000000 0.00000000000 "
-                             "0.00000000000 1.00000000000 255 0 0 0.50000000000\n";
+    const std::string line =
+        "0.00000000000 0.00000000000 0.00000000000 0.00000000000 "
+        "0.00000000000 1.00000000000 255 0 0 0.50000000000\n";
     std::string text = handoffHeader("ascii", 3, 1);
     text += line + line;  // two of the three declared vertices, and no face line
     const fs::path path = writeHandoffFile("truncated.ply", text);
@@ -643,8 +644,9 @@ TEST_CASE("a truncated ASCII data section fails instead of spinning at end of fi
 TEST_CASE("an ASCII data line carrying fewer values than the element declares is rejected") {
     // Four values for ten declared properties, padded so the file clears the
     // minimum byte cost and the short line itself is what gets caught.
-    const std::string line = "0.0000000000000000 0.0000000000000000 0.0000000000000000 "
-                             "0.0000000000000000\n";
+    const std::string line =
+        "0.0000000000000000 0.0000000000000000 0.0000000000000000 "
+        "0.0000000000000000\n";
     std::string text = handoffHeader("ascii", 3, 1);
     text += line + line + line + "3 0 1 2\n";
     const fs::path path = writeHandoffFile("shortline.ply", text);
@@ -669,8 +671,9 @@ TEST_CASE("a handoff element with no properties is charged for its entries, not 
     // A property-less element carries no data, so the demand guard scored it at
     // zero and let the header declare 2^64-1 entries the payload never backs —
     // which the reader then tried to walk one by one.
-    const std::string text = "ply\nformat ascii 1.0\ncomment cyber_sculpt_handoff 1 0\n"
-                             "element zzz 18446744073709551615\nend_header\n";
+    const std::string text =
+        "ply\nformat ascii 1.0\ncomment cyber_sculpt_handoff 1 0\n"
+        "element zzz 18446744073709551615\nend_header\n";
     const fs::path path = writeHandoffFile("propertyless.ply", text);
 
     auto rejected = std::make_shared<std::atomic<bool>>(false);

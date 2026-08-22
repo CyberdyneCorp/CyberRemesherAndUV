@@ -150,16 +150,14 @@ TEST_CASE("a recycled touch id without the strict count reports no gesture, not 
     SUBCASE("two fingertips") {
         feed(rec, {TouchPoint{1, {0, 0}, 5, 1}, TouchPoint{2, {10, 0}, 5, 1}});
         GestureSample s{};
-        REQUIRE_NOTHROW(
-            s = feed(rec, {TouchPoint{3, {0, 0}, 5, 1}, TouchPoint{4, {10, 0}, 5, 1}}));
+        REQUIRE_NOTHROW(s = feed(rec, {TouchPoint{3, {0, 0}, 5, 1}, TouchPoint{4, {10, 0}, 5, 1}}));
         CHECK(s.kind == GestureKind::None);
     }
 
     SUBCASE("one of two fingertips is new") {
         feed(rec, {TouchPoint{1, {0, 0}, 5, 1}, TouchPoint{2, {10, 0}, 5, 1}});
         GestureSample s{};
-        REQUIRE_NOTHROW(
-            s = feed(rec, {TouchPoint{1, {0, 0}, 5, 1}, TouchPoint{7, {20, 0}, 5, 1}}));
+        REQUIRE_NOTHROW(s = feed(rec, {TouchPoint{1, {0, 0}, 5, 1}, TouchPoint{7, {20, 0}, 5, 1}}));
         CHECK(s.kind == GestureKind::None);
     }
 }

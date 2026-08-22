@@ -69,9 +69,9 @@ std::shared_ptr<IBackend> backendFromEnvironment() {
         const char* name;
         BackendKind kind;
     };
-    for (const Named& entry : {Named{"cpu", BackendKind::Cpu}, Named{"metal", BackendKind::Metal},
-                               Named{"cuda", BackendKind::Cuda},
-                               Named{"opencl", BackendKind::OpenCl}}) {
+    for (const Named& entry :
+         {Named{"cpu", BackendKind::Cpu}, Named{"metal", BackendKind::Metal},
+          Named{"cuda", BackendKind::Cuda}, Named{"opencl", BackendKind::OpenCl}}) {
         if (std::strcmp(name, entry.name) == 0) {
             return selectBackend(entry.kind);
         }

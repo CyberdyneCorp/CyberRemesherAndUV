@@ -67,14 +67,13 @@ TEST_CASE("the build does not fuse multiply-add, so the bake goldens are portabl
     const float rounded = opaque(x * y);
     const float residual = opaque(x) * opaque(y) - rounded;
 
-    INFO("residual "
-         << residual
-         << " != 0 means this translation unit was compiled with FMA contraction "
-            "enabled. Every dot, cross and difference of products in the bake then "
-            "rounds once instead of twice and the pixel checksums in "
-            "test_field_bake.cpp move. Configure with cmake/FloatingPoint.cmake's "
-            "-ffp-contract=off (this is what -march=native strips off a stock x86-64 "
-            "build, and what aarch64 does by default).");
+    INFO("residual " << residual
+                     << " != 0 means this translation unit was compiled with FMA contraction "
+                        "enabled. Every dot, cross and difference of products in the bake then "
+                        "rounds once instead of twice and the pixel checksums in "
+                        "test_field_bake.cpp move. Configure with cmake/FloatingPoint.cmake's "
+                        "-ffp-contract=off (this is what -march=native strips off a stock x86-64 "
+                        "build, and what aarch64 does by default).");
     CHECK(residual == 0.0f);
 }
 

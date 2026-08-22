@@ -1,10 +1,9 @@
 #pragma once
 
 #include <cstdint>
+#include <json.hpp>
 #include <limits>
 #include <string>
-
-#include <json.hpp>
 
 // Accessors for peer-supplied JSON. nlohmann's at()/get<T>()/value() throw on a
 // missing or retyped member, and its arithmetic conversion is a plain

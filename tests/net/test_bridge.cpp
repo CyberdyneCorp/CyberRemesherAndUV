@@ -89,7 +89,9 @@ void armForeignAllocationFailure() {
     g_failForeignAlloc.store(true, std::memory_order_release);
 }
 
-void disarmForeignAllocationFailure() { g_failForeignAlloc.store(false, std::memory_order_release); }
+void disarmForeignAllocationFailure() {
+    g_failForeignAlloc.store(false, std::memory_order_release);
+}
 
 bool foreignAllocationFailed() { return g_foreignAllocFailed.load(std::memory_order_acquire); }
 #endif  // CYBER_TEST_UNDER_ASAN
@@ -796,10 +798,11 @@ TEST_CASE("guidance transport: guides and density round-trip and clear with the 
         }
 
         // A well-formed payload still goes through untouched.
-        REQUIRE(net::processRequest(
-                    session,
-                    R"({"type":"push_guides","guides":[{"points":[[0,0,0],[1,0,0]],"radius":0.1}]})")
-                    .find("\"ok\"") != std::string::npos);
+        REQUIRE(
+            net::processRequest(
+                session,
+                R"({"type":"push_guides","guides":[{"points":[[0,0,0],[1,0,0]],"radius":0.1}]})")
+                .find("\"ok\"") != std::string::npos);
         CHECK(session.guides().size() == 1);
     }
 

@@ -212,8 +212,8 @@ float rayTriangle(Vec3 origin, Vec3 dir, Vec3 a, Vec3 b, Vec3 c) {
     const float eab = edgeVolume(dir, oa, ob);
     const float ebc = edgeVolume(dir, ob, oc);
     const float eca = edgeVolume(dir, oc, oa);
-    const bool inside = (eab >= 0.0f && ebc >= 0.0f && eca >= 0.0f) ||
-                        (eab <= 0.0f && ebc <= 0.0f && eca <= 0.0f);
+    const bool inside =
+        (eab >= 0.0f && ebc >= 0.0f && eca >= 0.0f) || (eab <= 0.0f && ebc <= 0.0f && eca <= 0.0f);
     if (!inside) {
         return -1.0f;
     }

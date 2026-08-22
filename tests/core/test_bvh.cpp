@@ -182,7 +182,7 @@ TEST_CASE("a regular grid does not degrade the build (spec: mesh-core)") {
         int nu, nv;
     };
     // Same triangle budget (18432), six ways of laying the grid out.
-    const std::vector<Shape> shapes = {{96, 96}, {32, 288}, {288, 32},
+    const std::vector<Shape> shapes = {{96, 96},  {32, 288}, {288, 32},
                                        {576, 16}, {64, 144}, {144, 64}};
     for (const Shape& shape : shapes) {
         CAPTURE(shape.nu);
@@ -305,8 +305,7 @@ TEST_CASE("the build reports progress and honours a cancel token") {
     CHECK(aborted.cancelled());
     CHECK(aborted.empty());
     CHECK(aborted.triangleCount() == 0);
-    CHECK(aborted.closestPoint({0, 0, 0}).distanceSquared ==
-          std::numeric_limits<float>::max());
+    CHECK(aborted.closestPoint({0, 0, 0}).distanceSquared == std::numeric_limits<float>::max());
     CHECK_FALSE(aborted.raycast({0, 0, 5}, {0, 0, -1}).has_value());
 
     // Cancelling mid-build (the token trips on the first progress report) is the

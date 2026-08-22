@@ -91,8 +91,7 @@ void seedWeights(CyberMesh* mesh) {
 // of the vertices it touches — a topology edit the adjacency table cannot
 // survive. Adds four vertices, so it also grows the mesh.
 uint32_t bridgeCorners(CyberMesh* mesh) {
-    const float quad[12] = {0.0f, 0.0f, 0.0f, 0.0f, 3.0f, 0.0f,
-                            1.5f, 5.0f, 1.0f, 3.0f, 0.0f, 0.0f};
+    const float quad[12] = {0.0f, 0.0f, 0.0f, 0.0f, 3.0f, 0.0f, 1.5f, 5.0f, 1.0f, 3.0f, 0.0f, 0.0f};
     uint32_t face = 0;
     REQUIRE(cyber_retopo_create_face(mesh, quad, 4, nullptr, &face) == CYBER_OK);
     return face;
@@ -146,8 +145,7 @@ TEST_CASE("capi cache: a positions-only edit refreshes positions and normals") {
 
     // Same again through the copying accessors, which read the same buffers.
     std::vector<float> copied(positionsAfter.size());
-    REQUIRE(cyber_mesh_copy_render_positions(mesh, copied.data(), copied.size()) ==
-            copied.size());
+    REQUIRE(cyber_mesh_copy_render_positions(mesh, copied.data(), copied.size()) == copied.size());
     CHECK(copied == positionsAfter);
     std::vector<float> copiedNormals(normalsAfter.size());
     REQUIRE(cyber_mesh_copy_normals(mesh, copiedNormals.data(), copiedNormals.size()) ==
@@ -174,8 +172,7 @@ TEST_CASE("capi cache: a positions-only edit leaves the index buffers untouched"
     REQUIRE(!edges.empty());
 
     seedWeights(mesh);
-    const float xf[12] = {1.0f, 0.0f, 0.0f, 0.25f, 0.0f, 1.0f,
-                          0.0f, 0.0f, 0.0f, 0.0f,  1.0f, 0.0f};
+    const float xf[12] = {1.0f, 0.0f, 0.0f, 0.25f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f};
     CyberSoftTransformReport report;
     REQUIRE(cyber_retopo_selection_transform(mesh, xf, snapper, 0.0f, &report) == CYBER_OK);
     CHECK(triangleIndices(mesh) == triangles);

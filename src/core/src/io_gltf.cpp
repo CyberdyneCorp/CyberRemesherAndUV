@@ -291,7 +291,7 @@ Result<ImportedMesh> importGltf(const std::filesystem::path& path,
                                 continue;
                             }
                             uvs[loops[static_cast<std::size_t>(c)].value] = {uv->number(src, 0),
-                                                                            uv->number(src, 1)};
+                                                                             uv->number(src, 1)};
                         }
                     }
                     if (normal != nullptr) {

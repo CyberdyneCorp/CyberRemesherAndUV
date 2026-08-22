@@ -61,8 +61,8 @@ void appendSphere(std::vector<Vec3>& p, std::vector<std::vector<Index>>& f, floa
         for (int s = 0; s < segments; ++s) {
             const float th =
                 2.0f * 3.14159265f * static_cast<float>(s) / static_cast<float>(segments);
-            p.push_back({dx + std::sin(phi) * std::cos(th), std::sin(phi) * std::sin(th),
-                         std::cos(phi)});
+            p.push_back(
+                {dx + std::sin(phi) * std::cos(th), std::sin(phi) * std::sin(th), std::cos(phi)});
         }
     }
     p.push_back({dx, 0, -1});
@@ -310,7 +310,7 @@ namespace {
 
 // Captures everything the guarded scope writes to std::cout / std::cerr.
 class ConsoleCapture {
-  public:
+public:
     ConsoleCapture()
         : savedOut_(std::cout.rdbuf(out_.rdbuf())), savedErr_(std::cerr.rdbuf(err_.rdbuf())) {}
     ~ConsoleCapture() {
@@ -322,7 +322,7 @@ class ConsoleCapture {
     std::string out() const { return out_.str(); }
     std::string err() const { return err_.str(); }
 
-  private:
+private:
     std::ostringstream out_;
     std::ostringstream err_;
     std::streambuf* savedOut_;

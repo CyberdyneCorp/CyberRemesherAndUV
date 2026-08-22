@@ -59,8 +59,22 @@ void makeViewProj(float aspect, float m[16]) {
     const float dist = 2.4f;
     const float zn = 0.1f;
     const float zf = 10.0f;
-    const float proj[16] = {f / aspect, 0, 0, 0, 0, f, 0, 0, 0, 0, (zf + zn) / (zn - zf), -1.0f,
-                            0,          0, 2.0f * zf * zn / (zn - zf), 0};
+    const float proj[16] = {f / aspect,
+                            0,
+                            0,
+                            0,
+                            0,
+                            f,
+                            0,
+                            0,
+                            0,
+                            0,
+                            (zf + zn) / (zn - zf),
+                            -1.0f,
+                            0,
+                            0,
+                            2.0f * zf * zn / (zn - zf),
+                            0};
     const float view[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, -dist, 1};
     for (int col = 0; col < 4; ++col) {
         for (int row = 0; row < 4; ++row) {
@@ -98,7 +112,8 @@ std::vector<std::vector<Vec2>> strokeCorpus() {
         std::vector<Vec2> line;
         for (int i = 0; i < 64; ++i) {
             const float t = static_cast<float>(i) / 63.0f - 0.5f;
-            line.push_back({cx + std::cos(angle) * 2.0f * r * t, cy + std::sin(angle) * 2.0f * r * t});
+            line.push_back(
+                {cx + std::cos(angle) * 2.0f * r * t, cy + std::sin(angle) * 2.0f * r * t});
         }
         strokes.push_back(line);
         std::vector<Vec2> ring;
@@ -225,8 +240,9 @@ struct Reference {
                     continue;
                 }
                 const auto [v0, v1] = mesh.edgeVertices(e);
-                near = detail::length2(
-                           detail::closestOnSegment2(proj.screen(v0), proj.screen(v1), s) - s) <= r2;
+                near =
+                    detail::length2(detail::closestOnSegment2(proj.screen(v0), proj.screen(v1), s) -
+                                    s) <= r2;
             }
             if (near) {
                 ++hits;
@@ -280,7 +296,8 @@ struct Reference {
             if (!mesh.isAlive(f)) {
                 continue;
             }
-            if (const std::optional<Vec2> c = centroid(f); c && detail::pointInPolygon(stroke, *c)) {
+            if (const std::optional<Vec2> c = centroid(f);
+                c && detail::pointInPolygon(stroke, *c)) {
                 inside.push_back(f);
             }
         }
@@ -407,7 +424,8 @@ TEST_CASE("resolver queries survive a mesh with deleted and unprojectable faces"
         CHECK(proj.faceContaining(probe) == reference.faceContaining(probe));
         CHECK(ids(proj.edgesCrossing(stroke)) == ids(reference.edgesCrossing(stroke)));
         CHECK(ids(proj.edgesNear(stroke, 0.05f)) == ids(reference.edgesNear(stroke, 0.05f)));
-        CHECK(proj.fractionAlongEdges(stroke, 0.05f) == reference.fractionAlongEdges(stroke, 0.05f));
+        CHECK(proj.fractionAlongEdges(stroke, 0.05f) ==
+              reference.fractionAlongEdges(stroke, 0.05f));
         CHECK(ids(proj.facesEnclosed(stroke)) == ids(reference.facesEnclosed(stroke)));
     }
 }
@@ -430,7 +448,8 @@ TEST_CASE("resolver queries stay exact for degenerate strokes") {
     for (const std::vector<Vec2>& stroke : strokes) {
         CHECK(ids(proj.edgesCrossing(stroke)) == ids(reference.edgesCrossing(stroke)));
         CHECK(ids(proj.edgesNear(stroke, 0.03f)) == ids(reference.edgesNear(stroke, 0.03f)));
-        CHECK(proj.fractionAlongEdges(stroke, 0.03f) == reference.fractionAlongEdges(stroke, 0.03f));
+        CHECK(proj.fractionAlongEdges(stroke, 0.03f) ==
+              reference.fractionAlongEdges(stroke, 0.03f));
         if (!stroke.empty()) {
             CHECK(ids(proj.facesEnclosed(stroke)) == ids(reference.facesEnclosed(stroke)));
         }
@@ -509,7 +528,9 @@ TEST_CASE("interpretStroke keeps its shapes, contexts and elements over a cage")
          circle,
          retopo::StrokeShape::Circle,
          {{Action::HideRegion, 15}, {Action::RotateEdge, 1}}},
-        {"scribble over edges", scribble, retopo::StrokeShape::Scribble,
+        {"scribble over edges",
+         scribble,
+         retopo::StrokeShape::Scribble,
          {{Action::DissolveEdge, 163}}},
         {"hold on a vertex", hold, retopo::StrokeShape::HoldPoint, {{Action::TweakVertex, 1}}},
     };

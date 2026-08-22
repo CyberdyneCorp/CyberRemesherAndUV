@@ -351,9 +351,8 @@ TEST_CASE("attribute rows follow the compacted ids across a deleted face") {
 // Corner rows are linearised face by face, so a mesh of mixed arity is the
 // case that catches an off-by-one in that walk.
 TEST_CASE("corner attributes survive faces of mixed arity") {
-    const std::vector<Vec3> positions = {{0.0f, 0.0f, 0.0f}, {1.0f, 0.0f, 0.0f},
-                                         {2.0f, 0.0f, 0.0f}, {3.0f, 0.0f, 0.0f},
-                                         {0.0f, 1.0f, 0.0f}, {1.0f, 1.0f, 0.0f},
+    const std::vector<Vec3> positions = {{0.0f, 0.0f, 0.0f}, {1.0f, 0.0f, 0.0f}, {2.0f, 0.0f, 0.0f},
+                                         {3.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f}, {1.0f, 1.0f, 0.0f},
                                          {2.0f, 1.0f, 0.0f}, {3.0f, 1.0f, 0.0f}};
     const std::vector<std::vector<Index>> faces = {{0, 1, 5}, {1, 2, 6, 5}, {2, 3, 7, 6, 5}};
 

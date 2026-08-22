@@ -177,8 +177,8 @@ TEST_CASE("two maps that expand to one file name are refused") {
     // an automated material builder then binds curvature into the normal slot.
     // This is the failure the missing-{map} rejection already guards against,
     // reached through a repeated suffix instead of a pattern without the token.
-    const auto sharedSuffix = io::parsePreset(presetJson(
-        R"("maps":[{"map":"normal","suffix":"n"},{"map":"curvature","suffix":"n"}])"));
+    const auto sharedSuffix = io::parsePreset(
+        presetJson(R"("maps":[{"map":"normal","suffix":"n"},{"map":"curvature","suffix":"n"}])"));
     REQUIRE_FALSE(sharedSuffix.ok());
     REQUIRE(sharedSuffix.error().code == io::ErrorCode::ParseError);
     // The message has to name both offenders, or the author cannot tell which
@@ -193,9 +193,8 @@ TEST_CASE("two maps that expand to one file name are refused") {
         io::parsePreset(presetJson(R"("maps":["ao",{"map":"cavity","suffix":"ao"}])")).ok());
 
     // Distinct suffixes on the same map are distinct files, so they stand.
-    REQUIRE(io::parsePreset(presetJson(
-                                R"("maps":[{"map":"ao","suffix":"ao1"},)"
-                                R"({"map":"ao","suffix":"ao2"}])"))
+    REQUIRE(io::parsePreset(presetJson(R"("maps":[{"map":"ao","suffix":"ao1"},)"
+                                       R"({"map":"ao","suffix":"ao2"}])"))
                 .ok());
     // Every built-in must satisfy the rule it now imposes on user presets.
     for (const std::string& name : io::builtinPresetNames()) {
@@ -244,9 +243,9 @@ TEST_CASE("a preset name cannot escape the output directory through {preset}") {
     // whose pattern was a legal relative name smuggled the escape in through
     // the "name" field that {preset} expands — the parse succeeded and the
     // public file-name accessor handed a climbing path to the host.
-    const auto climbing = io::parsePreset(
-        R"({"schemaVersion":1,"name":"../../../tmp/pwned","maps":["normal"],)"
-        R"("namingPattern":"{preset}_{map}.{ext}"})");
+    const auto climbing =
+        io::parsePreset(R"({"schemaVersion":1,"name":"../../../tmp/pwned","maps":["normal"],)"
+                        R"("namingPattern":"{preset}_{map}.{ext}"})");
     REQUIRE_FALSE(climbing.ok());
     REQUIRE(climbing.error().code == io::ErrorCode::ParseError);
     REQUIRE(climbing.error().message.find("name") != std::string::npos);

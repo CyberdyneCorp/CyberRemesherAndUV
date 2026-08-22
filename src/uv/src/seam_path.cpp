@@ -99,10 +99,9 @@ bool SeamPath::addWaypoint(VertexId vertex) {
     // The armed resume marker acts as the current last waypoint, so the repeat
     // check has to run against it BEFORE it is seeded — otherwise a rejected
     // add still grows the pending path.
-    const bool seedResume =
-        m_waypoints.empty() && m_resume.valid() && m_mesh->isAlive(m_resume);
-    const VertexId last = m_waypoints.empty() ? (seedResume ? m_resume : VertexId{})
-                                              : m_waypoints.back();
+    const bool seedResume = m_waypoints.empty() && m_resume.valid() && m_mesh->isAlive(m_resume);
+    const VertexId last =
+        m_waypoints.empty() ? (seedResume ? m_resume : VertexId{}) : m_waypoints.back();
     if (last.valid() && last == vertex) {
         return false;
     }

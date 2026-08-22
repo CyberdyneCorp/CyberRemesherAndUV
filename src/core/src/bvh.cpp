@@ -156,8 +156,8 @@ std::optional<float> rayTriangle(Vec3 origin, Vec3 dir, Vec3 a, Vec3 b, Vec3 c) 
     const float eab = edgeVolume(dir, oa, ob);
     const float ebc = edgeVolume(dir, ob, oc);
     const float eca = edgeVolume(dir, oc, oa);
-    const bool inside = (eab >= 0.0f && ebc >= 0.0f && eca >= 0.0f) ||
-                        (eab <= 0.0f && ebc <= 0.0f && eca <= 0.0f);
+    const bool inside =
+        (eab >= 0.0f && ebc >= 0.0f && eca >= 0.0f) || (eab <= 0.0f && ebc <= 0.0f && eca <= 0.0f);
     if (!inside) {
         return std::nullopt;
     }
@@ -507,8 +507,8 @@ Bvh::Bvh(const Mesh& mesh, ProgressSink* progress, const CancelToken* cancel) {
         splits.assign(level.size(), 0);
         detail::forEachChunk(0, level.size(), workers, [&](std::size_t lo, std::size_t hi) {
             for (std::size_t i = lo; i < hi; ++i) {
-                splits[i] = builder.splitNode(m_nodes, level[i].node, level[i].begin, level[i].end,
-                                              depth);
+                splits[i] =
+                    builder.splitNode(m_nodes, level[i].node, level[i].begin, level[i].end, depth);
             }
         });
         builder.tasks.clear();
@@ -521,9 +521,9 @@ Bvh::Bvh(const Mesh& mesh, ProgressSink* progress, const CancelToken* cancel) {
             builder.tasks.push_back({left + 1, splits[i], level[i].end, depth + 1});
         }
         if (progress != nullptr) {
-            progress->report(0.05f + 0.10f * static_cast<float>(depth + 1) /
-                                         static_cast<float>(taskDepth),
-                             "bvh");
+            progress->report(
+                0.05f + 0.10f * static_cast<float>(depth + 1) / static_cast<float>(taskDepth),
+                "bvh");
         }
     }
 
@@ -563,9 +563,9 @@ Bvh::Bvh(const Mesh& mesh, ProgressSink* progress, const CancelToken* cancel) {
             m_nodes.push_back(relink(local[k]));
         }
         if (progress != nullptr) {
-            progress->report(0.15f + 0.85f * static_cast<float>(t + 1) /
-                                         static_cast<float>(subtrees.size()),
-                             "bvh");
+            progress->report(
+                0.15f + 0.85f * static_cast<float>(t + 1) / static_cast<float>(subtrees.size()),
+                "bvh");
         }
     }
 

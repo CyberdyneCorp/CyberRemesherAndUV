@@ -92,8 +92,8 @@ TEST_CASE("capi backend selection reports what it actually selected") {
     // An absent backend is REFUSED, never silently downgraded to the CPU:
     // selectBackend() falls back to CPU internally, so reporting CYBER_OK here
     // would tell a host it is on the GPU while it runs on the CPU.
-    for (const CyberBackend absent : {CYBER_BACKEND_METAL, CYBER_BACKEND_CUDA,
-                                      CYBER_BACKEND_OPENCL}) {
+    for (const CyberBackend absent :
+         {CYBER_BACKEND_METAL, CYBER_BACKEND_CUDA, CYBER_BACKEND_OPENCL}) {
         if (std::find(backends.begin(), backends.end(), absent) != backends.end()) {
             continue;
         }
@@ -491,8 +491,7 @@ TEST_CASE("capi soft relax reports distinct vertices, not per-iteration writes")
 TEST_CASE("capi soft selection: an erased vertex cannot pass its weight to a new one") {
     CyberMesh* edit = cyber_mesh_create();
     REQUIRE(edit != nullptr);
-    const float quad[12] = {0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f,
-                            1.0f, 1.0f, 0.0f, 0.0f, 1.0f, 0.0f};
+    const float quad[12] = {0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, 1.0f, 0.0f, 0.0f, 1.0f, 0.0f};
     uint32_t face = 0;
     REQUIRE(cyber_retopo_create_face(edit, quad, 4, nullptr, &face) == CYBER_OK);
 
@@ -583,8 +582,7 @@ TEST_CASE("capi overlays: a deleted face cannot pass its hidden flag to a new on
 TEST_CASE("capi overlays: a deleted edge cannot pass its tag to a new one") {
     CyberMesh* mesh = cyber_mesh_create();
     REQUIRE(mesh != nullptr);
-    const float quad[12] = {0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f,
-                            1.0f, 1.0f, 0.0f, 0.0f, 1.0f, 0.0f};
+    const float quad[12] = {0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, 1.0f, 0.0f, 0.0f, 1.0f, 0.0f};
     uint32_t face = 0;
     REQUIRE(cyber_retopo_create_face(mesh, quad, 4, nullptr, &face) == CYBER_OK);
 
@@ -722,8 +720,8 @@ TEST_CASE("capi soft selection: a non-finite line or sphere region is refused, n
     CHECK(cyber_retopo_selection_line(edit, centre, nowhere, viewDir, 0, 15.0f,
                                       CYBER_FALLOFF_SMOOTH) == CYBER_ERR_INVALID_ARG);
     CHECK(weightsUnchanged());
-    CHECK(cyber_retopo_selection_line(edit, centre, end, nowhere, 0, 15.0f,
-                                      CYBER_FALLOFF_SMOOTH) == CYBER_ERR_INVALID_ARG);
+    CHECK(cyber_retopo_selection_line(edit, centre, end, nowhere, 0, 15.0f, CYBER_FALLOFF_SMOOTH) ==
+          CYBER_ERR_INVALID_ARG);
     CHECK(weightsUnchanged());
     // snap_degrees only steers the line when snapping is on, so only then is a
     // non-finite value a refusal.

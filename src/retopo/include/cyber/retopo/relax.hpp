@@ -71,8 +71,8 @@ namespace detail {
 // Tangential Laplacian target for `v`, blended by `w` toward the one-ring
 // centroid with the normal component removed.
 [[nodiscard]] inline Vec3 relaxTarget(const Mesh& mesh, VertexId v, float w,
-                                      std::span<const VertexId> ring,
-                                      std::span<const FaceId> faces, FaceNormalCache& normals) {
+                                      std::span<const VertexId> ring, std::span<const FaceId> faces,
+                                      FaceNormalCache& normals) {
     const Vec3 pos = mesh.position(v);
     Vec3 delta = ringCentroid(mesh, ring, pos) - pos;
     const Vec3 n = ringNormal(normals, faces);
@@ -103,8 +103,7 @@ inline void countVertexOnce(std::vector<std::uint8_t>& seen, VertexId v, std::si
 template <typename ExtraWeight>
 inline ResnapReport relaxSweep(Mesh& mesh, const RelaxParams& params, const PinSet* pins,
                                const SurfaceSnapper* snap, float resnapEpsilon,
-                               ExtraWeight extraWeight,
-                               const MeshAdjacency* adjacency = nullptr) {
+                               ExtraWeight extraWeight, const MeshAdjacency* adjacency = nullptr) {
     ResnapReport report;
     const bool snapping = snap != nullptr && !snap->empty();
     RingSource rings(mesh, adjacency);
@@ -154,10 +153,8 @@ inline ResnapReport relaxSweep(Mesh& mesh, const RelaxParams& params, const PinS
 }  // namespace detail
 
 inline void relax(Mesh& mesh, const RelaxParams& params, const PinSet* pins = nullptr,
-                  const SurfaceSnapper* snap = nullptr,
-                  const MeshAdjacency* adjacency = nullptr) {
-    detail::relaxSweep(
-        mesh, params, pins, snap, 0.0f, [](VertexId) { return 1.0f; }, adjacency);
+                  const SurfaceSnapper* snap = nullptr, const MeshAdjacency* adjacency = nullptr) {
+    detail::relaxSweep(mesh, params, pins, snap, 0.0f, [](VertexId) { return 1.0f; }, adjacency);
 }
 
 }  // namespace cyber::retopo

@@ -238,12 +238,12 @@ TEST_CASE("packing never reports a non-finite placement as a successful pack") {
     good.expand({1.0f, 1.0f});
     uv::Bounds2 infinite;
     infinite.expand({0.0f, 0.0f});
-    infinite.expand({std::numeric_limits<float>::infinity(),
-                     std::numeric_limits<float>::infinity()});
+    infinite.expand(
+        {std::numeric_limits<float>::infinity(), std::numeric_limits<float>::infinity()});
     uv::Bounds2 notANumber;
     notANumber.expand({0.0f, 0.0f});
-    notANumber.expand({std::numeric_limits<float>::quiet_NaN(),
-                       std::numeric_limits<float>::quiet_NaN()});
+    notANumber.expand(
+        {std::numeric_limits<float>::quiet_NaN(), std::numeric_limits<float>::quiet_NaN()});
     const std::vector<uv::Bounds2> boxes = {good, infinite, notANumber, good};
 
     for (const uv::PackStrategy strategy : {uv::PackStrategy::Shelf, uv::PackStrategy::Skyline}) {

@@ -193,13 +193,12 @@ bool BridgeClient::querySymmetry(SymmetryState& out) {
 }
 
 bool BridgeClient::queryChanged(std::uint64_t marker, bool& changed, std::uint64_t& revision) {
-    return m->decodeReply({{"type", "query_changed"}, {"marker", marker}}, "changed",
-                          [&](const json& response) {
-                              changed = response.value("changed", false);
-                              revision = detail::readUnsigned(response, "revision",
-                                                              std::uint64_t{0});
-                              return true;
-                          });
+    return m->decodeReply(
+        {{"type", "query_changed"}, {"marker", marker}}, "changed", [&](const json& response) {
+            changed = response.value("changed", false);
+            revision = detail::readUnsigned(response, "revision", std::uint64_t{0});
+            return true;
+        });
 }
 
 bool BridgeClient::setCamera(const CameraPose& pose) {

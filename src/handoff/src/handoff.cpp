@@ -178,8 +178,8 @@ std::size_t plyTypeBytes(const std::string& type) {
     if (type == "short" || type == "ushort" || type == "int16" || type == "uint16") {
         return 2;
     }
-    if (type == "int" || type == "uint" || type == "int32" || type == "uint32" ||
-        type == "float" || type == "float32") {
+    if (type == "int" || type == "uint" || type == "int32" || type == "uint32" || type == "float" ||
+        type == "float32") {
         return 4;
     }
     if (type == "double" || type == "float64") {
