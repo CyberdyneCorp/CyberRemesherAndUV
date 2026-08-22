@@ -11,6 +11,7 @@
 #include "cyber/core/mesh.hpp"
 #include "cyber/quadrangulate/quadcover_extractor.hpp"
 #include "cyber/quadrangulate/seamless_solver.hpp"
+#include "support/scoped_env.hpp"
 
 using cyber::EdgeId;
 using cyber::FaceId;
@@ -492,10 +493,10 @@ TEST_CASE("seamless direct path: matches the masked-CG fallback to solver tolera
         remesh::solveParameterization(sphere, setup, 0.12f, *backend);
     REQUIRE(direct.valid);
 
-    setenv("CYBER_QC_NO_DIRECT", "1", 1);
+    cyber::test::setEnv("CYBER_QC_NO_DIRECT", "1");
     const remesh::Parameterization cg =
         remesh::solveParameterization(sphere, setup, 0.12f, *backend);
-    unsetenv("CYBER_QC_NO_DIRECT");
+    cyber::test::unsetEnv("CYBER_QC_NO_DIRECT");
     REQUIRE(cg.valid);
     CHECK(cg.cgIterationsU > 0);       // the fallback really iterated
     CHECK(direct.cgIterationsU == 0);  // the direct path really back-substituted

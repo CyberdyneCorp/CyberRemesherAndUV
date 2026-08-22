@@ -35,6 +35,8 @@ add_executable(cyber_tests
     accel/test_primitives.cpp
 )
 target_link_libraries(cyber_tests PRIVATE cyber_accel cyber_bake cyber_quadrangulate cyber_doctest)
+# tests/support/: header-only helpers shared across the suite (portable setenv).
+target_include_directories(cyber_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests)
 if(TARGET cyber_net)
     target_sources(cyber_tests PRIVATE net/test_bridge.cpp)
     target_link_libraries(cyber_tests PRIVATE cyber_net)
