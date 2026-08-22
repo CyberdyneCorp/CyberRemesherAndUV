@@ -112,10 +112,14 @@ public:
     // created on demand). Used when building derived meshes (subdivision).
     void adoptSchema(const AttributeSet& other) {
         for (const auto& [name, column] : other.m_columns) {
+            // Bind an ordinary reference before the lambda: clang < 16 (Xcode 15's
+            // Apple clang, which the iOS/Swift/Metal lanes pin) cannot capture a
+            // structured binding (P1091).
+            const std::string& columnName = name;
             std::visit(
                 [&](const auto& vec) {
                     using T = typename std::decay_t<decltype(vec)>::value_type;
-                    create<T>(name);
+                    create<T>(columnName);
                 },
                 column);
         }
@@ -130,7 +134,11 @@ public:
     [[nodiscard]] Row extractRow(std::size_t i) const {
         Row row;
         for (const auto& [name, column] : m_columns) {
-            std::visit([&](const auto& vec) { row.emplace(name, vec[i]); }, column);
+            // Bind an ordinary reference before the lambda: clang < 16 (Xcode 15's
+            // Apple clang, which the iOS/Swift/Metal lanes pin) cannot capture a
+            // structured binding (P1091).
+            const std::string& columnName = name;
+            std::visit([&](const auto& vec) { row.emplace(columnName, vec[i]); }, column);
         }
         return row;
     }
@@ -141,10 +149,14 @@ public:
             if (it == m_columns.end()) {
                 continue;
             }
+            // Bind an ordinary reference before the lambda: clang < 16 (Xcode 15's
+            // Apple clang, which the iOS/Swift/Metal lanes pin) cannot capture a
+            // structured binding (P1091).
+            const RowValue& rowValue = value;
             std::visit(
                 [&](auto& vec) {
                     using T = typename std::decay_t<decltype(vec)>::value_type;
-                    if (const T* v = std::get_if<T>(&value)) {
+                    if (const T* v = std::get_if<T>(&rowValue)) {
                         vec[i] = *v;
                     }
                 },
@@ -196,7 +208,11 @@ public:
     template <typename Fn>
     void forEachColumn(const Fn& fn) const {
         for (const auto& [name, column] : m_columns) {
-            std::visit([&](const auto& vec) { fn(name, vec); }, column);
+            // Bind an ordinary reference before the lambda: clang < 16 (Xcode 15's
+            // Apple clang, which the iOS/Swift/Metal lanes pin) cannot capture a
+            // structured binding (P1091).
+            const std::string& columnName = name;
+            std::visit([&](const auto& vec) { fn(columnName, vec); }, column);
         }
     }
 
