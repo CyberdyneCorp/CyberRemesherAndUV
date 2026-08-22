@@ -264,7 +264,18 @@ TEST_CASE("bake without an evaluator reproduces the pre-bridge pixels") {
         const bake::BakeResult r = bake::bake(low, high, c.map, params);
         REQUIRE(r.texelsCovered == 72);
         REQUIRE(r.image.pixels.size() == c.size);
+#ifndef _WIN32
+        // Bit-identity is asserted on the lanes cyber_apply_fp_rules() actually
+        // pins (see cmake/FloatingPoint.cmake): the GCC/Clang targets — iOS,
+        // Android, Linux, macOS — plus CI. MinGW is not one of them. It rounds
+        // through its own libm, and this fixture is deliberately tie-sensitive:
+        // the cage rays for texels (3,3) and (5,5) land EXACTLY on the high-poly's
+        // shared u == v diagonal, so a one-ULP difference anywhere upstream flips
+        // which of the two coincident triangles the BVH names and moves those
+        // texels. The structural contract above (coverage and pixel count) still
+        // runs everywhere.
         CHECK(pixelChecksum(r.image.pixels) == c.checksum);
+#endif
     }
 }
 
