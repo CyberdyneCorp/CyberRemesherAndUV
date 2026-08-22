@@ -24,18 +24,32 @@ endif()
 
 # CYBER_AARCH64_SYSROOT / CYBER_QEMU_AARCH64 let a toolchain unpacked somewhere
 # other than /usr (an unprivileged CI cache, say) be used unchanged.
+#
+# Deliberately NO CMAKE_SYSROOT for the distro toolchain. Debian/Ubuntu ship
+# /usr/aarch64-linux-gnu/lib/libc.so as a linker script that names its
+# dependencies by ABSOLUTE path. Passing --sysroot=/usr/aarch64-linux-gnu makes
+# ld re-root those names, so it hunts for
+#   /usr/aarch64-linux-gnu/usr/aarch64-linux-gnu/lib/libm.so.6
+# and the compiler check fails with "cannot find .../libm.so.6 inside
+# /usr/aarch64-linux-gnu". The cross compiler already knows its own library and
+# header paths; a multiarch cross toolchain must not be given a sysroot.
 if(DEFINED CYBER_AARCH64_SYSROOT)
     set(CMAKE_SYSROOT ${CYBER_AARCH64_SYSROOT})
-elseif(EXISTS /usr/${_cyber_triple})
-    set(CMAKE_SYSROOT /usr/${_cyber_triple})
+    set(_cyber_guest_libs ${CYBER_AARCH64_SYSROOT})
+else()
+    set(_cyber_guest_libs /usr/${_cyber_triple})
 endif()
 
+# qemu-user resolves the guest's shared libraries under -L.
 if(NOT DEFINED CYBER_QEMU_AARCH64)
     set(CYBER_QEMU_AARCH64 qemu-aarch64-static)
 endif()
-set(CMAKE_CROSSCOMPILING_EMULATOR ${CYBER_QEMU_AARCH64} -L ${CMAKE_SYSROOT})
+set(CMAKE_CROSSCOMPILING_EMULATOR ${CYBER_QEMU_AARCH64} -L ${_cyber_guest_libs})
 
-# Look for programs on the host, libraries and headers in the sysroot only.
+# Look for programs on the host, libraries and headers in the target tree only.
+# With no CMAKE_SYSROOT this is what keeps find_library() off the host's x86
+# libraries, so it has to be set explicitly.
+set(CMAKE_FIND_ROOT_PATH ${_cyber_guest_libs})
 set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
 set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
 set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
