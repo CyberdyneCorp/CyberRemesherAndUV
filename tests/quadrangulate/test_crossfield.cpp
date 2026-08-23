@@ -7,6 +7,7 @@
 #include "cyber/accel/backend.hpp"
 #include "cyber/core/mesh.hpp"
 #include "cyber/quadrangulate/crossfield.hpp"
+#include "support/scoped_env.hpp"
 
 using cyber::FaceId;
 using cyber::Index;
@@ -68,15 +69,55 @@ TEST_CASE("cross field on a flat grid relaxes to the axis-aligned directions") {
         ++count;
     }
     REQUIRE(count > 0);
-    // A boundary-constrained flat field aligns tightly to the grid axes. The bound was
-    // 8.0 while the transport block built its rotation from float atan2 + cos/sin; the
-    // algebraic replacement (stable_angle.hpp) is 4x MORE accurate against a double
-    // reference -- worst absolute error 2.4e-07 against the old path's 9.5e-07 -- but a
-    // perturbation that small is enough to land this solve on a neighbouring fixed
-    // point, 15 faces off-axis instead of 12. The value is a genuine converged state,
-    // identical from 50 to 2000 sweeps and now identical across toolchains, so the bound
-    // moves to sit just above it rather than chase the old arithmetic's luck.
-    REQUIRE(totalErr / static_cast<double>(count) < 10.0);
+    // A boundary-constrained flat field aligns tightly to the grid axes. This was 8.0
+    // and then 10.0, both accommodating a Jacobi two-cycle in the smoother that left a
+    // block of interior faces at the maximum 45 degrees off; the sweep count's parity
+    // decided which half of each quad came out wrong. The smoother averages with the
+    // previous iterate now, so a flat grid relaxes to a genuinely axis-aligned field
+    // and the bound can say so.
+    REQUIRE(totalErr / static_cast<double>(count) < 0.5);
+}
+
+// Regression guard for the smoother's Jacobi two-cycle.
+//
+// The neighbour-averaging operator is applied Jacobi-style, and on a triangulated grid
+// the smooth solution is anti-correlated between the two triangles of a quad -- their
+// reference tangents differ by 45 degrees, which is 180 degrees in the 4-symmetry
+// encoding. Straight replacement made the whole interior flip sign every sweep: maxDelta
+// pinned at 2 so the convergence test never fired, and the field that came out was
+// whichever phase the loop stopped on. 15 of 72 faces sat at the maximum 45 degrees off
+// on a FLAT grid, and one more sweep moved the damage to the other half of every quad.
+//
+// Sweep-count parity is the sharpest way to catch that: a solver that has converged does
+// not care whether it was given an odd or an even budget, and one that is oscillating
+// returns a different field for each. This also guards the perturbation sensitivity the
+// two-cycle caused -- a face poised between two antipodal attractors falls whichever way
+// rounding pushes it, which is how a 1e-6 arithmetic change moved a quality metric 17%.
+TEST_CASE("cross field converges rather than oscillating with the sweep count") {
+    Mesh mesh = makeGrid(6);
+    mesh.tagFeatureEdges(90.0f);
+    auto backend = cyber::accel::defaultBackend();
+
+    // computeCrossField clamps its sweep budget to at least 120, so drive the count
+    // through the calibration override the solver already exposes.
+    remesh::CrossField even, odd;
+    {
+        const cyber::test::ScopedEnv sweeps("CYBER_QC_FIELD_ITERS", "120");
+        even = remesh::computeCrossField(mesh, 50, *backend);
+    }
+    {
+        const cyber::test::ScopedEnv sweeps("CYBER_QC_FIELD_ITERS", "121");
+        odd = remesh::computeCrossField(mesh, 50, *backend);
+    }
+    REQUIRE(even.size() == odd.size());
+
+    for (Index i = 0; i < mesh.faceCapacity(); ++i) {
+        if (!mesh.isAlive(FaceId{i})) {
+            continue;
+        }
+        CHECK(even.real[i] == doctest::Approx(odd.real[i]).epsilon(1e-5));
+        CHECK(even.imag[i] == doctest::Approx(odd.imag[i]).epsilon(1e-5));
+    }
 }
 
 TEST_CASE("orientation-derived cross field is a unit 4-RoSy aligned to a flat grid") {
