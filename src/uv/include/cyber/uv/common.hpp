@@ -1,7 +1,9 @@
 #pragma once
 
+#include <cmath>
 #include <cstddef>
 #include <limits>
+#include <span>
 #include <string_view>
 #include <vector>
 
@@ -15,6 +17,15 @@
 namespace cyber::uv {
 
 inline constexpr std::string_view kUvAttributeName = "uv";
+
+// True when every component is an ordinary finite number. NaN fails every
+// ordered comparison, so a single non-finite mesh position slips past the
+// `<`/`<=` guards in the unwrap and ends up written into the UV attribute;
+// these are the explicit checks that catch it.
+[[nodiscard]] inline bool isFinite(Vec2 v) { return std::isfinite(v.x) && std::isfinite(v.y); }
+[[nodiscard]] inline bool isFinite(Vec3 v) {
+    return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z);
+}
 
 // Axis-aligned 2D bounds used for island bounding boxes and packing.
 struct Bounds2 {
@@ -69,6 +80,33 @@ struct Bounds2 {
         }
     }
     return box;
+}
+
+// Area the island's faces really cover in the UV plane: the sum of the
+// per-face |shoelace| areas. This is the honest texel-coverage measure — an
+// island's bounding box is typically two to three times larger, because a
+// chart never fills its box.
+[[nodiscard]] inline double islandUvArea(const Mesh& mesh, std::span<const FaceId> island) {
+    const std::vector<Vec2>* uv = uvColumn(mesh);
+    if (uv == nullptr) {
+        return 0.0;
+    }
+    double total = 0.0;
+    for (const FaceId face : island) {
+        const std::vector<LoopId> loops = mesh.faceLoops(face);
+        const std::size_t n = loops.size();
+        if (n < 3) {
+            continue;
+        }
+        double shoelace = 0.0;
+        for (std::size_t i = 0; i < n; ++i) {
+            const Vec2 a = (*uv)[static_cast<std::size_t>(loops[i].value)];
+            const Vec2 b = (*uv)[static_cast<std::size_t>(loops[(i + 1) % n].value)];
+            shoelace += static_cast<double>(a.x) * b.y - static_cast<double>(b.x) * a.y;
+        }
+        total += std::fabs(shoelace) * 0.5;
+    }
+    return total;
 }
 
 // Centroid of every corner UV in an island (average over loops).

@@ -1,39 +1,49 @@
-// UNVERIFIED: requires the Swift toolchain and the `cyber_capi` library; not
-// buildable in headless Linux CI. Written against the ABI contract in README.md.
-//
-// Typed Swift error surface over the C ABI's `CyberStatus` integer codes. Every
+// Typed Swift error surface over the C ABI's `CyberStatus` codes. Every
 // fallible capi call returns a `CyberStatus`; `CyberError.check(_:)` turns a
-// non-OK status into a thrown, richly-typed Swift error, pulling the human
-// message from the ABI's thread-local last-error string.
+// non-`CYBER_OK` status into a thrown, richly-typed Swift error, pulling the
+// human message from the ABI's thread-local last-error string.
+//
+// The cases mirror `enum CyberStatus` in capi/include/cyber_capi.h one for one,
+// plus `.outOfMemory` for the binding-side "the ABI handed back a NULL handle"
+// case, which has no status code of its own.
 
 import CCyberRemesher
+import Foundation
 
 /// Errors surfaced by the CyberRemesher engine across the C ABI boundary.
 ///
-/// Cases mirror the `CYBER_STATUS_*` code family. `.cancelled` is modelled
-/// explicitly (rather than as a generic failure) so callers can distinguish a
-/// cooperative cancellation from a real error — see `Mesh.remesh(params:)`.
+/// `.cancelled` is modelled explicitly (rather than as a generic failure) so
+/// callers can distinguish a cooperative cancellation from a real error — see
+/// ``Mesh/remesh(params:)``.
 public enum CyberError: Error, Equatable {
-    /// A caller passed an invalid argument (null handle, malformed buffer…).
-    case invalidArgument(String)
-    /// The engine could not allocate memory.
-    case outOfMemory
-    /// A long-running call observed cooperative cancellation and unwound.
-    case cancelled
-    /// Mesh import/export or file access failed.
+    /// `CYBER_ERR_IO` — file missing, unreadable, or unwritable.
     case io(String)
-    /// A parameter was outside its permitted range (e.g. `targetQuads == 0`).
-    case outOfRange(String)
-    /// The remeshing/parameterization pipeline failed for a specific island.
-    case pipeline(String)
-    /// A status code the binding does not model yet.
+    /// `CYBER_ERR_INVALID_ARG` — a required pointer argument was NULL, or a
+    /// binding-side precondition on a buffer/id failed.
+    case invalidArgument(String)
+    /// `CYBER_ERR_INVALID_PARAM` — parameters were unusable (NaN, out of range).
+    case invalidParameter(String)
+    /// `CYBER_ERR_EMPTY` — the mesh had no geometry.
+    case empty(String)
+    /// `CYBER_ERR_RUNTIME` — the pipeline failed, or the engine was built
+    /// without the module the call needs (e.g. `CYBER_BUILD_UV=OFF`).
+    case runtime(String)
+    /// `CYBER_ERR_CANCELLED` — a long-running call observed cooperative
+    /// cancellation and unwound.
+    case cancelled
+    /// `CYBER_ERR_INCOMPATIBLE_VERSION` — a well-formed versioned file declares
+    /// a version this engine does not support.
+    case incompatibleVersion(String)
+    /// No status code of its own: an allocating ABI call returned a NULL handle.
+    case outOfMemory
+    /// A status code this binding does not model yet.
     case unknown(code: Int32, message: String)
 
-    /// Throws the mapped error when `status` is not `CYBER_STATUS_OK`.
+    /// Throws the mapped error when `status` is not `CYBER_OK`.
     ///
     /// - Parameter status: a raw code returned by any `cyber_*` entry point.
     static func check(_ status: CyberStatus) throws {
-        guard status != CYBER_STATUS_OK else { return }
+        guard status != CYBER_OK else { return }
         throw map(status)
     }
 
@@ -42,18 +52,20 @@ public enum CyberError: Error, Equatable {
     static func map(_ status: CyberStatus) -> CyberError {
         let message = CyberRuntime.lastErrorMessage()
         switch status {
-        case CYBER_STATUS_INVALID_ARGUMENT:
-            return .invalidArgument(message)
-        case CYBER_STATUS_OUT_OF_MEMORY:
-            return .outOfMemory
-        case CYBER_STATUS_CANCELLED:
-            return .cancelled
-        case CYBER_STATUS_IO:
+        case CYBER_ERR_IO:
             return .io(message)
-        case CYBER_STATUS_OUT_OF_RANGE:
-            return .outOfRange(message)
-        case CYBER_STATUS_PIPELINE:
-            return .pipeline(message)
+        case CYBER_ERR_INVALID_ARG:
+            return .invalidArgument(message)
+        case CYBER_ERR_INVALID_PARAM:
+            return .invalidParameter(message)
+        case CYBER_ERR_EMPTY:
+            return .empty(message)
+        case CYBER_ERR_RUNTIME:
+            return .runtime(message)
+        case CYBER_ERR_CANCELLED:
+            return .cancelled
+        case CYBER_ERR_INCOMPATIBLE_VERSION:
+            return .incompatibleVersion(message)
         default:
             // The C enum's rawValue may import as UInt32 or Int32 depending on
             // the platform's underlying enum type; normalize to Int32.
@@ -65,12 +77,14 @@ public enum CyberError: Error, Equatable {
 extension CyberError: LocalizedError {
     public var errorDescription: String? {
         switch self {
-        case .invalidArgument(let m): return "Invalid argument: \(m)"
-        case .outOfMemory: return "Out of memory"
-        case .cancelled: return "Operation cancelled"
         case .io(let m): return "I/O failure: \(m)"
-        case .outOfRange(let m): return "Parameter out of range: \(m)"
-        case .pipeline(let m): return "Pipeline failure: \(m)"
+        case .invalidArgument(let m): return "Invalid argument: \(m)"
+        case .invalidParameter(let m): return "Invalid parameter: \(m)"
+        case .empty(let m): return "Mesh is empty: \(m)"
+        case .runtime(let m): return "Pipeline failure: \(m)"
+        case .cancelled: return "Operation cancelled"
+        case .incompatibleVersion(let m): return "Incompatible version: \(m)"
+        case .outOfMemory: return "Out of memory"
         case .unknown(let code, let m): return "Engine error \(code): \(m)"
         }
     }

@@ -15,6 +15,27 @@ struct ShelfItem {
     Vec2 pos{};             // lower-left placement before normalize
 };
 
+// The extent a box contributes, or {0,0} for one the packer cannot place.
+//
+// Bounds2::valid() already rejects a NaN box (every comparison against NaN is
+// false), but NOT an infinite one: mn={0,0}/mx={inf,inf} is "valid" with an
+// infinite size, and that propagates through the skyline strategy as
+// inf/inf = NaN into `static_cast<int>(std::ceil(...))`, which is undefined
+// behaviour, and out of the shelf strategy as NaN placements reported with
+// ok = true. A box with no representable extent carries no geometry to place,
+// so it is treated exactly like an invalid one: it occupies a zero-size slot
+// and every other island still packs.
+[[nodiscard]] Vec2 placeableSize(const Bounds2& box) {
+    if (!box.valid()) {
+        return {0.0f, 0.0f};
+    }
+    const Vec2 s = box.size();
+    if (!std::isfinite(s.x) || !std::isfinite(s.y)) {
+        return {0.0f, 0.0f};
+    }
+    return s;
+}
+
 }  // namespace
 
 PackResult packBoxes(std::span<const Bounds2> boxes, const PackParams& params) {
@@ -24,7 +45,9 @@ PackResult packBoxes(std::span<const Bounds2> boxes, const PackParams& params) {
         return result;
     }
 
-    const float margin = std::fmax(params.margin, 0.0f);
+    // A non-finite margin would poison every padded size the same way a
+    // non-finite box does; fmax already maps NaN to 0.
+    const float margin = std::isfinite(params.margin) ? std::fmax(params.margin, 0.0f) : 0.0f;
 
     // Padded sizes and total area estimate.
     std::vector<ShelfItem> items;
@@ -32,7 +55,7 @@ PackResult packBoxes(std::span<const Bounds2> boxes, const PackParams& params) {
     double totalArea = 0.0;
     float maxWidth = 0.0f;
     for (std::size_t i = 0; i < boxes.size(); ++i) {
-        Vec2 s = boxes[i].valid() ? boxes[i].size() : Vec2{0.0f, 0.0f};
+        Vec2 s = placeableSize(boxes[i]);
         s = {s.x + margin, s.y + margin};
         totalArea += static_cast<double>(s.x) * static_cast<double>(s.y);
         maxWidth = std::fmax(maxWidth, s.x);
@@ -142,7 +165,7 @@ PackResult packBoxes(std::span<const Bounds2> boxes, const PackParams& params) {
         // padding, offset by half the margin.
         const float half = margin * 0.5f;
         packed.offset = {(item.pos.x + half) * scale, (item.pos.y + half) * scale};
-        const Vec2 islandSize = packed.source.valid() ? packed.source.size() : Vec2{0.0f, 0.0f};
+        const Vec2 islandSize = placeableSize(packed.source);
         packed.placed.mn = packed.offset;
         packed.placed.mx = {packed.offset.x + islandSize.x * scale,
                             packed.offset.y + islandSize.y * scale};
@@ -152,7 +175,9 @@ PackResult packBoxes(std::span<const Bounds2> boxes, const PackParams& params) {
 
     result.ok = true;
     result.scale = scale;
-    result.usedArea = static_cast<float>(placedArea);
+    result.boxArea = static_cast<float>(placedArea);
+    // Without geometry the boxes are all we cover; packIslands refines this.
+    result.usedArea = result.boxArea;
     result.texelDensity = static_cast<float>(params.textureSize) * scale;
     return result;
 }
@@ -165,18 +190,25 @@ PackResult packIslands(Mesh& mesh, std::span<const std::vector<FaceId>> islands,
         boxes.push_back(islandUvBounds(mesh, island));
     }
 
-    const PackResult result = packBoxes(boxes, params);
+    PackResult result = packBoxes(boxes, params);
     if (!result.ok) {
         return result;
     }
 
     std::vector<Vec2>* uv = uvColumn(mesh);
     if (uv == nullptr) {
+        result.usedArea = 0.0f;  // nothing was placed: no UVs to cover anything
         return result;
     }
     for (std::size_t i = 0; i < islands.size(); ++i) {
         const PackedIsland& packed = result.islands[i];
-        const Vec2 srcMin = packed.source.valid() ? packed.source.mn : Vec2{0.0f, 0.0f};
+        // Same rule as placeableSize: an unusable box contributes no origin to
+        // subtract, so its corners keep whatever they held instead of becoming
+        // non-finite through `p - (-inf)`.
+        const Vec2 srcMin = packed.source.valid() && std::isfinite(packed.source.mn.x) &&
+                                    std::isfinite(packed.source.mn.y)
+                                ? packed.source.mn
+                                : Vec2{0.0f, 0.0f};
         for (const FaceId face : islands[i]) {
             for (const LoopId loop : mesh.faceLoops(face)) {
                 Vec2& p = (*uv)[static_cast<std::size_t>(loop.value)];
@@ -185,6 +217,13 @@ PackResult packIslands(Mesh& mesh, std::span<const std::vector<FaceId>> islands,
             }
         }
     }
+
+    // Real coverage: the packed island geometry, not the boxes around it.
+    double covered = 0.0;
+    for (const std::vector<FaceId>& island : islands) {
+        covered += islandUvArea(mesh, island);
+    }
+    result.usedArea = static_cast<float>(covered);
     return result;
 }
 

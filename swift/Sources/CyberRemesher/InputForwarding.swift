@@ -1,35 +1,52 @@
-// UNVERIFIED: requires the Swift toolchain, the `cyber_capi` library, and
-// UIKit/PencilKit (Apple platforms only); not buildable in headless Linux CI.
-// Written against the ABI contract in README.md.
+// UIKit + PencilKit event capture. Converts native touch/pencil input into
+// engine `StrokeSample`s in normalized viewport coordinates and assembles them
+// into a `Stroke` the caller hands to `StrokeInterpretation`.
 //
-// UIKit + PencilKit event forwarding. Converts native touch/pencil input into
-// engine `StrokeSample`s in normalized viewport coordinates and injects them
-// into a `Session`. The whole file compiles out on platforms without UIKit so
-// the package still resolves on macOS-AppKit / Linux tooling.
+// The C ABI has no session to inject into — interpretation is a pure function
+// of one completed stroke plus the mesh and view matrix (see
+// StrokeInterpretation.swift) — so this type is a pure SAMPLER: it owns no
+// engine state and never calls the ABI. The caller supplies the view matrix,
+// because that changes per frame and only the renderer knows it.
+//
+// The whole file compiles out on platforms without UIKit so the package still
+// resolves on macOS-AppKit and Linux tooling.
 
 #if canImport(UIKit)
 import UIKit
 
-/// Bridges UIKit touch/pencil events for a bound viewport into a ``Session``.
+/// Collects UIKit touch/pencil events for a bound view into engine strokes.
 ///
-/// Attach it to your gesture pipeline and call the `forward` methods from your
-/// `UIView`/`UIGestureRecognizer` callbacks. Coordinates are normalized against
-/// `view.bounds` so the engine stays resolution-independent.
+/// Attach it to your gesture pipeline and call the capture methods from your
+/// `UIView` / `UIGestureRecognizer` callbacks. Coordinates are normalized
+/// against `view.bounds` so the engine stays resolution-independent.
+///
+/// ```swift
+/// forwarder.begin()
+/// forwarder.append(touches, coalescedFrom: event)
+/// let interpretation = try StrokeInterpretation(
+///     stroke: forwarder.end(), mesh: mesh, viewProjection: renderer.viewProjection)
+/// ```
 public final class TouchInputForwarder {
     // Same-file extensions (incl. the PencilKit one below) can reach these:
     // Swift `private` is file-scoped for extensions of the same type.
-    private let session: Session
     private weak var view: UIView?
     private var buffer: [StrokeSample] = []
+    private var startTimestamp: TimeInterval?
 
-    public init(session: Session, view: UIView) {
-        self.session = session
+    public init(view: UIView) {
         self.view = view
+    }
+
+    /// Viewport width / height of the bound view (1 when it has no extent).
+    public var aspect: Float {
+        guard let view, view.bounds.height > 0 else { return 1 }
+        return Float(view.bounds.width / view.bounds.height)
     }
 
     /// Begins a new stroke, discarding any partial buffer.
     public func begin() {
         buffer.removeAll(keepingCapacity: true)
+        startTimestamp = nil
     }
 
     /// Appends touches from a began/moved phase to the in-flight stroke,
@@ -39,25 +56,36 @@ public final class TouchInputForwarder {
         for touch in touches {
             let coalesced = event?.coalescedTouches(for: touch) ?? [touch]
             for sample in coalesced {
-                buffer.append(TouchInputForwarder.sample(from: sample, in: view))
+                if startTimestamp == nil { startTimestamp = sample.timestamp }
+                buffer.append(
+                    TouchInputForwarder.sample(
+                        from: sample, in: view, since: startTimestamp ?? sample.timestamp))
             }
         }
     }
 
-    /// Ends the stroke and injects it; an empty stroke is dropped.
-    public func end() throws {
-        defer { buffer.removeAll(keepingCapacity: true) }
-        try session.inject(stroke: buffer)
+    /// Ends the stroke and returns it, resetting the buffer.
+    public func end() -> Stroke {
+        defer {
+            buffer.removeAll(keepingCapacity: true)
+            startTimestamp = nil
+        }
+        return Stroke(samples: buffer, aspect: aspect)
     }
 
-    /// Forwards a discrete tap (e.g. from a `UITapGestureRecognizer`).
-    public func forwardTap(at location: CGPoint, in view: UIView) throws {
-        try session.inject(tapAt: TouchInputForwarder.point(location, in: view))
+    /// A discrete tap (e.g. from a `UITapGestureRecognizer`) as a one-sample
+    /// stroke — the grammar reads it as a stationary hold point.
+    public func tap(at location: CGPoint) -> Stroke {
+        guard let view else { return Stroke(samples: [], aspect: 1) }
+        let sample = StrokeSample(location: TouchInputForwarder.point(location, in: view))
+        return Stroke(samples: [sample], aspect: aspect)
     }
 
     // MARK: - Mapping
 
-    private static func sample(from touch: UITouch, in view: UIView) -> StrokeSample {
+    private static func sample(
+        from touch: UITouch, in view: UIView, since start: TimeInterval
+    ) -> StrokeSample {
         let location = point(touch.location(in: view), in: view)
         let normalizedPressure = touch.maximumPossibleForce > 0
             ? Double(touch.force / touch.maximumPossibleForce)
@@ -67,7 +95,7 @@ public final class TouchInputForwarder {
             pressure: normalizedPressure,
             altitudeAngle: Double(touch.altitudeAngle),
             azimuthAngle: Double(touch.azimuthAngle(in: view)),
-            timestamp: touch.timestamp
+            timestamp: touch.timestamp - start
         )
     }
 
@@ -85,22 +113,20 @@ public final class TouchInputForwarder {
 import PencilKit
 
 public extension TouchInputForwarder {
-    /// Forwards a finished PencilKit stroke (from a `PKCanvasView` drawing) by
-    /// sampling its interpolated path and injecting it as one engine stroke.
+    /// Converts a finished PencilKit stroke (from a `PKCanvasView` drawing)
+    /// into one engine stroke by sampling its interpolated path.
     ///
     /// - Parameters:
     ///   - stroke: the PencilKit stroke to replay.
     ///   - view: the view whose bounds define the normalization frame.
-    func forward(pencilStroke stroke: PKStroke, in view: UIView) throws {
+    func stroke(from stroke: PKStroke, in view: UIView) -> Stroke {
         let path = stroke.path
-        guard !path.isEmpty else { return }
         var samples: [StrokeSample] = []
         samples.reserveCapacity(path.count)
         for point in path {
-            let mapped = TouchInputForwarder.point(point.location, in: view)
             samples.append(
                 StrokeSample(
-                    location: mapped,
+                    location: TouchInputForwarder.point(point.location, in: view),
                     pressure: Double(point.force),
                     altitudeAngle: Double(point.altitude),
                     azimuthAngle: Double(point.azimuth),
@@ -108,7 +134,7 @@ public extension TouchInputForwarder {
                 )
             )
         }
-        try session.inject(stroke: samples)
+        return Stroke(samples: samples, aspect: aspect)
     }
 }
 #endif // canImport(UIKit) && canImport(PencilKit)

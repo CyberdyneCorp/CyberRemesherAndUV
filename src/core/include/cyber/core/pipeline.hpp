@@ -37,12 +37,24 @@ struct Statistics {
     float targetEdgeLength = 0.0f;
 };
 
+// Per-island guidance audit (remeshing-pipeline spec, "Guidance is honored
+// loudly or rejected loudly"). One row per island whenever guidance was
+// supplied, whether or not the island's backend could use it.
+struct IslandGuidance {
+    std::size_t islandIndex = 0;
+    std::size_t guidesInRange = 0;  // guides whose influence reaches this island
+    bool guidesHonored = false;     // the backend applied the flow guides
+    bool densityHonored = false;    // the backend applied the painted density
+    std::string reason;             // why not, when either is false
+};
+
 struct PipelineResult {
     RunStatus status = RunStatus::Error;
     Mesh mesh;
     Statistics stats;
     std::vector<IslandDiagnostic> failedIslands;  // reported, never swallowed (spec)
     std::vector<ParameterIssue> parameterIssues;  // clamp warnings from validation
+    std::vector<IslandGuidance> islandGuidance;   // empty when no guidance was supplied
     std::string error;                            // set when status == Error
 };
 
@@ -62,12 +74,19 @@ struct PipelineResult {
 // fallback quadrangulator, so making quad-cover the default never sacrifices the
 // always-produces-output robustness of the field-aligned path. Ignored for other
 // methods; nullptr disables recovery (the island is simply reported failed).
+//
+// `guidance` (optional) carries user-drawn flow guides and painted density
+// (remeshing-pipeline spec). It is validated exactly like `rawParams` — clamps
+// become parameterIssues, fatal problems abort the run — and audited per island
+// into `PipelineResult::islandGuidance`. A null pointer, or a Guidance whose
+// guides and density are both empty, takes exactly the same code path as today.
 using QuadrangulatorFactory = std::function<std::unique_ptr<IQuadrangulator>()>;
 [[nodiscard]] PipelineResult remesh(const Mesh& input, const Parameters& rawParams,
                                     ProgressSink* progress = nullptr,
                                     const CancelToken* cancel = nullptr,
                                     const QuadrangulatorFactory& quadrangulator = {},
-                                    const QuadrangulatorFactory& fallbackQuadrangulator = {});
+                                    const QuadrangulatorFactory& fallbackQuadrangulator = {},
+                                    const Guidance* guidance = nullptr);
 
 // Cleanup policy from the canonical parameters, applied per island result:
 // KeepLargest keeps only the biggest connected patch, KeepAll keeps

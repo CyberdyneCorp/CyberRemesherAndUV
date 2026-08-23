@@ -52,12 +52,28 @@
       "command": "tool.cut"
     },
     {
+      "id": "seampath",
+      "title": "Seam Path",
+      "systemImage": "point.topleft.down.curvedto.point.bottomright.up",
+      "androidIcon": "ic_action_seam_path",
+      "stages": ["uv"],
+      "command": "tool.seamPath"
+    },
+    {
       "id": "cage",
       "title": "Cage",
       "systemImage": "cube.transparent",
       "androidIcon": "ic_action_cage",
       "stages": ["baking"],
       "command": "tool.cage"
+    },
+    {
+      "id": "soft-selection",
+      "title": "Soft Selection",
+      "systemImage": "circle.dotted",
+      "androidIcon": "ic_action_soft_selection",
+      "stages": ["retopology"],
+      "command": "tool.softSelection"
     }
   ]
 }

@@ -3,6 +3,7 @@
 #include <exception>
 #include <json.hpp>
 
+#include "json_read.hpp"
 #include "mesh_json.hpp"
 
 namespace cyber::net {
@@ -14,6 +15,14 @@ using detail::meshToJson;
 using nlohmann::json;
 
 json error(const std::string& message) { return json{{"type", "error"}, {"message", message}}; }
+
+// Every reply leaves through here. dump() throws type_error.316 when a string
+// in the reply is not valid UTF-8, and a throw on the connection thread ends
+// the host process, so the replacing handler is what keeps the reply path
+// total. Valid UTF-8 dumps byte-identically to a plain dump().
+std::string dumpReply(const json& reply) {
+    return reply.dump(-1, ' ', false, json::error_handler_t::replace);
+}
 
 json handle(BridgeSession& session, const json& req) {
     const std::string type = req.at("type").get<std::string>();
@@ -39,6 +48,53 @@ json handle(BridgeSession& session, const json& req) {
         return json{{"type", "target"},
                     {"present", session.hasTarget()},
                     {"mesh", meshToJson(session.target())}};
+    }
+    // Guidance transport. Adding commands is backward compatible (an older
+    // server answers "unknown command" loudly), so kProtocolVersion is NOT
+    // bumped — bumping it would reject every existing client.
+    if (type == "push_guides") {
+        std::vector<WireGuide> guides;
+        for (const json& g : req.at("guides")) {
+            WireGuide guide;
+            for (const json& p : g.at("points")) {
+                // operator[](size_type) on a const array node is unchecked, so
+                // the shape has to be validated before the components are read.
+                if (!p.is_array() || p.size() != 3) {
+                    return error("push_guides: each point must be [x, y, z]");
+                }
+                guide.points.push_back(p[0].get<float>());
+                guide.points.push_back(p[1].get<float>());
+                guide.points.push_back(p[2].get<float>());
+            }
+            guide.strength = g.value("strength", 1.0f);
+            guide.radius = g.value("radius", 0.0f);
+            guides.push_back(std::move(guide));
+        }
+        const std::size_t n = guides.size();
+        session.setGuides(std::move(guides));
+        return json{{"type", "ok"}, {"guides", n}};
+    }
+    if (type == "pull_guides") {
+        json guides = json::array();
+        for (const WireGuide& g : session.guides()) {
+            json points = json::array();
+            for (std::size_t i = 0; i + 2 < g.points.size(); i += 3) {
+                points.push_back({g.points[i], g.points[i + 1], g.points[i + 2]});
+            }
+            guides.push_back({{"points", points}, {"strength", g.strength}, {"radius", g.radius}});
+        }
+        return json{{"type", "guides"}, {"guides", guides}};
+    }
+    if (type == "clear_guides") {
+        session.clearGuides();
+        return json{{"type", "ok"}};
+    }
+    if (type == "push_density") {
+        session.setDensity(req.at("values").get<std::vector<float>>());
+        return json{{"type", "ok"}, {"values", session.density().size()}};
+    }
+    if (type == "pull_density") {
+        return json{{"type", "density"}, {"values", session.density()}};
     }
     if (type == "clear_scene") {
         session.clearScene();
@@ -86,7 +142,7 @@ json handle(BridgeSession& session, const json& req) {
         return json{{"type", "symmetry"}, {"axis", sym.axis}, {"enabled", sym.enabled}};
     }
     if (type == "query_changed") {
-        const std::uint64_t marker = req.value("marker", std::uint64_t{0});
+        const std::uint64_t marker = detail::readUnsigned(req, "marker", std::uint64_t{0});
         const std::uint64_t rev = session.editMeshRevision();
         return json{{"type", "changed"}, {"changed", rev != marker}, {"revision", rev}};
     }
@@ -121,35 +177,34 @@ std::string processHandshake(const std::string& helloJson, bool& accept) {
     try {
         const json j = json::parse(helloJson);
         if (j.value("type", std::string{}) != "hello") {
-            return json{{"type", "reject"},
-                        {"reason", "expected hello"},
-                        {"serverProtocol", kProtocolVersion}}
-                .dump();
+            return dumpReply(json{{"type", "reject"},
+                                  {"reason", "expected hello"},
+                                  {"serverProtocol", kProtocolVersion}});
         }
-        const std::uint32_t clientProtocol = j.value("protocol", std::uint32_t{0});
+        const std::uint32_t clientProtocol = detail::readUnsigned(j, "protocol", std::uint32_t{0});
         if (clientProtocol != kProtocolVersion) {
-            return json{{"type", "reject"},
-                        {"reason", "incompatible protocol version"},
-                        {"serverProtocol", kProtocolVersion},
-                        {"clientProtocol", clientProtocol}}
-                .dump();
+            return dumpReply(json{{"type", "reject"},
+                                  {"reason", "incompatible protocol version"},
+                                  {"serverProtocol", kProtocolVersion},
+                                  {"clientProtocol", clientProtocol}});
         }
         accept = true;
-        return json{{"type", "welcome"}, {"protocol", kProtocolVersion}, {"app", "CyberRemesher"}}
-            .dump();
-    } catch (const std::exception& e) {
-        return json{{"type", "reject"},
-                    {"reason", std::string("bad handshake: ") + e.what()},
-                    {"serverProtocol", kProtocolVersion}}
-            .dump();
+        return dumpReply(
+            json{{"type", "welcome"}, {"protocol", kProtocolVersion}, {"app", "CyberRemesher"}});
+    } catch (const std::exception&) {
+        // e.what() is deliberately not echoed: a parse error quotes the
+        // offending input verbatim, which would copy raw peer bytes into the
+        // reply.
+        return dumpReply(json{
+            {"type", "reject"}, {"reason", "bad handshake"}, {"serverProtocol", kProtocolVersion}});
     }
 }
 
 std::string processRequest(BridgeSession& session, const std::string& requestJson) {
     try {
-        return handle(session, json::parse(requestJson)).dump();
-    } catch (const std::exception& e) {
-        return error(std::string("bad request: ") + e.what()).dump();
+        return dumpReply(handle(session, json::parse(requestJson)));
+    } catch (const std::exception&) {
+        return dumpReply(error("bad request"));  // peer bytes stay out of the reply
     }
 }
 

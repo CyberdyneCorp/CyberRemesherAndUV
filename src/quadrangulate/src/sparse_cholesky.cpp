@@ -99,7 +99,18 @@ std::vector<std::size_t> reverseCuthillMcKee(std::size_t n,
                 const std::size_t da = degree(a), db = degree(b);
                 return da != db ? da < db : a < b;
             });
+            // GCC 12/13 mis-analyses the inlined memmove behind this range
+            // insert and reports a bogus -Wstringop-overflow against
+            // <stl_algobase.h>. Suppressed at the single site so -Werror can
+            // stay on for the rest of the tree.
+#if defined(__GNUC__) && !defined(__clang__) && __GNUC__ >= 12
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wstringop-overflow"
+#endif
             queue.insert(queue.end(), nbrs.begin(), nbrs.end());
+#if defined(__GNUC__) && !defined(__clang__) && __GNUC__ >= 12
+#pragma GCC diagnostic pop
+#endif
         }
     }
     std::reverse(order.begin(), order.end());

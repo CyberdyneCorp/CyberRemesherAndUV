@@ -1,10 +1,15 @@
 #pragma once
 
+#include <algorithm>
 #include <cmath>
+#include <cstdint>
+#include <span>
+#include <utility>
 #include <vector>
 
 #include "cyber/core/math.hpp"
 #include "cyber/core/mesh.hpp"
+#include "cyber/retopo/adjacency.hpp"
 #include "cyber/retopo/neighbors.hpp"
 #include "cyber/retopo/pins.hpp"
 #include "cyber/retopo/snapping.hpp"
@@ -42,41 +47,114 @@ struct RelaxParams {
     return oneRing(mesh, v).size() <= 2;
 }
 
-inline void relax(Mesh& mesh, const RelaxParams& params, const PinSet* pins = nullptr,
-                  const SurfaceSnapper* snap = nullptr) {
+namespace detail {
+
+// A vertex is exempt from a relax sweep when it is dead, pinned, an auto-pinned
+// grid corner, or outside the brush mask. `ringSize` is the vertex's one-ring
+// size, which the caller has already gathered for the sweep itself.
+[[nodiscard]] inline bool relaxSkips(const Mesh& mesh, VertexId v, std::size_t ringSize,
+                                     const RelaxParams& params, const PinSet* pins) {
+    if (!mesh.isAlive(v)) {
+        return true;
+    }
+    if (pins != nullptr && pins->isPinned(v)) {
+        return true;
+    }
+    if (params.autoPinCorners && ringSize <= 2) {
+        return true;
+    }
     const float radiusSquared = params.brushRadius * params.brushRadius;
+    return params.brushRadius > 0.0f &&
+           lengthSquared(mesh.position(v) - params.brushCenter) > radiusSquared;
+}
+
+// Tangential Laplacian target for `v`, blended by `w` toward the one-ring
+// centroid with the normal component removed.
+[[nodiscard]] inline Vec3 relaxTarget(const Mesh& mesh, VertexId v, float w,
+                                      std::span<const VertexId> ring, std::span<const FaceId> faces,
+                                      FaceNormalCache& normals) {
+    const Vec3 pos = mesh.position(v);
+    Vec3 delta = ringCentroid(mesh, ring, pos) - pos;
+    const Vec3 n = ringNormal(normals, faces);
+    delta = delta - n * dot(delta, n);  // keep the move tangential
+    return pos + delta * w;
+}
+
+// Tallies `v` at most once for the whole sweep. The iterations revisit the same
+// vertices, and ResnapReport counts DISTINCT vertices, not writes.
+inline void countVertexOnce(std::vector<std::uint8_t>& seen, VertexId v, std::size_t& counter) {
+    if (v.value < seen.size() && seen[v.value] == 0) {
+        seen[v.value] = 1;
+        ++counter;
+    }
+}
+
+// The relax sweep shared by plain `relax()` and the weighted relax in
+// soft_selection.hpp. `extraWeight(v)` scales the per-vertex blend on top of the
+// brush falloff; a value <= 0 leaves the vertex COMPLETELY untouched — it is
+// neither moved nor re-snapped, which is what makes zero-weight vertices
+// bit-identical under a weighted relax. Passing a constant 1 reproduces the
+// unweighted sweep exactly (multiplying by 1.0f is bit-neutral).
+//
+// `adjacency`, when given, must describe `mesh`'s current topology: the sweep
+// reads its one-ring and vertex->face lists instead of gathering them per
+// vertex, which is what keeps a drag frame off the allocator. Passing nullptr
+// gathers them from the mesh and computes exactly the same result.
+template <typename ExtraWeight>
+inline ResnapReport relaxSweep(Mesh& mesh, const RelaxParams& params, const PinSet* pins,
+                               const SurfaceSnapper* snap, float resnapEpsilon,
+                               ExtraWeight extraWeight, const MeshAdjacency* adjacency = nullptr) {
+    ResnapReport report;
+    const bool snapping = snap != nullptr && !snap->empty();
+    RingSource rings(mesh, adjacency);
+    FaceNormalCache faceNormals(mesh);
+    std::vector<std::uint8_t> movedSeen(mesh.vertexCapacity(), 0);
+    std::vector<std::uint8_t> resnappedSeen(mesh.vertexCapacity(), 0);
+    std::vector<std::pair<VertexId, Vec3>> updates;
     for (int iter = 0; iter < params.iterations; ++iter) {
-        std::vector<std::pair<VertexId, Vec3>> updates;
+        updates.clear();
+        faceNormals.reset();
         for (Index i = 0; i < mesh.vertexCapacity(); ++i) {
             const VertexId v{i};
             if (!mesh.isAlive(v)) {
                 continue;
             }
-            if (pins != nullptr && pins->isPinned(v)) {
+            const std::span<const VertexId> ring = rings.ring(v);
+            if (relaxSkips(mesh, v, ring.size(), params, pins)) {
                 continue;
             }
-            if (params.autoPinCorners && isGridCorner(mesh, v)) {
+            const float extra = extraWeight(v);
+            if (extra <= 0.0f) {
                 continue;
             }
             const Vec3 pos = mesh.position(v);
-            if (params.brushRadius > 0.0f &&
-                lengthSquared(pos - params.brushCenter) > radiusSquared) {
-                continue;
-            }
-            const Vec3 centroid = neighborCentroid(mesh, v);
-            Vec3 delta = centroid - pos;
-            const Vec3 n = vertexNormal(mesh, v);
-            delta = delta - n * dot(delta, n);  // keep the move tangential
-            const float w = params.strength *
+            const float w = params.strength * extra *
                             brushFalloff(length(pos - params.brushCenter), params.brushRadius);
-            updates.emplace_back(v, pos + delta * w);
+            updates.emplace_back(v, relaxTarget(mesh, v, w, ring, rings.faces(v), faceNormals));
         }
         for (const auto& [v, target] : updates) {
-            const Vec3 p =
-                (snap != nullptr && !snap->empty()) ? snap->snapToSurface(target).point : target;
+            countVertexOnce(movedSeen, v, report.moved);
+            if (!snapping) {
+                mesh.setPosition(v, target);
+                continue;
+            }
+            const Vec3 p = snap->snapToSurface(target).point;
+            const float pulled = length(p - target);
+            if (pulled > resnapEpsilon) {
+                countVertexOnce(resnappedSeen, v, report.resnapped);
+                report.maxSnapDistance = std::max(report.maxSnapDistance, pulled);
+            }
             mesh.setPosition(v, p);
         }
     }
+    return report;
+}
+
+}  // namespace detail
+
+inline void relax(Mesh& mesh, const RelaxParams& params, const PinSet* pins = nullptr,
+                  const SurfaceSnapper* snap = nullptr, const MeshAdjacency* adjacency = nullptr) {
+    detail::relaxSweep(mesh, params, pins, snap, 0.0f, [](VertexId) { return 1.0f; }, adjacency);
 }
 
 }  // namespace cyber::retopo

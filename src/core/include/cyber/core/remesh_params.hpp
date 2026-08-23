@@ -1,7 +1,10 @@
 #pragma once
 
+#include <cstddef>
 #include <string>
 #include <vector>
+
+#include "cyber/core/guidance.hpp"
 
 namespace cyber::remesh {
 
@@ -47,6 +50,36 @@ struct ValidatedParameters {
 // this before the pipeline starts (remeshing-parameters spec, "Validation at
 // every entry point").
 [[nodiscard]] ValidatedParameters validate(const Parameters& raw);
+
+// Validated guidance (remeshing-parameters spec, "Guide and density parameters
+// are validated"). Guidance is deliberately NOT part of `Parameters`, which is
+// the POD mirror of the C ABI's CyberRemeshParams and must stay POD.
+struct ValidatedGuidance {
+    Guidance guidance;
+    std::vector<ParameterIssue> issues;
+
+    [[nodiscard]] bool ok() const {
+        for (const auto& issue : issues) {
+            if (issue.fatal) {
+                return false;
+            }
+        }
+        return true;
+    }
+};
+
+// Clamp-and-warn: guide strength outside [kGuideStrengthMin, kGuideStrengthMax]
+// and density values outside [kDensityMin, kDensityMax] (one aggregated issue
+// naming the clamped count and the effective range, not a per-value flood).
+//
+// Fatal-and-reject — the "rejected LOUDLY" half of the spec: a guide with fewer
+// than two points, a non-finite coordinate / strength / radius, a radius <= 0
+// (which could never be honored, so accepting it silently is exactly the
+// competitor's quiet-failure bug), a density array carrying both per-vertex and
+// per-face values, and a density array whose length matches neither the
+// Target's live vertex nor live face count.
+[[nodiscard]] ValidatedGuidance validateGuidance(const Guidance& raw, std::size_t targetVertexCount,
+                                                 std::size_t targetFaceCount);
 
 // Derived target edge length from total surface area (guarded: non-positive
 // area or quad count is an error, never a division by zero — the AutoRemesher

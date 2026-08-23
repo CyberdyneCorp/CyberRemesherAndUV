@@ -20,6 +20,14 @@ the found and supported versions.
 - **WHEN** a handoff declares an unsupported version
 - **THEN** ingest SHALL fail with a typed error naming both versions and no partial Target SHALL be created
 
+#### Scenario: Geometry loss is loud
+- **WHEN** a handoff describes triangles the mesh cannot accept (a repeated vertex index) on any route
+- **THEN** ingest SHALL keep the rest of the surface and SHALL report the number of dropped triangles — a count on the result and a warning — rather than report success with a silently smaller Target
+
+#### Scenario: glTF handoff matches the documented profile
+- **WHEN** a `.gltf`/`.glb` handoff declares `asset.extras.cyberSculptHandoff`
+- **THEN** the version gate, the producer label, geometry, vertex colors and per-vertex normals SHALL all be read as documented, and any documented payload the container cannot carry SHALL be named in the result's warnings
+
 ### Requirement: Field-sampled baking through an evaluator interface
 Baking SHALL accept an optional field evaluator — an abstract interface
 providing signed distance, gradient, and ambient-occlusion queries at world

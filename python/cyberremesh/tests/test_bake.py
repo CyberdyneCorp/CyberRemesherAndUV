@@ -51,7 +51,21 @@ def main() -> int:
             assert os.path.getsize(png.name) > 0
             os.unlink(png.name)
             img.close()
-        print("PASS bake: 16x16 tangent-space normal map, centre points up")
+
+            # Curvature/cavity reach the bindings and carry the extra
+            # curvature_range field across the ctypes struct boundary. A flat
+            # Target has nothing to normalize against, so both take their
+            # neutral value: mid-gray for curvature, white for cavity.
+            params = BakeParams(width=16, height=16, curvature_range=0.0)
+            with bake(low, high, BakeMap.CURVATURE, params) as curv:
+                assert curv.channels == 1, curv.channels
+                mid = float(curv.to_numpy()[8, 8, 0])
+                assert abs(mid - 0.5) < 0.02, ("flat curvature", mid)
+            with bake(low, high, BakeMap.CAVITY, params) as cav:
+                assert cav.channels == 1, cav.channels
+                white = float(cav.to_numpy()[8, 8, 0])
+                assert abs(white - 1.0) < 0.02, ("flat cavity", white)
+        print("PASS bake: normal map points up; curvature/cavity read neutral on a flat Target")
     finally:
         os.unlink(obj.name)
     return 0

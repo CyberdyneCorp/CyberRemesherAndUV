@@ -1,5 +1,6 @@
 add_library(cyber_bake STATIC
     src/bake.cpp
+    src/curvature.cpp
 )
 add_library(cyber::bake ALIAS cyber_bake)
 

@@ -9,13 +9,15 @@
 #include <functional>
 #include <limits>
 #include <map>
+#include <optional>
 #include <queue>
-#include <thread>
 
 #include "cyber/core/bvh.hpp"
+#include "cyber/core/detail/parallel_chunks.hpp"
 #include "cyber/core/isotropic.hpp"
 #include "cyber/core/quadrangulate.hpp"
 #include "cyber/core/reference_surface.hpp"
+#include "cyber/core/threading.hpp"
 
 namespace cyber::remesh {
 
@@ -37,6 +39,65 @@ double totalSurfaceArea(const Mesh& mesh) {
         }
     }
     return area;
+}
+
+// Largest |coordinate| anywhere on the mesh. float spacing at magnitude m is
+// m * FLT_EPSILON, so this is what decides whether a derived edge length is
+// representable at all.
+float maxAbsCoordinate(const Mesh& mesh) {
+    float maxAbs = 0.0f;
+    for (Index vi = 0; vi < mesh.vertexCapacity(); ++vi) {
+        const VertexId v{vi};
+        if (!mesh.isAlive(v)) {
+            continue;
+        }
+        const Vec3 p = mesh.position(v);
+        maxAbs = std::max({maxAbs, std::fabs(p.x), std::fabs(p.y), std::fabs(p.z)});
+    }
+    return maxAbs;
+}
+
+// The isotropic split pass refuses any split whose halves the float grid cannot
+// separate (isotropic.cpp, kMinResolvableSpacings), so a target edge length
+// below that floor cannot be honoured: the geometry is already quantized onto
+// a grid coarser than the request. That happens for a mesh parked far from the
+// world origin — a scan in UTM/site coordinates, a glTF scene with a baked
+// translation — and it used to be silent, the run simply coming back at
+// roughly the input density.
+//
+// Clamp-and-warn, the same contract validate() applies to every other
+// out-of-range parameter, and for a concrete reason beyond honesty: the
+// downstream quadrangulator does NOT share the float grid (the vendored
+// seamless solve works in double), so it accepted the un-honourable target and
+// tried to fit thousands of quads onto the handful of distinct positions the
+// coordinates can express. On a unit sphere at 1e7 that turned a 0.02 s run
+// into one still going after five minutes. Clamping asks every stage for the
+// density the coordinates can actually carry.
+constexpr float kMinResolvableSpacings = 4.0f;  // mirrors isotropic.cpp
+
+struct ResolvedEdgeLength {
+    float edgeLength = 0.0f;
+    std::optional<ParameterIssue> issue;
+};
+
+ResolvedEdgeLength resolveAgainstCoordinates(const Mesh& mesh, float targetEdgeLength) {
+    const float maxAbs = maxAbsCoordinate(mesh);
+    const float resolution =
+        kMinResolvableSpacings * maxAbs * std::numeric_limits<float>::epsilon();
+    // `resolution > 0` and `isfinite` also reject a mesh whose coordinates are
+    // NaN or infinite: there is no representable density to clamp to there, and
+    // substituting one would replace a coarse result with an unusable one.
+    if (!(targetEdgeLength <= resolution) || !(resolution > 0.0f) || !std::isfinite(resolution)) {
+        return {targetEdgeLength, std::nullopt};
+    }
+    char message[320];
+    std::snprintf(message, sizeof(message),
+                  "target edge length %.6g is below the %.6g float resolution of coordinates up "
+                  "to %.6g: the mesh is too far from the origin for the requested density. Using "
+                  "%.6g instead — move the mesh near the origin to get the density you asked for.",
+                  static_cast<double>(targetEdgeLength), static_cast<double>(resolution),
+                  static_cast<double>(maxAbs), static_cast<double>(resolution));
+    return {resolution, ParameterIssue{"targetQuadCount", message, false}};
 }
 
 // Extracts one island into a standalone mesh (local vertex indexing).
@@ -221,31 +282,18 @@ Mesh orientFacesConsistently(const Mesh& mesh) {
     return Mesh::fromIndexed(pos, faces);
 }
 
-// Run fn over the vertex index range [0,n) split into hardware-concurrency chunks.
+// Run fn over the vertex index range [0,n) split into as many chunks as the host
+// allows workers (hardware concurrency unless cyber::setMaxWorkerThreads capped it).
 // The relax loops are per-vertex independent, so the split is byte-identical to the
 // serial loop; each thread does enough work (thousands of BVH projections) that the
 // spawn/join overhead is negligible (unlike the tiny per-CG-iter spmv).
+//
+// A throw from fn (a relax pass that runs out of memory, say) comes back on the
+// calling thread rather than terminating the process on a worker, so the C ABI
+// still turns it into a CyberStatus.
 template <typename Fn>
 void parallelVertexRange(std::size_t n, const Fn& fn) {
-    if (n == 0) {
-        return;
-    }
-    const std::size_t hw = std::max<std::size_t>(1, std::thread::hardware_concurrency());
-    const std::size_t workers = std::min<std::size_t>(hw, n);
-    if (workers <= 1) {
-        fn(std::size_t{0}, n);
-        return;
-    }
-    const std::size_t chunk = (n + workers - 1) / workers;
-    std::vector<std::thread> threads;
-    threads.reserve(workers);
-    for (std::size_t lo = 0; lo < n; lo += chunk) {
-        const std::size_t hi = std::min(n, lo + chunk);
-        threads.emplace_back([&fn, lo, hi] { fn(lo, hi); });
-    }
-    for (auto& t : threads) {
-        t.join();
-    }
+    cyber::detail::forEachChunk(0, n, cyber::workerThreadsFor(n), fn);
 }
 
 // Tangential Laplacian step for an interior vertex: move toward the 1-ring
@@ -374,7 +422,8 @@ Vec3 tangentialTarget(const Mesh& mesh, VertexId v, float lambda) {
 // faceted crease instead reprojects erratically and creates new slivers.
 void relaxQuadMesh(Mesh& mesh, const ReferenceSurface& reference, float sharpEdgeDegrees,
                    int iterations, float lambda, bool shapeMatch = false,
-                   const std::vector<std::array<Vec3, 2>>& creaseNetwork = {}) {
+                   const std::vector<std::array<Vec3, 2>>& creaseNetwork = {},
+                   const GuidanceField* density = nullptr) {
     mesh.tagFeatureEdges(sharpEdgeDegrees);
     std::vector<bool> constrained(mesh.vertexCapacity(), false);
     for (Index ei = 0; ei < mesh.edgeCapacity(); ++ei) {
@@ -459,7 +508,14 @@ void relaxQuadMesh(Mesh& mesh, const ReferenceSurface& reference, float sharpEdg
             if (!mesh.isAlive(v) || constrained[i] || mesh.vertexEdges(v).empty()) {
                 continue;
             }
-            newPos[i] = shapeMatch ? shapeMatchTarget(mesh, v, lambda, targetRadius)
+            // Painted density shrinks the ideal square locally, so the
+            // uniform-square shape match does not re-uniformize a region the
+            // sizing stage deliberately densified. Null density leaves the
+            // radius exactly as it was.
+            const float localRadius =
+                density != nullptr ? targetRadius / std::sqrt(density->densityAt(mesh.position(v)))
+                                   : targetRadius;
+            newPos[i] = shapeMatch ? shapeMatchTarget(mesh, v, lambda, localRadius)
                                    : tangentialTarget(mesh, v, lambda);
             move[i] = true;
         }
@@ -530,13 +586,23 @@ void applySmallPatchPolicy(Mesh& mesh, SmallPatchPolicy policy, int minFaces) {
 
 PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSink* progress,
                       const CancelToken* cancel, const QuadrangulatorFactory& quadrangulator,
-                      const QuadrangulatorFactory& fallbackQuadrangulator) {
+                      const QuadrangulatorFactory& fallbackQuadrangulator,
+                      const Guidance* guidance) {
     PipelineResult result;
 
     // Stage 0: parameters (validated at every entry point — spec).
     ValidatedParameters validated = validate(rawParams);
     result.parameterIssues = validated.issues;
-    if (!validated.ok()) {
+    // Guidance is validated on exactly the same terms: clamps are warnings that
+    // reach the machine-readable report, unusable input is fatal.
+    ValidatedGuidance validatedGuidance;
+    if (guidance != nullptr && !guidance->empty()) {
+        validatedGuidance = validateGuidance(*guidance, input.vertexCount(), input.faceCount());
+        result.parameterIssues.insert(result.parameterIssues.end(),
+                                      validatedGuidance.issues.begin(),
+                                      validatedGuidance.issues.end());
+    }
+    if (!validated.ok() || !validatedGuidance.ok()) {
         result.status = RunStatus::Error;
         result.error = "invalid parameters";
         return result;
@@ -547,6 +613,17 @@ PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSi
         result.status = RunStatus::Error;
         result.error = "input mesh is empty";
         return result;
+    }
+
+    // The guidance sampler is built from the ORIGINAL input, before triangulate /
+    // weld / orient / island split, so it stays valid through every stage without
+    // index remapping (it answers geometric queries, not indexed ones).
+    std::unique_ptr<GuidanceField> guidanceField;
+    if (!validatedGuidance.guidance.empty()) {
+        guidanceField = std::make_unique<GuidanceField>(input, validatedGuidance.guidance);
+        if (guidanceField->empty()) {
+            guidanceField.reset();
+        }
     }
 
     // Pure quads: remesh at quarter density, then one linear subdivision
@@ -648,7 +725,14 @@ PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSi
         result.error = lengthResult.error;
         return result;
     }
-    result.stats.targetEdgeLength = lengthResult.edgeLength;
+    // Every later stage reads `effectiveEdgeLength`, so the reported statistic
+    // is the density that actually ran, not the one that was asked for.
+    const ResolvedEdgeLength resolved = resolveAgainstCoordinates(work, lengthResult.edgeLength);
+    const float effectiveEdgeLength = resolved.edgeLength;
+    result.stats.targetEdgeLength = effectiveEdgeLength;
+    if (resolved.issue) {
+        result.parameterIssues.push_back(*resolved.issue);
+    }
 
     // Stage 2: islands (face-complete, deterministic order — mesh-core spec).
     const auto islandFaces = work.islands();
@@ -687,9 +771,10 @@ PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSi
                                        IslandOutcome& oc) -> IsotropicStatus {
         const ReferenceSurface reference(m, params.smoothNormalDegrees);
         IsotropicOptions iso;
-        iso.targetEdgeLength = lengthResult.edgeLength;
+        iso.targetEdgeLength = effectiveEdgeLength;
         iso.adaptivity = params.adaptivity;
         iso.smoothNormalDegrees = params.smoothNormalDegrees;
+        iso.density = guidanceField.get();  // null unless painted density was supplied
         ProgressSink isoSink =
             progress ? progress->subrange(base, base + span, "isotropic") : ProgressSink{};
         const IsotropicStatus st =
@@ -718,6 +803,30 @@ PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSi
 
         outcome.mesh = extractIsland(work, islandFaces[i]);
         outcome.mesh.tagFeatureEdges(params.sharpEdgeDegrees);
+        // Per-island guidance audit: one row per island whenever guidance was
+        // supplied, filled in as the island routes and pushed on every exit.
+        IslandGuidance audit;
+        audit.islandIndex = i;
+        if (guidanceField) {
+            Vec3 islandLo{}, islandHi{};
+            bool first = true;
+            for (Index vi = 0; vi < outcome.mesh.vertexCapacity(); ++vi) {
+                const VertexId v{vi};
+                if (!outcome.mesh.isAlive(v)) {
+                    continue;
+                }
+                const Vec3 p = outcome.mesh.position(v);
+                islandLo = first ? p : min(islandLo, p);
+                islandHi = first ? p : max(islandHi, p);
+                first = false;
+            }
+            audit.guidesInRange = guidanceField->guidesReaching(islandLo, islandHi);
+        }
+        const auto recordAudit = [&result, &guidanceField](IslandGuidance& row) {
+            if (guidanceField) {
+                result.islandGuidance.push_back(row);
+            }
+        };
 
         // Isotropic stage: overall 0.0-0.3 of this island's slice. Skipped for quad-cover,
         // which does its own isotropic remesh downstream (see quadCoverMethod above).
@@ -729,6 +838,8 @@ PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSi
                 return result;
             }
             if (isoStatus != IsotropicStatus::Success || outcome.mesh.faceCount() == 0) {
+                audit.reason = "island failed before quadrangulation: " + outcome.reason;
+                recordAudit(audit);
                 progressBase += weight;
                 continue;
             }
@@ -744,17 +855,42 @@ PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSi
         // less-uniform triangle-pairing base keeps the lighter centroid relax.
         fieldExtractor = quad->name() == "instant-meshes" || quad->name() == "quad-cover";
         integerExtractor = quad->name() == "integer";
+        // Offer the guidance to this island's backend. A backend that declines
+        // is recorded, never silently ignored (spec: "honored loudly or
+        // rejected loudly").
+        if (guidanceField) {
+            std::string reason;
+            if (quad->acceptGuidance(*guidanceField, reason)) {
+                audit.guidesHonored = guidanceField->hasGuides();
+                audit.densityHonored = guidanceField->hasDensity();
+            } else {
+                audit.reason = reason;
+            }
+            // The isotropic stage sizes for density regardless of the quad
+            // backend, so density is honored even where guides are not —
+            // except for quad-cover, which skips our isotropic stage.
+            if (!audit.densityHonored && guidanceField->hasDensity() && !quadCoverMethod) {
+                audit.densityHonored = true;
+            }
+        }
         ProgressSink quadSink =
             progress ? progress->subrange(progressBase + weight * 0.3f,
                                           progressBase + weight * 0.9f, "quadrangulate")
                      : ProgressSink{};
-        const auto quadOutcome = quad->quadrangulate(outcome.mesh, lengthResult.edgeLength,
+        const auto quadOutcome = quad->quadrangulate(outcome.mesh, effectiveEdgeLength,
                                                      progress ? &quadSink : nullptr, cancel);
         if (quadOutcome.cancelled) {
             result.status = RunStatus::Cancelled;
             return result;
         }
         bool quadOk = quadOutcome.success && outcome.mesh.faceCount() > 0;
+        const auto mergeUnhonored = [&audit](const std::vector<std::string>& reasons) {
+            for (const std::string& r : reasons) {
+                audit.guidesHonored = false;
+                audit.reason = audit.reason.empty() ? r : audit.reason + "; " + r;
+            }
+        };
+        mergeUnhonored(quad->unhonoredGuidance());
 
         // Quad-cover recovery: it skipped the isotropic stage and declined this island
         // (no seamless-UV solver, or a solve/extraction failure). The mesh is untouched,
@@ -772,12 +908,24 @@ PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSi
                 std::unique_ptr<IQuadrangulator> fb = fallbackQuadrangulator();
                 fieldExtractor = fb->name() == "instant-meshes" || fb->name() == "quad-cover";
                 integerExtractor = fb->name() == "integer";
-                const auto fbOutcome = fb->quadrangulate(outcome.mesh, lengthResult.edgeLength,
+                if (guidanceField) {
+                    std::string fbReason;
+                    const bool accepted = fb->acceptGuidance(*guidanceField, fbReason);
+                    audit.guidesHonored = accepted && guidanceField->hasGuides();
+                    if (!accepted) {
+                        audit.reason = fbReason;
+                    } else {
+                        audit.reason.clear();
+                    }
+                    audit.densityHonored = guidanceField->hasDensity();
+                }
+                const auto fbOutcome = fb->quadrangulate(outcome.mesh, effectiveEdgeLength,
                                                          progress ? &quadSink : nullptr, cancel);
                 if (fbOutcome.cancelled) {
                     result.status = RunStatus::Cancelled;
                     return result;
                 }
+                mergeUnhonored(fb->unhonoredGuidance());
                 quadOk = fbOutcome.success && outcome.mesh.faceCount() > 0;
             }
         }
@@ -787,9 +935,15 @@ PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSi
                 outcome.reason = quadOutcome.failureReason.empty() ? "no faces produced"
                                                                    : quadOutcome.failureReason;
             }
+            audit.guidesHonored = false;
+            if (audit.reason.empty()) {
+                audit.reason = "island failed to quadrangulate: " + outcome.reason;
+            }
+            recordAudit(audit);
             progressBase += weight;
             continue;
         }
+        recordAudit(audit);
 
         applySmallPatchPolicy(outcome.mesh, params.smallPatchPolicy, params.smallPatchMinFaces);
         outcome.ok = outcome.mesh.faceCount() > 0;
@@ -845,6 +999,8 @@ PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSi
         // Enabled for the position-field extractor by default; CYBER_SHAPEMATCH=1
         // forces it on for every method (Step-1 CV experiment), CYBER_SHAPEMATCH=0
         // forces it off. CYBER_RELAX_ITERS / CYBER_RELAX_LAMBDA tune the final pass.
+        const GuidanceField* densityForRelax =
+            (guidanceField && guidanceField->hasDensity()) ? guidanceField.get() : nullptr;
         const char* smEnv = std::getenv("CYBER_SHAPEMATCH");
         const bool shapeMatch = smEnv != nullptr ? (std::atoi(smEnv) != 0) : fieldExtractor;
         const char* riEnv = std::getenv("CYBER_RELAX_ITERS");
@@ -904,7 +1060,7 @@ PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSi
                                                ? std::atoi(briEnv)
                                                : ((integerExtractor || quadCoverMethod) ? 40 : 10);
                 relaxQuadMesh(result.mesh, baseSurface, params.sharpEdgeDegrees, baseRelaxIters,
-                              /*lambda=*/0.5f, shapeMatch, creaseNetwork);
+                              /*lambda=*/0.5f, shapeMatch, creaseNetwork, densityForRelax);
             }
         }
         if (pipeTime) {
@@ -998,7 +1154,7 @@ PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSi
                 }
             }
             relaxQuadMesh(result.mesh, sourceSurface, params.sharpEdgeDegrees, finalRelaxIters,
-                          finalRelaxLambda, shapeMatch, creaseNetwork);
+                          finalRelaxLambda, shapeMatch, creaseNetwork, densityForRelax);
         }
         if (pipeTime) {
             std::fprintf(stderr, "[pipe-time] final project+relax=%lldms\n", pms(pt, PClk::now()));

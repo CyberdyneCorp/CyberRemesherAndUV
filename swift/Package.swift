@@ -1,20 +1,21 @@
 // swift-tools-version:5.9
 //
-// UNVERIFIED: This SwiftPM package cannot be built in the headless Linux CI —
-// it requires a Swift toolchain (Xcode 15+ on macOS/iPadOS) *and* the
-// `cyber_capi` shared library + `cyber_capi.h` produced by the `capi/` module
-// (tasks 13.1). The header is consumed through the system-library shim in
-// `Sources/CCyberRemesher`. The header search path and link path below point at
-// the in-repo capi build tree by default; real integrations should override
-// them (see README.md). Structure, types and control flow are implemented for
-// real — there are no throwing stubs — but nothing here has been compiled.
+// This SwiftPM package needs a Swift toolchain (Xcode 15+ on macOS/iPadOS) and
+// the `cyber_capi` shared library from the `capi/` module, so it is built on the
+// macOS runner only — see the `swift-package` job in .github/workflows/ci.yml.
+// The header it binds is checked against the Swift sources on every platform by
+// tests/packaging/test_swift_abi_parity.py (ctest: `swift_abi_parity`).
+//
+// The header is consumed through the system-library shim in
+// `Sources/CCyberRemesher`. The search paths below point at the in-repo capi
+// tree by default; real integrations should override them (see README.md).
 import PackageDescription
 
-// Relative to this package root (`swift/`). The capi headers live in the
-// sibling module and the built dylib is produced by the CMake build. Xcode
-// consumers should instead set HEADER_SEARCH_PATHS / LIBRARY_SEARCH_PATHS on
-// their app target and can drop these unsafe flags.
-let capiHeaderSearchPath = "../src/capi/include"
+// Relative to this package root (`swift/`). `cyber_capi.h` is checked in; the
+// dylib it declares is produced by the CMake build. Xcode consumers should
+// instead set HEADER_SEARCH_PATHS / LIBRARY_SEARCH_PATHS on their app target
+// and can drop these unsafe flags.
+let capiHeaderSearchPath = "../capi/include"
 
 let package = Package(
     name: "CyberRemesher",

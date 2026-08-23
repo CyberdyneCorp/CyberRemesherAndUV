@@ -30,8 +30,13 @@ Every strategy feeds a pure-quad path (subdivision + surface-projected relaxatio
 for a 100%-quad result. `examples/10_vs_reference.py` and `examples/11_benchmark.py`
 score the output side-by-side against QuadriFlow and AutoRemesher — e.g. the
 stanford-bunny at ~3000 quads: median **83° / 3% irregular** vs QuadriFlow's
-82° / 4% and AutoRemesher's 74° / 13%. GPL sources (AutoRemesher, its QuadCover/CoMISo path) were
-idea references only, never copied — see [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
+82° / 4% and AutoRemesher's 74° / 13%. AutoRemesher (MIT) and the Geogram subset
+(BSD-3-Clause) it carries are fetched on demand and compiled into the shipped
+binaries as the optional QuadCover field solver; the Instant Meshes extraction
+stage is a clean-room reimplementation with no code copied. Every licence and
+copyright notice is reproduced in
+[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md), which ships inside each
+release artifact.
 
 ### Automatic UV atlas
 
@@ -44,7 +49,9 @@ together, e.g. a cube's six faces into two flat strips), LSCM-unwraps each chart
 conformally, re-orients each chart to its minimum-area bounding box, skyline-packs
 them into the unit square, and writes the per-corner UV attribute —
 mesh in, packed atlas out, no manual seams. It returns chart count, conformal
-(angle) distortion, flip count and packing efficiency. On the remeshed quad output
+(angle) distortion, flip count and packing efficiency — where `packed_area` is
+the fraction of the UV square the chart *geometry* covers (the bounding-box
+fraction is reported separately as `packed_box_area`). On the remeshed quad output
 it holds angular distortion under ~0.05 (conformal error, 0 = angle-preserving)
 with no flipped charts; min-area re-orientation roughly doubles usable coverage on
 box-like meshes (45°-diamond faces → axis-aligned squares). `examples/14_uv_atlas.py`
@@ -57,6 +64,155 @@ charts tighter (higher coverage), the one remaining gap.
 ![Automatic UV atlas: quad mesh and its packed chart layout](examples/output/14_uv_atlas.png)
 
 <sub>Each quad mesh (left) auto-seamed, unwrapped, re-oriented, and packed into a UV atlas (right), tinted by chart · <code>examples/14_uv_atlas.py</code></sub>
+
+### Auto-routed seam paths
+
+Between "draw every seam edge by hand" and "let the atlas decide" sits the UV
+Path tool (`SeamPath` in Python/Swift, `cyber_seam_path_*` in C). You place
+waypoints; the engine routes a least-cost edge path between consecutive ones
+with a cost model that discounts feature-tagged and concave (valley) edges, so
+a two-click hop **follows the groove** instead of cutting the geodesic shortcut
+across flat surface. This is what makes seaming spiral-looped auto-retopo
+output tractable — exactly the layouts where no traceable edge loop exists.
+
+The pending path stays editable: any waypoint can be dragged
+(`move_waypoint_to` snaps it to the nearest vertex) or deleted, and an edit
+re-routes **only the segments adjacent to it** — the rest of the path keeps its
+route, and each segment's `segment_revision` counter tells a viewport exactly
+what to redraw. `commit` marks the route into a `SeamSet` — the one seam model,
+the same `mark`/`erase`/`sew` set a hand-drawn seam edits, so in C++ island
+computation, unwrap and stitch treat a routed seam exactly like a hand-marked
+one (note that those three consume a seam set only in C++ today: the bindings
+expose the set and the path, not island/unwrap/stitch over it) — and arms a
+resume marker so the next waypoint continues from the
+last committed point. Committing returns the edge ids it newly marked: that
+list is the undo record (`revert_commit`), and edges that were already seams
+are never in it, so they survive the undo. Dropping the resume marker only
+forgets where to continue; it never touches a committed seam.
+
+```python
+seams, path = SeamSet(), SeamPath(mesh)
+path.add_waypoint(a); path.add_waypoint(b)
+path.move_waypoint_to(1, (x, y, z), radius=0.5)   # re-routes one segment
+undo = path.commit(seams)                          # -> newly seamed edge ids
+```
+
+### Per-DCC export presets
+
+`--preset` turns a run into a ready-to-hand-off bundle instead of a bare mesh:
+remesh → auto-UV → bake the preset's map set → write the mesh and its maps under
+the preset's naming, color-space and normal conventions.
+
+```sh
+cyberremesh --input sculpt.obj --output out/hero.obj --preset blender \
+            --report out/report.json
+# out/hero.obj  hero_normal.png  hero_ao.png  hero_curvature.png  hero_color.png
+```
+
+Four built-ins ship — `blender`, `unity`, `unreal`, `gltf-generic` (list them
+with `--list-presets`). They differ where the target apps actually differ: only
+`unreal` uses the DirectX green-channel convention (green points down), and only
+`gltf-generic` drops curvature, because glTF 2.0 core has no slot for it. Color
+is the one sRGB-encoded map in every preset; normal, AO and curvature carry data,
+not appearance, and a gamma curve on them is a bug in every target app.
+
+A preset is versioned JSON, so `--preset ./mine.json` behaves exactly like a
+built-in:
+
+```json
+{ "schemaVersion": 1, "name": "mine", "resolution": 2048,
+  "namingPattern": "{basename}_{map}.{ext}",
+  "maps": ["normal", "ao", {"map": "color", "colorSpace": "srgb", "suffix": "basecolor"}] }
+```
+
+A preset declaring a schema version this engine does not support is rejected by
+name, and a field the engine does not recognise is an error rather than a silent
+drop — a preset that quietly loses the field you added is worse than one that
+refuses to load. A wrong-typed field is reported the same way, naming the field. So are two maps
+that expand to the same file name — a repeated map, or a repeated `suffix` — and
+the error names both: one map would overwrite the other while the report still
+listed the file twice, under two kinds.
+`namingPattern` (and a map's `suffix`, and the preset `name` that `{preset}`
+expands to) names a file *inside* `--output`'s directory: an absolute path or
+one climbing with `..` is refused, and so is any expansion of the pattern that
+would leave that directory — including through the caller's basename — so a
+preset file you downloaded cannot choose where the engine writes. The container
+follows the preset's `textureFormat`, not the file name. The JSON report records the
+effective preset and every file produced.
+
+The same thing from Python, without the CLI (C ABI: `cyber_export_preset_*` and
+`cyber_export_bundle_write`):
+
+```python
+from cyberremesh import ExportPreset, builtin_presets, write_bundle
+
+builtin_presets()                                  # ['blender', 'unity', ...]
+with ExportPreset.resolve("unreal") as preset:     # or a path to your JSON
+    preset.resolution = 1024                       # == --texture-size
+    preset.normal_green                            # '-Y' — Unreal reads DirectX
+    result = write_bundle(low, high, preset, "out/hero.glb")
+result.files                                       # mesh + one per baked map
+```
+
+Listing, resolving and reading a preset works in every build; only
+`write_bundle` needs the UV-gated bundle module, and says so where it is absent.
+
+**Cost:** the AO bake dominates a preset run — about 96% of it — and scales with
+texel count, so the default 2048² map set takes minutes on a desktop CPU. Use
+`--texture-size` (and `--ao-samples`) to trade resolution for time; parallelising
+the bake's texel loop is the open follow-up.
+
+## Sculpt handoff bridge
+
+The pipeline story is `sculpt -> retopo -> UV -> bake` in one place. This engine
+owns the second half, and takes the first half's output through a **versioned
+interchange** rather than a library dependency: there is **no build or link
+dependency on any sculpting or volumetric engine**, and there never will be —
+the format and the evaluator interface are the only coupling points.
+
+```sh
+# One command: sculpt handoff in, low-poly plus maps out.
+cyberremesh --target sculpt.ply --output low.obj \
+            --preset blender --bake normal,ao,curvature --report run.json
+
+# Or straight off a producer's stdout.
+producer --for-retopo | cyberremesh --target - --output low.obj --preset blender
+```
+
+`run.json` gains a `handoff` block recording the declared version, the producer
+label, and which optional payloads (vertex colors, normals, material mix) were
+present. A handoff declaring a version this engine does not support is **exit 3
+naming both versions**, and writes nothing — a newer minor is refused rather
+than read with the unknown parts dropped.
+
+The format — a PLY profile carrying positions, normals, vertex colors and a
+`material_mix` weight, plus a GLB profile and an in-memory buffer profile — is
+specified in [`docs/sculpt-handoff-format.md`](docs/sculpt-handoff-format.md).
+`examples/18_sculpt_handoff.py` is a working synthetic producer end to end. From
+Python, `Mesh.load_handoff` takes the file profile and
+`Mesh.load_handoff_buffers` the in-memory one — an in-process producer needs no
+temporary file, and gets the same version gate either way.
+
+PLY and the buffer profile are the proven paths. The `.gltf`/`.glb` route is
+accepted and version-gated but carries geometry only today: the declared
+producer label is not read back and vertex normals do not reach the Target, so
+prefer PLY when either matters.
+
+Two more pieces ride on the same "no hard dependency" rule:
+
+- **Field-sampled baking.** `cyber::bake::FieldEvaluator` is a pure-abstract
+  interface (signed distance, gradient, occlusion, curvature). Attach one to a
+  bake and normal/AO/curvature/cavity sample the field directly — the cage ray
+  is sphere-traced through it and normals come from exact gradients instead of
+  interpolated mesh normals, with no Target mesh needed at all. Without one,
+  baking takes the raycast path with **bit-identical** output. Reachable from
+  C++ (`BakeParams::field`), the C ABI (`cyber_bake_field`) and Python
+  (`cyberremesh.FieldEvaluator` + `bake_field`).
+- **Conform.** When the sculpt changes after retopology has started,
+  `cyber::retopo::conform` (`cyber_conform`, `cyberremesh.conform`) re-snaps the
+  EditMesh onto the new Target preserving its topology exactly, and reports the
+  **maximum and RMS deviation** plus any vertices past a caller-set threshold.
+  It completes and flags rather than silently stretching.
 
 ## How it works
 
@@ -99,7 +255,14 @@ Stage by stage:
    the hard edges); everything else goes to the vendored in-process Geogram
    QuadCover field first, which wins on organic geometry. Either side falls back to
    the other, so a decline is never a failure. `CYBER_QC_NO_ROUTE` disables the
-   routing, `CYBER_QC_DEBUG` traces the decision.
+   routing, `CYBER_QC_DEBUG` traces the decision. The vendored solver is silent by
+   default — it is a library inside someone else's process, so it writes nothing to
+   the host's console and leaves the host's signal/terminate/new handlers and
+   `LC_NUMERIC` untouched. Silencing it never silences the host: what the host
+   itself logs to `std::cout`/`std::cerr` while a solve runs still gets through.
+   `CYBER_QC_VERBOSE` lets the solver's progress traces through too. It also
+   retains nothing per call in Geogram's process-global state, so a farm worker or
+   DCC plugin can remesh for hours without growing.
 2. **Seamless UV.** The solver builds a smooth cross field, cuts the surface along
    seams, and solves for a UV parametrization whose transitions across those seams
    are rotations by multiples of 90° plus integer translations. That "seamless"
@@ -107,11 +270,14 @@ Stage by stage:
 3. **Isoline extraction.** Tracing the integer isolines of that UV and intersecting
    them yields the quad mesh. Field singularities become the irregular vertices.
    A graph-cleanup pass then merges the redundant samples left along each isoline;
-   without it every cell traces as an n-gon. On a **closed** surface that pass runs
-   by default. On an **open** one it is still opt-in (`CYBER_QC_OPEN_CLEANUP`,
-   experimental) because it is only half-built: it no longer fills the surface's
-   own rim, but the graph simplification can still merge genuine boundary corners.
-   The win it is chasing is large — on an open paraboloid, median 50° → 80°.
+   without it every cell traces as an n-gon. It runs by default on **closed** and
+   **open** surfaces alike (opt out with `CYBER_QC_NO_OPEN_CLEANUP`). On an open
+   island it runs in a reduced form — hole filling only, with the graph
+   simplification skipped, because dissolving every valence-2 node there merges
+   legitimately-valence-2 isoline samples into long uneven quads. That is what
+   made it safe to enable: an open paraboloid at a ~900-quad request went from 92
+   faces at median 27° to ~1744 uniform quads at median 78°, edge-length CV 0.27,
+   and closed islands are byte-identical either way.
 4. **Pure-quad path.** The extracted mesh is relaxed onto the original surface
    (longer for the uniform quad-cover/integer bases, which tolerate it — see
    `CYBER_BASE_RELAX_ITERS`), subdivided 4× so any residual triangle or pentagon
@@ -163,6 +329,95 @@ Stage by stage:
 Source: `src/uv/src/atlas.cpp` (`greedyMergeCharts` is the shared fixpoint driver
 behind both merge passes).
 
+## Compute backends
+
+The engine dispatches its heavy primitives (parallel map/reduce/scan/sort, BVH
+build and traversal, sparse matrix–vector products, closest-point projection, ray
+casting) through one backend interface with four implementations: **CPU**
+(always compiled in, always present, and the definition of a correct result),
+**Metal**, **CUDA** and **OpenCL**. GPU backends are accelerators, never
+functional requirements — every feature completes on the CPU alone.
+
+Selection is automatic and best-first — **Metal/CUDA > OpenCL > CPU** — over the
+backends whose device is actually present; a compiled-in backend whose device is
+missing is skipped rather than failing the run. Three ways to override it:
+
+```sh
+cyberremesh --list-backends                 # what this build sees on this machine
+cyberremesh --backend opencl --input …      # pin one run
+CYBER_BACKEND=cpu  your_host_app            # pin the process, no rebuild needed
+```
+
+`CYBER_BACKEND` (`cpu` | `metal` | `cuda` | `opencl`) is the support escape hatch
+for a consumer who cannot change the host application at all; an unset or
+unrecognised value keeps the automatic choice. In-process, C++ callers use
+`cyber::accel::selectBackend(kind)` + `setDefaultBackend()`, and C callers
+`cyber_available_backends` / `cyber_set_backend` / `cyber_active_backend` — a
+kind this build or this machine does not have is refused rather than silently
+substituted, so query first and offer a real choice.
+
+Two things worth knowing if you drive a GPU backend directly: the library's
+CPU-side parallel loops keep running on the worker pool whichever backend is
+selected (a GPU no longer serializes them), and the BVH is cached on the device
+keyed on the snapshot's identity — every `Bvh::flatten()` stamps a serial the
+process never reuses — so between queries hand over a **rebuilt** BVH snapshot
+rather than mutating the node/triangle arrays you already passed. Every primitive
+has a CPU-versus-GPU parity test over square, wide and tall inputs; it fails
+rather than passes silently when a compiled-in backend is absent.
+
+**Verification status:** CUDA and OpenCL are exercised on real hardware — the
+full suite runs green with either selected as the default backend — and CI's
+`gpu-backends-compile` lane builds both on every PR. A GitHub-hosted runner has
+no GPU, so that lane is a *compile* gate, not a parity gate; the parity run on
+real devices is `hardening.yml`'s `gpu-parity`, dispatched with the label of a
+self-hosted runner that has one. Metal has a preset (`macos-metal`) and a
+report-only macOS compile lane, but this project's own hardware cannot run it:
+treat the Metal backend as **unverified**.
+
+### Bounding the worker threads
+
+The engine's parallel loops size themselves from the machine's hardware
+concurrency, which is right for a batch run and wrong inside an interactive
+app: an uncapped bake takes every core the host is trying to share, and on a
+tablet that fights the OS scheduler and drains the battery. A host caps it:
+
+```c
+cyber_set_max_worker_threads(4);   /* 0 (the default) means uncapped */
+```
+
+C++ callers use `cyber::setMaxWorkerThreads()` from `cyber/core/threading.hpp`.
+It is an API and not an environment variable on purpose — a host learns its
+thread budget while it is already running and multi-threaded, where `setenv`
+is not safe — and it is callable at any time from any thread; loops already
+running keep the fan-out they started with.
+
+The cap **cannot change a result**. The loops split a range into contiguous
+chunks and each chunk writes only its own indices, so a capped run is
+byte-identical to an uncapped one; only speed and CPU load move. That is what
+makes it safe to turn down mid-session, and it is pinned by a test that
+compares a capped remesh against an uncapped one vertex for vertex.
+
+## Environment variables
+
+Nothing here is required — the defaults are the supported configuration. These
+exist for support, debugging and experiments; a variable that is unset or holds
+an unrecognised value always means "default behaviour".
+
+| Variable | Effect |
+|---|---|
+| `CYBER_BACKEND` | Pins the process-wide compute backend: `cpu` \| `metal` \| `cuda` \| `opencl`. |
+| `CYBER_CAPI_LIB` | Full path (or directory) of the C ABI shared library the Python bindings should load. |
+| `CYBER_QC_VERBOSE` | Lets the vendored field solver's progress traces reach the console (silent by default). |
+| `CYBER_QC_DEBUG` | Traces the seamless-UV backend routing decision. |
+| `CYBER_QC_NO_ROUTE` | Disables crease-fraction routing; every island goes to the vendored solver first. |
+| `CYBER_QC_NO_NATIVE` | Disables the native seamless solve. Guidance cannot be honoured then, and the run reports it as unhonoured naming this variable. |
+| `CYBER_QC_NO_OPEN_CLEANUP` | Turns off the open-surface extraction cleanup (hole filling), restoring pre-0.2.5 behaviour on open surfaces. |
+| `CYBER_BASE_RELAX_ITERS` | Overrides the base-relax iteration count before subdivision. |
+
+`src/quadrangulate` carries a further set of `CYBER_QC_*` levers used by the
+benchmark and the plans in `docs/`; they are developer instrumentation, not part
+of the supported surface, and are documented at their call sites.
+
 ## Layout
 
 ```
@@ -171,6 +426,7 @@ src/app/         document model, tools, undo (toolkit-free)
 src/render/      viewport renderer (Metal | Vulkan)
 src/accel/       compute backends: cpu | metal | cuda | opencl
 src/core/        mesh kernel, io, remeshing pipeline, uv, bake
+src/handoff/     versioned sculpt-handoff ingest (pipeline bridge)
 tests/           unit + property + golden regression tests
 thirdparty/      vendored permissive dependencies (manifest.json)
 ```
@@ -200,7 +456,45 @@ ctest --preset cpu-headless
 ```
 
 Other presets: `cpu-headless-debug` (ASan/UBSan), `macos-metal`, `linux-cuda`,
-`windows-cuda`, `ios`, `android`.
+`windows-cuda`, `ios`, `android`, `linux-arm64-cross`.
+
+The mobile presets need their platform toolchain file; `android` also wants an
+ABI and API level:
+
+```sh
+cmake --preset android \
+  -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_ROOT/build/cmake/android.toolchain.cmake" \
+  -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-26
+```
+
+`linux-arm64-cross` builds the whole tree — library, CLI and suite — for 64-bit
+ARM with `g++-aarch64-linux-gnu` and runs the suite under `qemu-user`, which is
+how CI executes the engine on the ISA the mobile targets ship on. It needs only
+`g++-aarch64-linux-gnu` and `qemu-user-static`; `ctest --preset
+linux-arm64-cross` launches each binary through the emulator on its own, so no
+binfmt registration and no root are involved. A toolchain unpacked somewhere
+other than `/usr` is reachable with `-DCYBER_AARCH64_SYSROOT=…` and
+`-DCYBER_QEMU_AARCH64=…`.
+
+#### Supported toolchains
+
+The project's own code compiles with **warnings as errors** (`-Werror` /
+`/WX`) — that is the default, not a CI-only setting, and it is what the
+following are held to:
+
+| Toolchain | Status |
+|---|---|
+| GCC 13 (Ubuntu 24.04) | Builds and tests clean with `-Werror`; the default local and CI Linux lane. GCC 12 is covered by the same guarded suppression. |
+| AppleClang (Xcode 15.4) | CI builds and tests `cpu-headless`; also the Swift-package lane. |
+| MinGW GCC (windows-latest) | CI builds and tests `cpu-headless`, and is the shipped Windows lane. |
+| MSVC | The build files handle it (export table, warning flags) but **no CI lane compiles it** — treat as unverified. |
+
+One libstdc++ `-Wstringop-overflow` false positive on GCC 12/13 is suppressed at
+its single call site (`reverseCuthillMcKee`), guarded on `__GNUC__ >= 12 &&
+!__clang__`, so nothing else loses the diagnostic. If a toolchain newer than
+these raises a diagnostic of its own,
+`-DCYBER_WARNINGS_AS_ERRORS=OFF` is the escape hatch — it exists so you can look
+at the failure, not as a supported configuration.
 
 The `cpu-headless` preset requests `-DCYBER_WITH_QUADCOVER=ON`, which vendors and
 compiles an in-process Geogram QuadCover solver (~102 sources, a one-time build
@@ -212,6 +506,15 @@ seamless-UV solver** (a few degrees lower median, still fully functional and
 portable) — so `-DCYBER_WITH_QUADCOVER=ON` never hard-fails. Override with
 `-DCYBER_WITH_QUADCOVER=OFF` to skip it outright; mobile presets (`ios`/`android`)
 leave it off.
+
+That fallback is convenient and, for anything you intend to ship, dangerous: the
+field engine in the artifact would be inherited from whatever the build machine
+happened to have. `-DCYBER_REQUIRE_QUADCOVER=ON` turns the fallback into a
+configure error, which is what the release lanes set so a package cannot silently
+carry a different quadrangulator than the one the benchmarks measured. The
+vendored sources are pinned to the commit in
+`examples/reference/autoremesher.pin`, and a checkout found at any other commit
+is re-fetched rather than built.
 
 ### Use as a library
 
@@ -226,12 +529,44 @@ target_link_libraries(your_app PRIVATE cyber::capi)   # + #include <cyber_capi.h
 
 The `cyber::capi` target carries the include path and links the versioned
 `libcyber_capi.so`; the C++ core, quadrangulator, UV, and the in-process Geogram
-solver are all baked into it, so the package has no transitive dependencies. In
+solver are all baked into it, so the package exports no transitive *targets* —
+`find_package` needs nothing else. The library itself still has the run-time
+dependencies its build gave it (with the vendored field: `libgomp`, `libtbb`,
+`libz`, `libstdc++`); `ldd` on the installed `.so` lists them. In
 the same build tree, `add_subdirectory()` also exposes the `cyber::*` targets
 (`cyber::core`, `cyber::uv`, …). Python bindings live in `python/cyberremesh/`.
+
+The shared library exports **only its `cyber_*` C ABI** — a linker version script
+on ELF, an exported-symbols list on Mach-O — so the ~4000 vendored
+Geogram/stb/tinygltf/tinyobj/AutoRemesher definitions linked in from the static
+archives are neither visible to nor interposable by a host process carrying its
+own copy of the same third-party code. Nothing but the documented header is
+reachable; if you were reaching a vendored symbol through this library, link it
+yourself.
 
 ## Development
 
 - Specs first: medium/large changes go through OpenSpec (`openspec list`).
+  `openspec validate --all --strict` runs as a CI job, so a malformed spec or
+  change delta fails the build; whether a spec still matches the code is a review
+  question, not something the validator can answer.
 - `python3 tools/license_audit.py` — dependency license gate (permissive only).
-- `.clang-format` / `.clang-tidy` are enforced in CI.
+  It covers the vendored trees outside `thirdparty/` too, and fails when anything
+  linked into a shipped binary is missing from `THIRD_PARTY_NOTICES.md`.
+- `.clang-format` is enforced in CI (`ci.yml`, pinned to clang-format 18).
+  `.clang-tidy` configures editors and local runs; it is **not** a merge gate.
+- `.github/workflows/hardening.yml` — nightly (and manually triggerable)
+  ASan/UBSan, TSan and libFuzzer lanes, plus the opt-in `gpu-parity` lane for a
+  self-hosted runner with a GPU. The cheap half, replaying the checked-in
+  corpus under `tests/fuzz/corpus`, runs on every CI leg as the
+  `fuzz_corpus_replay` ctest case.
+- The GPU backends are compiled on every PR (`ci.yml`: `gpu-backends-compile`
+  for CUDA + OpenCL, `gpu-metal-compile` report-only for Metal). Those lanes
+  catch build breakage only — a hosted runner has no device, and the parity case
+  fails rather than passes when a compiled-in backend is not exercised.
+- The packaging and release rules are tests, not prose: `build_hygiene` and
+  `release_gates` (ctest, from `tests/packaging/`) assert that the release
+  workflow runs the suite before publishing, that the wheel carries a native
+  library, that every compiled-in dependency appears in the notices file, and
+  that the version has one source of truth. `swift_abi_parity` fails when a Swift
+  source references a C symbol the header does not declare.

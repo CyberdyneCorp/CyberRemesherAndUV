@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "cyber/accel/backend.hpp"
+#include "cyber/accel/detail/bvh_residency.hpp"
 #include "cyber/core/bvh.hpp"
 #include "cyber/core/math.hpp"
 #include "cyber/core/mesh.hpp"
@@ -119,12 +120,10 @@ TEST_CASE("flattened-BVH closest point and raycast match the CPU reference on ev
 
     // CPU reference results.
     std::vector<float> refClosest(n * 3);
-    cpu->closestPointsBvh(flat.nodes.data(), flat.nodes.size(), flat.tris.data(), flat.tris.size(),
-                          queries.data(), n, refClosest.data());
+    cpu->closestPointsBvh(flat, queries.data(), n, refClosest.data());
     std::vector<float> refHit(n * 3);
     std::vector<int> refFace(n);
-    cpu->raycastBvh(flat.nodes.data(), flat.nodes.size(), flat.tris.data(), flat.tris.size(),
-                    origins.data(), dirs.data(), n, refHit.data(), refFace.data());
+    cpu->raycastBvh(flat, origins.data(), dirs.data(), n, refHit.data(), refFace.data());
 
     // The CPU reference must reproduce the core Bvh per-query traversal exactly
     // (validates Bvh::flatten() and the flat-array traversal).
@@ -140,17 +139,14 @@ TEST_CASE("flattened-BVH closest point and raycast match the CPU reference on ev
         CAPTURE(backend->deviceName());
 
         std::vector<float> closest(n * 3);
-        backend->closestPointsBvh(flat.nodes.data(), flat.nodes.size(), flat.tris.data(),
-                                  flat.tris.size(), queries.data(), n, closest.data());
+        backend->closestPointsBvh(flat, queries.data(), n, closest.data());
         for (std::size_t i = 0; i < n * 3; ++i) {
             REQUIRE(closest[i] == doctest::Approx(refClosest[i]).epsilon(kTol));
         }
 
         std::vector<float> hit(n * 3);
         std::vector<int> face(n);
-        backend->raycastBvh(flat.nodes.data(), flat.nodes.size(), flat.tris.data(),
-                            flat.tris.size(), origins.data(), dirs.data(), n, hit.data(),
-                            face.data());
+        backend->raycastBvh(flat, origins.data(), dirs.data(), n, hit.data(), face.data());
         for (std::size_t i = 0; i < n; ++i) {
             CAPTURE(i);
             const bool refMiss = refFace[i] < 0;
@@ -168,5 +164,207 @@ TEST_CASE("flattened-BVH closest point and raycast match the CPU reference on ev
                 REQUIRE(cyber::length(rp - gp) < kTol);
             }
         }
+    }
+}
+
+TEST_CASE("no ray through a shared edge is rejected by both adjacent triangles") {
+    // Regression: the ray/triangle test rejected u/v strictly at 0 and 1 with no
+    // edge-ownership rule, so rounding could make BOTH triangles sharing an edge
+    // reject the same ray and a ray that geometrically crosses a closed surface
+    // report a miss — isolated wrong texels in an AO bake. The inside test now
+    // evaluates each edge in a canonical vertex order, so the two triangles see
+    // bitwise opposite values and at most one of them can reject.
+    //
+    // Deliberately irregular coordinates: axis-aligned vertices make too many of
+    // the intermediate products exact and hide the leak.
+    const Vec3 a{-0.7331f, 0.1129f, 0.4517f};
+    const Vec3 b{0.6217f, -0.3384f, 0.2903f};
+    const Vec3 c{0.1873f, 0.8821f, -0.5119f};
+    const Vec3 d{-0.2447f, -0.9013f, -0.3761f};
+    // Consistent winding across the shared edge a-b.
+    const std::vector<Vec3> points{a, b, c, d};
+    const std::vector<std::vector<Index>> faces{{0, 1, 2}, {1, 0, 3}};
+    Mesh mesh = Mesh::fromIndexed(points, faces);
+    const Bvh bvh(mesh);
+    REQUIRE(bvh.triangleCount() == 2);
+    const FlatBvh flat = bvh.flatten();
+
+    constexpr std::size_t rays = 200'000;  // bounded: seconds at most, never unbounded
+    std::vector<float> origins(rays * 3);
+    std::vector<float> dirs(rays * 3);
+    const Vec3 normal = cyber::normalized(cyber::cross(b - a, c - a));
+    std::mt19937 rng(7);
+    std::uniform_real_distribution<float> along(0.05f, 0.95f);
+    std::uniform_real_distribution<float> height(0.5f, 2.0f);
+    for (std::size_t i = 0; i < rays; ++i) {
+        const Vec3 target = a + (b - a) * along(rng);  // exactly on the shared edge
+        const Vec3 origin = target + normal * height(rng);
+        const Vec3 dir = cyber::normalized(target - origin);
+        origins[i * 3] = origin.x;
+        origins[i * 3 + 1] = origin.y;
+        origins[i * 3 + 2] = origin.z;
+        dirs[i * 3] = dir.x;
+        dirs[i * 3 + 1] = dir.y;
+        dirs[i * 3 + 2] = dir.z;
+    }
+
+    const auto backend = accel::defaultBackend();
+    std::vector<float> hit(rays * 3);
+    std::vector<int> face(rays);
+    backend->raycastBvh(flat, origins.data(), dirs.data(), rays, hit.data(), face.data());
+    std::size_t leaks = 0;
+    for (std::size_t i = 0; i < rays; ++i) {
+        if (face[i] < 0) {
+            ++leaks;
+        }
+    }
+    CAPTURE(leaks);
+    REQUIRE(leaks == 0);
+}
+
+TEST_CASE("BVH residency key tells two snapshots apart at recycled addresses") {
+    // GPU backends keep the last-queried snapshot resident instead of
+    // re-uploading it per call (the AO bake queries once per texel). Keying on
+    // addresses, sizes and a content fingerprint served a STALE hierarchy: a
+    // freed FlatBvh's storage comes back at the same address with the same
+    // counts, and a fingerprint that samples the root bounds and the extreme
+    // triangles cannot see an interior edit. The key therefore carries
+    // FlatBvh::serial, which Bvh::flatten() never reuses.
+    namespace detail = cyber::accel::detail;
+    const Mesh mesh = makeSphere(6, 8);
+    const Bvh bvh(mesh);
+
+    detail::BvhResidencyKey first;
+    {
+        const FlatBvh flat = bvh.flatten();
+        REQUIRE(!flat.tris.empty());
+        REQUIRE(flat.serial != 0);
+        first = detail::makeBvhResidencyKey(flat);
+        // Re-querying the same snapshot is what residency is FOR.
+        REQUIRE(detail::namesResidentBvh(first, detail::makeBvhResidencyKey(flat)));
+    }
+
+    // A second snapshot of the SAME hierarchy: identical counts, identical
+    // bytes, and very likely the freed arrays' addresses. It is a different
+    // snapshot, so it must not be answered from the first one's upload.
+    const FlatBvh again = bvh.flatten();
+    const auto second = detail::makeBvhResidencyKey(again);
+    REQUIRE(second.serial != first.serial);
+    REQUIRE(!detail::namesResidentBvh(first, second));
+    REQUIRE(detail::namesResidentBvh(second, second));
+
+    // A snapshot nobody stamped (serial 0) is unidentifiable and never resident,
+    // not even against itself.
+    FlatBvh unstamped = bvh.flatten();
+    unstamped.serial = 0;
+    const auto anonymous = detail::makeBvhResidencyKey(unstamped);
+    REQUIRE(!detail::namesResidentBvh(anonymous, anonymous));
+
+    // A shorter view of the same arrays is a different BVH.
+    FlatBvh shorter = again;
+    shorter.tris.pop_back();
+    REQUIRE(!detail::namesResidentBvh(second, detail::makeBvhResidencyKey(shorter)));
+}
+
+namespace {
+
+// Closed slab: a `cells` x `cells` top grid at y = 0, the same grid at y = -1,
+// and side walls. The bounding box is pinned by the bottom and the walls, so
+// denting one INTERIOR top vertex changes neither the root bounds nor the
+// triangle count — the fingerprint the residency key used to rely on.
+Mesh makeSlab(int cells, int dentX, int dentZ, float dentY) {
+    const int side = cells + 1;
+    auto top = [side](int x, int z) { return static_cast<Index>(z * side + x); };
+    auto bottom = [side](int x, int z) { return static_cast<Index>(side * side + z * side + x); };
+    std::vector<Vec3> points;
+    for (int z = 0; z < side; ++z) {
+        for (int x = 0; x < side; ++x) {
+            const float fx = static_cast<float>(x) / static_cast<float>(cells) - 0.5f;
+            const float fz = static_cast<float>(z) / static_cast<float>(cells) - 0.5f;
+            const bool dented = x == dentX && z == dentZ;
+            points.push_back({fx, dented ? dentY : 0.0f, fz});
+        }
+    }
+    for (int z = 0; z < side; ++z) {
+        for (int x = 0; x < side; ++x) {
+            const float fx = static_cast<float>(x) / static_cast<float>(cells) - 0.5f;
+            const float fz = static_cast<float>(z) / static_cast<float>(cells) - 0.5f;
+            points.push_back({fx, -1.0f, fz});
+        }
+    }
+    std::vector<std::vector<Index>> faces;
+    for (int z = 0; z < cells; ++z) {
+        for (int x = 0; x < cells; ++x) {
+            faces.push_back({top(x, z), top(x, z + 1), top(x + 1, z + 1), top(x + 1, z)});
+            faces.push_back(
+                {bottom(x, z), bottom(x + 1, z), bottom(x + 1, z + 1), bottom(x, z + 1)});
+        }
+    }
+    for (int i = 0; i < cells; ++i) {
+        faces.push_back({top(i, 0), top(i + 1, 0), bottom(i + 1, 0), bottom(i, 0)});
+        faces.push_back({top(i + 1, cells), top(i, cells), bottom(i, cells), bottom(i + 1, cells)});
+        faces.push_back({top(0, i + 1), top(0, i), bottom(0, i), bottom(0, i + 1)});
+        faces.push_back({top(cells, i), top(cells, i + 1), bottom(cells, i + 1), bottom(cells, i)});
+    }
+    return Mesh::fromIndexed(points, faces);
+}
+
+}  // namespace
+
+TEST_CASE("a second BVH is never answered from the first one's device residency") {
+    // Regression: two equal-sized snapshots whose root bounds and extreme
+    // triangles agree compared EQUAL under the old residency fingerprint, so a
+    // GPU backend skipped the upload and answered the second mesh's queries
+    // with the first mesh's geometry — silently, with no fallback. Reproduced
+    // on CUDA and OpenCL: a downward ray onto a dented cell returned the flat
+    // plate's y = 0 instead of the dent.
+    //
+    // The first snapshot is destroyed before the second is built, so the
+    // allocator hands the second one the same blocks; only the serial separates
+    // them.
+    constexpr int kCells = 8;
+    constexpr int kDentX = 3;
+    constexpr int kDentZ = 5;
+    constexpr float kDentY = -0.45f;
+    const Mesh flatSlab = makeSlab(kCells, -1, -1, 0.0f);
+    const Mesh dentedSlab = makeSlab(kCells, kDentX, kDentZ, kDentY);
+
+    // A ray straight down onto the dented cell's corner vertex.
+    const float x = static_cast<float>(kDentX) / static_cast<float>(kCells) - 0.5f;
+    const float z = static_cast<float>(kDentZ) / static_cast<float>(kCells) - 0.5f;
+    const std::vector<float> origin{x, 2.0f, z};
+    const std::vector<float> down{0.0f, -1.0f, 0.0f};
+
+    const Bvh flatBvh(flatSlab);
+    const Bvh dentedBvh(dentedSlab);
+    REQUIRE(flatBvh.triangleCount() == dentedBvh.triangleCount());
+    const auto flatRef = flatBvh.raycast({x, 2.0f, z}, {0.0f, -1.0f, 0.0f});
+    const auto dentedRef = dentedBvh.raycast({x, 2.0f, z}, {0.0f, -1.0f, 0.0f});
+    REQUIRE(flatRef.has_value());
+    REQUIRE(dentedRef.has_value());
+    // The two meshes must genuinely disagree where the ray lands, or the test
+    // would pass on a stale hierarchy too.
+    REQUIRE(std::fabs(flatRef->point.y - dentedRef->point.y) > 0.1f);
+
+    for (const auto& backend : accel::availableBackends()) {
+        CAPTURE(backend->deviceName());
+        std::vector<float> hit(3);
+        std::vector<int> face(1);
+
+        // Priming query: leaves the flat slab resident on a device backend.
+        {
+            const FlatBvh flat = flatBvh.flatten();
+            backend->raycastBvh(flat, origin.data(), down.data(), 1, hit.data(), face.data());
+        }
+        REQUIRE(face[0] >= 0);
+        REQUIRE(hit[1] == doctest::Approx(flatRef->point.y).epsilon(kTol));
+
+        // Second, different mesh at (very likely) the same addresses.
+        {
+            const FlatBvh flat = dentedBvh.flatten();
+            backend->raycastBvh(flat, origin.data(), down.data(), 1, hit.data(), face.data());
+        }
+        REQUIRE(face[0] >= 0);
+        REQUIRE(hit[1] == doctest::Approx(dentedRef->point.y).epsilon(kTol));
     }
 }

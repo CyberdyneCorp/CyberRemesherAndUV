@@ -70,6 +70,9 @@ public:
     // ---- persistence alongside autosave -------------------------------
     [[nodiscard]] JournalMetadata metadata() const;
     void serializeMetadata(ByteWriter& w) const;
+    // Returns nullopt for a truncated or corrupt journal — including one whose
+    // declared entry count the buffer could never hold — rather than
+    // allocating on it or handing back a partial snapshot.
     [[nodiscard]] static std::optional<JournalMetadata> loadMetadata(ByteReader& r);
 
 private:

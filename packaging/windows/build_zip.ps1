@@ -48,6 +48,16 @@ foreach ($dll in @("libstdc++-6.dll", "libgcc_s_seh-1.dll", "libwinpthread-1.dll
 
 Copy-Item (Join-Path $RepoRoot "LICENSE") $Stage
 Copy-Item (Join-Path $RepoRoot "README.md") $Stage
+# The MIT/BSD-3/MPL-2.0 licences of the statically linked third-party tree
+# require their notices in binary redistributions, so they ship in the archive.
+Copy-Item (Join-Path $RepoRoot "THIRD_PARTY_NOTICES.md") $Stage
+
+# Record which field solver this artifact carries; without it a quality report
+# against a downloaded zip cannot be attributed to a quadrangulator.
+$SolverFile = Join-Path $RepoRoot "build\cpu-headless\cyber_field_solver.txt"
+$Solver = if (Test-Path $SolverFile) { (Get-Content $SolverFile -Raw).Trim() } else { "native-seamless-uv" }
+Set-Content -Path (Join-Path $Stage "BUILD_INFO.txt") `
+    -Value @("cyberremesh $Version", "field_solver=$Solver")
 
 # Optional Authenticode signing (placeholder secrets).
 $CertPath = $env:WINDOWS_CERT_PFX

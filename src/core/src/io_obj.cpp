@@ -7,6 +7,21 @@
 
 namespace cyber::io::detail {
 
+namespace {
+
+// tinyobjloader hands out-of-range vt/vn indices through unchanged — it only appends a
+// warning string and still reports success — so every attribute index has to be range
+// checked here before it is used as a subscript. A negative index means "absent", which
+// is legal and leaves the corner at its default.
+bool attributeIndexInRange(int index, std::size_t componentCount, std::size_t stride) {
+    if (index < 0) {
+        return true;
+    }
+    return static_cast<std::size_t>(index) < componentCount / stride;
+}
+
+}  // namespace
+
 Result<ImportedMesh> importObj(const std::filesystem::path& path, const ImportOptions& options) {
     tinyobj::ObjReaderConfig config;
     config.triangulate = false;  // arity preserved; policy applied afterwards
@@ -74,6 +89,11 @@ Result<ImportedMesh> importObj(const std::filesystem::path& path, const ImportOp
                 const tinyobj::index_t idx = shape.mesh.indices[indexOffset + v];
                 if (idx.vertex_index < 0 ||
                     static_cast<std::size_t>(idx.vertex_index) >= vertexCount) {
+                    faceVerts.clear();
+                    break;
+                }
+                if (!attributeIndexInRange(idx.texcoord_index, attrib.texcoords.size(), 2) ||
+                    !attributeIndexInRange(idx.normal_index, attrib.normals.size(), 3)) {
                     faceVerts.clear();
                     break;
                 }

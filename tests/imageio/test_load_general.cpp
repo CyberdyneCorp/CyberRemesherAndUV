@@ -1,6 +1,7 @@
 #include <doctest.h>
 
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -191,8 +192,12 @@ void emitMatch(BitWriter& bw, int length, int distance) {
     while (li < 28 && length >= kLengthBase[static_cast<std::size_t>(li) + 1]) {
         ++li;
     }
-    const int lsym = 257 + li;  // fixed table: 257..279 → 7-bit code (sym-256)
-    bw.huff(static_cast<unsigned>(lsym - 256), 7);
+    const int lsym = 257 + li;
+    if (lsym <= 279) {
+        bw.huff(static_cast<unsigned>(lsym - 256), 7);  // fixed table: 7-bit code (sym-256)
+    } else {
+        bw.huff(0xc0u + static_cast<unsigned>(lsym - 280), 8);  // 280..287 → 8-bit code
+    }
     bw.bitsLSB(static_cast<unsigned>(length - kLengthBase[static_cast<std::size_t>(li)]),
                static_cast<unsigned>(kLengthExtra[static_cast<std::size_t>(li)]));
     int di = 0;
@@ -364,6 +369,70 @@ TEST_CASE("loadPng rejects 16-bit and interlaced PNGs cleanly") {
     CHECK_FALSE(cyber::imageio::loadPng(writeTemp("cyber_general_16bit.png", deep)).has_value());
     CHECK_FALSE(
         cyber::imageio::loadPng(writeTemp("cyber_general_interlaced.png", interlaced)).has_value());
+}
+
+TEST_CASE("loadPng rejects a decompression bomb without inflating it") {
+    // 1x1 grayscale: the header calls for exactly two inflated bytes, while the
+    // IDAT expands to 256 MiB of zeros. The decoder must stop at the size the
+    // header can possibly need instead of materialising the whole stream only to
+    // reject it afterwards.
+    constexpr std::size_t kBombBytes = 256u * 1024u * 1024u;
+    BitWriter bw;
+    bw.bitsLSB(1, 1);  // BFINAL = 1
+    bw.bitsLSB(1, 2);  // BTYPE = 01 (fixed Huffman)
+    emitLiteral(bw, 0);
+    for (std::size_t produced = 1; produced < kBombBytes; produced += 258) {
+        emitMatch(bw, 258, 1);  // one byte of input per ~158 bytes of output
+    }
+    emitEndOfBlock(bw);
+    bw.flush();
+
+    Bytes z{0x78, 0x01};
+    z.insert(z.end(), bw.bytes.begin(), bw.bytes.end());
+    appendU32BE(z, 0);  // Adler-32 placeholder: the stream must never get this far
+
+    const Bytes png = buildPng(1, 1, 8, 0, 0, z, {}, {});
+    const std::string path = writeTemp("cyber_general_bomb.png", png);
+
+    const auto start = std::chrono::steady_clock::now();
+    const auto loaded = cyber::imageio::loadPng(path);
+    const double elapsedMs =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+
+    CHECK_FALSE(loaded.has_value());
+    // Inflating the bomb in full costs ~900 ms and ~256 MiB; capped at the two
+    // bytes the header declares it takes ~1 ms. The bound keeps a regression a
+    // failing test rather than a memory-hungry hang.
+    CHECK(elapsedMs < 500.0);
+}
+
+TEST_CASE("loadPng accepts a stream that exactly fills the declared size") {
+    // Boundary either side of the inflate cap: the exact size decodes, one byte
+    // more is rejected (as reconstruct() has always demanded).
+    constexpr std::size_t w = 2;
+    constexpr std::size_t h = 2;
+    constexpr std::size_t bpp = 3;
+    Bytes img(w * h * bpp);
+    for (std::size_t i = 0; i < img.size(); ++i) {
+        img[i] = static_cast<std::uint8_t>((i * 31 + 9) & 0xff);
+    }
+    const Bytes exact = applyFilter(img, w, h, bpp, 0);
+
+    const Bytes exactPng = buildPng(static_cast<std::uint32_t>(w), static_cast<std::uint32_t>(h), 8,
+                                    2, 0, zlibStored(exact), {}, {});
+    const auto loaded = cyber::imageio::loadPng(writeTemp("cyber_general_exact.png", exactPng));
+    REQUIRE(loaded.has_value());
+    REQUIRE(loaded->pixels.size() == img.size());
+    for (std::size_t i = 0; i < img.size(); ++i) {
+        CHECK(loaded->pixels[i] == doctest::Approx(static_cast<float>(img[i]) / 255.0f));
+    }
+
+    Bytes overlong = exact;
+    overlong.push_back(0);
+    const Bytes overlongPng = buildPng(static_cast<std::uint32_t>(w), static_cast<std::uint32_t>(h),
+                                       8, 2, 0, zlibStored(overlong), {}, {});
+    CHECK_FALSE(
+        cyber::imageio::loadPng(writeTemp("cyber_general_overlong.png", overlongPng)).has_value());
 }
 
 TEST_CASE("loadPng rejects a corrupt Adler-32 trailer") {

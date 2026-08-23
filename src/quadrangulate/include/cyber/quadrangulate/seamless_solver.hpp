@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "cyber/accel/backend.hpp"
+#include "cyber/core/guidance.hpp"
 #include "cyber/core/mesh.hpp"
 #include "cyber/core/progress.hpp"
 #include "cyber/quadrangulate/crossfield.hpp"
@@ -54,9 +55,13 @@ struct SeamlessSetup {
 // `creaseAlignSupport` (optional, indexed by EdgeId): resolution-aware crease-pin gating,
 // forwarded to computeCrossField and to the dipole-annihilation barrier — see
 // crossfield.hpp. Null keeps every crease pin (historical behavior).
+//
+// `guidance` (optional) carries user-drawn flow guides into the cross-field
+// solve as a soft alignment constraint — see crossfield.hpp. Null leaves the
+// field build textually unchanged.
 [[nodiscard]] SeamlessSetup buildSeamlessSetup(
     const Mesh& mesh, int iterations, accel::IBackend& backend, bool featureBinding = false,
-    const std::vector<char>* creaseAlignSupport = nullptr);
+    const std::vector<char>* creaseAlignSupport = nullptr, const GuidanceField* guidance = nullptr);
 
 // Euler characteristic V - E + F of the mesh cut open along `setup.isCutEdge`: each cut
 // edge is split so the two sides no longer share it. A cut graph that opens a closed
@@ -99,10 +104,16 @@ struct SeamlessSolveCache {
     std::shared_ptr<SeamlessSolveCacheImpl> impl;
 };
 
+//
+// `density` (optional) is the painted sizing multiplier: the per-face target
+// grid spacing becomes spacing / sqrt(density), i.e. the RHS is scaled per
+// face. It touches the RHS ONLY — exactly like `spacing` itself — so the
+// cached factorizations in `cache` stay valid across density changes.
 [[nodiscard]] Parameterization solveParameterization(const Mesh& mesh, const SeamlessSetup& setup,
                                                      float spacing, accel::IBackend& backend,
                                                      const CancelToken* cancel = nullptr,
-                                                     SeamlessSolveCache* cache = nullptr);
+                                                     SeamlessSolveCache* cache = nullptr,
+                                                     const GuidanceField* density = nullptr);
 
 // Relaxed-only calibration probe: runs solveParameterization's assembly + the initial
 // relaxed Poisson solve at `spacing` (no ARAP polish, no integer phase) and returns the
@@ -114,6 +125,7 @@ struct SeamlessSolveCache {
 // quadrangulator's initial-scaling probe (quadcover_extractor.cpp).
 [[nodiscard]] double relaxedCellArea(const Mesh& mesh, const SeamlessSetup& setup, float spacing,
                                      accel::IBackend& backend, const CancelToken* cancel = nullptr,
-                                     SeamlessSolveCache* cache = nullptr);
+                                     SeamlessSolveCache* cache = nullptr,
+                                     const GuidanceField* density = nullptr);
 
 }  // namespace cyber::remesh

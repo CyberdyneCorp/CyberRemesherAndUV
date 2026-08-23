@@ -19,6 +19,20 @@ trap 'rm -rf "${WORKDIR}"' EXIT
 OUT="${WORKDIR}/out.obj"
 REPORT="${WORKDIR}/report.json"
 
+# A packaged binary must resolve every shared library it needs from what the
+# package carries plus the host's core runtime. The 0.2.3 Windows zip shipped
+# without the MinGW DLLs and the Linux AppImage used to bundle no libraries at
+# all, so both died at startup on a clean machine while every CI check stayed
+# green — the runner that built them happened to have the libraries.
+if command -v ldd >/dev/null 2>&1; then
+    echo "==> Checking shared-library resolution"
+    if ldd "${CLI_BIN}" 2>/dev/null | grep -q 'not found'; then
+        echo "SMOKE FAIL: ${CLI_BIN} has unresolved shared libraries:" >&2
+        ldd "${CLI_BIN}" | grep 'not found' >&2
+        exit 1
+    fi
+fi
+
 echo "==> cyberremesh --version"
 "${CLI_BIN}" --version
 

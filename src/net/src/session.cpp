@@ -36,11 +36,39 @@ std::uint64_t BridgeSession::editMeshRevision() const {
     return m_editRevision;
 }
 
+void BridgeSession::setGuides(std::vector<WireGuide> guides) {
+    const std::lock_guard<std::mutex> lock(m_mutex);
+    m_guides = std::move(guides);
+}
+
+std::vector<WireGuide> BridgeSession::guides() const {
+    const std::lock_guard<std::mutex> lock(m_mutex);
+    return m_guides;
+}
+
+void BridgeSession::clearGuides() {
+    const std::lock_guard<std::mutex> lock(m_mutex);
+    m_guides.clear();
+}
+
+void BridgeSession::setDensity(std::vector<float> density) {
+    const std::lock_guard<std::mutex> lock(m_mutex);
+    m_density = std::move(density);
+}
+
+std::vector<float> BridgeSession::density() const {
+    const std::lock_guard<std::mutex> lock(m_mutex);
+    return m_density;
+}
+
 void BridgeSession::clearScene() {
     const std::lock_guard<std::mutex> lock(m_mutex);
     m_target.reset();
     m_editMesh = WireMesh{};
     ++m_editRevision;
+    // Guidance is authored against the Target's geometry, so it cannot outlive it.
+    m_guides.clear();
+    m_density.clear();
 }
 
 void BridgeSession::closeDocument() {
@@ -48,6 +76,8 @@ void BridgeSession::closeDocument() {
     m_target.reset();
     m_editMesh = WireMesh{};
     ++m_editRevision;
+    m_guides.clear();
+    m_density.clear();
     m_actions.clear();
     m_presses.clear();
     m_message.clear();

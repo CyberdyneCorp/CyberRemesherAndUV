@@ -1,9 +1,12 @@
 #include <doctest.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstddef>
 #include <map>
+#include <sstream>
+#include <string>
 #include <tuple>
 #include <vector>
 
@@ -11,6 +14,7 @@
 #include "cyber/core/mesh.hpp"
 #include "cyber/quadrangulate/quadcover_extractor.hpp"
 #include "cyber/quadrangulate/seamless_solver.hpp"
+#include "support/scoped_env.hpp"
 
 using cyber::EdgeId;
 using cyber::FaceId;
@@ -492,10 +496,10 @@ TEST_CASE("seamless direct path: matches the masked-CG fallback to solver tolera
         remesh::solveParameterization(sphere, setup, 0.12f, *backend);
     REQUIRE(direct.valid);
 
-    setenv("CYBER_QC_NO_DIRECT", "1", 1);
+    cyber::test::setEnv("CYBER_QC_NO_DIRECT", "1");
     const remesh::Parameterization cg =
         remesh::solveParameterization(sphere, setup, 0.12f, *backend);
-    unsetenv("CYBER_QC_NO_DIRECT");
+    cyber::test::unsetEnv("CYBER_QC_NO_DIRECT");
     REQUIRE(cg.valid);
     CHECK(cg.cgIterationsU > 0);       // the fallback really iterated
     CHECK(direct.cgIterationsU == 0);  // the direct path really back-substituted
@@ -604,6 +608,7 @@ float maxAbsUv(const Mesh& mesh, const remesh::Parameterization& param) {
 // ill-conditioned and blew up. buildSeamlessSetup must now mark the 12 creases as cut (seam)
 // edges, and solveParameterization must produce a valid, BOUNDED (non-divergent) integer-seamless
 // map. This is the gate that lets CAD / sharp-feature models take the native path.
+
 TEST_CASE("seamless feature: sharp cube runs and stays bounded (feature edges become seams)") {
     auto backend = cyber::accel::defaultBackend();
     Mesh cube = makeCube(6);
@@ -640,7 +645,12 @@ TEST_CASE("seamless feature: sharp cube runs and stays bounded (feature edges be
     // The map is BOUNDED — the per-component gauge pinning kept it from diverging (pre-fix this
     // exploded to ~1e6+). A sane map on a unit cube spans only a handful of grid cells.
     CHECK(maxAbsUv(cube, param) < 1e3f);
-    // And it is integer-seamless across the (now feature-aware) seams.
+    // And it is integer-seamless across the (now feature-aware) seams. This is
+    // also the regression guard for the reduction being toolchain-independent:
+    // while the pivot search broke ties on unordered_map iteration order, and
+    // the hist/unit choice minimised total rather than UNREPAIRABLE integrality
+    // violations, MinGW selected a reduction the joint-lattice closure could not
+    // repair and this residual came out at exactly 0.5.
     const remesh::SeamlessUv uv = assembleUv(cube, param);
     REQUIRE(uv.valid);
     CHECK(remesh::seamlessUvResidual(uv) < 1e-3);

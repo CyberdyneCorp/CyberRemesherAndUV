@@ -125,3 +125,52 @@ TEST_CASE("strict contact count rejects a frame where a finger is added") {
     const GestureSample s = feed(rec, {TouchPoint{1, {5, 0}, 5, 1}, TouchPoint{2, {10, 0}, 5, 1}});
     CHECK(s.kind == GestureKind::None);  // count changed 1 -> 2, ambiguous
 }
+
+TEST_CASE("a recycled touch id without the strict count reports no gesture, not an exception") {
+    // Regression: only the strict-count early return kept the delta lookups
+    // away from ids the previous frame never saw, so with the option off a
+    // platform recycling an id -- one finger lifting as another lands, which
+    // both iOS and Android do -- threw std::out_of_range out of a touch handler.
+    GestureConfig config;
+    config.strictContactCount = false;
+    GestureRecognizer rec(config);
+
+    SUBCASE("one fingertip") {
+        feed(rec, {TouchPoint{1, {0, 0}, 5, 1}});
+        GestureSample s{};
+        REQUIRE_NOTHROW(s = feed(rec, {TouchPoint{2, {10, 0}, 5, 1}}));
+        CHECK(s.kind == GestureKind::None);
+        CHECK(s.fingertipCount == 1);
+        // The frame still establishes a baseline, so the next one classifies.
+        const GestureSample next = feed(rec, {TouchPoint{2, {20, 0}, 5, 1}});
+        CHECK(next.kind == GestureKind::Orbit);
+        CHECK(next.delta.x == doctest::Approx(10.0f));
+    }
+
+    SUBCASE("two fingertips") {
+        feed(rec, {TouchPoint{1, {0, 0}, 5, 1}, TouchPoint{2, {10, 0}, 5, 1}});
+        GestureSample s{};
+        REQUIRE_NOTHROW(s = feed(rec, {TouchPoint{3, {0, 0}, 5, 1}, TouchPoint{4, {10, 0}, 5, 1}}));
+        CHECK(s.kind == GestureKind::None);
+    }
+
+    SUBCASE("one of two fingertips is new") {
+        feed(rec, {TouchPoint{1, {0, 0}, 5, 1}, TouchPoint{2, {10, 0}, 5, 1}});
+        GestureSample s{};
+        REQUIRE_NOTHROW(s = feed(rec, {TouchPoint{1, {0, 0}, 5, 1}, TouchPoint{7, {20, 0}, 5, 1}}));
+        CHECK(s.kind == GestureKind::None);
+    }
+}
+
+TEST_CASE("without the strict count a tracked finger is still classified") {
+    // The relaxed option must keep classifying what it can: a finger lifting
+    // beside a tracked one is a delta the strict option would have discarded.
+    GestureConfig config;
+    config.strictContactCount = false;
+    GestureRecognizer rec(config);
+    feed(rec, {TouchPoint{1, {0, 0}, 5, 1}, TouchPoint{2, {10, 0}, 5, 1}});
+    const GestureSample s = feed(rec, {TouchPoint{1, {5, 5}, 5, 1}});
+    CHECK(s.kind == GestureKind::Orbit);
+    CHECK(s.delta.x == doctest::Approx(5.0f));
+    CHECK(s.delta.y == doctest::Approx(5.0f));
+}

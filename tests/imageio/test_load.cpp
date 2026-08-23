@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -127,6 +128,52 @@ TEST_CASE("sampleBilinear clamps to edge and reports alpha 1 for RGB") {
     const std::array<float, 4> bottomRight = cyber::imageio::sampleBilinear(*loaded, 5.0f, 5.0f);
     CHECK(bottomRight[0] == doctest::Approx(100.0f / 255.0f));
     CHECK(bottomRight[3] == doctest::Approx(1.0f));
+}
+
+TEST_CASE("sampleBilinear survives non-finite and out-of-range coordinates") {
+    constexpr int w = 2;
+    constexpr int h = 2;
+    constexpr int ch = 3;
+    const std::array<std::uint8_t, w * h * ch> src = {
+        10, 20, 30, 40,  50,  60,   // row 0
+        70, 80, 90, 100, 110, 120,  // row 1
+    };
+    const std::string path = tempPath("cyber_load_nonfinite.png");
+    REQUIRE(cyber::imageio::writePng(path, w, h, ch, src.data()));
+    const auto loaded = cyber::imageio::loadPng(path);
+    REQUIRE(loaded.has_value());
+
+    // A mesh UV that overflowed to inf or NaN must not poison the sample: it
+    // yields opaque black, the same as an empty image.
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    const float inf = std::numeric_limits<float>::infinity();
+    const std::array<std::array<float, 2>, 5> bad = {{
+        {nan, 0.5f},
+        {0.5f, nan},
+        {inf, inf},
+        {-inf, 0.5f},
+        {nan, nan},
+    }};
+    for (const auto& uv : bad) {
+        const std::array<float, 4> s = cyber::imageio::sampleBilinear(*loaded, uv[0], uv[1]);
+        CHECK(s[0] == 0.0f);
+        CHECK(s[1] == 0.0f);
+        CHECK(s[2] == 0.0f);
+        CHECK(s[3] == 1.0f);
+    }
+
+    // Finite but far past int range still clamps to the edge texel.
+    const std::array<float, 4> huge = cyber::imageio::sampleBilinear(*loaded, 1e30f, 1e30f);
+    CHECK(huge[0] == doctest::Approx(100.0f / 255.0f));
+    CHECK(huge[1] == doctest::Approx(110.0f / 255.0f));
+    CHECK(huge[2] == doctest::Approx(120.0f / 255.0f));
+    const std::array<float, 4> tiny = cyber::imageio::sampleBilinear(*loaded, -1e30f, -1e30f);
+    CHECK(tiny[0] == doctest::Approx(10.0f / 255.0f));
+    CHECK(tiny[2] == doctest::Approx(30.0f / 255.0f));
+    for (std::size_t c = 0; c < 4; ++c) {
+        CHECK(std::isfinite(huge[c]));
+        CHECK(std::isfinite(tiny[c]));
+    }
 }
 
 TEST_CASE("loadPng rejects a truncated PNG") {

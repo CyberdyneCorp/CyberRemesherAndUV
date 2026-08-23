@@ -40,6 +40,13 @@ gcc:
     cmake --build build/gcc
     ctest --test-dir build/gcc --output-on-failure
 
+# Cross-build for 64-bit ARM and run the suite under qemu-user (the mobile ISA).
+# Needs g++-aarch64-linux-gnu and qemu-user-static; no device.
+arm64:
+    cmake --preset linux-arm64-cross
+    cmake --build --preset linux-arm64-cross
+    ctest --preset linux-arm64-cross
+
 # Apply clang-format (the CI-pinned version) to all C/C++ sources.
 format:
     find src apps tests \( -name '*.hpp' -o -name '*.cpp' \) | xargs clang-format -i

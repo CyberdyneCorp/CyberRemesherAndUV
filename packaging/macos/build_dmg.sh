@@ -46,6 +46,20 @@ cp "${SCRIPT_DIR}/Info.plist.in" \
 sed -i '' "s/@CYBER_VERSION@/${CYBER_VERSION}/g" \
    "${STAGE_DIR}/${APP_NAME}/Contents/Info.plist"
 
+# Licence notices travel with the binary (the statically linked
+# Geogram/AutoRemesher/Eigen tree is MIT/BSD-3/MPL-2.0, all of which require the
+# notice in binary redistributions), and BUILD_INFO records which field solver
+# this artifact actually contains — AppleClang without brew's libomp silently
+# falls back to the native seamless-UV solver.
+cp "${REPO_ROOT}/LICENSE" "${REPO_ROOT}/THIRD_PARTY_NOTICES.md" \
+   "${STAGE_DIR}/${APP_NAME}/Contents/Resources/"
+{
+    echo "cyberremesh ${CYBER_VERSION}"
+    echo "field_solver=$(cat "${REPO_ROOT}/build/macos-metal/cyber_field_solver.txt" \
+        2>/dev/null || echo native-seamless-uv)"
+} >"${STAGE_DIR}/${APP_NAME}/Contents/Resources/BUILD_INFO.txt"
+cat "${STAGE_DIR}/${APP_NAME}/Contents/Resources/BUILD_INFO.txt"
+
 if [[ -n "${CODESIGN_IDENTITY}" ]]; then
     echo "==> Codesigning (hardened runtime)"
     codesign --force --deep --options runtime --timestamp \

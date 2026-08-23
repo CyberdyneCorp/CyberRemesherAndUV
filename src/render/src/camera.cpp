@@ -244,16 +244,34 @@ GestureSample GestureRecognizer::update(std::span<const TouchPoint> contacts) {
         return sample;
     }
 
+    // A contact whose id is new this frame has no previous position, so there
+    // is no delta to report -- the platform recycled the id, or a finger was
+    // lifted and another landed in the same frame. Relaxing the strict count
+    // means "classify what can be classified", never "assume the map holds
+    // every id": looking one up unconditionally threw out of a touch handler.
+    const auto previousPosition = [&previous](std::int32_t id) -> const Vec2* {
+        const auto found = previous.find(id);
+        return found == previous.end() ? nullptr : &found->second;
+    };
+
     if (fingers.size() == 1) {
-        const Vec2 prev = previous.at(fingers[0]->id);
+        const Vec2* prev = previousPosition(fingers[0]->id);
+        if (prev == nullptr) {
+            return sample;
+        }
         sample.kind = GestureKind::Orbit;
-        sample.delta = fingers[0]->position - prev;
+        sample.delta = fingers[0]->position - *prev;
         return sample;
     }
 
     if (fingers.size() == 2) {
-        const Vec2 p0Prev = previous.at(fingers[0]->id);
-        const Vec2 p1Prev = previous.at(fingers[1]->id);
+        const Vec2* prev0 = previousPosition(fingers[0]->id);
+        const Vec2* prev1 = previousPosition(fingers[1]->id);
+        if (prev0 == nullptr || prev1 == nullptr) {
+            return sample;
+        }
+        const Vec2 p0Prev = *prev0;
+        const Vec2 p1Prev = *prev1;
         const Vec2 p0 = fingers[0]->position;
         const Vec2 p1 = fingers[1]->position;
 

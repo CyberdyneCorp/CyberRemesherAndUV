@@ -3,11 +3,13 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <string>
 #include <utility>
 #include <vector>
 
 #include "cyber/accel/primitives.hpp"
 #include "cyber/quadrangulate/position_field.hpp"
+#include "stable_angle.hpp"
 
 namespace cyber::remesh {
 
@@ -27,8 +29,14 @@ Vec3 faceTangent(const Mesh& mesh, FaceId f, Vec3 normal) {
     return normalized(t);
 }
 
-// Angle of world direction `d` in the (t, b) tangent frame.
-float frameAngle(Vec3 d, Vec3 t, Vec3 b) { return std::atan2(dot(d, b), dot(d, t)); }
+// Angle round-trips go through stable_angle.hpp rather than sinf/cosf: libm's
+// float trig disagrees by one ULP between toolchains, and the field's discrete
+// downstream decisions amplify that into a different mesh. See the header.
+using stable::CosSin;
+
+// (cos 4t, sin 4t) where t is the angle of world direction `d` in the (t, b)
+// tangent frame.
+CosSin cross4InFrame(Vec3 d, Vec3 t, Vec3 b) { return stable::cross4(dot(d, t), dot(d, b)); }
 
 // Per-face tangent frames for the live triangles; returns the live faces and fills `compact`
 // with each face's dense index.
@@ -60,14 +68,33 @@ std::vector<char> applyPins(const Mesh& mesh, const std::vector<FaceId>& faces,
                             const std::vector<Index>& compact, CrossField& field,
                             float creaseAlignDegrees, const std::vector<char>* creaseAlignSupport);
 
+// A flow guide's soft pull on one face: `weight` in (0,1] and the guide tangent
+// encoded as the 4-RoSy unit complex (cos 4a, sin 4a) in that face's frame.
+struct GuideBias {
+    float weight = 0.0f;
+    float real = 1.0f;
+    float imag = 0.0f;
+};
+
+// Per-dense-face guide bias. Returns an EMPTY vector when there is nothing to
+// apply, which is what keeps the unguided sweep textually identical.
+std::vector<GuideBias> buildGuideConstraints(const Mesh& mesh, const std::vector<FaceId>& faces,
+                                             const std::vector<char>& constrained,
+                                             CrossField& field, const GuidanceField* guidance);
+
 // The converged damped transport-averaging solve shared by computeCrossField (its historical
 // sweep loop, byte-identical) and the multires hand-off relax: builds the 2F x 2F CSR
 // neighbour-averaging operator from the CURRENT field frames and iterates from the field's
 // current real/imag until maxDelta < 1e-6 (min 9 sweeps, cap `sweepCap`), re-pinning the
 // constrained faces every sweep. CYBER_QC_FIELD_ITERS overrides the cap for calibration.
+//
+// `bias` (empty by default) is the flow-guide soft constraint: a face with a positive
+// weight has its renormalised value blended toward the guide encoding each sweep. An
+// empty vector never enters that branch, so the unguided sweep is bit-identical.
 void transportSmooth(const Mesh& mesh, const std::vector<FaceId>& faces,
                      const std::vector<Index>& compact, const std::vector<char>& constrained,
-                     CrossField& field, int sweepCap, accel::IBackend& backend);
+                     CrossField& field, int sweepCap, accel::IBackend& backend,
+                     const std::vector<GuideBias>& bias = {});
 
 // CYBER_QC_FIELD_DUMP=<path>: write each live face's centroid, normal and final field
 // direction (one line per face) after the solve. Diagnosis instrumentation only.
@@ -99,8 +126,8 @@ void dumpField(const Mesh& mesh, const std::vector<FaceId>& faces, const CrossFi
 
 Vec3 CrossField::direction(FaceId f) const {
     // Recover theta from the 4-symmetry representation u = e^{i*4*theta}.
-    const float theta = std::atan2(imag[f.value], real[f.value]) / 4.0f;
-    return tangent[f.value] * std::cos(theta) + bitangent[f.value] * std::sin(theta);
+    const CosSin q = stable::quarter(real[f.value], imag[f.value]);
+    return tangent[f.value] * q.c + bitangent[f.value] * q.s;
 }
 
 float CrossField::angle(FaceId f) const {
@@ -111,9 +138,18 @@ float CrossField::angle(FaceId f) const {
     return theta;
 }
 
+std::string unhonoredGuideReport(const CrossField& field) {
+    if (field.guidedFaces > 0 || field.guideConflictFaces == 0) {
+        return {};  // the guides biased something, or no guide reached a face at all
+    }
+    return "flow guides: all " + std::to_string(field.guideConflictFaces) +
+           " faces the guides reached are owned by a hard pin (feature edge, boundary or crease "
+           "alignment), so the guides biased no face and the field is the unguided one";
+}
+
 CrossField computeCrossField(const Mesh& mesh, int iterations, accel::IBackend& backend,
-                             float creaseAlignDegrees,
-                             const std::vector<char>* creaseAlignSupport) {
+                             float creaseAlignDegrees, const std::vector<char>* creaseAlignSupport,
+                             const GuidanceField* guidance) {
     const std::size_t cap = mesh.faceCapacity();
     CrossField field;
     field.tangent.assign(cap, Vec3{1, 0, 0});
@@ -128,12 +164,65 @@ CrossField computeCrossField(const Mesh& mesh, int iterations, accel::IBackend& 
     }
     const std::vector<char> constrained =
         applyPins(mesh, faces, compact, field, creaseAlignDegrees, creaseAlignSupport);
-    transportSmooth(mesh, faces, compact, constrained, field, std::max(iterations, 120), backend);
+    const std::vector<GuideBias> bias =
+        buildGuideConstraints(mesh, faces, constrained, field, guidance);
+    transportSmooth(mesh, faces, compact, constrained, field, std::max(iterations, 120), backend,
+                    bias);
     dumpField(mesh, faces, field);
     return field;
 }
 
 namespace {
+
+std::vector<GuideBias> buildGuideConstraints(const Mesh& mesh, const std::vector<FaceId>& faces,
+                                             const std::vector<char>& constrained,
+                                             CrossField& field, const GuidanceField* guidance) {
+    std::size_t guidedFaces = 0;
+    std::size_t conflictFaces = 0;
+    if (guidance == nullptr || !guidance->hasGuides()) {
+        return {};
+    }
+    std::vector<GuideBias> bias(faces.size());
+    for (std::size_t c = 0; c < faces.size(); ++c) {
+        const FaceId f = faces[c];
+        const std::vector<VertexId> fv = mesh.faceVertices(f);
+        Vec3 centroid{0, 0, 0};
+        for (const VertexId v : fv) {
+            centroid += mesh.position(v);
+        }
+        centroid = centroid / static_cast<float>(fv.size());
+        const Vec3 n = normalized(mesh.faceNormal(f));
+        const GuideSample sample = guidance->guideAt(centroid, n);
+        if (!(sample.weight > 0.0f)) {
+            continue;
+        }
+        if (constrained[c] != 0) {
+            // A hard pin owns this face. Guides are soft by design, so the pin
+            // wins and the conflict is counted (never silently overridden, and
+            // never silently dropped either — the island report names it).
+            ++conflictFaces;
+            continue;
+        }
+        // Project the guide tangent into the face plane; a tangent that is
+        // (nearly) normal to the face carries no in-plane direction.
+        const Vec3 t = sample.tangent - n * dot(n, sample.tangent);
+        if (lengthSquared(t) < 1e-12f) {
+            continue;
+        }
+        const Vec3 tn = normalized(t);
+        const CosSin u = cross4InFrame(tn, field.tangent[f.value], field.bitangent[f.value]);
+        bias[c].weight = std::clamp(sample.weight, 0.0f, 1.0f);
+        bias[c].real = u.c;
+        bias[c].imag = u.s;
+        ++guidedFaces;
+    }
+    field.guidedFaces = guidedFaces;
+    field.guideConflictFaces = conflictFaces;
+    if (guidedFaces == 0) {
+        return {};  // nothing to blend: keep the unguided sweep textually identical
+    }
+    return bias;
+}
 
 std::vector<char> applyPins(const Mesh& mesh, const std::vector<FaceId>& faces,
                             const std::vector<Index>& compact, CrossField& field,
@@ -147,7 +236,7 @@ std::vector<char> applyPins(const Mesh& mesh, const std::vector<FaceId>& faces,
     if (const char* fc = std::getenv("CYBER_QC_FIELD_CREASE_DEG"); fc != nullptr) {
         alignDeg = static_cast<float>(std::atof(fc));
     }
-    const float alignCos = alignDeg > 0.0f ? std::cos(degreesToRadians(alignDeg)) : 2.0f;
+    const float alignCos = alignDeg > 0.0f ? stable::cosDegrees(alignDeg) : 2.0f;
     const auto creaseAligned = [&](const EdgeId e) {
         if (alignCos > 1.0f || mesh.edgeFaceCount(e) != 2) {
             return false;
@@ -176,8 +265,8 @@ std::vector<char> applyPins(const Mesh& mesh, const std::vector<FaceId>& faces,
     // when every own-side neighbour is coplanar. The separation is clean rather than delicate: a
     // cube's same-panel neighbours are EXACTLY coplanar (0 degrees), while any curvature at all
     // puts fandisk past a fraction of a degree.
-    const float planarCos = std::cos(degreesToRadians(kPlanarNeighbourDegrees));
-    const float sameSideCos = std::cos(degreesToRadians(45.0f));
+    const float planarCos = stable::cosDegrees(kPlanarNeighbourDegrees);
+    const float sameSideCos = stable::cosDegrees(45.0f);
     const auto planarNeighbourhood = [&](const FaceId f, const std::vector<VertexId>& fv) {
         const Vec3 n = normalized(mesh.faceNormal(f));
         // Use the VERTEX ring, not the edge ring. A crease-adjacent triangle's edge-neighbours can
@@ -234,9 +323,9 @@ std::vector<char> applyPins(const Mesh& mesh, const std::vector<FaceId>& faces,
             }
             const auto [a, b] = mesh.edgeVertices(e);
             const Vec3 d = normalized(mesh.position(b) - mesh.position(a));
-            const float alpha = frameAngle(d, field.tangent[f.value], field.bitangent[f.value]);
-            field.real[f.value] = std::cos(4.0f * alpha);
-            field.imag[f.value] = std::sin(4.0f * alpha);
+            const CosSin u = cross4InFrame(d, field.tangent[f.value], field.bitangent[f.value]);
+            field.real[f.value] = u.c;
+            field.imag[f.value] = u.s;
             constrained[c] = 1;
             if (mesh.isFeatureEdge(e) && mesh.edgeFaceCount(e) == 2) {
                 fillSeed[c] = 1;
@@ -288,9 +377,8 @@ std::vector<char> applyPins(const Mesh& mesh, const std::vector<FaceId>& faces,
             const std::size_t c = queue[head++];
             const FaceId f = faces[c];
             const Vec3 nF = normalized(mesh.faceNormal(f));
-            const float alpha = std::atan2(field.imag[f.value], field.real[f.value]) * 0.25f;
-            const Vec3 dir3d = field.tangent[f.value] * std::cos(alpha) +
-                               field.bitangent[f.value] * std::sin(alpha);
+            const CosSin q = stable::quarter(field.real[f.value], field.imag[f.value]);
+            const Vec3 dir3d = field.tangent[f.value] * q.c + field.bitangent[f.value] * q.s;
             const std::vector<VertexId> fv = mesh.faceVertices(f);
             for (std::size_t k = 0; k < fv.size(); ++k) {
                 const EdgeId e = mesh.edgeBetween(fv[k], fv[(k + 1) % fv.size()]);
@@ -308,10 +396,10 @@ std::vector<char> applyPins(const Mesh& mesh, const std::vector<FaceId>& faces,
                     if (dot(nF, normalized(mesh.faceNormal(g))) < planarCos) {
                         continue;  // genuinely curved: leave to the smoother
                     }
-                    const float beta =
-                        frameAngle(dir3d, field.tangent[g.value], field.bitangent[g.value]);
-                    field.real[g.value] = std::cos(4.0f * beta);
-                    field.imag[g.value] = std::sin(4.0f * beta);
+                    const CosSin u =
+                        cross4InFrame(dir3d, field.tangent[g.value], field.bitangent[g.value]);
+                    field.real[g.value] = u.c;
+                    field.imag[g.value] = u.s;
                     constrained[gc] = 1;
                     queue.push_back(gc);
                 }
@@ -331,7 +419,8 @@ std::vector<char> applyPins(const Mesh& mesh, const std::vector<FaceId>& faces,
 
 void transportSmooth(const Mesh& mesh, const std::vector<FaceId>& faces,
                      const std::vector<Index>& compact, const std::vector<char>& constrained,
-                     CrossField& field, int sweepCap, accel::IBackend& backend) {
+                     CrossField& field, int sweepCap, accel::IBackend& backend,
+                     const std::vector<GuideBias>& bias) {
     const std::size_t nf = faces.size();
 
     // Build the 2F x 2F transport-averaging operator as CSR: row 2c/2c+1 hold
@@ -361,22 +450,26 @@ void transportSmooth(const Mesh& mesh, const std::vector<FaceId>& faces,
         }
         const auto [a, b] = mesh.edgeVertices(e);
         const Vec3 d = normalized(mesh.position(b) - mesh.position(a));
-        const float af = frameAngle(d, field.tangent[ef[0].value], field.bitangent[ef[0].value]);
-        const float ag = frameAngle(d, field.tangent[ef[1].value], field.bitangent[ef[1].value]);
-        // Transport g -> f rotates by 4*(af-ag); f -> g by the negative.
-        const auto addBlock = [&rows](Index row, Index col, float phi) {
-            const float cphi = std::cos(phi), sphi = std::sin(phi);
-            rows[2 * row].emplace_back(2 * col, cphi);
-            rows[2 * row].emplace_back(2 * col + 1, -sphi);
-            rows[2 * row + 1].emplace_back(2 * col, sphi);
-            rows[2 * row + 1].emplace_back(2 * col + 1, cphi);
+        const float xf = dot(d, field.tangent[ef[0].value]);
+        const float yf = dot(d, field.bitangent[ef[0].value]);
+        const float xg = dot(d, field.tangent[ef[1].value]);
+        const float yg = dot(d, field.bitangent[ef[1].value]);
+        // Transport g -> f rotates by 4*(af-ag); f -> g by the negative, which on
+        // the unit circle is the conjugate -- so the pair shares one evaluation.
+        const auto addBlock = [&rows](Index row, Index col, CosSin r) {
+            rows[2 * row].emplace_back(2 * col, r.c);
+            rows[2 * row].emplace_back(2 * col + 1, -r.s);
+            rows[2 * row + 1].emplace_back(2 * col, r.s);
+            rows[2 * row + 1].emplace_back(2 * col + 1, r.c);
         };
-        addBlock(cf, cg, 4.0f * (af - ag));
-        addBlock(cg, cf, 4.0f * (ag - af));
+        const CosSin rfg = stable::cross4Delta(xf, yf, xg, yg);
+        addBlock(cf, cg, rfg);
+        addBlock(cg, cf, {rfg.c, -rfg.s});
     }
 
     accel::SparseMatrix mat;
     mat.rows = 2 * nf;
+    mat.cols = 2 * nf;
     mat.rowStart.reserve(2 * nf + 1);
     mat.rowStart.push_back(0);
     for (const auto& row : rows) {
@@ -403,8 +496,22 @@ void transportSmooth(const Mesh& mesh, const std::vector<FaceId>& faces,
             if (constrained[c]) {
                 continue;
             }
-            const float re = y[2 * c];
-            const float im = y[2 * c + 1];
+            float re = y[2 * c];
+            float im = y[2 * c + 1];
+            // Flow-guide soft constraint. Pulling the TRANSPORTED value toward
+            // the guide encoding every sweep (rather than pinning) keeps the
+            // guide competing with the smoothness term instead of overriding
+            // it, so the influence decays smoothly outside the radius.
+            if (!bias.empty() && bias[c].weight > 0.0f) {
+                const float w = bias[c].weight;
+                const float len0 = std::sqrt(re * re + im * im);
+                if (len0 > 1e-12f) {
+                    re /= len0;
+                    im /= len0;
+                }
+                re = (1.0f - w) * re + w * bias[c].real;
+                im = (1.0f - w) * im + w * bias[c].imag;
+            }
             const float len = std::sqrt(re * re + im * im);
             if (len > 1e-12f) {
                 const float nr = re / len;
@@ -451,7 +558,8 @@ Vec3 matchRoSyLocal(Vec3 ref, Vec3 d, Vec3 n) {
 
 CrossField computeCrossFieldFromOrientation(const Mesh& mesh, int iterations,
                                             accel::IBackend& backend, float creaseAlignDegrees,
-                                            const std::vector<char>* creaseAlignSupport) {
+                                            const std::vector<char>* creaseAlignSupport,
+                                            const GuidanceField* guidance) {
     const std::size_t cap = mesh.faceCapacity();
     CrossField field;
     field.tangent.assign(cap, Vec3{1, 0, 0});
@@ -502,9 +610,9 @@ CrossField computeCrossFieldFromOrientation(const Mesh& mesh, int iterations,
             continue;  // no usable orientation -> leave the identity cross (theta 0)
         }
         const Vec3 dFace = projectUnitLocal(acc, n);
-        const float theta = frameAngle(dFace, field.tangent[i], field.bitangent[i]);
-        field.real[i] = std::cos(4.0f * theta);
-        field.imag[i] = std::sin(4.0f * theta);
+        const CosSin u = cross4InFrame(dFace, field.tangent[i], field.bitangent[i]);
+        field.real[i] = u.c;
+        field.imag[i] = u.s;
     }
 
     // Pin exactly as computeCrossField does (feature/boundary alignment, crease pins, planar
@@ -517,7 +625,10 @@ CrossField computeCrossFieldFromOrientation(const Mesh& mesh, int iterations,
     // the seed's cone placement while restoring stock-level fine-scale smoothness.
     const std::vector<char> constrained =
         applyPins(mesh, faces, compact, field, creaseAlignDegrees, creaseAlignSupport);
-    transportSmooth(mesh, faces, compact, constrained, field, std::max(iterations, 120), backend);
+    const std::vector<GuideBias> bias =
+        buildGuideConstraints(mesh, faces, constrained, field, guidance);
+    transportSmooth(mesh, faces, compact, constrained, field, std::max(iterations, 120), backend,
+                    bias);
     dumpField(mesh, faces, field);
     return field;
 }

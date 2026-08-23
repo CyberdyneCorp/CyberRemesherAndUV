@@ -27,6 +27,16 @@ struct ActionButton {
     std::string label;
 };
 
+// A flow guide as it travels over the wire: an ordered polyline (flat xyz
+// triples) plus its strength and influence radius. The bridge's job is
+// transport + storage — the remesh itself is not a bridge command today, so
+// guides drawn in a DCC land here and the engine reads them from the session.
+struct WireGuide {
+    std::vector<float> points;  // 3 floats per point, at least 2 points
+    float strength = 1.0f;
+    float radius = 0.0f;
+};
+
 // In-memory backing store the bridge acts on: the current Target and EditMesh,
 // remote action buttons and their pending presses, symmetry, camera pose, the
 // last message shown, and an EditMesh revision counter for change queries.
@@ -44,7 +54,15 @@ public:
     [[nodiscard]] WireMesh editMesh() const;  // pulled by clients
     [[nodiscard]] std::uint64_t editMeshRevision() const;
 
-    void clearScene();     // drop target + editmesh, bump revision
+    // Guidance transport: flow guides and painted density authored against the
+    // current Target. Cleared alongside it, since both index into its geometry.
+    void setGuides(std::vector<WireGuide> guides);
+    [[nodiscard]] std::vector<WireGuide> guides() const;
+    void clearGuides();
+    void setDensity(std::vector<float> density);
+    [[nodiscard]] std::vector<float> density() const;
+
+    void clearScene();     // drop target + editmesh + guidance, bump revision
     void closeDocument();  // clearScene + drop actions/message
 
     void showMessage(std::string text);
@@ -65,6 +83,8 @@ public:
 private:
     mutable std::mutex m_mutex;
     std::optional<WireMesh> m_target;
+    std::vector<WireGuide> m_guides;
+    std::vector<float> m_density;
     WireMesh m_editMesh;
     std::uint64_t m_editRevision = 0;
     std::string m_message;

@@ -3,6 +3,7 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <vector>
 
 #include "cyber/core/io.hpp"
 #include "cyber/core/mesh.hpp"
@@ -160,4 +161,59 @@ TEST_CASE("malformed OBJ face indices are skipped with a warning") {
     REQUIRE(result.ok());
     REQUIRE(result.value().mesh.faceCount() == 1);
     REQUIRE(!result.value().warnings.empty());
+}
+
+TEST_CASE("out-of-range vt/vn face indices are skipped, not dereferenced") {
+    // tinyobjloader only warns about a positive out-of-range texcoord/normal index and
+    // still reports success, so the raw index used to reach the attribute arrays.
+    SUBCASE("out-of-range texcoord index") {
+        const auto path = writeFile("bad_texcoord.obj",
+                                    "v 0 0 0\nv 1 0 0\nv 0 1 0\nv 2 0 0\n"
+                                    "vt 0 0\nvt 1 0\nvt 0 1\n"
+                                    "f 1/1 2/2 3/3\nf 1/1 2/2 4/60000000\n");
+        auto result = io::importMesh(path);
+        REQUIRE(result.ok());
+        REQUIRE(result.value().mesh.faceCount() == 1);
+        REQUIRE(!result.value().warnings.empty());
+    }
+    SUBCASE("out-of-range normal index") {
+        const auto path = writeFile("bad_normal.obj",
+                                    "v 0 0 0\nv 1 0 0\nv 0 1 0\nv 2 0 0\n"
+                                    "vn 0 0 1\n"
+                                    "f 1//1 2//1 3//1\nf 1//1 2//1 4//60000000\n");
+        auto result = io::importMesh(path);
+        REQUIRE(result.ok());
+        REQUIRE(result.value().mesh.faceCount() == 1);
+        REQUIRE(!result.value().warnings.empty());
+    }
+    SUBCASE("every face out of range leaves no usable mesh") {
+        const auto path = writeFile("all_bad_texcoord.obj",
+                                    "v 0 0 0\nv 1 0 0\nv 0 1 0\n"
+                                    "vt 0 0\n"
+                                    "f 1/60000000 2/60000000 3/60000000\n");
+        auto result = io::importMesh(path);
+        REQUIRE(!result.ok());
+        REQUIRE(result.error().code == io::ErrorCode::EmptyMesh);
+    }
+}
+
+TEST_CASE("in-range vt/vn corner attributes still import unchanged") {
+    const auto path = writeFile("uv_normals.obj",
+                                "v 0 0 0\nv 1 0 0\nv 0 1 0\n"
+                                "vt 0 0\nvt 1 0\nvt 0 1\n"
+                                "vn 0 0 1\n"
+                                "f 1/1/1 2/2/1 3/3/1\n");
+    auto result = io::importMesh(path);
+    REQUIRE(result.ok());
+    REQUIRE(result.value().mesh.faceCount() == 1);
+    REQUIRE(result.value().warnings.empty());
+    const Mesh& mesh = result.value().mesh;
+    const auto* uvs = mesh.cornerAttributes().find<Vec2>(io::kUvAttribute);
+    const auto* normals = mesh.cornerAttributes().find<Vec3>(io::kNormalAttribute);
+    REQUIRE(uvs != nullptr);
+    REQUIRE(normals != nullptr);
+    const std::vector<cyber::LoopId> loops = mesh.faceLoops(FaceId{0});
+    REQUIRE(loops.size() == 3);
+    REQUIRE((*uvs)[loops[1].value].x == doctest::Approx(1.0f));
+    REQUIRE((*normals)[loops[0].value].z == doctest::Approx(1.0f));
 }

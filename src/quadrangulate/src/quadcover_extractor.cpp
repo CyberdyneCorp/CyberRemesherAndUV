@@ -31,8 +31,10 @@
 #include "cyber/core/isotropic.hpp"
 #include "cyber/core/math.hpp"
 #include "cyber/core/reference_surface.hpp"
+#include "cyber/core/remesh_params.hpp"
 #include "cyber/quadrangulate/position_field.hpp"
 #include "cyber/quadrangulate/seamless_solver.hpp"
+#include "stable_angle.hpp"
 
 #ifdef CYBER_HAVE_QUADCOVER
 #include "autoremesher_solve.hpp"
@@ -216,7 +218,7 @@ void filterFeatureEdgesToReference(Mesh& mesh, const std::vector<std::array<Vec3
         const float cosAngle =
             std::clamp(dot(normalized(mesh.faceNormal(ef[0])), normalized(mesh.faceNormal(ef[1]))),
                        -1.0f, 1.0f);
-        if (std::acos(cosAngle) >= fallbackNormalAngle) {
+        if (stable::acosRadians(cosAngle) >= fallbackNormalAngle) {
             continue;  // knife edge: the lever-off tag would keep it too
         }
         const auto [a, b] = mesh.edgeVertices(e);
@@ -378,7 +380,7 @@ bool bendPersistsAtScale(const Mesh& work, EdgeId e, const Mesh& original,
     // period ~= the cell puts opposite flanks under the probes and reads as a crease:
     // measured, it kept 2975 of nefertiti's 5214 wrinkle pins and cones went 589 -> 1021).
     constexpr std::array<float, 3> kProbeScales{0.3f, 0.6f, 1.0f};
-    const float coherentCos = std::cos(degreesToRadians(20.0f));
+    const float coherentCos = stable::cosDegrees(20.0);
     Vec3 sideMean[2];
     for (std::size_t s = 0; s < 2; ++s) {
         std::array<Vec3, kProbeScales.size()> n{};
@@ -400,7 +402,7 @@ bool bendPersistsAtScale(const Mesh& work, EdgeId e, const Mesh& original,
         }
         sideMean[s] = normalized(n[0] + n[1] + n[2]);
     }
-    return dot(sideMean[0], sideMean[1]) < std::cos(degreesToRadians(minAngleDegrees));
+    return dot(sideMean[0], sideMean[1]) < stable::cosDegrees(minAngleDegrees);
 }
 
 // Resolution-aware feature DEMOTION, tag level (kill switch CYBER_QC_NO_FEATURE_DEMOTE, see
@@ -443,7 +445,7 @@ std::vector<char> creaseAlignSupportFlags(const Mesh& mesh,
                                           const ReferenceSurface& originalRef, float sampleDistance,
                                           float persistDegrees) {
     std::vector<char> flags(mesh.edgeCapacity(), 1);
-    const float candCos = std::cos(degreesToRadians(35.0f));
+    const float candCos = stable::cosDegrees(35.0);
     for (Index ei = 0; ei < mesh.edgeCapacity(); ++ei) {
         const EdgeId e{ei};
         if (!mesh.isAlive(e) || mesh.edgeFaceCount(e) != 2) {
@@ -651,6 +653,9 @@ bool prepareNativeSolve(const Mesh& mesh, float targetEdgeLength, float adaptivi
     IsotropicOptions iso;
     iso.targetEdgeLength = targetEdgeLength;
     iso.adaptivity = adaptivity;
+    // Painted density sizes the solve substrate: quad-cover skips the pipeline's
+    // isotropic stage, so this is where density has to enter for this backend.
+    iso.density = ctx.guidance;
     if (isotropicRemesh(work, reference, iso, nullptr, cancel) != IsotropicStatus::Success ||
         work.faceCount() == 0) {
         reason = "isotropic remesh failed (or cancelled)";
@@ -709,7 +714,7 @@ bool prepareNativeSolve(const Mesh& mesh, float targetEdgeLength, float adaptivi
                                     originalRef, sampleDist, persistDeg);
         if (fieldStats) {
             std::size_t candidates = 0, supported = 0;
-            const float candCos = std::cos(degreesToRadians(45.0f));
+            const float candCos = stable::cosDegrees(45.0);
             for (Index ei = 0; ei < work.edgeCapacity(); ++ei) {
                 const EdgeId e{ei};
                 if (!work.isAlive(e) || work.edgeFaceCount(e) != 2) {
@@ -805,9 +810,9 @@ bool prepareNativeSolve(const Mesh& mesh, float targetEdgeLength, float adaptivi
     }
 
     auto backend = accel::defaultBackend();
-    ctx.setup =
-        buildSeamlessSetup(work, kFieldIterations, *backend, ctx.featureBinding,
-                           ctx.creaseAlignSupport.empty() ? nullptr : &ctx.creaseAlignSupport);
+    ctx.setup = buildSeamlessSetup(
+        work, kFieldIterations, *backend, ctx.featureBinding,
+        ctx.creaseAlignSupport.empty() ? nullptr : &ctx.creaseAlignSupport, ctx.guidance);
     const SeamlessSetup& setup = ctx.setup;
     if (fieldStats) {
         // Cone census: total cones, how many sit off tagged feature edges (spurious flat-region
@@ -815,7 +820,7 @@ bool prepareNativeSolve(const Mesh& mesh, float targetEdgeLength, float adaptivi
         // incident interior edge past the 45-degree normal-angle alignment threshold) — the
         // cones-vs-web statistic for the wrinkle-web lever.
         std::size_t cones = 0, coneFlat = 0, coneOnAlign = 0;
-        const float alignCos = std::cos(degreesToRadians(45.0f));
+        const float alignCos = stable::cosDegrees(45.0);
         for (Index vi = 0; vi < work.vertexCapacity(); ++vi) {
             const VertexId vv{vi};
             if (!work.isAlive(vv) || vi >= setup.singularityIndex.size() ||
@@ -928,8 +933,9 @@ SeamlessUv computeSeamlessUvNative(const Mesh& mesh, float targetEdgeLength, flo
     const char* spEnv = std::getenv("CYBER_QC_SPACING_MUL");
     const float spacingMul = spEnv != nullptr ? static_cast<float>(std::atof(spEnv)) : spacingScale;
     const auto tSolve0 = tick();
-    const Parameterization param = solveParameterization(work, setup, targetEdgeLength * spacingMul,
-                                                         *backend, cancel, &prep.solveCache);
+    const Parameterization param =
+        solveParameterization(work, setup, targetEdgeLength * spacingMul, *backend, cancel,
+                              &prep.solveCache, prep.guidance);
     if (!param.valid) {
         logNative(false, "parameterization invalid (or cancelled)");
         return uv;
@@ -1044,8 +1050,8 @@ double nativeRelaxedCellArea(const Mesh& mesh, float targetEdgeLength, float ada
     }
     auto backend = accel::defaultBackend();
     const auto tRelax0 = tick();
-    const double cells =
-        relaxedCellArea(ctx.work, ctx.setup, targetEdgeLength, *backend, cancel, &ctx.solveCache);
+    const double cells = relaxedCellArea(ctx.work, ctx.setup, targetEdgeLength, *backend, cancel,
+                                         &ctx.solveCache, ctx.guidance);
     if (std::getenv("CYBER_QC_TIME") != nullptr) {
         std::fprintf(stderr,
                      "[qc-time] probe: isotropic=%ldms field+setup=%ldms relaxed=%ldms "
@@ -1213,7 +1219,7 @@ SeamlessUv computeSeamlessUvVendored(const Mesh& mesh, float targetEdgeLength, f
 // ~4%), near zero on smooth organic meshes (spot/rocker/bunny < 0.2%). Const and
 // non-mutating (unlike Mesh::tagFeatureEdges, which writes edge flags).
 float creaseEdgeFraction(const Mesh& mesh, float dihedralDegrees) {
-    const float cosThresh = std::cos(dihedralDegrees * 3.14159265358979324f / 180.0f);
+    const float cosThresh = stable::cosDegrees(dihedralDegrees);
     std::size_t interior = 0;
     std::size_t creases = 0;
     for (Index e = 0; e < mesh.edgeCapacity(); ++e) {
@@ -1253,8 +1259,16 @@ SeamlessUv computeSeamlessUv(const Mesh& mesh, float targetEdgeLength, float har
     // the original vendored-first order for A/B.
     const char* routeEnv = std::getenv("CYBER_QC_ROUTE_CREASE");
     const float routeThresh = routeEnv != nullptr ? static_cast<float>(std::atof(routeEnv)) : 0.02f;
-    const bool routeNative = haveNative && std::getenv("CYBER_QC_NO_ROUTE") == nullptr &&
-                             routeThresh > 0.0f && creaseEdgeFraction(mesh, 45.0f) >= routeThresh;
+    // User-drawn guidance FORCES the native route: the vendored Geogram
+    // quad_cover has no hook for either flow guides or painted density (it
+    // builds its own frame field from a single scalar density inside sources we
+    // do not patch). Routing a guided island there would silently drop the
+    // input, which is precisely the failure mode this feature exists to avoid.
+    const bool guided = ctx != nullptr && ctx->guidance != nullptr;
+    const bool routeNative =
+        haveNative &&
+        (guided || (std::getenv("CYBER_QC_NO_ROUTE") == nullptr && routeThresh > 0.0f &&
+                    creaseEdgeFraction(mesh, 45.0f) >= routeThresh));
 
     if (routeNative) {
         SeamlessUv native = computeSeamlessUvNative(mesh, targetEdgeLength, harnessAdaptivity,
@@ -1262,9 +1276,25 @@ SeamlessUv computeSeamlessUv(const Mesh& mesh, float targetEdgeLength, float har
         if (native.valid) {
             return native;
         }
-        // Native declined -> fall back to the vendored path (valid or not).
+        // Native declined -> fall back to the vendored path (valid or not). A
+        // guided island loses its guidance here; say so instead of pretending.
+        if (guided) {
+            ctx->guidanceUnhonoredReason =
+                "flow guides and painted density: the native seamless solve declined this "
+                "island and the vendored Geogram quad_cover solve has no guide/density hook";
+        }
         return computeSeamlessUvVendored(mesh, targetEdgeLength, harnessScaling, harnessAdaptivity,
                                          cancel);
+    }
+    if (guided) {
+        // Guidance normally FORCES the native route above; the only way a guided
+        // island reaches this line is the developer kill switch, which turns the
+        // guide/density hooks off with it. Report it on the same channel as a
+        // native decline instead of quietly running an unguided vendored solve.
+        ctx->guidanceUnhonoredReason =
+            "flow guides and painted density: CYBER_QC_NO_NATIVE disabled the native seamless "
+            "solve, and the vendored Geogram quad_cover solve it routed to has no guide/density "
+            "hook — unset CYBER_QC_NO_NATIVE to honor the guidance";
     }
 
     // Vendored (Geogram quad_cover) FIRST — QuadriFlow parity (1-4% irregular),
@@ -1520,7 +1550,12 @@ void splitToIslands(const std::vector<std::vector<std::size_t>>& faces,
 // reference to keep the port auditable. Cognitive complexity of extractMesh /
 // extractConnections is high by nature (deeply nested orbit walk / isoline
 // tracer) — this is an irreducible ported algorithm.
-using Graph = std::unordered_map<std::size_t, std::unordered_set<std::size_t>>;
+// Ordered, not hashed: extractEdges / simplifyGraph / collapseShortEdges /
+// collapseTriangles / removeSingleEndpoints all ITERATE this graph and act on what
+// they see first, so hash order made the traced mesh a property of the standard
+// library. libstdc++ and libc++ traced the same paraboloid into 144 and 224 quads.
+// Index order is canonical and derives only from the input.
+using Graph = std::map<std::size_t, std::set<std::size_t>>;
 using EdgePair = std::pair<std::size_t, std::size_t>;
 
 class IsolineExtractor {
@@ -1612,7 +1647,7 @@ void IsolineExtractor::extractEdges(const std::set<EdgePair>& connections, Graph
 
 void IsolineExtractor::simplifyGraph(Graph& graph) {
     for (;;) {
-        std::unordered_map<std::size_t, std::pair<std::size_t, std::size_t>> delayPairs;
+        std::map<std::size_t, std::pair<std::size_t, std::size_t>> delayPairs;
         for (auto it = graph.begin(); it != graph.end();) {
             if (it->second.size() != 2) {
                 ++it;
@@ -1809,12 +1844,16 @@ bool IsolineExtractor::collapseShortEdges(std::vector<DVec3>& crossPoints, Graph
     std::map<EdgePair, double> edgeLengths;
     for (const auto& node : edgeConnectMap) {
         for (const std::size_t neighbor : node.second) {
-            if (edgeLengths.end() != edgeLengths.find({neighbor, node.first})) {
+            // Canonical (low, high) key: the pair is an undirected edge, and
+            // collapseEdge merges first into second, so a key that kept whichever
+            // orientation was reached first also decided which endpoint survived.
+            const EdgePair key{std::min(node.first, neighbor), std::max(node.first, neighbor)};
+            if (edgeLengths.end() != edgeLengths.find(key)) {
                 continue;
             }
             const double edgeLength = dLength(crossPoints[node.first] - crossPoints[neighbor]);
             totalLength += edgeLength;
-            edgeLengths.insert({{node.first, neighbor}, edgeLength});
+            edgeLengths.insert({key, edgeLength});
             ++edgeCount;
         }
     }
@@ -3317,7 +3356,7 @@ std::size_t cancelValenceDipoles(std::vector<Vec3>& vertices,
         const float len = length(n);
         return len > 0.0f ? n * (1.0f / len) : n;
     };
-    const float cosThreshold = std::cos(featureDegrees * 3.14159265358979323846f / 180.0f);
+    const float cosThreshold = stable::cosDegrees(featureDegrees);
     std::map<std::pair<int, int>, std::pair<int, Vec3>> edgeFaces;  // count + first normal
     const auto scanFace = [&](const std::vector<std::size_t>& f) {
         if (f.size() < 3) {
@@ -3422,6 +3461,27 @@ public:
         // context computes them once and each attempt re-runs only the (spacing-dependent)
         // parameterization + extraction.
         NativeSolveContext nativeCtx;
+        nativeCtx.guidance = m_guidance;  // non-null forces the native route (see the header)
+        // Everything the run could NOT do with the guidance, on the route it
+        // actually took. Called on EVERY exit below (including the early one),
+        // because an island that never reached a solver honored nothing either.
+        const auto reportUnhonoredGuidance = [this, &nativeCtx]() {
+            if (m_guidance == nullptr) {
+                return;
+            }
+            if (!nativeCtx.guidanceUnhonoredReason.empty()) {
+                m_unhonored.push_back(nativeCtx.guidanceUnhonoredReason);
+                return;
+            }
+            // The native route ran: the guides may still have been absorbed
+            // whole by hard pins, which is not "honored" either.
+            if (nativeCtx.ready) {
+                if (std::string absorbed = unhonoredGuideReport(nativeCtx.setup.field);
+                    !absorbed.empty()) {
+                    m_unhonored.push_back(std::move(absorbed));
+                }
+            }
+        };
         // Probe-predicted initial scaling (native route only). The hardcoded 0.5 start
         // overshoots the extracted count 1.5-3x on every corpus mesh, so the loop below
         // always pays a second full solve. The relaxed Poisson phase already fixes the UV
@@ -3447,7 +3507,8 @@ public:
                                   std::getenv("CYBER_QC_NO_NATIVE") == nullptr &&
                                   std::getenv("CYBER_QC_SCALING") == nullptr &&
                                   std::getenv("CYBER_QC_SPACING_MUL") == nullptr &&
-                                  !vendoredSeamlessAvailable() && targetQuads > 0.0;
+                                  (!vendoredSeamlessAvailable() || m_guidance != nullptr) &&
+                                  targetQuads > 0.0;
         if (probeEnabled) {
             const double cells = nativeRelaxedCellArea(mesh, targetEdgeLength, m_adaptivity,
                                                        m_featureDegrees, cancel, nativeCtx);
@@ -3466,6 +3527,7 @@ public:
             const SeamlessUv uv = computeSeamlessUv(mesh, targetEdgeLength, scaling, m_adaptivity,
                                                     cancel, m_featureDegrees, &nativeCtx);
             if (!uv.valid) {
+                reportUnhonoredGuidance();
                 return {.success = false,
                         .cancelled = false,
                         .failureReason =
@@ -3522,6 +3584,7 @@ public:
             }
             scaling = std::clamp(scaling * static_cast<float>(std::sqrt(ratio)), 0.2f, 1.5f);
         }
+        reportUnhonoredGuidance();
         if (progress != nullptr) {
             progress->report(0.5f, "quadrangulate (quad-cover: isoline extract)");
         }
@@ -3623,6 +3686,20 @@ public:
         return {.success = true, .cancelled = false, .failureReason = {}};
     }
 
+    // Guides reach the native cross field; painted density reaches both the
+    // native solve's isotropic pre-remesh AND its per-face grid spacing. Both
+    // are native-only, so accepting here also forces the native route.
+    bool acceptGuidance(const GuidanceField& field, std::string& reason) override {
+        (void)reason;
+        m_guidance = &field;
+        m_unhonored.clear();
+        return true;
+    }
+
+    [[nodiscard]] std::vector<std::string> unhonoredGuidance() const override {
+        return m_unhonored;
+    }
+
     [[nodiscard]] std::string name() const override { return "quad-cover"; }
 
 private:
@@ -3630,6 +3707,8 @@ private:
     float m_adaptivity;
     int m_holeFillMaxBoundary;
     float m_featureDegrees = 40.0f;
+    const GuidanceField* m_guidance = nullptr;
+    std::vector<std::string> m_unhonored;
 };
 
 }  // namespace
@@ -3637,8 +3716,18 @@ private:
 std::unique_ptr<IQuadrangulator> makeQuadCoverQuadrangulator(int fieldIterations, float adaptivity,
                                                              int holeFillMaxBoundary,
                                                              float featureDegrees) {
-    return std::make_unique<QuadCoverQuadrangulator>(fieldIterations, adaptivity,
-                                                     holeFillMaxBoundary, featureDegrees);
+    // Clamp here, not just at the call site: these arguments drive the solve
+    // directly (they never pass through remesh()'s validation), so an entry
+    // point handing over an out-of-range value would run unclamped while the
+    // pipeline reports it as clamped. Reuse validate() so the ranges stay in
+    // one place (remeshing-parameters spec, "Validation at every entry point").
+    Parameters raw;
+    raw.adaptivity = adaptivity;
+    raw.holeFillMaxBoundary = holeFillMaxBoundary;
+    raw.sharpEdgeDegrees = featureDegrees;
+    const Parameters clamped = validate(raw).params;
+    return std::make_unique<QuadCoverQuadrangulator>(
+        fieldIterations, clamped.adaptivity, clamped.holeFillMaxBoundary, clamped.sharpEdgeDegrees);
 }
 
 bool quadCoverAvailable() {
@@ -3647,6 +3736,14 @@ bool quadCoverAvailable() {
     // — quad-cover no longer needs Geogram (CYBER_HAVE_QUADCOVER) or the CYBER_QUADCOVER_CLI
     // harness. The vendored / subprocess paths remain as faster/reference fallbacks.
     return true;
+}
+
+std::string quadCoverSolverBuild() {
+#ifdef CYBER_HAVE_QUADCOVER
+    return "native+geogram";
+#else
+    return "native";
+#endif
 }
 
 }  // namespace cyber::remesh

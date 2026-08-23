@@ -7,11 +7,16 @@ namespace cyber {
 
 // ---- element allocation -------------------------------------------------
 
+// An id popped off a free list still carries the dead element's attribute
+// values, so every alloc* clears the recycled row: a freshly allocated id
+// always starts from column defaults (rows grown by resize already are).
+
 VertexId Mesh::allocVertex() {
     Index i;
     if (!m_freeVertices.empty()) {
         i = m_freeVertices.back();
         m_freeVertices.pop_back();
+        m_vertexAttrs.reset(i);
     } else {
         i = static_cast<Index>(m_vertices.size());
         m_vertices.emplace_back();
@@ -28,6 +33,7 @@ EdgeId Mesh::allocEdge() {
     if (!m_freeEdges.empty()) {
         i = m_freeEdges.back();
         m_freeEdges.pop_back();
+        m_edgeAttrs.reset(i);
     } else {
         i = static_cast<Index>(m_edges.size());
         m_edges.emplace_back();
@@ -44,6 +50,7 @@ FaceId Mesh::allocFace() {
     if (!m_freeFaces.empty()) {
         i = m_freeFaces.back();
         m_freeFaces.pop_back();
+        m_faceAttrs.reset(i);
     } else {
         i = static_cast<Index>(m_faces.size());
         m_faces.emplace_back();
@@ -60,6 +67,7 @@ LoopId Mesh::allocLoop() {
     if (!m_freeLoops.empty()) {
         i = m_freeLoops.back();
         m_freeLoops.pop_back();
+        m_cornerAttrs.reset(i);
     } else {
         i = static_cast<Index>(m_loops.size());
         m_loops.emplace_back();
@@ -164,6 +172,36 @@ void Mesh::destroyEdgeIfUnused(EdgeId e) {
 
 // ---- construction ----------------------------------------------------------
 
+namespace {
+
+// Exact "the corner list repeats a vertex" test. The nested scan is fastest
+// for the 3/4-corner faces that dominate real meshes; face arity is caller-
+// and importer-controlled, though, and n^2/2 comparisons stall the loader on
+// one hostile n-gon, so wider faces go through a sorted scratch copy.
+bool hasRepeatedVertex(std::span<const VertexId> vertices) {
+    constexpr std::size_t kNestedScanLimit = 16;
+    const std::size_t n = vertices.size();
+    if (n <= kNestedScanLimit) {
+        for (std::size_t i = 0; i < n; ++i) {
+            for (std::size_t j = i + 1; j < n; ++j) {
+                if (vertices[i] == vertices[j]) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+    std::vector<Index> sorted;
+    sorted.reserve(n);
+    for (const VertexId v : vertices) {
+        sorted.push_back(v.value);
+    }
+    std::sort(sorted.begin(), sorted.end());
+    return std::adjacent_find(sorted.begin(), sorted.end()) != sorted.end();
+}
+
+}  // namespace
+
 VertexId Mesh::addVertex(Vec3 position) {
     const VertexId v = allocVertex();
     m_vertices[v.value].position = position;
@@ -179,11 +217,9 @@ FaceId Mesh::addFace(std::span<const VertexId> vertices) {
         if (!isAlive(vertices[i])) {
             return {};
         }
-        for (std::size_t j = i + 1; j < n; ++j) {
-            if (vertices[i] == vertices[j]) {
-                return {};
-            }
-        }
+    }
+    if (hasRepeatedVertex(vertices)) {
+        return {};
     }
 
     const FaceId f = allocFace();

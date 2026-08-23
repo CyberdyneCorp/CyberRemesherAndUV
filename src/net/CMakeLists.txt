@@ -11,7 +11,7 @@ add_library(cyber::net ALIAS cyber_net)
 target_include_directories(cyber_net PUBLIC include)
 # nlohmann/json is vendored with tinygltf (MIT, audited); included as SYSTEM so
 # its internals never trip the strict project warning flags.
-target_include_directories(cyber_net SYSTEM PRIVATE ${CMAKE_SOURCE_DIR}/thirdparty/tinygltf)
+target_include_directories(cyber_net SYSTEM PRIVATE ${PROJECT_SOURCE_DIR}/thirdparty/tinygltf)
 
 find_package(Threads REQUIRED)
 target_link_libraries(cyber_net PUBLIC Threads::Threads)

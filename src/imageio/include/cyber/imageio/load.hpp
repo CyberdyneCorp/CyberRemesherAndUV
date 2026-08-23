@@ -47,13 +47,27 @@ struct LoadedImage {
     if (image.width <= 0 || image.height <= 0 || image.channels < 3) {
         return {0.0f, 0.0f, 0.0f, 1.0f};
     }
+    // A NaN or infinite coordinate has no texel to clamp to and would make the
+    // conversion below undefined; treat it like the empty-image case so a mesh
+    // carrying a non-finite UV cannot poison the sampled result.
+    if (!std::isfinite(u) || !std::isfinite(v)) {
+        return {0.0f, 0.0f, 0.0f, 1.0f};
+    }
     const int w = image.width;
     const int h = image.height;
     const int ch = image.channels;
     const float fx = u * static_cast<float>(w) - 0.5f;
     const float fy = v * static_cast<float>(h) - 0.5f;
-    const int x0 = static_cast<int>(std::floor(fx));
-    const int y0 = static_cast<int>(std::floor(fy));
+    // Floor in double and clamp before narrowing: a finite but huge coordinate
+    // (u = 1e9) lands outside int's range, where the conversion is undefined.
+    // Anything past [-1, extent] already resolves to a single edge texel, so
+    // clamping there leaves in-range sampling untouched.
+    const auto floorToIndex = [](float f, int extent) {
+        return static_cast<int>(std::min(std::max(std::floor(static_cast<double>(f)), -1.0),
+                                         static_cast<double>(extent)));
+    };
+    const int x0 = floorToIndex(fx, w);
+    const int y0 = floorToIndex(fy, h);
     const float tx = fx - static_cast<float>(x0);
     const float ty = fy - static_cast<float>(y0);
     const auto clampCoord = [](int c, int limit) { return std::min(std::max(c, 0), limit - 1); };

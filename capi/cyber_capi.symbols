@@ -1,0 +1,3 @@
+# Mach-O counterpart of cyber_capi.map: export only the extern "C" ABI
+# (leading underscore is the Mach-O symbol prefix).
+_cyber_*

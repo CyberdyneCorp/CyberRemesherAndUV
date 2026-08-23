@@ -32,6 +32,17 @@ from an arbitrary mesh to a packed UV atlas without a human drawing every seam.
      together (a cube's six faces → two flat three-face strips), cutting the chart
      count to xatlas levels while staying ~2× under its distortion.
 
+     **This pass is the atlas's cost.** Its accept predicate is a full LSCM solve
+     of the candidate union, driven to a fixpoint, so it dominates the call while
+     everything else runs in milliseconds: rocker-arm (20k faces) 8.6s,
+     stanford-bunny (69k faces) 5m23s. Rejections are memoized — a pair
+     stays rejected until one of its two charts grows, which is what keeps the
+     later rounds from re-solving the whole mesh — but the pass is still
+     superlinear in the face count. `maxChartDistortion = 0` disables it and puts
+     the whole atlas in the milliseconds at the cost of more charts, and
+     `unwrapAtlas` takes a `CancelToken` (C ABI: `cyber_uv_atlas_cancellable`) so
+     a host can abort it; the cancel is observed before any UV is written.
+
    `autoSeams` then marks the edges between the final charts as seams (mesh
    boundary edges are already island boundaries and are left unmarked).
 3. **Charts** — `computeIslands(mesh, seams)` re-derives the face partition from
@@ -56,8 +67,18 @@ from an arbitrary mesh to a packed UV atlas without a human drawing every seam.
    one with the smallest square bounding extent wins. (The interactive path keeps
    the simpler `Shelf` default.)
 
-Returns `AtlasResult` (chart count, seam edges, max/RMS angle distortion,
-flipped + fallback chart counts, packed-area fraction, texel density).
+Returns `AtlasResult` (chart count, dropped-chart count, seam edges, max/RMS
+angle distortion, flipped + fallback chart counts, packed-area fraction, packed
+bounding-box fraction, texel density).
+
+`packedArea` is the **geometry** coverage — the summed UV face areas of the
+packed charts, the fraction of the square a texture painter actually sees.
+`packedBoxArea` is the fraction the charts' bounding boxes cover, i.e. how
+tightly the box packer placed them; the gap between the two is the slack inside
+each chart's own box, and closing it is what polygon nesting would buy.
+`chartCount` counts only charts that land: an island whose LSCM *and* planar
+fallback both come out degenerate covers nothing and is reported as
+`droppedCharts` instead, so the two always sum to the island count.
 
 ## Surfaces
 

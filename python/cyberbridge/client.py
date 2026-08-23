@@ -14,6 +14,12 @@ from typing import Any, Dict, List, Optional, Tuple
 
 PROTOCOL_VERSION = 1
 
+# Hard ceiling on a single message, mirroring kMaxMessageBytes in
+# src/net/include/cyber/net/protocol.hpp. A peer-declared length above this is
+# refused before any of the payload is buffered, so a hostile or broken server
+# cannot make the host process (a DCC) grow to the 4 GiB the u32 prefix allows.
+MAX_MESSAGE_BYTES = 256 * 1024 * 1024
+
 
 class BridgeError(Exception):
     """Raised on a handshake rejection, transport failure, or server error."""
@@ -73,7 +79,13 @@ class Client:
         data = json.dumps(payload).encode("utf-8")
         self._sock.sendall(struct.pack(">I", len(data)) + data)
         (length,) = struct.unpack(">I", self._read_exact(4))
-        return json.loads(self._read_exact(length).decode("utf-8"))
+        if length > MAX_MESSAGE_BYTES:
+            self.close()
+            raise BridgeError(f"reply of {length} bytes exceeds the {MAX_MESSAGE_BYTES}-byte limit")
+        reply = json.loads(self._read_exact(length).decode("utf-8"))
+        if not isinstance(reply, dict):
+            raise BridgeError("malformed reply: expected a JSON object")
+        return reply
 
     def _ok(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         reply = self._exchange(payload)

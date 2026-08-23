@@ -1,6 +1,7 @@
 #include <doctest.h>
 
 #include <array>
+#include <chrono>
 #include <vector>
 
 #include "cyber/core/mesh.hpp"
@@ -323,4 +324,98 @@ TEST_CASE("subdivision preserves feature flags on child edges") {
         }
     }
     REQUIRE(features == 24);  // each of the 12 cube edges split in two
+}
+
+// Regression: element ids are recycled from the free lists, and a recycled id
+// used to inherit the DEAD element's attribute row. flipEdge rebuilds its two
+// triangles through removeFace + addFace, so the six freed loops came back
+// carrying the pre-flip UVs permuted onto the wrong corners — a plausible but
+// wrong texture instead of the header's documented "corner attributes reset to
+// defaults", with no way for a caller to detect it.
+TEST_CASE("flipEdge resets the rewritten corners instead of inheriting freed rows") {
+    const std::vector<Vec3> p = {{0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0}};
+    const std::vector<std::vector<Index>> f = {{0, 1, 2}, {0, 2, 3}};
+    Mesh mesh = Mesh::fromIndexed(p, f);
+
+    auto& uv = mesh.cornerAttributes().create<cyber::Vec2>("uv");
+    for (std::size_t i = 0; i < uv.size(); ++i) {
+        uv[i] = {100.0f + static_cast<float>(i), 100.0f};
+    }
+
+    const auto diagonal = mesh.edgeBetween(VertexId{0}, VertexId{2});
+    REQUIRE(mesh.flipEdge(diagonal));
+    requireValid(mesh);
+
+    const auto* flipped = mesh.cornerAttributes().find<cyber::Vec2>("uv");
+    REQUIRE(flipped != nullptr);
+    for (Index i = 0; i < mesh.faceCapacity(); ++i) {
+        const FaceId face{i};
+        if (!mesh.isAlive(face)) {
+            continue;
+        }
+        for (const cyber::LoopId l : mesh.faceLoops(face)) {
+            REQUIRE((*flipped)[l.value].x == doctest::Approx(0.0f));
+            REQUIRE((*flipped)[l.value].y == doctest::Approx(0.0f));
+        }
+    }
+}
+
+// Regression: same root cause one level up — a face or vertex id handed back
+// out after a delete arrived carrying the deleted element's attribute values.
+TEST_CASE("a recycled face or vertex id starts from attribute defaults") {
+    Mesh mesh;
+    const VertexId a = mesh.addVertex({0, 0, 0});
+    const VertexId b = mesh.addVertex({1, 0, 0});
+    const VertexId c = mesh.addVertex({0, 1, 0});
+    mesh.faceAttributes().create<std::int32_t>("material");
+    mesh.vertexAttributes().create<float>("weight");
+
+    const FaceId face = mesh.addFace(std::array{a, b, c});
+    REQUIRE(face.valid());
+    (*mesh.faceAttributes().find<std::int32_t>("material"))[face.value] = 42;
+    (*mesh.vertexAttributes().find<float>("weight"))[c.value] = 7.5f;
+
+    mesh.removeFace(face);
+    const FaceId reused = mesh.addFace(std::array{a, b, c});
+    REQUIRE(reused.value == face.value);  // the id really is recycled
+    REQUIRE((*mesh.faceAttributes().find<std::int32_t>("material"))[reused.value] == 0);
+
+    mesh.removeFace(reused);
+    REQUIRE(mesh.removeIsolatedVertex(c));
+    const VertexId fresh = mesh.addVertex({0, 2, 0});
+    REQUIRE(fresh.value == c.value);
+    REQUIRE((*mesh.vertexAttributes().find<float>("weight"))[fresh.value] == doctest::Approx(0.0f));
+}
+
+// Regression: the duplicate-corner check was a nested scan over the corner
+// list, so face arity — which every importer takes from the file — cost
+// n^2/2 comparisons. One 200k-corner n-gon took ~4 s inside a single addFace
+// call with no cancellation poll; the exact-same rejection now costs
+// milliseconds. Bounded so a regression fails the test instead of hanging CI.
+TEST_CASE("addFace validates a huge n-gon's corners without going quadratic") {
+    constexpr std::size_t kCorners = 200000;
+    Mesh mesh;
+    std::vector<VertexId> ring;
+    ring.reserve(kCorners);
+    for (std::size_t i = 0; i < kCorners; ++i) {
+        ring.push_back(mesh.addVertex({static_cast<float>(i), 0, 0}));
+    }
+
+    const auto start = std::chrono::steady_clock::now();
+    REQUIRE(mesh.addFace(ring).valid());
+    const double seconds =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    CAPTURE(seconds);
+    REQUIRE(seconds < 2.0);
+
+    // Rejection is unchanged: one repeat anywhere in the list still fails.
+    Mesh other;
+    std::vector<VertexId> repeated;
+    repeated.reserve(kCorners);
+    for (std::size_t i = 0; i < kCorners; ++i) {
+        repeated.push_back(other.addVertex({static_cast<float>(i), 0, 0}));
+    }
+    repeated[kCorners / 2] = repeated[3];
+    REQUIRE(!other.addFace(repeated).valid());
+    REQUIRE(other.faceCount() == 0);
 }

@@ -14,6 +14,17 @@ The automatic remesher SHALL execute, in order: (1) derive the target edge lengt
 - **WHEN** a mesh with zero faces is submitted
 - **THEN** the pipeline SHALL return a typed "empty input" error without crashing, dividing by zero, or reporting success
 
+### Requirement: Toolchain-independent output
+The pipeline SHALL produce identical output for identical input regardless of the compiler and standard library it was built with. No stage SHALL let an unordered container's iteration order, or a libm function whose result is not correctly rounded, decide a discrete outcome.
+
+#### Scenario: Same input across toolchains
+- **WHEN** the same mesh and parameters are remeshed by builds produced by different compilers or standard libraries
+- **THEN** the resulting meshes SHALL be identical
+
+#### Scenario: Order-sensitive graph passes
+- **WHEN** a pass iterates the isoline graph and acts on the first element it reaches
+- **THEN** the traversal order SHALL derive from the input mesh, not from a hash container's layout
+
 ### Requirement: Guarded target computation
 The target-edge-length computation SHALL validate its inputs: a non-positive target quad count or zero surface area SHALL produce a typed parameter error before any stage runs. No code path SHALL evaluate a division whose denominator can be zero from user input.
 
@@ -24,9 +35,19 @@ The target-edge-length computation SHALL validate its inputs: a non-positive tar
 ### Requirement: Feature-preserving isotropic stage
 The isotropic stage SHALL split long edges, collapse short edges, flip toward valence 6, tangentially smooth, and re-project to the source surface, keeping edge lengths within a documented band around the (adaptivity-scaled) target. Feature-edge vertices SHALL NOT be collapsed, projected off the feature, or crossed by edge flips; when smooth-normal degrees > 0 projection SHALL target a smoothed (PN-triangle or equivalent) surface.
 
+The stage SHALL terminate on any finite input, whatever its coordinates. A refinement operation that cannot make progress SHALL NOT be re-attempted: an edge already at the resolution the float grid can express at its own coordinate magnitude, or a split whose midpoint rounds onto an endpoint, SHALL be left alone. The stage SHALL additionally run under an element budget derived from the input's surface area and the finest target the scale field allows, so residual non-convergence produces a bounded, under-refined mesh rather than an allocation failure. These guards SHALL NOT alter output for inputs at ordinary coordinates.
+
 #### Scenario: Edge flips respect features
 - **WHEN** the isotropic stage runs on a mesh with tagged sharp edges
 - **THEN** no edge flip SHALL create an edge crossing a feature edge (AutoRemesher's flip guard was commented out)
+
+#### Scenario: Geometry far from the origin terminates
+- **WHEN** a mesh whose coordinates are large relative to its features is remeshed — for example a radius-1 sphere at world (5e5, 5e5, 5e5), which arises from centimetre units, site coordinates or a baked scene transform — at a target edge length the float grid cannot resolve there
+- **THEN** the stage SHALL terminate with a bounded element count and the run SHALL complete, rather than growing until allocation fails and taking the host process with it
+
+#### Scenario: The guards are inert at ordinary coordinates
+- **WHEN** the corpus is remeshed at ordinary coordinates across densities on every quadrangulator path
+- **THEN** the output SHALL be byte-identical to the output produced without the termination guards
 
 ### Requirement: Per-island parameterization with instance-local state
 Each island SHALL be parameterized by a frame-field-driven mixed-integer quad-cover solve behind a solver interface (`IParameterizer`), with hard feature-edge constraints and per-face adaptive scaling. Solver progress and diagnostic state SHALL be instance-local so multiple islands can solve concurrently (no process-global solver state).
@@ -143,4 +164,28 @@ The quad-cover quadrangulator SHALL resolve its seamless-UV solve through a back
 #### Scenario: Crease-heavy meshes route to the feature-aware solver
 - **WHEN** a mesh's fraction of interior sharp (crease) edges exceeds the routing threshold (a CAD part such as fandisk)
 - **THEN** the selector SHALL try the feature-aware native seamless solver (which marks sharp edges as hard seams and pins the feature-bounded patches) first, producing squarer quads on the CAD part than the reference field, while smooth meshes below the threshold are unaffected (their output is byte-identical to routing disabled)
+
+### Requirement: Global integer quantization
+
+The native seamless solve SHALL support assigning ALL integer isoline counts
+through a single global min-deviation-flow optimization over the T-mesh of the
+seamless parameterization (Bi-MDF class), as an alternative to per-translation
+greedy rounding. Feature-seam integer pins SHALL enter as fixed flow
+constraints so feature fidelity is preserved exactly. The quantizer SHALL be
+selectable at runtime with the greedy rounding as fallback, and reverting to
+greedy SHALL reproduce its output byte-exactly.
+
+#### Scenario: Quantizer swap preserves features
+
+- **WHEN** the same island is solved with the greedy quantizer and the Bi-MDF
+  quantizer on a feature-bound CAD mesh
+- **THEN** both runs SHALL complete, both SHALL keep every pinned feature
+  curve on an integer isoline, and the run report SHALL name the quantizer used
+
+#### Scenario: Degenerate assignment guarded
+
+- **WHEN** the flow optimum would assign a zero isoline count that collapses a
+  T-mesh strip
+- **THEN** the quantizer SHALL enforce the minimum positive count and report
+  the adjustment
 

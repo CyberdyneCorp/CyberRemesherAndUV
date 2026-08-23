@@ -1,11 +1,34 @@
 #include <doctest.h>
 
+#include <algorithm>
 #include <array>
+#include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
+#include <cstdlib>
+#include <exception>
+#include <iostream>
 #include <map>
+#include <new>
+#include <sstream>
+#include <streambuf>
+#include <string>
+#include <thread>
 #include <utility>
 #include <vector>
+
+#ifndef _WIN32
+#include <csignal>
+#endif
+
+// mallinfo2() (glibc 2.33+) is how the per-call retention case reads the live
+// heap; without it that case cannot measure and is compiled out.
+#if defined(CYBER_TESTS_HAVE_QUADCOVER) && defined(__GLIBC__) && \
+    (__GLIBC__ > 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ >= 33))
+#include <malloc.h>
+#define CYBER_TESTS_HAVE_MALLINFO2 1
+#endif
 
 #include "cyber/core/mesh.hpp"
 #include "cyber/quadrangulate/quadcover_extractor.hpp"
@@ -28,27 +51,27 @@ Mesh makeTwoTri() {
     return Mesh::fromIndexed(p, f);
 }
 
-// A closed UV sphere — a well-formed input for the seamless-UV solver.
-Mesh makeSphere(int rings = 16, int segments = 24) {
-    std::vector<Vec3> p;
-    p.push_back({0, 0, 1});
+// A closed UV sphere centred at (dx, 0, 0), appended to p/f.
+void appendSphere(std::vector<Vec3>& p, std::vector<std::vector<Index>>& f, float dx, int rings,
+                  int segments) {
+    const Index base = static_cast<Index>(p.size());
+    p.push_back({dx, 0, 1});
     for (int r = 1; r < rings; ++r) {
         const float phi = 3.14159265f * static_cast<float>(r) / static_cast<float>(rings);
         for (int s = 0; s < segments; ++s) {
             const float th =
                 2.0f * 3.14159265f * static_cast<float>(s) / static_cast<float>(segments);
             p.push_back(
-                {std::sin(phi) * std::cos(th), std::sin(phi) * std::sin(th), std::cos(phi)});
+                {dx + std::sin(phi) * std::cos(th), std::sin(phi) * std::sin(th), std::cos(phi)});
         }
     }
-    p.push_back({0, 0, -1});
+    p.push_back({dx, 0, -1});
     const Index south = static_cast<Index>(p.size() - 1);
     const auto ring = [&](int r, int s) {
-        return static_cast<Index>(1 + (r - 1) * segments + (s % segments));
+        return base + static_cast<Index>(1 + (r - 1) * segments + (s % segments));
     };
-    std::vector<std::vector<Index>> f;
     for (int s = 0; s < segments; ++s) {
-        f.push_back({0, ring(1, s), ring(1, s + 1)});
+        f.push_back({base, ring(1, s), ring(1, s + 1)});
     }
     for (int r = 1; r + 1 < rings; ++r) {
         for (int s = 0; s < segments; ++s) {
@@ -59,6 +82,24 @@ Mesh makeSphere(int rings = 16, int segments = 24) {
     for (int s = 0; s < segments; ++s) {
         f.push_back({south, ring(rings - 1, s + 1), ring(rings - 1, s)});
     }
+}
+
+// A closed UV sphere — a well-formed input for the seamless-UV solver.
+Mesh makeSphere(int rings = 16, int segments = 24) {
+    std::vector<Vec3> p;
+    std::vector<std::vector<Index>> f;
+    appendSphere(p, f, 0.0f, rings, segments);
+    return Mesh::fromIndexed(p, f);
+}
+
+// Two disjoint spheres. A two-island input, so the vendored solver parameterizes
+// the islands on its worker pool and traces its progress from THOSE threads, not
+// only from the thread that called in.
+Mesh makeSpherePair() {
+    std::vector<Vec3> p;
+    std::vector<std::vector<Index>> f;
+    appendSphere(p, f, 0.0f, 16, 24);
+    appendSphere(p, f, 4.0f, 16, 24);
     return Mesh::fromIndexed(p, f);
 }
 
@@ -264,6 +305,229 @@ TEST_CASE("quad-cover M1: harness seamless UV has zero integer-jump residual") {
     CHECK(uv.vertices.size() > 0);
     CHECK(remesh::seamlessUvResidual(uv) < 1e-3);  // seamless by construction
 }
+
+namespace {
+
+// Captures everything the guarded scope writes to std::cout / std::cerr.
+class ConsoleCapture {
+public:
+    ConsoleCapture()
+        : savedOut_(std::cout.rdbuf(out_.rdbuf())), savedErr_(std::cerr.rdbuf(err_.rdbuf())) {}
+    ~ConsoleCapture() {
+        std::cout.rdbuf(savedOut_);
+        std::cerr.rdbuf(savedErr_);
+    }
+    ConsoleCapture(const ConsoleCapture&) = delete;
+    ConsoleCapture& operator=(const ConsoleCapture&) = delete;
+    std::string out() const { return out_.str(); }
+    std::string err() const { return err_.str(); }
+
+private:
+    std::ostringstream out_;
+    std::ostringstream err_;
+    std::streambuf* savedOut_;
+    std::streambuf* savedErr_;
+};
+
+#ifndef _WIN32
+// The process-global state the vendored Geogram solver used to take over.
+const int kWatchedSignals[] = {SIGSEGV, SIGILL, SIGBUS, SIGFPE, SIGINT};
+
+struct HostState {
+    std::array<struct sigaction, sizeof(kWatchedSignals) / sizeof(kWatchedSignals[0])> signals{};
+    std::terminate_handler terminate = nullptr;
+    std::new_handler newHandler = nullptr;
+    std::string lcNumeric;
+};
+
+HostState snapshotHostState() {
+    HostState state;
+    for (std::size_t i = 0; i < state.signals.size(); ++i) {
+        ::sigaction(kWatchedSignals[i], nullptr, &state.signals[i]);
+    }
+    state.terminate = std::get_terminate();
+    state.newHandler = std::get_new_handler();
+    const char* lc = std::getenv("LC_NUMERIC");
+    state.lcNumeric = lc != nullptr ? lc : "";
+    return state;
+}
+
+bool sameDisposition(const struct sigaction& a, const struct sigaction& b) {
+    if (a.sa_flags != b.sa_flags) {
+        return false;
+    }
+    return (a.sa_flags & SA_SIGINFO) != 0 ? a.sa_sigaction == b.sa_sigaction
+                                          : a.sa_handler == b.sa_handler;
+}
+#endif
+
+#ifdef CYBER_TESTS_HAVE_MALLINFO2
+// Bytes the process holds in in-use main-arena blocks. Freed memory drops out of
+// it whether or not the allocator hands the pages back, which is what makes it a
+// RETENTION measure rather than an RSS reading.
+std::size_t liveHeapBytes() { return mallinfo2().uordblks; }
+#endif
+
+}  // namespace
+
+// Host-process hygiene. The vendored Geogram/AutoRemesher solver behind the default
+// quad-cover path used to hijack the host's SIGSEGV/SIGILL/SIGBUS/SIGFPE handlers,
+// reset SIGINT, replace std::terminate and std::new_handler, rewrite LC_NUMERIC and
+// trace hundreds of lines to std::cerr — a DCC plugin lost its crash reporter and got
+// spammed the moment a user remeshed. A solve must leave every one of those exactly as
+// it found it. (The handler half only bites on the FIRST solve in a process, so the
+// fresh-process check lives in python/cyberremesh/tests/test_host_process_hygiene.py;
+// the console half is per-call and is what this case guards everywhere.)
+TEST_CASE("quad-cover seamless UV leaves the host's console and handlers alone") {
+    const Mesh sphere = makeSphere();
+#ifndef _WIN32
+    const char* lcBefore = std::getenv("LC_NUMERIC");
+    const std::string lcRestore = lcBefore != nullptr ? lcBefore : "";
+    ::setenv("LC_NUMERIC", "en_US.UTF-8", 1);  // sentinel: a rewrite must be visible
+    const HostState before = snapshotHostState();
+#endif
+
+    std::string outText;
+    std::string errText;
+    {
+        const ConsoleCapture capture;
+        const remesh::SeamlessUv uv = remesh::computeSeamlessUv(sphere, 0.15f);
+        outText = capture.out();
+        errText = capture.err();
+        CHECK(uv.triangles.size() == uv.triangleUv.size());
+    }
+    CHECK(errText.empty());
+    CHECK(outText.empty());
+
+#ifndef _WIN32
+    const HostState after = snapshotHostState();
+    for (std::size_t i = 0; i < before.signals.size(); ++i) {
+        CHECK(sameDisposition(before.signals[i], after.signals[i]));
+    }
+    CHECK(before.terminate == after.terminate);
+    CHECK(before.newHandler == after.newHandler);
+    CHECK(after.lcNumeric == "en_US.UTF-8");
+    if (lcRestore.empty()) {
+        ::unsetenv("LC_NUMERIC");
+    } else {
+        ::setenv("LC_NUMERIC", lcRestore.c_str(), 1);
+    }
+#endif
+}
+
+// The other half of the console contract: silencing the vendored solver must not
+// silence the HOST. The solve used to point the process-global std::cout/std::cerr
+// at a null sink for its whole duration, so an embedder logging from its own thread
+// lost every line for as long as a remesh ran. What the host writes must still reach
+// the buffer the host installed, while the solver's own chatter — traced from the
+// worker threads it farms the islands out to as well as from the calling thread —
+// still reaches nothing.
+TEST_CASE("quad-cover seamless UV silences the solver without silencing the host") {
+    const Mesh pair = makeSpherePair();  // two islands -> the solver's worker pool traces too
+    const std::string hostLine = "host-log-line\n";
+    constexpr int kMaxHostLines = 4000;  // bound: a regression must fail, never spin
+
+    std::atomic<bool> solving{true};
+    std::atomic<int> written{0};
+    std::string outText;
+    std::string errText;
+    {
+        const ConsoleCapture capture;
+        std::thread hostLogger([&] {
+            do {
+                std::cout << hostLine;
+                written.fetch_add(1);
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            } while (solving.load() && written.load() < kMaxHostLines);
+        });
+        const remesh::SeamlessUv uv = remesh::computeSeamlessUv(pair, 0.15f);
+        solving.store(false);
+        hostLogger.join();
+        outText = capture.out();
+        errText = capture.err();
+        CHECK(uv.triangles.size() == uv.triangleUv.size());
+    }
+
+    const int lines = written.load();
+    REQUIRE(lines > 0);
+    std::size_t delivered = 0;
+    std::string residue;
+    for (std::size_t at = 0; at < outText.size();) {
+        const std::size_t hit = outText.find(hostLine, at);
+        if (hit == std::string::npos) {
+            residue += outText.substr(at);
+            break;
+        }
+        residue += outText.substr(at, hit - at);
+        at = hit + hostLine.size();
+        ++delivered;
+    }
+    CHECK(delivered == static_cast<std::size_t>(lines));  // not one host line swallowed
+    CHECK(residue.empty());                               // and no solver chatter leaked
+    CHECK(errText.empty());
+}
+
+#ifdef CYBER_TESTS_HAVE_MALLINFO2
+// Declared by hand instead of including <geogram/bibliography/bibliography.h>:
+// the strict C++20 test build deliberately never sees the vendored C++14 headers
+// (that isolation is the whole point of the cyber_quadcover_solver target).
+namespace GEO::Biblio {
+void cite(const char* ref, const char* file, int line, const char* function, const char* info);
+}  // namespace GEO::Biblio
+
+// The third process-global Geogram takeover: its citation registry is a static
+// vector that geo_cite() appends to with no dedup and no cap, once per spatial
+// sort inside a solve, and nothing in this tree ever consumed or cleared it — so
+// a host that remeshes for hours kept every record of every solve, invisible to
+// LeakSanitizer because the memory stays reachable from the static. A solve must
+// leave the registry as empty as it found it.
+//
+// Measured through the registry's OWN records rather than the solve's total heap
+// churn: each iteration seeds a known, large number of citations before solving,
+// so the leak this guards against is ~2 MB per iteration while the rest of a
+// solve's per-call residue is a few kB. Bounded by construction — kIters solves
+// of a small sphere, and the unfixed peak is ~40 MB, so a regression fails on the
+// assertion instead of exhausting CI.
+TEST_CASE("quad-cover seamless UV leaves no citation records behind") {
+    const Mesh sphere = makeSphere(8, 10);
+    const std::string info(256, 'x');  // big enough that each record is heap, not SSO
+    constexpr int kIters = 20;
+    constexpr int kWarmIters = 10;  // by here every one-shot cache is populated
+    constexpr int kCitesPerIter = 4000;
+    constexpr std::size_t kAllowedGrowth = std::size_t{4} << 20;
+
+    // cite() reads Geogram's CmdLine, so the runtime has to be up before the
+    // first record: one solve is what brings it up (GEO::initialize()).
+    REQUIRE(remesh::computeSeamlessUv(sphere, 0.3f).valid);
+
+    // A sanitizer replaces the allocator wholesale, so glibc's main arena stays
+    // empty and mallinfo2 reports 0 for every field. There is nothing to measure
+    // then — the retention this case guards is real, but only a build running on
+    // glibc's own allocator can see it, so say so rather than failing the
+    // sanitizer lane on an instrument that is not connected.
+    if (liveHeapBytes() == 0) {
+        MESSAGE("skipped: the allocator is replaced (sanitizer build), mallinfo2 reads 0");
+        return;
+    }
+
+    std::size_t warm = 0;
+    std::size_t last = 0;
+    for (int i = 1; i <= kIters; ++i) {
+        for (int c = 0; c < kCitesPerIter; ++c) {
+            GEO::Biblio::cite("CYBER:RETENTION", "test_quadcover_extractor.cpp", __LINE__,
+                              "citationRetention()", info.c_str());
+        }
+        const remesh::SeamlessUv uv = remesh::computeSeamlessUv(sphere, 0.3f);
+        REQUIRE(uv.valid);  // a declined solve would never reach the reclaimer
+        if (i == kWarmIters) {
+            warm = liveHeapBytes();
+        }
+        last = liveHeapBytes();
+    }
+    REQUIRE(warm > 0);
+    CHECK(last < warm + kAllowedGrowth);
+}
+#endif  // CYBER_TESTS_HAVE_MALLINFO2
 
 // Milestone 2 PRIMARY checkpoint: the isoline tracer on a flat integer-grid UV must
 // recover a clean N x N quad grid. This exercises the tracer core deterministically
@@ -517,6 +781,39 @@ TEST_CASE("quad-cover hole-fill policy: loops longer than holeFillMaxBoundary st
     const remesh::IsolineQuadMesh none = remesh::extractIsolineQuads(dummy, uv, 0);
     CHECK(none.quads.size() == open.quads.size());
     CHECK(boundaryEdgeCount(rebuildMesh(none)) == 8);
+}
+
+// The factory clamps its construction arguments to the documented parameter
+// ranges (remeshing-parameters spec, "Validation at every entry point"): these
+// values drive the solve directly and never pass through remesh()'s validation,
+// so an out-of-range adaptivity used to produce a mesh that no in-range run
+// could reproduce while the caller reported it as clamped.
+TEST_CASE("quad-cover quadrangulator clamps out-of-range construction parameters") {
+    auto outOfRange = remesh::makeQuadCoverQuadrangulator(40, 7.0f, 64, 90.0f);
+    auto atMaximum = remesh::makeQuadCoverQuadrangulator(40, 1.0f, 64, 90.0f);
+    REQUIRE(outOfRange != nullptr);
+    REQUIRE(atMaximum != nullptr);
+
+    Mesh clamped = makeSphere();
+    Mesh maximum = makeSphere();
+    const auto a = outOfRange->quadrangulate(clamped, 0.15f, nullptr, nullptr);
+    const auto b = atMaximum->quadrangulate(maximum, 0.15f, nullptr, nullptr);
+
+    REQUIRE(a.success == b.success);
+    REQUIRE(aliveFaces(clamped) == aliveFaces(maximum));
+    REQUIRE(clamped.vertexCount() == maximum.vertexCount());
+    // One aggregated check: a per-vertex assertion would flood the log.
+    float maxDelta = 0.0f;
+    for (Index i = 0; i < clamped.vertexCapacity(); ++i) {
+        if (!clamped.isAlive(VertexId{i})) {
+            continue;
+        }
+        const Vec3 p = clamped.position(VertexId{i});
+        const Vec3 q = maximum.position(VertexId{i});
+        maxDelta =
+            std::max({maxDelta, std::abs(p.x - q.x), std::abs(p.y - q.y), std::abs(p.z - q.z)});
+    }
+    CHECK(maxDelta == doctest::Approx(0.0f));
 }
 
 // Cooperative cancellation (remeshing-pipeline spec): a cancelled token makes the
