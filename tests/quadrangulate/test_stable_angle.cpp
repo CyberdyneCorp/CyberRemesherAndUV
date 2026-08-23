@@ -1,6 +1,7 @@
 #include <doctest.h>
 
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 
@@ -14,6 +15,10 @@ using cyber::remesh::stable::cross4Delta;
 using cyber::remesh::stable::quarter;
 
 namespace {
+
+// M_PI is a POSIX extension rather than standard C++, and MinGW does not declare
+// it under -std=c++20, so spell the constant out.
+constexpr double kPi = 3.14159265358979323846;
 
 std::uint32_t bits(float v) {
     std::uint32_t b = 0;
@@ -121,7 +126,7 @@ TEST_CASE("cross4Delta is the fourth power of the angle difference") {
 // quarter() undoes cross4() up to the 4-fold symmetry the representation encodes.
 TEST_CASE("quarter inverts cross4 up to the cross's 4-fold symmetry") {
     for (int i = 1; i <= 400; ++i) {
-        const double theta = (static_cast<double>(i) / 400.0) * (M_PI / 2.0) - (M_PI / 4.0);
+        const double theta = (static_cast<double>(i) / 400.0) * (kPi / 2.0) - (kPi / 4.0);
         const CosSin round = quarter(static_cast<float>(std::cos(4.0 * theta)),
                                      static_cast<float>(std::sin(4.0 * theta)));
         CHECK(round.c == doctest::Approx(std::cos(theta)).epsilon(1e-4));
