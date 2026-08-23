@@ -4,19 +4,93 @@ Goal: make CyberRemesher's automatic quad retopology **better than QuadriFlow**
 across four axes — quality-per-polygon, median quad angle, feature/CAD fidelity,
 and robustness — not just competitive on one.
 
-## Next — Bi-MDF quantization (openspec change `bimdf-quantization`)
+## Campaign status — Bi-MDF quantization LANDED, exit gate MET
 
-Both remaining quality gaps converge on the same lever: flow-loop length
-(41→433 landed; QuadriFlow 1811 — the residual ~4x is global grid structure)
-and dense-organic singularities (dipole annihilation saturates at nefertiti
-316-347 vs QF 80 — the residual cones come from per-seam greedy rounding).
-The quantization-as-global-optimization answer (QuadWild's Bi-MDF, Heistermann
-et al. 2023) replaces greedy integer rounding with a min-deviation-flow solve
-over the T-mesh: papers only (GPL binaries stay external benchmarks), in-tree
-min-cost flow, `CYBER_QC_BIMDF` gated, greedy fallback byte-exact. Exit gate:
-spot flow_loop_mean_len >= 1000 count-matched AND nefertiti cyber-pure
-singularities <= 200 with no recorded-metric regression, multi-density per the
-measurement rules. See openspec/changes/bimdf-quantization/.
+The Bi-MDF campaign that headed this file is **done**, and its change is archived
+at `openspec/changes/archive/2026-08-06-bimdf-quantization/`.
+
+Both quality gaps it targeted converged on flow-loop length (41→433) and
+dense-organic singularities (nefertiti 316-347 vs QuadriFlow 80). The
+quantization-as-global-optimization answer — QuadWild's Bi-MDF, Heistermann et
+al. 2023, papers only, in-tree min-cost flow — landed, and the exit gate
+(nefertiti cyber-pure singularities ≤ 200) was **met on the stock path at 176**,
+recorded in the 2026-08-03 `feat/multires-default` entry below. That closed the
+campaign and shipped as 0.5.0.
+
+The dated entries below are the working log of how it got there, newest first.
+They are a record of what was measured when, not a description of the current
+code: where a number here disagrees with `tests/bench/baselines.json` or the
+README, the baselines are authoritative.
+
+## Update — 2026-08-23: the solver was not reproducible across toolchains — three stacked causes, all fixed
+
+Not a retopology-quality entry. It is here because it invalidates how every
+number in this file was read: **the same source produced different meshes
+depending on the compiler**, so a measurement was only ever a measurement of one
+build. Found while triaging a macOS-only CI failure that looked like a flaky
+threshold.
+
+Three independent causes, each masking the next:
+
+1. **libm's float trig.** `sinf`/`cosf` are not correctly rounded and Apple Clang
+   and GCC disagree by one ULP on ~1.25% of inputs (measured). `atan2`, `sqrt`,
+   `hypot`, `exp`, `log`, `pow` all agree exactly — it is specifically the float
+   sine and cosine. The cross field ran every angle through them.
+   `src/quadrangulate/src/stable_angle.hpp` now does the angle round-trips with
+   normalisation and the double/half-angle identities — multiplication and sqrt
+   only — which is bit-identical across toolchains and, measured against a double
+   reference, **4x more accurate** than the trig it replaces (2.4e-07 vs 9.5e-07).
+2. **Hash iteration order.** The isoline graph was an `unordered_map` of
+   `unordered_set`, and five extraction passes act on whatever they reach first,
+   so the traced mesh was a property of the standard library: libstdc++ and libc++
+   traced the same open paraboloid into 144 and 224 quads. It is index-ordered
+   now. This also surfaced a real bug — `collapseShortEdges` keyed edges on
+   whichever orientation iteration reached first, and since `collapseEdge` merges
+   first into second, that decided which endpoint survived the collapse.
+3. **The smoother never converged.** `transportSmooth` runs Jacobi on a
+   **bipartite** dual graph (each lower triangle of a quad borders only uppers),
+   so the averaging operator has an eigenvalue at −1 and the iteration oscillates
+   on that mode. The smooth solution here genuinely *is* anti-correlated between
+   the two triangles of a quad — their reference tangents differ by 45°, which is
+   180° in the 4-symmetry encoding. `maxDelta` pinned at 2, the convergence break
+   never fired, and the field that came out was whichever phase the loop stopped
+   on: on a **flat** grid, 15 of 72 faces at the maximum 45° off, with sweep-count
+   parity deciding which half of each quad was damaged. Fixed by averaging with
+   the previous iterate; ω = ½ annihilates that mode exactly.
+
+Cause 3 is the one that matters for reading this file. It is why the other two
+mattered at all: a face poised between two antipodal attractors falls whichever
+way rounding pushes it, so a **9.5e-07** perturbation moved a quality metric
+**17%**. Any entry below that reports a delta smaller than that is not
+necessarily reporting a real effect.
+
+Both quality bounds that had been loosened to accommodate the artefact now sit
+**tighter than they started**: the flat-grid alignment gate 8.0° → 0.5°, and the
+open-surface paraboloid's edge-length CV measured 0.350 against its original 0.6
+bound (it was 0.625 before cause 3 was fixed, and 0.402/0.725 depending on
+toolchain before causes 1-2).
+
+Bench A/B on the generated corpus is mixed and unreviewed: torus `cyber-pure`
+103 → 53 singularities with hausdorff 0.0085 → 0.0484; sphere `cyber` 21 → 28
+singularities with hausdorff 0.0071 → 0.0047. Worth a look before the next
+campaign leans on those meshes.
+
+**The bench gate was dark the whole time.** `baselines.json` is recorded on a
+`native+geogram` build and `check` refuses to compare across solvers, so a default
+build prints `bench check SKIPPED` — which reads like a pass in a green ctest run.
+CI still never enables it: `ci.yml` installs no TBB and never sets
+`CYBER_WITH_QUADCOVER`. Turning that lane on is the open follow-up, and it is what
+would have caught all of the above early.
+
+## Update — 2026-08-23: authoring track and mesh I/O shipped
+
+Non-quality work that landed alongside: soft selection, auto-routed UV seam
+paths, flow guides and painted density, curvature and cavity bakes, per-DCC
+export presets, and a versioned sculpt handoff (all archived under
+`openspec/changes/archive/`), plus FBX import via vendored ufbx and
+`Mesh.subdivide` in the Python binding. FBX was the only parser in the import
+dispatch not reachable from `fuzz_mesh_io`; it is now, with seeds committed so
+`fuzz_corpus_replay` covers it on every build.
 
 ### Update — 2026-08-02 (branch `feat/bimdf-quantization`): pipeline landed opt-in; CAD path end-to-end, organics fall back at the T-mesh
 

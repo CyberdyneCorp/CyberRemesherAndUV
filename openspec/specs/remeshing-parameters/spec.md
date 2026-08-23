@@ -53,3 +53,13 @@ Every parameter accepted by any entry point SHALL affect pipeline behavior. Para
 - **WHEN** the same parameter set is run through the CLI and through the C ABI (and the Python and Swift bindings over it) on the same input
 - **THEN** each entry point SHALL produce the same result, and no entry point SHALL substitute a component's own default for a value the caller supplied — as `cyber_remesh` did for `sharpEdgeDegrees`, which reached the CLI's pipeline but not the ABI's extractor, so the documented default of 90° could never take effect and the crease-pinning behaviour it gates was unreachable from every binding
 
+### Requirement: Guide and density parameters are validated
+The parameter surface SHALL validate per-guide strength and influence radius
+and the global density clamp range, with documented defaults and the same
+clamp-and-report behavior as existing parameters. The effective post-clamp
+values SHALL appear in the machine-readable report.
+
+#### Scenario: Out-of-range guide strength clamps and reports
+- **WHEN** a run supplies a guide strength beyond the documented range
+- **THEN** the value SHALL clamp and the report SHALL record the effective value
+

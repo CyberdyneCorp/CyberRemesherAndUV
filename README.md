@@ -6,8 +6,9 @@ desktop and mobile, with CPU/CUDA/OpenCL/Metal compute backends.
 Re-implements and improves on [AutoRemesher](https://github.com/huxingyi/autoremesher)
 (automatic field-guided quad remeshing) and the workflow pioneered by CozyBlanket
 (manual retopology / UV / bake on tablets). Specifications live in [`openspec/`](openspec/) —
-see `openspec/changes/bootstrap-v1-platform/` for the founding change (proposal, design,
-capability specs, task plan).
+see `openspec/changes/archive/2026-07-22-bootstrap-v1-platform/` for the founding change
+(proposal, design, capability specs, task plan). Completed changes are archived there and
+their requirements folded into `openspec/specs/`, which is the current contract.
 
 ### Auto-retopology
 
@@ -306,9 +307,12 @@ Stage by stage:
    island it runs in a reduced form — hole filling only, with the graph
    simplification skipped, because dissolving every valence-2 node there merges
    legitimately-valence-2 isoline samples into long uneven quads. That is what
-   made it safe to enable: an open paraboloid at a ~900-quad request went from 92
-   faces at median 27° to ~1744 uniform quads at median 78°, edge-length CV 0.27,
-   and closed islands are byte-identical either way.
+   made it safe to enable: on the vendored-field build an open paraboloid at a
+   ~900-quad request goes from 50 sparse faces at edge-length CV 0.77 to 4827
+   uniform quads at median 90° and CV 0.29, and closed islands are byte-identical
+   either way. The dependency-free native solver traces the same input to 160
+   quads at median 89° and CV 0.35, where the cleanup changes little — it is the
+   vendored field that makes the difference here.
 4. **Pure-quad path.** The extracted mesh is relaxed onto the original surface
    (longer for the uniform quad-cover/integer bases, which tolerate it — see
    `CYBER_BASE_RELAX_ITERS`), subdivided 4× so any residual triangle or pentagon
@@ -452,13 +456,22 @@ of the supported surface, and are documented at their call sites.
 ## Layout
 
 ```
-apps/            desktop shell, mobile shells, headless CLI
+apps/            desktop shell, mobile shells, headless CLI, bridge server
+capi/            the C ABI shared library — the only exported surface
 src/app/         document model, tools, undo (toolkit-free)
 src/render/      viewport renderer (Metal | Vulkan)
 src/accel/       compute backends: cpu | metal | cuda | opencl
-src/core/        mesh kernel, io, remeshing pipeline, uv, bake
+src/core/        mesh kernel, io, remeshing pipeline orchestration
+src/quadrangulate/  cross field, seamless UV, isoline extraction, quantization
+src/retopo/      manual retopology: strokes, snapping, relax, subdivide, conform
+src/uv/          seams, LSCM unwrap, packing, automatic atlas
+src/bake/        normal / AO / curvature / cavity bakes
+src/bakecage/    cage generation for the bake
+src/exportbundle/  per-DCC export presets and bundle writing
+src/imageio/     PNG / EXR encode and decode
 src/handoff/     versioned sculpt-handoff ingest (pipeline bridge)
-tests/           unit + property + golden regression tests
+src/net/         bridge protocol
+tests/           unit + property + golden + fuzz corpus
 thirdparty/      vendored permissive dependencies (manifest.json)
 ```
 
@@ -531,10 +544,12 @@ The `cpu-headless` preset requests `-DCYBER_WITH_QUADCOVER=ON`, which vendors an
 compiles an in-process Geogram QuadCover solver (~102 sources, a one-time build
 cost). That is the field that lets the default `quad-cover` quadrangulator **beat
 QuadriFlow on median quad angle and irregular-vertex count** on organic meshes. It
-needs **OpenMP + TBB**; where they are absent (a minimal CI runner, a macOS box
-without `libomp`) the build **auto-falls-back to the dependency-free native
-seamless-UV solver** (a few degrees lower median, still fully functional and
-portable) — so `-DCYBER_WITH_QUADCOVER=ON` never hard-fails. Override with
+needs **OpenMP + TBB** (`brew install libomp tbb`, apt `libtbb-dev`); where they
+are absent — a minimal CI runner, say — the build **auto-falls-back to the
+dependency-free native seamless-UV solver** (a few degrees lower median, still
+fully functional and portable) — so `-DCYBER_WITH_QUADCOVER=ON` never hard-fails.
+Homebrew's `libomp` is keg-only and off AppleClang's default search path, so the
+configure retries with the brew prefix rather than reporting it missing. Override with
 `-DCYBER_WITH_QUADCOVER=OFF` to skip it outright; mobile presets (`ios`/`android`)
 leave it off.
 
