@@ -16,11 +16,14 @@
 // toward the lower vertex id via the priority queue's (distance, id) order.
 namespace cyber::retopo {
 
-// Shortest edge path between two live vertices, endpoints inclusive and in
-// from->to order. Empty when either vertex is dead, from == to, or no path
-// exists (disconnected components).
-[[nodiscard]] inline std::vector<VertexId> shortestVertexPath(const Mesh& mesh, VertexId from,
-                                                              VertexId to) {
+// Least-cost edge path between two live vertices under a caller-supplied edge
+// weight, endpoints inclusive and in from->to order. `weight` is invoked as
+// weight(EdgeId, VertexId from, VertexId to) and MUST return a non-negative
+// cost — Dijkstra is only correct for non-negative weights. Empty when either
+// vertex is dead, from == to, or no path exists (disconnected components).
+template <class WeightFn>
+[[nodiscard]] std::vector<VertexId> weightedVertexPath(const Mesh& mesh, VertexId from, VertexId to,
+                                                       WeightFn&& weight) {
     std::vector<VertexId> path;
     if (!mesh.isAlive(from) || !mesh.isAlive(to) || from == to) {
         return path;
@@ -47,7 +50,7 @@ namespace cyber::retopo {
             }
             const auto [a, b] = mesh.edgeVertices(e);
             const VertexId v = a.value == u ? b : a;
-            const float step = length(mesh.position(v) - mesh.position(VertexId{u}));
+            const float step = weight(e, VertexId{u}, v);
             const float candidate = d + step;
             const auto it = distance.find(v.value);
             if (it == distance.end() || candidate < it->second) {
@@ -73,6 +76,16 @@ namespace cyber::retopo {
     }
     std::vector<VertexId> ordered(path.rbegin(), path.rend());
     return ordered;
+}
+
+// Shortest edge path between two live vertices, endpoints inclusive and in
+// from->to order. Empty when either vertex is dead, from == to, or no path
+// exists (disconnected components).
+[[nodiscard]] inline std::vector<VertexId> shortestVertexPath(const Mesh& mesh, VertexId from,
+                                                              VertexId to) {
+    return weightedVertexPath(mesh, from, to, [&mesh](EdgeId, VertexId a, VertexId b) {
+        return length(mesh.position(b) - mesh.position(a));
+    });
 }
 
 }  // namespace cyber::retopo

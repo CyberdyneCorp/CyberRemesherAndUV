@@ -2,7 +2,10 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <limits>
+#include <string_view>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -10,6 +13,7 @@
 #include "cyber/uv/common.hpp"
 #include "cyber/uv/distortion.hpp"
 #include "cyber/uv/transforms.hpp"
+#include "rejection_memo.hpp"
 
 namespace cyber::uv {
 
@@ -61,25 +65,11 @@ std::vector<int> computeCharts(const Mesh& mesh, const AtlasOptions& options) {
     return chartOf;
 }
 
-// Greedy chart-merge driver: repeatedly merges any adjacent chart pair for which
-// `accept(facesA, facesB)` holds, to a fixpoint, then relabels `chartOf`
-// compactly. Deterministic — candidate pairs are visited in sorted order.
-template <typename AcceptFn>
-void greedyMergeCharts(const Mesh& mesh, std::vector<int>& chartOf, AcceptFn accept) {
-    int chartCount = 0;
-    for (const int c : chartOf) {
-        chartCount = std::max(chartCount, c + 1);
-    }
-    if (chartCount <= 1) {
-        return;
-    }
-    const auto n = static_cast<std::size_t>(chartCount);
-    std::vector<int> parent(n);
-    std::vector<std::vector<FaceId>> chartFaces(n);
-    for (std::size_t i = 0; i < n; ++i) {
-        parent[i] = static_cast<int>(i);
-    }
-
+// The faces of every chart, indexed by chart id.
+std::vector<std::vector<FaceId>> collectChartFaces(const Mesh& mesh,
+                                                   const std::vector<int>& chartOf,
+                                                   std::size_t chartCount) {
+    std::vector<std::vector<FaceId>> chartFaces(chartCount);
     const auto capacity = mesh.faceCapacity();
     for (Index f = 0; f < capacity; ++f) {
         const FaceId face{f};
@@ -91,9 +81,14 @@ void greedyMergeCharts(const Mesh& mesh, std::vector<int>& chartOf, AcceptFn acc
             chartFaces[static_cast<std::size_t>(c)].push_back(face);
         }
     }
+    return chartFaces;
+}
 
-    // Adjacent chart pairs (deduplicated, sorted for determinism).
+// Adjacent chart pairs (deduplicated, sorted for determinism).
+std::vector<std::pair<int, int>> collectChartPairs(const Mesh& mesh,
+                                                   const std::vector<int>& chartOf) {
     std::vector<std::pair<int, int>> pairs;
+    const auto capacity = mesh.faceCapacity();
     for (Index f = 0; f < capacity; ++f) {
         const FaceId face{f};
         if (!mesh.isAlive(face)) {
@@ -117,6 +112,49 @@ void greedyMergeCharts(const Mesh& mesh, std::vector<int>& chartOf, AcceptFn acc
     }
     std::sort(pairs.begin(), pairs.end());
     pairs.erase(std::unique(pairs.begin(), pairs.end()), pairs.end());
+    return pairs;
+}
+
+using detail::RejectionMemo;
+
+// Progress/cancellation plumbing for the merge passes.
+struct MergeContext {
+    ProgressSink* progress = nullptr;
+    const CancelToken* cancel = nullptr;
+};
+
+// Charts only ever merge, so the count of accepted merges is monotonic and
+// bounded by chartCount - 1; a pass that reaches its fixpoint early simply
+// stops short of 1.
+void reportMergeProgress(const MergeContext& ctx, int merges, std::size_t chartCount) {
+    if (ctx.progress == nullptr || chartCount < 2) {
+        return;
+    }
+    ctx.progress->report(static_cast<float>(merges) / static_cast<float>(chartCount - 1),
+                         "uv atlas: merging charts");
+}
+
+// Greedy chart-merge driver: repeatedly merges any adjacent chart pair for which
+// `accept(facesA, facesB)` holds, to a fixpoint, then relabels `chartOf`
+// compactly. Deterministic — candidate pairs are visited in sorted order. A
+// cancel leaves `chartOf` with its (still valid) pre-merge labelling.
+template <typename AcceptFn>
+void greedyMergeCharts(const Mesh& mesh, std::vector<int>& chartOf, const MergeContext& ctx,
+                       AcceptFn accept) {
+    int chartCount = 0;
+    for (const int c : chartOf) {
+        chartCount = std::max(chartCount, c + 1);
+    }
+    if (chartCount <= 1) {
+        return;
+    }
+    const auto n = static_cast<std::size_t>(chartCount);
+    std::vector<int> parent(n);
+    for (std::size_t i = 0; i < n; ++i) {
+        parent[i] = static_cast<int>(i);
+    }
+    std::vector<std::vector<FaceId>> chartFaces = collectChartFaces(mesh, chartOf, n);
+    const std::vector<std::pair<int, int>> pairs = collectChartPairs(mesh, chartOf);
 
     const auto findRoot = [&](int x) {
         while (parent[static_cast<std::size_t>(x)] != x) {
@@ -127,17 +165,26 @@ void greedyMergeCharts(const Mesh& mesh, std::vector<int>& chartOf, AcceptFn acc
         return x;
     };
 
+    RejectionMemo memo(n);
+    int merges = 0;
     bool changed = true;
     while (changed) {
         changed = false;
         for (const std::pair<int, int>& pr : pairs) {
             const int ra = findRoot(pr.first);
             const int rb = findRoot(pr.second);
-            if (ra == rb) {
+            if (ra == rb || memo.isKnownRejected(ra, rb)) {
                 continue;
+            }
+            // Polled here only: a memo hit is a hash lookup, but reaching this
+            // point means `accept` has to run, which for the distortion pass is
+            // a whole trial unwrap. Cancel latency is one such trial.
+            if (ctx.cancel != nullptr && ctx.cancel->isCancelled()) {
+                return;
             }
             if (!accept(chartFaces[static_cast<std::size_t>(ra)],
                         chartFaces[static_cast<std::size_t>(rb)])) {
+                memo.reject(ra, rb);
                 continue;
             }
             const std::size_t keep = static_cast<std::size_t>(std::min(ra, rb));
@@ -146,10 +193,13 @@ void greedyMergeCharts(const Mesh& mesh, std::vector<int>& chartOf, AcceptFn acc
             chartFaces[keep].insert(chartFaces[keep].end(), chartFaces[drop].begin(),
                                     chartFaces[drop].end());
             chartFaces[drop].clear();
+            memo.bumpVersion(keep);  // `drop` is no longer a root, so its version is dead
             changed = true;
+            reportMergeProgress(ctx, ++merges, n);
         }
     }
 
+    const auto capacity = mesh.faceCapacity();
     std::vector<int> relabel(n, -1);
     int next = 0;
     for (Index f = 0; f < capacity; ++f) {
@@ -169,9 +219,10 @@ void greedyMergeCharts(const Mesh& mesh, std::vector<int>& chartOf, AcceptFn acc
 // normal cone. Because every face of a merged chart stays within one cone, the
 // result is at least as flat as growth guarantees (distortion cannot rise) and
 // stays disk-like (a cone under 90 degrees cannot wrap a tube).
-void mergeCoplanarCharts(const Mesh& mesh, std::vector<int>& chartOf, const AtlasOptions& options) {
+void mergeCoplanarCharts(const Mesh& mesh, std::vector<int>& chartOf, const AtlasOptions& options,
+                         const CancelToken* cancel) {
     const float cosBound = std::cos(degreesToRadians(options.maxChartAngleDeg));
-    greedyMergeCharts(mesh, chartOf,
+    greedyMergeCharts(mesh, chartOf, MergeContext{nullptr, cancel},
                       [&](const std::vector<FaceId>& a, const std::vector<FaceId>& b) {
                           Vec3 sum{0.0f, 0.0f, 0.0f};
                           for (const FaceId face : a) {
@@ -283,12 +334,13 @@ float unwrapDistortion(const Mesh& mesh, const std::vector<FaceId>& faces,
 // `maxChartDistortion` (and does not fold). This spends the distortion headroom
 // the cone merge leaves on the table to cut the chart count further. A no-op
 // when the cap is <= 0.
-void mergeByDistortion(const Mesh& mesh, std::vector<int>& chartOf, const AtlasOptions& options) {
+void mergeByDistortion(const Mesh& mesh, std::vector<int>& chartOf, const AtlasOptions& options,
+                       const MergeContext& ctx) {
     if (options.maxChartDistortion <= 0.0f) {
         return;
     }
     const float cap = options.maxChartDistortion;
-    greedyMergeCharts(mesh, chartOf,
+    greedyMergeCharts(mesh, chartOf, ctx,
                       [&](const std::vector<FaceId>& a, const std::vector<FaceId>& b) {
                           std::vector<FaceId> merged;
                           merged.reserve(a.size() + b.size());
@@ -313,7 +365,7 @@ UnwrapResult planarProject(const Mesh& mesh, std::span<const FaceId> island) {
         normal = normal + mesh.faceNormal(face);
     }
     normal = normalized(normal);
-    if (lengthSquared(normal) < 0.5f) {
+    if (!(lengthSquared(normal) >= 0.5f)) {  // also catches a non-finite normal
         normal = {0.0f, 0.0f, 1.0f};
     }
     // A tangent basis (t, b) orthogonal to the plane normal.
@@ -333,7 +385,10 @@ UnwrapResult planarProject(const Mesh& mesh, std::span<const FaceId> island) {
             out.uv.push_back({dot(p, t), dot(p, b)});
         }
     }
-    out.ok = out.vertices.size() >= 3;
+    // A non-finite position projects to a non-finite UV; the fallback reports
+    // failure rather than handing the chart back with an unusable layout.
+    out.ok = out.vertices.size() >= 3 &&
+             std::all_of(out.uv.begin(), out.uv.end(), [](Vec2 p) { return isFinite(p); });
     return out;
 }
 
@@ -426,6 +481,35 @@ float minAreaBoxRotation(const std::vector<Vec2>& points) {
     return rotation;
 }
 
+void reportStage(ProgressSink* progress, float fraction, std::string_view stage) {
+    if (progress != nullptr) {
+        progress->report(fraction, stage);
+    }
+}
+
+// Per-chart conformal statistics, measured before packing (packing applies a
+// per-chart similarity transform, which leaves angles unchanged).
+void measureAtlasDistortion(const Mesh& mesh, const std::vector<std::vector<FaceId>>& islands,
+                            AtlasResult& result) {
+    float sumSq = 0.0f;
+    int measured = 0;
+    for (const std::vector<FaceId>& island : islands) {
+        const IslandDistortion d = measureDistortion(mesh, island);
+        if (d.faces.empty()) {
+            continue;
+        }
+        ++measured;
+        result.maxAngleDistortion = std::fmax(result.maxAngleDistortion, d.maxAngle);
+        sumSq += d.rmsAngle * d.rmsAngle;
+        if (d.flipped) {
+            ++result.flippedCharts;
+        }
+    }
+    if (measured > 0) {
+        result.rmsAngleDistortion = std::sqrt(sumSq / static_cast<float>(measured));
+    }
+}
+
 // Collects the island's corner UVs (with the current parameterization).
 std::vector<Vec2> islandUvPoints(const Mesh& mesh, std::span<const FaceId> island) {
     std::vector<Vec2> points;
@@ -443,11 +527,15 @@ std::vector<Vec2> islandUvPoints(const Mesh& mesh, std::span<const FaceId> islan
 
 }  // namespace
 
-SeamSet autoSeams(const Mesh& mesh, const AtlasOptions& options) {
+SeamSet autoSeams(const Mesh& mesh, const AtlasOptions& options, ProgressSink* progress,
+                  const CancelToken* cancel) {
     std::vector<int> chartOf = computeCharts(mesh, options);
     if (options.mergeCharts) {
-        mergeCoplanarCharts(mesh, chartOf, options);  // free: no distortion rise
-        mergeByDistortion(mesh, chartOf, options);    // spend headroom up to the cap
+        // free: no distortion rise
+        mergeCoplanarCharts(mesh, chartOf, options, cancel);
+        // spend headroom up to the cap — the expensive pass, so it owns the
+        // progress channel
+        mergeByDistortion(mesh, chartOf, options, MergeContext{progress, cancel});
     }
     SeamSet seams;
     const auto capacity = mesh.faceCapacity();
@@ -475,9 +563,21 @@ SeamSet autoSeams(const Mesh& mesh, const AtlasOptions& options) {
     return seams;
 }
 
-AtlasResult unwrapAtlas(Mesh& mesh, const AtlasOptions& options) {
+AtlasResult unwrapAtlas(Mesh& mesh, const AtlasOptions& options, ProgressSink* progress,
+                        const CancelToken* cancel) {
     AtlasResult result;
-    const SeamSet seams = autoSeams(mesh, options);
+    // The merge fixpoint is the pass that can run for minutes, so it owns the
+    // bulk of the progress range.
+    ProgressSink seamStage =
+        progress != nullptr ? progress->subrange(0.0f, 0.6f, "uv atlas") : ProgressSink{};
+    const SeamSet seams =
+        autoSeams(mesh, options, progress != nullptr ? &seamStage : nullptr, cancel);
+    // Cancellation is observed here, before a single UV is written, so a
+    // cancelled run leaves the mesh exactly as it found it.
+    if (cancel != nullptr && cancel->isCancelled()) {
+        result.cancelled = true;
+        return result;
+    }
     result.seamEdges = seams.size();
 
     const std::vector<std::vector<FaceId>> islands = computeIslands(mesh, seams);
@@ -485,8 +585,10 @@ AtlasResult unwrapAtlas(Mesh& mesh, const AtlasOptions& options) {
     if (islands.empty()) {
         return result;
     }
+    reportStage(progress, 0.6f, "uv atlas: unwrapping charts");
 
     static_cast<void>(ensureUvColumn(mesh));
+    bool allParameterized = true;
     for (const std::vector<FaceId>& island : islands) {
         UnwrapResult unwrap = lscmUnwrap(mesh, island, options.unwrap);
         if (!unwrap.ok) {
@@ -497,6 +599,8 @@ AtlasResult unwrapAtlas(Mesh& mesh, const AtlasOptions& options) {
         }
         if (unwrap.ok) {
             writeIslandUv(mesh, island, unwrap);
+        } else {
+            allParameterized = false;
         }
     }
 
@@ -512,32 +616,32 @@ AtlasResult unwrapAtlas(Mesh& mesh, const AtlasOptions& options) {
         }
     }
 
-    // Measure conformal distortion per chart before packing (packing applies a
-    // per-chart similarity transform, which leaves angles unchanged).
-    float sumSq = 0.0f;
-    int measured = 0;
-    for (const std::vector<FaceId>& island : islands) {
-        const IslandDistortion d = measureDistortion(mesh, island);
-        if (d.faces.empty()) {
-            continue;
-        }
-        ++measured;
-        result.maxAngleDistortion = std::fmax(result.maxAngleDistortion, d.maxAngle);
-        sumSq += d.rmsAngle * d.rmsAngle;
-        if (d.flipped) {
-            ++result.flippedCharts;
-        }
-    }
-    if (measured > 0) {
-        result.rmsAngleDistortion = std::sqrt(sumSq / static_cast<float>(measured));
-    }
+    measureAtlasDistortion(mesh, islands, result);
 
+    reportStage(progress, 0.9f, "uv atlas: packing");
     PackParams pack = options.pack;
     pack.strategy = PackStrategy::Skyline;
     const PackResult packResult = packIslands(mesh, islands, pack);
     result.packedArea = packResult.usedArea;
+    result.packedBoxArea = packResult.boxArea;
     result.texelDensity = packResult.texelDensity;
-    result.ok = packResult.ok;
+    // A chart neither LSCM nor the planar fallback could parameterize leaves its
+    // corners without UVs, so the atlas is incomplete however well it packed.
+    result.ok = packResult.ok && allParameterized;
+
+    // An island whose UVs stayed degenerate (both LSCM and the planar fallback
+    // failed, or the projection collapsed to a line) packs to a box with a zero
+    // extent: it covers nothing, so counting it as a chart makes the report
+    // disagree with the layout users can see.
+    int landed = 0;
+    for (const PackedIsland& island : packResult.islands) {
+        if (island.placed.area() > 0.0f) {
+            ++landed;
+        }
+    }
+    result.droppedCharts = result.chartCount - landed;
+    result.chartCount = landed;
+    reportStage(progress, 1.0f, "uv atlas");
     return result;
 }
 

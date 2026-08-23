@@ -120,6 +120,10 @@ inline bool writeFile(const std::string& path, const Bytes& data) {
         file.write(reinterpret_cast<const char*>(data.data()),
                    static_cast<std::streamsize>(data.size()));
     }
+    // close() flushes the filebuf and latches failbit if that flush fails, so a
+    // full disk or over-quota mount is reported here rather than being lost in
+    // the destructor after the caller has already been told the write succeeded.
+    file.close();
     return static_cast<bool>(file);
 }
 

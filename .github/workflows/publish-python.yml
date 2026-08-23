@@ -100,13 +100,37 @@ jobs:
           CIBW_ARCHS: ${{ matrix.archs }}
           CIBW_BUILD: "cp38-* cp39-* cp310-* cp311-* cp312-* cp313-*"
           CIBW_SKIP: "*-musllinux_*"
-          # Build the native C ABI the ctypes layer loads before each wheel.
+          # The C++20 core needs a newer toolchain than manylinux2014's GCC 10.
+          CIBW_MANYLINUX_X86_64_IMAGE: manylinux_2_28
+          CIBW_MANYLINUX_AARCH64_IMAGE: manylinux_2_28
+          # Build the native C ABI the ctypes layer loads, then STAGE it into the
+          # package directory. Paths must be absolute: cibuildwheel runs before-all
+          # with the cwd set to package-dir (python/cyberremesh), which holds no
+          # CMakeLists.txt, so `-S .` could never resolve a source tree. Without the
+          # staging step setuptools emitted a `py3-none-any` wheel containing three
+          # .py files and no engine.
           CIBW_BEFORE_ALL: >-
-            cmake -S . -B build/wheel -DCMAKE_BUILD_TYPE=Release
-            -DCYBER_BUILD_CAPI=ON -DCYBER_BUILD_TESTS=OFF &&
-            cmake --build build/wheel --target cyber_capi_shared
-          # Import-check the freshly built wheel on every target.
-          CIBW_TEST_COMMAND: "python -c \"import cyberremesh; print(cyberremesh.__version__)\""
+            cmake -S {project} -B {project}/build/wheel -DCMAKE_BUILD_TYPE=Release
+            -DCYBER_BUILD_CAPI=ON -DCYBER_BUILD_TESTS=OFF -DCYBER_BUILD_CLI=OFF &&
+            cmake --build {project}/build/wheel --target cyber_capi_shared &&
+            python {project}/packaging/publish/stage_native_lib.py
+            {project}/build/wheel {package}/cyberremesh
+          # The manylinux image carries neither CMake nor Ninja.
+          CIBW_BEFORE_ALL_LINUX: >-
+            python -m pip install --upgrade cmake ninja &&
+            cmake -S {project} -B {project}/build/wheel -DCMAKE_BUILD_TYPE=Release
+            -DCYBER_BUILD_CAPI=ON -DCYBER_BUILD_TESTS=OFF -DCYBER_BUILD_CLI=OFF &&
+            cmake --build {project}/build/wheel --target cyber_capi_shared &&
+            python {project}/packaging/publish/stage_native_lib.py
+            {project}/build/wheel {package}/cyberremesh
+          # A real gate: importing the package deliberately dlopens nothing
+          # (cyberremesh/__init__.py), so an import-only check passed on a wheel with
+          # no library in it. `version()` calls through to `cyber_version`, so this
+          # fails when the library is missing, unloadable, or exports nothing —
+          # which is exactly how a Windows/MSVC build with no dllexport presents.
+          CIBW_TEST_COMMAND: >-
+            python -c "import cyberremesh;
+            print(cyberremesh.__version__, cyberremesh.version())"
 
       - name: Upload wheelhouse
         uses: actions/upload-artifact@v4

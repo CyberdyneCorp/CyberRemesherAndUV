@@ -7,8 +7,10 @@
 
 #include <exception>
 #include <json.hpp>
+#include <utility>
 
 #include "cyber/net/protocol.hpp"
+#include "json_read.hpp"
 #include "mesh_json.hpp"
 #include "socket_io.hpp"
 
@@ -27,7 +29,11 @@ struct BridgeClient::Impl {
         if (fd < 0) {
             return false;
         }
-        if (!detail::sendFrame(fd, request.dump())) {
+        // dump() throws type_error.316 on a string that is not valid UTF-8 — a
+        // Latin-1 label or message handed in by the host — out of an API that
+        // reports errors as `false`. The server's reply path takes the same
+        // replacing handler; valid UTF-8 dumps byte-identically.
+        if (!detail::sendFrame(fd, request.dump(-1, ' ', false, json::error_handler_t::replace))) {
             return false;
         }
         std::string raw;
@@ -45,7 +51,31 @@ struct BridgeClient::Impl {
     // Convenience for commands whose success is just a non-error reply.
     bool command(const json& request) {
         json response;
-        return exchange(request, response) && response.value("type", std::string{}) != "error";
+        const std::string type = exchange(request, response) ? replyType(response) : std::string{};
+        return !type.empty() && type != "error";
+    }
+
+    // Sends `request` and, when the reply is of `expectedType`, hands it to
+    // `decode`. The reply is peer-controlled and is read through accessors that
+    // throw on a missing or retyped member, so the decode runs under a catch:
+    // client.hpp documents a protocol error as a `false` return, and letting an
+    // exception out of here would unwind into the host application instead.
+    template <typename Decoder>
+    bool decodeReply(const json& request, const char* expectedType, Decoder decode) {
+        json response;
+        if (!exchange(request, response) || replyType(response) != expectedType) {
+            return false;
+        }
+        try {
+            return decode(response);
+        } catch (const std::exception&) {
+            return false;
+        }
+    }
+
+    // Reply "type", or empty when the reply is not an object with a string one.
+    static std::string replyType(const json& response) {
+        return detail::readString(response, "type", std::string{});
     }
 };
 
@@ -72,9 +102,8 @@ bool BridgeClient::connect(std::uint16_t port, const std::string& host) {
     // Handshake.
     json hello{{"type", "hello"}, {"protocol", kProtocolVersion}, {"client", "cyber-cpp"}};
     json response;
-    if (!m->exchange(hello, response) || response.value("type", std::string{}) != "welcome") {
-        m->handshakeError = response.contains("reason") ? response.at("reason").get<std::string>()
-                                                        : "handshake failed";
+    if (!m->exchange(hello, response) || Impl::replyType(response) != "welcome") {
+        m->handshakeError = detail::readString(response, "reason", "handshake failed");
         close();
         return false;
     }
@@ -101,14 +130,13 @@ bool BridgeClient::pushTarget(const WireMesh& mesh) {
 }
 
 bool BridgeClient::pullTarget(WireMesh& out, bool& present) {
-    json response;
-    if (!m->exchange({{"type", "pull_target"}}, response) ||
-        response.value("type", std::string{}) != "target") {
-        return false;
-    }
-    present = response.value("present", false);
-    out = detail::meshFromJson(response.at("mesh"));
-    return true;
+    return m->decodeReply({{"type", "pull_target"}}, "target", [&](const json& response) {
+        const bool hasTarget = response.value("present", false);
+        WireMesh mesh = detail::meshFromJson(response.at("mesh"));
+        present = hasTarget;
+        out = std::move(mesh);
+        return true;
+    });
 }
 
 bool BridgeClient::pushEditMesh(const WireMesh& mesh) {
@@ -116,13 +144,10 @@ bool BridgeClient::pushEditMesh(const WireMesh& mesh) {
 }
 
 bool BridgeClient::pullEditMesh(WireMesh& out) {
-    json response;
-    if (!m->exchange({{"type", "pull_editmesh"}}, response) ||
-        response.value("type", std::string{}) != "editmesh") {
-        return false;
-    }
-    out = detail::meshFromJson(response.at("mesh"));
-    return true;
+    return m->decodeReply({{"type", "pull_editmesh"}}, "editmesh", [&](const json& response) {
+        out = detail::meshFromJson(response.at("mesh"));
+        return true;
+    });
 }
 
 bool BridgeClient::clearScene() { return m->command({{"type", "clear_scene"}}); }
@@ -145,12 +170,14 @@ bool BridgeClient::pressAction(const std::string& id) {
 }
 
 std::vector<std::string> BridgeClient::pollPresses() {
-    json response;
-    if (!m->exchange({{"type", "poll_presses"}}, response) ||
-        response.value("type", std::string{}) != "presses") {
+    std::vector<std::string> ids;
+    if (!m->decodeReply({{"type", "poll_presses"}}, "presses", [&](const json& response) {
+            ids = response.at("ids").get<std::vector<std::string>>();
+            return true;
+        })) {
         return {};
     }
-    return response.at("ids").get<std::vector<std::string>>();
+    return ids;
 }
 
 bool BridgeClient::setSymmetry(const std::string& axis, bool enabled) {
@@ -158,25 +185,20 @@ bool BridgeClient::setSymmetry(const std::string& axis, bool enabled) {
 }
 
 bool BridgeClient::querySymmetry(SymmetryState& out) {
-    json response;
-    if (!m->exchange({{"type", "query_symmetry"}}, response) ||
-        response.value("type", std::string{}) != "symmetry") {
-        return false;
-    }
-    out.axis = response.value("axis", std::string{"none"});
-    out.enabled = response.value("enabled", false);
-    return true;
+    return m->decodeReply({{"type", "query_symmetry"}}, "symmetry", [&](const json& response) {
+        out.axis = detail::readString(response, "axis", "none");
+        out.enabled = response.value("enabled", false);
+        return true;
+    });
 }
 
 bool BridgeClient::queryChanged(std::uint64_t marker, bool& changed, std::uint64_t& revision) {
-    json response;
-    if (!m->exchange({{"type", "query_changed"}, {"marker", marker}}, response) ||
-        response.value("type", std::string{}) != "changed") {
-        return false;
-    }
-    changed = response.value("changed", false);
-    revision = response.value("revision", std::uint64_t{0});
-    return true;
+    return m->decodeReply(
+        {{"type", "query_changed"}, {"marker", marker}}, "changed", [&](const json& response) {
+            changed = response.value("changed", false);
+            revision = detail::readUnsigned(response, "revision", std::uint64_t{0});
+            return true;
+        });
 }
 
 bool BridgeClient::setCamera(const CameraPose& pose) {
@@ -188,19 +210,18 @@ bool BridgeClient::setCamera(const CameraPose& pose) {
 }
 
 bool BridgeClient::getCamera(CameraPose& out) {
-    json response;
-    if (!m->exchange({{"type", "get_camera"}}, response) ||
-        response.value("type", std::string{}) != "camera") {
-        return false;
-    }
-    const json& p = response.at("pose");
-    for (int i = 0; i < 3; ++i) {
-        out.position[i] = p.at("position").at(static_cast<std::size_t>(i)).get<float>();
-        out.target[i] = p.at("target").at(static_cast<std::size_t>(i)).get<float>();
-        out.up[i] = p.at("up").at(static_cast<std::size_t>(i)).get<float>();
-    }
-    out.fovDegrees = p.value("fov", 45.0f);
-    return true;
+    return m->decodeReply({{"type", "get_camera"}}, "camera", [&](const json& response) {
+        const json& p = response.at("pose");
+        CameraPose pose;
+        for (std::size_t i = 0; i < 3; ++i) {
+            pose.position[i] = p.at("position").at(i).get<float>();
+            pose.target[i] = p.at("target").at(i).get<float>();
+            pose.up[i] = p.at("up").at(i).get<float>();
+        }
+        pose.fovDegrees = p.value("fov", 45.0f);
+        out = pose;
+        return true;
+    });
 }
 
 }  // namespace cyber::net

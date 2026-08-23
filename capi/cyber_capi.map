@@ -1,0 +1,10 @@
+/* Exported ABI of libcyber_capi: the extern "C" entry points in cyber_capi.h
+   and nothing else. The vendored Geogram/stb/tinygltf/tinyobj/AutoRemesher
+   objects are linked in statically; leaving their symbols global would let a
+   host process that vendors its own copy interpose on ours (and vice versa). */
+{
+    global:
+        cyber_*;
+    local:
+        *;
+};

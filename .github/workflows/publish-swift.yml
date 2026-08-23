@@ -57,6 +57,20 @@ jobs:
             tag="${{ inputs.tag }}"
           fi
           version="${tag#swift-v}"
+
+          # The tag is the only thing that names the version here, so a typo in a
+          # hand-pushed tag would publish a Swift package claiming a version the
+          # tree never built. Cross-check it against the project's own version.
+          project="$(sed -n 's/^[[:space:]]*VERSION[[:space:]]\+\([0-9][0-9.]*\).*/\1/p' CMakeLists.txt | head -1)"
+          if [ -z "${project}" ]; then
+            echo "could not read VERSION from CMakeLists.txt" >&2
+            exit 1
+          fi
+          if [ "${version}" != "${project}" ]; then
+            echo "tag '${tag}' resolves to ${version}, but CMakeLists.txt says ${project}" >&2
+            exit 1
+          fi
+
           echo "tag=${tag}" >>"${GITHUB_OUTPUT}"
           echo "version=${version}" >>"${GITHUB_OUTPUT}"
 

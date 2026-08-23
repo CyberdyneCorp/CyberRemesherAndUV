@@ -1,5 +1,7 @@
 #include <doctest.h>
 
+#include <cmath>
+#include <limits>
 #include <vector>
 
 #include "cyber/bake/bake.hpp"
@@ -84,6 +86,82 @@ TEST_CASE("normal bake of coincident flat surfaces is tangent-space up") {
     REQUIRE(center(r.image, 2) == doctest::Approx(1.0f).epsilon(0.02));
 }
 
+TEST_CASE("normal-map padding is the flat normal, and survives a DirectX green flip") {
+    // Regression: uncovered texels were left at (0,0,0). Black is not a normal
+    // — it bleeds into the surface under dilation/mips — and the unreal export
+    // preset's green flip turned it into pure green (0,1,0), so one bake shipped
+    // two different paddings depending on the target app. The flat normal is
+    // invariant under the flip, which is the property that makes it correct.
+    const Mesh low = makePlane(0, 0, 0.5f, 0, 0.5f, /*uv=*/true, false);  // covers a UV corner only
+    const Mesh high = makePlane(0, 0, 0.5f, 0, 0.5f, false, false);
+    const bake::BakeResult r = bake::bake(low, high, bake::BakeMap::Normal, params32());
+    REQUIRE_FALSE(r.image.pixels.empty());
+
+    // A texel far outside the layout is padding.
+    const int px = r.image.width - 1;
+    const int py = 0;
+    CHECK(r.image.at(px, py, 0) == doctest::Approx(0.5f));
+    CHECK(r.image.at(px, py, 1) == doctest::Approx(0.5f));
+    CHECK(r.image.at(px, py, 2) == doctest::Approx(1.0f));
+    // g -> 1 - g leaves it unchanged, so both conventions ship the same padding.
+    CHECK(1.0f - r.image.at(px, py, 1) == doctest::Approx(r.image.at(px, py, 1)));
+}
+
+TEST_CASE("padding is each map's neutral value, never black") {
+    // Regression: only the normal map pre-filled a neutral padding, so cavity
+    // and AO shipped 0 (maximum concavity / full occlusion) and curvature
+    // shipped 0 (maximum concavity) in the gutters. Without a coverage mask,
+    // mip generation and dilation bleed that black inward at every chart
+    // border — a phantom dark crease in the multiply slot, a ring in AO.
+    const Mesh low = makePlane(0, 0, 0.5f, 0, 0.5f, /*uv=*/true, false);  // a UV corner only
+    const Mesh high = makePlane(0, 0, 0.5f, 0, 0.5f, false, false);
+    bake::BakeParams p = params32();
+    p.aoSamples = 8;
+
+    struct Case {
+        bake::BakeMap map;
+        float padding;
+    };
+    const std::vector<Case> cases = {
+        {bake::BakeMap::Curvature, 0.5f},         // mid-gray: no curvature
+        {bake::BakeMap::Cavity, 1.0f},            // white: no concavity
+        {bake::BakeMap::AmbientOcclusion, 1.0f},  // fully open
+        {bake::BakeMap::Displacement, 0.0f},      // zero height already IS neutral
+    };
+    for (const Case& c : cases) {
+        CAPTURE(static_cast<int>(c.map));
+        const bake::BakeResult r = bake::bake(low, high, c.map, p);
+        REQUIRE_FALSE(r.image.pixels.empty());
+        REQUIRE(r.texelsCovered > 0);  // the layout really is partial, not empty
+        // Far outside the covered corner, and again just past its border: the
+        // padding equals what the flat covered texels read, so the border is
+        // continuous under a filter that ignores coverage.
+        CHECK(r.image.at(r.image.width - 1, 0, 0) == doctest::Approx(c.padding));
+        CHECK(r.image.at(r.image.width - 1, r.image.height - 1, 0) == doctest::Approx(c.padding));
+    }
+}
+
+TEST_CASE("a non-finite UV cannot poison the baked image") {
+    // Regression: the inside test is a `>` comparison on an expression a NaN UV
+    // makes NaN, and `NaN > eps` is false — so the texel was ACCEPTED rather
+    // than rejected and the bbox of the triangle's remaining finite corners was
+    // written as NaN. A glTF TEXCOORD_0 accessor holding a NaN float reaches
+    // the rasterizer verbatim.
+    Mesh low = makePlane(0, 0, 1, 0, 1, /*uv=*/true, false);
+    std::vector<Vec2>* uv = low.cornerAttributes().find<Vec2>("uv");
+    REQUIRE(uv != nullptr);
+    (*uv)[1] = {std::numeric_limits<float>::quiet_NaN(), std::numeric_limits<float>::quiet_NaN()};
+
+    const Mesh high = makePlane(0, 0, 1, 0, 1, false, false);
+    const bake::BakeResult r = bake::bake(low, high, bake::BakeMap::Position, params32());
+    for (const float v : r.image.pixels) {
+        REQUIRE(std::isfinite(v));
+    }
+    // Only the sub-triangle carrying the NaN corner is dropped, so the rest of
+    // the layout still bakes — the guard rejects, it does not empty the map.
+    REQUIRE(r.texelsCovered > 0);
+}
+
 TEST_CASE("displacement bake measures height of the target above the surface") {
     const Mesh low = makePlane(0.0f, 0, 1, 0, 1, true, false);
     const Mesh high = makePlane(0.05f, 0, 1, 0, 1, false, false);  // 0.05 above, within the cage
@@ -125,6 +203,93 @@ TEST_CASE("ambient occlusion darkens under an occluder") {
     const Mesh ceiling = makePlane(0.3f, -1, 2, -1, 2, false, false);
     const bake::BakeResult rc = bake::bake(low, ceiling, bake::BakeMap::AmbientOcclusion, p);
     REQUIRE(center(rc.image, 0) < 0.3f);
+}
+
+TEST_CASE("an AO bake with no ray budget is rejected instead of baked as NaN") {
+    // Regression: aoSamples was never range-checked, so openness computed
+    // `1 - occluded / 0` = NaN at every covered texel and the bake reported
+    // success with texelsCovered > 0. NaN loses every ordered comparison, so
+    // the PNG writer's clamp turned the whole map into byte 0 — solid black,
+    // the inverse of AO's neutral white — and the caller was told nothing.
+    const Mesh low = makePlane(0, 0, 1, 0, 1, /*uv=*/true, false);
+    const Mesh high = makePlane(0, 0, 1, 0, 1, false, false);
+
+    bake::BakeParams p = params32();
+    p.aoSamples = 0;
+    const bake::BakeResult zero = bake::bake(low, high, bake::BakeMap::AmbientOcclusion, p);
+    CHECK(zero.image.pixels.empty());
+    CHECK(zero.texelsCovered == 0);
+
+    // A negative budget is the same caller bug one step further along: it used
+    // to reach the ray buffers as an enormous allocation.
+    p.aoSamples = -4;
+    CHECK(bake::bake(low, high, bake::BakeMap::AmbientOcclusion, p).image.pixels.empty());
+
+    // The boundary still bakes, and every float in it is finite.
+    p.aoSamples = 1;
+    const bake::BakeResult one = bake::bake(low, high, bake::BakeMap::AmbientOcclusion, p);
+    REQUIRE(one.texelsCovered > 0);
+    for (const float v : one.image.pixels) {
+        REQUIRE(std::isfinite(v));
+    }
+
+    // aoSamples belongs to AO alone: a map that never spends a ray budget is
+    // unaffected by a garbage one, exactly as before the check existed.
+    p.aoSamples = 0;
+    CHECK_FALSE(bake::bake(low, high, bake::BakeMap::Normal, p).image.pixels.empty());
+}
+
+TEST_CASE("a numeric bake parameter out of range yields an empty image") {
+    // Every member the requested map reads is checked, not just aoSamples: a
+    // non-finite distance seeds rays that can never hit anything, so the bake
+    // would ship a blank map dressed as a success.
+    const Mesh low = makePlane(0, 0, 1, 0, 1, /*uv=*/true, false);
+    const Mesh high = makePlane(0, 0, 1, 0, 1, false, false);
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    const float inf = std::numeric_limits<float>::infinity();
+
+    struct Case {
+        const char* what;
+        bake::BakeMap map;
+        bake::BakeParams params;
+    };
+    auto with = [](auto&& set) {
+        bake::BakeParams p = params32();
+        p.aoSamples = 8;
+        set(p);
+        return p;
+    };
+    const std::vector<Case> cases = {
+        {"cage NaN", bake::BakeMap::Normal,
+         with([&](bake::BakeParams& p) { p.cageDistance = nan; })},
+        {"cage inf", bake::BakeMap::Normal,
+         with([&](bake::BakeParams& p) { p.cageDistance = inf; })},
+        {"cage < 0", bake::BakeMap::Displacement,
+         with([](bake::BakeParams& p) { p.cageDistance = -0.1f; })},
+        {"aoRadius NaN", bake::BakeMap::AmbientOcclusion,
+         with([&](bake::BakeParams& p) { p.aoRadius = nan; })},
+        {"aoRadius < 0", bake::BakeMap::AmbientOcclusion,
+         with([](bake::BakeParams& p) { p.aoRadius = -1.0f; })},
+        {"aoBias NaN", bake::BakeMap::AmbientOcclusion,
+         with([&](bake::BakeParams& p) { p.aoBias = nan; })},
+        {"curvatureRange NaN", bake::BakeMap::Curvature,
+         with([&](bake::BakeParams& p) { p.curvatureRange = nan; })},
+    };
+    for (const Case& c : cases) {
+        INFO(c.what);
+        const bake::BakeResult r = bake::bake(low, high, c.map, c.params);
+        CHECK(r.image.pixels.empty());
+        CHECK(r.texelsCovered == 0);
+    }
+
+    // The values these cases perturb are all in range in params32(), so the
+    // control bakes — the check rejects a bad request, it does not reject bakes.
+    bake::BakeParams ok = params32();
+    ok.aoSamples = 8;
+    CHECK_FALSE(bake::bake(low, high, bake::BakeMap::AmbientOcclusion, ok).image.pixels.empty());
+    // A negative curvatureRange keeps its documented meaning (auto range).
+    ok.curvatureRange = -1.0f;
+    CHECK_FALSE(bake::bake(low, high, bake::BakeMap::Curvature, ok).image.pixels.empty());
 }
 
 TEST_CASE("bake honors cooperative cancellation") {

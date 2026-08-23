@@ -126,9 +126,13 @@ def _run(tmp: str) -> int:
     # the request (~164 quads) where Geogram traces it fully (~1744).
     check("open surface traces densely (not the ~90-face under-trace)",
           len(quads) > 130, f"got {len(quads)} quads")
-    # Edge-length CV is the primary discriminator and holds on both backends: the pre-fix
-    # simplifyGraph path merged cells into long uneven quads (~0.93 here, ~1.7 on the Geogram
-    # path), while the fix keeps them uniform.
+    # Edge-length CV is the primary discriminator: the pre-fix simplifyGraph path merged
+    # cells into long uneven quads (~0.93 here, ~1.7 on the Geogram path), while the fix
+    # keeps them uniform. This bound briefly went to 0.7: the isoline graph used to iterate
+    # in hash order, which made the traced mesh a property of the standard library
+    # (libstdc++ landed on 0.40, libc++ on 0.73), and ordering it settled both toolchains
+    # on 0.625. Fixing the smoother's Jacobi two-cycle then brought it to 0.35 -- better
+    # than either toolchain managed before -- so the original bound is back.
     cv = edge_cv(verts, faces)
     check("edge-length CV stays uniform (pre-fix simplifyGraph blew it up)",
           cv < 0.6, f"cv={cv:.3f}")

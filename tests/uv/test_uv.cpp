@@ -1,6 +1,10 @@
 #include <doctest.h>
 
+#include <algorithm>
 #include <cmath>
+#include <cstddef>
+#include <limits>
+#include <string_view>
 #include <vector>
 
 #include "cyber/core/math.hpp"
@@ -59,6 +63,58 @@ Mesh makeBentStrip(int quads, float degPerQuad) {
         f.push_back({b0, b1, b1 + 1, b0 + 1});
     }
     return Mesh::fromIndexed(p, f);
+}
+
+// Flat n x n quad grid in the z=0 plane: one chart with many faces, so a single
+// poisoned vertex still leaves plenty of well-formed triangles around it.
+Mesh makeGrid(int n) {
+    std::vector<Vec3> p;
+    std::vector<std::vector<Index>> f;
+    for (int y = 0; y <= n; ++y) {
+        for (int x = 0; x <= n; ++x) {
+            p.push_back({static_cast<float>(x), static_cast<float>(y), 0.0f});
+        }
+    }
+    const Index stride = static_cast<Index>(n + 1);
+    for (int y = 0; y < n; ++y) {
+        for (int x = 0; x < n; ++x) {
+            const Index b = static_cast<Index>(y) * stride + static_cast<Index>(x);
+            f.push_back({b, b + 1, b + 1 + stride, b + stride});
+        }
+    }
+    return Mesh::fromIndexed(p, f);
+}
+
+// A closed quad sphere. Every face carries a different normal, so chart growth
+// fragments it and the distortion merge pass genuinely has to grind — unlike the
+// hand-built cubes and strips above, where it converges in one round.
+Mesh makeQuadSphere(int slices, int stacks) {
+    std::vector<Vec3> p;
+    std::vector<std::vector<Index>> f;
+    for (int j = 0; j <= stacks; ++j) {
+        const float v = cyber::kPi * static_cast<float>(j) / static_cast<float>(stacks);
+        for (int i = 0; i < slices; ++i) {
+            const float u = 2.0f * cyber::kPi * static_cast<float>(i) / static_cast<float>(slices);
+            p.push_back({std::sin(v) * std::cos(u), std::cos(v), std::sin(v) * std::sin(u)});
+        }
+    }
+    const auto id = [slices](int i, int j) {
+        return static_cast<Index>(j * slices + (i % slices));
+    };
+    for (int j = 0; j < stacks; ++j) {
+        for (int i = 0; i < slices; ++i) {
+            f.push_back({id(i, j), id(i, j + 1), id(i + 1, j + 1), id(i + 1, j)});
+        }
+    }
+    return Mesh::fromIndexed(p, f);
+}
+
+bool allUvFinite(const Mesh& mesh) {
+    const std::vector<Vec2>* column = uv::uvColumn(mesh);
+    if (column == nullptr) {
+        return true;
+    }
+    return std::all_of(column->begin(), column->end(), [](Vec2 p) { return uv::isFinite(p); });
 }
 
 std::vector<FaceId> aliveFaces(const Mesh& mesh) {
@@ -168,6 +224,53 @@ TEST_CASE("skyline packing is tighter than shelf and stays valid") {
             REQUIRE_FALSE(uv::Bounds2::overlap(b.islands[i].placed, b.islands[j].placed, 1e-5f));
         }
     }
+}
+
+TEST_CASE("packing never reports a non-finite placement as a successful pack") {
+    // Bounds2::valid() rejects a NaN box (comparisons against NaN are false)
+    // but NOT an infinite one, so an infinite island used to reach the
+    // strategies: the skyline path computed inf/inf = NaN and fed it to
+    // `static_cast<int>(std::ceil(...))` (undefined behaviour), and the shelf
+    // path emitted NaN placements alongside ok = true. Every real island must
+    // still pack, and every placement must be finite.
+    uv::Bounds2 good;
+    good.expand({0.0f, 0.0f});
+    good.expand({1.0f, 1.0f});
+    uv::Bounds2 infinite;
+    infinite.expand({0.0f, 0.0f});
+    infinite.expand(
+        {std::numeric_limits<float>::infinity(), std::numeric_limits<float>::infinity()});
+    uv::Bounds2 notANumber;
+    notANumber.expand({0.0f, 0.0f});
+    notANumber.expand(
+        {std::numeric_limits<float>::quiet_NaN(), std::numeric_limits<float>::quiet_NaN()});
+    const std::vector<uv::Bounds2> boxes = {good, infinite, notANumber, good};
+
+    for (const uv::PackStrategy strategy : {uv::PackStrategy::Shelf, uv::PackStrategy::Skyline}) {
+        uv::PackParams params;
+        params.strategy = strategy;
+        const uv::PackResult packed = uv::packBoxes(boxes, params);
+        REQUIRE(packed.ok);
+        REQUIRE(packed.islands.size() == boxes.size());
+        REQUIRE(std::isfinite(packed.scale));
+        for (const uv::PackedIsland& island : packed.islands) {
+            CHECK(std::isfinite(island.placed.mn.x));
+            CHECK(std::isfinite(island.placed.mn.y));
+            CHECK(std::isfinite(island.placed.mx.x));
+            CHECK(std::isfinite(island.placed.mx.y));
+        }
+        // The two real islands keep a real extent instead of collapsing.
+        CHECK(packed.islands[0].placed.size().x > 0.0f);
+        CHECK(packed.islands[3].placed.size().x > 0.0f);
+    }
+
+    // A non-finite margin is the same class of poison and is neutralized too.
+    uv::PackParams badMargin;
+    badMargin.margin = std::numeric_limits<float>::infinity();
+    const uv::PackResult packed = uv::packBoxes(std::vector<uv::Bounds2>{good, good}, badMargin);
+    REQUIRE(packed.ok);
+    CHECK(std::isfinite(packed.islands[0].placed.mx.x));
+    CHECK(packed.islands[0].placed.size().x > 0.0f);
 }
 
 TEST_CASE("packing preserves relative scale of unequal islands") {
@@ -312,6 +415,103 @@ TEST_CASE("distortion-bounded merge folds developable strips together") {
     REQUIRE(atlas.chartCount < base.chartCount);
 }
 
+// The distortion merge drives a fixpoint over adjacent chart pairs and its
+// accept predicate LSCM-unwraps the union of each candidate pair, so re-testing
+// a pair whose charts have not changed since it was rejected costs a full trial
+// unwrap for an answer already known. The four cases below pin the cost and the
+// escape hatch of that pass, which is on by default.
+
+TEST_CASE("the chart merge does not re-test pairs it already rejected") {
+    Mesh mesh = makeQuadSphere(40, 20);
+    int trials = 0;
+    const cyber::CancelToken token;
+    token.setPoll([&trials]() {
+        ++trials;
+        return false;
+    });
+    const uv::AtlasResult atlas = uv::unwrapAtlas(mesh, {}, nullptr, &token);
+    REQUIRE(atlas.ok);
+
+    // The token is polled once per merge trial (plus once after seaming), so
+    // `trials` counts the trial unwraps the merge passes ran. A fixpoint that
+    // forgets its rejections re-runs most of them on every round and needs 206
+    // here; remembering them needs 112. The bound sits between the two with
+    // room to spare on the remembering side.
+    REQUIRE(trials < 160);
+
+    // ...and it reaches exactly the partition the forgetful fixpoint reached:
+    // skipping a re-test can only skip an answer that was already known.
+    REQUIRE(atlas.chartCount == 8);
+    REQUIRE(atlas.seamEdges == 242);
+}
+
+TEST_CASE("a cancel token that never fires changes nothing about the atlas") {
+    Mesh plain = makeQuadSphere(24, 12);
+    const uv::AtlasResult expected = uv::unwrapAtlas(plain);
+
+    Mesh watched = makeQuadSphere(24, 12);
+    const cyber::CancelToken token;
+    token.setPoll([]() { return false; });
+    float lastProgress = -1.0f;
+    cyber::ProgressSink sink([&lastProgress](float p, std::string_view) {
+        REQUIRE(p >= lastProgress);  // the sink is monotonic
+        lastProgress = p;
+    });
+    const uv::AtlasResult observed = uv::unwrapAtlas(watched, {}, &sink, &token);
+
+    REQUIRE(observed.ok);
+    REQUIRE_FALSE(observed.cancelled);
+    REQUIRE(observed.chartCount == expected.chartCount);
+    REQUIRE(observed.seamEdges == expected.seamEdges);
+    REQUIRE(observed.maxAngleDistortion == expected.maxAngleDistortion);
+    REQUIRE(observed.packedArea == expected.packedArea);
+    REQUIRE(lastProgress == doctest::Approx(1.0f));
+
+    const std::vector<Vec2>* a = uv::uvColumn(plain);
+    const std::vector<Vec2>* b = uv::uvColumn(watched);
+    REQUIRE(a != nullptr);
+    REQUIRE(b != nullptr);
+    REQUIRE(a->size() == b->size());
+    for (std::size_t i = 0; i < a->size(); ++i) {
+        REQUIRE((*a)[i].x == (*b)[i].x);
+        REQUIRE((*a)[i].y == (*b)[i].y);
+    }
+}
+
+TEST_CASE("a cancelled unwrap leaves the mesh exactly as it was") {
+    Mesh mesh = makeQuadSphere(24, 12);
+    // Pre-existing UVs the caller would lose if a cancel wrote a partial atlas.
+    std::vector<Vec2>& before = uv::ensureUvColumn(mesh);
+    std::fill(before.begin(), before.end(), Vec2{0.25f, 0.75f});
+    const std::vector<Vec2> snapshot = before;
+
+    const cyber::CancelToken token;
+    token.requestCancel();
+    const uv::AtlasResult atlas = uv::unwrapAtlas(mesh, {}, nullptr, &token);
+
+    REQUIRE(atlas.cancelled);
+    REQUIRE_FALSE(atlas.ok);
+    REQUIRE(atlas.chartCount == 0);
+    const std::vector<Vec2>* after = uv::uvColumn(mesh);
+    REQUIRE(after != nullptr);
+    REQUIRE(*after == snapshot);
+}
+
+TEST_CASE("a cancel raised mid-merge aborts promptly instead of running to the end") {
+    Mesh mesh = makeQuadSphere(40, 20);
+    int polls = 0;
+    const cyber::CancelToken token;
+    token.setPoll([&polls]() { return ++polls > 5; });
+    const uv::AtlasResult atlas = uv::unwrapAtlas(mesh, {}, nullptr, &token);
+
+    REQUIRE(atlas.cancelled);
+    // The token latches on the sixth poll and the pass stops there; running the
+    // merge to its fixpoint would have taken over a hundred more trials.
+    REQUIRE(polls == 6);
+    // Nothing was written, so the mesh never grew a UV column.
+    REQUIRE(uv::uvColumn(mesh) == nullptr);
+}
+
 TEST_CASE("chart re-orientation tightens the cube atlas") {
     // Without re-orientation LSCM leaves each cube face as a 45-degree diamond,
     // whose axis-aligned bounding box wastes half its area. Re-orienting to the
@@ -352,6 +552,87 @@ TEST_CASE("unwrapAtlas is deterministic") {
     for (std::size_t i = 0; i < ua->size(); ++i) {
         REQUIRE((*ua)[i].x == doctest::Approx((*ub)[i].x));
         REQUIRE((*ua)[i].y == doctest::Approx((*ub)[i].y));
+    }
+}
+
+TEST_CASE("packedArea is the fraction of the UV square geometry really covers") {
+    // LSCM lays each cube face out as a 45-degree diamond, whose axis-aligned
+    // bounding box is twice its area. Summing bounding boxes therefore reports
+    // roughly double the coverage a texture painter would see.
+    Mesh mesh = makeCube();
+    uv::AtlasOptions opts;
+    opts.maxChartDistortion = 0.0f;  // one chart per face -> diamonds
+    opts.reorientCharts = false;     // keep them diamonds
+    const uv::AtlasResult atlas = uv::unwrapAtlas(mesh, opts);
+    REQUIRE(atlas.ok);
+
+    // Ground truth: the summed |UV area| of every face, in the unit square.
+    const std::vector<FaceId> faces = aliveFaces(mesh);
+    const double covered = uv::islandUvArea(mesh, faces);
+
+    REQUIRE(atlas.packedArea == doctest::Approx(static_cast<float>(covered)).epsilon(1e-3));
+    // The bounding-box figure is reported separately and is materially larger.
+    REQUIRE(atlas.packedBoxArea > atlas.packedArea * 1.4f);
+    REQUIRE(atlas.packedArea > 0.0f);
+    REQUIRE(atlas.packedArea <= 1.0f);
+}
+
+TEST_CASE("charts that never land are reported as dropped, not as charts") {
+    // Two islands: a unit quad, and a quad whose four vertices are collinear.
+    // The degenerate one has no surface, so neither LSCM nor the planar
+    // fallback can give it area — it covers nothing in the packed atlas and
+    // must not inflate chartCount.
+    const std::vector<Vec3> p = {{0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0},
+                                 {2, 0, 0}, {3, 0, 0}, {4, 0, 0}, {5, 0, 0}};
+    const std::vector<std::vector<Index>> f = {{0, 1, 2, 3}, {4, 5, 6, 7}};
+    Mesh mesh = Mesh::fromIndexed(p, f);
+
+    const uv::AtlasResult atlas = uv::unwrapAtlas(mesh);
+    REQUIRE(atlas.ok);
+    REQUIRE(uv::computeIslands(mesh, uv::autoSeams(mesh)).size() == 2);
+
+    // One chart lands, one is dropped; the two must reconcile with the islands.
+    REQUIRE(atlas.chartCount == 1);
+    REQUIRE(atlas.droppedCharts == 1);
+
+    // ...and the surviving chart is exactly the one with UV area.
+    int withArea = 0;
+    for (const FaceId face : aliveFaces(mesh)) {
+        const std::vector<FaceId> single{face};
+        if (uv::islandUvArea(mesh, single) > 0.0) {
+            ++withArea;
+        }
+    }
+    REQUIRE(withArea == atlas.chartCount);
+}
+
+TEST_CASE("a non-finite vertex position is refused instead of unwrapping to non-finite UVs") {
+    // Control: the same grid without the poisoned vertex unwraps and packs.
+    Mesh clean = makeGrid(4);
+    const uv::AtlasResult cleanAtlas = uv::unwrapAtlas(clean);
+    REQUIRE(cleanAtlas.ok);
+    REQUIRE(cleanAtlas.chartCount == 1);
+    REQUIRE(allUvFinite(clean));
+
+    // NaN fails every ordered comparison and inf survives them, so both slipped
+    // past the degenerate-triangle and pin-length guards.
+    const float poison[] = {std::numeric_limits<float>::infinity(),
+                            std::numeric_limits<float>::quiet_NaN()};
+    for (const float value : poison) {
+        Mesh mesh = makeGrid(4);
+        const VertexId bad{7};
+        Vec3 p = mesh.position(bad);
+        p.z = value;
+        mesh.setPosition(bad, p);
+
+        // The solve must not claim success on an island it cannot parameterize.
+        REQUIRE_FALSE(uv::lscmUnwrap(mesh, aliveFaces(mesh)).ok);
+
+        // ...and the atlas must report that failure rather than write the
+        // non-finite values into the mesh's corners.
+        const uv::AtlasResult atlas = uv::unwrapAtlas(mesh);
+        REQUIRE_FALSE(atlas.ok);
+        REQUIRE(allUvFinite(mesh));
     }
 }
 

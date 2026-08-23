@@ -9,11 +9,18 @@ In addition to stroke-over-edges seam editing, the UV stage SHALL support
 routed seam paths: the user places an ordered sequence of waypoints on the
 EditMesh, and between consecutive waypoints the engine SHALL route a
 least-cost path along mesh edges, with an edge-cost model that prefers
-feature-tagged and high-curvature edges over flat-region crossings.
+feature-tagged and high-curvature edges over flat-region crossings. A crease
+SHALL be recognised by the MAGNITUDE of its dihedral, so concave (valley) and
+convex (ridge) feature lines are both routable, each with its own tunable
+weight exposed through the C ABI and the language bindings.
 
 #### Scenario: Route follows the groove
 - **WHEN** two waypoints are placed on either side of a concave feature line
 - **THEN** the routed path SHALL follow edges along the feature rather than the geodesic shortcut across flat surface
+
+#### Scenario: Route follows a convex ridge
+- **WHEN** two waypoints are placed at either end of a convex feature line, with a flat but slightly shorter crossing available
+- **THEN** the routed path SHALL follow the ridge rather than the flat shortcut, and setting the convex weight to the flat weight SHALL restore the plain geodesic
 
 ### Requirement: Pending paths are editable until commit
 Every placed waypoint SHALL be repositionable and deletable before commit,

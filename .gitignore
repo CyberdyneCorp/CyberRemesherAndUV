@@ -6,6 +6,15 @@ compile_commands.json
 .DS_Store
 __pycache__/
 *.pyc
+*.egg-info/
+
+# The C ABI shared library packaging/publish/stage_native_lib.py copies into the
+# wheel's package directory. Built per platform, never committed.
+python/cyberremesh/cyberremesh/*.so
+python/cyberremesh/cyberremesh/*.so.*
+python/cyberremesh/cyberremesh/*.dylib
+python/cyberremesh/cyberremesh/*.dll
+python/cyberremesh/cyberremesh/*.pyd
 
 # Downloaded on demand by examples/09_test_models.py (see common.download_model).
 examples/models/
@@ -14,3 +23,7 @@ examples/reference/autoremesher-src/
 examples/reference/scipp-src/
 .claude/worktrees/
 dist/
+
+# Example byproducts: meshes written next to the committed figures.
+examples/output/*.obj
+examples/output/*.mtl

@@ -41,9 +41,25 @@ option(CYBER_WITH_QUADCOVER "Build the in-process QuadCover seamless-UV solver" 
 # default so normal builds stay dependency-free.
 option(CYBER_WITH_SCIPP "Build the min-cost-flow integer quadrangulator (vendored NumPP+SciPP)" OFF)
 
+# capi/src/capi.cpp includes cyber/retopo/* unconditionally and links
+# cyber_retopo, so the combination is not buildable. Caught here, because CMake
+# would otherwise demote the missing target to a raw `-lcyber_retopo` and only
+# fail at the very end of the build, in the link step.
+if(CYBER_BUILD_CAPI AND NOT CYBER_BUILD_RETOPO)
+    message(FATAL_ERROR
+        "CYBER_BUILD_CAPI requires CYBER_BUILD_RETOPO (the C ABI wraps the "
+        "retopology toolset). Configure with -DCYBER_BUILD_CAPI=OFF to build "
+        "without it.")
+endif()
+
 include(cmake/CompilerWarnings.cmake)
 
+# Before any target is created, so the rule reaches vendored code too.
+include(cmake/FloatingPoint.cmake)
+cyber_apply_fp_rules()
+
 # ufbx (FBX import) is a C translation unit; the project is otherwise CXX-only.
+# After cyber_apply_fp_rules() so the contraction rule reaches it too.
 enable_language(C)
 include(cmake/Ufbx.cmake)
 cyber_add_ufbx()
@@ -61,6 +77,9 @@ if(CYBER_WITH_SCIPP)
 endif()
 
 add_subdirectory(src/core)
+# Sculpt handoff ingest (pipeline-bridge). Depends on core only and is built
+# unconditionally, so the C ABI can link it in every configuration.
+add_subdirectory(src/handoff)
 add_subdirectory(src/accel)
 add_subdirectory(src/bake)
 # imageio depends on bake (saveImage) and bake uses imageio's header (texture
@@ -70,16 +89,23 @@ add_subdirectory(src/quadrangulate)
 # UV module before capi so the C ABI can conditionally link cyber_uv (atlas).
 if(CYBER_BUILD_UV)
     add_subdirectory(src/uv)
+    # Preset-driven export packaging needs to unwrap a low-poly that has no UVs,
+    # so it rides on the UV module's availability. Without it the CLI still
+    # remeshes; only --preset is unavailable, and it says so.
+    add_subdirectory(src/exportbundle)
 endif()
 
+# The application-shell library is added BEFORE capi: capi's C document handle
+# (cyber_document_*) links cyber_app when it exists, and the `if(TARGET ...)`
+# probe there only sees targets already defined.
+if(CYBER_BUILD_APP)
+    add_subdirectory(src/app)
+endif()
 if(CYBER_BUILD_CAPI)
     add_subdirectory(capi)
 endif()
 if(CYBER_BUILD_RENDER)
     add_subdirectory(src/render)
-endif()
-if(CYBER_BUILD_APP)
-    add_subdirectory(src/app)
 endif()
 if(CYBER_BUILD_RETOPO)
     add_subdirectory(src/retopo)

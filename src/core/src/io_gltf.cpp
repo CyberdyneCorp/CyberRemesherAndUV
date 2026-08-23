@@ -1,7 +1,9 @@
 #include <bit>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <map>
+#include <optional>
 #include <tuple>
 
 #include "io_internal.hpp"
@@ -16,18 +18,87 @@ namespace cyber::io::detail {
 
 namespace {
 
+constexpr std::size_t kSizeMax = std::numeric_limits<std::size_t>::max();
+
+bool addOverflows(std::size_t a, std::size_t b) { return a > kSizeMax - b; }
+bool mulOverflows(std::size_t a, std::size_t b) { return b != 0 && a > kSizeMax / b; }
+
+// The byte span an accessor declares must lie inside both its bufferView and
+// the decoded buffer: count, stride and the offsets all come straight from the
+// file and tinygltf never compares them against the data it decoded.
+bool accessorFitsBuffer(const tinygltf::Accessor& accessor, const tinygltf::BufferView& view,
+                        std::size_t bufferBytes, std::size_t stride, std::size_t elementBytes) {
+    if (addOverflows(view.byteOffset, accessor.byteOffset)) {
+        return false;
+    }
+    const std::size_t base = view.byteOffset + accessor.byteOffset;
+    if (accessor.byteOffset > view.byteLength || base > bufferBytes) {
+        return false;
+    }
+    if (accessor.count == 0) {
+        return true;
+    }
+    const std::size_t last = accessor.count - 1;
+    if (mulOverflows(last, stride) || addOverflows(last * stride, elementBytes)) {
+        return false;
+    }
+    const std::size_t span = last * stride + elementBytes;  // bytes read past accessor.byteOffset
+    if (addOverflows(accessor.byteOffset, span) || accessor.byteOffset + span > view.byteLength) {
+        return false;
+    }
+    return !addOverflows(base, span) && base + span <= bufferBytes;
+}
+
 // Reads accessor element `i`, component `c`, converted to float with
 // normalization for integer component types (glTF 2.0 spec).
 class AccessorReader {
 public:
-    AccessorReader(const tinygltf::Model& model, int accessorIndex)
-        : m_accessor(model.accessors[static_cast<std::size_t>(accessorIndex)]),
-          m_view(model.bufferViews[static_cast<std::size_t>(m_accessor.bufferView)]),
-          m_data(model.buffers[static_cast<std::size_t>(m_view.buffer)].data.data() +
-                 m_view.byteOffset + m_accessor.byteOffset),
-          m_stride(static_cast<std::size_t>(m_accessor.ByteStride(m_view))),
-          m_components(static_cast<std::size_t>(
-              tinygltf::GetNumComponentsInType(static_cast<std::uint32_t>(m_accessor.type)))) {}
+    // The only way to build a reader: every index and byte range the accessor
+    // implies is checked here, before any pointer is formed. tinygltf leaves
+    // mesh accessor/bufferView/buffer indices unvalidated (an omitted
+    // "bufferView" stays -1) and never bounds-checks the declared count, so a
+    // malformed file would otherwise read far outside the decoded buffer.
+    // Returns nullopt when the accessor cannot be read safely.
+    [[nodiscard]] static std::optional<AccessorReader> make(const tinygltf::Model& model,
+                                                            int accessorIndex,
+                                                            std::size_t minComponents) {
+        if (accessorIndex < 0 ||
+            static_cast<std::size_t>(accessorIndex) >= model.accessors.size()) {
+            return std::nullopt;
+        }
+        const tinygltf::Accessor& accessor =
+            model.accessors[static_cast<std::size_t>(accessorIndex)];
+        if (accessor.bufferView < 0 ||
+            static_cast<std::size_t>(accessor.bufferView) >= model.bufferViews.size()) {
+            return std::nullopt;
+        }
+        const tinygltf::BufferView& view =
+            model.bufferViews[static_cast<std::size_t>(accessor.bufferView)];
+        if (view.buffer < 0 || static_cast<std::size_t>(view.buffer) >= model.buffers.size()) {
+            return std::nullopt;
+        }
+        const std::vector<unsigned char>& data =
+            model.buffers[static_cast<std::size_t>(view.buffer)].data;
+
+        const int stride = accessor.ByteStride(view);  // -1 on an unusable configuration
+        const int componentBytes =
+            tinygltf::GetComponentSizeInBytes(static_cast<std::uint32_t>(accessor.componentType));
+        const int components =
+            tinygltf::GetNumComponentsInType(static_cast<std::uint32_t>(accessor.type));
+        if (stride <= 0 || componentBytes <= 0 || components <= 0 ||
+            static_cast<std::size_t>(components) < minComponents) {
+            return std::nullopt;
+        }
+        const std::size_t elementBytes =
+            static_cast<std::size_t>(componentBytes) * static_cast<std::size_t>(components);
+        if (!accessorFitsBuffer(accessor, view, data.size(), static_cast<std::size_t>(stride),
+                                elementBytes)) {
+            return std::nullopt;
+        }
+        return AccessorReader(accessor, data.data() + view.byteOffset + accessor.byteOffset,
+                              static_cast<std::size_t>(stride),
+                              static_cast<std::size_t>(components));
+    }
 
     [[nodiscard]] std::size_t count() const { return m_accessor.count; }
     [[nodiscard]] std::size_t components() const { return m_components; }
@@ -73,8 +144,11 @@ public:
     }
 
 private:
+    AccessorReader(const tinygltf::Accessor& accessor, const unsigned char* data,
+                   std::size_t stride, std::size_t components)
+        : m_accessor(accessor), m_data(data), m_stride(stride), m_components(components) {}
+
     const tinygltf::Accessor& m_accessor;
-    const tinygltf::BufferView& m_view;
     const unsigned char* m_data;
     std::size_t m_stride;
     std::size_t m_components;
@@ -105,6 +179,12 @@ Result<ImportedMesh> importGltf(const std::filesystem::path& path,
     }
     std::size_t skipped = 0;
 
+    auto invalidAccessor = [&path](const char* what, int index) {
+        return Error{ErrorCode::ParseError, "accessor " + std::to_string(index) + " for " + what +
+                                                " in '" + path.string() +
+                                                "' is out of range or exceeds its buffer"};
+    };
+
     for (const tinygltf::Mesh& gltfMesh : model.meshes) {
         for (const tinygltf::Primitive& prim : gltfMesh.primitives) {
             if (prim.mode != TINYGLTF_MODE_TRIANGLES) {
@@ -115,33 +195,45 @@ Result<ImportedMesh> importGltf(const std::filesystem::path& path,
             if (posAccessor < 0) {
                 continue;
             }
-            const AccessorReader positions(model, posAccessor);
+            const std::optional<AccessorReader> positions =
+                AccessorReader::make(model, posAccessor, 3);
+            if (!positions) {
+                return invalidAccessor("POSITION", posAccessor);
+            }
             std::vector<VertexId> ids;
-            ids.reserve(positions.count());
-            for (std::size_t i = 0; i < positions.count(); ++i) {
+            ids.reserve(positions->count());
+            for (std::size_t i = 0; i < positions->count(); ++i) {
                 ids.push_back(out.mesh.addVertex(
-                    {positions.number(i, 0), positions.number(i, 1), positions.number(i, 2)}));
+                    {positions->number(i, 0), positions->number(i, 1), positions->number(i, 2)}));
             }
 
             if (const int colorAccessor = findAttribute(prim, "COLOR_0"); colorAccessor >= 0) {
-                const AccessorReader colors(model, colorAccessor);
+                const std::optional<AccessorReader> colors =
+                    AccessorReader::make(model, colorAccessor, 3);
+                if (!colors) {
+                    return invalidAccessor("COLOR_0", colorAccessor);
+                }
                 auto& column = out.mesh.vertexAttributes().create<Vec3>(kColorAttribute);
-                for (std::size_t i = 0; i < colors.count() && i < ids.size(); ++i) {
-                    column[ids[i].value] = {colors.number(i, 0), colors.number(i, 1),
-                                            colors.number(i, 2)};
+                for (std::size_t i = 0; i < colors->count() && i < ids.size(); ++i) {
+                    column[ids[i].value] = {colors->number(i, 0), colors->number(i, 1),
+                                            colors->number(i, 2)};
                 }
             }
 
             // Triangle list (indexed or sequential).
             std::vector<std::uint32_t> indices;
             if (prim.indices >= 0) {
-                const AccessorReader reader(model, prim.indices);
-                indices.reserve(reader.count());
-                for (std::size_t i = 0; i < reader.count(); ++i) {
-                    indices.push_back(reader.index(i));
+                const std::optional<AccessorReader> reader =
+                    AccessorReader::make(model, prim.indices, 1);
+                if (!reader) {
+                    return invalidAccessor("indices", prim.indices);
+                }
+                indices.reserve(reader->count());
+                for (std::size_t i = 0; i < reader->count(); ++i) {
+                    indices.push_back(reader->index(i));
                 }
             } else {
-                indices.resize(positions.count());
+                indices.resize(positions->count());
                 for (std::uint32_t i = 0; i < indices.size(); ++i) {
                     indices[i] = i;
                 }
@@ -149,6 +241,32 @@ Result<ImportedMesh> importGltf(const std::filesystem::path& path,
 
             const int uvAccessor = findAttribute(prim, "TEXCOORD_0");
             const int normalAccessor = findAttribute(prim, "NORMAL");
+            const std::optional<AccessorReader> uvReader =
+                uvAccessor >= 0 ? AccessorReader::make(model, uvAccessor, 2) : std::nullopt;
+            if (uvAccessor >= 0 && !uvReader) {
+                return invalidAccessor("TEXCOORD_0", uvAccessor);
+            }
+            const std::optional<AccessorReader> normalReader =
+                normalAccessor >= 0 ? AccessorReader::make(model, normalAccessor, 3) : std::nullopt;
+            if (normalAccessor >= 0 && !normalReader) {
+                return invalidAccessor("NORMAL", normalAccessor);
+            }
+            // Read the optionals once, here: GCC cannot see that the engaged
+            // check below dominates the member accesses and reports a bogus
+            // -Wmaybe-uninitialized against the disengaged union storage.
+            const AccessorReader* const uv = uvReader ? &*uvReader : nullptr;
+            const AccessorReader* const normal = normalReader ? &*normalReader : nullptr;
+
+            // Create the corner columns ONCE per primitive, like the OBJ reader
+            // (io_obj.cpp): calling create() per triangle instead rebuilds a
+            // size-m_size temporary every time — O(triangles * corners) = O(n^2).
+            // The columns live in a node-based map, so these pointers stay valid
+            // while addFace grows the columns below.
+            std::vector<Vec2>* uvColumn =
+                uv != nullptr ? &out.mesh.cornerAttributes().create<Vec2>(kUvAttribute) : nullptr;
+            std::vector<Vec3>* normalColumn =
+                normal != nullptr ? &out.mesh.cornerAttributes().create<Vec3>(kNormalAttribute)
+                                  : nullptr;
 
             for (std::size_t t = 0; t + 2 < indices.size(); t += 3) {
                 const std::uint32_t i0 = indices[t], i1 = indices[t + 1], i2 = indices[t + 2];
@@ -161,24 +279,31 @@ Result<ImportedMesh> importGltf(const std::filesystem::path& path,
                     ++skipped;
                     continue;
                 }
-                if (uvAccessor >= 0 || normalAccessor >= 0) {
+                if (uv != nullptr || normal != nullptr) {
                     const std::vector<LoopId> loops = out.mesh.faceLoops(f);
                     const std::uint32_t corner[3] = {i0, i1, i2};
-                    if (uvAccessor >= 0) {
-                        const AccessorReader uvReader(model, uvAccessor);
-                        auto& uvs = out.mesh.cornerAttributes().create<Vec2>(kUvAttribute);
+                    if (uv != nullptr) {
+                        auto& uvs = *uvColumn;
                         for (int c = 0; c < 3; ++c) {
-                            uvs[loops[static_cast<std::size_t>(c)].value] = {
-                                uvReader.number(corner[c], 0), uvReader.number(corner[c], 1)};
+                            // An attribute accessor may declare fewer elements than POSITION.
+                            const std::size_t src = corner[c];
+                            if (src >= uv->count()) {
+                                continue;
+                            }
+                            uvs[loops[static_cast<std::size_t>(c)].value] = {uv->number(src, 0),
+                                                                             uv->number(src, 1)};
                         }
                     }
-                    if (normalAccessor >= 0) {
-                        const AccessorReader nReader(model, normalAccessor);
-                        auto& normals = out.mesh.cornerAttributes().create<Vec3>(kNormalAttribute);
+                    if (normal != nullptr) {
+                        auto& normals = *normalColumn;
                         for (int c = 0; c < 3; ++c) {
+                            const std::size_t src = corner[c];
+                            if (src >= normal->count()) {
+                                continue;
+                            }
                             normals[loops[static_cast<std::size_t>(c)].value] = {
-                                nReader.number(corner[c], 0), nReader.number(corner[c], 1),
-                                nReader.number(corner[c], 2)};
+                                normal->number(src, 0), normal->number(src, 1),
+                                normal->number(src, 2)};
                         }
                     }
                 }
@@ -190,6 +315,7 @@ Result<ImportedMesh> importGltf(const std::filesystem::path& path,
         return Error{ErrorCode::EmptyMesh, "no usable triangles in '" + path.string() + "'"};
     }
     if (skipped > 0) {
+        out.droppedFaces = skipped;
         out.warnings.push_back("skipped " + std::to_string(skipped) + " degenerate triangle(s)");
     }
     computeBounds(out);

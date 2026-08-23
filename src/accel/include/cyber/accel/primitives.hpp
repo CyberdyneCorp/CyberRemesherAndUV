@@ -91,9 +91,13 @@ void sort(IBackend& /*backend*/, Buffer<T>& buffer, Less less) {
 }
 
 // Compressed sparse row matrix, the shape the frame-field and Laplacian
-// solvers hand to spmv (task 5.8).
+// solvers hand to spmv (task 5.8). Rectangular matrices are ordinary here — the
+// seamless solver's reduction operators are nUv x W and W x nUv — so `cols`
+// must be set alongside `rows`; it is the only bound a GPU backend has on how
+// much of x it may stage.
 struct SparseMatrix {
     std::size_t rows = 0;
+    std::size_t cols = 0;
     std::vector<std::size_t> rowStart;  // size rows + 1
     std::vector<std::size_t> colIndex;  // size nnz
     std::vector<float> value;           // size nnz
@@ -105,39 +109,49 @@ struct SparseMatrix {
 inline void spmv(IBackend& backend, const SparseMatrix& a, const Buffer<float>& x,
                  Buffer<float>& y) {
     y.resize(a.rows);
-    backend.spmvCsr(a.rows, a.rowStart.data(), a.colIndex.data(), a.value.data(), x.data(),
+    // x's length is the hard bound on what any backend may read; a matrix left
+    // without an explicit column count is taken to span the whole vector rather
+    // than the row count, which for a rectangular matrix would either truncate
+    // the device copy or over-read the caller's buffer.
+    const std::size_t cols = a.cols > 0 ? std::min(a.cols, x.size()) : x.size();
+    backend.spmvCsr(a.rows, cols, a.rowStart.data(), a.colIndex.data(), a.value.data(), x.data(),
                     y.data());
 }
 
-// Batched closest-point projection: out[i] = closest point on `bvh` to
-// queries[i]. Flattens the BVH once and dispatches through the backend's
-// closestPointsBvh, so a GPU backend runs the traversal on-device; the CPU
-// reference produces identical results. Vec3 is three contiguous floats, so the
-// query/out buffers upload without a repack.
-inline void closestPoints(IBackend& backend, const Bvh& bvh, const Buffer<Vec3>& queries,
+// Batched closest-point projection: out[i] = closest point on `flat` to
+// queries[i]. Dispatches through the backend's closestPointsBvh, so a GPU
+// backend runs the traversal on-device; the CPU reference produces identical
+// results. Vec3 is three contiguous floats, so the query/out buffers upload
+// without a repack.
+inline void closestPoints(IBackend& backend, const FlatBvh& flat, const Buffer<Vec3>& queries,
                           Buffer<Vec3>& out) {
     out.resize(queries.size());
-    const FlatBvh flat = bvh.flatten();
-    backend.closestPointsBvh(flat.nodes.data(), flat.nodes.size(), flat.tris.data(),
-                             flat.tris.size(), reinterpret_cast<const float*>(queries.data()),
-                             queries.size(), reinterpret_cast<float*>(out.data()));
+    backend.closestPointsBvh(flat, reinterpret_cast<const float*>(queries.data()), queries.size(),
+                             reinterpret_cast<float*>(out.data()));
+}
+
+// Convenience overload that flattens `bvh` for this one call. Bvh::flatten()
+// copies every node and triangle, so a caller that queries the same BVH more
+// than once must flatten ONCE and use the FlatBvh overload — otherwise the copy
+// is repaid per call and the query cost becomes linear in triangle count.
+inline void closestPoints(IBackend& backend, const Bvh& bvh, const Buffer<Vec3>& queries,
+                          Buffer<Vec3>& out) {
+    closestPoints(backend, bvh.flatten(), queries, out);
 }
 
 // Batched ray cast: out[i] holds the hit for ray i, or nullopt on a miss.
 // Dispatches through the backend's raycastBvh and rebuilds the RayHit records
 // (t is the distance from the origin to the returned hit point).
-inline void raycast(IBackend& backend, const Bvh& bvh, const Buffer<Vec3>& origins,
+inline void raycast(IBackend& backend, const FlatBvh& flat, const Buffer<Vec3>& origins,
                     const Buffer<Vec3>& directions, Buffer<std::optional<Bvh::RayHit>>& out) {
     const std::size_t n = origins.size();
     out.resize(n);
     if (n == 0) {
         return;
     }
-    const FlatBvh flat = bvh.flatten();
     std::vector<float> hitXYZ(n * 3);
     std::vector<int> faces(n);
-    backend.raycastBvh(flat.nodes.data(), flat.nodes.size(), flat.tris.data(), flat.tris.size(),
-                       reinterpret_cast<const float*>(origins.data()),
+    backend.raycastBvh(flat, reinterpret_cast<const float*>(origins.data()),
                        reinterpret_cast<const float*>(directions.data()), n, hitXYZ.data(),
                        faces.data());
     for (std::size_t i = 0; i < n; ++i) {
@@ -149,6 +163,13 @@ inline void raycast(IBackend& backend, const Bvh& bvh, const Buffer<Vec3>& origi
         const float t = length(point - origins[i]);
         out[i] = Bvh::RayHit{point, t, FaceId{static_cast<Index>(faces[i])}};
     }
+}
+
+// Convenience overload that flattens `bvh` for this one call — see the
+// closestPoints overload above for why repeated queries must not use it.
+inline void raycast(IBackend& backend, const Bvh& bvh, const Buffer<Vec3>& origins,
+                    const Buffer<Vec3>& directions, Buffer<std::optional<Bvh::RayHit>>& out) {
+    raycast(backend, bvh.flatten(), origins, directions, out);
 }
 
 }  // namespace cyber::accel

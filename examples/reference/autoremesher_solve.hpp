@@ -33,6 +33,18 @@ struct SeamlessSolveResult {
 // setGradientAdaptivity. GEO::initialize() runs exactly once per process
 // (thread-safe) and GEO::terminate() is never called. Returns ok == false on any
 // failure (remesh() false, empty output, or a mismatched UV/triangle count).
+//
+// Host-process contract: the call leaves the process's signal dispositions,
+// std::terminate handler, std::new_handler and LC_NUMERIC exactly as it found
+// them, and writes nothing to std::cout/std::cerr. Silencing the vendored solver
+// does not silence the host: a write the host makes to those streams from its own
+// thread while a solve runs still reaches the buffer the host installed. (The one
+// exception is a host thread that is itself a task-pool or OpenMP worker, which
+// cannot be told apart from the solver's own.) Set CYBER_QC_VERBOSE to let the
+// vendored solver's progress traces through. It also retains nothing per call in
+// Geogram's process-global state: the citation records geo_cite() appends during
+// a solve are dropped when the last concurrent solve returns, so a host that
+// remeshes for hours does not grow.
 SeamlessSolveResult solveSeamlessUv(const std::vector<std::array<double, 3>>& verts,
                                     const std::vector<std::array<std::size_t, 3>>& tris,
                                     long targetQuads, double scaling, double adaptivity);

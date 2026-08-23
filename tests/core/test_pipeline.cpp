@@ -1,6 +1,9 @@
 #include <doctest.h>
 
+#include <algorithm>
 #include <cmath>
+#include <limits>
+#include <string>
 #include <vector>
 
 #include "cyber/core/pipeline.hpp"
@@ -231,6 +234,43 @@ TEST_CASE("parameter clamp warnings surface in the result (spec)") {
     REQUIRE(result.status == remesh::RunStatus::Success);
     REQUIRE(result.parameterIssues.size() == 1);
     REQUIRE(result.parameterIssues[0].parameter == "edgeScale");
+}
+
+TEST_CASE("a mesh too far from the origin is clamped and reported, not silently un-remeshed") {
+    // The isotropic split pass refuses any split the float grid cannot resolve
+    // (isotropic.cpp's coordinate-resolution floor, which replaced an
+    // allocate-until-bad_alloc loop). That floor stopped the OOM but was
+    // silent, and worse, only the isotropic stage knew about it: the
+    // quadrangulator works in double precision, accepted the un-honourable
+    // target and tried to fit thousands of quads onto the handful of distinct
+    // positions the coordinates can express (a unit sphere at 1e7 asking for
+    // 5000 quads was still solving after eight minutes). The whole pipeline now
+    // runs at the density the coordinates can carry, and says so.
+    const float offset = 4.0e5f;
+    const Mesh far = makeSphere(12, 18, Vec3{offset, offset, offset}, 1.0f);
+    const auto result = remesh::remesh(far, smallRun(400));
+
+    const auto issue =
+        std::find_if(result.parameterIssues.begin(), result.parameterIssues.end(),
+                     [](const remesh::ParameterIssue& i) {
+                         return i.message.find("too far from the origin") != std::string::npos;
+                     });
+    REQUIRE(issue != result.parameterIssues.end());
+    CHECK_FALSE(issue->fatal);  // a warning: the run still produces geometry
+    CHECK(issue->parameter == "targetQuadCount");
+
+    // The reported statistic is the density that RAN, and it is at least the
+    // float resolution of these coordinates (4 spacings at ~4e5).
+    const float resolution = 4.0f * offset * std::numeric_limits<float>::epsilon();
+    CHECK(result.stats.targetEdgeLength >= resolution);
+
+    // Same mesh, same density, at the origin: nothing clamped, nothing reported.
+    const Mesh near = makeSphere(12, 18, Vec3{}, 1.0f);
+    const auto ok = remesh::remesh(near, smallRun(400));
+    for (const remesh::ParameterIssue& i : ok.parameterIssues) {
+        CHECK(i.message.find("too far from the origin") == std::string::npos);
+    }
+    CHECK(ok.stats.targetEdgeLength < resolution);  // the requested density, untouched
 }
 
 TEST_CASE("cancellation returns Cancelled and an empty result (spec: atomic)") {

@@ -35,6 +35,194 @@ jobs:
       - run: npm install -g @fission-ai/openspec@latest
       - run: openspec validate --all --strict
 
+  # The SwiftPM package binds cyber_capi.h directly, and only an Apple toolchain
+  # can compile it. Without this job the binding rots invisibly: publish-swift.yml
+  # is the sole other Swift lane and it triggers on swift-v* tags only, so a
+  # divergence stays hidden until release day. tests/packaging/test_swift_abi_parity.py
+  # (ctest: swift_abi_parity) catches missing symbols on every platform; this
+  # catches everything else — types, ownership, concurrency, platform #ifs.
+  swift-package:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: lukka/get-cmake@latest
+      - name: Select Xcode
+        run: sudo xcode-select -switch /Applications/Xcode_15.4.app
+      - name: Build the native C ABI the package links
+        run: |
+          cmake -S . -B build/swift -DCMAKE_BUILD_TYPE=Release \
+            -DCYBER_BUILD_CAPI=ON -DCYBER_BUILD_TESTS=OFF
+          cmake --build build/swift --target cyber_capi_shared
+      - name: swift build
+        working-directory: swift
+        run: |
+          set -euo pipefail
+          swift package dump-package >/dev/null
+          swift build \
+            -Xcc -I"${GITHUB_WORKSPACE}/capi/include" \
+            -Xlinker -L"${GITHUB_WORKSPACE}/build/swift/capi"
+
+  # The GPU backends, compiled. Every other lane builds cpu-headless, where
+  # CYBER_ENABLE_CUDA/OPENCL/METAL are all OFF, so cuda_backend.cu,
+  # opencl_backend.cpp and metal_backend.mm were never fed to a compiler by this
+  # repository at all — a GPU fix could be reverted and CI stayed green.
+  #
+  # What this job is: a COMPILE gate. A GitHub-hosted runner has no GPU, so it
+  # cannot be a parity gate. It deliberately does not run the suite: with a
+  # backend compiled in and no device present the parity case at
+  # tests/accel/test_gpu_parity.cpp fails BY DESIGN (a compiled-in backend that
+  # nothing exercised is a failure there, not a skip), which is the behaviour we
+  # want and not one a device-less runner can satisfy. Real parity needs real
+  # hardware: hardening.yml's `gpu-parity`, dispatched with the label of a
+  # self-hosted runner that has the device.
+  #
+  # An OpenCL CPU ICD (POCL) does NOT substitute for that: makeOpenClBackend
+  # accepts CL_DEVICE_TYPE_GPU devices only, so under POCL the backend stays
+  # unavailable and the parity case fails exactly as it does with no ICD at all.
+  # What the runner CAN honestly run is the degrade path — a binary with both
+  # backends compiled in must enumerate CPU and start on a machine with neither
+  # device — so that is the one execution step here.
+  gpu-backends-compile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: lukka/get-cmake@latest
+      - name: Install the CUDA toolkit and the OpenCL headers/loader
+        run: |
+          sudo apt-get update
+          # opencl-clhpp-headers carries CL/opencl.hpp, which the backend includes;
+          # the C headers alone are not enough. nvcc needs no device to compile.
+          sudo apt-get install -y nvidia-cuda-toolkit \
+            opencl-headers opencl-clhpp-headers ocl-icd-opencl-dev
+      - name: Configure (CUDA + OpenCL)
+        # Do NOT pin CMAKE_CUDA_HOST_COMPILER: the distro toolkit selects a host
+        # compiler its nvcc supports via /etc/nvcc.profile, and pointing nvcc at
+        # the image's default g++ trips its GNU version check instead.
+        run: |
+          cmake -S . -B build/gpu -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCYBER_ENABLE_CUDA=ON -DCYBER_ENABLE_OPENCL=ON
+      - name: Compile the backend translation units
+        run: cmake --build build/gpu --target cyber_accel_cuda cyber_accel_opencl
+      - name: Build everything that links them
+        run: cmake --build build/gpu
+      - name: Degrade path (no device on this runner)
+        run: |
+          set -euo pipefail
+          ./build/gpu/apps/cli/cyberremesh --list-backends
+          ./build/gpu/apps/cli/cyberremesh --version
+
+  # Metal can only be compiled on an Apple toolchain, and no lane has ever
+  # compiled it, so it reports rather than blocks: a PR should not be gated on a
+  # backend this repository has never built. Promote it to a blocking job (drop
+  # continue-on-error) once it has gone green.
+  gpu-metal-compile:
+    runs-on: macos-14
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: lukka/get-cmake@latest
+      - name: Configure (Metal)
+        run: |
+          cmake -S . -B build/metal -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCYBER_ENABLE_METAL=ON -DCYBER_BUILD_TESTS=OFF
+      - name: Compile the Metal backend
+        run: cmake --build build/metal --target cyber_accel_metal
+
+  # The viewport renderer is off in cpu-headless and the only presets that turn it
+  # on are macos-metal (not built here) and ios/android (which set
+  # CYBER_BUILD_TESTS=OFF), so tests/render/ compiled on no lane at all — the
+  # GestureRecognizer regression test included. One Linux leg with the module on
+  # is enough to keep them honest; the renderer itself is headless-buildable.
+  render-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: lukka/get-cmake@latest
+      - name: Configure (cpu-headless + renderer)
+        run: cmake --preset cpu-headless -B build/render -DCYBER_BUILD_RENDER=ON
+      - name: Build
+        run: cmake --build build/render -j 4
+      - name: Test
+        run: ctest --test-dir build/render --output-on-failure
+
+  # The Android preset, configured and built. It had NEVER configured: the
+  # preset set CYBER_ENABLE_OPENCL=ON and src/accel/CMakeLists.txt asked for
+  # find_package(OpenCL REQUIRED), while the NDK ships no OpenCL at all — so
+  # the configure died before reaching any other setting in it, and nothing in
+  # CI noticed because nothing in CI ever ran it. The runner image already
+  # carries an NDK, so this costs one job and no download.
+  #
+  # It builds the CLI and the test suite as well as the library, deliberately:
+  # the NDK's standard library is libc++, whose floating-point std::from_chars
+  # overloads are DELETED, and that is exactly how apps/cli/main.cpp failed to
+  # compile here.
+  android-ndk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: lukka/get-cmake@latest
+      - name: Configure (android preset, arm64-v8a)
+        run: |
+          cmake --preset android \
+            -DCMAKE_TOOLCHAIN_FILE="${ANDROID_NDK_ROOT}/build/cmake/android.toolchain.cmake" \
+            -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-26 \
+            -DCYBER_BUILD_CLI=ON -DCYBER_BUILD_TESTS=ON
+      - name: Build
+        # Compile only: these binaries are arm64 Android, and this runner is
+        # neither. Executing the suite on this ISA is the arm64-cross lane's
+        # job; executing it on Bionic needs a device or an emulator.
+        run: cmake --build build/android -j 4
+
+  # The iPadOS/iOS preset, configured and built. Reports rather than blocks,
+  # like gpu-metal-compile above and for the same reason: no lane in this
+  # repository has ever configured it, so a pull request should not be the
+  # first thing gated on it. Drop continue-on-error once it has gone green.
+  ios-preset:
+    runs-on: macos-14
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: lukka/get-cmake@latest
+      - name: Configure (ios preset)
+        run: cmake --preset ios -DCMAKE_OSX_SYSROOT=iphoneos
+      - name: Build
+        run: cmake --build build/ios -j 4
+
+  # arm64, actually EXECUTED. Every other lane runs x86-64, and the shipping
+  # targets (iPadOS, Android) are neither: they differ in pointer-free struct
+  # padding, in alignment rules, in whether `char` is signed, and above all in
+  # floating point — an aarch64 compiler contracts a*b+c into a single FMA where
+  # x86-64 without -mfma cannot, so the same source computes different bits.
+  # None of that is visible to a compile-only check, and none of it is visible
+  # on x86 at all. This lane cross-compiles the whole library, CLI and test
+  # suite for aarch64 and runs the suite under qemu-user; it needs two apt
+  # packages and no device, so it can gate every pull request.
+  #
+  # It is not iOS and not Android — different libc (glibc, not Bionic or
+  # Apple's), no NDK, no Apple SDK. What it shares with them is the ISA, which
+  # is where the bugs x86 cannot see actually live.
+  arm64-cross:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: lukka/get-cmake@latest
+      - name: Install the aarch64 toolchain and the user-mode emulator
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y g++-aarch64-linux-gnu qemu-user-static
+      - name: Configure (arm64 cross)
+        # The preset's toolchain file points CMAKE_CROSSCOMPILING_EMULATOR at
+        # qemu, so ctest launches each binary through it — no binfmt, no root.
+        run: cmake --preset linux-arm64-cross
+      - name: Build (library + CLI + suite)
+        run: cmake --build --preset linux-arm64-cross -j 4
+      - name: Test (under qemu-aarch64)
+        # Emulated, so an order of magnitude slower than the native lane; the
+        # suite still finishes well inside the default job timeout.
+        run: ctest --preset linux-arm64-cross
+
   build-test:
     strategy:
       fail-fast: false

@@ -1,5 +1,7 @@
 add_library(cyber_core STATIC
     src/bvh.cpp
+    src/export_preset.cpp
+    src/guidance.cpp
     src/io.cpp
     src/io_fbx.cpp
     src/io_gltf.cpp
@@ -14,13 +16,14 @@ add_library(cyber_core STATIC
     src/quadrangulate.cpp
     src/reference_surface.cpp
     src/remesh_params.cpp
+    src/threading.cpp
     src/version.cpp
 )
 
 target_include_directories(cyber_core SYSTEM PRIVATE
-    ${CMAKE_SOURCE_DIR}/thirdparty/tinyobjloader
-    ${CMAKE_SOURCE_DIR}/thirdparty/happly
-    ${CMAKE_SOURCE_DIR}/thirdparty/tinygltf)
+    ${PROJECT_SOURCE_DIR}/thirdparty/tinyobjloader
+    ${PROJECT_SOURCE_DIR}/thirdparty/happly
+    ${PROJECT_SOURCE_DIR}/thirdparty/tinygltf)
 target_link_libraries(cyber_core PRIVATE cyber_ufbx)
 add_library(cyber::core ALIAS cyber_core)
 

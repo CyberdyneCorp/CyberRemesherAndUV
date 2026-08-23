@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <filesystem>
 #include <string>
 #include <variant>
@@ -18,6 +19,10 @@ enum class ErrorCode {
     ParseError,
     EmptyMesh,
     WriteFailed,
+    // A versioned data file (an export preset) declares a schema version this
+    // engine does not support. Distinct from ParseError because the file is
+    // well-formed -- it is the contract that does not match.
+    IncompatibleVersion,
 };
 
 struct Error {
@@ -65,6 +70,7 @@ struct ImportedMesh {
     Mesh mesh;
     Vec3 boundsMin, boundsMax;          // mesh-io spec, "Import scale and unit sanity"
     std::vector<std::string> warnings;  // skipped degenerate faces etc.
+    std::size_t droppedFaces = 0;       // triangles the file described that the Mesh refused
 };
 
 // Dispatches on file extension (.obj today; .ply/.stl/.gltf/.glb are task

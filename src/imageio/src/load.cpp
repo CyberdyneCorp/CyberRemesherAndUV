@@ -7,6 +7,9 @@
 #include <cstdlib>
 #include <fstream>
 #include <iterator>
+#include <limits>
+#include <new>
+#include <stdexcept>
 #include <vector>
 
 #include "detail.hpp"
@@ -181,7 +184,8 @@ Huffman fixedDistanceTable() {
 }
 
 // Copies a stored (BTYPE=00) block into `out`. The block is byte-aligned.
-bool inflateStored(BitReader& br, Bytes& out) {
+// `maxOut` bounds the total inflated size (see zlibInflate).
+bool inflateStored(BitReader& br, Bytes& out, std::size_t maxOut) {
     br.alignToByte();
     if (br.bytePos + 4 > br.data.size()) {
         return false;
@@ -195,6 +199,9 @@ bool inflateStored(BitReader& br, Bytes& out) {
     if (br.bytePos + len > br.data.size()) {
         return false;
     }
+    if (len > maxOut - out.size()) {
+        return false;
+    }
     out.insert(out.end(), br.data.begin() + static_cast<std::ptrdiff_t>(br.bytePos),
                br.data.begin() + static_cast<std::ptrdiff_t>(br.bytePos + len));
     br.bytePos += len;
@@ -203,8 +210,10 @@ bool inflateStored(BitReader& br, Bytes& out) {
 
 // Decodes one Huffman-compressed block (fixed or dynamic tables) into `out`,
 // resolving LZ77 length/distance back-references against the output produced so
-// far. Returns on the end-of-block symbol (256).
-bool inflateHuffman(BitReader& br, Bytes& out, const Huffman& lit, const Huffman& dist) {
+// far. Returns on the end-of-block symbol (256). `maxOut` bounds the total
+// inflated size (see zlibInflate).
+bool inflateHuffman(BitReader& br, Bytes& out, const Huffman& lit, const Huffman& dist,
+                    std::size_t maxOut) {
     for (;;) {
         const int sym = lit.decode(br);
         if (br.error || sym < 0) {
@@ -214,6 +223,9 @@ bool inflateHuffman(BitReader& br, Bytes& out, const Huffman& lit, const Huffman
             return true;
         }
         if (sym < 256) {
+            if (out.size() == maxOut) {
+                return false;
+            }
             out.push_back(static_cast<std::uint8_t>(sym));
             continue;
         }
@@ -231,6 +243,9 @@ bool inflateHuffman(BitReader& br, Bytes& out, const Huffman& lit, const Huffman
         const std::size_t distance = static_cast<std::size_t>(kDistBase[didx]) +
                                      br.getBits(static_cast<unsigned>(kDistExtra[didx]));
         if (distance == 0 || distance > out.size()) {
+            return false;
+        }
+        if (length > maxOut - out.size()) {
             return false;
         }
         const std::size_t from = out.size() - distance;
@@ -304,8 +319,11 @@ bool buildDynamicTables(BitReader& br, Huffman& lit, Huffman& dist) {
 
 // Validates the zlib wrapper (CMF/FLG, no preset dictionary) and inflates every
 // DEFLATE block (stored / fixed / dynamic Huffman), then checks the trailing
-// Adler-32 over the decompressed data.
-std::optional<Bytes> zlibInflate(const Bytes& z) {
+// Adler-32 over the decompressed data. `maxOut` is the largest output the caller
+// can possibly accept: the stream is abandoned the moment it would exceed that,
+// so a compression bomb cannot materialise gigabytes before the caller rejects
+// it for the same reason.
+std::optional<Bytes> zlibInflate(const Bytes& z, std::size_t maxOut) {
     if (z.size() < 6) {
         return std::nullopt;
     }
@@ -332,17 +350,17 @@ std::optional<Bytes> zlibInflate(const Bytes& z) {
             return std::nullopt;
         }
         if (btype == 0u) {
-            if (!inflateStored(br, out)) {
+            if (!inflateStored(br, out, maxOut)) {
                 return std::nullopt;
             }
         } else if (btype == 1u) {
-            if (!inflateHuffman(br, out, fixedLit, fixedDist)) {
+            if (!inflateHuffman(br, out, fixedLit, fixedDist, maxOut)) {
                 return std::nullopt;
             }
         } else if (btype == 2u) {
             Huffman lit;
             Huffman dist;
-            if (!buildDynamicTables(br, lit, dist) || !inflateHuffman(br, out, lit, dist)) {
+            if (!buildDynamicTables(br, lit, dist) || !inflateHuffman(br, out, lit, dist, maxOut)) {
                 return std::nullopt;
             }
         } else {  // btype == 3 is reserved
@@ -598,9 +616,25 @@ std::optional<std::vector<float>> decodePixels(const Bytes& raw, const Header& h
     }
 }
 
-}  // namespace
+// Size of the inflated IDAT stream the header calls for: one filter byte plus
+// rowBytes per scanline, exactly what reconstruct() demands. nullopt when the
+// declared dimensions overflow std::size_t, which no decodable image can do.
+std::optional<std::size_t> expectedRawSize(const Header& hdr) {
+    constexpr std::size_t kMax = std::numeric_limits<std::size_t>::max();
+    const std::size_t w = static_cast<std::size_t>(hdr.width);
+    const std::size_t h = static_cast<std::size_t>(hdr.height);
+    const std::size_t bpp = static_cast<std::size_t>(hdr.channels);
+    if (w > (kMax - 1) / bpp) {
+        return std::nullopt;
+    }
+    const std::size_t stride = w * bpp + 1;
+    if (stride > kMax / h) {
+        return std::nullopt;
+    }
+    return stride * h;
+}
 
-std::optional<LoadedImage> loadPng(const std::string& path) {
+std::optional<LoadedImage> decodePngFile(const std::string& path) {
     const Bytes bytes = readFileBytes(path);
     if (!hasPngSignature(bytes)) {
         return std::nullopt;
@@ -612,7 +646,11 @@ std::optional<LoadedImage> loadPng(const std::string& path) {
     if (!collectChunks(bytes, header, idat, plte, trns)) {
         return std::nullopt;
     }
-    const auto raw = zlibInflate(idat);
+    const auto maxRaw = expectedRawSize(header);
+    if (!maxRaw) {
+        return std::nullopt;
+    }
+    const auto raw = zlibInflate(idat, *maxRaw);
     if (!raw) {
         return std::nullopt;
     }
@@ -627,6 +665,20 @@ std::optional<LoadedImage> loadPng(const std::string& path) {
     image.channels = outChannels;
     image.pixels = std::move(*pixels);
     return image;
+}
+
+}  // namespace
+
+std::optional<LoadedImage> loadPng(const std::string& path) {
+    // The header documents failure as std::nullopt, so a legitimately huge image
+    // whose buffers do not fit must report that rather than throw at the caller.
+    try {
+        return decodePngFile(path);
+    } catch (const std::bad_alloc&) {
+        return std::nullopt;
+    } catch (const std::length_error&) {
+        return std::nullopt;
+    }
 }
 
 }  // namespace cyber::imageio

@@ -54,7 +54,9 @@ def uv_coverage(uvs, faces_vt):
     """Fraction of the unit UV square actually covered by geometry (sum of
     per-face UV areas). This is the real texel-efficiency measure: chart
     re-orientation shrinks each chart's slack, so more surface fits per texel.
-    Bounding-box packing coverage does not capture this."""
+    Recomputed here from the saved OBJ as an independent check on the engine's
+    own ``AtlasResult.packed_area`` (``packed_box_area`` is the looser
+    bounding-box figure)."""
     total = 0.0
     for f in faces_vt:
         if any(i < 0 for i in f) or len(f) < 3:

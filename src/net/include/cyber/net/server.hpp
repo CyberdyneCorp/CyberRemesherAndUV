@@ -11,7 +11,9 @@ class BridgeSession;
 // start() is called, binds to 127.0.0.1 exclusively (never a routable
 // interface, never a cloud relay), and serves each connection on its own
 // thread so a stalled or malicious client cannot block the accept loop or the
-// (future) UI thread. isListening() backs the required visible indicator.
+// (future) UI thread. Concurrent connections are bounded and their threads are
+// reaped as they finish, so a client that reconnects per operation costs
+// nothing over time. isListening() backs the required visible indicator.
 class BridgeServer {
 public:
     explicit BridgeServer(BridgeSession& session);
@@ -22,6 +24,9 @@ public:
     // Binds 127.0.0.1:port (port 0 selects an ephemeral port) and starts
     // serving. Returns false if the socket could not be bound.
     bool start(std::uint16_t port = 0);
+
+    // Stops listening. Returns only once the accept thread and every connection
+    // handler have finished, so no socket the server owned outlives the call.
     void stop();
 
     [[nodiscard]] bool isListening() const;

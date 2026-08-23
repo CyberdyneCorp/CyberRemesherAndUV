@@ -8,6 +8,7 @@ command set through the reference Python client. Exits non-zero on any failure.
 """
 
 import os
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -19,8 +20,11 @@ from cyberbridge import BridgeError, Client, load_obj, save_obj  # noqa: E402
 
 
 def start_server(binary):
+    # On a cross-build the server is not this machine's ISA; CTest passes the
+    # emulator it uses for native test commands. Empty on a native build.
+    launcher = shlex.split(os.environ.get("CYBER_TEST_LAUNCHER", ""))
     proc = subprocess.Popen(
-        [binary], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True
+        [*launcher, binary], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True
     )
     line = proc.stdout.readline().strip()
     if not line.startswith("LISTENING"):

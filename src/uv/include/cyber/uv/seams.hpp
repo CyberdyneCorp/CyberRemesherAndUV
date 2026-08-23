@@ -37,6 +37,19 @@ public:
     [[nodiscard]] bool empty() const { return m_edges.empty(); }
     void clear() { m_edges.clear(); }
 
+    // Seam edges in ascending id order — the hash set's own iteration order is
+    // unspecified, so readers (bindings, serialization) go through this.
+    [[nodiscard]] std::vector<EdgeId> edges() const {
+        std::vector<Index> ids(m_edges.begin(), m_edges.end());
+        std::sort(ids.begin(), ids.end());
+        std::vector<EdgeId> result;
+        result.reserve(ids.size());
+        for (const Index id : ids) {
+            result.push_back(EdgeId{id});
+        }
+        return result;
+    }
+
 private:
     std::unordered_set<Index> m_edges;
 };

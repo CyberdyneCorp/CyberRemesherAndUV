@@ -475,6 +475,14 @@ public:
     iss >> count;
     currEntry++;
 
+    // CYBER LOCAL PATCH (keep on re-vendor): a list whose declared count outruns the values on
+    // the line used to read (and resize) past the token vector.
+    if (count > tokens.size() - currEntry) {
+      throw std::runtime_error("PLY parser: list property " + name + " declares " +
+                               std::to_string(count) + " values but the data line carries " +
+                               std::to_string(tokens.size() - currEntry));
+    }
+
     size_t currSize = flattenedData.size();
     size_t afterSize = currSize + count;
     flattenedData.resize(afterSize);
@@ -489,10 +497,29 @@ public:
   }
 
   /**
-   * @brief (binary reading) Copy the next value of this property from a stream of bits.
+   * @brief (binary reading) CYBER LOCAL PATCH (keep on re-vendor): append `count` values from the
+   * stream, growing the storage in bounded steps so a declared count read out of the data section
+   * cannot commit memory the stream has no bytes for. Returns the new size of flattenedData, which
+   * for a list the stream can supply in full is the old size plus `count`. A short read leaves the
+   * stream failed, which the per-entry check in parseBinary/parseBinaryBigEndian reports.
    *
    * @param stream Stream to read from.
+   * @param count Number of values the list declares.
    */
+  size_t readListValues(std::istream& stream, size_t count) {
+    const size_t stepValues = sizeof(T) >= 4096 ? 1 : 4096 / sizeof(T);
+    size_t haveRead = 0;
+    while (haveRead < count && stream) {
+      size_t step = count - haveRead;
+      if (step > stepValues) step = stepValues;
+      size_t at = flattenedData.size();
+      flattenedData.resize(at + step);
+      stream.read((char*)&flattenedData[at], static_cast<std::streamsize>(step * sizeof(T)));
+      haveRead += step;
+    }
+    return flattenedData.size();
+  }
+
   virtual void readNext(std::istream& stream) override {
 
     // Read the size of the list
@@ -500,12 +527,10 @@ public:
     stream.read(((char*)&count), listCountBytes);
 
     // Read list elements
-    size_t currSize = flattenedData.size();
-    size_t afterSize = currSize + count;
-    flattenedData.resize(afterSize);
-    if (count > 0) {
-      stream.read((char*)&flattenedData[currSize], count * sizeof(T));
-    }
+    // CYBER LOCAL PATCH (keep on re-vendor): the count is read straight out of the data section,
+    // so resizing to it up front let a 4-byte field commit gigabytes for a file a few hundred
+    // bytes long. readListValues grows in bounded steps instead.
+    size_t afterSize = readListValues(stream, count);
     flattenedIndexStart.emplace_back(afterSize);
   }
 
@@ -528,12 +553,10 @@ public:
     }
 
     // Read list elements
+    // CYBER LOCAL PATCH (keep on re-vendor): see readNext — the declared count is untrusted, so
+    // the storage is grown in bounded steps rather than committed before anything is read.
     size_t currSize = flattenedData.size();
-    size_t afterSize = currSize + count;
-    flattenedData.resize(afterSize);
-    if (count > 0) {
-      stream.read((char*)&flattenedData[currSize], count * sizeof(T));
-    }
+    size_t afterSize = readListValues(stream, count);
     flattenedIndexStart.emplace_back(afterSize);
 
     // Swap endian order of list elements
@@ -1831,6 +1854,20 @@ private:
   }
 
   /**
+   * @brief CYBER LOCAL PATCH (keep on re-vendor): reject an element that declares entries but no
+   * properties. Such an entry can hold no data in any of the three formats, so reading one makes
+   * no progress and the per-entry loops used to spin for the whole declared count.
+   *
+   * @param elem
+   */
+  static void throwIfPropertyless(const Element& elem) {
+    if (elem.properties.empty() && elem.count > 0) {
+      throw std::runtime_error("PLY parser: element " + elem.name + " declares " +
+                               std::to_string(elem.count) + " entries but no properties");
+    }
+  }
+
+  /**
    * @brief Read the actual data for a file, in ASCII
    *
    * @param inStream
@@ -1848,6 +1885,11 @@ private:
         std::cout << "  - Processing element: " << elem.name << std::endl;
       }
 
+      // CYBER LOCAL PATCH (keep on re-vendor): an element with no properties carries no data, so
+      // the entry loop below makes no progress on the stream — a declared count then spun for as
+      // many iterations as the header asked for, up to 2^64.
+      throwIfPropertyless(elem);
+
       for (size_t iP = 0; iP < elem.properties.size(); iP++) {
         elem.properties[iP]->reserve(elem.count);
       }
@@ -1859,14 +1901,30 @@ private:
         // Some .ply files seem to include empty lines before the start of property data (though this is not specified
         // in the format description). We attempt to recover and parse such files by skipping any empty lines.
         if (!elem.properties.empty()) { // if the element has no properties, the line _should_ be blank, presumably
-          while (line.empty()) { // skip lines until we hit something nonempty
+          // CYBER LOCAL PATCH (keep on re-vendor): the skip loop had no stream test, so a
+          // truncated data section spun here forever at EOF; end the file with an exception instead.
+          while (line.empty() && inStream.good()) { // skip lines until we hit something nonempty
             std::getline(inStream, line);
+          }
+          if (line.empty()) {
+            throw std::runtime_error("PLY parser: file ended before element " + elem.name +
+                                     " delivered its declared " + std::to_string(elem.count) +
+                                     " entries");
           }
         }
 
         vector<string> tokens = tokenSplit(line);
         size_t iTok = 0;
         for (size_t iP = 0; iP < elem.properties.size(); iP++) {
+          // CYBER LOCAL PATCH (keep on re-vendor): parseNext indexes the token vector without
+          // bounds-checking, so a line carrying fewer values than the element declares properties
+          // read past the end of the allocation.
+          if (iTok >= tokens.size()) {
+            throw std::runtime_error("PLY parser: element " + elem.name +
+                                     " data line has fewer values than the element declares "
+                                     "properties: " +
+                                     line);
+          }
           elem.properties[iP]->parseNext(tokens, iTok);
         }
       }
@@ -1895,12 +1953,23 @@ private:
         std::cout << "  - Processing element: " << elem.name << std::endl;
       }
 
+      // CYBER LOCAL PATCH (keep on re-vendor): see parseASCII — a property-less element reads
+      // nothing, so a nonzero count is malformed rather than a loop to run to its end.
+      throwIfPropertyless(elem);
+
       for (size_t iP = 0; iP < elem.properties.size(); iP++) {
         elem.properties[iP]->reserve(elem.count);
       }
       for (size_t iEntry = 0; iEntry < elem.count; iEntry++) {
         for (size_t iP = 0; iP < elem.properties.size(); iP++) {
           elem.properties[iP]->readNext(inStream);
+        }
+        // CYBER LOCAL PATCH (keep on re-vendor): a failed read leaves the entry value-initialized,
+        // so a truncated payload used to become geometry the file never carried.
+        if (!inStream) {
+          throw std::runtime_error("PLY parser: file ended before element " + elem.name +
+                                   " delivered its declared " + std::to_string(elem.count) +
+                                   " entries");
         }
       }
     }
@@ -1928,12 +1997,23 @@ private:
         std::cout << "  - Processing element: " << elem.name << std::endl;
       }
 
+      // CYBER LOCAL PATCH (keep on re-vendor): see parseASCII — a property-less element reads
+      // nothing, so a nonzero count is malformed rather than a loop to run to its end.
+      throwIfPropertyless(elem);
+
       for (size_t iP = 0; iP < elem.properties.size(); iP++) {
         elem.properties[iP]->reserve(elem.count);
       }
       for (size_t iEntry = 0; iEntry < elem.count; iEntry++) {
         for (size_t iP = 0; iP < elem.properties.size(); iP++) {
           elem.properties[iP]->readNextBigEndian(inStream);
+        }
+        // CYBER LOCAL PATCH (keep on re-vendor): see parseBinary — a truncated payload must fail
+        // rather than fabricate value-initialized entries.
+        if (!inStream) {
+          throw std::runtime_error("PLY parser: file ended before element " + elem.name +
+                                   " delivered its declared " + std::to_string(elem.count) +
+                                   " entries");
         }
       }
     }

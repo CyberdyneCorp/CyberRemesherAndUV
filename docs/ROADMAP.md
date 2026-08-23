@@ -816,6 +816,84 @@ sideMismatch 0.534 still refuses unaided — 150 needs the override);
 (c) torus residual: 59 cones vs an ideal 0 — the extraction still
 pays for the ~22° constant twist both fields share.
 
+### Update — 2026-08-06 (guided-rounding default-flip A/B on the pinned solver): NO FLIP — the lattice-closure fix moved the greedy baseline under guided; guided is now 9 wins / 22 losses on singularities where it engages
+
+The full default-flip evaluation for `CYBER_QC_BIMDF=guided`, run AFTER
+the two foundations of this cycle (vendored-solver pin `b43dc827`;
+joint-lattice closure of dependent seam translations in the reduced
+integer phase) — precisely because both were expected to shift the
+absolute numbers. They did, and the shift refutes the flip.
+
+**Harness** (`tools/bench/bimdf_ab.py`, results in
+`tools/bench/bimdf_ab_results.csv`, 348 rows): 6 models (spot, fandisk,
+rocker-arm, cheburashka, cube, stanford-bunny) × 7 densities
+(500/1000/1500/2000/3000/4500/6000) × both arms (mixed default +
+`--pure-quads`) × off/guided × BOTH backends — the Geogram build (`geo`,
+the shipped cpu-headless configuration, native solver reached only by
+crease routing) and the no-Geogram build (`nogeo`, the ubuntu-CI/stock
+backend where the native solver — and therefore the flag — runs on every
+mesh). Count-matched per the repo rule: the guided run re-requests
+toward the off run's ACHIEVED quad count until within 2% (≤3 attempts);
+rows that still miss are marked `count_matched=False` and treated as
+failures of guided's count stability, not as comparable cells.
+
+**Noise floor, measured first (the pin makes this possible):** one cell
+per backend run 3× per state — geo bunny@3000 + fandisk@3000, nogeo
+bunny@3000 off AND guided — every repeat bit-identical on every metric
+(quads, sing, angle, haus, flow, recall). Noise floor is ZERO on the
+pinned solver; every delta below is real.
+
+**geo backend (shipped default): guided is inert-to-mixed.** 82/84
+cells metrically identical (56 never read the flag — vendored route; 28
+native-routed CAD cells refused by the crease health gate with the
+injection finding no exact solution). The 2 differing cells are cube
+exact injections: cube@1000 mixed sing 33 → 24 but angle_dev
+1.77 → 1.95 (median 0.295 → 0.342); cube@4500 pure sing 13 → 8 but
+flow_loop 110 → 104. Mixed even where it fires.
+
+**nogeo backend (where the flag actually lives): NOT a clean win — not
+close.** 84 cells: 26 steered, 56 health-refused (injection still
+active), 2 tmesh-only, 53 bit-identical. Where guided differs from off, singularity
+wins/losses/ties = **9 / 22 / 53**, and 9 cells FAILED the 2% count
+match after 3 re-requests. The load-bearing rows:
+
+| cell (nogeo) | quads off/guided | sing | angle mean | haus p99 | recall | verdict |
+|---|---|---|---|---|---|---|
+| bunny@3000 mixed | 2515/2535 | 87 → 92 | 7.08 → 6.71 | 0.0067 → 0.0071 | 0.65 → 0.56 | **the round-4 flagship (135 → 94) is REVERSED: off is now 87** |
+| bunny@3000 pure | 2156/2168 | 99 → 114 | 10.6 → 12.0 | ~same | 0.38 → 0.37 | loss |
+| spot@3000 mixed | 2562/2548 | 24 → 20 | ~same | ~same | 0.57 → 0.58 | win |
+| spot@6000 pure | 5012/5246 (4.7%, unmatched) | 54 → **508** | 7.35 → 9.57 | 0.0037 → 0.0039 | — | catastrophic |
+| cheburashka@1000 pure | 904/**2504** (unmatched ×3) | 58 → 383 | 15.7 → 31.8 | — | — | count blowup: guided ships 2.8× the request |
+| rocker-arm@2000 mixed | 1613/1608 | 71 → 101 | ~same | ~same | 0.53 → 0.60 | loss |
+| rocker-arm@4500 mixed | 3786/3355 (11%, unmatched) | 64 → 102 | 13.5 → 16.1 | 0.0050 → **0.0176** | 0.76 → 0.62 | loss + count instability |
+| bunny@1000 mixed | 840/837 | 59 → 45 | 8.4 → 10.4 | ~same | 0.25 → 0.28 | injection win, angle cost |
+| fandisk (all 14 cells) | — | identical | identical | identical | identical | crease gate refuses; injection never exact |
+
+**Why the flip died: the greedy baseline moved.** The joint-lattice
+closure (dependent seam translations / crease offsets now rounded on
+their induced half-integer lattice) improved PLAIN GREEDY exactly where
+guided used to win — bunny@3000 mixed off went 135 → 87 sing vs the
+round-4 baseline, spot pure 66 → 53 — and the same change altered what
+the attraction steers (lattice frees participate in the schedule the
+flow never modeled). The historical wins did not survive: bunny
+94-vs-135 became 92-vs-87, spot pure 65-vs-66 became 65-vs-53. Guided's
+steering now often fights a better greedy.
+
+**Decision (repo rule: clean full-corpus win or no flip): NO FLIP.**
+Mixed on both backends, material regressions on 4 of 6 models across
+densities and arms, two catastrophic cells, and 9/84 count-stability
+failures. The health gates as shipped do NOT scope the damage away
+(rocker-arm/spot/cheburashka cells above all PASSED the gates and
+steered), so a gates-scoped default is not available without new
+heuristics — out of scope this round. `CYBER_QC_BIMDF=guided` stays
+opt-in. Banked for any future flip attempt: (a) re-baseline guided's
+attraction against the lattice-closed greedy (the flow targets predate
+it); (b) guided count stability on pure arms (cheburashka 2.8×,
+spot@6000 +4.7% with 10× sing) is a correctness-adjacent bug worth its
+own investigation; (c) note that today `CYBER_QC_BIMDF=off` is NOT a
+no-op — any non-null value builds the T-mesh and arms exact injection;
+a real flip needs an explicit off/0 → disabled mapping first.
+
 ## Update — 2026-08-02 (CAD density robustness: the sweep's 🔴 failures are FIXED; 32/32 gate cells clean)
 
 The two density-dependent robustness bugs the CAD sweep below exposed are fixed

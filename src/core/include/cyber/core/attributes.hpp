@@ -23,10 +23,16 @@ public:
     using Column = std::variant<std::vector<float>, std::vector<std::int32_t>, std::vector<Vec2>,
                                 std::vector<Vec3>, std::vector<Vec4>>;
 
+    // Look the column up BEFORE building the default: passing std::vector<T>(m_size)
+    // as an argument would allocate and zero-fill a whole column on every call, even
+    // when the column already exists — turning a create()-per-element loop into
+    // O(n^2). Behaviour is otherwise identical to the try_emplace form.
     template <typename T>
     std::vector<T>& create(const std::string& name) {
-        auto [it, inserted] = m_columns.try_emplace(name, std::vector<T>(m_size));
-        if (!inserted && !std::holds_alternative<std::vector<T>>(it->second)) {
+        auto it = m_columns.find(name);
+        if (it == m_columns.end()) {
+            it = m_columns.emplace(name, std::vector<T>(m_size)).first;
+        } else if (!std::holds_alternative<std::vector<T>>(it->second)) {
             it->second = std::vector<T>(m_size);
         }
         return std::get<std::vector<T>>(it->second);
@@ -82,6 +88,20 @@ public:
         }
     }
 
+    // Value-initialises one element's row in every column. The mesh calls this
+    // when it hands out an id recycled from a free list, so a new element
+    // never inherits the dead one's values.
+    void reset(std::size_t i) {
+        for (auto& [name, column] : m_columns) {
+            std::visit(
+                [i](auto& vec) {
+                    using T = typename std::decay_t<decltype(vec)>::value_type;
+                    vec[i] = T{};
+                },
+                column);
+        }
+    }
+
     void copy(std::size_t dst, std::size_t src) {
         for (auto& [name, column] : m_columns) {
             std::visit([&](auto& vec) { vec[dst] = vec[src]; }, column);
@@ -92,10 +112,14 @@ public:
     // created on demand). Used when building derived meshes (subdivision).
     void adoptSchema(const AttributeSet& other) {
         for (const auto& [name, column] : other.m_columns) {
+            // Bind an ordinary reference before the lambda: clang < 16 (Xcode 15's
+            // Apple clang, which the iOS/Swift/Metal lanes pin) cannot capture a
+            // structured binding (P1091).
+            const std::string& columnName = name;
             std::visit(
                 [&](const auto& vec) {
                     using T = typename std::decay_t<decltype(vec)>::value_type;
-                    create<T>(name);
+                    create<T>(columnName);
                 },
                 column);
         }
@@ -110,7 +134,11 @@ public:
     [[nodiscard]] Row extractRow(std::size_t i) const {
         Row row;
         for (const auto& [name, column] : m_columns) {
-            std::visit([&](const auto& vec) { row.emplace(name, vec[i]); }, column);
+            // Bind an ordinary reference before the lambda: clang < 16 (Xcode 15's
+            // Apple clang, which the iOS/Swift/Metal lanes pin) cannot capture a
+            // structured binding (P1091).
+            const std::string& columnName = name;
+            std::visit([&](const auto& vec) { row.emplace(columnName, vec[i]); }, column);
         }
         return row;
     }
@@ -121,10 +149,14 @@ public:
             if (it == m_columns.end()) {
                 continue;
             }
+            // Bind an ordinary reference before the lambda: clang < 16 (Xcode 15's
+            // Apple clang, which the iOS/Swift/Metal lanes pin) cannot capture a
+            // structured binding (P1091).
+            const RowValue& rowValue = value;
             std::visit(
                 [&](auto& vec) {
                     using T = typename std::decay_t<decltype(vec)>::value_type;
-                    if (const T* v = std::get_if<T>(&value)) {
+                    if (const T* v = std::get_if<T>(&rowValue)) {
                         vec[i] = *v;
                     }
                 },
@@ -168,6 +200,20 @@ public:
             out.emplace(name, acc);
         }
         return out;
+    }
+
+    // Visits every column as (name, const std::vector<T>&) in name order.
+    // Lets a serializer write whatever columns a mesh happens to carry without
+    // knowing their names or types up front.
+    template <typename Fn>
+    void forEachColumn(const Fn& fn) const {
+        for (const auto& [name, column] : m_columns) {
+            // Bind an ordinary reference before the lambda: clang < 16 (Xcode 15's
+            // Apple clang, which the iOS/Swift/Metal lanes pin) cannot capture a
+            // structured binding (P1091).
+            const std::string& columnName = name;
+            std::visit([&](const auto& vec) { fn(columnName, vec); }, column);
+        }
     }
 
     template <typename Fn>

@@ -29,6 +29,10 @@ uniform sizing byte-identically.
 - **WHEN** a remesh runs with density 4.0 painted on a region and 1.0 elsewhere
 - **THEN** quads inside the painted region SHALL be smaller than outside by approximately the documented sizing relation, and total quad count SHALL respect the requested target within its guarantee
 
+#### Scenario: A density of 1.0 everywhere is a no-op
+- **WHEN** a remesh runs with a density of 1.0 at every vertex (or every face)
+- **THEN** validation SHALL drop the neutral density and report it as a non-fatal issue, and the output SHALL be byte-identical to the same run with no density supplied — on every backend, including the default quad-cover, whose route selection would otherwise change merely because guidance is present
+
 ### Requirement: Guidance is honored loudly or rejected loudly
 The pipeline SHALL NOT silently ignore supplied guidance: when a backend or
 island path cannot honor guides or density, the per-island report SHALL name

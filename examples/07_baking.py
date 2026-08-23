@@ -25,7 +25,7 @@ def main() -> None:
 
         # 320^2 with 16 AO rays keeps the CPU run brisk; a GPU build is far
         # faster (ray casting dispatches through the accel layer).
-        params = BakeParams(width=320, height=320, cage_distance=0.35, ao_samples=16, ao_radius=0.5)
+        params = BakeParams(width=320, height=320, cage_distance=0.35, ao_samples=64, ao_radius=0.5)
 
         maps = []
         with Mesh.load_obj(low_path) as low, Mesh.load_obj(high_path) as high:
@@ -34,6 +34,11 @@ def main() -> None:
             for title, kind, png in [
                 ("tangent-space normal", BakeMap.NORMAL, "07_bake_normal.png"),
                 ("displacement", BakeMap.DISPLACEMENT, "07_bake_displacement.png"),
+                # Curvature completes the standard pre-texture recipe
+                # (curvature + occlusion + normal). curvature_range=0 auto-fits
+                # the range to the Target, so it needs no per-model tuning.
+                ("curvature", BakeMap.CURVATURE, "07_bake_curvature.png"),
+                ("cavity", BakeMap.CAVITY, "07_bake_cavity.png"),
             ]:
                 img = bake(low, high, kind, params)
                 maps.append((title, img.to_numpy()))

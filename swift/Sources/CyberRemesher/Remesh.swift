@@ -1,55 +1,92 @@
-// UNVERIFIED: requires the Swift toolchain and the `cyber_capi` library; not
-// buildable in headless Linux CI. Written against the ABI contract in README.md.
-//
 // Async/await remeshing. The engine's `cyber_remesh` is a blocking C call that
-// takes C function-pointer callbacks for progress and cancellation. This file
+// takes a POD `CyberRemeshParams` and C function-pointer callbacks for progress
+// and cancellation, sharing ONE opaque `user` pointer between them. This file
 // bridges it to Swift concurrency:
 //   * progress -> an `AsyncStream<Double>` the caller can `for await` over;
 //   * Swift `Task` cancellation -> the ABI's `CyberCancelCb`, which the engine
-//     polls cooperatively (< 100 ms) and unwinds leaving inputs untouched.
+//     polls cooperatively and unwinds leaving inputs untouched.
 // The blocking call runs on a dedicated thread so it never stalls the Swift
 // cooperative thread pool.
 
 import CCyberRemesher
 import Foundation
 
-/// User-facing remeshing parameters, mapped onto the ABI's opaque params object.
-public struct RemeshParameters: Sendable {
-    /// Desired output quad count. Clamped to a safe minimum by the engine
-    /// (guards the historic `--target-quads 0` division-by-zero defect).
-    public var targetQuads: Int
-    /// Request the pure-quad post-pass (topological cleanup of non-quads).
-    public var pureQuad: Bool
-    /// Preserve sharp feature edges during the flow.
-    public var preserveSharpEdges: Bool
-    /// Dihedral angle (degrees) above which an edge counts as sharp.
-    public var sharpAngleDegrees: Double
+/// Which quadrangulator `cyber_remesh` runs, mirroring the `CYBER_QUAD_*`
+/// values of `CyberRemeshParams.quadMethod`.
+public struct QuadMethod: RawRepresentable, Equatable, Sendable {
+    public var rawValue: Int32
+    public init(rawValue: Int32) { self.rawValue = rawValue }
 
-    public init(
-        targetQuads: Int,
-        pureQuad: Bool = false,
-        preserveSharpEdges: Bool = true,
-        sharpAngleDegrees: Double = 30.0
-    ) {
-        self.targetQuads = targetQuads
-        self.pureQuad = pureQuad
-        self.preserveSharpEdges = preserveSharpEdges
-        self.sharpAngleDegrees = sharpAngleDegrees
+    public static let fieldAligned = QuadMethod(rawValue: Int32(CYBER_QUAD_FIELD_ALIGNED))
+    public static let instantMeshes = QuadMethod(rawValue: Int32(CYBER_QUAD_INSTANT_MESHES))
+    public static let integer = QuadMethod(rawValue: Int32(CYBER_QUAD_INTEGER))
+    /// QuadCover seamless-UV isoline extractor — the engine default. Falls back
+    /// to field-aligned in builds with no seamless-UV solver.
+    public static let quadCover = QuadMethod(rawValue: Int32(CYBER_QUAD_QUADCOVER))
+}
+
+/// User-facing remeshing parameters — a Swift mirror of `CyberRemeshParams`.
+///
+/// The memberwise defaults come from the engine itself (`cyber_default_params`),
+/// so a freshly initialized value always matches the CLI's behaviour.
+public struct RemeshParameters: Sendable {
+    /// Desired output quad count.
+    public var targetQuads: Int
+    /// Multiplier on the derived edge length.
+    public var edgeScale: Float
+    /// Dihedral threshold (degrees) for feature edges.
+    public var sharpEdgeDegrees: Float
+    /// Normal-smoothing angle in degrees.
+    public var smoothNormalDegrees: Float
+    /// 0 uniform .. 1 fully curvature-adaptive.
+    public var adaptivity: Float
+    /// Forbid residual triangles in the output.
+    public var pureQuads: Bool
+    /// Maximum boundary-edge count of holes to fill; 0 disables hole filling
+    /// and preserves open rims.
+    public var holeFillMaxBoundary: Int
+    /// Which quadrangulator to run.
+    public var quadMethod: QuadMethod
+
+    /// The engine defaults, read back through the ABI.
+    public init() {
+        var defaults = CyberRemeshParams()
+        cyber_default_params(&defaults)
+        targetQuads = Int(defaults.targetQuads)
+        edgeScale = defaults.edgeScale
+        sharpEdgeDegrees = defaults.sharpEdgeDegrees
+        smoothNormalDegrees = defaults.smoothNormalDegrees
+        adaptivity = defaults.adaptivity
+        pureQuads = defaults.pureQuads != 0
+        holeFillMaxBoundary = Int(defaults.holeFillMaxBoundary)
+        quadMethod = QuadMethod(rawValue: defaults.quadMethod)
     }
 
-    /// Pushes the values onto an engine-owned params handle.
-    func apply(to handle: OpaquePointer) {
-        cyber_remesh_params_set_target_quads(handle, max(0, targetQuads))
-        cyber_remesh_params_set_pure_quad(handle, pureQuad ? 1 : 0)
-        cyber_remesh_params_set_preserve_sharp(handle, preserveSharpEdges ? 1 : 0)
-        cyber_remesh_params_set_sharp_angle(handle, sharpAngleDegrees)
+    /// The engine defaults with a target quad count applied.
+    public init(targetQuads: Int) {
+        self.init()
+        self.targetQuads = targetQuads
+    }
+
+    /// Lowers to the plain-C ABI struct.
+    var cValue: CyberRemeshParams {
+        CyberRemeshParams(
+            targetQuads: Int32(clamping: targetQuads),
+            edgeScale: edgeScale,
+            sharpEdgeDegrees: sharpEdgeDegrees,
+            smoothNormalDegrees: smoothNormalDegrees,
+            adaptivity: adaptivity,
+            pureQuads: pureQuads ? 1 : 0,
+            holeFillMaxBoundary: Int32(clamping: holeFillMaxBoundary),
+            quadMethod: quadMethod.rawValue
+        )
     }
 }
 
-/// Shared control block handed to the C callbacks via an opaque `user` pointer.
+/// Shared control block handed to the C callbacks via the opaque `user` pointer.
 ///
 /// Held strongly by the running thread closure for the whole blocking call, so
-/// the `Unmanaged.passUnretained` pointers stay valid. Cancellation state is
+/// the `Unmanaged.passUnretained` pointer stays valid. Cancellation state is
 /// lock-guarded because the cancel callback is polled from an engine thread
 /// while `Task` cancellation is signalled from Swift concurrency.
 final class RemeshControlBox {
@@ -83,10 +120,13 @@ final class RemeshControlBox {
 }
 
 // C function pointers must be context-free top-level closures; the engine's
-// `user` pointer carries the RemeshControlBox back to us.
-private let remeshProgressCb: CyberProgressCb = { progress, _stage, user in
+// `user` pointer carries the RemeshControlBox back to us. The stage label the
+// ABI also passes is unused here — progress is reported as a bare fraction.
+private let remeshProgressCb: CyberProgressCb = { fraction, _stage, user in
     guard let user else { return }
-    Unmanaged<RemeshControlBox>.fromOpaque(user).takeUnretainedValue().reportProgress(progress)
+    Unmanaged<RemeshControlBox>.fromOpaque(user)
+        .takeUnretainedValue()
+        .reportProgress(Double(fraction))
 }
 
 private let remeshCancelCb: CyberCancelCb = { user in
@@ -125,7 +165,8 @@ public final class RemeshOperation {
     /// - Throws: ``CyberError`` (`.cancelled` on cooperative cancellation).
     public func value() async throws -> Mesh {
         try await withTaskCancellationHandler {
-            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Mesh, Error>) in
+            try await withCheckedThrowingContinuation {
+                (continuation: CheckedContinuation<Mesh, Error>) in
                 let input = self.input
                 let params = self.params
                 let box = self.box
@@ -146,22 +187,16 @@ public final class RemeshOperation {
         params: RemeshParameters,
         box: RemeshControlBox
     ) -> Result<Mesh, Error> {
-        guard let cparams = cyber_remesh_params_create() else {
-            return .failure(CyberError.outOfMemory)
-        }
-        defer { cyber_remesh_params_destroy(cparams) }
-        params.apply(to: cparams)
-
+        var cparams = params.cValue
         var out: OpaquePointer?
         let user = Unmanaged.passUnretained(box).toOpaque()
         let status = cyber_remesh(
-            input.handle, cparams,
-            remeshProgressCb, user,
-            remeshCancelCb, user,
+            input.handle, &cparams,
+            remeshProgressCb, remeshCancelCb, user,
             &out
         )
         withExtendedLifetime(input) {}
-        guard status == CYBER_STATUS_OK, let handle = out else {
+        guard status == CYBER_OK, let handle = out else {
             return .failure(CyberError.map(status))
         }
         return .success(Mesh(owning: handle))

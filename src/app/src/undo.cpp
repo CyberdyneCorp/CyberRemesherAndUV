@@ -1,7 +1,9 @@
 #include "cyber/app/undo.hpp"
 
 #include <algorithm>
+#include <optional>
 #include <utility>
+#include <vector>
 
 namespace cyber::app {
 
@@ -88,14 +90,25 @@ void writeEntries(ByteWriter& w, const std::vector<JournalEntry>& entries) {
     }
 }
 
-std::vector<JournalEntry> readEntries(ByteReader& r) {
+// Validate the count against the bytes actually left before reserving — a
+// corrupt/truncated journal (e.g. count = 0xFFFFFFFF) would otherwise throw
+// bad_alloc and abort. Each entry costs at least a 4-byte label length plus an
+// 8-byte size, and the loop stops as soon as the reader latches an error so a
+// short buffer cannot be walked `count` times.
+std::optional<std::vector<JournalEntry>> readEntries(ByteReader& r) {
     const std::uint32_t count = r.u32();
+    if (!r.ok() || count > r.remaining() / 12u) {
+        return std::nullopt;
+    }
     std::vector<JournalEntry> entries;
     entries.reserve(count);
     for (std::uint32_t i = 0; i < count; ++i) {
         JournalEntry e;
         e.label = r.str();
         e.bytes = static_cast<std::size_t>(r.u64());
+        if (!r.ok()) {
+            return std::nullopt;
+        }
         entries.push_back(std::move(e));
     }
     return entries;
@@ -111,9 +124,17 @@ void UndoStack::serializeMetadata(ByteWriter& w) const {
 }
 
 std::optional<JournalMetadata> UndoStack::loadMetadata(ByteReader& r) {
+    auto undoEntries = readEntries(r);
+    if (!undoEntries) {
+        return std::nullopt;
+    }
+    auto redoEntries = readEntries(r);
+    if (!redoEntries) {
+        return std::nullopt;
+    }
     JournalMetadata meta;
-    meta.undo = readEntries(r);
-    meta.redo = readEntries(r);
+    meta.undo = std::move(*undoEntries);
+    meta.redo = std::move(*redoEntries);
     meta.evicted = static_cast<std::size_t>(r.u64());
     if (!r.ok()) {
         return std::nullopt;

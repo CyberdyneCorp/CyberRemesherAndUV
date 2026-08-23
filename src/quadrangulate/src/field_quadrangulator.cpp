@@ -4,6 +4,8 @@
 #include <array>
 #include <cmath>
 #include <functional>
+#include <string>
+#include <utility>
 #include <vector>
 
 #include "cyber/accel/backend.hpp"
@@ -461,7 +463,14 @@ public:
     Outcome quadrangulate(Mesh& mesh, float /*targetEdgeLength*/, ProgressSink* progress,
                           const CancelToken* cancel) override {
         auto backend = accel::defaultBackend();
-        const CrossField field = computeCrossField(mesh, m_iterations, *backend);
+        const CrossField field =
+            computeCrossField(mesh, m_iterations, *backend, 45.0f, nullptr, m_guidance);
+        m_unhonored.clear();
+        // Guides the field could not act on (all reached faces hard-pinned) are
+        // reported, not counted as honored.
+        if (std::string absorbed = unhonoredGuideReport(field); !absorbed.empty()) {
+            m_unhonored.push_back(std::move(absorbed));
+        }
         if (cancel && cancel->isCancelled()) {
             return {.success = false, .cancelled = true, .failureReason = "cancelled"};
         }
@@ -503,10 +512,26 @@ public:
         return {.success = true, .cancelled = false, .failureReason = {}};
     }
 
+    // Flow guides reach this backend's own cross field directly; painted
+    // density reaches it through the pipeline's isotropic sizing stage, which
+    // ran before this quadrangulator (unlike quad-cover, which skips it).
+    bool acceptGuidance(const GuidanceField& field, std::string& reason) override {
+        (void)reason;
+        m_guidance = &field;
+        m_unhonored.clear();
+        return true;
+    }
+
+    [[nodiscard]] std::vector<std::string> unhonoredGuidance() const override {
+        return m_unhonored;
+    }
+
     [[nodiscard]] std::string name() const override { return "field-aligned"; }
 
 private:
     int m_iterations;
+    const GuidanceField* m_guidance = nullptr;
+    std::vector<std::string> m_unhonored;
 };
 
 }  // namespace
