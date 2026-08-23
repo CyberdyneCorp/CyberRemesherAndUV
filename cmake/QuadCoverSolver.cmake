@@ -82,6 +82,20 @@ function(cyber_add_quadcover_solver)
     # names `tbb` directly, so a box with the headers but no runtime used to
     # configure happily and die at link time.
     find_package(OpenMP QUIET)
+    # Homebrew's libomp is keg-only, so it is not on AppleClang's default search
+    # path and the plain find_package above misses it even when it is installed.
+    # Retry with the brew prefix before giving up, so the "brew libomp tbb" the
+    # error below recommends is actually enough on macOS -- it was not, and the
+    # message sent you to install packages you already had.
+    if(APPLE AND NOT OpenMP_CXX_FOUND)
+        execute_process(COMMAND brew --prefix libomp
+            OUTPUT_VARIABLE _brew_libomp OUTPUT_STRIP_TRAILING_WHITESPACE
+            ERROR_QUIET RESULT_VARIABLE _brew_rc)
+        if(_brew_rc EQUAL 0 AND EXISTS "${_brew_libomp}")
+            set(OpenMP_ROOT "${_brew_libomp}")
+            find_package(OpenMP QUIET)
+        endif()
+    endif()
     find_path(CYBER_QC_TBB_INCLUDE tbb/blocked_range.h)
     find_library(CYBER_QC_TBB_LIB NAMES tbb)
     if(NOT OpenMP_CXX_FOUND OR NOT CYBER_QC_TBB_INCLUDE OR NOT CYBER_QC_TBB_LIB)
@@ -136,7 +150,12 @@ function(cyber_add_quadcover_solver)
         CXX_STANDARD 14
         CXX_STANDARD_REQUIRED ON
         CXX_EXTENSIONS OFF)
-    target_compile_options(cyber_quadcover_solver PRIVATE -w -fopenmp -pthread)
+    # No bare -fopenmp here: build_autoremesher.sh could hardcode it because it only
+    # ever ran under GCC, but AppleClang rejects the spelling outright ("unsupported
+    # option '-fopenmp'") and needs -Xclang -fopenmp. The OpenMP::OpenMP_CXX target
+    # linked below already carries whatever the detected compiler wants, so passing it
+    # again by hand is redundant everywhere and fatal on macOS.
+    target_compile_options(cyber_quadcover_solver PRIVATE -w -pthread)
     target_compile_definitions(cyber_quadcover_solver PRIVATE
         NDEBUG _USE_MATH_DEFINES NOMINMAX GEO_STATIC_LIBS)
     target_include_directories(cyber_quadcover_solver PRIVATE
@@ -147,6 +166,13 @@ function(cyber_add_quadcover_solver)
         "${_ar}/thirdparty/geogram/geogram-1.8.3/src/lib"
         "${_ar}/thirdparty/geogram/geogram-1.8.3/src/lib/geogram/third_party/libMeshb/sources"
         "${_ar}/thirdparty/geogram")
+    # find_path already located the TBB headers for the capability check above, but
+    # the result was never handed to the compiler. On Linux that went unnoticed
+    # because they sit in /usr/include; Homebrew's tbb is keg-only, so the vendored
+    # sources failed on `tbb/blocked_range.h` with the headers plainly present.
+    # SYSTEM so TBB's own warnings stay out of the build log.
+    target_include_directories(cyber_quadcover_solver SYSTEM PRIVATE
+        "${CYBER_QC_TBB_INCLUDE}")
     # The solve TU's public header lives next to it; expose it so consumers can
     # include "autoremesher_solve.hpp" without seeing any Geogram include path.
     target_include_directories(cyber_quadcover_solver PUBLIC "${_ref}")
