@@ -59,6 +59,19 @@ ufbx_load_opts importOpts() {
     opts.ignore_animation = true;
     opts.ignore_embedded = true;
     opts.load_external_files = false;
+    // Bound what a forged header can commit. FBX is untrusted input and its
+    // element counts are attacker-controlled, so a small file can declare
+    // enormous arrays; happly carries a local patch against exactly this
+    // (see thirdparty/manifest.json). ufbx reports the ceiling as a typed
+    // error, which importMesh already turns into an ErrorCode. The budget is
+    // far above any real scene -- a 20M-triangle mesh is well under a
+    // gigabyte -- so it only bites on files that were never going to load.
+    constexpr std::size_t kMemoryLimit = 2ull * 1024 * 1024 * 1024;
+    constexpr std::size_t kAllocationLimit = 1ull << 22;
+    opts.temp_allocator.memory_limit = kMemoryLimit;
+    opts.temp_allocator.allocation_limit = kAllocationLimit;
+    opts.result_allocator.memory_limit = kMemoryLimit;
+    opts.result_allocator.allocation_limit = kAllocationLimit;
     return opts;
 }
 

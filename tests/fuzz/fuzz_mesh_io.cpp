@@ -9,7 +9,7 @@ namespace {
 // importMesh dispatches on the extension, so the first input byte selects the
 // parser. libFuzzer mutates that byte like any other, which lets one corpus and
 // one campaign reach every importer.
-constexpr std::array<const char*, 5> kExtensions{".obj", ".ply", ".stl", ".gltf", ".glb"};
+constexpr std::array<const char*, 6> kExtensions{".obj", ".ply", ".stl", ".gltf", ".glb", ".fbx"};
 
 }  // namespace
 

@@ -108,6 +108,11 @@ is listed; this is the index, not the account.
   `Mesh.save` in Python: the canonical names for behaviour that has dispatched on
   the file extension since PLY/STL/glTF landed. `cyber_mesh_load_obj` /
   `cyber_mesh_save_obj` and `Mesh.load_obj` / `Mesh.save_obj` remain as aliases.
+- **FBX joins the fuzzed import surface.** `.fbx` is dispatched by
+  `fuzz_mesh_io`, with seeds committed so `fuzz_corpus_replay` exercises it on
+  every build, and the ufbx allocators are bounded so a forged header cannot
+  commit memory the stream has no bytes for — it comes back as a typed error like
+  any other malformed input.
 - **Python coverage for the bindings and the example gallery.**
   `test_io_formats.py` (round-trip across every writable format, FBX load, FBX
   export refusal, unknown-extension error, alias behaviour), `test_subdivide.py`

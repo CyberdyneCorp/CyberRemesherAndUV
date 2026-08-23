@@ -35,6 +35,16 @@
 - [x] 5.4 Python `tests/test_subdivide.py`: face-count quadrupling, idempotent id invalidation, reprojection moving vertices onto the target, empty-mesh error
 - [x] 5.5 Python `tests/test_examples.py`: run the offline examples end-to-end and assert their outputs appear
 - [x] 5.6 Register all three new files with CTest (`tests/CMakeLists.txt`), under the existing `SKIP_RETURN_CODE 77` convention — CI already runs `ctest`, so no new workflow lane was needed; `python_test_examples` gets a raised timeout since it runs the real pipeline six times
+- [x] 5.7 Extend `tests/fuzz/fuzz_mesh_io.cpp` to dispatch `.fbx` as well. FBX is
+  untrusted binary input with attacker-controlled element counts, and every other
+  importer already runs under that harness; leaving the new one out would have been
+  the only unfuzzed parser in the dispatch. Two seeds committed (a real cube, and a
+  forged header declaring enormous arrays), so `fuzz_corpus_replay` covers it on
+  every build, not only in a manual campaign.
+- [x] 5.8 Bound the ufbx allocators (`memory_limit` / `allocation_limit`). A small
+  file can declare enormous arrays; happly carries a local patch against exactly
+  this class (see `thirdparty/manifest.json`). ufbx surfaces the ceiling as a typed
+  error, which `importMesh` already maps to an `ErrorCode`.
 
 ## 6. Examples and docs
 
