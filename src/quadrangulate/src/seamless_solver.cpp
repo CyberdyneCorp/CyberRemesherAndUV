@@ -1967,9 +1967,22 @@ int solveSeamlessReduced(accel::IBackend& backend, std::size_t nCut,
                 const bool unit = std::abs(std::abs(w) - 1.0) < 1e-6;
                 const int score =
                     unitFirst ? (unit ? 2 : 0) + (cont ? 1 : 0) : (cont ? 2 : 0) + (unit ? 1 : 0);
-                if (score > bestScore || (score == bestScore && std::abs(w) > bestMag)) {
+                const double mag = std::abs(w);
+                // Rank on (score, |w|, column). `cur` is an unordered_map, so
+                // without the column term a tie is settled by hash iteration
+                // order — which is a property of the standard library, not of
+                // the mesh. With unitFirst every candidate has |w| == 1 exactly,
+                // so EVERY choice was such a tie: the reduction differed between
+                // toolchains and MinGW landed on one with 56 integrality
+                // violations where libstdc++ on Linux found 38. The worse
+                // reduction lost the joint-lattice closure and left the sharp
+                // cube with a half-integer seam (residual 0.5).
+                const bool better =
+                    score > bestScore ||
+                    (score == bestScore && (mag > bestMag || (mag == bestMag && c < pv)));
+                if (better) {
                     bestScore = score;
-                    bestMag = std::abs(w);
+                    bestMag = mag;
                     pv = c;
                 }
             }
@@ -2004,20 +2017,39 @@ int solveSeamlessReduced(accel::IBackend& backend, std::size_t nCut,
     };
     // Structural integrality violations: dependent integers whose expression reaches a
     // continuous free or carries a non-integer coefficient on an integer free.
+    //
+    // The two are NOT equivalent, and the raw count alone is the wrong thing to
+    // minimise. The joint-lattice closure below repairs the first kind — it
+    // promotes a continuous free carrying INTEGER coefficients onto a
+    // sub-integer lattice — but it can do nothing about a fractional
+    // coefficient, which it skips explicitly. So a reduction with many fixable
+    // violations beats one with fewer unfixable ones, and choosing on the total
+    // picked the unrepairable reduction and left a half-integer seam.
+    struct Integrality {
+        std::size_t unfixable = 0;
+        std::size_t total = 0;
+    };
     const auto integralityViolations = [&](const Reduction& red) {
-        std::size_t bad = 0;
+        Integrality out;
         for (std::size_t j = nUv; j < N; ++j) {
             if (!red.isPivot[j]) {
                 continue;
             }
+            bool bad = false;
+            bool unfixable = false;
             for (const auto& [c, w] : red.pivotExpr[j]) {
-                if (c < nUv || std::abs(w - std::round(w)) > 1e-6) {
-                    ++bad;
-                    break;
-                }
+                const bool fractional = std::abs(w - std::round(w)) > 1e-6;
+                bad = bad || c < nUv || fractional;
+                unfixable = unfixable || fractional;
             }
+            out.total += bad ? 1 : 0;
+            out.unfixable += unfixable ? 1 : 0;
         }
-        return bad;
+        return out;
+    };
+    // Fewer unrepairable violations wins; the total only breaks the tie.
+    const auto better = [](const Integrality& a, const Integrality& b) {
+        return a.unfixable != b.unfixable ? a.unfixable < b.unfixable : a.total < b.total;
     };
     Reduction red;
     if (std::getenv("CYBER_QC_NO_UNIT_PIVOT") != nullptr) {
@@ -2026,16 +2058,20 @@ int solveSeamlessReduced(accel::IBackend& backend, std::size_t nCut,
         red = eliminate(true);
     } else {
         Reduction hist = eliminate(false);
-        const std::size_t histBad = integralityViolations(hist);
-        if (histBad == 0) {
+        const Integrality histBad = integralityViolations(hist);
+        if (histBad.total == 0) {
             red = std::move(hist);  // historical reduction already integer-exact
         } else {
             Reduction unit = eliminate(true);
-            const std::size_t unitBad = integralityViolations(unit);
-            red = unitBad < histBad ? std::move(unit) : std::move(hist);
+            const Integrality unitBad = integralityViolations(unit);
+            const bool takeUnit = better(unitBad, histBad);
+            red = takeUnit ? std::move(unit) : std::move(hist);
             if (std::getenv("CYBER_QC_DEBUG") != nullptr) {
-                std::fprintf(stderr, "[qc] pivot integrality: hist=%zu unit=%zu -> %s\n", histBad,
-                             unitBad, unitBad < histBad ? "unit" : "hist");
+                std::fprintf(stderr,
+                             "[qc] pivot integrality: hist=%zu/%zu unit=%zu/%zu "
+                             "(unfixable/total) -> %s\n",
+                             histBad.unfixable, histBad.total, unitBad.unfixable, unitBad.total,
+                             takeUnit ? "unit" : "hist");
             }
         }
     }
