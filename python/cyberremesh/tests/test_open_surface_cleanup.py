@@ -128,14 +128,14 @@ def _run(tmp: str) -> int:
           len(quads) > 130, f"got {len(quads)} quads")
     # Edge-length CV is the primary discriminator: the pre-fix simplifyGraph path merged
     # cells into long uneven quads (~0.93 here, ~1.7 on the Geogram path), while the fix
-    # keeps them uniform. The bound was 0.6 when the isoline graph iterated in hash order,
-    # which made the traced mesh a property of the standard library -- libstdc++ landed on
-    # 0.40 and libc++ on 0.73 for this input, so the gate passed on Linux and failed on
-    # macOS. The graph is ordered now and both toolchains agree on 0.625; the bound sits
-    # above that and still catches the blowup it was written for, which is 1.5x higher.
+    # keeps them uniform. This bound briefly went to 0.7: the isoline graph used to iterate
+    # in hash order, which made the traced mesh a property of the standard library
+    # (libstdc++ landed on 0.40, libc++ on 0.73), and ordering it settled both toolchains
+    # on 0.625. Fixing the smoother's Jacobi two-cycle then brought it to 0.35 -- better
+    # than either toolchain managed before -- so the original bound is back.
     cv = edge_cv(verts, faces)
     check("edge-length CV stays uniform (pre-fix simplifyGraph blew it up)",
-          cv < 0.7, f"cv={cv:.3f}")
+          cv < 0.6, f"cv={cv:.3f}")
     check("output is all quads", len(quads) == len(faces),
           f"{len(faces) - len(quads)} non-quads")
     check("output is manifold", nonmanifold_edges(faces) == 0,

@@ -514,8 +514,37 @@ void transportSmooth(const Mesh& mesh, const std::vector<FaceId>& faces,
             }
             const float len = std::sqrt(re * re + im * im);
             if (len > 1e-12f) {
-                const float nr = re / len;
-                const float ni = im / len;
+                const float tr = re / len;
+                const float ti = im / len;
+                // Average with the previous iterate instead of replacing it. The
+                // operator is applied Jacobi-style -- every face reads the previous
+                // sweep -- and on a triangulated grid the smooth solution is
+                // ANTI-correlated between the two triangles of a quad: their reference
+                // tangents differ by 45 degrees, which is 180 degrees in the 4-symmetry
+                // encoding, so the transport between them is a sign flip. Straight
+                // replacement therefore two-cycles. The whole interior flipped sign
+                // every sweep, maxDelta pinned at 2 so the convergence test never
+                // fired, and the field that came out was whichever phase the loop
+                // happened to stop on -- 15 of 72 faces at the maximum 45 degrees off
+                // on a FLAT grid, and which 15 decided by the sweep count's parity.
+                // That is also what made the solve so perturbation-sensitive: a face
+                // sitting between two antipodal attractors falls whichever way
+                // rounding pushes it. Averaging lands on the true fixed point; the
+                // flat grid now relaxes fully axis-aligned.
+                float nr = 0.5f * (u[2 * c] + tr);
+                float ni = 0.5f * (u[2 * c + 1] + ti);
+                const float rl = std::sqrt(nr * nr + ni * ni);
+                if (rl > 1e-12f) {
+                    nr /= rl;
+                    ni /= rl;
+                }
+                // else: the face sits exactly on the oscillating mode, the average
+                // cancels, and nr/ni stay zero on purpose. A zero contributes nothing
+                // to its neighbours' sums next sweep, which is precisely what breaks
+                // the deadlock -- holding the old value or taking the transported one
+                // both just reinstate the flip. It picks a direction back up as soon as
+                // the neighbourhood settles; the guard after the loop catches the case
+                // where one never does.
                 const float d = std::abs(nr - u[2 * c]) + std::abs(ni - u[2 * c + 1]);
                 maxDelta = std::max(maxDelta, d);
                 u[2 * c] = nr;
@@ -527,9 +556,21 @@ void transportSmooth(const Mesh& mesh, const std::vector<FaceId>& faces,
         }
     }
 
+    // A face that abstained on the final sweep would leave a zero-length cross, which
+    // is not a direction. Nothing downstream should have to defend against that, so
+    // settle it here: the transported neighbour value if the operator offers one, and
+    // the identity otherwise.
+    accel::spmv(backend, mat, u, y);
     for (std::size_t c = 0; c < nf; ++c) {
-        field.real[faces[c].value] = u[2 * c];
-        field.imag[faces[c].value] = u[2 * c + 1];
+        float re = u[2 * c];
+        float im = u[2 * c + 1];
+        if (re * re + im * im < 0.25f) {
+            const float yl = std::sqrt(y[2 * c] * y[2 * c] + y[2 * c + 1] * y[2 * c + 1]);
+            re = yl > 1e-12f ? y[2 * c] / yl : 1.0f;
+            im = yl > 1e-12f ? y[2 * c + 1] / yl : 0.0f;
+        }
+        field.real[faces[c].value] = re;
+        field.imag[faces[c].value] = im;
     }
 }
 
