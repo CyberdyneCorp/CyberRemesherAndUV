@@ -186,9 +186,9 @@ const char* cyber_status_string(CyberStatus status) {
 
 const char* cyber_last_error(void) { return errorSlot().c_str(); }
 
-CyberStatus cyber_mesh_load_obj(const char* path, CyberMesh** out) {
+CyberStatus cyber_mesh_load(const char* path, CyberMesh** out) {
     if (path == nullptr || out == nullptr) {
-        setError("cyber_mesh_load_obj: null argument");
+        setError("cyber_mesh_load: null argument");
         return CYBER_ERR_INVALID_ARG;
     }
     *out = nullptr;
@@ -203,17 +203,17 @@ CyberStatus cyber_mesh_load_obj(const char* path, CyberMesh** out) {
         *out = handle.release();
         return CYBER_OK;
     } catch (const std::exception& e) {
-        setError(std::string("cyber_mesh_load_obj: ") + e.what());
+        setError(std::string("cyber_mesh_load: ") + e.what());
         return CYBER_ERR_RUNTIME;
     } catch (...) {
-        setError("cyber_mesh_load_obj: unknown error");
+        setError("cyber_mesh_load: unknown error");
         return CYBER_ERR_RUNTIME;
     }
 }
 
-CyberStatus cyber_mesh_save_obj(const CyberMesh* mesh, const char* path) {
+CyberStatus cyber_mesh_save(const CyberMesh* mesh, const char* path) {
     if (mesh == nullptr || path == nullptr) {
-        setError("cyber_mesh_save_obj: null argument");
+        setError("cyber_mesh_save: null argument");
         return CYBER_ERR_INVALID_ARG;
     }
     try {
@@ -225,12 +225,23 @@ CyberStatus cyber_mesh_save_obj(const CyberMesh* mesh, const char* path) {
         clearError();
         return CYBER_OK;
     } catch (const std::exception& e) {
-        setError(std::string("cyber_mesh_save_obj: ") + e.what());
+        setError(std::string("cyber_mesh_save: ") + e.what());
         return CYBER_ERR_RUNTIME;
     } catch (...) {
-        setError("cyber_mesh_save_obj: unknown error");
+        setError("cyber_mesh_save: unknown error");
         return CYBER_ERR_RUNTIME;
     }
+}
+
+// Kept for callers written when OBJ was the only format. The names always lied
+// — both have dispatched on the extension since PLY/STL/glTF landed — so they
+// forward rather than duplicate.
+CyberStatus cyber_mesh_load_obj(const char* path, CyberMesh** out) {
+    return cyber_mesh_load(path, out);
+}
+
+CyberStatus cyber_mesh_save_obj(const CyberMesh* mesh, const char* path) {
+    return cyber_mesh_save(mesh, path);
 }
 
 void cyber_mesh_free(CyberMesh* mesh) { delete mesh; }

@@ -43,6 +43,11 @@ option(CYBER_WITH_SCIPP "Build the min-cost-flow integer quadrangulator (vendore
 
 include(cmake/CompilerWarnings.cmake)
 
+# ufbx (FBX import) is a C translation unit; the project is otherwise CXX-only.
+enable_language(C)
+include(cmake/Ufbx.cmake)
+cyber_add_ufbx()
+
 if(CYBER_WITH_QUADCOVER)
     # The vendored Geogram subset includes ~11 C translation units; the base
     # project only enables CXX, so enable C for the isolated solver library.

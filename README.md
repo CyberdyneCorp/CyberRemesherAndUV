@@ -58,6 +58,38 @@ charts tighter (higher coverage), the one remaining gap.
 
 <sub>Each quad mesh (left) auto-seamed, unwrapped, re-oriented, and packed into a UV atlas (right), tinted by chart · <code>examples/14_uv_atlas.py</code></sub>
 
+### Mesh I/O and subdivision
+
+`Mesh.load` / `Mesh.save` (C: `cyber_mesh_load` / `cyber_mesh_save`) dispatch on
+the file extension.
+
+| Format | Import | Export |
+|--------|:------:|:------:|
+| OBJ (+MTL, vertex colors incl. ZBrush polypaint) | ✅ | ✅ |
+| PLY | ✅ | ✅ |
+| STL (binary + ASCII) | ✅ | ✅ |
+| glTF 2.0 / GLB | ✅ | ✅ |
+| FBX (binary + ASCII, geometry only) | ✅ | — |
+
+FBX import reads quads at their authored arity with UVs, normals and vertex
+colors, applies each mesh node's world transform, and normalizes the file's axis
+and unit conventions — a Z-up centimetre export lands at the same size and
+orientation as the OBJ of the same model. It is **import-only**: writing FBX
+needs the proprietary binary container and no permissively licensed writer
+exists, so a `.fbx` export fails with an error naming the writable formats.
+Import is powered by the vendored [ufbx](https://github.com/ufbx/ufbx) (MIT).
+
+`Mesh.subdivide()` (C: `cyber_retopo_subdivide`) adds resolution to a result:
+linear subdivision with Catmull-Clark *topology* and no smoothing, so every
+n-gon becomes n quads and a quad mesh quadruples. Passing `project_to=` a
+surface snaps every new vertex onto it, which is what recovers curvature the
+coarse cage lost — on the torus knot below that halves the RMS deviation from
+the source surface (0.635% → 0.325%).
+
+![Subdivision with and without reprojection](examples/output/16_subdivide.png)
+
+<sub>Quad remesh → linear subdivision → subdivision reprojected onto the source surface · <code>examples/16_subdivide.py</code></sub>
+
 ## How it works
 
 Two algorithms carry the project: the quad retopology pipeline (triangles in, an

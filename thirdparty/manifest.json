@@ -32,6 +32,14 @@
       "path": "tinygltf",
       "url": "https://github.com/syoyo/tinygltf",
       "usedBy": "mesh-io glTF 2.0 import/export (bundles nlohmann json.hpp, MIT)"
+    },
+    {
+      "name": "ufbx",
+      "version": "0.23.0",
+      "license": "MIT",
+      "path": "ufbx",
+      "url": "https://github.com/ufbx/ufbx",
+      "usedBy": "mesh-io FBX import (import-only — no permissive FBX writer exists)"
     }
   ],
   "planned": [

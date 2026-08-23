@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Load a model and convert the whole thing to good-quality quads.
 
-Loads a mesh (OBJ / PLY / STL / glTF — the engine dispatches by extension; FBX
-is NOT supported, convert it first) and remeshes it two ways:
+Loads a mesh (OBJ / PLY / STL / glTF / FBX — the engine dispatches by
+extension) and remeshes it two ways:
 
   * quad-dominant — the fastest good result (a few residual triangles at
     irregular vertices), and

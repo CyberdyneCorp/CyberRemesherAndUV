@@ -47,6 +47,9 @@ Result<ImportedMesh> importMesh(const std::filesystem::path& path, const ImportO
     if (ext == ".gltf" || ext == ".glb") {
         return detail::importGltf(path, options);
     }
+    if (ext == ".fbx") {
+        return detail::importFbx(path, options);
+    }
     return Error{ErrorCode::UnsupportedFormat,
                  "unsupported import format '" + ext + "' for '" + path.string() + "'"};
 }
@@ -68,6 +71,14 @@ Status exportMesh(const Mesh& mesh, const std::filesystem::path& path,
     }
     if (ext == ".gltf" || ext == ".glb") {
         return detail::exportGltf(mesh, path, options);
+    }
+    if (ext == ".fbx") {
+        // Named separately from the generic message below: "unsupported" reads
+        // like a bug when the same extension imports fine (mesh-io spec,
+        // "Export formats" — FBX export is refused with an actionable error).
+        return Error{ErrorCode::UnsupportedFormat,
+                     "FBX is import-only: cannot write '" + path.string() +
+                         "'. Export to .obj, .ply, .stl, .gltf or .glb instead"};
     }
     return Error{ErrorCode::UnsupportedFormat,
                  "unsupported export format '" + ext + "' for '" + path.string() + "'"};

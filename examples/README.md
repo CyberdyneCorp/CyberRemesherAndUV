@@ -28,6 +28,7 @@ so quad-dominance reads at a glance.
 | `13_broken_robustness.py` | clean quad output from deliberately-malformed input | `output/13_broken_robustness.png` |
 | `14_uv_atlas.py` | automatic UV atlas (auto-seam → LSCM → re-orient → skyline pack) | `output/14_uv_atlas.png` |
 | `15_uv_vs_xatlas.py` | UV atlas benchmark vs the xatlas reference (distortion / charts / packing) | `output/15_uv_vs_xatlas.png` |
+| `16_subdivide.py` | `Mesh.subdivide` — linear subdivision, with and without reprojection | `output/16_subdivide.png` |
 | `run_all.py` | runs all of the above + a stitched `output/gallery.png` | `output/gallery.png` |
 
 `08_load_model.py` loads a mesh and converts it to quads. It defaults to a
@@ -37,9 +38,10 @@ procedural torus knot but takes `--input <file>` for your own model:
 examples/run.sh examples/08_load_model.py --input model.obj --target-quads 8000 --output quads.obj
 ```
 
-**Supported input formats: OBJ, PLY, STL, glTF/GLB** (the loader dispatches by
-extension). **FBX is not supported** — convert it to one of the above first
-(e.g. in Blender). Two results are produced: *quad-dominant* (a few residual
+**Supported input formats: OBJ, PLY, STL, glTF/GLB, FBX** (the loader
+dispatches by extension). FBX is **import-only** — writing it needs the
+proprietary binary container, so export to one of the others. Two results are
+produced: *quad-dominant* (a few residual
 triangles at irregular vertices) and *pure quads* (100% quads via subdivision).
 
 `09_test_models.py` runs the pipeline on real geometry from Alec Jacobson's
