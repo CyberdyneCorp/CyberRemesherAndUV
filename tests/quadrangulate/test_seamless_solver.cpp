@@ -1,9 +1,12 @@
 #include <doctest.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstddef>
 #include <map>
+#include <sstream>
+#include <string>
 #include <tuple>
 #include <vector>
 
@@ -605,6 +608,87 @@ float maxAbsUv(const Mesh& mesh, const remesh::Parameterization& param) {
 // ill-conditioned and blew up. buildSeamlessSetup must now mark the 12 creases as cut (seam)
 // edges, and solveParameterization must produce a valid, BOUNDED (non-divergent) integer-seamless
 // map. This is the gate that lets CAD / sharp-feature models take the native path.
+
+// TEMPORARY CI DIAGNOSTIC (remove once the MinGW sharp-cube residual is pinned
+// down). Mirrors seamlessUvResidual()'s own loop so the Windows lane can report
+// WHICH seam diverges and, crucially, how close the rot90 search came to a tie:
+// that search takes the first strict minimum, so a one-ULP difference on a
+// perfectly symmetric cube flips the rotation and turns a sound map into a
+// half-integer translation.
+void reportSeamResidual(const remesh::SeamlessUv& uv) {
+    std::map<std::pair<Index, Index>, std::vector<int>> edges;
+    for (int t = 0; t < static_cast<int>(uv.triangles.size()); ++t) {
+        const auto& tri = uv.triangles[static_cast<std::size_t>(t)];
+        for (int i = 0; i < 3; ++i) {
+            const Index a = tri[static_cast<std::size_t>(i)];
+            const Index b = tri[static_cast<std::size_t>((i + 1) % 3)];
+            edges[{std::min(a, b), std::max(a, b)}].push_back(t);
+        }
+    }
+    const auto uvOf = [&](int t, Index vid) {
+        const auto& tri = uv.triangles[static_cast<std::size_t>(t)];
+        for (int c = 0; c < 3; ++c) {
+            if (tri[static_cast<std::size_t>(c)] == vid) {
+                return uv.triangleUv[static_cast<std::size_t>(t)][static_cast<std::size_t>(c)];
+            }
+        }
+        return Vec2{0.0f, 0.0f};
+    };
+    const auto rot90 = [](Vec2 v, int k) {
+        for (int i = 0; i < ((k % 4) + 4) % 4; ++i) {
+            v = Vec2{-v.y, v.x};
+        }
+        return v;
+    };
+
+    double worst = -1.0;
+    std::string worstLine;
+    for (const auto& [e, inc] : edges) {
+        if (inc.size() != 2) {
+            continue;
+        }
+        const Vec2 a1 = uvOf(inc[0], e.first), a2 = uvOf(inc[0], e.second);
+        const Vec2 b1 = uvOf(inc[1], e.first), b2 = uvOf(inc[1], e.second);
+        const Vec2 da{a2.x - a1.x, a2.y - a1.y}, db{b2.x - b1.x, b2.y - b1.y};
+        if (da.x == 0.0f && da.y == 0.0f) {
+            continue;
+        }
+        int bestK = 0;
+        float bestD = 1e18f, secondD = 1e18f;
+        std::array<float, 4> dk{};
+        for (int k = 0; k < 4; ++k) {
+            const Vec2 r = rot90(da, k);
+            const float d = (r.x - db.x) * (r.x - db.x) + (r.y - db.y) * (r.y - db.y);
+            dk[static_cast<std::size_t>(k)] = d;
+            if (d < bestD) {
+                secondD = bestD;
+                bestD = d;
+                bestK = k;
+            } else if (d < secondD) {
+                secondD = d;
+            }
+        }
+        const Vec2 ra1 = rot90(a1, bestK);
+        const float tx = b1.x - ra1.x, ty = b1.y - ra1.y;
+        const double res = static_cast<double>(
+            std::max(std::abs(tx - std::round(tx)), std::abs(ty - std::round(ty))));
+        if (res > worst) {
+            worst = res;
+            std::ostringstream os;
+            os.precision(9);
+            os << std::scientific << "worst seam v" << e.first << "-v" << e.second << " res=" << res
+               << " bestK=" << bestK << " bestD=" << bestD << " secondD=" << secondD
+               << " tieMargin=" << (secondD - bestD) << " d=[" << dk[0] << "," << dk[1] << ","
+               << dk[2] << "," << dk[3] << "]"
+               << " da=(" << da.x << "," << da.y << ") db=(" << db.x << "," << db.y << ")"
+               << " a1=(" << a1.x << "," << a1.y << ") b1=(" << b1.x << "," << b1.y << ")"
+               << " t=(" << tx << "," << ty << ")";
+            worstLine = os.str();
+        }
+    }
+    MESSAGE("sharp-cube seam diagnostic: " << worstLine);
+}
+
 TEST_CASE("seamless feature: sharp cube runs and stays bounded (feature edges become seams)") {
     auto backend = cyber::accel::defaultBackend();
     Mesh cube = makeCube(6);
@@ -644,6 +728,7 @@ TEST_CASE("seamless feature: sharp cube runs and stays bounded (feature edges be
     // And it is integer-seamless across the (now feature-aware) seams.
     const remesh::SeamlessUv uv = assembleUv(cube, param);
     REQUIRE(uv.valid);
+    reportSeamResidual(uv);
     CHECK(remesh::seamlessUvResidual(uv) < 1e-3);
 }
 
