@@ -143,11 +143,11 @@ class QuadCoverFrameFieldSolver final : public IFrameFieldSolver {
 public:
     explicit QuadCoverFrameFieldSolver(QuadCoverOptions options) : m_options(options) {}
 
-    Outcome solve(const Mesh& mesh, const FeatureGraph& /*features — angle re-detection
-                   until 5.10*/,
-                  const std::vector<float>& /*vertexScales — density enters the
-                   parameterization, not the field*/,
-                  ProgressSink* progress, const CancelToken* cancel) override {
+    // `features` is unused: angle re-detection is deferred until 5.10. `vertexScales`
+    // is unused too — density enters the parameterization, not the field.
+    Outcome solve(const Mesh& mesh, const FeatureGraph& /*features*/,
+                  const std::vector<float>& /*vertexScales*/, ProgressSink* progress,
+                  const CancelToken* cancel) override {
         ensureGeogramInitialized();
         Outcome outcome;
         if (cancel && cancel->isCancelled()) {
@@ -165,8 +165,8 @@ public:
             {
                 const std::lock_guard<std::mutex> lock(frameFieldMutex);
                 field.set_use_spatial_search(false);
-                field.create_from_surface_mesh(
-                    geo, false, static_cast<double>(m_options.sharpEdgeDegrees));
+                field.create_from_surface_mesh(geo, false,
+                                               static_cast<double>(m_options.sharpEdgeDegrees));
             }
 
             // One representative cross direction per face: the first row of
@@ -174,10 +174,9 @@ public:
             outcome.field.faceDirections.assign(mesh.faceCapacity(), Vec3{});
             const auto& frames = field.frames();
             for (std::size_t gf = 0; gf < maps.faceOfGeo.size(); ++gf) {
-                outcome.field.faceDirections[maps.faceOfGeo[gf].value] =
-                    Vec3{static_cast<float>(frames[9 * gf + 0]),
-                         static_cast<float>(frames[9 * gf + 1]),
-                         static_cast<float>(frames[9 * gf + 2])};
+                outcome.field.faceDirections[maps.faceOfGeo[gf].value] = Vec3{
+                    static_cast<float>(frames[9 * gf + 0]), static_cast<float>(frames[9 * gf + 1]),
+                    static_cast<float>(frames[9 * gf + 2])};
             }
             outcome.success = true;
         } catch (const std::exception& e) {
@@ -202,8 +201,8 @@ public:
     explicit QuadCoverParameterizer(QuadCoverOptions options) : m_options(options) {}
 
     Outcome parameterize(const Mesh& mesh, const FeatureGraph& /*features — see 5.10*/,
-                         const FrameField& field, float targetEdgeLength,
-                         ProgressSink* progress, const CancelToken* cancel) override {
+                         const FrameField& field, float targetEdgeLength, ProgressSink* progress,
+                         const CancelToken* cancel) override {
         ensureGeogramInitialized();
         Outcome outcome;
         if (cancel && cancel->isCancelled()) {
@@ -222,9 +221,8 @@ public:
             GEO::Attribute<GEO::vec3> fieldAttr(geo.facets.attributes(), "B");
             for (std::size_t gf = 0; gf < maps.faceOfGeo.size(); ++gf) {
                 const Vec3 d = field.faceDirections[maps.faceOfGeo[gf].value];
-                fieldAttr[static_cast<GEO::index_t>(gf)] =
-                    GEO::vec3(static_cast<double>(d.x), static_cast<double>(d.y),
-                              static_cast<double>(d.z));
+                fieldAttr[static_cast<GEO::index_t>(gf)] = GEO::vec3(
+                    static_cast<double>(d.x), static_cast<double>(d.y), static_cast<double>(d.z));
             }
 
             GEO::Attribute<GEO::vec2> uv(geo.facet_corners.attributes(), "U");
@@ -237,10 +235,10 @@ public:
 
             {
                 ProgressHookGuard hooks(progress);
-                GEO::GlobalParam2d::quad_cover(
-                    &geo, fieldAttr, uv, scaling, /*constrain_hard_edges=*/true,
-                    /*do_brush=*/true, /*integer_constraints=*/true,
-                    static_cast<double>(m_options.sharpEdgeDegrees));
+                GEO::GlobalParam2d::quad_cover(&geo, fieldAttr, uv, scaling,
+                                               /*constrain_hard_edges=*/true,
+                                               /*do_brush=*/true, /*integer_constraints=*/true,
+                                               static_cast<double>(m_options.sharpEdgeDegrees));
             }
             if (cancel && cancel->isCancelled()) {
                 outcome.cancelled = true;
@@ -250,8 +248,7 @@ public:
             outcome.param.cornerUVs.assign(mesh.faceCapacity(), {});
             for (std::size_t gf = 0; gf < maps.faceOfGeo.size(); ++gf) {
                 auto& corners = outcome.param.cornerUVs[maps.faceOfGeo[gf].value];
-                const GEO::index_t base =
-                    geo.facets.corners_begin(static_cast<GEO::index_t>(gf));
+                const GEO::index_t base = geo.facets.corners_begin(static_cast<GEO::index_t>(gf));
                 for (GEO::index_t k = 0; k < 3; ++k) {
                     const GEO::vec2 value = uv[base + k];
                     corners[k] = Vec2{static_cast<float>(value.x), static_cast<float>(value.y)};

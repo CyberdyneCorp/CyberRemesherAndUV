@@ -99,7 +99,11 @@ std::vector<std::size_t> reverseCuthillMcKee(std::size_t n,
                 const std::size_t da = degree(a), db = degree(b);
                 return da != db ? da < db : a < b;
             });
-            queue.insert(queue.end(), nbrs.begin(), nbrs.end());
+            // push_back rather than range-insert: GCC 13 mis-analyses the
+            // inlined _M_range_insert here and reports a bogus stringop-overflow.
+            for (const std::size_t v : nbrs) {
+                queue.push_back(v);
+            }
         }
     }
     std::reverse(order.begin(), order.end());

@@ -1227,8 +1227,8 @@ private:
             for (const auto& segs : faceSegs_) {
                 maxSegs = std::max(maxSegs, segs.size());
                 total += segs.size();
-                over32 += segs.size() >= 32 ? 1 : 0;
-                over48 += segs.size() >= 48 ? 1 : 0;
+                over32 += segs.size() >= 32 ? 1u : 0u;
+                over48 += segs.size() >= 48 ? 1u : 0u;
             }
             std::fprintf(stderr,
                          "[qc] bimdf trail density (%s): faces=%zu rays=%zu cap=%zu maxSegs=%zu "
@@ -3498,11 +3498,12 @@ BimdfResult solveBimdf(const TMesh& tm, const BimdfOptions& opts) {
                     }
                     edges.push_back({inner[ii].n0, inner[ii].n1, 0.0, kNone, ii});
                 }
-                std::sort(edges.begin(), edges.end(), [](const TEdge& a, const TEdge& b) {
-                    if (a.w != b.w) {
-                        return a.w < b.w;
+                std::sort(edges.begin(), edges.end(), [](const TEdge& e0, const TEdge& e1) {
+                    if (e0.w != e1.w) {
+                        return e0.w < e1.w;
                     }
-                    return std::tie(a.u, a.v, a.arc, a.inner) < std::tie(b.u, b.v, b.arc, b.inner);
+                    return std::tie(e0.u, e0.v, e0.arc, e0.inner) <
+                           std::tie(e1.u, e1.v, e1.arc, e1.inner);
                 });
                 std::vector<std::size_t> parent(nP);
                 for (std::size_t i = 0; i < nP; ++i) {
