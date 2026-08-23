@@ -24,6 +24,12 @@ is listed; this is the index, not the account.
 - Meshes at coordinates far from the origin now terminate under a resolution
   floor and a face budget instead of exhausting memory; meshes at ordinary
   coordinates are byte-identical. *(Hardened)*
+- Remeshing is now reproducible across toolchains, and the meshes it produces
+  change as a result. The cross field no longer routes angles through libm's
+  `sinf`/`cosf` (Apple Clang and GCC disagree on those by one ULP), and the
+  isoline graph is traced in index order rather than hash order. Builds from
+  different compilers previously traced the same open paraboloid into 144 or 224
+  quads; they now agree exactly. *(Fixed)*
 - The CLI clamps `--sharp-edge` and `--adaptivity` to their documented ranges
   instead of warning that it clamped them and then running the raw value, so a
   `--sharp-edge` below 30° now produces different topology than it used to.
