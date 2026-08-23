@@ -46,6 +46,15 @@
       "url": "https://github.com/nlohmann/json",
       "usedBy": "bundled by tinygltf as thirdparty/tinygltf/json.hpp",
       "redistributed": true
+    },
+    {
+      "name": "ufbx",
+      "version": "0.23.0",
+      "license": "MIT",
+      "path": "ufbx",
+      "url": "https://github.com/ufbx/ufbx",
+      "usedBy": "mesh-io FBX import (import-only — no permissive FBX writer exists)",
+      "redistributed": true
     }
   ],
   "vendoredOnDemand": [

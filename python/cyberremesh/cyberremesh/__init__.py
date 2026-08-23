@@ -7,10 +7,11 @@ imports cleanly on a machine where the engine has not been built.
 
     from cyberremesh import Mesh, RemeshParams, remesh, CyberError
 
-    mesh = Mesh.load_obj("model.obj")
+    mesh = Mesh.load("model.fbx")          # .obj .ply .stl .gltf .glb .fbx
     result = remesh(mesh, RemeshParams(target_quad_count=5000))
     print(result.stats.quads)
-    result.save_obj("out.obj")
+    result.subdivide(project_to=mesh)      # 4x the quads, back on the surface
+    result.save("out.obj")                 # FBX is import-only
 """
 
 from .api import (

@@ -3,6 +3,7 @@ add_library(cyber_core STATIC
     src/export_preset.cpp
     src/guidance.cpp
     src/io.cpp
+    src/io_fbx.cpp
     src/io_gltf.cpp
     src/io_obj.cpp
     src/io_ply.cpp
@@ -23,6 +24,7 @@ target_include_directories(cyber_core SYSTEM PRIVATE
     ${PROJECT_SOURCE_DIR}/thirdparty/tinyobjloader
     ${PROJECT_SOURCE_DIR}/thirdparty/happly
     ${PROJECT_SOURCE_DIR}/thirdparty/tinygltf)
+target_link_libraries(cyber_core PRIVATE cyber_ufbx)
 add_library(cyber::core ALIAS cyber_core)
 
 target_include_directories(cyber_core PUBLIC include)

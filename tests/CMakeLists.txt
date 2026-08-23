@@ -26,6 +26,7 @@ add_executable(cyber_tests
     core/test_golden_organic.cpp
     core/test_holes.cpp
     core/test_export_preset.cpp
+    core/test_io_fbx.cpp
     core/test_io_formats.cpp
     core/test_io_obj.cpp
     core/test_isotropic.cpp
@@ -53,6 +54,10 @@ target_link_libraries(cyber_tests PRIVATE cyber_accel cyber_bake cyber_handoff
 target_include_directories(cyber_tests PRIVATE ${PROJECT_SOURCE_DIR}/apps/cli)
 # tests/support/: header-only helpers shared across the suite (portable setenv).
 target_include_directories(cyber_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests)
+# Committed binary fixtures the suite cannot author itself (FBX has no
+# permissively licensed writer) — see tests/data/generate_fbx_fixtures.py.
+target_compile_definitions(cyber_tests PRIVATE
+    CYBER_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data")
 if(TARGET cyber_net)
     target_sources(cyber_tests PRIVATE net/test_bridge.cpp)
     target_link_libraries(cyber_tests PRIVATE cyber_net)
@@ -326,13 +331,17 @@ if(TARGET cyber_capi_shared AND Python3_FOUND)
                  test_hole_fill_policy test_open_surface_cleanup
                  test_cad_density_robustness test_soft_selection test_seam_path
                  test_handoff test_mesh_state test_export_presets
-                 test_library_lookup test_host_process_hygiene)
+                 test_library_lookup test_host_process_hygiene
+                 test_io_formats test_subdivide test_examples)
         add_test(NAME python_${_pyt}
             COMMAND ${Python3_EXECUTABLE} ${_pydir}/${_pyt}.py)
         set_tests_properties(python_${_pyt} PROPERTIES
             ENVIRONMENT "${_py_test_env}"
             SKIP_RETURN_CODE 77)
     endforeach()
+    # test_examples runs the real pipeline across six example scripts; the
+    # default 1500s CTest timeout is tight for that on a loaded CI runner.
+    set_tests_properties(python_test_examples PROPERTIES TIMEOUT 1800)
 endif()
 
 # Benchmark count-matching regression tests. Pure control flow — no engine, no

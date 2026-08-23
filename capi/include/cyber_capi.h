@@ -116,11 +116,23 @@ int cyber_max_worker_threads(void);
 
 /* ---- mesh I/O -------------------------------------------------------- */
 
-/* Loads a Wavefront OBJ. On success *out receives a newly allocated handle
- * the caller must release with cyber_mesh_free. */
-CyberStatus cyber_mesh_load_obj(const char* path, CyberMesh** out);
+/* Loads a mesh, dispatching on the file extension: .obj, .ply, .stl, .gltf,
+ * .glb, .fbx. On success *out receives a newly allocated handle the caller
+ * must release with cyber_mesh_free. An unknown extension fails with
+ * CYBER_ERR_IO and cyber_last_error names the path. */
+CyberStatus cyber_mesh_load(const char* path, CyberMesh** out);
 
-/* Writes a mesh to a Wavefront OBJ (a sibling .mtl may be written too). */
+/* Writes a mesh, dispatching on the file extension: .obj (a sibling .mtl may
+ * be written too), .ply, .stl, .gltf, .glb. FBX is IMPORT-ONLY — writing it
+ * needs the proprietary binary container, which no permissively licensed
+ * library produces — so a .fbx path fails with CYBER_ERR_IO, and
+ * cyber_last_error names the formats that can be written. */
+CyberStatus cyber_mesh_save(const CyberMesh* mesh, const char* path);
+
+/* Aliases kept for callers written before the loaders grew past OBJ. Despite
+ * the names these have always dispatched on the extension; they behave exactly
+ * as cyber_mesh_load / cyber_mesh_save. Prefer the names above. */
+CyberStatus cyber_mesh_load_obj(const char* path, CyberMesh** out);
 CyberStatus cyber_mesh_save_obj(const CyberMesh* mesh, const char* path);
 
 /* Releases a handle. NULL is ignored. */

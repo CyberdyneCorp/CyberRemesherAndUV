@@ -87,6 +87,39 @@ is listed; this is the index, not the account.
 
 ### Added
 
+- **FBX import.** `.fbx` joins OBJ / PLY / STL / glTF in the import dispatch,
+  via the vendored [ufbx](https://github.com/ufbx/ufbx) (MIT, `thirdparty/ufbx`).
+  Reads polygons at their authored arity, per-corner UVs and normals, and vertex
+  colors; applies each mesh node's world transform so multi-node scenes arrive
+  assembled; and normalizes the file's axis and unit conventions, so a Z-up
+  centimetre export lands at the same size and orientation as the OBJ of the same
+  model. Animation, skinning, materials, cameras and lights are ignored, not
+  rejected. FBX is **import-only** — writing it needs the proprietary binary
+  container, which no permissively licensed library produces — and an export to
+  `.fbx` now fails with an error naming the writable formats instead of a bare
+  "unsupported format".
+- **`Mesh.subdivide()` in the Python binding.** Linear subdivision (Catmull-Clark
+  topology, no smoothing) was reachable from C++ and the C ABI but not from
+  Python. `mesh.subdivide()` splits every n-gon into n quads in place and returns
+  the new face count; `mesh.subdivide(project_to=other)` additionally projects
+  every vertex onto `other`'s surface, which is what recovers curvature that
+  linear subdivision alone cannot add. See `examples/16_subdivide.py`.
+- **`cyber_mesh_load` / `cyber_mesh_save`** in the C ABI, and `Mesh.load` /
+  `Mesh.save` in Python: the canonical names for behaviour that has dispatched on
+  the file extension since PLY/STL/glTF landed. `cyber_mesh_load_obj` /
+  `cyber_mesh_save_obj` and `Mesh.load_obj` / `Mesh.save_obj` remain as aliases.
+- **FBX joins the fuzzed import surface.** `.fbx` is dispatched by
+  `fuzz_mesh_io`, with seeds committed so `fuzz_corpus_replay` exercises it on
+  every build, and the ufbx allocators are bounded so a forged header cannot
+  commit memory the stream has no bytes for — it comes back as a typed error like
+  any other malformed input.
+- **Python coverage for the bindings and the example gallery.**
+  `test_io_formats.py` (round-trip across every writable format, FBX load, FBX
+  export refusal, unknown-extension error, alias behaviour), `test_subdivide.py`
+  (face-count growth, n-gon splitting, reprojection landing vertices on the
+  target, empty-mesh error), and `test_examples.py`, which executes the six
+  offline examples end-to-end — nothing ran them before. All three are registered
+  with CTest under the existing capability-gated convention.
 - **The mobile targets build, and 64-bit ARM is now executed in CI.** Three
   things blocked the platform the product actually ships on, and nothing
   reported any of them. The `android` preset had **never configured**: it set

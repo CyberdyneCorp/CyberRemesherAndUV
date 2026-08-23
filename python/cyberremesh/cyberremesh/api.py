@@ -686,23 +686,74 @@ class Mesh:
 
     # -- I/O ----------------------------------------------------------------
     @classmethod
-    def load_obj(cls, path: str) -> "Mesh":
-        """Load a mesh from a Wavefront ``.obj`` file."""
+    def load(cls, path: str) -> "Mesh":
+        """Load a mesh, dispatching on the file extension.
+
+        Readable formats: ``.obj``, ``.ply``, ``.stl``, ``.gltf``, ``.glb``,
+        ``.fbx``. Raises :class:`CyberError` naming the path for an unknown
+        extension or an unreadable file.
+        """
         out = ctypes.c_void_p()
-        status = _ffi.get_lib().cyber_mesh_load_obj(
+        status = _ffi.get_lib().cyber_mesh_load(
             str(path).encode("utf-8"), ctypes.byref(out)
         )
         if status != _ffi.STATUS_OK:
             raise CyberError(status, _last_error())
         return cls(handle=out.value)
 
-    def save_obj(self, path: str) -> None:
-        """Write this mesh to a Wavefront ``.obj`` file."""
+    def save(self, path: str) -> None:
+        """Write this mesh, dispatching on the file extension.
+
+        Writable formats: ``.obj`` (with a sibling ``.mtl``), ``.ply``,
+        ``.stl``, ``.gltf``, ``.glb``. FBX is **import-only** — writing it needs
+        the proprietary binary container, so a ``.fbx`` path raises
+        :class:`CyberError`.
+        """
         _check(
-            _ffi.get_lib().cyber_mesh_save_obj(
-                self.handle, str(path).encode("utf-8")
-            )
+            _ffi.get_lib().cyber_mesh_save(self.handle, str(path).encode("utf-8"))
         )
+
+    @classmethod
+    def load_obj(cls, path: str) -> "Mesh":
+        """Alias of :meth:`load`, kept for callers written before the loader
+        grew past OBJ. It has always dispatched on the extension."""
+        return cls.load(path)
+
+    def save_obj(self, path: str) -> None:
+        """Alias of :meth:`save`, kept for callers written before the writer
+        grew past OBJ. It has always dispatched on the extension."""
+        self.save(path)
+
+    # -- editing ------------------------------------------------------------
+    def subdivide(self, project_to: Optional["Mesh"] = None) -> int:
+        """Subdivide this mesh IN PLACE, returning the resulting face count.
+
+        Linear subdivision with Catmull-Clark *topology* and no smoothing:
+        every n-gon is split into n quads around its centroid, so a quad mesh
+        of N faces becomes 4N quads and a triangle becomes 3 quads. The new
+        vertices land on the existing facets, which adds resolution but not
+        curvature.
+
+        Pass ``project_to`` to recover curvature: every vertex of the
+        subdivided mesh is then projected onto that mesh's surface, which is
+        what "subdivide + reproject" means — subdivide the retopologised cage,
+        then pull it back onto the original scan.
+
+        The mesh is rebuilt from scratch, so every vertex, edge and face id
+        from before the call is invalid afterwards.
+        """
+        lib = _ffi.get_lib()
+        faces = ctypes.c_size_t(0)
+        snapper = ctypes.c_void_p()
+        if project_to is not None:
+            _check(lib.cyber_snapper_create(project_to.handle, ctypes.byref(snapper)))
+        try:
+            _check(lib.cyber_retopo_subdivide(self.handle, snapper, ctypes.byref(faces)))
+        finally:
+            if snapper:
+                lib.cyber_snapper_free(snapper)
+        self._stats = None
+        return faces.value
 
     @classmethod
     def load_handoff(cls, path: str) -> Tuple["Mesh", "HandoffInfo"]:

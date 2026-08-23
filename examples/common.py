@@ -32,7 +32,13 @@ sys.path.insert(0, os.path.join(_REPO, "python", "cyberremesh"))
 import cyberremesh  # noqa: E402
 from cyberremesh import Mesh, RemeshParams, remesh  # noqa: E402
 
-OUTPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output")
+# Where examples write their PNGs. Overridable so the example smoke test can
+# render into a scratch directory instead of rewriting the committed gallery
+# images (matplotlib versions differ, so re-rendering them dirties the repo).
+OUTPUT_DIR = os.environ.get(
+    "CYBER_EXAMPLES_OUTPUT",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "output"),
+)
 MODELS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")
 
 Vec3 = Tuple[float, float, float]
@@ -677,12 +683,12 @@ def torus_knot_obj(path: str, p: int = 3, q: int = 2, curve_segments: int = 200,
 
 
 def load_any(path: str) -> MeshData:
-    """Load any engine-supported mesh (OBJ / PLY / STL / glTF) for rendering by
-    routing it through the engine (load -> export OBJ -> parse)."""
-    with Mesh.load_obj(path) as mesh:
+    """Load any engine-supported mesh (OBJ / PLY / STL / glTF / FBX) for
+    rendering by routing it through the engine (load -> export OBJ -> parse)."""
+    with Mesh.load(path) as mesh:
         with tempfile.NamedTemporaryFile(suffix=".obj", delete=False) as tmp:
             out = tmp.name
-        mesh.save_obj(out)
+        mesh.save(out)
     data = load_obj(out)
     os.unlink(out)
     return data

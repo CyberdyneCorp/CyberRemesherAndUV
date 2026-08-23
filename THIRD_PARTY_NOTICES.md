@@ -771,3 +771,31 @@ under any license — and `libtbb.so.12` (oneTBB, Apache-2.0). The copies are
 verbatim and unmodified; their sources are available from the distributions
 that ship them. `packaging/linux/appimage.sh` prints the exact bundled set at
 package time.
+
+## ufbx
+
+FBX import (`src/core/src/io_fbx.cpp`), vendored at `thirdparty/ufbx` and
+statically linked into every build. ufbx is dual-licensed MIT / Unlicense; the
+MIT terms are reproduced here:
+
+```
+Copyright (c) 2020 Samuli Raivio
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+of the Software, and to permit persons to whom the Software is furnished to do
+so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```

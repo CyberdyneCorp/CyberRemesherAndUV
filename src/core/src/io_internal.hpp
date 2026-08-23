@@ -19,6 +19,10 @@ Result<ImportedMesh> importGltf(const std::filesystem::path& path, const ImportO
 Status exportGltf(const Mesh& mesh, const std::filesystem::path& path,
                   const ExportOptions& options);
 
+// Import-only: writing FBX needs the proprietary binary container, which no
+// permissively licensed library produces (mesh-io spec, "Export formats").
+Result<ImportedMesh> importFbx(const std::filesystem::path& path, const ImportOptions& options);
+
 // Shared helpers.
 std::string lowercaseExtension(const std::filesystem::path& path);
 void computeBounds(ImportedMesh& imported);

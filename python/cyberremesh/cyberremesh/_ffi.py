@@ -690,12 +690,17 @@ def _declare(lib: ctypes.CDLL) -> None:
     lib.cyber_mesh_clone.restype = c_int32
 
     # -- mesh I/O ------------------------------------------------------------
-    # CyberStatus cyber_mesh_load_obj(const char* path, CyberMesh** out)
-    lib.cyber_mesh_load_obj.argtypes = [c_char_p, POINTER(c_void_p)]
-    lib.cyber_mesh_load_obj.restype = c_int32
+    # Both dispatch on the file extension (.obj/.ply/.stl/.gltf/.glb, plus .fbx
+    # on load — FBX is import-only). The `_obj` spellings are the historical
+    # aliases the C ABI keeps for older callers.
+    # CyberStatus cyber_mesh_load(const char* path, CyberMesh** out)
+    for _loader in ("cyber_mesh_load", "cyber_mesh_load_obj"):
+        getattr(lib, _loader).argtypes = [c_char_p, POINTER(c_void_p)]
+        getattr(lib, _loader).restype = c_int32
 
-    lib.cyber_mesh_save_obj.argtypes = [c_void_p, c_char_p]
-    lib.cyber_mesh_save_obj.restype = c_int32
+    for _saver in ("cyber_mesh_save", "cyber_mesh_save_obj"):
+        getattr(lib, _saver).argtypes = [c_void_p, c_char_p]
+        getattr(lib, _saver).restype = c_int32
 
     # CyberStatus cyber_mesh_stats(const CyberMesh*, CyberStats* out)
     lib.cyber_mesh_stats.argtypes = [c_void_p, POINTER(CyberStatistics)]
@@ -729,6 +734,19 @@ def _declare(lib: ctypes.CDLL) -> None:
     # int cyber_mesh_vertex_position(const CyberMesh*, uint32_t, float out[3])
     lib.cyber_mesh_vertex_position.argtypes = [c_void_p, c_uint32, POINTER(c_float)]
     lib.cyber_mesh_vertex_position.restype = c_int32
+
+    # -- mesh editing --------------------------------------------------------
+    # Linear (Catmull-Clark topology, no smoothing) subdivision in place; the
+    # optional snapper reprojects the result onto a target surface.
+    # CyberStatus cyber_retopo_subdivide(CyberMesh*, const CyberSnapper*, size_t*)
+    lib.cyber_retopo_subdivide.argtypes = [c_void_p, c_void_p, POINTER(c_size_t)]
+    lib.cyber_retopo_subdivide.restype = c_int32
+
+    # CyberStatus cyber_snapper_create(const CyberMesh* target, CyberSnapper** out)
+    lib.cyber_snapper_create.argtypes = [c_void_p, POINTER(c_void_p)]
+    lib.cyber_snapper_create.restype = c_int32
+    lib.cyber_snapper_free.argtypes = [c_void_p]
+    lib.cyber_snapper_free.restype = None
 
     # -- parameters ----------------------------------------------------------
     lib.cyber_remesh_params_default.argtypes = [POINTER(CyberRemeshParams)]

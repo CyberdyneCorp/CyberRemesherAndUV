@@ -58,6 +58,12 @@ include(cmake/CompilerWarnings.cmake)
 include(cmake/FloatingPoint.cmake)
 cyber_apply_fp_rules()
 
+# ufbx (FBX import) is a C translation unit; the project is otherwise CXX-only.
+# After cyber_apply_fp_rules() so the contraction rule reaches it too.
+enable_language(C)
+include(cmake/Ufbx.cmake)
+cyber_add_ufbx()
+
 if(CYBER_WITH_QUADCOVER)
     # The vendored Geogram subset includes ~11 C translation units; the base
     # project only enables CXX, so enable C for the isolated solver library.
