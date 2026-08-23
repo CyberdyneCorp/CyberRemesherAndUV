@@ -718,8 +718,12 @@ TEST_CASE("seamless feature: sharp cube runs and stays bounded (feature edges be
         }
     }
 
-    const remesh::Parameterization param =
-        remesh::solveParameterization(cube, setup, 0.25f, *backend);
+    // TEMPORARY: surface the pivot-integrality and joint-lattice-closure
+    // decisions on both lanes (see reportSeamResidual above).
+    const remesh::Parameterization param = [&] {
+        const cyber::test::ScopedEnv debug("CYBER_QC_DEBUG", "1");
+        return remesh::solveParameterization(cube, setup, 0.25f, *backend);
+    }();
     REQUIRE(param.valid);
 
     // The map is BOUNDED — the per-component gauge pinning kept it from diverging (pre-fix this

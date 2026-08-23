@@ -2072,6 +2072,37 @@ int solveSeamlessReduced(accel::IBackend& backend, std::size_t nCut,
         }
     }
 
+    if (std::getenv("CYBER_QC_DEBUG") != nullptr) {
+        // How close the reduction's coefficients actually land to integers, and
+        // how many continuous frees the joint-lattice closure promoted. The
+        // closure skips any coefficient further than 1e-6 from an integer, so a
+        // reduction that is integer-exact on one toolchain and marginally off on
+        // another silently loses the promotion and leaves a half-integer seam.
+        std::size_t promoted = 0;
+        for (std::size_t c = 0; c < nUv; ++c) {
+            if (latticeDen[c] != 0) {
+                ++promoted;
+            }
+        }
+        double maxDev = 0.0;
+        std::size_t contReach = 0;
+        for (std::size_t j = nUv; j < N; ++j) {
+            if (!isPivot[j]) {
+                continue;
+            }
+            for (const auto& [c, cw] : pivotExpr[j]) {
+                if (c < nUv) {
+                    ++contReach;
+                }
+                maxDev = std::max(maxDev, std::abs(cw - std::round(cw)));
+            }
+        }
+        std::fprintf(stderr,
+                     "[qc] lattice closure: promoted=%zu contReach=%zu maxCoeffDev=%.3e nUv=%zu "
+                     "N=%zu\n",
+                     promoted, contReach, maxDev, nUv, N);
+    }
+
     // Independent variables -> reduced index; classify integer (translation) frees for rounding.
     std::vector<std::size_t> freeIx(N, kInvalidIndex);
     std::vector<std::size_t> intFree;  // reduced indices of independent integer translations
