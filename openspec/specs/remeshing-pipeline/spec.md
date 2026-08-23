@@ -14,6 +14,17 @@ The automatic remesher SHALL execute, in order: (1) derive the target edge lengt
 - **WHEN** a mesh with zero faces is submitted
 - **THEN** the pipeline SHALL return a typed "empty input" error without crashing, dividing by zero, or reporting success
 
+### Requirement: Toolchain-independent output
+The pipeline SHALL produce identical output for identical input regardless of the compiler and standard library it was built with. No stage SHALL let an unordered container's iteration order, or a libm function whose result is not correctly rounded, decide a discrete outcome.
+
+#### Scenario: Same input across toolchains
+- **WHEN** the same mesh and parameters are remeshed by builds produced by different compilers or standard libraries
+- **THEN** the resulting meshes SHALL be identical
+
+#### Scenario: Order-sensitive graph passes
+- **WHEN** a pass iterates the isoline graph and acts on the first element it reaches
+- **THEN** the traversal order SHALL derive from the input mesh, not from a hash container's layout
+
 ### Requirement: Guarded target computation
 The target-edge-length computation SHALL validate its inputs: a non-positive target quad count or zero surface area SHALL produce a typed parameter error before any stage runs. No code path SHALL evaluate a division whose denominator can be zero from user input.
 

@@ -34,6 +34,7 @@
 #include "cyber/core/remesh_params.hpp"
 #include "cyber/quadrangulate/position_field.hpp"
 #include "cyber/quadrangulate/seamless_solver.hpp"
+#include "stable_angle.hpp"
 
 #ifdef CYBER_HAVE_QUADCOVER
 #include "autoremesher_solve.hpp"
@@ -217,7 +218,7 @@ void filterFeatureEdgesToReference(Mesh& mesh, const std::vector<std::array<Vec3
         const float cosAngle =
             std::clamp(dot(normalized(mesh.faceNormal(ef[0])), normalized(mesh.faceNormal(ef[1]))),
                        -1.0f, 1.0f);
-        if (std::acos(cosAngle) >= fallbackNormalAngle) {
+        if (stable::acosRadians(cosAngle) >= fallbackNormalAngle) {
             continue;  // knife edge: the lever-off tag would keep it too
         }
         const auto [a, b] = mesh.edgeVertices(e);
@@ -379,7 +380,7 @@ bool bendPersistsAtScale(const Mesh& work, EdgeId e, const Mesh& original,
     // period ~= the cell puts opposite flanks under the probes and reads as a crease:
     // measured, it kept 2975 of nefertiti's 5214 wrinkle pins and cones went 589 -> 1021).
     constexpr std::array<float, 3> kProbeScales{0.3f, 0.6f, 1.0f};
-    const float coherentCos = std::cos(degreesToRadians(20.0f));
+    const float coherentCos = stable::cosDegrees(20.0);
     Vec3 sideMean[2];
     for (std::size_t s = 0; s < 2; ++s) {
         std::array<Vec3, kProbeScales.size()> n{};
@@ -401,7 +402,7 @@ bool bendPersistsAtScale(const Mesh& work, EdgeId e, const Mesh& original,
         }
         sideMean[s] = normalized(n[0] + n[1] + n[2]);
     }
-    return dot(sideMean[0], sideMean[1]) < std::cos(degreesToRadians(minAngleDegrees));
+    return dot(sideMean[0], sideMean[1]) < stable::cosDegrees(minAngleDegrees);
 }
 
 // Resolution-aware feature DEMOTION, tag level (kill switch CYBER_QC_NO_FEATURE_DEMOTE, see
@@ -444,7 +445,7 @@ std::vector<char> creaseAlignSupportFlags(const Mesh& mesh,
                                           const ReferenceSurface& originalRef, float sampleDistance,
                                           float persistDegrees) {
     std::vector<char> flags(mesh.edgeCapacity(), 1);
-    const float candCos = std::cos(degreesToRadians(35.0f));
+    const float candCos = stable::cosDegrees(35.0);
     for (Index ei = 0; ei < mesh.edgeCapacity(); ++ei) {
         const EdgeId e{ei};
         if (!mesh.isAlive(e) || mesh.edgeFaceCount(e) != 2) {
@@ -713,7 +714,7 @@ bool prepareNativeSolve(const Mesh& mesh, float targetEdgeLength, float adaptivi
                                     originalRef, sampleDist, persistDeg);
         if (fieldStats) {
             std::size_t candidates = 0, supported = 0;
-            const float candCos = std::cos(degreesToRadians(45.0f));
+            const float candCos = stable::cosDegrees(45.0);
             for (Index ei = 0; ei < work.edgeCapacity(); ++ei) {
                 const EdgeId e{ei};
                 if (!work.isAlive(e) || work.edgeFaceCount(e) != 2) {
@@ -819,7 +820,7 @@ bool prepareNativeSolve(const Mesh& mesh, float targetEdgeLength, float adaptivi
         // incident interior edge past the 45-degree normal-angle alignment threshold) — the
         // cones-vs-web statistic for the wrinkle-web lever.
         std::size_t cones = 0, coneFlat = 0, coneOnAlign = 0;
-        const float alignCos = std::cos(degreesToRadians(45.0f));
+        const float alignCos = stable::cosDegrees(45.0);
         for (Index vi = 0; vi < work.vertexCapacity(); ++vi) {
             const VertexId vv{vi};
             if (!work.isAlive(vv) || vi >= setup.singularityIndex.size() ||
@@ -1218,7 +1219,7 @@ SeamlessUv computeSeamlessUvVendored(const Mesh& mesh, float targetEdgeLength, f
 // ~4%), near zero on smooth organic meshes (spot/rocker/bunny < 0.2%). Const and
 // non-mutating (unlike Mesh::tagFeatureEdges, which writes edge flags).
 float creaseEdgeFraction(const Mesh& mesh, float dihedralDegrees) {
-    const float cosThresh = std::cos(dihedralDegrees * 3.14159265358979324f / 180.0f);
+    const float cosThresh = stable::cosDegrees(dihedralDegrees);
     std::size_t interior = 0;
     std::size_t creases = 0;
     for (Index e = 0; e < mesh.edgeCapacity(); ++e) {
@@ -1549,7 +1550,12 @@ void splitToIslands(const std::vector<std::vector<std::size_t>>& faces,
 // reference to keep the port auditable. Cognitive complexity of extractMesh /
 // extractConnections is high by nature (deeply nested orbit walk / isoline
 // tracer) — this is an irreducible ported algorithm.
-using Graph = std::unordered_map<std::size_t, std::unordered_set<std::size_t>>;
+// Ordered, not hashed: extractEdges / simplifyGraph / collapseShortEdges /
+// collapseTriangles / removeSingleEndpoints all ITERATE this graph and act on what
+// they see first, so hash order made the traced mesh a property of the standard
+// library. libstdc++ and libc++ traced the same paraboloid into 144 and 224 quads.
+// Index order is canonical and derives only from the input.
+using Graph = std::map<std::size_t, std::set<std::size_t>>;
 using EdgePair = std::pair<std::size_t, std::size_t>;
 
 class IsolineExtractor {
@@ -1641,7 +1647,7 @@ void IsolineExtractor::extractEdges(const std::set<EdgePair>& connections, Graph
 
 void IsolineExtractor::simplifyGraph(Graph& graph) {
     for (;;) {
-        std::unordered_map<std::size_t, std::pair<std::size_t, std::size_t>> delayPairs;
+        std::map<std::size_t, std::pair<std::size_t, std::size_t>> delayPairs;
         for (auto it = graph.begin(); it != graph.end();) {
             if (it->second.size() != 2) {
                 ++it;
@@ -1838,12 +1844,16 @@ bool IsolineExtractor::collapseShortEdges(std::vector<DVec3>& crossPoints, Graph
     std::map<EdgePair, double> edgeLengths;
     for (const auto& node : edgeConnectMap) {
         for (const std::size_t neighbor : node.second) {
-            if (edgeLengths.end() != edgeLengths.find({neighbor, node.first})) {
+            // Canonical (low, high) key: the pair is an undirected edge, and
+            // collapseEdge merges first into second, so a key that kept whichever
+            // orientation was reached first also decided which endpoint survived.
+            const EdgePair key{std::min(node.first, neighbor), std::max(node.first, neighbor)};
+            if (edgeLengths.end() != edgeLengths.find(key)) {
                 continue;
             }
             const double edgeLength = dLength(crossPoints[node.first] - crossPoints[neighbor]);
             totalLength += edgeLength;
-            edgeLengths.insert({{node.first, neighbor}, edgeLength});
+            edgeLengths.insert({key, edgeLength});
             ++edgeCount;
         }
     }
@@ -3346,7 +3356,7 @@ std::size_t cancelValenceDipoles(std::vector<Vec3>& vertices,
         const float len = length(n);
         return len > 0.0f ? n * (1.0f / len) : n;
     };
-    const float cosThreshold = std::cos(featureDegrees * 3.14159265358979323846f / 180.0f);
+    const float cosThreshold = stable::cosDegrees(featureDegrees);
     std::map<std::pair<int, int>, std::pair<int, Vec3>> edgeFaces;  // count + first normal
     const auto scanFace = [&](const std::vector<std::size_t>& f) {
         if (f.size() < 3) {
