@@ -38,6 +38,31 @@ python3 tools/bench/bench.py check
 Distances are sampling approximations (100k points/side by default) — stable
 for trend tracking, not certified bounds.
 
+## Which solver the baselines gate
+
+`baselines.json` records the solver the run used (`native` or `native+geogram`)
+and `check` refuses to compare across the two — the build option picks genuinely
+different quads, so a baseline recorded on one is not a gate on the other. A
+default build resolves only the native solver, so `check` **skips**, which is
+easy to mistake for a pass. Look for `bench check SKIPPED` in the log.
+
+To build the gated configuration:
+
+```sh
+brew install libomp tbb          # apt: libtbb-dev
+cmake --preset cpu-headless -B build/geogram \
+  -DCYBER_WITH_QUADCOVER=ON -DCYBER_REQUIRE_QUADCOVER=ON
+cmake --build build/geogram
+python3 tools/bench/bench.py check --cyber-binary build/geogram/apps/cli/cyberremesh
+```
+
+`CYBER_REQUIRE_QUADCOVER=ON` is what makes a missing dependency a configure
+error instead of a silent fall back to the native solver — without it you get a
+build that skips the gate and looks fine.
+
+Only quality metrics are gated (see `CHECKED_METRICS`); `seconds` is recorded
+but never checked, so baselines are not tied to the machine that recorded them.
+
 ## External baselines
 
 Competitor binaries are resolved from env vars (see `solvers.json`); unset
