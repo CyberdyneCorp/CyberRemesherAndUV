@@ -76,6 +76,53 @@ jobs:
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
         run: ctest --preset cpu-headless-debug --output-on-failure
 
+  # The recorded-baseline quality gate. It has NEVER run in CI: tests/CMakeLists
+  # only adds the `bench` case when python3 imports numpy and scipy, and no lane
+  # installed them, so every leg printed "bench test skipped" at configure time
+  # and the suite went green without it. Even had it been added, ci.yml builds no
+  # vendored field, and bench.py refuses to compare a `native` binary against
+  # baselines recorded on `native+geogram` — it would have skipped at runtime too.
+  #
+  # Release, not the ASan preset: the baselines describe the configuration that
+  # ships, and ASan's teardown of the vendored TBB is fragile enough to fail a
+  # run for reasons that have nothing to do with mesh quality (on macOS it SEGVs
+  # in __TBB_InitOnce's destructor at exit, after a correct mesh is written).
+  #
+  # REQUIRE_QUADCOVER so a runner image that drops TBB fails the job instead of
+  # quietly building the portable solver and skipping the gate again — the exact
+  # failure mode this job exists to end.
+  bench:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: lukka/get-cmake@latest
+      - name: Install the vendored field solver's dependencies
+        run: sudo apt-get update && sudo apt-get install -y libtbb-dev
+      - name: Install the harness's dependencies
+        run: python3 -m pip install --upgrade numpy scipy
+      - name: Configure (cpu-headless, vendored field REQUIRED)
+        run: |
+          cmake --preset cpu-headless \
+            -DCYBER_WITH_QUADCOVER=ON -DCYBER_REQUIRE_QUADCOVER=ON
+      - name: Build
+        run: cmake --build --preset cpu-headless
+      # Fail loudly if the gate would skip: a skip here means the solver the
+      # binary carries does not match the baselines, and reading that as a pass
+      # is how the gate stayed dark.
+      - name: Which solver this binary carries
+        run: ./build/cpu-headless/apps/cli/cyberremesh --version
+      - name: Benchmark regression check
+        run: |
+          python3 tools/bench/bench.py check \
+            --cyber-binary build/cpu-headless/apps/cli/cyberremesh \
+            --cache-dir build/cpu-headless/bench-cache | tee bench.log
+          if grep -q "bench check SKIPPED" bench.log; then
+            echo "::error::bench check SKIPPED — the gate did not run"
+            exit 1
+          fi
+
   # TSan over the bridge server and the threaded solver paths. The BridgeServer
   # stop/accept race closed in the third hardening round is only observable here;
   # no other lane could re-detect it.
