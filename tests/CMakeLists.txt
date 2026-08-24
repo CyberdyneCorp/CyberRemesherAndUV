@@ -242,29 +242,26 @@ if(CYBER_BUILD_CLI AND Python3_FOUND)
         set_tests_properties(cli PROPERTIES ENVIRONMENT "${CYBER_TEST_LAUNCHER_ENV}")
     endif()
 
-    # Benchmark regression check (tools/bench) — recorded-baseline gate over
-    # the deterministic generated corpus. Needs numpy/scipy; skipped (not
-    # failed) where they are absent so bare CI runners stay green. It skips
-    # itself the same way (CTest's SKIP code 77) when the binary carries a
-    # different seamless-UV solver than the baselines were recorded on: those
-    # numbers describe one solver, and comparing the other against them is not
-    # a regression report.
-    execute_process(
-        COMMAND ${Python3_EXECUTABLE} -c "import numpy, scipy"
-        RESULT_VARIABLE CYBER_BENCH_DEPS_MISSING
-        OUTPUT_QUIET ERROR_QUIET)
+    # Benchmark regression check (tools/bench) — recorded-baseline gate over the
+    # deterministic generated corpus. It reports CTest's SKIP code (77) rather
+    # than failing in the two cases where it cannot say anything: numpy/scipy
+    # absent, and a binary carrying a different seamless-UV solver than the
+    # baselines were recorded on (those numbers describe one solver; comparing
+    # the other against them is not a regression report).
+    #
+    # Registered either way. It used to be dropped at configure time when the
+    # dependencies were missing, so the case did not appear in the ctest list at
+    # all — which is how nobody noticed this gate had never once run in CI.
     if(CMAKE_CROSSCOMPILING)
         # The baselines record wall-clock and quality for a NATIVE binary; the
         # same binary under an instruction emulator reports neither honestly.
         message(STATUS "bench test skipped: cross-build (timings under an emulator are not baselines)")
-    elseif(CYBER_BENCH_DEPS_MISSING EQUAL 0)
+    else()
         add_test(NAME bench
             COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tools/bench/bench.py
                     check --cyber-binary $<TARGET_FILE:cyberremesh>
                     --cache-dir ${PROJECT_BINARY_DIR}/bench-cache)
         set_tests_properties(bench PROPERTIES TIMEOUT 900 SKIP_RETURN_CODE 77)
-    else()
-        message(STATUS "bench test skipped: python3 lacks numpy/scipy")
     endif()
 endif()
 

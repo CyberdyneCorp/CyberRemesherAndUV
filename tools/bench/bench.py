@@ -25,7 +25,16 @@ import time
 from pathlib import Path
 
 import corpus
-import mesh_metrics
+
+try:
+    import mesh_metrics
+except ImportError as exc:  # numpy / scipy absent
+    # CTest's SKIP code, so a runner without the harness's dependencies reports
+    # the gate as SKIPPED rather than as a failure — and, more importantly, is
+    # still LISTED. The case used to be dropped at configure time instead, which
+    # is why nobody noticed it had never run.
+    print(f"bench SKIPPED: the harness needs numpy and scipy ({exc})")
+    sys.exit(77)
 
 BENCH_DIR = Path(__file__).resolve().parent
 REPO = BENCH_DIR.parent.parent

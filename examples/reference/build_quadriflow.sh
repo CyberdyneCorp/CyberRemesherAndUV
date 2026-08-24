@@ -14,10 +14,22 @@ BIN="$SRC/build/quadriflow"
 if [ -x "$BIN" ]; then echo "$BIN"; exit 0; fi
 
 EIGEN=""
-for cand in /usr/include/eigen3 /usr/local/include/eigen3 "$HOME"/vcpkg/packages/eigen3_*/include/eigen3; do
-  if [ -d "$cand/Eigen" ]; then EIGEN="$cand"; break; fi
+# Homebrew's prefix is /opt/homebrew on Apple Silicon and /usr/local on Intel,
+# and neither carries eigen3 at the apt locations, so ask brew where it put it
+# before falling back to the fixed list. Without this the reference cannot be
+# built on a Mac at all, and the comparison columns silently vanish.
+BREW_EIGEN=""
+if command -v brew >/dev/null 2>&1; then
+  BREW_EIGEN="$(brew --prefix eigen 2>/dev/null)/include/eigen3"
+fi
+for cand in "$BREW_EIGEN" /usr/include/eigen3 /usr/local/include/eigen3 \
+            "$HOME"/vcpkg/packages/eigen3_*/include/eigen3; do
+  if [ -n "$cand" ] && [ -d "$cand/Eigen" ]; then EIGEN="$cand"; break; fi
 done
-if [ -z "$EIGEN" ]; then echo "eigen3 not found (apt install libeigen3-dev)" >&2; exit 1; fi
+if [ -z "$EIGEN" ]; then
+  echo "eigen3 not found (apt install libeigen3-dev / brew install eigen)" >&2
+  exit 1
+fi
 
 if [ ! -d "$SRC/src" ]; then
   git clone --recursive --depth 1 https://github.com/hjwdzh/QuadriFlow "$SRC" >&2
