@@ -13,13 +13,34 @@ their requirements folded into `openspec/specs/`, which is the current contract.
 ### Auto-retopology
 
 Triangle→quad remeshing via `RemeshParams.quad_method`, clean-room and permissively
-licensed. The default **`quad-cover`** — a QuadCover seamless-UV isoline extractor —
-**beats [QuadriFlow](https://github.com/hjwdzh/QuadriFlow) on both median quad angle
-and irregular-vertex count** on 3 of the 5 corpus models (spot, rocker-arm,
-stanford-bunny), losing fandisk and cheburashka, and routes crease-heavy CAD parts
-to a feature-aware solver. It is at least as topologically valid as QuadriFlow on
-all 5, and stays manifold on flat CAD input where QuadriFlow tears. Other
-strategies: **`field-aligned`** (max-matching over a smoothed cross field, ~95%+
+licensed. The default **`quad-cover`** is a QuadCover seamless-UV isoline extractor,
+and it routes crease-heavy CAD parts to a feature-aware solver.
+
+Against [QuadriFlow](https://github.com/hjwdzh/QuadriFlow) at matched counts, measured
+2026-08-24 (`examples/11_benchmark.py`, numbers below), **the honest summary is that
+we win on validity and lose on angle quality**:
+
+| model | median angle° | irregular % | topo defects |
+|---|---|---|---|
+| spot | **82** vs 81 | **2** vs 3 | 0 vs 0 |
+| rocker-arm | 83 vs **84** | 1 vs 1 | 0 vs 0 |
+| fandisk | 80 vs **85** | 2 vs **1** | 0 vs 0 |
+| cheburashka | 78 vs **83** | 4 vs **3** | 0 vs 0 |
+| stanford-bunny | 76 vs **82** | 5 vs **4** | **0** vs 80 |
+| cube (synthetic, flat CAD) | **90** vs 12 | **1** vs 20 | **0** vs 722 |
+
+We beat QuadriFlow on *both* median angle and irregular count on **1 of the 5
+community models** (spot), plus the synthetic flat-CAD cube — where the gap is not
+close: QuadriFlow returns a 12° median and 722 topological defects on a shape it
+tears, and we return 90° and none.
+
+**Topological validity is the claim that holds across the board**: zero defects on
+every model, 6 of 6, where QuadriFlow has 80 on the bunny and 722 on the cube. If
+you need output you can hand to a subdivision surface without repair, that is the
+number that matters. If you need the tightest median angle on organic scans,
+QuadriFlow is still ahead on four of these five.
+
+Other strategies: **`field-aligned`** (max-matching over a smoothed cross field, ~95%+
 quad-dominance, strongest on box/CAD geometry), **`instant-meshes`** (Instant-Meshes-style
 position-field extractor), and **`integer`** (experimental integer parametrization).
 
@@ -29,9 +50,11 @@ position-field extractor), and **`integer`** (experimental integer parametrizati
 
 Every strategy feeds a pure-quad path (subdivision + surface-projected relaxation)
 for a 100%-quad result. `examples/10_vs_reference.py` and `examples/11_benchmark.py`
-score the output side-by-side against QuadriFlow and AutoRemesher — e.g. the
-stanford-bunny at ~3000 quads: median **83° / 3% irregular** vs QuadriFlow's
-82° / 4% and AutoRemesher's 74° / 13%. AutoRemesher (MIT) and the Geogram subset
+score the output side-by-side against QuadriFlow and AutoRemesher. Both fetch and
+build their reference on first run, so the table above is reproducible with
+`python3 examples/11_benchmark.py` — the AutoRemesher arm did not rebuild on the
+machine those numbers came from, so its column is absent rather than stale.
+AutoRemesher (MIT) and the Geogram subset
 (BSD-3-Clause) it carries are fetched on demand and compiled into the shipped
 binaries as the optional QuadCover field solver; the Instant Meshes extraction
 stage is a clean-room reimplementation with no code copied. Every licence and

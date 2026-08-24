@@ -22,6 +22,49 @@ They are a record of what was measured when, not a description of the current
 code: where a number here disagrees with `tests/bench/baselines.json` or the
 README, the baselines are authoritative.
 
+## Update — 2026-08-24: the median-angle win against QuadriFlow no longer reproduces
+
+Measured with `examples/11_benchmark.py` on the shipped default (`quad-cover`,
+Geogram field) at matched counts, against a QuadriFlow built from source on the
+same machine. This is the first run since the reference became buildable on macOS
+— `build_quadriflow.sh` searched only apt and vcpkg paths for eigen, so on a Mac
+it reported "eigen3 not found" with eigen installed and the comparison silently
+dropped its reference columns.
+
+Median quad angle, ours vs QuadriFlow, against the figures Phase 4 recorded:
+
+| model | ours then | ours now | delta | QF then | QF now |
+|---|---|---|---|---|---|
+| spot | 84 | 82 | -2 | 82 | 81 |
+| rocker-arm | 85 | 83 | -2 | 82 | 84 |
+| stanford-bunny | 83 | 76 | **-7** | 82 | 82 |
+| fandisk | 83 | 80 | -3 | 85 | 85 |
+| cheburashka | 80 | 78 | -2 | 82 | 83 |
+
+**QuadriFlow's column is stable within a degree or two; ours dropped on all five.**
+That is systematic, not sampling noise, and it turns "beats QuadriFlow on both
+median angle and irregular count on 3/5" into 1/5 (spot alone). The bunny also
+lost surface accuracy: dev 0.29% -> 0.75%, edge CV 0.16 -> 0.43.
+
+**Not attributed.** The obvious suspects are the three solver changes of 2026-08-23,
+but the A/B recorded there showed the Geogram path — which is what this run uses —
+barely moving, with singularities identical on all four generated meshes. So the
+cause is more likely older than that week, and bisecting our own median on one
+model is the way to find it. Nobody would have noticed either way: the community
+corpus these numbers come from is `examples/11_benchmark.py`'s, which nothing in
+CI runs, and it is a different corpus from `tests/bench/baselines.json`'s.
+
+**What did NOT regress**, and is worth more than the median gap: topological
+defects are **0 on all six models**, against QuadriFlow's 80 on the bunny and 722
+on the flat-CAD cube. On that cube QuadriFlow returns a 12-degree median and tears;
+we return 90 degrees and nothing to repair. The validity claim is the one that
+survived contact with a rebuilt reference.
+
+The nefertiti campaign gate also still holds, narrowly: `nefertiti@4000` cyber-pure
+measures **195** singularities against the exit gate of <= 200, where the 2026-08-03
+entry recorded 176. (The bench harness runs nefertiti at 8000, where it measures
+318 — not comparable to a gate defined at 4000.)
+
 ## Update — 2026-08-23: the solver was not reproducible across toolchains — three stacked causes, all fixed
 
 Not a retopology-quality entry. It is here because it invalidates how every
@@ -2103,13 +2146,13 @@ measured hypotheses — A/B them like anything else.
 
 ## Phase 4 — Close the median-angle gap — ✅ largely closed by the quad-cover default
 
-> ⚠️ **Premise superseded.** The framing below — "the hard core", 36% irregular,
-> only a global rewrite can close it — describes the retired extractor. The
-> shipped default runs at **1–4% irregular** and **beats QuadriFlow on median on
-> 3/5** (spot 84/82, rocker 85/82, bunny 83/82; losing fandisk 83/85 and
-> cheburashka 80/82). The remaining median gap is the crease-alignment problem
-> tracked in Phase 3, not a singularity problem. The 4a/4b history is retained
-> because it records what was measured and why the local levers failed.
+> ⚠️ **Premise superseded, and the numbers below it have since regressed.** The
+> framing in this section — "the hard core", 36% irregular, only a global rewrite
+> can close it — describes the retired extractor, and the shipped default does run
+> at 1–5% irregular. But the median-angle win recorded here (3/5: spot 84/82,
+> rocker 85/82, bunny 83/82) **no longer reproduces**; see the 2026-08-24 entry at
+> the top of this file. The 4a/4b history is retained because it records what was
+> measured and why the local levers failed.
 
 Reduce spurious singularities (36% irregular → target < 10%) for angle parity.
 - ❌ **4a. Local valence optimization** (edge rotation to cancel val-3/5 pairs) —
