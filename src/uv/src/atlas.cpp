@@ -570,8 +570,14 @@ AtlasResult unwrapAtlas(Mesh& mesh, const AtlasOptions& options, ProgressSink* p
     // bulk of the progress range.
     ProgressSink seamStage =
         progress != nullptr ? progress->subrange(0.0f, 0.6f, "uv atlas") : ProgressSink{};
+    // A caller-supplied seam set replaces the whole seaming stage: growth and
+    // both merge passes exist to DECIDE where to cut, and that decision has
+    // already been made. Copied rather than referenced so the rest of this
+    // function reads identically either way.
     const SeamSet seams =
-        autoSeams(mesh, options, progress != nullptr ? &seamStage : nullptr, cancel);
+        options.seams != nullptr
+            ? *options.seams
+            : autoSeams(mesh, options, progress != nullptr ? &seamStage : nullptr, cancel);
     // Cancellation is observed here, before a single UV is written, so a
     // cancelled run leaves the mesh exactly as it found it.
     if (cancel != nullptr && cancel->isCancelled()) {

@@ -44,6 +44,16 @@ struct AtlasOptions {
     // LSCM fixes orientation from its pinned corners, so charts otherwise land
     // at arbitrary angles and waste space in the axis-aligned shelf packer.
     bool reorientCharts = true;
+    // Cut along these seams instead of computing them. When set, autoSeams and
+    // both merge passes are skipped -- the seams ARE the charts -- so
+    // maxChartAngleDeg, mergeCharts and maxChartDistortion have no effect. This
+    // is what lets a caller who marked seams by hand, or committed a routed
+    // SeamPath, parameterize along them and still get the atlas's unwrap,
+    // re-orientation, packing and metrics. Null (the default) keeps the fully
+    // automatic behaviour, byte for byte.
+    //
+    // Borrowed, not owned: it must outlive the unwrapAtlas call.
+    const SeamSet* seams = nullptr;
     UnwrapOptions unwrap{};
     PackParams pack{};
 };

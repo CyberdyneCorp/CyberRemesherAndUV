@@ -17,6 +17,7 @@ imports cleanly on a machine where the engine has not been built.
 from .api import (
     HANDOFF_VERSION,
     AtlasParams,
+    UnwrapSeamsParams,
     AtlasResult,
     BakeMap,
     BakeParams,
@@ -68,6 +69,7 @@ __all__ = [
     "Image",
     "bake",
     "AtlasParams",
+    "UnwrapSeamsParams",
     "AtlasResult",
     "Falloff",
     "Snapper",

@@ -87,6 +87,24 @@ is listed; this is the index, not the account.
 
 ### Added
 
+- **Seam-driven UV unwrap in the bindings.** The manual UV workflow used to
+  dead-end: the C ABI shipped 24 seam entry points — `cyber_seam_set_*` and the
+  eighteen `cyber_seam_path_*` routing functions — and nothing that consumed
+  them. `unwrapIslandToUv`, `packIslands` and `stitchAlongSeams` were C++-only,
+  and the one reachable unwrap, `cyber_uv_atlas`, computes its own cuts and
+  ignores whatever the caller marked. `cyber_uv_unwrap_seams` (Python
+  `Mesh.unwrap_seams`) takes the seam set you built, cuts the mesh into islands
+  at exactly those edges, unwraps, re-orients and packs them, and reports through
+  the existing `CyberAtlasResult`; a cancellable twin observes cancellation
+  before any UV is written. An empty seam set means *do not cut*, never *seam it
+  automatically*, and a null one is a typed argument error rather than a silent
+  fall back. `cyber_uv_stitch_seams` (`Mesh.stitch_seams`) is the inverse — the
+  "sew" half of the model the seam set documents.
+- **`Mesh.edge_count()` and `Mesh.edge_between()` in Python.** Marking a seam
+  takes an edge id, and there was no way to enumerate or look one up from the
+  binding — `cyber_mesh_edge_count` existed in the C ABI but was never declared
+  on the Python side.
+
 - **FBX import.** `.fbx` joins OBJ / PLY / STL / glTF in the import dispatch,
   via the vendored [ufbx](https://github.com/ufbx/ufbx) (MIT, `thirdparty/ufbx`).
   Reads polygons at their authored arity, per-corner UVs and normals, and vertex

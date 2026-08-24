@@ -217,6 +217,28 @@ class AtlasParams:
 
 
 @dataclass
+class UnwrapSeamsParams:
+    """Parameters for :meth:`Mesh.unwrap_seams`.
+
+    Only the knobs that still mean something once the caller supplies the
+    seams. :class:`AtlasParams`' chart-angle and chart-merge fields are absent
+    on purpose: those decide WHERE to cut, and here the seam set already has.
+    """
+
+    pack_margin: float = 0.0  # gap around each island, in UV units
+    texture_size: int = 1024  # resolution for the texel-density readout
+    # Rotate each chart to its minimum-area bounding box before packing.
+    reorient_charts: bool = True
+
+    def _to_c(self) -> "_ffi.CyberUnwrapSeamsParams":
+        return _ffi.CyberUnwrapSeamsParams(
+            pack_margin=float(self.pack_margin),
+            texture_size=int(self.texture_size),
+            reorient_charts=1 if self.reorient_charts else 0,
+        )
+
+
+@dataclass
 class AtlasResult:
     """Aggregate atlas quality/packing report (mirror of ``CyberAtlasResult``)."""
 
@@ -876,6 +898,58 @@ class Mesh:
         )
         return AtlasResult._from_c(c_result)
 
+    def unwrap_seams(
+        self, seams: "SeamSet", params: Optional["UnwrapSeamsParams"] = None
+    ) -> "AtlasResult":
+        """Unwrap this mesh along `seams`, IN PLACE — the counterpart to
+        :meth:`unwrap_atlas`.
+
+        :meth:`unwrap_atlas` decides its own cuts and ignores whatever you
+        marked. This one takes the seam set YOU built — by
+        :meth:`SeamSet.mark`, or by committing a routed :class:`SeamPath` into
+        it — cuts the mesh into islands at exactly those edges, LSCM-unwraps
+        each (planar projection as fallback), optionally re-orients them and
+        packs them into the unit square. Everything downstream of the cut is
+        the same code the automatic atlas runs, so the :class:`AtlasResult`
+        means the same thing: ``chart_count`` is the number of islands the
+        seams cut the mesh into, ``seam_edges`` the size of the set you passed.
+
+        An EMPTY seam set means "do not cut" — a closed mesh comes back as one
+        chart — never "seam it automatically".
+
+        >>> seams, path = SeamSet(), SeamPath(mesh)
+        >>> path.add_waypoint(a); path.add_waypoint(b)
+        >>> path.commit(seams)
+        >>> mesh.unwrap_seams(seams).chart_count
+        2
+        """
+        if params is None:
+            params = UnwrapSeamsParams()
+        c_params = params._to_c()
+        c_result = _ffi.CyberAtlasResult()
+        _check(
+            _ffi.get_lib().cyber_uv_unwrap_seams(
+                self.handle, seams.handle, ctypes.byref(c_params), ctypes.byref(c_result)
+            )
+        )
+        return AtlasResult._from_c(c_result)
+
+    def stitch_seams(self, seams: "SeamSet", edges: "Sequence[int]") -> None:
+        """Sew `edges` shut: the inverse of the cut :meth:`unwrap_seams` applies.
+
+        Each edge is removed from `seams` (so it stops cutting islands) and,
+        across it, the two corners at each shared endpoint are welded to the
+        average of their UVs so the boundary fits together. Both this mesh and
+        `seams` are modified. An edge that is not currently a seam is ignored.
+        """
+        ids = list(edges)
+        buf = (ctypes.c_uint32 * len(ids))(*[int(e) for e in ids]) if ids else None
+        _check(
+            _ffi.get_lib().cyber_uv_stitch_seams(
+                self.handle, seams.handle, buf, len(ids)
+            )
+        )
+
     def edge_signed_dihedral(self, edge: int) -> float:
         """Dihedral angle of an edge in degrees: >0 in a valley, <0 on a ridge.
 
@@ -1090,6 +1164,22 @@ class Mesh:
     def stats(self) -> Optional[Statistics]:
         """Statistics from the run that produced this mesh, if any."""
         return self._stats
+
+    def edge_count(self) -> int:
+        """Number of edges. Edge ids are dense in ``range(edge_count())``.
+
+        Seam work needs this: :meth:`SeamSet.mark` takes an edge id, and
+        without a count there is no way to enumerate the edges to choose from.
+        """
+        return int(_ffi.get_lib().cyber_mesh_edge_count(self.handle))
+
+    def edge_between(self, a: int, b: int) -> Optional[int]:
+        """The edge joining vertices `a` and `b`, or None if they share none."""
+        for e in range(self.edge_count()):
+            ends = self.edge_endpoints(e)
+            if ends is not None and set(ends) == {int(a), int(b)}:
+                return e
+        return None
 
     def edge_endpoints(self, edge: int) -> Optional[Tuple[int, int]]:
         """The two vertex ids of a live edge, or ``None`` when it is not alive.
