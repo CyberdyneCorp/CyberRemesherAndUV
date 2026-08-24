@@ -46,13 +46,51 @@ That is systematic, not sampling noise, and it turns "beats QuadriFlow on both
 median angle and irregular count on 3/5" into 1/5 (spot alone). The bunny also
 lost surface accuracy: dev 0.29% -> 0.75%, edge CV 0.16 -> 0.43.
 
-**Not attributed.** The obvious suspects are the three solver changes of 2026-08-23,
-but the A/B recorded there showed the Geogram path — which is what this run uses —
-barely moving, with singularities identical on all four generated meshes. So the
-cause is more likely older than that week, and bisecting our own median on one
-model is the way to find it. Nobody would have noticed either way: the community
-corpus these numbers come from is `examples/11_benchmark.py`'s, which nothing in
-CI runs, and it is a different corpus from `tests/bench/baselines.json`'s.
+**ATTRIBUTED — and it is not a regression.** Bisected 2026-08-24 by building the
+bunny at 681e1ec (before that week's solver work) and at HEAD, each with the
+vendored field ON and OFF, measured through the CLI so no Python-binding ABI drift
+could confound it:
+
+| build | quads | median | irregular |
+|---|---|---|---|
+| 681e1ec, native | 2802 | 80 | 4% |
+| 681e1ec, **vendored field** | 3424 | **78** | **11%** |
+| HEAD, native | 3808 | **82** | **2%** |
+| HEAD, **vendored field** | 3340 | **78** | **11%** |
+
+The vendored-field path produces 78 / 11% at BOTH commits — identical, so nothing
+regressed. The native path IMPROVED over the same span, 80 -> 82 and 4% -> 2%.
+
+What changed is which solver the measurement ran. Before the libomp discovery fix
+of 2026-08-23, `cmake --preset cpu-headless` on a Mac could not find Homebrew's
+keg-only libomp, so `CYBER_WITH_QUADCOVER=ON` silently fell back to the native
+solver. The recorded 83 degrees is the NATIVE number, and it still holds today at
+82. The benchmark now resolves the vendored field, and reports its number instead.
+
+### The real finding: the default routes to the WORSE solver on most of this corpus
+
+Measured at matched counts on HEAD, native vs vendored field:
+
+| model | native | vendored field | better |
+|---|---|---|---|
+| spot | **83** / 2% | 78 / 3% | native |
+| cheburashka | **81** / 4% | 65 / 9% | native, by 16 degrees |
+| stanford-bunny | **82** / 2% | 78 / 11% | native |
+| fandisk | **84** / 2% | 83 / 3% | native |
+| rocker-arm | 77 / 4% | **82** / 2% | vendored field |
+
+`computeSeamlessUv` routes organic meshes to the vendored field and crease-heavy
+CAD to the native solver. On this corpus that is backwards for four models out of
+five, and the one clear win for the vendored field (rocker-arm) is the CAD-ish part
+the routing would have sent the other way.
+
+This was invisible for the obvious reason: a machine without OpenMP/TBB ran native
+and saw the good numbers, a machine with them ran the vendored field and saw the
+bad ones, nothing in CI ran this corpus at all, and until 2026-08-24 the QuadriFlow
+reference could not even be built on macOS to compare against.
+
+Changing the routing default is a solver decision, not a documentation one, so it
+is NOT made here.
 
 **What did NOT regress**, and is worth more than the median gap: topological
 defects are **0 on all six models**, against QuadriFlow's 80 on the bunny and 722

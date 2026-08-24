@@ -17,8 +17,8 @@ licensed. The default **`quad-cover`** is a QuadCover seamless-UV isoline extrac
 and it routes crease-heavy CAD parts to a feature-aware solver.
 
 Against [QuadriFlow](https://github.com/hjwdzh/QuadriFlow) at matched counts, measured
-2026-08-24 (`examples/11_benchmark.py`, numbers below), **the honest summary is that
-we win on validity and lose on angle quality**:
+2026-08-24 (`examples/11_benchmark.py`), **we win on validity and, with the default
+solver selection, lose on angle quality**:
 
 | model | median angle° | irregular % | topo defects |
 |---|---|---|---|
@@ -33,6 +33,15 @@ We beat QuadriFlow on *both* median angle and irregular count on **1 of the 5
 community models** (spot), plus the synthetic flat-CAD cube — where the gap is not
 close: QuadriFlow returns a 12° median and 722 topological defects on a shape it
 tears, and we return 90° and none.
+
+**Those are the numbers for the vendored Geogram field, which is the default where
+its dependencies are present — and on this corpus it is the worse of our two
+solvers.** The dependency-free native seamless solver scores 83/2% on spot, 82/2%
+on the bunny, 84/2% on fandisk and 81/4% on cheburashka, beating the vendored field
+on four of the five and losing only rocker-arm. Build with
+`-DCYBER_WITH_QUADCOVER=OFF` to select it. Fixing the routing so the better solver
+is chosen per input is open work, tracked in
+[`docs/ROADMAP.md`](docs/ROADMAP.md) under the 2026-08-24 entry.
 
 **Topological validity is the claim that holds across the board**: zero defects on
 every model, 6 of 6, where QuadriFlow has 80 on the bunny and 722 on the cube. If
@@ -575,12 +584,18 @@ at the failure, not as a supported configuration.
 
 The `cpu-headless` preset requests `-DCYBER_WITH_QUADCOVER=ON`, which vendors and
 compiles an in-process Geogram QuadCover solver (~102 sources, a one-time build
-cost). That is the field that lets the default `quad-cover` quadrangulator **beat
-QuadriFlow on median quad angle and irregular-vertex count** on organic meshes. It
-needs **OpenMP + TBB** (`brew install libomp tbb`, apt `libtbb-dev`); where they
-are absent — a minimal CI runner, say — the build **auto-falls-back to the
-dependency-free native seamless-UV solver** (a few degrees lower median, still
-fully functional and portable) — so `-DCYBER_WITH_QUADCOVER=ON` never hard-fails.
+cost), which the routing then prefers for organic meshes. It needs **OpenMP + TBB**
+(`brew install libomp tbb`, apt `libtbb-dev`); where they are absent — a minimal CI
+runner, say — the build **auto-falls-back to the dependency-free native seamless-UV
+solver**, so `-DCYBER_WITH_QUADCOVER=ON` never hard-fails.
+
+That fallback used to be described here as "a few degrees lower median". Measured
+2026-08-24 it is the other way round on the community corpus: the native solver
+beats the vendored field on four of five models (spot 83 vs 78, bunny 82 vs 78,
+fandisk 84 vs 83, cheburashka 81 vs 65) and loses only rocker-arm (77 vs 82). So
+`OFF` is not merely a portable degradation, and which solver a build carries
+matters more than the flag name suggests. Fixing the routing is open work — see the
+2026-08-24 entry in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 Homebrew's `libomp` is keg-only and off AppleClang's default search path, so the
 configure retries with the brew prefix rather than reporting it missing. Override with
 `-DCYBER_WITH_QUADCOVER=OFF` to skip it outright; mobile presets (`ios`/`android`)
