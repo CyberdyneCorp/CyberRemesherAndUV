@@ -81,11 +81,9 @@ The pending path stays editable: any waypoint can be dragged
 re-routes **only the segments adjacent to it** — the rest of the path keeps its
 route, and each segment's `segment_revision` counter tells a viewport exactly
 what to redraw. `commit` marks the route into a `SeamSet` — the one seam model,
-the same `mark`/`erase`/`sew` set a hand-drawn seam edits, so in C++ island
+the same `mark`/`erase`/`sew` set a hand-drawn seam edits, so island
 computation, unwrap and stitch treat a routed seam exactly like a hand-marked
-one (note that those three consume a seam set only in C++ today: the bindings
-expose the set and the path, not island/unwrap/stitch over it) — and arms a
-resume marker so the next waypoint continues from the
+one — and arms a resume marker so the next waypoint continues from the
 last committed point. Committing returns the edge ids it newly marked: that
 list is the undo record (`revert_commit`), and edges that were already seams
 are never in it, so they survive the undo. Dropping the resume marker only
@@ -96,7 +94,19 @@ seams, path = SeamSet(), SeamPath(mesh)
 path.add_waypoint(a); path.add_waypoint(b)
 path.move_waypoint_to(1, (x, y, z), radius=0.5)   # re-routes one segment
 undo = path.commit(seams)                          # -> newly seamed edge ids
+
+mesh.unwrap_seams(seams)                           # parameterize along YOUR cuts
+mesh.stitch_seams(seams, undo)                     # ...or sew them back shut
 ```
+
+`Mesh.unwrap_seams` (C: `cyber_uv_unwrap_seams`) is the counterpart to the
+automatic atlas: `unwrap_atlas` decides its own cuts and ignores what you
+marked, while this one takes the seam set you built — by hand or by committing a
+routed path — cuts the mesh into islands at exactly those edges, unwraps each,
+re-orients and packs them, and reports through the same `AtlasResult`. An empty
+seam set means *do not cut*, never *decide for me*. `Mesh.stitch_seams`
+(`cyber_uv_stitch_seams`) is the inverse: it removes the given edges from the
+set and welds the corners across each one.
 
 ### Per-DCC export presets
 

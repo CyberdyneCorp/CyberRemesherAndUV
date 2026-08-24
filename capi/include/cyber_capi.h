@@ -1620,6 +1620,60 @@ uint32_t cyber_seam_path_resume_marker(const CyberSeamPath* path);
  * touches a seam set — committed seams are unaffected. */
 void cyber_seam_path_drop_resume_marker(CyberSeamPath* path);
 
+/* --- Unwrap along seams the caller marked ------------------------------- */
+
+/* The knobs that still mean something once the caller supplies the seams. The
+ * atlas's chart-angle and chart-merge fields are absent on purpose: those exist
+ * to DECIDE where to cut, and here that decision is the seam set. */
+typedef struct CyberUnwrapSeamsParams {
+    float packMargin;  /* gap around each island, in UV units */
+    int textureSize;   /* resolution for the texel-density readout */
+    int reorientCharts; /* non-zero: rotate each chart to its minimum-area
+                         * bounding box before packing */
+} CyberUnwrapSeamsParams;
+
+/* Fills params with the engine defaults. No-op on NULL. */
+void cyber_default_unwrap_seams_params(CyberUnwrapSeamsParams* params);
+
+/* Unwraps `mesh` along `seams` — the seam set the caller built, by marking
+ * edges directly or by committing routed seam paths into it — and writes the
+ * per-corner UV attribute IN PLACE. The seams define the charts: the mesh is cut
+ * into islands at exactly those edges, each island is LSCM-unwrapped (planar
+ * projection as fallback), optionally re-oriented, and the islands are packed
+ * into the unit square.
+ *
+ * This is the counterpart to cyber_uv_atlas: same pipeline and the same
+ * CyberAtlasResult, but the cuts come from the caller instead of autoSeams.
+ * `chartCount` is the number of islands the seams cut the mesh into, and
+ * `seamEdges` is the size of the set that was handed in.
+ *
+ * An EMPTY seam set means "do not cut" — a closed mesh comes back as one chart —
+ * never "seam it automatically". A NULL `seams` is CYBER_ERR_INVALID_ARG.
+ * `params` may be NULL (defaults); `out` may be NULL. Returns CYBER_ERR_RUNTIME
+ * when the engine was built without the UV module. */
+CyberStatus cyber_uv_unwrap_seams(CyberMesh* mesh, const CyberSeamSet* seams,
+                                  const CyberUnwrapSeamsParams* params, CyberAtlasResult* out);
+
+/* As cyber_uv_unwrap_seams, with cooperative progress and cancellation on the
+ * same terms as cyber_uv_atlas_cancellable: on cancel the status is
+ * CYBER_ERR_CANCELLED and `mesh` IS LEFT EXACTLY AS IT WAS. Either callback may
+ * be NULL; `user` is passed through to both. */
+CyberStatus cyber_uv_unwrap_seams_cancellable(CyberMesh* mesh, const CyberSeamSet* seams,
+                                              const CyberUnwrapSeamsParams* params,
+                                              CyberProgressCb progress, CyberCancelCb cancel,
+                                              void* user, CyberAtlasResult* out);
+
+/* Sews `edges` shut: each one is removed from `seams` (so it stops cutting
+ * islands) and, across it, the two corners at each shared endpoint are welded to
+ * the average of their UVs so the boundary fits together. This is the "sew" half
+ * of the seam model — the inverse of the cut cyber_uv_unwrap_seams applies.
+ *
+ * Both `mesh` and `seams` are modified. An edge that is not currently a seam is
+ * ignored rather than an error. NULL `mesh`, NULL `seams`, or NULL `edges` with
+ * a non-zero count is CYBER_ERR_INVALID_ARG. */
+CyberStatus cyber_uv_stitch_seams(CyberMesh* mesh, CyberSeamSet* seams, const uint32_t* edges,
+                                  size_t edge_count);
+
 /* ---- sculpt handoff bridge (pipeline-bridge) -------------------------
  *
  * A versioned interchange for taking a sculpt as a Target, plus a field

@@ -66,6 +66,7 @@
 #endif
 #ifdef CYBER_CAPI_WITH_UV
 #include "cyber/uv/atlas.hpp"
+#include "cyber/uv/layout.hpp"
 #include "cyber/uv/seam_path.hpp"
 #include "cyber/uv/seams.hpp"
 #endif
@@ -781,8 +782,9 @@ CyberStatus runUvAtlas(const char* name, CyberMesh* mesh, const CyberAtlasParams
             // failure always names what went wrong: the report fields separate
             // "nothing to unwrap" from a chart the unwrap could not handle.
             setError(r.chartCount == 0 && r.droppedCharts == 0
-                         ? std::string(name) + ": no chart could be built (the mesh has "
-                                               "no faces, or none survived seam splitting)"
+                         ? std::string(name) +
+                               ": no chart could be built (the mesh has "
+                               "no faces, or none survived seam splitting)"
                          : std::string(name) + ": unwrap failed (" + std::to_string(r.chartCount) +
                                " chart(s) packed, " + std::to_string(r.droppedCharts) +
                                " dropped); a chart could not be parameterized or packed — "
@@ -1994,8 +1996,7 @@ CyberStatus cyber_retopo_relax(CyberMesh* mesh, const float center[3], float rad
         params.brushRadius = radius;
         params.autoPinCorners = auto_pin_corners != 0;
         const cyber::retopo::PinSet pins = makePinSet(pinned, pinned_count);
-        cyber::retopo::relax(mesh->mesh, params, &pins, snapperOf(snapper),
-                             ensureAdjacency(mesh));
+        cyber::retopo::relax(mesh->mesh, params, &pins, snapperOf(snapper), ensureAdjacency(mesh));
         return CYBER_OK;
     });
 }
@@ -2935,8 +2936,9 @@ CyberStatus cyber_retopo_selection_line(CyberMesh* mesh, const float anchor[3], 
         // user's field (the degenerate-length test below is false for NaN).
         if (!isFinite3(anchor) || !isFinite3(end) || !isFinite3(view_dir) ||
             (snap_angle != 0 && !std::isfinite(snap_degrees))) {
-            setError("cyber_retopo_selection_line: non-finite anchor, end, view direction or "
-                     "snap angle");
+            setError(
+                "cyber_retopo_selection_line: non-finite anchor, end, view direction or "
+                "snap angle");
             return CYBER_ERR_INVALID_ARG;
         }
         cyber::retopo::LineRegion region;
@@ -3181,10 +3183,9 @@ CyberStatus cyber_retopo_selection_relax(CyberMesh* mesh, float strength, int it
         params.iterations = iterations;
         const cyber::retopo::PinSet pins = makePinSet(pinned, pinned_count);
         const float eps = resnap_epsilon >= 0.0f ? resnap_epsilon : 0.0f;
-        fillReport(out_report,
-                   cyber::retopo::relaxWeighted(mesh->mesh, mesh->selection, params,
-                                                snapperOf(snapper), &pins, eps,
-                                                ensureAdjacency(mesh)));
+        fillReport(out_report, cyber::retopo::relaxWeighted(mesh->mesh, mesh->selection, params,
+                                                            snapperOf(snapper), &pins, eps,
+                                                            ensureAdjacency(mesh)));
         return CYBER_OK;
     });
 }
@@ -3949,6 +3950,158 @@ float cyber_mesh_edge_signed_dihedral([[maybe_unused]] const CyberMesh* mesh,
     return cyber::uv::edgeSignedDihedral(mesh->mesh, cyber::EdgeId{edge});
 #else
     return 0.0f;
+#endif
+}
+
+/* --- unwrap along caller-supplied seams --------------------------------- */
+
+#ifdef CYBER_CAPI_WITH_UV
+namespace {
+
+// Shared body of cyber_uv_unwrap_seams and its cancellable twin. The atlas
+// pipeline does the work; the only difference is that the cut comes from the
+// caller, so autoSeams and both merge passes are skipped.
+CyberStatus runUnwrapSeams(const char* name, CyberMesh* mesh, const CyberSeamSet* seams,
+                           const CyberUnwrapSeamsParams* params, CyberAtlasResult* out,
+                           cyber::ProgressSink* progress, const cyber::CancelToken* cancel) {
+    if (mesh == nullptr) {
+        setError(std::string(name) + ": null mesh");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    if (seams == nullptr) {
+        // Never fall back to automatic seaming: a caller reaching for this entry
+        // point wants ITS cuts, and silently substituting others would look like
+        // it worked.
+        setError(std::string(name) + ": null seams");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    try {
+        cyber::uv::AtlasOptions opts;
+        opts.seams = &seams->seams;
+        if (params != nullptr) {
+            opts.pack.margin = params->packMargin;
+            opts.pack.textureSize = params->textureSize;
+            opts.reorientCharts = params->reorientCharts != 0;
+        }
+        const cyber::uv::AtlasResult r = cyber::uv::unwrapAtlas(mesh->mesh, opts, progress, cancel);
+        if (r.cancelled) {
+            setError(std::string(name) + ": cancelled");
+            return CYBER_ERR_CANCELLED;
+        }
+        if (out != nullptr) {
+            out->chartCount = r.chartCount;
+            out->seamEdges = r.seamEdges;
+            out->maxAngleDistortion = r.maxAngleDistortion;
+            out->rmsAngleDistortion = r.rmsAngleDistortion;
+            out->flippedCharts = r.flippedCharts;
+            out->fallbackCharts = r.fallbackCharts;
+            out->packedArea = r.packedArea;
+            out->texelDensity = r.texelDensity;
+            out->droppedCharts = r.droppedCharts;
+            out->packedBoxArea = r.packedBoxArea;
+        }
+        if (!r.ok) {
+            setError(r.chartCount == 0 && r.droppedCharts == 0
+                         ? std::string(name) + ": no chart could be built (the mesh has no faces)"
+                         : std::string(name) + ": unwrap failed (" + std::to_string(r.chartCount) +
+                               " chart(s) packed, " + std::to_string(r.droppedCharts) +
+                               " dropped); an island could not be parameterized or packed — "
+                               "check for non-finite vertex positions and degenerate faces");
+            return CYBER_ERR_RUNTIME;
+        }
+        clearError();
+        return CYBER_OK;
+    } catch (const std::exception& e) {
+        setError(std::string(name) + ": " + e.what());
+        return CYBER_ERR_RUNTIME;
+    } catch (...) {
+        setError(std::string(name) + ": unknown error");
+        return CYBER_ERR_RUNTIME;
+    }
+}
+
+}  // namespace
+#endif
+
+void cyber_default_unwrap_seams_params(CyberUnwrapSeamsParams* params) {
+    if (params == nullptr) {
+        return;
+    }
+    const cyber::uv::AtlasOptions defaults;
+    params->packMargin = defaults.pack.margin;
+    params->textureSize = defaults.pack.textureSize;
+    params->reorientCharts = defaults.reorientCharts ? 1 : 0;
+}
+
+CyberStatus cyber_uv_unwrap_seams([[maybe_unused]] CyberMesh* mesh,
+                                  [[maybe_unused]] const CyberSeamSet* seams,
+                                  [[maybe_unused]] const CyberUnwrapSeamsParams* params,
+                                  [[maybe_unused]] CyberAtlasResult* out) {
+#ifdef CYBER_CAPI_WITH_UV
+    return runUnwrapSeams("cyber_uv_unwrap_seams", mesh, seams, params, out, nullptr, nullptr);
+#else
+    setError("cyber_uv_unwrap_seams: engine built without the UV module (CYBER_BUILD_UV=OFF)");
+    return CYBER_ERR_RUNTIME;
+#endif
+}
+
+CyberStatus cyber_uv_unwrap_seams_cancellable([[maybe_unused]] CyberMesh* mesh,
+                                              [[maybe_unused]] const CyberSeamSet* seams,
+                                              [[maybe_unused]] const CyberUnwrapSeamsParams* params,
+                                              [[maybe_unused]] CyberProgressCb progress,
+                                              [[maybe_unused]] CyberCancelCb cancel,
+                                              [[maybe_unused]] void* user,
+                                              [[maybe_unused]] CyberAtlasResult* out) {
+#ifdef CYBER_CAPI_WITH_UV
+    const cyber::CancelToken token;
+    token.setPoll([cancel, user]() { return cancel != nullptr && cancel(user) != 0; });
+    cyber::ProgressSink sink = makeSink(progress, cancel, user, token);
+    return runUnwrapSeams("cyber_uv_unwrap_seams_cancellable", mesh, seams, params, out, &sink,
+                          &token);
+#else
+    setError(
+        "cyber_uv_unwrap_seams_cancellable: engine built without the UV module "
+        "(CYBER_BUILD_UV=OFF)");
+    return CYBER_ERR_RUNTIME;
+#endif
+}
+
+CyberStatus cyber_uv_stitch_seams([[maybe_unused]] CyberMesh* mesh,
+                                  [[maybe_unused]] CyberSeamSet* seams,
+                                  [[maybe_unused]] const uint32_t* edges,
+                                  [[maybe_unused]] size_t edge_count) {
+#ifdef CYBER_CAPI_WITH_UV
+    if (mesh == nullptr) {
+        setError("cyber_uv_stitch_seams: null mesh");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    if (seams == nullptr) {
+        setError("cyber_uv_stitch_seams: null seams");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    if (edges == nullptr && edge_count != 0) {
+        setError("cyber_uv_stitch_seams: null edges with a non-zero count");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    try {
+        std::vector<cyber::EdgeId> ids;
+        ids.reserve(edge_count);
+        for (size_t i = 0; i < edge_count; ++i) {
+            ids.push_back(cyber::EdgeId{edges[i]});
+        }
+        cyber::uv::stitchAlongSeams(mesh->mesh, seams->seams, ids);
+        clearError();
+        return CYBER_OK;
+    } catch (const std::exception& e) {
+        setError(std::string("cyber_uv_stitch_seams: ") + e.what());
+        return CYBER_ERR_RUNTIME;
+    } catch (...) {
+        setError("cyber_uv_stitch_seams: unknown error");
+        return CYBER_ERR_RUNTIME;
+    }
+#else
+    setError("cyber_uv_stitch_seams: engine built without the UV module (CYBER_BUILD_UV=OFF)");
+    return CYBER_ERR_RUNTIME;
 #endif
 }
 

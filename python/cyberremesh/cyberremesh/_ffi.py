@@ -157,6 +157,16 @@ class CyberAtlasParams(Structure):
     ]
 
 
+class CyberUnwrapSeamsParams(Structure):
+    """Mirror of ``CyberUnwrapSeamsParams`` in capi/include/cyber_capi.h."""
+
+    _fields_ = [
+        ("pack_margin", c_float),
+        ("texture_size", c_int32),
+        ("reorient_charts", c_int32),
+    ]
+
+
 class CyberSeamPathOptions(Structure):
     """Mirror of ``CyberSeamPathOptions`` in capi/include/cyber_capi.h."""
 
@@ -711,6 +721,19 @@ def _declare(lib: ctypes.CDLL) -> None:
     lib.cyber_uv_atlas.argtypes = [c_void_p, POINTER(CyberAtlasParams), POINTER(CyberAtlasResult)]
     lib.cyber_uv_atlas.restype = c_int32
 
+    # Unwrap along a caller-built seam set — the counterpart to cyber_uv_atlas,
+    # which computes its own cuts and ignores whatever the caller marked.
+    lib.cyber_default_unwrap_seams_params.argtypes = [POINTER(CyberUnwrapSeamsParams)]
+    lib.cyber_default_unwrap_seams_params.restype = None
+    lib.cyber_uv_unwrap_seams.argtypes = [
+        c_void_p, c_void_p, POINTER(CyberUnwrapSeamsParams), POINTER(CyberAtlasResult)
+    ]
+    lib.cyber_uv_unwrap_seams.restype = c_int32
+
+    # CyberStatus cyber_uv_stitch_seams(CyberMesh*, CyberSeamSet*, const uint32_t*, size_t)
+    lib.cyber_uv_stitch_seams.argtypes = [c_void_p, c_void_p, POINTER(c_uint32), c_size_t]
+    lib.cyber_uv_stitch_seams.restype = c_int32
+
     # -- mesh queries --------------------------------------------------------
     lib.cyber_mesh_vertex_count.argtypes = [c_void_p]
     lib.cyber_mesh_vertex_count.restype = c_size_t
@@ -726,6 +749,11 @@ def _declare(lib: ctypes.CDLL) -> None:
     # CyberStatus cyber_mesh_set_positions(CyberMesh*, const float*, size_t)
     lib.cyber_mesh_set_positions.argtypes = [c_void_p, POINTER(c_float), c_size_t]
     lib.cyber_mesh_set_positions.restype = c_int32
+
+    # Edge ids are dense in [0, edge_count); without this a caller has no way to
+    # enumerate the edges it wants to mark as seams.
+    lib.cyber_mesh_edge_count.argtypes = [c_void_p]
+    lib.cyber_mesh_edge_count.restype = c_size_t
 
     # int cyber_mesh_edge_endpoints(const CyberMesh*, uint32_t, uint32_t out[2])
     lib.cyber_mesh_edge_endpoints.argtypes = [c_void_p, c_uint32, POINTER(c_uint32)]

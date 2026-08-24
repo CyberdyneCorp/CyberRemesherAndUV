@@ -12,11 +12,13 @@
 #include "cyber/uv/atlas.hpp"
 #include "cyber/uv/common.hpp"
 #include "cyber/uv/distortion.hpp"
+#include "cyber/uv/layout.hpp"
 #include "cyber/uv/packing.hpp"
 #include "cyber/uv/seams.hpp"
 #include "cyber/uv/transforms.hpp"
 #include "cyber/uv/unwrap.hpp"
 
+using cyber::EdgeId;
 using cyber::FaceId;
 using cyber::Index;
 using cyber::Mesh;
@@ -645,4 +647,113 @@ TEST_CASE("mirrored UVs are detected as a flipped island") {
     // Mirror U about x=0 to reverse winding.
     uv::scaleIslandUv(mesh, island, {-1.0f, 1.0f}, {0.0f, 0.0f});
     REQUIRE(uv::measureDistortion(mesh, island).flipped);
+}
+
+// --- unwrap along caller-supplied seams --------------------------------------
+// The manual UV workflow used to dead-end: a caller could mark seams (or commit
+// a routed SeamPath) and then had no way to parameterize along them, because the
+// only unwrap the bindings reach computes its own cuts. These pin the option
+// that closes it.
+
+TEST_CASE("a caller-supplied seam set defines the charts") {
+    Mesh mesh = makeCube();
+    // Cut the cube's top face free: the four edges of face 1 (4,5,6,7).
+    uv::SeamSet seams;
+    const std::vector<std::pair<Index, Index>> ring = {{4, 5}, {5, 6}, {6, 7}, {7, 4}};
+    for (const auto& [a, b] : ring) {
+        const EdgeId e = uv::faceEdge(mesh, VertexId{a}, VertexId{b});
+        REQUIRE(e.valid());
+        seams.mark(e);
+    }
+    REQUIRE(seams.size() == 4);
+
+    uv::AtlasOptions opts;
+    opts.seams = &seams;
+    const uv::AtlasResult r = uv::unwrapAtlas(mesh, opts);
+
+    REQUIRE(r.ok);
+    // Exactly the split the seams describe: the lid, and the rest of the cube.
+    CHECK(r.chartCount == 2);
+    CHECK(r.seamEdges == 4);
+    // Reported through the same structure the automatic atlas fills.
+    CHECK(r.packedArea > 0.0f);
+    CHECK(r.flippedCharts == 0);
+}
+
+TEST_CASE("an empty seam set unwraps the whole mesh as one chart") {
+    Mesh mesh = makeCube();
+    const uv::SeamSet none;
+    uv::AtlasOptions opts;
+    opts.seams = &none;
+
+    const uv::AtlasResult r = uv::unwrapAtlas(mesh, opts);
+    // The automatic path would have seamed this cube into several charts; an
+    // explicit empty set means "do not cut", not "decide for me".
+    CHECK(r.chartCount == 1);
+    CHECK(r.seamEdges == 0);
+}
+
+TEST_CASE("chart growth and merge options are inert once seams are supplied") {
+    Mesh mesh = makeCube();
+    uv::SeamSet seams;
+    for (const auto& [a, b] :
+         std::vector<std::pair<Index, Index>>{{4, 5}, {5, 6}, {6, 7}, {7, 4}}) {
+        seams.mark(uv::faceEdge(mesh, VertexId{a}, VertexId{b}));
+    }
+
+    uv::AtlasOptions tight;
+    tight.seams = &seams;
+    tight.maxChartAngleDeg = 1.0f;
+    tight.mergeCharts = false;
+    tight.maxChartDistortion = 0.0f;
+
+    uv::AtlasOptions loose;
+    loose.seams = &seams;
+    loose.maxChartAngleDeg = 179.0f;
+    loose.mergeCharts = true;
+    loose.maxChartDistortion = 0.9f;
+
+    Mesh a = mesh, b = mesh;
+    const uv::AtlasResult ra = uv::unwrapAtlas(a, tight);
+    const uv::AtlasResult rb = uv::unwrapAtlas(b, loose);
+
+    // The seams decided the charts, so nothing that only steers seam CHOICE can move.
+    CHECK(ra.chartCount == rb.chartCount);
+    CHECK(ra.seamEdges == rb.seamEdges);
+    CHECK(ra.packedArea == doctest::Approx(rb.packedArea));
+}
+
+TEST_CASE("supplying no seam set leaves the automatic atlas untouched") {
+    Mesh a = makeCube(), b = makeCube();
+    uv::AtlasOptions autoOpts;  // seams == nullptr
+    uv::AtlasOptions explicitNull;
+    explicitNull.seams = nullptr;
+
+    const uv::AtlasResult ra = uv::unwrapAtlas(a, autoOpts);
+    const uv::AtlasResult rb = uv::unwrapAtlas(b, explicitNull);
+    CHECK(ra.chartCount == rb.chartCount);
+    CHECK(ra.seamEdges == rb.seamEdges);
+    CHECK(ra.maxAngleDistortion == doctest::Approx(rb.maxAngleDistortion));
+}
+
+TEST_CASE("sewing a seam rejoins the islands it separated") {
+    Mesh mesh = makeCube();
+    uv::SeamSet seams;
+    std::vector<EdgeId> ring;
+    for (const auto& [a, b] :
+         std::vector<std::pair<Index, Index>>{{4, 5}, {5, 6}, {6, 7}, {7, 4}}) {
+        const EdgeId e = uv::faceEdge(mesh, VertexId{a}, VertexId{b});
+        seams.mark(e);
+        ring.push_back(e);
+    }
+    REQUIRE(uv::computeIslands(mesh, seams).size() == 2);
+
+    uv::AtlasOptions opts;
+    opts.seams = &seams;
+    REQUIRE(uv::unwrapAtlas(mesh, opts).ok);
+
+    uv::stitchAlongSeams(mesh, seams, ring);
+
+    CHECK(seams.size() == 0);
+    CHECK(uv::computeIslands(mesh, seams).size() == 1);
 }
