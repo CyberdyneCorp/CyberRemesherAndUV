@@ -116,9 +116,18 @@ costs a second extraction, not just a second solve, and is not attempted here.
 
 **What did NOT regress**, and is worth more than the median gap: topological
 defects are **0 on all six models**, against QuadriFlow's 80 on the bunny and 722
-on the flat-CAD cube. On that cube QuadriFlow returns a 12-degree median and tears;
-we return 90 degrees and nothing to repair. The validity claim is the one that
-survived contact with a rebuilt reference.
+on the flat-CAD cube. On that cube QuadriFlow tears the surface and we return 90
+degrees with nothing to repair. The validity claim is the one that survived contact
+with a rebuilt reference.
+
+Correction (2026-08-25): the "12-degree median" quoted for QuadriFlow on that cube
+does not reproduce. Over 12 runs of the same binary on the same input, 7 wrote
+`v nan nan nan` for a third of their vertices while exiting 0, and the 5 clean runs
+came out bimodal at 12.3 or 78.7 degrees. Only positions vary -- quad count and
+irregular share were identical every run -- so the tearing (400 boundary edges at
+979 quads, in all 12 runs) is the reproducible part and the angle is not. NaN
+positions score a 0-degree median, which reads as a bad result rather than a failed
+one, so both loaders now refuse non-finite geometry.
 
 The nefertiti campaign gate also still holds, narrowly: `nefertiti@4000` cyber-pure
 measures **195** singularities against the exit gate of <= 200, where the 2026-08-03

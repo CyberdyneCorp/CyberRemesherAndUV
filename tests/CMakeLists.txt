@@ -333,7 +333,8 @@ if(TARGET cyber_capi_shared AND Python3_FOUND)
                  test_handoff test_mesh_state test_export_presets
                  test_library_lookup test_host_process_hygiene
                  test_io_formats test_subdivide test_loop_subdivide test_examples
-                 test_unwrap_seams test_retopo_ops test_isotropic_remesh)
+                 test_unwrap_seams test_retopo_ops test_isotropic_remesh
+                 test_reference_nan_guard)
         add_test(NAME python_${_pyt}
             COMMAND ${Python3_EXECUTABLE} ${_pydir}/${_pyt}.py)
         set_tests_properties(python_${_pyt} PROPERTIES

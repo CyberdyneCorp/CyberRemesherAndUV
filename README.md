@@ -30,9 +30,21 @@ solver selection, lose on angle quality**:
 | cube (synthetic, flat CAD) | **90** vs 12 | **1** vs 20 | **0** vs 722 |
 
 We beat QuadriFlow on *both* median angle and irregular count on **1 of the 5
-community models** (spot), plus the synthetic flat-CAD cube — where the gap is not
-close: QuadriFlow returns a 12° median and 722 topological defects on a shape it
-tears, and we return 90° and none.
+community models** (spot), plus the synthetic flat-CAD cube — where it tears the
+shape into 722 topological defects and we return none.
+
+> **The cube's 12° QuadriFlow median is a single sample and does not reproduce.**
+> Re-measured 2026-08-25 over 12 runs of the same binary on the same cube: 7 runs
+> emitted `v nan nan nan` for a third of their vertices while exiting 0, and the 5
+> clean runs were bimodal at **12.3° or 78.7°** — not a spread around 12°, two
+> distinct outcomes. Quad count (979) and irregular share (33.8%) were identical in
+> every run, so only the positions move. The 12° figure is the worse of the two
+> modes, and the angle comparison on this row should be read as "QuadriFlow is
+> non-deterministic here", not as a 78-point gap. The **defect count is the robust
+> part**: 400 boundary edges at that density in all 12 runs, NaN or not — QuadriFlow
+> genuinely tears this cube, and that is what the validity claim rests on.
+> `tools/bench` and the examples now refuse non-finite geometry rather than scoring
+> it, since NaN positions yield a plausible-looking 0° median.
 
 **The table above was measured on the pre-2026-08-24 routing, which sent every one
 of these models to the vendored Geogram field — the worse of our two solvers on

@@ -232,11 +232,50 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: lukka/get-cmake@latest
+      # Pins ONE interpreter for the whole lane. Two reasons, both load-bearing:
+      # the macOS runner's default python3 is PEP 668 externally-managed, so
+      # pip install into it is refused outright; and pip and CMake have to agree
+      # on which interpreter they mean, or the modules land somewhere
+      # find_package(Python3) never looks and the tests skip anyway. This action
+      # puts its python first on PATH, which is what CMake resolves.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      # NumPy, SciPy and matplotlib are what python_test_examples and the
+      # reference panels need: matplotlib and NumPy at import, SciPy inside
+      # surface_metrics/feature_error (cKDTree) and at the top of
+      # tools/bench/mesh_metrics.py. Without them those tests exit 77 and CTest
+      # reports SKIP, so the lane went green having rendered nothing -- which is
+      # how a non-finite-geometry crash in 04_sharp_edges.py survived on main.
+      - name: Install Python test dependencies
+        run: python -m pip install --upgrade --disable-pip-version-check numpy scipy matplotlib
       - name: Configure (cpu-headless)
         run: cmake --preset cpu-headless
+      # The interpreter CTest will use is the one CMake resolved, which is not
+      # necessarily the one pip installed into. If they diverge, every Python
+      # test exits 77 and the lane goes green having run none of them -- the
+      # exact failure mode this PR exists to remove, one level up. Assert the
+      # modules are importable from CMake's own interpreter, loudly.
+      - name: Verify CMake's interpreter has the test dependencies
+        shell: bash
+        run: |
+          # CMake caches this as the INTERNAL _Python3_EXECUTABLE; the
+          # underscore-less public form is not written by find_package, so
+          # match either rather than the one that looks obvious.
+          PY=$(sed -n 's/^_\{0,1\}Python3_EXECUTABLE:[^=]*=//p' build/cpu-headless/CMakeCache.txt | head -1)
+          echo "CMake resolved Python3_EXECUTABLE=${PY:-<unset>}"
+          test -n "$PY" || { echo "::error::CMake found no Python3 interpreter"; exit 1; }
+          "$PY" -c 'import numpy, scipy, matplotlib; print("deps OK:", numpy.__version__, scipy.__version__, matplotlib.__version__)'
       - name: Build
         run: cmake --build --preset cpu-headless
       - name: Test
+        # Reference solvers are NOT built here. The examples resolve QuadriFlow
+        # and AutoRemesher on demand, and each example runs as its own process,
+        # so six scripts would each pay a from-scratch clone and compile against
+        # a 900s per-script timeout. With them skipped the whole example suite
+        # renders our own panels in about 8 seconds.
+        env:
+          CYBER_SKIP_REFERENCE_BUILDS: "1"
         run: ctest --preset cpu-headless
       - name: CLI smoke
         shell: bash

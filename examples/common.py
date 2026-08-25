@@ -61,11 +61,26 @@ COMMON_3D_MODELS: Dict[str, str] = {
 }
 
 
+def _reference_builds_disabled() -> bool:
+    """True when reference solvers must not be built or run.
+
+    The examples build QuadriFlow and AutoRemesher on demand to draw their
+    comparison panels. That is right on a workstation and wrong in CI: each
+    example runs as its own process, so nothing is shared between them, and six
+    scripts would each pay a from-scratch clone and compile (QuadriFlow up to
+    900s, AutoRemesher up to 1800s) against a 900s per-script timeout. Setting
+    CYBER_SKIP_REFERENCE_BUILDS=1 renders our own panels only.
+    """
+    return os.environ.get("CYBER_SKIP_REFERENCE_BUILDS", "").strip().lower() not in ("", "0", "false", "no")
+
+
 def quadriflow_binary() -> "str | None":
     """Build (once, cached) and return the path to the QuadriFlow reference
     binary, or None if it cannot be built (offline / no Eigen / no toolchain).
     QuadriFlow is a field-based quad remesher standing in for AutoRemesher (which
     is GUI-only). See reference/build_quadriflow.sh."""
+    if _reference_builds_disabled():
+        return None
     import subprocess
     script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "reference",
                           "build_quadriflow.sh")
@@ -99,7 +114,8 @@ def quadriflow_try(binary: "str | None", model_path: str, faces: int) -> "MeshDa
         return None
     try:
         return quadriflow_remesh(binary, model_path, faces)
-    except Exception:  # noqa: BLE001 - QuadriFlow failure -> no reference panel
+    except Exception as exc:  # noqa: BLE001 - QuadriFlow failure -> no reference panel
+        print(f"  QuadriFlow panel dropped: {exc}")
         return None
 
 
@@ -108,6 +124,8 @@ def autoremesher_binary() -> "str | None":
     (a Qt-free harness over its QuadCover core), or None if it cannot be built.
     AutoRemesher (github.com/huxingyi/autoremesher, MIT) is the isoline-tracing
     QuadCover remesher; see reference/build_autoremesher.sh."""
+    if _reference_builds_disabled():
+        return None
     import subprocess
     script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "reference",
                           "build_autoremesher.sh")
@@ -156,7 +174,8 @@ def autoremesher_try(binary: "str | None", model_path: str, faces: int) -> "Mesh
         return None
     try:
         return autoremesher_remesh(binary, model_path, faces)
-    except Exception:  # noqa: BLE001 - AutoRemesher failure -> no reference panel
+    except Exception as exc:  # noqa: BLE001 - AutoRemesher failure -> no reference panel
+        print(f"  AutoRemesher panel dropped: {exc}")
         return None
 
 
@@ -736,7 +755,20 @@ def load_obj(path: str) -> MeshData:
                 positions.append((float(parts[1]), float(parts[2]), float(parts[3])))
             elif parts[0] == "f":
                 faces.append([int(p.split("/")[0]) - 1 for p in parts[1:]])
-    return {"positions": np.array(positions, dtype=float), "faces": faces}
+    pos = np.array(positions, dtype=float)
+    # A solver can exit 0 and still write "v nan nan nan" (QuadriFlow does,
+    # non-deterministically, on the flat-CAD cube). Refusing here is what turns
+    # that into a dropped reference panel via the *_try wrappers, instead of a
+    # "Axis limits cannot be NaN or Inf" traceback out of matplotlib three
+    # frames deeper, or -- worse -- a rendered panel labelled with the
+    # 0-degree median that NaN positions happen to produce.
+    if pos.size and not np.isfinite(pos).all():
+        bad = int(np.count_nonzero(~np.isfinite(pos)))
+        raise ValueError(
+            f"{path}: {bad} non-finite vertex coordinates; the writer of this "
+            f"file failed on this input without reporting it"
+        )
+    return {"positions": pos, "faces": faces}
 
 
 # ---------------------------------------------------------------------------
@@ -788,6 +820,12 @@ def _draw(ax, mesh: MeshData, title: str) -> None:
     coll.set_alpha(1.0)
     ax.add_collection3d(coll)
 
+    if not np.isfinite(pos).all():
+        # Reference panels are filtered at load, so reaching this means OUR
+        # mesh carries non-finite positions. Say so here rather than letting
+        # matplotlib raise "Axis limits cannot be NaN or Inf" with no clue
+        # which of the N panels was responsible.
+        raise ValueError(f"panel {title!r}: mesh has non-finite vertex positions")
     lo = pos.min(axis=0)
     hi = pos.max(axis=0)
     center = (lo + hi) / 2.0

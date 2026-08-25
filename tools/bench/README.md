@@ -84,3 +84,17 @@ python3 tools/bench/bench.py run --corpus all
 - *downloaded* (`corpus.json`): real models with recorded licenses; fetched to
   `.bench-cache/` on first use, sha256-pinned (the fetch prints the hash to pin
   for new entries).
+
+## Non-finite solver output is refused, not measured
+
+`mesh_metrics.load_obj` raises on a mesh carrying NaN or Inf vertex
+coordinates. An external solver can exit 0 and still write `v nan nan nan` —
+QuadriFlow does, non-deterministically, on the flat-CAD cube — and the metrics
+computed from such a file are not merely noisy, they are plausible: NaN
+positions produce a 0° median angle and a 74% sliver rate, which reads as "the
+reference did badly" rather than "the reference produced nothing measurable".
+
+So a run that would have quietly recorded a number now fails with the file and
+the count of bad coordinates. If you hit this, re-run that solver rather than
+recording the result: the same binary on the same input often succeeds on the
+next attempt.
