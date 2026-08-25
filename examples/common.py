@@ -278,9 +278,17 @@ def _sample_surface(mesh: MeshData, n: int, rng: "np.random.Generator"
     a, b, c = P[T[:, 0]], P[T[:, 1]], P[T[:, 2]]
     cross = np.cross(b - a, c - a)
     area = 0.5 * np.linalg.norm(cross, axis=1)
+    # A torn mesh can carry non-finite vertices, and a NaN area slips straight
+    # through a `total <= 0` test because every comparison against NaN is false.
+    # rng.choice then raises "Probabilities contain NaN" instead of the caller
+    # seeing a degenerate mesh. Treat a non-finite face as zero-area, and test
+    # the total for finiteness rather than only for sign. Reached in practice by
+    # the QuadriFlow reference panel on sharp-edged input, which is exactly the
+    # case where it tears.
+    area = np.where(np.isfinite(area), area, 0.0)
     normals = cross / (np.linalg.norm(cross, axis=1, keepdims=True) + 1e-12)
     total = float(area.sum())
-    if total <= 0.0:
+    if not np.isfinite(total) or total <= 0.0:
         return a, normals
     idx = rng.choice(len(T), size=n, p=area / total)
     u, v = rng.random(n), rng.random(n)
