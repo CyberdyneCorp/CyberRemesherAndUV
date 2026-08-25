@@ -229,3 +229,48 @@ TEST_CASE("an empty mesh is refused by name") {
     // The typed code carries a message a host can show verbatim.
     CHECK(std::string(retopo::toString(res.error)) == "mesh has no faces");
 }
+
+// The three tests below pin the Loop masks to hand-computed values rather than
+// to a qualitative property ("moved", "still on the border"). A weight that is
+// wrong but still plausible — a midpoint where the mask belongs, a flat 1/16
+// beta at every valence — satisfies the qualitative checks above and only shows
+// up against the arithmetic itself.
+
+TEST_CASE("the odd (edge) point uses Loop's 3/8-1/8 mask, not the midpoint") {
+    // Tent grid edge v1=(0,-1,0) -- v4=(0,0,1), apexes v0=(-1,-1,0), v5=(1,0,0):
+    //   3/8*(v1+v4) + 1/8*(v0+v5) = (0,-0.375,0.375) + (0,-0.125,0) = (0,-0.5,0.375)
+    // The midpoint would be (0,-0.5,0.5); only the z coordinate separates them.
+    const retopo::LoopSubdivideResult r =
+        retopo::loopSubdivide(makeTentGrid(), retopo::LoopSubdivideMode::Smooth);
+    REQUIRE(r.ok());
+    const Mesh& out = r.mesh;
+    CHECK(nearestVertexDistance({0.0f, -0.5f, 0.375f}, out) < 1e-5f);
+    CHECK(nearestVertexDistance({0.0f, -0.5f, 0.5f}, out) > 1e-3f);
+}
+
+TEST_CASE("the boundary even point uses the 1/8-3/4-1/8 curve mask") {
+    // Tent grid corner v0=(-1,-1,0) with boundary neighbours (0,-1,0), (-1,0,0):
+    //   3/4*v0 + 1/8*[(0,-1,0)+(-1,0,0)] = (-0.75,-0.75,0) + (-0.125,-0.125,0)
+    // A right-angle corner is the discriminating case: on a straight run the
+    // curve mask and the neighbour midpoint agree, so a flat border proves nothing.
+    const retopo::LoopSubdivideResult r =
+        retopo::loopSubdivide(makeTentGrid(), retopo::LoopSubdivideMode::Smooth);
+    REQUIRE(r.ok());
+    const Mesh& out = r.mesh;
+    CHECK(nearestVertexDistance({-0.875f, -0.875f, 0.0f}, out) < 1e-5f);
+    CHECK(nearestVertexDistance({-0.5f, -0.5f, 0.0f}, out) > 1e-3f);
+}
+
+TEST_CASE("the interior even mask is valence-dependent, not a flat 1/16") {
+    // Tetrahedron: every vertex is interior at valence 3, where Loop's beta is
+    //   (1/3)(5/8 - (3/8 + 1/4*cos(2pi/3))^2) = (1/3)(0.625 - 0.0625) = 0.1875,
+    // three times the regular-valence 1/16. For v0=(0,0,0) with ring sum (1,1,1):
+    //   v0*(1 - 3*0.1875) + (1,1,1)*0.1875 = (0.1875, 0.1875, 0.1875)
+    // whereas a hardcoded 1/16 would place it at (0.0625, 0.0625, 0.0625).
+    const retopo::LoopSubdivideResult r =
+        retopo::loopSubdivide(makeTetrahedron(), retopo::LoopSubdivideMode::Smooth);
+    REQUIRE(r.ok());
+    const Mesh& out = r.mesh;
+    CHECK(nearestVertexDistance({0.1875f, 0.1875f, 0.1875f}, out) < 1e-5f);
+    CHECK(nearestVertexDistance({0.0625f, 0.0625f, 0.0625f}, out) > 1e-3f);
+}
