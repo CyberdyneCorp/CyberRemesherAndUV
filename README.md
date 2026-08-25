@@ -34,14 +34,14 @@ community models** (spot), plus the synthetic flat-CAD cube — where the gap is
 close: QuadriFlow returns a 12° median and 722 topological defects on a shape it
 tears, and we return 90° and none.
 
-**Those are the numbers for the vendored Geogram field, which is the default where
-its dependencies are present — and on this corpus it is the worse of our two
-solvers.** The dependency-free native seamless solver scores 83/2% on spot, 82/2%
-on the bunny, 84/2% on fandisk and 81/4% on cheburashka, beating the vendored field
-on four of the five and losing only rocker-arm. Build with
-`-DCYBER_WITH_QUADCOVER=OFF` to select it. Fixing the routing so the better solver
-is chosen per input is open work, tracked in
-[`docs/ROADMAP.md`](docs/ROADMAP.md) under the 2026-08-24 entry.
+**The table above was measured on the pre-2026-08-24 routing, which sent every one
+of these models to the vendored Geogram field — the worse of our two solvers on
+all but one of them.** With the corrected routing the same models score spot 85/2%,
+cow 84/4%, fandisk 83/3%, cheburashka 82/4% and stanford-bunny 80/4%, against
+rocker-arm's 74/3%; the table will be re-recorded against QuadriFlow on the next
+benchmark pass. Choosing per input by measuring both solvers, rather than by a
+threshold that provably cannot separate these cases, is still open work — see the
+2026-08-24 entry in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 **Topological validity is the claim that holds across the board**: zero defects on
 every model, 6 of 6, where QuadriFlow has 80 on the bunny and 722 on the cube. If
@@ -324,10 +324,14 @@ flowchart TD
 Stage by stage:
 
 1. **Backend routing.** `computeSeamlessUv` measures `creaseEdgeFraction` — the
-   share of interior edges sharper than 45°. Crease-heavy CAD parts go to the
-   native feature-aware solver first (it pins seams to the creases so loops follow
-   the hard edges); everything else goes to the vendored in-process Geogram
-   QuadCover field first, which wins on organic geometry. Either side falls back to
+   share of interior edges sharper than 45°. A mesh with *any* creasing goes to
+   the native feature-aware solver first (it pins seams to the creases so loops
+   follow the hard edges); a surface with none at all — a sphere, a torus — goes
+   to the vendored in-process Geogram QuadCover field, which wins decisively
+   there. The threshold used to sit at 0.02, which sent every real scanned and CAD
+   model to the vendored path; measured across eight community models that cost a
+   mean 3.6° of median angle and nearly doubled the irregular-vertex rate. See the
+   2026-08-24 entry in [`docs/ROADMAP.md`](docs/ROADMAP.md). Either side falls back to
    the other, so a decline is never a failure. `CYBER_QC_NO_ROUTE` disables the
    routing, `CYBER_QC_DEBUG` traces the decision. The vendored solver is silent by
    default — it is a library inside someone else's process, so it writes nothing to
@@ -487,6 +491,7 @@ an unrecognised value always means "default behaviour".
 | `CYBER_QC_VERBOSE` | Lets the vendored field solver's progress traces reach the console (silent by default). |
 | `CYBER_QC_DEBUG` | Traces the seamless-UV backend routing decision. |
 | `CYBER_QC_NO_ROUTE` | Disables crease-fraction routing; every island goes to the vendored solver first. |
+| `CYBER_QC_ROUTE_CREASE` | Crease-fraction threshold above which an island routes to the native solver first (default `0.0001` — any creasing at all; `0.02` restores the pre-2026-08-24 behaviour, `0` disables native routing). |
 | `CYBER_QC_NO_NATIVE` | Disables the native seamless solve. Guidance cannot be honoured then, and the run reports it as unhonoured naming this variable. |
 | `CYBER_QC_NO_OPEN_CLEANUP` | Turns off the open-surface extraction cleanup (hole filling), restoring pre-0.2.5 behaviour on open surfaces. |
 | `CYBER_BASE_RELAX_ITERS` | Overrides the base-relax iteration count before subdivision. |
