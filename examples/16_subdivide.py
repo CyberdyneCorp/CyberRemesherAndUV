@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """Subdivision: add resolution to a quad mesh, with and without reprojection.
 
-`Mesh.subdivide()` is linear — Catmull-Clark *topology* with no smoothing — so
-every quad becomes four around the face centroid and the new vertices land on
-the existing flat facets. That multiplies the quad count but adds no curvature.
+`Mesh.subdivide()` defaults to linear — Catmull-Clark *topology* with no
+smoothing — so every quad becomes four around the face centroid and the new
+vertices land on the existing flat facets. That multiplies the quad count but
+adds no curvature.
 
 Passing `project_to=` a surface pulls every vertex of the subdivided mesh onto
 that surface, which is what recovers the curvature the coarse cage lost. The
 two right-hand panels are the same subdivision with and without that step.
+(`mode=Subdivision.CATMULL_CLARK` recovers curvature without a Target at all,
+by running the smooth rules; this example is about the reprojection route.)
 
     examples/run.sh examples/16_subdivide.py
     examples/run.sh examples/16_subdivide.py --input model.fbx --target-quads 800

@@ -2,6 +2,7 @@
 #include <cassert>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 
 #include "cyber/core/mesh.hpp"
 
@@ -473,7 +474,7 @@ std::size_t Mesh::fillHoles(std::size_t maxBoundaryEdges) {
     return filled;
 }
 
-Mesh Mesh::linearSubdivide() const {
+Mesh Mesh::linearSubdivide(SubdivisionMap* correspondence) const {
     Mesh out;
     out.vertexAttributes().adoptSchema(m_vertexAttrs);
     out.edgeAttributes().adoptSchema(m_edgeAttrs);
@@ -502,6 +503,7 @@ Mesh Mesh::linearSubdivide() const {
                                                         m_vertexAttrs.extractRow(e.v1.value)}));
     }
 
+    std::vector<VertexId> faceMap(m_faces.size());
     for (Index fi = 0; fi < m_faces.size(); ++fi) {
         if (!m_faces[fi].alive) {
             continue;
@@ -511,6 +513,7 @@ Mesh Mesh::linearSubdivide() const {
         const std::size_t n = loops.size();
 
         const VertexId center = out.addVertex(faceCentroid(f));
+        faceMap[fi] = center;
         {
             std::vector<AttributeSet::Row> rows;
             rows.reserve(n);
@@ -563,6 +566,11 @@ Mesh Mesh::linearSubdivide() const {
                 }
             }
         }
+    }
+    if (correspondence != nullptr) {
+        correspondence->vertexPoints = std::move(vertexMap);
+        correspondence->edgePoints = std::move(midMap);
+        correspondence->facePoints = std::move(faceMap);
     }
     return out;
 }

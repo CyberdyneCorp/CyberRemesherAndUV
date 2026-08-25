@@ -96,10 +96,21 @@ public:
     // Returns the number of holes filled (remeshing-parameters spec,
     // "holeFillMaxBoundary").
     std::size_t fillHoles(std::size_t maxBoundaryEdges);
+    // Where each source element's subdivision vertex landed in the result.
+    // Indexed by SOURCE element id (so sized to the source capacities); a dead
+    // source element's slot holds an invalid id. Catmull-Clark builds on this:
+    // the smooth rules reposition the vertex- and edge-points, which is only
+    // possible if the caller can name them.
+    struct SubdivisionMap {
+        std::vector<VertexId> vertexPoints;  // per source vertex
+        std::vector<VertexId> edgePoints;    // per source edge (the midpoint)
+        std::vector<VertexId> facePoints;    // per source face (the centroid)
+    };
     // Linear (Catmull-Clark topology, no smoothing) subdivision into quads.
     // Vertex/edge/face/corner attributes propagate per the documented
-    // policy. Returns a new mesh.
-    [[nodiscard]] Mesh linearSubdivide() const;
+    // policy. Returns a new mesh. Pass `correspondence` to recover the source
+    // -> result vertex map; it does not change what is built.
+    [[nodiscard]] Mesh linearSubdivide(SubdivisionMap* correspondence = nullptr) const;
 
     // ---- adjacency queries --------------------------------------------
     [[nodiscard]] std::size_t vertexCount() const { return m_aliveVertices; }

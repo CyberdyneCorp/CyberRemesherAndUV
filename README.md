@@ -340,11 +340,21 @@ exists, so a `.fbx` export fails with an error naming the writable formats.
 Import is powered by the vendored [ufbx](https://github.com/ufbx/ufbx) (MIT).
 
 `Mesh.subdivide()` (C: `cyber_retopo_subdivide`) adds resolution to a result:
-linear subdivision with Catmull-Clark *topology* and no smoothing, so every
-n-gon becomes n quads and a quad mesh quadruples. Passing `project_to=` a
-surface snaps every new vertex onto it, which is what recovers curvature the
-coarse cage lost — on the torus knot below that halves the RMS deviation from
-the source surface (0.635% → 0.325%).
+every n-gon becomes n quads and a quad mesh quadruples. By default it is
+*linear* — Catmull-Clark topology with no smoothing, so the new vertices land on
+the facets the cage already had. Passing `project_to=` a surface snaps every new
+vertex onto it, which is what recovers curvature the coarse cage lost — on the
+torus knot below that halves the RMS deviation from the source surface
+(0.635% → 0.325%).
+
+Passing `mode=Subdivision.CATMULL_CLARK` (C: `cyber_retopo_subdivide_ex`) runs
+the smooth Catmull-Clark rules instead, so the cage rounds toward its limit
+surface with no Target needed at all — for a cage handed on without the sculpt
+behind it, or one that never had a source scan. Creases are held sharp:
+feature-tagged edges plus boundary and non-manifold edges use the crease rule,
+the same "feature or boundary" predicate the pipeline's quad relax freezes on,
+so open borders keep their shape and corners stay put. Tag the edges you want
+kept hard before subdividing; an untagged mesh smooths everywhere.
 
 ![Subdivision with and without reprojection](examples/output/16_subdivide.png)
 

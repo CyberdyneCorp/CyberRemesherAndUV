@@ -3,6 +3,31 @@
 > Note: releases 0.3.0, 0.4.0 and 0.5.0 were tagged without changelog entries;
 > their content is recorded in `docs/ROADMAP.md`. Entries resume here.
 
+## Unreleased
+
+### Added
+
+- **Smooth (Catmull-Clark) subdivision.** `cyber_retopo_subdivide` was linear
+  only — the header said so outright — so the sole way to recover curvature was
+  reprojecting onto a Target, which requires still having one. The smooth rules
+  (face points, edge points, and the `(F + 2R + (n-3)P) / n` vertex weighting)
+  are now available as an opt-in mode: `Subdivision.CATMULL_CLARK` for
+  `Mesh.subdivide` in Python, `cyber_retopo_subdivide_ex` in C, and
+  `retopo::subdivide(mesh, SubdivisionMode::CatmullClark)` in C++. A cube's
+  worst dihedral falls 90° → 43° → 26° → 14° → 7° across four levels where the
+  linear path stays at 90° forever.
+
+  Creases are held sharp by the same "feature edge or boundary" predicate the
+  pipeline's quad relax freezes vertices on, so an open patch keeps its border
+  and corners instead of shrinking inward, and a fully feature-tagged cube comes
+  back an exact cube. Tag the edges you want kept hard before subdividing.
+
+  **Linear remains the default and is unchanged bit-for-bit** — pinned by a test
+  hashing the float bits of the linear output against values captured before the
+  change. The mode arrived as a sibling C entry point rather than a new parameter
+  on `cyber_retopo_subdivide`, so already-compiled callers of the ABI keep
+  working; the mode-less name is now a forwarder to the linear case.
+
 ## 0.6.0 - 2026-08-24
 
 ### Upgrade notes

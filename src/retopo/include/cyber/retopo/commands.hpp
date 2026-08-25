@@ -10,6 +10,7 @@
 #include "cyber/retopo/conform.hpp"
 #include "cyber/retopo/pins.hpp"
 #include "cyber/retopo/relax.hpp"
+#include "cyber/retopo/subdivision.hpp"
 #include "cyber/retopo/symmetry.hpp"
 
 // Retopology commands (manual-retopology spec, roadmap 9.4): Auto Relax honoring
@@ -49,9 +50,13 @@ inline ConformReport snapAll(Mesh& mesh, const SurfaceSnapper& snapper,
     return conform(mesh, snapper, ConformParams{}, pins);
 }
 
-// Whole-mesh subdivide-all: linear (Catmull-Clark topology) subdivision to
-// quads, replacing the mesh in place.
-inline void subdivideAll(Mesh& mesh) { mesh = mesh.linearSubdivide(); }
+// Whole-mesh subdivide-all: subdivision to quads, replacing the mesh in place.
+// Linear (Catmull-Clark topology, no smoothing) by default; pass
+// SubdivisionMode::CatmullClark for the smooth rules. See subdivision.hpp for
+// what each mode does with creases.
+inline void subdivideAll(Mesh& mesh, SubdivisionMode mode = SubdivisionMode::Linear) {
+    mesh = subdivide(mesh, mode);
+}
 
 // Whole-mesh mirror-all: bake the symmetry plane into real geometry. Returns
 // the number of faces added.

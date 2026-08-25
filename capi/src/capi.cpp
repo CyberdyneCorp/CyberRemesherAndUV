@@ -2842,15 +2842,30 @@ CyberStatus cyber_retopo_snap_all(CyberMesh* mesh, const CyberSnapper* snapper,
 
 CyberStatus cyber_retopo_subdivide(CyberMesh* mesh, const CyberSnapper* snapper,
                                    size_t* out_faces) {
+    // The old, mode-less entry point IS the linear mode; keeping it as a
+    // forwarder is what stops the two paths from ever drifting apart.
+    return cyber_retopo_subdivide_ex(mesh, snapper, CYBER_SUBDIV_LINEAR, out_faces);
+}
+
+CyberStatus cyber_retopo_subdivide_ex(CyberMesh* mesh, const CyberSnapper* snapper,
+                                      CyberSubdivisionMode mode, size_t* out_faces) {
     return runMeshEdit(mesh, "cyber_retopo_subdivide", [&] {
         if (mesh->mesh.faceCount() == 0) {
             setError("cyber_retopo_subdivide: mesh has no faces");
             return CYBER_ERR_EMPTY;
         }
-        cyber::retopo::subdivideAll(mesh->mesh);
+        if (mode != CYBER_SUBDIV_LINEAR && mode != CYBER_SUBDIV_CATMULL_CLARK) {
+            setError("cyber_retopo_subdivide: unknown subdivision mode");
+            return CYBER_ERR_INVALID_ARG;
+        }
+        cyber::retopo::subdivideAll(mesh->mesh, mode == CYBER_SUBDIV_CATMULL_CLARK
+                                                    ? cyber::retopo::SubdivisionMode::CatmullClark
+                                                    : cyber::retopo::SubdivisionMode::Linear);
         // Reprojection: linear subdivision alone only inserts vertices on
         // the existing facets, so the Target projection is what recovers
-        // curvature ("subdivide+reproject").
+        // curvature ("subdivide+reproject"). Catmull-Clark carries curvature
+        // of its own, but a Target is still the more accurate answer, so the
+        // projection runs in both modes when a snapper is supplied.
         const cyber::retopo::SurfaceSnapper* snap = snapperOf(snapper);
         if (snap != nullptr && !snap->empty()) {
             for (std::uint32_t i = 0; i < mesh->mesh.vertexCapacity(); ++i) {
