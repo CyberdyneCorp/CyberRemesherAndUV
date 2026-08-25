@@ -20,10 +20,20 @@ _REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."
 sys.path.insert(0, os.path.join(_REPO, "examples"))
 sys.path.insert(0, os.path.join(_REPO, "tools", "bench"))
 
+# Probe every third-party module this test actually reaches, not just the
+# first one: examples/common.py needs matplotlib and NumPy at import and SciPy
+# inside surface_metrics, and tools/bench/mesh_metrics.py imports SciPy at
+# module level. Probing only NumPy turned a missing SciPy into a hard failure
+# instead of a skip -- which is how CI first ran this.
 try:
     import numpy as np  # noqa: F401
-except ImportError:
-    print("SKIP: NumPy not available")
+    import scipy  # noqa: F401
+    import matplotlib
+    matplotlib.use("Agg")
+except ImportError as exc:
+    # exc.name is None for an ImportError raised from inside a module rather
+    # than by the import machinery, so fall back to the message itself.
+    print(f"SKIP: {exc.name or exc} not available")
     sys.exit(77)
 
 _CLEAN = "v 0 0 0\nv 1 0 0\nv 1 1 0\nv 0 1 0\nf 1 2 3 4\n"
@@ -95,14 +105,8 @@ def main() -> None:
     # at load, so non-finite reaching _draw means OUR mesh produced it, and the
     # error has to name the panel instead of surfacing as a matplotlib
     # axis-limits failure with no clue which of N panels was responsible.
-    try:
-        import matplotlib
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
-        from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
-    except ImportError:
-        print("SKIP-PART: matplotlib missing, renderer guard not exercised")
-        return
+    import matplotlib.pyplot as plt
+    from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
 
     fig = plt.figure()
     ax = fig.add_subplot(111, projection="3d")

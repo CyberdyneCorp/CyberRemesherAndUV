@@ -2,9 +2,10 @@
 
 A gallery of runnable examples that drive the engine through the **`cyberremesh`
 Python binding** (ctypes over the C ABI) and render the results to PNG with
-matplotlib. Each script generates a procedural input mesh, runs the remeshing
-pipeline with a specific feature highlighted, and writes an image to
-`examples/output/`.
+matplotlib. NumPy, SciPy and matplotlib are all required: SciPy supplies the
+`cKDTree` behind the surface-fidelity and feature-following metrics. Each script
+generates a procedural input mesh, runs the remeshing pipeline with a specific
+feature highlighted, and writes an image to `examples/output/`.
 
 Faces are coloured by arity: **blue = quad, orange = triangle, grey = n-gon**,
 so quad-dominance reads at a glance.
