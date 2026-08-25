@@ -1107,8 +1107,8 @@ CyberStatus cyber_retopo_resymmetrize(CyberMesh* mesh, const CyberSymmetry* symm
  *     face id survives, so caller-side annotations keyed on stable ids
  *     (pins, loop tags, hidden faces) stay valid.
  *
- *   - cyber_retopo_subdivide REBUILDS THE MESH FROM SCRATCH (Mesh::
- *     linearSubdivide returns a new mesh). EVERY vertex, edge and face id
+ *   - cyber_retopo_subdivide (and _ex, in either mode) REBUILDS THE MESH FROM
+ *     SCRATCH (subdivision returns a new mesh). EVERY vertex, edge and face id
  *     is reassigned, so ALL caller-side annotations keyed on ids are
  *     orphaned and must be dropped or rebuilt by the caller. The handle's
  *     own hidden-face / tagged-edge render state is cleared here for the
@@ -1131,15 +1131,45 @@ CyberStatus cyber_retopo_snap_all(CyberMesh* mesh, const CyberSnapper* snapper,
                                   const uint32_t* pinned, size_t pinned_count, size_t* out_moved,
                                   float* out_max_distance);
 
-/* Linear (Catmull-Clark topology, NO smoothing) subdivision into quads. The
- * engine has no smooth/limit-surface subdivision, so this is linear
- * subdivision plus optional REPROJECTION: when `snapper` is non-NULL every
- * vertex of the subdivided mesh is projected onto the Target surface, which
- * is what "subdivide+reproject" means (the reprojection is what recovers
- * curvature — linear subdivision alone only adds vertices along the
- * existing facets). Writes the resulting face count to *out_faces (may be
- * NULL). See the ELEMENT-ID STABILITY note above: all ids are reassigned. */
+/* Subdivision modes. Both produce the SAME topology (every n-gon becomes n
+ * quads around its centroid); they differ only in where the new vertices go. */
+typedef enum CyberSubdivisionMode {
+    /* Vertices stay put, edge points at the midpoint: resolution, no
+     * curvature. The historical behaviour of cyber_retopo_subdivide. */
+    CYBER_SUBDIV_LINEAR = 0,
+    /* Catmull-Clark smooth rules — face points, edge points and the vertex
+     * weighting — so the cage converges toward its limit surface with no
+     * Target to reproject onto. Creases (edges tagged as features, plus
+     * boundary and non-manifold edges) use the sharp rule, so open borders do
+     * not shrink inward and corners stay put. A mesh with no feature tags
+     * subdivides fully smoothly; tag the edges you want kept hard first. */
+    CYBER_SUBDIV_CATMULL_CLARK = 1
+} CyberSubdivisionMode;
+
+/* Subdivision into quads, LINEAR (Catmull-Clark topology, NO smoothing), plus
+ * optional REPROJECTION: when `snapper` is non-NULL every vertex of the
+ * subdivided mesh is projected onto the Target surface, which is what
+ * "subdivide+reproject" means (with linear subdivision the reprojection is
+ * what recovers curvature — linear subdivision alone only adds vertices along
+ * the existing facets). Writes the resulting face count to *out_faces (may be
+ * NULL). See the ELEMENT-ID STABILITY note above: all ids are reassigned.
+ *
+ * Exactly cyber_retopo_subdivide_ex(mesh, snapper, CYBER_SUBDIV_LINEAR,
+ * out_faces). It keeps its old signature rather than growing a mode parameter
+ * because that would break every already-compiled caller of this ABI; the
+ * smooth mode is a sibling entry point instead. */
 CyberStatus cyber_retopo_subdivide(CyberMesh* mesh, const CyberSnapper* snapper, size_t* out_faces);
+
+/* Subdivision into quads in the chosen `mode`, plus the same optional
+ * reprojection as cyber_retopo_subdivide. With CYBER_SUBDIV_CATMULL_CLARK the
+ * result carries curvature on its own, so `snapper` may be NULL even when the
+ * caller wants a rounded surface; passing one still pulls the smoothed result
+ * back onto the Target, which is the accurate combination when a Target
+ * exists. Fails with CYBER_ERR_INVALID_ARG on an unknown mode. Writes the
+ * resulting face count to *out_faces (may be NULL). ELEMENT-ID STABILITY is
+ * as above in BOTH modes: all ids are reassigned. */
+CyberStatus cyber_retopo_subdivide_ex(CyberMesh* mesh, const CyberSnapper* snapper,
+                                      CyberSubdivisionMode mode, size_t* out_faces);
 
 /* Fan-triangulates every face with more than three sides. Writes the
  * resulting face count to *out_faces (may be NULL). See the ELEMENT-ID

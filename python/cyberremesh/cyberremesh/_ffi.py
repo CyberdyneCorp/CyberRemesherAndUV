@@ -77,6 +77,11 @@ FALLOFF_SMOOTH = 1
 FALLOFF_SHARP = 2
 FALLOFF_ROUND = 3
 
+# CyberSubdivisionMode — same topology either way, different vertex positions.
+# Persisted by callers, so these values are append-only.
+SUBDIV_LINEAR = 0
+SUBDIV_CATMULL_CLARK = 1
+
 
 def status_name(status: int) -> str:
     """Human-readable name for a ``cyber_status`` code."""
@@ -860,6 +865,12 @@ def _declare(lib: ctypes.CDLL) -> None:
     # CyberStatus cyber_retopo_subdivide(CyberMesh*, const CyberSnapper*, size_t*)
     lib.cyber_retopo_subdivide.argtypes = [c_void_p, c_void_p, POINTER(c_size_t)]
     lib.cyber_retopo_subdivide.restype = c_int32
+
+    # Same, with a SUBDIV_* mode; the mode-less call above is its linear case.
+    # CyberStatus cyber_retopo_subdivide_ex(CyberMesh*, const CyberSnapper*,
+    #                                       CyberSubdivisionMode, size_t*)
+    lib.cyber_retopo_subdivide_ex.argtypes = [c_void_p, c_void_p, c_int32, POINTER(c_size_t)]
+    lib.cyber_retopo_subdivide_ex.restype = c_int32
 
     # CyberStatus cyber_snapper_create(const CyberMesh* target, CyberSnapper** out)
     lib.cyber_snapper_create.argtypes = [c_void_p, POINTER(c_void_p)]

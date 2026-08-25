@@ -110,6 +110,7 @@ if(TARGET cyber_retopo)
                                         retopo/test_soft_selection.cpp retopo/test_conform.cpp
                                         retopo/test_adjacency.cpp
                                         retopo/test_stroke_interpreter.cpp
+                                        retopo/test_subdivision.cpp
                                         retopo/test_vertex_snap.cpp)
     target_link_libraries(cyber_tests PRIVATE cyber_retopo)
 endif()

@@ -323,6 +323,23 @@ class Falloff:
     ROUND = _ffi.FALLOFF_ROUND
 
 
+class Subdivision:
+    """Subdivision modes (mirrors ``CyberSubdivisionMode``).
+
+    Both modes produce the same topology — every n-gon becomes n quads around
+    its centroid — and differ only in where the new vertices land.
+    """
+
+    #: Vertices stay put, edge points at the midpoint: resolution, no
+    #: curvature. The default, and what :meth:`Mesh.subdivide` has always done.
+    LINEAR = _ffi.SUBDIV_LINEAR
+    #: Catmull-Clark smooth rules, so the cage converges toward its limit
+    #: surface with no Target to reproject onto. Creases — feature-tagged,
+    #: boundary and non-manifold edges — use the sharp rule, so open borders
+    #: keep their shape and corners stay put.
+    CATMULL_CLARK = _ffi.SUBDIV_CATMULL_CLARK
+
+
 @dataclass(frozen=True)
 class SoftTransformReport:
     """Outcome of a weighted transform/relax.
@@ -813,19 +830,29 @@ class Mesh:
         self.save(path)
 
     # -- editing ------------------------------------------------------------
-    def subdivide(self, project_to: Optional["Mesh"] = None) -> int:
+    def subdivide(
+        self,
+        project_to: Optional["Mesh"] = None,
+        mode: int = Subdivision.LINEAR,
+    ) -> int:
         """Subdivide this mesh IN PLACE, returning the resulting face count.
 
-        Linear subdivision with Catmull-Clark *topology* and no smoothing:
-        every n-gon is split into n quads around its centroid, so a quad mesh
-        of N faces becomes 4N quads and a triangle becomes 3 quads. The new
-        vertices land on the existing facets, which adds resolution but not
-        curvature.
+        Every n-gon is split into n quads around its centroid, so a quad mesh
+        of N faces becomes 4N quads and a triangle becomes 3 quads — that is
+        the topology in both modes.
 
-        Pass ``project_to`` to recover curvature: every vertex of the
+        With the default :attr:`Subdivision.LINEAR` there is no smoothing: the
+        new vertices land on the existing facets, which adds resolution but not
+        curvature. Pass ``project_to`` to recover it — every vertex of the
         subdivided mesh is then projected onto that mesh's surface, which is
-        what "subdivide + reproject" means — subdivide the retopologised cage,
+        what "subdivide + reproject" means: subdivide the retopologised cage,
         then pull it back onto the original scan.
+
+        With :attr:`Subdivision.CATMULL_CLARK` the smooth rules run instead, so
+        the cage rounds toward its limit surface without needing a Target at
+        all. Creases — feature-tagged edges plus boundary and non-manifold
+        edges — use the sharp rule, so an open patch keeps its border and
+        corners stay put. ``project_to`` still applies afterwards if given.
 
         The mesh is rebuilt from scratch, so every vertex, edge and face id
         from before the call is invalid afterwards.
@@ -836,7 +863,11 @@ class Mesh:
         if project_to is not None:
             _check(lib.cyber_snapper_create(project_to.handle, ctypes.byref(snapper)))
         try:
-            _check(lib.cyber_retopo_subdivide(self.handle, snapper, ctypes.byref(faces)))
+            _check(
+                lib.cyber_retopo_subdivide_ex(
+                    self.handle, snapper, int(mode), ctypes.byref(faces)
+                )
+            )
         finally:
             if snapper:
                 lib.cyber_snapper_free(snapper)
