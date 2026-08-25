@@ -144,6 +144,18 @@ class CyberStatistics(Structure):
     ]
 
 
+class CyberIsotropicParams(Structure):
+    """Mirror of ``CyberIsotropicParams`` in capi/include/cyber_capi.h."""
+
+    _fields_ = [
+        ("target_edge_length", c_float),
+        ("iterations", c_int32),
+        ("adaptivity", c_float),
+        ("smooth_normal_degrees", c_float),
+        ("sharp_edge_degrees", c_float),
+    ]
+
+
 class CyberAtlasParams(Structure):
     """Mirror of ``CyberAtlasParams`` in capi/include/cyber_capi.h."""
 
@@ -783,6 +795,17 @@ def _declare(lib: ctypes.CDLL) -> None:
     # CyberStatus cyber_mesh_stats(const CyberMesh*, CyberStats* out)
     lib.cyber_mesh_stats.argtypes = [c_void_p, POINTER(CyberStatistics)]
     lib.cyber_mesh_stats.restype = c_int32
+
+    # Adaptive isotropic (triangle) remesh in place — the density control the
+    # bindings previously could not reach at all.
+    # void cyber_default_isotropic_params(CyberIsotropicParams*)
+    lib.cyber_default_isotropic_params.argtypes = [POINTER(CyberIsotropicParams)]
+    lib.cyber_default_isotropic_params.restype = None
+    # CyberStatus cyber_mesh_isotropic_remesh(CyberMesh*, const CyberIsotropicParams*, size_t*)
+    lib.cyber_mesh_isotropic_remesh.argtypes = [
+        c_void_p, POINTER(CyberIsotropicParams), POINTER(c_size_t)
+    ]
+    lib.cyber_mesh_isotropic_remesh.restype = c_int32
 
     lib.cyber_default_atlas_params.argtypes = [POINTER(CyberAtlasParams)]
     lib.cyber_default_atlas_params.restype = None

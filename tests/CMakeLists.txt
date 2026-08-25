@@ -71,7 +71,8 @@ if(TARGET cyber_imageio)
     target_link_libraries(cyber_tests PRIVATE cyber_imageio)
 endif()
 if(TARGET cyber_capi)
-    target_sources(cyber_tests PRIVATE capi/test_capi.cpp capi/test_capi_cache.cpp)
+    target_sources(cyber_tests PRIVATE capi/test_capi.cpp capi/test_capi_cache.cpp
+                                        capi/test_capi_isotropic.cpp)
     target_link_libraries(cyber_tests PRIVATE cyber_capi)
     # Some ABI promises live only in the header's prose (handle lifetimes), so
     # the capi cases read it and gate on what it says.
@@ -330,7 +331,7 @@ if(TARGET cyber_capi_shared AND Python3_FOUND)
                  test_handoff test_mesh_state test_export_presets
                  test_library_lookup test_host_process_hygiene
                  test_io_formats test_subdivide test_examples
-                 test_unwrap_seams test_retopo_ops)
+                 test_unwrap_seams test_retopo_ops test_isotropic_remesh)
         add_test(NAME python_${_pyt}
             COMMAND ${Python3_EXECUTABLE} ${_pydir}/${_pyt}.py)
         set_tests_properties(python_${_pyt} PROPERTIES

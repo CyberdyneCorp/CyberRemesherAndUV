@@ -30,9 +30,11 @@
 #include "cyber/bake/field_evaluator.hpp"
 #include "cyber/core/export_preset.hpp"
 #include "cyber/core/io.hpp"
+#include "cyber/core/isotropic.hpp"
 #include "cyber/core/mesh.hpp"
 #include "cyber/core/pipeline.hpp"
 #include "cyber/core/progress.hpp"
+#include "cyber/core/reference_surface.hpp"
 #include "cyber/core/remesh_params.hpp"
 #include "cyber/core/threading.hpp"
 #include "cyber/handoff/handoff.hpp"
@@ -458,6 +460,25 @@ void cyber_default_params(CyberRemeshParams* params) {
     // quad-cover is the default: it reaches QuadriFlow-class irregular/CV where a solver
     // is available, and degrades to field-aligned (per-island) when it is not.
     params->quadMethod = CYBER_QUAD_QUADCOVER;
+}
+
+void cyber_default_isotropic_params(CyberIsotropicParams* params) {
+    if (params == nullptr) {
+        return;
+    }
+    const cyber::remesh::IsotropicOptions defaults;
+    // 0, and deliberately so: a world-space length cannot have a default that
+    // means anything on an arbitrary mesh, and a silently-invented one would
+    // densify or decimate by orders of magnitude. The remesh rejects it, which
+    // is the loud version of "you have to pick this".
+    params->targetEdgeLength = defaults.targetEdgeLength;
+    params->iterations = defaults.iterations;
+    params->adaptivity = defaults.adaptivity;
+    params->smoothNormalDegrees = defaults.smoothNormalDegrees;
+    // Not part of IsotropicOptions: the feature tagging is a pre-pass this
+    // entry point runs on the caller's behalf, so its threshold comes from the
+    // pipeline parameters that own the same decision.
+    params->sharpEdgeDegrees = cyber::remesh::Parameters{}.sharpEdgeDegrees;
 }
 
 namespace {
@@ -2864,6 +2885,82 @@ CyberStatus cyber_retopo_triangulate(CyberMesh* mesh, size_t* out_faces) {
         // hidden n-gon would come back partly visible: drop the hidden set.
         // Tagged EDGE ids are unaffected and are kept.
         mesh->hiddenFaces.clear();
+        if (out_faces != nullptr) {
+            *out_faces = mesh->mesh.faceCount();
+        }
+        return CYBER_OK;
+    });
+}
+
+// ---- isotropic remeshing ---------------------------------------------------
+//
+// Declared up with the remeshing entry points in the header — that is what it
+// is to a caller — but defined down here because it rewrites topology and so
+// needs runMeshEdit's render-cache invalidation, which is only in scope from
+// the editing block onwards.
+
+CyberStatus cyber_mesh_isotropic_remesh(CyberMesh* mesh, const CyberIsotropicParams* params,
+                                        size_t* out_faces) {
+    return runMeshEdit(mesh, "cyber_mesh_isotropic_remesh", [&] {
+        // Every rejection below happens before the mesh is touched, which is
+        // what lets the header promise an unchanged mesh on them.
+        if (params == nullptr) {
+            setError("cyber_mesh_isotropic_remesh: null params");
+            return CYBER_ERR_INVALID_ARG;
+        }
+        if (mesh->mesh.faceCount() == 0) {
+            setError("cyber_mesh_isotropic_remesh: mesh has no faces");
+            return CYBER_ERR_EMPTY;
+        }
+        if (!std::isfinite(params->targetEdgeLength) || params->targetEdgeLength <= 0.0f) {
+            setError(
+                "cyber_mesh_isotropic_remesh: targetEdgeLength must be finite and > 0 "
+                "(it is a world-space length; cyber_default_isotropic_params leaves it 0 "
+                "for the caller to set)");
+            return CYBER_ERR_INVALID_PARAM;
+        }
+        if (params->iterations < 1) {
+            setError("cyber_mesh_isotropic_remesh: iterations must be >= 1");
+            return CYBER_ERR_INVALID_PARAM;
+        }
+
+        // The engine's isotropicRemesh contracts for triangles. Triangulating
+        // here rather than rejecting is what makes this one call: the obvious
+        // input is a quad mesh the caller just remeshed, and the output is a
+        // triangle mesh either way, so there is no quad topology to protect.
+        mesh->mesh.triangulate();
+        if (params->sharpEdgeDegrees > 0.0f) {
+            mesh->mesh.tagFeatureEdges(params->sharpEdgeDegrees);
+        }
+        // Built AFTER triangulation and BEFORE any remeshing: it is the shape
+        // the caller handed in, frozen, so the passes project onto that
+        // instead of onto a surface drifting under their own smoothing.
+        const cyber::remesh::ReferenceSurface reference(mesh->mesh, params->smoothNormalDegrees);
+
+        cyber::remesh::IsotropicOptions options;
+        options.targetEdgeLength = params->targetEdgeLength;
+        options.iterations = params->iterations;
+        options.adaptivity = params->adaptivity;
+        options.smoothNormalDegrees = params->smoothNormalDegrees;
+        const cyber::remesh::IsotropicStatus status =
+            cyber::remesh::isotropicRemesh(mesh->mesh, reference, options);
+        if (status != cyber::remesh::IsotropicStatus::Success) {
+            // Cancelled is unreachable (no token is passed) and InvalidInput
+            // means the engine rejected something the checks above let past,
+            // so both are reported as what they are: a failure of the remesh.
+            setError(std::string("cyber_mesh_isotropic_remesh: remesh failed (") +
+                     (status == cyber::remesh::IsotropicStatus::Cancelled ? "cancelled"
+                                                                          : "invalid input") +
+                     ")");
+            return CYBER_ERR_RUNTIME;
+        }
+        // Split/collapse/flip recycle ids freely, so an entry left on any of
+        // them would be inherited by unrelated new geometry — see the
+        // ELEMENT-ID STABILITY block in the header.
+        mesh->hiddenFaces.clear();
+        mesh->taggedEdges.clear();
+        mesh->selection = cyber::retopo::SoftSelection{};
+        mesh->selectionSlots.clear();
         if (out_faces != nullptr) {
             *out_faces = mesh->mesh.faceCount();
         }

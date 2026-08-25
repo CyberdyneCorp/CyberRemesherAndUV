@@ -187,6 +187,45 @@ class RemeshParams:
 
 
 @dataclass
+class IsotropicParams:
+    """Adaptive isotropic (triangle) remeshing parameters.
+
+    Mirror of the useful subset of ``cyber::remesh::IsotropicOptions``.
+    ``target_edge_length`` has no default: it is a WORLD-SPACE length, so no
+    value means anything until you have seen the mesh. Size it against the
+    model (a bounding-box diagonal over the number of edges you want across it
+    is the usual choice) — the engine rejects a non-positive one rather than
+    inventing a scale.
+
+    The painted-density field ``IsotropicOptions`` carries is not mirrored
+    here; painted density stays reachable through :func:`remesh`'s ``density``
+    guidance until the isotropic entry point grows the same array-validation
+    surface.
+    """
+
+    target_edge_length: float  # world-space, must be > 0
+    iterations: int = 3  # split/collapse/flip/smooth rounds
+    adaptivity: float = 0.0  # 0 uniform .. 1 fully curvature-adaptive
+    # 0: flat closest-point projection. > 0: PN-triangle (curved) projection
+    # with this crease threshold, so relaxed vertices follow the smooth surface
+    # instead of sinking onto coarse facets.
+    smooth_normal_degrees: float = 0.0
+    # Dihedral threshold used to tag feature edges BEFORE remeshing, so creases
+    # and boundaries survive it. <= 0 skips the tagging pass and honours
+    # whatever the mesh already carries.
+    sharp_edge_degrees: float = 90.0
+
+    def _to_c(self) -> "_ffi.CyberIsotropicParams":
+        return _ffi.CyberIsotropicParams(
+            target_edge_length=float(self.target_edge_length),
+            iterations=int(self.iterations),
+            adaptivity=float(self.adaptivity),
+            smooth_normal_degrees=float(self.smooth_normal_degrees),
+            sharp_edge_degrees=float(self.sharp_edge_degrees),
+        )
+
+
+@dataclass
 class AtlasParams:
     """Automatic UV-atlas parameters (mirror of ``cyber::uv::AtlasOptions``)."""
 
@@ -811,6 +850,51 @@ class Mesh:
     # stability is the contract callers have to read, so each docstring says
     # what it does to ids; :attr:`stats` is dropped by the ops that change
     # topology, because it describes the run that produced the old mesh.
+
+
+    def isotropic_remesh(self, params: "IsotropicParams | float") -> int:
+        """Adaptive isotropic (triangle) remesh IN PLACE, returning the face count.
+
+        This is the "give me more polygons to work with" operation, and the
+        only way to reach the engine's isotropic stage without running the
+        whole quad pipeline. Per iteration it splits long edges, collapses
+        short ones, flips toward valence 6, tangentially smooths and projects
+        back onto the input surface, so edge lengths converge to
+        ``[4/5, 4/3] * target_edge_length``. A target BELOW the mesh's current
+        edge length densifies it; one above decimates it.
+
+        ``params`` is an :class:`IsotropicParams`, or a bare float read as the
+        target edge length when the defaults will do::
+
+            mesh.isotropic_remesh(0.05)
+            mesh.isotropic_remesh(IsotropicParams(0.05, adaptivity=1.0))
+
+        THE RESULT IS A TRIANGLE MESH. A non-triangulated input is
+        triangulated first rather than refused — the obvious call is to
+        densify quads that just came out of :func:`remesh`, and the isotropic
+        passes cannot preserve quads in any case.
+
+        The projection reference is built from the input surface before any
+        remeshing, so the result stays on the shape you passed in. Feature
+        edges are tagged from ``sharp_edge_degrees`` first and are never
+        collapsed, flipped, smoothed off or projected.
+
+        The mesh is rewritten in place, so every vertex, edge and face id from
+        before the call is meaningless afterwards. The call cannot be
+        interrupted; size the target before making it (halving the target
+        roughly quadruples the face count).
+        """
+        if not isinstance(params, IsotropicParams):
+            params = IsotropicParams(float(params))
+        c_params = params._to_c()
+        faces = ctypes.c_size_t(0)
+        _check(
+            _ffi.get_lib().cyber_mesh_isotropic_remesh(
+                self.handle, ctypes.byref(c_params), ctypes.byref(faces)
+            )
+        )
+        self._stats = None
+        return faces.value
 
     def triangulate(self) -> int:
         """Fan-triangulate every face with more than three sides, IN PLACE.

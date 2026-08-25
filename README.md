@@ -377,6 +377,16 @@ The stroke and drawing family (`cyber_retopo_draw_strip`, `create_face`,
 `erase`, `move`, `tweak_vertex`, `distribute_path`, `transform_vertices` and the
 symmetry ops) is still reachable through the C ABI only.
 
+`Mesh.isotropic_remesh(target_edge_length)` (C: `cyber_mesh_isotropic_remesh`)
+is the other direction: adaptive isotropic *triangle* remeshing to a world-space
+edge length, so a target below the mesh's current edge length densifies it and
+one above decimates it. Subdivision quadruples the face count in one
+uncontrollable jump and can only ever add; this converges edge lengths to
+`[4/5, 4/3] × target` by splitting, collapsing, flipping and reprojecting, and
+`IsotropicParams(adaptivity=1.0)` spends those edges where curvature actually
+is. A mesh with quads is triangulated first — the result is always triangles —
+and feature edges are tagged and preserved.
+
 ## How it works
 
 Two algorithms carry the project: the quad retopology pipeline (triangles in, an

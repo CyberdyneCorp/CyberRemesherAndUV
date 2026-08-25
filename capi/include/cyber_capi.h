@@ -230,6 +230,91 @@ CyberStatus cyber_remesh_guided(const CyberMesh* in, const CyberRemeshParams* pa
                                 CyberCancelCb cancel, CyberWarningCb warning, void* user,
                                 CyberMesh** out);
 
+/* ---- isotropic (triangle) remeshing ---------------------------------- */
+
+/* Adaptive isotropic remeshing parameters (POD mirror of the useful subset of
+ * cyber::remesh::IsotropicOptions). Fill with cyber_default_isotropic_params,
+ * then override.
+ *
+ * The painted-density field IsotropicOptions carries is deliberately NOT
+ * mirrored here. A density paint is indexed against the mesh it was authored
+ * on, and this entry point triangulates before it remeshes — so the array
+ * would need its own pointer/count validation surface plus a statement about
+ * which index domain it lives in (cyber_remesh_guided's CyberGuidance is that
+ * surface, for the full pipeline). Painted density therefore stays reachable
+ * only through cyber_remesh_guided until it gets that treatment here. */
+typedef struct CyberIsotropicParams {
+    float targetEdgeLength;    /* world-space edge length the mesh converges
+                                * to; REQUIRED, must be finite and > 0 */
+    int iterations;            /* split/collapse/flip/smooth rounds; > 0 */
+    float adaptivity;          /* 0 uniform .. 1 fully curvature-adaptive */
+    float smoothNormalDegrees; /* 0: flat closest-point projection. > 0:
+                                * PN-triangle (curved) projection, with this
+                                * as the crease threshold, so relaxed vertices
+                                * follow the smooth surface instead of sinking
+                                * onto coarse facets */
+    float sharpEdgeDegrees;    /* dihedral threshold used to tag feature edges
+                                * BEFORE remeshing, so creases and boundaries
+                                * survive it. <= 0 skips the tagging pass and
+                                * honors whatever the mesh already carries */
+} CyberIsotropicParams;
+
+/* Fills params with the engine defaults. No-op on NULL.
+ *
+ * targetEdgeLength is filled with 0, which cyber_mesh_isotropic_remesh
+ * REJECTS: a world-space length has no scale-free default, so the caller has
+ * to pick one against its own mesh (a bounding-box diagonal / N is the usual
+ * choice). This is the one field the filler cannot answer for you. */
+void cyber_default_isotropic_params(CyberIsotropicParams* params);
+
+/* Adaptive isotropic remesh of `mesh`, IN PLACE. Per iteration: split long
+ * edges, collapse short ones, flip toward valence 6, tangentially smooth and
+ * project back onto the input surface. Edge lengths converge to
+ * [4/5, 4/3] * the (adaptivity-scaled) target, so a target BELOW the mesh's
+ * current edge length densifies it and one above decimates it — this is the
+ * "give me more triangles to work with" operation, and the only way to reach
+ * the isotropic stage without running the whole quad pipeline.
+ *
+ * Everything the C++ entry point makes the caller assemble is done here, so
+ * this is a one-call operation:
+ *
+ *   - NON-TRIANGULATED INPUT IS TRIANGULATED, NOT REJECTED. The engine's
+ *     isotropicRemesh requires triangles; rejecting a quad mesh would make
+ *     the most obvious call (densify what cyber_remesh just produced) fail
+ *     for a reason the caller can only fix by calling
+ *     cyber_retopo_triangulate first. So the entry point fan-triangulates
+ *     every face with more than three sides itself. The output is a TRIANGLE
+ *     mesh either way: this operation does not preserve quads and cannot.
+ *   - The projection reference is built from the input surface (after that
+ *     triangulation, before any remeshing), which is what keeps the result on
+ *     the shape you handed in rather than on a mesh drifting under its own
+ *     smoothing.
+ *   - Feature edges are tagged from CyberIsotropicParams.sharpEdgeDegrees;
+ *     tagged edges are never collapsed, flipped, smoothed off or projected.
+ *
+ * Writes the resulting face count to *out_faces (may be NULL). `params` must
+ * be non-NULL — there is no default target edge length to fall back on.
+ *
+ * ELEMENT-ID STABILITY (see the retopo block below for the full contract):
+ * the passes add, remove and rewire elements freely, so EVERY vertex, edge
+ * and face id is meaningless afterwards and all caller-side annotations keyed
+ * on ids must be dropped. The handle's own hidden-face / tagged-edge / soft-
+ * selection state is cleared here for that reason.
+ *
+ * COST: the call is uninterruptible — there is no cancellable twin yet — and
+ * a target edge length far below the input's runs several extra convergence
+ * iterations by design. Halving the target roughly quadruples the face count;
+ * size the target before calling rather than expecting to abort.
+ *
+ * Fails with CYBER_ERR_INVALID_ARG on a NULL mesh or NULL params,
+ * CYBER_ERR_EMPTY when the mesh has no faces, and CYBER_ERR_INVALID_PARAM
+ * when targetEdgeLength is not finite and positive or iterations is < 1. All
+ * three are decided before anything is touched, so on them the mesh is left
+ * exactly as it was; a CYBER_ERR_RUNTIME can only come from the remesh itself
+ * and leaves a partially rewritten mesh, like every other editing op here. */
+CyberStatus cyber_mesh_isotropic_remesh(CyberMesh* mesh, const CyberIsotropicParams* params,
+                                        size_t* out_faces);
+
 /* ---- statistics ------------------------------------------------------ */
 
 /* Topology summary of a mesh. */
