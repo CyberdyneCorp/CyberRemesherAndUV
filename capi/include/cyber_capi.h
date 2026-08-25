@@ -1797,8 +1797,8 @@ void cyber_seam_path_drop_resume_marker(CyberSeamPath* path);
  * atlas's chart-angle and chart-merge fields are absent on purpose: those exist
  * to DECIDE where to cut, and here that decision is the seam set. */
 typedef struct CyberUnwrapSeamsParams {
-    float packMargin;  /* gap around each island, in UV units */
-    int textureSize;   /* resolution for the texel-density readout */
+    float packMargin;   /* gap around each island, in UV units */
+    int textureSize;    /* resolution for the texel-density readout */
     int reorientCharts; /* non-zero: rotate each chart to its minimum-area
                          * bounding box before packing */
 } CyberUnwrapSeamsParams;
