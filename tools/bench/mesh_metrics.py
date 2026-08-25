@@ -55,7 +55,23 @@ def load_obj(path: str) -> MeshData:
                     idx.append(i - 1 if i > 0 else len(verts) + i)
                 if len(idx) >= 3:
                     faces.append(tuple(idx))
-    return MeshData(np.asarray(verts, dtype=np.float64).reshape(-1, 3), faces)
+    vertices = np.asarray(verts, dtype=np.float64).reshape(-1, 3)
+    # Refuse non-finite geometry rather than measuring it. A solver can exit 0
+    # and still write "v nan nan nan" -- QuadriFlow does, non-deterministically,
+    # on the flat-CAD cube -- and every metric below would then report a number
+    # that looks ordinary: NaN positions give a 0-degree median and a 74% sliver
+    # rate, which reads as "the reference did badly" rather than "the reference
+    # produced nothing measurable". A benchmark that records that number is
+    # worse than one that fails.
+    bad = int(np.count_nonzero(~np.isfinite(vertices)))
+    if bad:
+        rows = int(np.count_nonzero(~np.isfinite(vertices).all(axis=1)))
+        raise ValueError(
+            f"{path}: {bad} non-finite vertex coordinates across {rows} of "
+            f"{len(vertices)} vertices. The solver that wrote this file failed "
+            f"on this input without saying so; its metrics would be meaningless."
+        )
+    return MeshData(vertices, faces)
 
 
 def face_counts(mesh: MeshData) -> dict:

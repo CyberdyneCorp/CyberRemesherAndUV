@@ -232,6 +232,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: lukka/get-cmake@latest
+      # NumPy and matplotlib are what python_test_examples and the reference
+      # panels need. Without them those tests exit 77 and CTest reports SKIP,
+      # so the lane went green having rendered nothing -- which is how a
+      # non-finite-geometry crash in 04_sharp_edges.py survived on main.
+      - name: Install Python test dependencies
+        run: python3 -m pip install --upgrade --disable-pip-version-check numpy matplotlib
       - name: Configure (cpu-headless)
         run: cmake --preset cpu-headless
       - name: Build

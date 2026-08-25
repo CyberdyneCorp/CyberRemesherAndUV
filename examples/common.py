@@ -99,7 +99,8 @@ def quadriflow_try(binary: "str | None", model_path: str, faces: int) -> "MeshDa
         return None
     try:
         return quadriflow_remesh(binary, model_path, faces)
-    except Exception:  # noqa: BLE001 - QuadriFlow failure -> no reference panel
+    except Exception as exc:  # noqa: BLE001 - QuadriFlow failure -> no reference panel
+        print(f"  QuadriFlow panel dropped: {exc}")
         return None
 
 
@@ -156,7 +157,8 @@ def autoremesher_try(binary: "str | None", model_path: str, faces: int) -> "Mesh
         return None
     try:
         return autoremesher_remesh(binary, model_path, faces)
-    except Exception:  # noqa: BLE001 - AutoRemesher failure -> no reference panel
+    except Exception as exc:  # noqa: BLE001 - AutoRemesher failure -> no reference panel
+        print(f"  AutoRemesher panel dropped: {exc}")
         return None
 
 
@@ -736,7 +738,20 @@ def load_obj(path: str) -> MeshData:
                 positions.append((float(parts[1]), float(parts[2]), float(parts[3])))
             elif parts[0] == "f":
                 faces.append([int(p.split("/")[0]) - 1 for p in parts[1:]])
-    return {"positions": np.array(positions, dtype=float), "faces": faces}
+    pos = np.array(positions, dtype=float)
+    # A solver can exit 0 and still write "v nan nan nan" (QuadriFlow does,
+    # non-deterministically, on the flat-CAD cube). Refusing here is what turns
+    # that into a dropped reference panel via the *_try wrappers, instead of a
+    # "Axis limits cannot be NaN or Inf" traceback out of matplotlib three
+    # frames deeper, or -- worse -- a rendered panel labelled with the
+    # 0-degree median that NaN positions happen to produce.
+    if pos.size and not np.isfinite(pos).all():
+        bad = int(np.count_nonzero(~np.isfinite(pos)))
+        raise ValueError(
+            f"{path}: {bad} non-finite vertex coordinates; the writer of this "
+            f"file failed on this input without reporting it"
+        )
+    return {"positions": pos, "faces": faces}
 
 
 # ---------------------------------------------------------------------------
@@ -788,6 +803,12 @@ def _draw(ax, mesh: MeshData, title: str) -> None:
     coll.set_alpha(1.0)
     ax.add_collection3d(coll)
 
+    if not np.isfinite(pos).all():
+        # Reference panels are filtered at load, so reaching this means OUR
+        # mesh carries non-finite positions. Say so here rather than letting
+        # matplotlib raise "Axis limits cannot be NaN or Inf" with no clue
+        # which of the N panels was responsible.
+        raise ValueError(f"panel {title!r}: mesh has non-finite vertex positions")
     lo = pos.min(axis=0)
     hi = pos.max(axis=0)
     center = (lo + hi) / 2.0
