@@ -3,7 +3,7 @@
 > Note: releases 0.3.0, 0.4.0 and 0.5.0 were tagged without changelog entries;
 > their content is recorded in `docs/ROADMAP.md`. Entries resume here.
 
-## Unreleased
+## 0.6.0 - 2026-08-24
 
 ### Upgrade notes
 
@@ -24,6 +24,17 @@ is listed; this is the index, not the account.
 - Meshes at coordinates far from the origin now terminate under a resolution
   floor and a face budget instead of exhausting memory; meshes at ordinary
   coordinates are byte-identical. *(Hardened)*
+- A mesh with *any* sharp features now routes to the native seamless solver
+  first; only a surface with none at all (a sphere, a torus) goes to the vendored
+  Geogram field. The old threshold sent every real scanned and CAD model to the
+  vendored path. Across eight community models this moves mean median quad angle
+  77.4° → 81.0° and the irregular-vertex rate 6.4% → 3.4%, at the cost of
+  rocker-arm (82° → 74°). `CYBER_QC_ROUTE_CREASE=0.02` restores the old
+  behaviour. *(Fixed)*
+- The cross-field smoother converges instead of oscillating, so remesh output
+  changes on every input. It ran Jacobi on a bipartite dual graph and two-cycled:
+  on a flat grid 15 of 72 faces came out at the maximum 45° off, with the sweep
+  count's parity deciding which half of each quad was damaged. *(Fixed)*
 - Remeshing is now reproducible across toolchains, and the meshes it produces
   change as a result. The cross field no longer routes angles through libm's
   `sinf`/`cosf` (Apple Clang and GCC disagree on those by one ULP), and the
@@ -86,6 +97,14 @@ is listed; this is the index, not the account.
   build tree it does not own. *(Hardened)*
 
 ### Added
+
+- **The benchmark regression gate actually runs.** `tests/CMakeLists.txt` only
+  registered the `bench` case when python3 could import numpy and scipy, and no
+  CI lane installed either, so the case never appeared in the ctest list at all —
+  a green suite with no `bench` line reads exactly like one with a passing bench
+  line. The case is registered unconditionally now (it reports CTest's SKIP code
+  when it cannot run, so it stays visible), and a nightly `hardening.yml` job
+  builds with the vendored field REQUIRED and fails if the gate reports SKIPPED.
 
 - **Seam-driven UV unwrap in the bindings.** The manual UV workflow used to
   dead-end: the C ABI shipped 24 seam entry points — `cyber_seam_set_*` and the
