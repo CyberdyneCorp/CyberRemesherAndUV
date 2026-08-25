@@ -602,6 +602,74 @@ def _declare_soft_selection(lib: ctypes.CDLL) -> None:
     lib.cyber_retopo_selection_relax.restype = c_int32
 
 
+def _declare_retopo_ops(lib: ctypes.CDLL) -> None:
+    """Whole-mesh and local retopology edits (cyber_capi.h "EditMesh batch
+    commands" plus the gesture ops that need no stroke geometry).
+
+    ELEMENT-ID STABILITY, copied from the header because callers key
+    annotations on these ids: ``snap_all`` moves positions only, so every
+    vertex/edge/face id survives; ``triangulate`` keeps vertex and edge ids and
+    the ids of the faces it splits, but each n-gon gains NEW face ids for its
+    extra triangles; the topology ops below (delete_faces, dissolve_edges,
+    insert_loop, merge_vertices, rotate_edge) retire the elements they consume,
+    so ids collected before the call must be re-read after it.
+
+    ``snapper`` is a plain ``c_void_p`` here, the same way
+    :func:`_declare_soft_selection` passes it: it is an opaque handle and NULL
+    means "no Target snapping".
+    """
+    # CyberStatus cyber_retopo_relax(CyberMesh*, const float[3], float, float,
+    #                                int, int, const uint32_t*, size_t,
+    #                                const CyberSnapper*)
+    # radius <= 0 relaxes the whole mesh, which is why there is no separate
+    # relax-all entry point in the ABI.
+    lib.cyber_retopo_relax.argtypes = [
+        c_void_p, POINTER(c_float), c_float, c_float, c_int32, c_int32,
+        POINTER(c_uint32), c_size_t, c_void_p,
+    ]
+    lib.cyber_retopo_relax.restype = c_int32
+
+    # CyberStatus cyber_retopo_snap_all(CyberMesh*, const CyberSnapper*,
+    #                                   const uint32_t*, size_t, size_t*, float*)
+    lib.cyber_retopo_snap_all.argtypes = [
+        c_void_p, c_void_p, POINTER(c_uint32), c_size_t, POINTER(c_size_t),
+        POINTER(c_float),
+    ]
+    lib.cyber_retopo_snap_all.restype = c_int32
+
+    # CyberStatus cyber_retopo_triangulate(CyberMesh*, size_t*)
+    lib.cyber_retopo_triangulate.argtypes = [c_void_p, POINTER(c_size_t)]
+    lib.cyber_retopo_triangulate.restype = c_int32
+
+    # CyberStatus cyber_retopo_delete_faces(CyberMesh*, const uint32_t*, size_t,
+    #                                       size_t*)
+    lib.cyber_retopo_delete_faces.argtypes = [
+        c_void_p, POINTER(c_uint32), c_size_t, POINTER(c_size_t),
+    ]
+    lib.cyber_retopo_delete_faces.restype = c_int32
+
+    # CyberStatus cyber_retopo_dissolve_edges(CyberMesh*, const uint32_t*,
+    #                                         size_t, size_t*)
+    lib.cyber_retopo_dissolve_edges.argtypes = [
+        c_void_p, POINTER(c_uint32), c_size_t, POINTER(c_size_t),
+    ]
+    lib.cyber_retopo_dissolve_edges.restype = c_int32
+
+    # CyberStatus cyber_retopo_insert_loop(CyberMesh*, uint32_t, float, size_t*)
+    lib.cyber_retopo_insert_loop.argtypes = [
+        c_void_p, c_uint32, c_float, POINTER(c_size_t),
+    ]
+    lib.cyber_retopo_insert_loop.restype = c_int32
+
+    # CyberStatus cyber_retopo_merge_vertices(CyberMesh*, uint32_t, uint32_t, int)
+    lib.cyber_retopo_merge_vertices.argtypes = [c_void_p, c_uint32, c_uint32, c_int32]
+    lib.cyber_retopo_merge_vertices.restype = c_int32
+
+    # CyberStatus cyber_retopo_rotate_edge(CyberMesh*, uint32_t)
+    lib.cyber_retopo_rotate_edge.argtypes = [c_void_p, c_uint32]
+    lib.cyber_retopo_rotate_edge.restype = c_int32
+
+
 def _declare_seam_path(lib: ctypes.CDLL) -> None:
     """Auto-routed seam paths (the UV Path tool).
 
@@ -841,6 +909,7 @@ def _declare(lib: ctypes.CDLL) -> None:
     lib.cyber_snapper_free.restype = None
 
     _declare_soft_selection(lib)
+    _declare_retopo_ops(lib)
     _declare_document(lib)
     _declare_seam_path(lib)
     _declare_bridge(lib)

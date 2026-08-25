@@ -41,6 +41,7 @@ __all__ = [
     "bake",
     "Falloff",
     "Snapper",
+    "SnapReport",
     "SoftTransformReport",
     "SeamCostParams",
     "SeamSet",
@@ -315,6 +316,18 @@ class SoftTransformReport:
         )
 
 
+@dataclass(frozen=True)
+class SnapReport:
+    """Outcome of :meth:`Mesh.snap_all` — the whole-mesh Target projection."""
+
+    #: Live, unpinned vertices the projection actually displaced. A vertex
+    #: already sitting on the Target is not counted, so this is "how much work
+    #: was left", not the vertex count.
+    moved: int
+    #: Largest single displacement among those, 0.0 when nothing moved.
+    max_distance: float
+
+
 class Snapper:
     """Snapshot snapper over a Target mesh (a BVH for closest-surface queries).
 
@@ -390,6 +403,20 @@ def _uint32_buffer(values) -> "ctypes.Array":
         else:
             flat_list.extend(int(v) for v in item)
     return (ctypes.c_uint32 * len(flat_list))(*flat_list)
+
+
+def _ids(values: Optional[Sequence[int]]) -> Tuple[Optional["ctypes.Array"], int]:
+    """A ``(buffer, count)`` pair for an optional id list, NULL/0 when empty.
+
+    "No ids" is spelled NULL with count 0 throughout the C ABI (empty pin
+    sets, empty face lists), which is what the header documents; handing it a
+    zero-length array instead relies on ctypes' pointer for an empty buffer
+    being usable, so this returns the documented spelling.
+    """
+    ids = [int(v) for v in (values or [])]
+    if not ids:
+        return None, 0
+    return (ctypes.c_uint32 * len(ids))(*ids), len(ids)
 
 
 def _read_ids(reader: Callable[[Optional["ctypes.Array"], int], int]) -> List[int]:
@@ -776,6 +803,188 @@ class Mesh:
                 lib.cyber_snapper_free(snapper)
         self._stats = None
         return faces.value
+
+    # -- retopology mesh operations -----------------------------------------
+    #
+    # The whole-mesh commands and the gesture ops that need no stroke geometry
+    # (the stroke/drawing family still lives behind the C ABI only). Element-id
+    # stability is the contract callers have to read, so each docstring says
+    # what it does to ids; :attr:`stats` is dropped by the ops that change
+    # topology, because it describes the run that produced the old mesh.
+
+    def triangulate(self) -> int:
+        """Fan-triangulate every face with more than three sides, IN PLACE.
+
+        Returns the resulting face count. Vertex and edge ids survive, and so
+        do the ids of the faces that get split, but each n-gon gains NEW face
+        ids for its extra triangles: vertex- and edge-keyed annotations stay
+        valid while face-keyed ones become partial. A mesh with no faces
+        raises :class:`CyberError`.
+        """
+        faces = ctypes.c_size_t(0)
+        _check(
+            _ffi.get_lib().cyber_retopo_triangulate(self.handle, ctypes.byref(faces))
+        )
+        self._stats = None
+        return faces.value
+
+    def relax(
+        self,
+        center: Optional[Sequence[float]] = None,
+        radius: float = 0.0,
+        strength: float = 0.5,
+        iterations: int = 1,
+        auto_pin_corners: bool = False,
+        pinned: Optional[Sequence[int]] = None,
+        snapper: Optional["Snapper"] = None,
+    ) -> None:
+        """Tangential Laplacian smoothing, brushed or over the whole mesh.
+
+        Give ``center`` to confine the smoothing to a brush of ``radius``
+        around it; leave it ``None`` to relax EVERY vertex — the ABI has no
+        separate relax-all call, a non-positive radius is how you ask for one,
+        so ``radius`` is ignored in that case rather than quietly turning the
+        call back into a brush at the origin.
+
+        ``strength`` is the 0..1 per-iteration blend and ``iterations`` must be
+        at least 1; anything else raises :class:`CyberError`. Vertices in
+        ``pinned`` are held, and ``auto_pin_corners`` additionally holds
+        low-valence grid corners so regular patch shapes survive. A ``snapper``
+        reprojects the vertices it moves onto that Target inside the same pass.
+
+        Positions only: every vertex, edge and face id survives.
+        """
+        whole_mesh = center is None
+        brush = _vec3((0.0, 0.0, 0.0) if whole_mesh else center)
+        pin_buf, pin_count = _ids(pinned)
+        _check(
+            _ffi.get_lib().cyber_retopo_relax(
+                self.handle, brush, 0.0 if whole_mesh else float(radius),
+                float(strength), int(iterations), 1 if auto_pin_corners else 0,
+                pin_buf, pin_count, snapper.handle if snapper else None,
+            )
+        )
+
+    def snap_all(
+        self, snapper: Optional["Snapper"], pinned: Optional[Sequence[int]] = None
+    ) -> SnapReport:
+        """Project every live vertex onto a Target surface.
+
+        ``snapper`` has no default and a missing or empty one raises
+        :class:`CyberError` — there is nothing to snap to otherwise, and the
+        ABI refuses rather than quietly doing nothing. ``None`` is passed
+        through so that refusal comes from the engine, with its message.
+        Vertices listed in ``pinned`` are left exactly where they are.
+
+        Positions only: every vertex, edge and face id survives, so
+        annotations keyed on ids (pins, loop tags, hidden faces) stay valid.
+        """
+        pin_buf, pin_count = _ids(pinned)
+        moved = ctypes.c_size_t(0)
+        max_distance = ctypes.c_float(0.0)
+        _check(
+            _ffi.get_lib().cyber_retopo_snap_all(
+                self.handle, snapper.handle if snapper else None, pin_buf,
+                pin_count, ctypes.byref(moved), ctypes.byref(max_distance),
+            )
+        )
+        return SnapReport(moved=moved.value, max_distance=max_distance.value)
+
+    def delete_faces(self, faces: Sequence[int]) -> int:
+        """Delete the listed faces, then any vertices left isolated.
+
+        Dead and out-of-range face ids are SKIPPED rather than failing, so the
+        return value is how many were actually removed, not ``len(faces)``.
+        The removed faces, and the edges and vertices that went with them, are
+        dead ids afterwards.
+        """
+        buf, count = _ids(faces)
+        removed = ctypes.c_size_t(0)
+        _check(
+            _ffi.get_lib().cyber_retopo_delete_faces(
+                self.handle, buf, count, ctypes.byref(removed)
+            )
+        )
+        self._stats = None
+        return removed.value
+
+    def dissolve_edges(self, edges: Sequence[int]) -> int:
+        """Dissolve interior edges, returning how many actually dissolved.
+
+        Each listed edge with exactly two live faces is removed and its faces
+        merged into one, so a triangle pair becomes a quad. Dead, boundary and
+        would-be-degenerate edges are SKIPPED, as are edges invalidated by an
+        earlier dissolve in the same call — dissolving none is a success
+        returning 0, not an error.
+
+        Each merge retires the dissolved edge and BOTH its faces and creates a
+        new face, so face ids gathered before the call may be dead afterwards.
+        """
+        buf, count = _ids(edges)
+        dissolved = ctypes.c_size_t(0)
+        _check(
+            _ffi.get_lib().cyber_retopo_dissolve_edges(
+                self.handle, buf, count, ctypes.byref(dissolved)
+            )
+        )
+        self._stats = None
+        return dissolved.value
+
+    def insert_loop(self, edge: int, t: float = 0.5) -> int:
+        """Insert a COMPLETE edge loop around the quad ring through ``edge``.
+
+        Every edge of the ring is split at ``t`` (strictly inside ``(0, 1)``;
+        0.5 = midpoints) and every ring quad is split between consecutive
+        midpoints; a lone quad degenerates to the one-quad insert. Returns the
+        number of NEW faces. An edge that is dead or borders no quad, or a
+        ``t`` outside ``(0, 1)``, raises :class:`CyberError` with the mesh
+        unchanged.
+
+        The split faces and edges are replaced, so face and edge ids gathered
+        before the call may be dead; existing vertex ids survive and the
+        midpoints are added as new ones.
+        """
+        new_faces = ctypes.c_size_t(0)
+        _check(
+            _ffi.get_lib().cyber_retopo_insert_loop(
+                self.handle, int(edge), float(t), ctypes.byref(new_faces)
+            )
+        )
+        self._stats = None
+        return new_faces.value
+
+    def merge_vertices(self, keep: int, remove: int, at_midpoint: bool = False) -> None:
+        """Merge vertex ``remove`` into vertex ``keep``.
+
+        Faces degenerated by the merge are deleted. With ``at_midpoint`` the
+        survivor moves to the pair's midpoint, otherwise it stays at ``keep``'s
+        position. A dead vertex on either side, or ``keep == remove``, raises
+        :class:`CyberError` with the mesh unchanged.
+
+        ``keep`` survives; ``remove`` and every face and edge the merge
+        collapsed are dead ids afterwards.
+        """
+        _check(
+            _ffi.get_lib().cyber_retopo_merge_vertices(
+                self.handle, int(keep), int(remove), 1 if at_midpoint else 0
+            )
+        )
+        self._stats = None
+
+    def rotate_edge(self, edge: int) -> None:
+        """Rotate an interior edge.
+
+        A triangle pair flips its shared diagonal; a quad pair is re-split one
+        ring corner over, turning the pair's loop-flow direction. An edge that
+        is dead, on the boundary, part of a pair that is neither two triangles
+        nor two quads, or whose rotation would fold the mesh, raises
+        :class:`CyberError` with the mesh unchanged.
+
+        The quad case rebuilds the pair, so both face ids and the rotated
+        edge's id may be dead afterwards; vertex ids always survive.
+        """
+        _check(_ffi.get_lib().cyber_retopo_rotate_edge(self.handle, int(edge)))
+        self._stats = None
 
     @classmethod
     def load_handoff(cls, path: str) -> Tuple["Mesh", "HandoffInfo"]:

@@ -318,7 +318,7 @@ Two more pieces ride on the same "no hard dependency" rule:
   EditMesh onto the new Target preserving its topology exactly, and reports the
   **maximum and RMS deviation** plus any vertices past a caller-set threshold.
   It completes and flags rather than silently stretching.
-### Mesh I/O and subdivision
+### Mesh I/O and mesh editing
 
 `Mesh.load` / `Mesh.save` (C: `cyber_mesh_load` / `cyber_mesh_save`) dispatch on
 the file extension.
@@ -349,6 +349,33 @@ the source surface (0.635% → 0.325%).
 ![Subdivision with and without reprojection](examples/output/16_subdivide.png)
 
 <sub>Quad remesh → linear subdivision → subdivision reprojected onto the source surface · <code>examples/16_subdivide.py</code></sub>
+
+Subdivide is no longer the only edit Python can reach. The rest of the
+whole-mesh and local retopology operations are bound too, each a `Mesh` method
+over the matching `cyber_retopo_*` entry point:
+
+| Method | Does |
+|--------|------|
+| `triangulate()` | fan-triangulates every face with more than three sides |
+| `relax(...)` | tangential Laplacian smoothing, brushed or whole-mesh, honoring pins |
+| `snap_all(snapper, ...)` | projects every unpinned vertex onto a Target surface |
+| `delete_faces(faces)` | deletes faces, then the vertices left isolated |
+| `dissolve_edges(edges)` | merges the two faces of each interior edge |
+| `insert_loop(edge, t)` | inserts a complete edge loop around a quad ring |
+| `merge_vertices(keep, remove)` | welds one vertex onto another |
+| `rotate_edge(edge)` | flips a triangle pair's diagonal / turns a quad pair's loop flow |
+
+The batch operations (`delete_faces`, `dissolve_edges`) **skip** ids they cannot
+act on and return how many they really touched, so replaying a stale selection
+is a no-op rather than an error; the single-element operations refuse and leave
+the mesh unchanged. Each method's docstring carries the C header's element-id
+stability contract — which of the vertex, edge and face ids survive the call —
+because caller-side annotations are keyed on exactly those ids.
+
+The stroke and drawing family (`cyber_retopo_draw_strip`, `create_face`,
+`create_grid`, the `extend_boundary_*` ops, `patch_clone`, `surface_cut`,
+`erase`, `move`, `tweak_vertex`, `distribute_path`, `transform_vertices` and the
+symmetry ops) is still reachable through the C ABI only.
 
 ## How it works
 
