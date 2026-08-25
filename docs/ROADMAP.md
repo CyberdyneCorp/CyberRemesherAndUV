@@ -89,8 +89,30 @@ and saw the good numbers, a machine with them ran the vendored field and saw the
 bad ones, nothing in CI ran this corpus at all, and until 2026-08-24 the QuadriFlow
 reference could not even be built on macOS to compare against.
 
-Changing the routing default is a solver decision, not a documentation one, so it
-is NOT made here.
+### Routing default changed: any creasing routes native (2026-08-24)
+
+Widened to eight models and measured both routings on the same build, the crease
+threshold of 0.02 sat ABOVE every organic model's fraction, so all of them went to
+the vendored path. Lowering it to 1e-4 — "any creasing at all" — gives, at matched
+counts: spot 78 -> 85, cheburashka 65 -> 82, armadillo 72 -> 79, bunny 78 -> 80,
+fandisk and cow unchanged, and rocker-arm 82 -> 74. Mean median 77.4 -> 81.0,
+irregular 6.4% -> 3.4%.
+
+The threshold is not tuned: it separates has-features from has-none. Going all the
+way to unconditional native-first was tried and is WRONG — on the generated
+primitives it costs the torus 0 -> 54 singularities and 5.9 -> 21.8 degrees of angle
+deviation, and fails the bench gate on sphere and torus. A perfectly smooth closed
+surface is the case the vendored field genuinely wins.
+
+The full suite passes on the new default, bench gate included, with baselines
+untouched.
+
+**Still open: the crease fraction cannot do better than this.** rocker-arm (0.0074),
+the one model that genuinely prefers the vendored path, sits between spot (0.0051)
+and cheburashka (0.0142), which do not. No threshold on this feature separates
+them, so rocker-arm's 8 degrees is the price of a heuristic that cannot express the
+answer. Choosing per input by extracting both and comparing is the real fix; it
+costs a second extraction, not just a second solve, and is not attempted here.
 
 **What did NOT regress**, and is worth more than the median gap: topological
 defects are **0 on all six models**, against QuadriFlow's 80 on the bunny and 722

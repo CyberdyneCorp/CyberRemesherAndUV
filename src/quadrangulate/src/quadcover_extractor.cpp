@@ -1257,8 +1257,39 @@ SeamlessUv computeSeamlessUv(const Mesh& mesh, float targetEdgeLength, float har
     // vendored-first order (Geogram wins there). CYBER_QC_ROUTE_CREASE tunes the
     // interior-crease-fraction threshold (0 disables); CYBER_QC_NO_ROUTE forces
     // the original vendored-first order for A/B.
+    // The other half of that reasoning -- that smooth ORGANIC meshes do better on
+    // the vendored path -- did not survive measurement across a wider corpus
+    // (2026-08-24, eight community models, both paths at matched quad counts):
+    //
+    //   model           crease   vendored-first   native-first
+    //   spot            0.0051   78 / 3%          85 / 2%
+    //   cheburashka     0.0142   65 / 9%          82 / 4%
+    //   armadillo       0.0050   72 / 13%         79 / 4%
+    //   stanford-bunny  0.0037   78 / 11%         80 / 4%
+    //   rocker-arm      0.0074   82 / 2%          74 / 3%
+    //
+    // Mean median 77.4 -> 81.0 and irregular 6.4% -> 3.4% by going native first,
+    // paying rocker-arm's 82 -> 74. The 0.02 threshold sat above every one of these
+    // fractions, so it sent all of them to the vendored path.
+    //
+    // What the threshold is really for is the case where the vendored path wins
+    // decisively: a surface with no sharp features at ALL. On the generated
+    // primitives, always-native costs torus 0 -> 54 singularities and 5.9 -> 21.8
+    // degrees of angle deviation. So the default drops to "any creasing at all
+    // routes native", which keeps a sphere or a torus on the vendored solver and
+    // moves every real scanned or CAD model to the native one. It is not a tuned
+    // constant: the split is has-features vs has-none.
+    //
+    // Note the crease fraction cannot do better than this. rocker-arm (0.0074),
+    // the one model here that genuinely prefers the vendored path, sits BETWEEN
+    // spot (0.0051) and cheburashka (0.0142), which do not, so no threshold gets
+    // all three right. Choosing per input by measuring both is the real answer and
+    // is not attempted here.
+    //
+    // CYBER_QC_ROUTE_CREASE=<fraction> tunes it (0.02 restores the old behaviour,
+    // 0 disables native routing); CYBER_QC_NO_ROUTE forces vendored-first.
     const char* routeEnv = std::getenv("CYBER_QC_ROUTE_CREASE");
-    const float routeThresh = routeEnv != nullptr ? static_cast<float>(std::atof(routeEnv)) : 0.02f;
+    const float routeThresh = routeEnv != nullptr ? static_cast<float>(std::atof(routeEnv)) : 1e-4f;
     // User-drawn guidance FORCES the native route: the vendored Geogram
     // quad_cover has no hook for either flow guides or painted density (it
     // builds its own frame field from a single scalar density inside sources we
