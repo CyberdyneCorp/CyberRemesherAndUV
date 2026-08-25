@@ -98,6 +98,22 @@ is listed; this is the index, not the account.
 
 ### Added
 
+- **Isotropic (triangle) remeshing in the bindings.** `isotropicRemesh` — the
+  engine's real density control (target edge length, iterations, curvature
+  adaptivity, PN-triangle smoothing) — had no C entry point at all: it ran only
+  as an internal stage of the quad pipeline, so no binding consumer could
+  densify or re-tessellate a mesh. `cyber_mesh_isotropic_remesh` (Python
+  `Mesh.isotropic_remesh`) remeshes a handle in place to a target edge length,
+  and does for the caller what the C++ contract makes them do themselves: it
+  triangulates a non-triangulated input rather than rejecting it, tags feature
+  edges, and freezes the projection reference from the input surface before any
+  pass runs. `CyberIsotropicParams` / `IsotropicParams` mirror the engine's
+  options, filled by `cyber_default_isotropic_params` — except the target edge
+  length, which is world-space and is left at 0 and rejected rather than
+  invented. Painted density is deliberately not mirrored yet and the header says
+  so, naming `cyber_remesh_guided` as where it is reachable. The result is
+  always a triangle mesh, and every element id is invalidated.
+
 - **The benchmark regression gate actually runs.** `tests/CMakeLists.txt` only
   registered the `bench` case when python3 could import numpy and scipy, and no
   CI lane installed either, so the case never appeared in the ctest list at all —
