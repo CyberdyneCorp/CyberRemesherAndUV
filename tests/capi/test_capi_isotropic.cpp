@@ -70,6 +70,15 @@ std::string ellipsoidObj(float rx, float ry, float rz, int rings, int segments) 
 
 // Loads OBJ text through the C loader, so every case starts from the same
 // pure-C path a binding consumer would take.
+// A unit cube. Every edge is a 90-degree dihedral, which makes it the mesh
+// where the feature-tagging threshold is at its most visible: a low threshold
+// tags all twelve, a high one tags none.
+std::string cubeObj() {
+    return "v -0.5 -0.5 -0.5\nv 0.5 -0.5 -0.5\nv 0.5 0.5 -0.5\nv -0.5 0.5 -0.5\n"
+           "v -0.5 -0.5 0.5\nv 0.5 -0.5 0.5\nv 0.5 0.5 0.5\nv -0.5 0.5 0.5\n"
+           "f 1 4 3 2\nf 5 6 7 8\nf 1 2 6 5\nf 2 3 7 6\nf 3 4 8 7\nf 4 1 5 8\n";
+}
+
 CyberMesh* loadObjText(const std::string& text, const char* name) {
     const std::filesystem::path path = std::filesystem::temp_directory_path() / name;
     {
@@ -207,6 +216,87 @@ TEST_CASE("capi isotropic remesh: adaptivity reaches the engine's scale field") 
     // Same value twice is still deterministic: the spread is the knob, not
     // run-to-run noise.
     CHECK(remeshAt(1.0f).second == adaptivePositions);
+}
+
+// The three cases below apply the same "two runs differing only in the knob"
+// check the adaptivity case above uses. Each was written against a mutation:
+// dropping the corresponding assignment in cyber_mesh_isotropic_remesh left the
+// whole suite green, so every one of these knobs could have been accepted,
+// documented, and silently discarded without a test noticing.
+
+TEST_CASE("capi isotropic remesh: iterations reaches the engine") {
+    auto remeshWith = [](int iterations) {
+        CyberMesh* mesh = loadObjText(cubeObj(), "cyber_capi_iso_iters.obj");
+        CyberIsotropicParams params{};
+        cyber_default_isotropic_params(&params);
+        params.targetEdgeLength = 0.25f;
+        params.iterations = iterations;
+        REQUIRE(cyber_mesh_isotropic_remesh(mesh, &params, nullptr) == CYBER_OK);
+        const std::vector<float> positions = positionsOf(mesh);
+        cyber_mesh_free(mesh);
+        return positions;
+    };
+
+    // One round cannot reach what eight rounds of split/collapse/flip/smooth
+    // do; equality here means the count never left the params struct.
+    CHECK(remeshWith(1) != remeshWith(8));
+    // Deterministic at a fixed count, so the difference is the knob and not
+    // run-to-run noise.
+    CHECK(remeshWith(8) == remeshWith(8));
+}
+
+TEST_CASE("capi isotropic remesh: smoothNormalDegrees reaches the projection") {
+    auto remeshWith = [](float smoothNormalDegrees) {
+        CyberMesh* mesh = loadObjText(cubeObj(), "cyber_capi_iso_smooth.obj");
+        CyberIsotropicParams params{};
+        cyber_default_isotropic_params(&params);
+        params.targetEdgeLength = 0.25f;
+        params.smoothNormalDegrees = smoothNormalDegrees;
+        REQUIRE(cyber_mesh_isotropic_remesh(mesh, &params, nullptr) == CYBER_OK);
+        const std::vector<float> positions = positionsOf(mesh);
+        cyber_mesh_free(mesh);
+        return positions;
+    };
+
+    // 0 is flat closest-point projection, 45 is PN-triangle projection.
+    //
+    // What this actually gates is the ReferenceSurface constructor, because
+    // that is where the whole effect lives. The entry point also copies the
+    // value into IsotropicOptions, as the engine header asks, but
+    // isotropicRemesh never reads that field -- setting it is honouring a
+    // documented contract the engine does not currently enforce. Removing that
+    // copy is therefore invisible to any test, here or on main. Do not read a
+    // green run as evidence that the options field is live.
+    CHECK(remeshWith(0.0f) != remeshWith(45.0f));
+}
+
+TEST_CASE("capi isotropic remesh: sharpEdgeDegrees reaches the tagging pre-pass") {
+    auto remeshWith = [](float sharpEdgeDegrees) {
+        CyberMesh* mesh = loadObjText(cubeObj(), "cyber_capi_iso_sharp.obj");
+        CyberIsotropicParams params{};
+        cyber_default_isotropic_params(&params);
+        params.targetEdgeLength = 0.25f;
+        params.sharpEdgeDegrees = sharpEdgeDegrees;
+        REQUIRE(cyber_mesh_isotropic_remesh(mesh, &params, nullptr) == CYBER_OK);
+        CyberStats stats{};
+        REQUIRE(cyber_mesh_stats(mesh, &stats) == CYBER_OK);
+        const std::vector<float> positions = positionsOf(mesh);
+        cyber_mesh_free(mesh);
+        return positions;
+    };
+
+    // A HIGH threshold is the discriminating case, and the reason is worth
+    // stating: the OBJ loader already tags the cube's 90-degree edges, so a low
+    // threshold re-tags exactly what is there and skipping the pre-pass
+    // entirely is indistinguishable from running it. 179 degrees tags nothing
+    // and therefore CLEARS those loader tags, which only happens if the value
+    // actually reaches tagFeatureEdges.
+    const std::vector<float> tagged = remeshWith(30.0f);
+    const std::vector<float> cleared = remeshWith(179.0f);
+    CHECK(tagged != cleared);
+    // Protecting the twelve creases lets the interior converge to a coarser
+    // result; leaving them free spends vertices rounding them off.
+    CHECK(tagged.size() < cleared.size());
 }
 
 TEST_CASE("capi isotropic remesh triangulates a quad mesh instead of rejecting it") {
