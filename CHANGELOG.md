@@ -3,7 +3,7 @@
 > Note: releases 0.3.0, 0.4.0 and 0.5.0 were tagged without changelog entries;
 > their content is recorded in `docs/ROADMAP.md`. Entries resume here.
 
-## Unreleased
+## [0.7.0] - 2026-08-25
 
 ### Added
 

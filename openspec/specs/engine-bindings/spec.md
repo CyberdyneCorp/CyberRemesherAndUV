@@ -158,12 +158,23 @@ identical behaviour, so callers written against them keep working.
 - **THEN** it SHALL behave exactly as `Mesh.load` / `cyber_mesh_load` does
 
 ### Requirement: Subdivision binding
-The Python binding SHALL expose linear subdivision over `cyber_retopo_subdivide`
-as `Mesh.subdivide`, splitting every n-gon into n quads (Catmull-Clark topology,
-no smoothing) in place and returning the resulting face count. It SHALL accept
-an optional projection target; when given, every vertex of the subdivided mesh
-SHALL be projected onto that target's surface, which is what recovers curvature
-that linear subdivision alone cannot add.
+The Python binding SHALL expose subdivision over the C ABI as `Mesh.subdivide`,
+splitting every n-gon into n quads (Catmull-Clark topology) in place and
+returning the resulting face count. It SHALL accept a mode selecting LINEAR
+(Catmull-Clark topology, no smoothing) or CATMULL-CLARK (the smooth rules), with
+LINEAR as the default so that existing calls keep their exact behaviour. It
+SHALL accept an optional projection target; when given, every vertex of the
+subdivided mesh SHALL be projected onto that target's surface, which is what
+recovers curvature that linear subdivision alone cannot add — and which remains
+available in the smooth mode, where it is the more accurate answer whenever a
+Target exists.
+
+The C ABI SHALL carry the mode on a SIBLING entry point rather than by changing
+the signature of the published mode-less one, so that already-compiled callers
+keep working; the mode-less entry point SHALL be defined as the linear case of
+the mode-taking one rather than a second implementation. An unrecognised mode
+SHALL be rejected with the typed invalid-argument error, leaving the mesh
+untouched.
 
 #### Scenario: Subdividing quadruples a quad mesh
 - **WHEN** `Mesh.subdivide()` is called on a mesh of N quads
@@ -172,6 +183,14 @@ that linear subdivision alone cannot add.
 #### Scenario: Subdivide and reproject recovers curvature
 - **WHEN** a coarse mesh is subdivided with a curved surface passed as the projection target
 - **THEN** the new vertices SHALL lie on that surface rather than on the coarse mesh's flat facets
+
+#### Scenario: Smooth subdivision needs no projection target
+- **WHEN** `Mesh.subdivide()` is called in Catmull-Clark mode on a faceted cage with no projection target
+- **THEN** the result SHALL be measurably rounder than the same mesh subdivided linearly, and calling it without naming a mode SHALL still produce the faceted linear result
+
+#### Scenario: An unknown mode is refused
+- **WHEN** `Mesh.subdivide()` is called with a mode value the engine does not define
+- **THEN** it SHALL raise the typed invalid-argument error and the mesh SHALL be left exactly as it was
 
 #### Scenario: Subdividing an empty mesh fails loudly
 - **WHEN** `Mesh.subdivide()` is called on a mesh with no faces
@@ -246,4 +265,102 @@ The binding SHALL also expose the sew operation over the same seam set.
 #### Scenario: Cancelled before any write
 - **WHEN** a caller cancels a seam-driven unwrap
 - **THEN** the call SHALL report cancellation and the mesh SHALL be left exactly as it was
+
+### Requirement: Retopology mesh-operation bindings
+The Python binding SHALL expose the retopology mesh operations that need no
+stroke geometry — `cyber_retopo_triangulate`, `_relax`, `_snap_all`,
+`_delete_faces`, `_dissolve_edges`, `_insert_loop`, `_merge_vertices` and
+`_rotate_edge` — as `Mesh` methods, so a cage built or subdivided from Python
+can also be cleaned up, tightened and reprojected there. Each method SHALL
+document the C header's element-id stability contract, because caller-side
+annotations (pins, loop tags, hidden faces) are keyed on those ids. The batch
+operations SHALL preserve the ABI's skip-don't-fail contract, and the
+single-element operations SHALL surface the ABI's refusal as the typed error
+with the mesh unchanged.
+
+#### Scenario: Whole-mesh commands reach Python
+- **WHEN** a caller invokes `Mesh.triangulate`, `Mesh.relax` or `Mesh.snap_all`
+- **THEN** the operation SHALL run on the engine and report what the C entry point reports — the resulting face count, or the moved-vertex count and largest displacement
+
+#### Scenario: Relax without a brush centre relaxes the whole mesh
+- **WHEN** `Mesh.relax` is called with no centre
+- **THEN** every vertex SHALL be relaxed regardless of any radius passed, because the ABI has no separate relax-all entry point and spells it as a non-positive radius
+
+#### Scenario: Pinned vertices are immune
+- **WHEN** a vertex id is passed in the `pinned` list of `Mesh.relax` or `Mesh.snap_all`
+- **THEN** that vertex's position SHALL be unchanged by the call and SHALL NOT be counted as moved
+
+#### Scenario: Batch operations skip what they cannot act on
+- **WHEN** `Mesh.delete_faces` or `Mesh.dissolve_edges` is given ids that are dead, out of range, or ineligible
+- **THEN** those ids SHALL be skipped rather than raising, and the returned count SHALL be how many elements were actually removed or dissolved
+
+#### Scenario: A refused single-element operation leaves the mesh unchanged
+- **WHEN** `Mesh.rotate_edge`, `Mesh.insert_loop` or `Mesh.merge_vertices` is given arguments the engine refuses
+- **THEN** it SHALL raise the typed error carrying the engine's message, and the mesh's vertex and face counts SHALL be unchanged
+
+### Requirement: Loop subdivision binding
+The C ABI and the Python binding SHALL expose Loop subdivision over a triangle
+mesh, splitting every triangle into four in place and reporting the resulting
+face count. The smoothing mode SHALL be an explicit argument of the call, with
+the smooth and linear meanings documented on the binding itself, so a caller who
+asks for resolution without a shape change cannot receive smoothing by accident.
+
+They SHALL accept the same optional projection target the quad subdivision
+accepts; when given, every vertex of the refined mesh SHALL be projected onto
+that target's surface.
+
+A non-triangle input SHALL be reported through a status code distinct from the
+invalid-argument and invalid-parameter codes, with a message naming the
+offending face and its side count, and the binding SHALL raise a correspondingly
+distinct exception type. The bindings SHALL also expose the triangulation the
+refusal points callers at.
+
+#### Scenario: A triangle mesh densifies without becoming quads
+- **WHEN** `Mesh.loop_subdivide()` is called on a mesh of N triangles
+- **THEN** the mesh SHALL afterwards hold 4N triangles and the reported face count SHALL equal the mesh's face count
+
+#### Scenario: Linear mode is reachable and does not smooth
+- **WHEN** `Mesh.loop_subdivide(LoopSubdivideMode.LINEAR)` is called
+- **THEN** every original vertex position SHALL still be present in the refined mesh
+
+#### Scenario: A quad mesh raises the topology error
+- **WHEN** `Mesh.loop_subdivide()` is called on a mesh containing quads
+- **THEN** it SHALL raise the typed unsupported-topology error naming the face and its side count, and the mesh SHALL be unchanged
+
+### Requirement: Isotropic remeshing binding
+The C ABI and the Python binding SHALL expose the engine's adaptive isotropic
+(triangle) remesher as a one-call operation on a mesh handle, so a caller can
+densify, re-tessellate or decimate a mesh to a target edge length without
+running the quad pipeline. Parameters SHALL mirror the engine's own options —
+target edge length, iteration count, curvature adaptivity and smooth-normal
+degrees — and SHALL be fillable from the engine defaults, except the target
+edge length, which is world-space and SHALL be left for the caller to supply
+rather than invented.
+
+The entry point SHALL assemble the inputs the C++ contract requires: it SHALL
+build the projection reference from the input surface before any remeshing, it
+SHALL tag feature edges from a supplied dihedral threshold, and it SHALL
+triangulate a non-triangulated input rather than rejecting it. The header SHALL
+state which of those it does, that the result is therefore a triangle mesh, and
+that every element id is invalidated.
+
+A capability of the engine's isotropic options that the binding does not expose
+— painted density — SHALL be recorded in the header as a stated omission naming
+where it is reachable instead, so the gap is visible rather than assumed absent.
+
+#### Scenario: Target edge length controls density
+- **WHEN** a caller remeshes the same mesh at two target edge lengths through the binding
+- **THEN** the smaller target SHALL produce a substantially denser mesh whose mean edge length tracks the request, and the reported face count SHALL equal the mesh's own
+
+#### Scenario: Adaptivity reaches the engine
+- **WHEN** two runs differ only in the adaptivity parameter
+- **THEN** their results SHALL differ, and the adaptive run SHALL show a wider edge-length distribution than the uniform one; repeating either run SHALL reproduce it exactly
+
+#### Scenario: A quad mesh is remeshed, not refused
+- **WHEN** a caller passes a mesh carrying quads or n-gons
+- **THEN** the call SHALL triangulate it and remesh it, returning a mesh of triangles only
+
+#### Scenario: An unusable target edge length is refused
+- **WHEN** the target edge length is zero, negative or non-finite, or the iteration count is below one
+- **THEN** the call SHALL return the invalid-parameter status naming the field, and the mesh SHALL be left exactly as it was
 

@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.24)
 
 project(CyberRemesher
-    VERSION 0.6.0
+    VERSION 0.7.0
     DESCRIPTION "Quad remeshing, retopology, UV and baking engine"
     LANGUAGES CXX)
 
