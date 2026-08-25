@@ -57,6 +57,10 @@ position-field extractor), and **`integer`** (experimental integer parametrizati
 
 <sub>Real scanned / CAD models → quad-dominant retopology · <code>examples/09_test_models.py</code></sub>
 
+Twenty-one runnable examples drive the engine through the Python binding and
+render what they do; [`examples/README.md`](examples/README.md) indexes them,
+and `examples/run_all.py` runs the lot into a stitched gallery.
+
 Every strategy feeds a pure-quad path (subdivision + surface-projected relaxation)
 for a 100%-quad result. `examples/10_vs_reference.py` and `examples/11_benchmark.py`
 score the output side-by-side against QuadriFlow and AutoRemesher. Both fetch and
@@ -131,6 +135,10 @@ mesh.unwrap_seams(seams)                           # parameterize along YOUR cut
 mesh.stitch_seams(seams, undo)                     # ...or sew them back shut
 ```
 
+![Auto-routed seam path following a groove versus the shortest path](examples/output/20_seam_paths.png)
+
+<sub>A to B across a grooved plate: the routed seam rides concave edges for 100% of its length and never leaves the trench, where the uniform-cost shortest path climbs straight out and back in · <code>examples/20_seam_paths.py</code></sub>
+
 `Mesh.unwrap_seams` (C: `cyber_uv_unwrap_seams`) is the counterpart to the
 automatic atlas: `unwrap_atlas` decides its own cuts and ignores what you
 marked, while this one takes the seam set you built — by hand or by committing a
@@ -139,6 +147,56 @@ re-orients and packs them, and reports through the same `AtlasResult`. An empty
 seam set means *do not cut*, never *decide for me*. `Mesh.stitch_seams`
 (`cyber_uv_stitch_seams`) is the inverse: it removes the given edges from the
 set and welds the corners across each one.
+
+### Flow guides and painted density
+
+Where the automatic field puts loops somewhere you disagree with, you draw over
+it instead of fighting the parameters. A `FlowGuide` is an ordered polyline on
+or near the surface; the cross field is softly biased toward the stroke's
+tangent within `radius`, scaled by `strength`. It is a bias, not a constraint —
+the guide competes with the smoothness term rather than overriding it, so the
+influence decays outside the radius instead of leaving a hard edge at it.
+
+```python
+from cyberremesh import FlowGuide, RemeshParams, remesh
+
+guide = FlowGuide(points=stroke_xyz, strength=1.0, radius=0.12 * bbox_diagonal)
+out = remesh(source, RemeshParams(target_quad_count=3000), guides=[guide])
+```
+
+Measured as mean angular deviation of the extracted quad edges from the guide
+tangent inside the radius, folded mod 90° so a random field scores 22.5°:
+**10.98° mean and 13.77° worst across six runs** on the community corpus,
+against a ≤15° gate. `examples/17_flow_guides.py` is the artifact those numbers
+come from — it prints what it measures, met or not.
+
+![Flow guides: unguided versus guided remesh of the same mesh](examples/output/17_flow_guides.png)
+
+<sub>One stroke at 0.12 × bbox diagonal — unguided 13.5° mean deviation, guided 10.4° · <code>examples/17_flow_guides.py</code></sub>
+
+Guides force the native seamless solver: the vendored Geogram `quad_cover` has
+no hook for either a guide or a painted density, so routing a guided island
+there would silently drop the input. If that fallback ever happens anyway
+(`CYBER_QC_NO_NATIVE`), the run **reports the guidance as unhonoured and names
+the variable** rather than returning an unguided mesh that looks like a
+successful one.
+
+### Soft selection
+
+The manual-retopology stage has tweak, relax and rigid transforms; soft
+selection adds the gradient region on top. A line, sphere or painted stroke sets
+a per-vertex weight, four falloff curves shape it (`LINEAR`, `SMOOTH`, `SHARP`,
+`ROUND`), and the weighted transform and relax consume it.
+
+The part worth knowing is that the Target re-projection happens **inside** the
+transform. Passing a `Snapper` glues the moved vertices to the sculpt in the
+same call, so there is no snap-all cleanup pass afterwards — which would drag
+the untouched vertices too. Vertices at weight 0 are never moved and never
+re-snapped, and that is asserted rather than assumed.
+
+![Soft selection: weight field, weighted taper, falloff curves, movement versus weight](examples/output/16_soft_selection.png)
+
+<sub>The weight field painted on the mesh, the same taper run free and snapped to the Target, the four falloff curves read back out of the engine, and per-vertex movement against weight — where zero-weight geometry sits exactly on 0 · <code>examples/16_soft_selection.py</code></sub>
 
 ### Per-DCC export presets
 
@@ -199,6 +257,10 @@ result.files                                       # mesh + one per baked map
 
 Listing, resolving and reading a preset works in every build; only
 `write_bundle` needs the UV-gated bundle module, and says so where it is absent.
+
+![Export presets: the same bake packaged for each target app](examples/output/19_export_presets.png)
+
+<sub>One remesh, four bundles. Only the normal map's green channel differs — unreal writes −Y (DirectX), every other preset +Y (OpenGL); AO, curvature and color are texel-identical across all four · <code>examples/19_export_presets.py</code></sub>
 
 **Cost:** the AO bake dominates a preset run — about 96% of it — and scales with
 texel count, so the default 2048² map set takes minutes on a desktop CPU. Use

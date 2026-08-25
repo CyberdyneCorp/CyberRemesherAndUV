@@ -29,6 +29,11 @@ so quad-dominance reads at a glance.
 | `14_uv_atlas.py` | automatic UV atlas (auto-seam → LSCM → re-orient → skyline pack) | `output/14_uv_atlas.png` |
 | `15_uv_vs_xatlas.py` | UV atlas benchmark vs the xatlas reference (distortion / charts / packing) | `output/15_uv_vs_xatlas.png` |
 | `16_subdivide.py` | `Mesh.subdivide` — linear subdivision, with and without reprojection | `output/16_subdivide.png` |
+| `16_soft_selection.py` | soft selection — gradient regions, weighted edits, snapped to the Target inside the transform | `output/16_soft_selection.png` |
+| `17_flow_guides.py` | flow guides and painted density — guided vs unguided, with the angular-deviation gate | `output/17_flow_guides.png` |
+| `18_sculpt_handoff.py` | versioned sculpt handoff end to end, from a synthetic producer | `output/18_sculpt_handoff.png` |
+| `19_export_presets.py` | per-DCC export presets — one bake, four bundles, only the normal green channel differing | `output/19_export_presets.png` |
+| `20_seam_paths.py` | auto-routed UV seam paths — valley-biased routing vs the uniform-cost shortest path | `output/20_seam_paths.png` |
 | `run_all.py` | runs all of the above + a stitched `output/gallery.png` | `output/gallery.png` |
 
 `08_load_model.py` loads a mesh and converts it to quads. It defaults to a
