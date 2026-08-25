@@ -40,6 +40,8 @@ __all__ = [
     "Image",
     "bake",
     "Falloff",
+    "LoopSubdivideMode",
+    "UnsupportedTopologyError",
     "Snapper",
     "SnapReport",
     "SoftTransformReport",
@@ -338,6 +340,24 @@ class Subdivision:
     #: boundary and non-manifold edges — use the sharp rule, so open borders
     #: keep their shape and corners stay put.
     CATMULL_CLARK = _ffi.SUBDIV_CATMULL_CLARK
+
+
+class LoopSubdivideMode:
+    """How :meth:`Mesh.loop_subdivide` places vertices (mirrors
+    ``CyberLoopSubdivideMode``).
+
+    Both modes produce the same topology — one triangle becomes four. They
+    differ only in where the vertices land, and that difference is never
+    inferred: a caller who wants resolution without a shape change has to say
+    so, and one who wants smoothing has to ask for it.
+    """
+
+    #: True Loop weights. The surface converges to the Loop limit surface, so
+    #: THE SHAPE CHANGES — a faceted cage visibly rounds off.
+    SMOOTH = _ffi.LOOP_SUBDIVIDE_SMOOTH
+    #: Pure 1-to-4 split: new vertices are exact edge midpoints and no original
+    #: vertex moves. More polygons, same shape.
+    LINEAR = _ffi.LOOP_SUBDIVIDE_LINEAR
 
 
 @dataclass(frozen=True)
@@ -882,6 +902,60 @@ class Mesh:
     # what it does to ids; :attr:`stats` is dropped by the ops that change
     # topology, because it describes the run that produced the old mesh.
 
+
+
+    def loop_subdivide(
+        self,
+        mode: int = LoopSubdivideMode.SMOOTH,
+        project_to: Optional["Mesh"] = None,
+    ) -> int:
+        """Loop-subdivide this TRIANGLE mesh IN PLACE, returning the face count.
+
+        Triangles in, triangles out: every triangle becomes four, so a mesh of
+        N triangles comes back with 4N. This is the triangle counterpart of
+        :meth:`subdivide`, which applies Catmull-Clark topology and would turn
+        each triangle into three *quads* instead.
+
+        ``mode`` decides whether vertices move, and nothing infers it:
+
+        * :attr:`LoopSubdivideMode.SMOOTH` (the default) uses the true Loop
+          weights, so the surface converges to the Loop limit surface — **the
+          shape changes**, a faceted cage visibly rounds off.
+        * :attr:`LoopSubdivideMode.LINEAR` is a pure 1-to-4 split: new vertices
+          are exact edge midpoints and no original vertex moves. Ask for this
+          when you want more polygons and the same shape.
+
+        Open meshes keep their border either way: boundary edge points are
+        plain midpoints and boundary vertices follow the 1/8, 3/4, 1/8 curve
+        rule, never the interior mask that would pull the border inward.
+
+        A face that is not a triangle raises :class:`UnsupportedTopologyError`
+        naming the face and its side count. It is deliberately not
+        fan-triangulated for you — that is a topology decision only you can
+        make; call :meth:`triangulate` first if that is what you want.
+
+        Pass ``project_to`` to reproject every vertex onto that mesh's surface
+        afterwards, exactly as :meth:`subdivide` does.
+
+        The mesh is rebuilt from scratch, so every vertex, edge and face id
+        from before the call is invalid afterwards.
+        """
+        lib = _ffi.get_lib()
+        faces = ctypes.c_size_t(0)
+        snapper = ctypes.c_void_p()
+        if project_to is not None:
+            _check(lib.cyber_snapper_create(project_to.handle, ctypes.byref(snapper)))
+        try:
+            status = lib.cyber_retopo_loop_subdivide(
+                self.handle, int(mode), snapper, ctypes.byref(faces)
+            )
+        finally:
+            if snapper:
+                lib.cyber_snapper_free(snapper)
+        if status != _ffi.STATUS_OK:
+            _raise_status(status)
+        self._stats = None
+        return faces.value
 
     def isotropic_remesh(self, params: "IsotropicParams | float") -> int:
         """Adaptive isotropic (triangle) remesh IN PLACE, returning the face count.
@@ -2028,10 +2102,22 @@ class IncompatibleVersionError(CyberError):
     """
 
 
+class UnsupportedTopologyError(CyberError):
+    """The mesh is well-formed but its topology is not what the op needs.
+
+    Distinct from a bad argument: nothing the caller passed is wrong, the
+    GEOMETRY is unsuitable — Loop subdivision handed a quad, say — and the fix
+    is a mesh edit (:meth:`Mesh.triangulate`) rather than a different value.
+    The message names the offending element.
+    """
+
+
 def _raise_status(status: int) -> None:
     """Raises the most specific exception for a non-OK status."""
     if status == _ffi.STATUS_INCOMPATIBLE_VERSION:
         raise IncompatibleVersionError(status, _last_error())
+    if status == _ffi.STATUS_UNSUPPORTED_TOPOLOGY:
+        raise UnsupportedTopologyError(status, _last_error())
     raise CyberError(status, _last_error())
 
 

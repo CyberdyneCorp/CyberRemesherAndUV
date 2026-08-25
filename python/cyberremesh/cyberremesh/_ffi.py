@@ -49,6 +49,7 @@ STATUS_EMPTY = 4
 STATUS_RUNTIME = 5
 STATUS_CANCELLED = 6
 STATUS_INCOMPATIBLE_VERSION = 7
+STATUS_UNSUPPORTED_TOPOLOGY = 8
 STATUS_ERROR = STATUS_RUNTIME  # generic-failure alias used by the wrapper
 
 _STATUS_NAMES = {
@@ -60,6 +61,7 @@ _STATUS_NAMES = {
     STATUS_RUNTIME: "RUNTIME",
     STATUS_CANCELLED: "CANCELLED",
     STATUS_INCOMPATIBLE_VERSION: "INCOMPATIBLE_VERSION",
+    STATUS_UNSUPPORTED_TOPOLOGY: "UNSUPPORTED_TOPOLOGY",
 }
 
 # cyber_small_patch_policy enum — mirrors cyber::remesh::SmallPatchPolicy.
@@ -69,6 +71,11 @@ POLICY_MIN_FACES = 2
 
 # CYBER_INVALID_ID — the sentinel every element-id accessor returns for "none".
 INVALID_ID = 0xFFFFFFFF
+
+# CyberLoopSubdivideMode enum — mirrors cyber::retopo::LoopSubdivideMode.
+# Persisted by callers, so these values are append-only.
+LOOP_SUBDIVIDE_SMOOTH = 0
+LOOP_SUBDIVIDE_LINEAR = 1
 
 # cyber_falloff enum — mirrors cyber::retopo::Falloff. Persisted by callers, so
 # these values are append-only.
@@ -871,6 +878,19 @@ def _declare(lib: ctypes.CDLL) -> None:
     #                                       CyberSubdivisionMode, size_t*)
     lib.cyber_retopo_subdivide_ex.argtypes = [c_void_p, c_void_p, c_int32, POINTER(c_size_t)]
     lib.cyber_retopo_subdivide_ex.restype = c_int32
+
+    # Loop subdivision: triangles in, triangles out (1 -> 4). The mode decides
+    # whether vertices are repositioned; it is never inferred.
+    # CyberStatus cyber_retopo_loop_subdivide(CyberMesh*, CyberLoopSubdivideMode,
+    #                                         const CyberSnapper*, size_t*)
+    lib.cyber_retopo_loop_subdivide.argtypes = [c_void_p, c_int32, c_void_p, POINTER(c_size_t)]
+    lib.cyber_retopo_loop_subdivide.restype = c_int32
+
+    # Fan-triangulation, the explicit opt-in Loop subdivision points a caller
+    # at when it refuses an n-gon.
+    # CyberStatus cyber_retopo_triangulate(CyberMesh*, size_t*)
+    lib.cyber_retopo_triangulate.argtypes = [c_void_p, POINTER(c_size_t)]
+    lib.cyber_retopo_triangulate.restype = c_int32
 
     # CyberStatus cyber_snapper_create(const CyberMesh* target, CyberSnapper** out)
     lib.cyber_snapper_create.argtypes = [c_void_p, POINTER(c_void_p)]

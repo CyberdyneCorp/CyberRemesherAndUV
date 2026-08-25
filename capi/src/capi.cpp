@@ -51,6 +51,7 @@
 #include "cyber/retopo/dissolve.hpp"
 #include "cyber/retopo/erase.hpp"
 #include "cyber/retopo/loop_metrics.hpp"
+#include "cyber/retopo/loop_subdivide.hpp"
 #include "cyber/retopo/loops.hpp"
 #include "cyber/retopo/move.hpp"
 #include "cyber/retopo/paths.hpp"
@@ -251,6 +252,8 @@ const char* cyber_status_string(CyberStatus status) {
             return "cancelled";
         case CYBER_ERR_INCOMPATIBLE_VERSION:
             return "incompatible version";
+        case CYBER_ERR_UNSUPPORTED_TOPOLOGY:
+            return "unsupported topology";
     }
     return "unknown status";
 }
@@ -2840,6 +2843,30 @@ CyberStatus cyber_retopo_snap_all(CyberMesh* mesh, const CyberSnapper* snapper,
     });
 }
 
+namespace {
+
+// Reprojects every live vertex onto the Target. Shared by the two subdivide
+// entry points so "subdivide+reproject" cannot mean two different things.
+void reprojectAll(CyberMesh* mesh, const CyberSnapper* snapper) {
+    const cyber::retopo::SurfaceSnapper* snap = snapperOf(snapper);
+    if (snap == nullptr || snap->empty()) {
+        return;
+    }
+    for (std::uint32_t i = 0; i < mesh->mesh.vertexCapacity(); ++i) {
+        const cyber::VertexId v{i};
+        if (mesh->mesh.isAlive(v)) {
+            mesh->mesh.setPosition(v, snap->snapToSurface(mesh->mesh.position(v)).point);
+        }
+    }
+}
+
+cyber::retopo::LoopSubdivideMode toLoopMode(CyberLoopSubdivideMode mode) {
+    return mode == CYBER_LOOP_SUBDIVIDE_LINEAR ? cyber::retopo::LoopSubdivideMode::Linear
+                                               : cyber::retopo::LoopSubdivideMode::Smooth;
+}
+
+}  // namespace
+
 CyberStatus cyber_retopo_subdivide(CyberMesh* mesh, const CyberSnapper* snapper,
                                    size_t* out_faces) {
     // The old, mode-less entry point IS the linear mode; keeping it as a
@@ -2866,18 +2893,44 @@ CyberStatus cyber_retopo_subdivide_ex(CyberMesh* mesh, const CyberSnapper* snapp
         // curvature ("subdivide+reproject"). Catmull-Clark carries curvature
         // of its own, but a Target is still the more accurate answer, so the
         // projection runs in both modes when a snapper is supplied.
-        const cyber::retopo::SurfaceSnapper* snap = snapperOf(snapper);
-        if (snap != nullptr && !snap->empty()) {
-            for (std::uint32_t i = 0; i < mesh->mesh.vertexCapacity(); ++i) {
-                const cyber::VertexId v{i};
-                if (mesh->mesh.isAlive(v)) {
-                    mesh->mesh.setPosition(v, snap->snapToSurface(mesh->mesh.position(v)).point);
-                }
-            }
-        }
+        reprojectAll(mesh, snapper);
         // Every id was reassigned: the handle's id-keyed overlay state is
         // meaningless now and would mis-hide/mis-tag unrelated elements, and
         // the soft-selection weights would land on unrelated vertices.
+        mesh->hiddenFaces.clear();
+        mesh->taggedEdges.clear();
+        mesh->selection = cyber::retopo::SoftSelection{};
+        mesh->selectionSlots.clear();
+        if (out_faces != nullptr) {
+            *out_faces = mesh->mesh.faceCount();
+        }
+        return CYBER_OK;
+    });
+}
+
+CyberStatus cyber_retopo_loop_subdivide(CyberMesh* mesh, CyberLoopSubdivideMode mode,
+                                        const CyberSnapper* snapper, size_t* out_faces) {
+    return runMeshEdit(mesh, "cyber_retopo_loop_subdivide", [&] {
+        cyber::retopo::LoopSubdivideResult result =
+            cyber::retopo::loopSubdivide(mesh->mesh, toLoopMode(mode));
+        if (result.error == cyber::retopo::LoopSubdivideError::EmptyMesh) {
+            setError("cyber_retopo_loop_subdivide: mesh has no faces");
+            return CYBER_ERR_EMPTY;
+        }
+        if (!result.ok()) {
+            // Name the face AND its arity: the caller's next move is either
+            // cyber_retopo_triangulate or a look at that face, and both need
+            // to know which one it is.
+            setError("cyber_retopo_loop_subdivide: " +
+                     std::string(cyber::retopo::toString(result.error)) + " (face " +
+                     std::to_string(result.offendingFace.value) + " has " +
+                     std::to_string(result.offendingFaceSize) +
+                     " sides); call cyber_retopo_triangulate first if that is what you want");
+            return CYBER_ERR_UNSUPPORTED_TOPOLOGY;
+        }
+        mesh->mesh = std::move(result.mesh);
+        reprojectAll(mesh, snapper);
+        // Every id was reassigned — same consequence as cyber_retopo_subdivide.
         mesh->hiddenFaces.clear();
         mesh->taggedEdges.clear();
         mesh->selection = cyber::retopo::SoftSelection{};

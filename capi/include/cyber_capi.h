@@ -35,7 +35,14 @@ typedef enum CyberStatus {
     /* A versioned data file declares a version this engine does not support.
      * Distinct from a parse error: the file is well-formed, the CONTRACT does
      * not match. Appended in 0.6.0 — existing values keep their numbers. */
-    CYBER_ERR_INCOMPATIBLE_VERSION
+    CYBER_ERR_INCOMPATIBLE_VERSION,
+    /* The mesh is well-formed but its topology is not what the operation is
+     * defined on — Loop subdivision handed a quad, say. Distinct from
+     * CYBER_ERR_INVALID_PARAM: nothing the caller passed is wrong, the
+     * GEOMETRY is unsuitable, and the fix is a mesh edit (triangulate) rather
+     * than a different argument. cyber_last_error() names the offending
+     * element. Appended after 0.6.0 — existing values keep their numbers. */
+    CYBER_ERR_UNSUPPORTED_TOPOLOGY
 } CyberStatus;
 
 /* Engine semantic version (mirrors the CMake project() version). */
@@ -1114,6 +1121,9 @@ CyberStatus cyber_retopo_resymmetrize(CyberMesh* mesh, const CyberSymmetry* symm
  *     own hidden-face / tagged-edge render state is cleared here for the
  *     same reason.
  *
+ *   - cyber_retopo_loop_subdivide rebuilds the mesh the same way and carries
+ *     the same consequences; see its own note below.
+ *
  *   - cyber_retopo_triangulate mutates IN PLACE (Mesh::splitFace per ear):
  *     vertex and edge ids survive and so do the ids of the faces it splits,
  *     but each n-gon gains NEW face ids for its extra triangles. Vertex and
@@ -1170,6 +1180,52 @@ CyberStatus cyber_retopo_subdivide(CyberMesh* mesh, const CyberSnapper* snapper,
  * as above in BOTH modes: all ids are reassigned. */
 CyberStatus cyber_retopo_subdivide_ex(CyberMesh* mesh, const CyberSnapper* snapper,
                                       CyberSubdivisionMode mode, size_t* out_faces);
+
+/* How cyber_retopo_loop_subdivide places the vertices it produces. The
+ * topology is the same either way (every triangle becomes four); only the
+ * positions differ, and the difference is the whole reason both exist, so it
+ * is never inferred. Persisted by callers, so values are append-only. */
+typedef enum CyberLoopSubdivideMode {
+    /* True Loop weights: the surface converges to the Loop limit surface, so
+     * THE SHAPE CHANGES — a faceted cage visibly rounds off. */
+    CYBER_LOOP_SUBDIVIDE_SMOOTH = 0,
+    /* Pure topological 1-to-4 split: every new vertex is an exact edge
+     * midpoint and NO original vertex moves, so the surface is unchanged and
+     * only the triangle count grows. This is "more polygons, same shape". */
+    CYBER_LOOP_SUBDIVIDE_LINEAR = 1
+} CyberLoopSubdivideMode;
+
+/* Loop subdivision: TRIANGLES IN, TRIANGLES OUT — every triangle becomes four,
+ * so a mesh of N triangles comes back with 4N. This is the triangle
+ * counterpart of cyber_retopo_subdivide, which applies Catmull-Clark topology
+ * and would turn each triangle into three QUADS instead.
+ *
+ * `mode` chooses smoothing (see CyberLoopSubdivideMode); a caller who wants
+ * resolution without a shape change passes CYBER_LOOP_SUBDIVIDE_LINEAR and gets
+ * their vertices back bit-identical. Open meshes keep their border: boundary
+ * edge points are plain midpoints and boundary vertices use the 1/8, 3/4, 1/8
+ * curve rule, never the interior mask.
+ *
+ * A face that is not a triangle is refused with CYBER_ERR_UNSUPPORTED_TOPOLOGY
+ * naming the face and its side count; the mesh is left exactly as it was. It is
+ * deliberately NOT fan-triangulated on the caller's behalf — that is a topology
+ * decision only the caller can make, and cyber_retopo_triangulate is the
+ * explicit opt-in.
+ *
+ * `snapper` may be NULL. When it is not, every vertex of the refined mesh is
+ * projected onto the Target afterwards, exactly as cyber_retopo_subdivide's
+ * "subdivide+reproject" does. Writes the resulting face count to *out_faces
+ * (may be NULL).
+ *
+ * ELEMENT-ID STABILITY (the contract callers MUST read): like
+ * cyber_retopo_subdivide, this REBUILDS THE MESH FROM SCRATCH. EVERY vertex,
+ * edge and face id is reassigned, so ALL caller-side annotations keyed on ids
+ * (pins, loop tags, hidden faces) are orphaned and must be dropped or rebuilt.
+ * The handle's own hidden-face / tagged-edge render state and its soft
+ * selection are cleared here for the same reason. On a refusal nothing is
+ * rebuilt and nothing is cleared. */
+CyberStatus cyber_retopo_loop_subdivide(CyberMesh* mesh, CyberLoopSubdivideMode mode,
+                                        const CyberSnapper* snapper, size_t* out_faces);
 
 /* Fan-triangulates every face with more than three sides. Writes the
  * resulting face count to *out_faces (may be NULL). See the ELEMENT-ID
@@ -1741,8 +1797,8 @@ void cyber_seam_path_drop_resume_marker(CyberSeamPath* path);
  * atlas's chart-angle and chart-merge fields are absent on purpose: those exist
  * to DECIDE where to cut, and here that decision is the seam set. */
 typedef struct CyberUnwrapSeamsParams {
-    float packMargin;  /* gap around each island, in UV units */
-    int textureSize;   /* resolution for the texel-density readout */
+    float packMargin;   /* gap around each island, in UV units */
+    int textureSize;    /* resolution for the texel-density readout */
     int reorientCharts; /* non-zero: rotate each chart to its minimum-area
                          * bounding box before packing */
 } CyberUnwrapSeamsParams;

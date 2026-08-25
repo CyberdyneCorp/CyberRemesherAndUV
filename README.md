@@ -397,6 +397,17 @@ uncontrollable jump and can only ever add; this converges edge lengths to
 is. A mesh with quads is triangulated first — the result is always triangles —
 and feature edges are tagged and preserved.
 
+That call is Catmull-Clark topology, so it always hands back quads — a triangle
+becomes three of them. `Mesh.loop_subdivide()` (C:
+`cyber_retopo_loop_subdivide`) is the triangle counterpart: Loop subdivision,
+one triangle into four, triangles in and triangles out. Pass
+`LoopSubdivideMode.LINEAR` for a pure 1-to-4 split that leaves every original
+vertex exactly where it was — more polygons, same shape — or the default
+`SMOOTH` for the true Loop weights, which converge to the limit surface and
+therefore **do** change the shape. Open meshes keep their border either way. A
+face that is not a triangle is refused by name rather than fan-triangulated
+behind your back; call `Mesh.triangulate()` first if that is what you want.
+
 ## How it works
 
 Two algorithms carry the project: the quad retopology pipeline (triangles in, an
