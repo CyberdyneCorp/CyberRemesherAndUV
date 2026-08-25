@@ -243,6 +243,13 @@ jobs:
       - name: Build
         run: cmake --build --preset cpu-headless
       - name: Test
+        # Reference solvers are NOT built here. The examples resolve QuadriFlow
+        # and AutoRemesher on demand, and each example runs as its own process,
+        # so six scripts would each pay a from-scratch clone and compile against
+        # a 900s per-script timeout. With them skipped the whole example suite
+        # renders our own panels in about 8 seconds.
+        env:
+          CYBER_SKIP_REFERENCE_BUILDS: "1"
         run: ctest --preset cpu-headless
       - name: CLI smoke
         shell: bash

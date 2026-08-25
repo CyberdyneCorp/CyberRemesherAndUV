@@ -61,11 +61,26 @@ COMMON_3D_MODELS: Dict[str, str] = {
 }
 
 
+def _reference_builds_disabled() -> bool:
+    """True when reference solvers must not be built or run.
+
+    The examples build QuadriFlow and AutoRemesher on demand to draw their
+    comparison panels. That is right on a workstation and wrong in CI: each
+    example runs as its own process, so nothing is shared between them, and six
+    scripts would each pay a from-scratch clone and compile (QuadriFlow up to
+    900s, AutoRemesher up to 1800s) against a 900s per-script timeout. Setting
+    CYBER_SKIP_REFERENCE_BUILDS=1 renders our own panels only.
+    """
+    return os.environ.get("CYBER_SKIP_REFERENCE_BUILDS", "").strip().lower() not in ("", "0", "false", "no")
+
+
 def quadriflow_binary() -> "str | None":
     """Build (once, cached) and return the path to the QuadriFlow reference
     binary, or None if it cannot be built (offline / no Eigen / no toolchain).
     QuadriFlow is a field-based quad remesher standing in for AutoRemesher (which
     is GUI-only). See reference/build_quadriflow.sh."""
+    if _reference_builds_disabled():
+        return None
     import subprocess
     script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "reference",
                           "build_quadriflow.sh")
@@ -109,6 +124,8 @@ def autoremesher_binary() -> "str | None":
     (a Qt-free harness over its QuadCover core), or None if it cannot be built.
     AutoRemesher (github.com/huxingyi/autoremesher, MIT) is the isoline-tracing
     QuadCover remesher; see reference/build_autoremesher.sh."""
+    if _reference_builds_disabled():
+        return None
     import subprocess
     script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "reference",
                           "build_autoremesher.sh")

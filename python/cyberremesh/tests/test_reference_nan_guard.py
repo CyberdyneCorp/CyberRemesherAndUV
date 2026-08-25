@@ -67,6 +67,30 @@ def main() -> None:
             os.unlink(path)
         print(f"PASS {name}: refuses nan and inf, accepts clean geometry")
 
+    # CYBER_SKIP_REFERENCE_BUILDS must actually stop the resolvers. CI relies
+    # on it: each example runs as its own process, so without it six scripts
+    # would each pay a from-scratch QuadriFlow/AutoRemesher clone and compile
+    # against a 900s per-script timeout. The resolvers must return None BEFORE
+    # spawning the build script, so this asserts on the flag rather than on
+    # elapsed time, which would be flaky.
+    prior = os.environ.get("CYBER_SKIP_REFERENCE_BUILDS")
+    os.environ["CYBER_SKIP_REFERENCE_BUILDS"] = "1"
+    try:
+        assert common._reference_builds_disabled(), "flag not honoured"
+        for resolver in (common.quadriflow_binary, common.autoremesher_binary):
+            assert resolver() is None, f"{resolver.__name__} built despite the skip flag"
+        # An unset or falsy value must NOT disable them, or a workstation would
+        # silently lose its comparison panels.
+        for falsy in ("", "0", "false", "no"):
+            os.environ["CYBER_SKIP_REFERENCE_BUILDS"] = falsy
+            assert not common._reference_builds_disabled(), f"{falsy!r} wrongly disabled builds"
+    finally:
+        if prior is None:
+            os.environ.pop("CYBER_SKIP_REFERENCE_BUILDS", None)
+        else:
+            os.environ["CYBER_SKIP_REFERENCE_BUILDS"] = prior
+    print("PASS skip flag: disables both resolvers, and only for truthy values")
+
     # The renderer is the last line of defence: reference panels are filtered
     # at load, so non-finite reaching _draw means OUR mesh produced it, and the
     # error has to name the panel instead of surfacing as a matplotlib
