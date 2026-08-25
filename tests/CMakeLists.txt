@@ -111,7 +111,8 @@ if(TARGET cyber_retopo)
                                         retopo/test_adjacency.cpp
                                         retopo/test_stroke_interpreter.cpp
                                         retopo/test_subdivision.cpp
-                                        retopo/test_vertex_snap.cpp)
+                                        retopo/test_vertex_snap.cpp
+                                        retopo/test_loop_subdivide.cpp)
     target_link_libraries(cyber_tests PRIVATE cyber_retopo)
 endif()
 if(TARGET cyber_bakecage)
@@ -331,7 +332,7 @@ if(TARGET cyber_capi_shared AND Python3_FOUND)
                  test_cad_density_robustness test_soft_selection test_seam_path
                  test_handoff test_mesh_state test_export_presets
                  test_library_lookup test_host_process_hygiene
-                 test_io_formats test_subdivide test_examples
+                 test_io_formats test_subdivide test_loop_subdivide test_examples
                  test_unwrap_seams test_retopo_ops test_isotropic_remesh)
         add_test(NAME python_${_pyt}
             COMMAND ${Python3_EXECUTABLE} ${_pydir}/${_pyt}.py)

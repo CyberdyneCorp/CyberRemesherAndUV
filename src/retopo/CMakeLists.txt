@@ -2,6 +2,7 @@ add_library(cyber_retopo STATIC
     src/snapping.cpp
     src/actions.cpp
     src/subdivision.cpp
+    src/loop_subdivide.cpp
 )
 add_library(cyber::retopo ALIAS cyber_retopo)
 

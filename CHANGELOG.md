@@ -28,6 +28,29 @@
   on `cyber_retopo_subdivide`, so already-compiled callers of the ABI keep
   working; the mode-less name is now a forwarder to the linear case.
 
+- **Loop subdivision — triangle in, triangle out.** `cyber_retopo_subdivide`
+  applies Catmull-Clark topology, so a triangle mesh came back as quads (three
+  per triangle) and there was no way at all to get a denser *triangle* mesh.
+  `cyber::retopo::loopSubdivide`, `cyber_retopo_loop_subdivide` and
+  `Mesh.loop_subdivide` split every triangle into four with the standard Loop
+  weights, including the boundary rules that keep an open mesh's border where it
+  is instead of pulling it inward.
+
+  Two modes, and the caller always names one: `SMOOTH` uses the true Loop
+  weights and **changes the shape** (the surface converges to the Loop limit
+  surface), while `LINEAR` is a pure 1-to-4 split that leaves every original
+  vertex exactly where it was — "more polygons, same shape". Nothing infers the
+  mode, so smoothing is never silent.
+
+  A face that is not a triangle is refused, naming the face and its side count,
+  rather than being fan-triangulated behind the caller's back. `Mesh.triangulate`
+  is the explicit opt-in and is now exposed to the bindings too.
+
+- `CyberStatus` gains `CYBER_ERR_UNSUPPORTED_TOPOLOGY` (value 8, appended — every
+  existing value keeps its number): the mesh is well-formed but its topology is
+  not what the operation is defined on. Python raises the matching
+  `UnsupportedTopologyError`; Swift maps it to `.unsupportedTopology`.
+
 ## 0.6.0 - 2026-08-24
 
 ### Upgrade notes

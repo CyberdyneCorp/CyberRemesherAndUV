@@ -34,6 +34,10 @@ public enum CyberError: Error, Equatable {
     /// `CYBER_ERR_INCOMPATIBLE_VERSION` — a well-formed versioned file declares
     /// a version this engine does not support.
     case incompatibleVersion(String)
+    /// `CYBER_ERR_UNSUPPORTED_TOPOLOGY` — the mesh is well-formed but its
+    /// topology is not what the operation is defined on (Loop subdivision
+    /// handed a quad, say). The message names the offending element.
+    case unsupportedTopology(String)
     /// No status code of its own: an allocating ABI call returned a NULL handle.
     case outOfMemory
     /// A status code this binding does not model yet.
@@ -66,6 +70,8 @@ public enum CyberError: Error, Equatable {
             return .cancelled
         case CYBER_ERR_INCOMPATIBLE_VERSION:
             return .incompatibleVersion(message)
+        case CYBER_ERR_UNSUPPORTED_TOPOLOGY:
+            return .unsupportedTopology(message)
         default:
             // The C enum's rawValue may import as UInt32 or Int32 depending on
             // the platform's underlying enum type; normalize to Int32.
@@ -84,6 +90,7 @@ extension CyberError: LocalizedError {
         case .runtime(let m): return "Pipeline failure: \(m)"
         case .cancelled: return "Operation cancelled"
         case .incompatibleVersion(let m): return "Incompatible version: \(m)"
+        case .unsupportedTopology(let m): return "Unsupported topology: \(m)"
         case .outOfMemory: return "Out of memory"
         case .unknown(let code, let m): return "Engine error \(code): \(m)"
         }
