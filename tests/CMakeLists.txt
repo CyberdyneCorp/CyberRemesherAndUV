@@ -16,6 +16,7 @@ add_executable(cyber_tests
     quadrangulate/test_quadcover_extractor.cpp
     quadrangulate/test_seamless_solver.cpp
     quadrangulate/test_bimdf_quantize.cpp
+    quadrangulate/test_topology_layout.cpp
     quadrangulate/test_sparse_cholesky.cpp
     quadrangulate/test_stable_angle.cpp
     quadrangulate/test_quad_cleanup.cpp

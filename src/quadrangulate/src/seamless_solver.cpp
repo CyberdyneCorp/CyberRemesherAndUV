@@ -14,11 +14,13 @@
 #include <numeric>
 #include <queue>
 #include <set>
+#include <string>
 #include <unordered_map>
 #include <utility>
 #include <vector>
 
 #include "bimdf_quantize.hpp"
+#include "topology_layout_build.hpp"
 #include "cyber/accel/buffer.hpp"
 #include "cyber/accel/primitives.hpp"
 #include "cyber/core/math.hpp"
@@ -1799,6 +1801,53 @@ std::size_t winslowUntangle(const FoldRepairContext& ctx, std::size_t nCut,
     return foldCount();
 }
 
+// Promote the traced T-mesh to a TopologyLayout, validate it, and report it
+// (CYBER_ZR_LAYOUT). With a value other than "1" the value is a path prefix and
+// the layout is also written to <prefix>.json and <prefix>.obj, so it can be
+// diffed between runs and opened next to the output mesh in a viewer.
+void reportTopologyLayout(const bimdf::Charts& charts, const bimdf::TMesh& tmesh) {
+    TopologyLayout layout = layoutFromTMesh(charts, tmesh);
+    const LayoutValidation v = validateTopologyLayout(layout, charts.sourceFaceCount);
+    layout.valid = v.ok;
+    layout.invalidReason = v.error;
+    layout.nonClosingPatches = v.nonClosingPatches;
+    // A patch whose boundary walk does not close is contained the way a
+    // rejected orbit is: its arcs are marked excluded so no later stage
+    // injects against them, and the sound remainder proceeds.
+    for (const LayoutPatchId p : layout.nonClosingPatches) {
+        for (const auto& side : layout.patches[p].sides) {
+            for (const LayoutArcId a : side) {
+                layout.arcs[a].excluded = true;
+            }
+        }
+    }
+    const LayoutStats st = layout.stats();
+    std::fprintf(stderr,
+                 "[zr] layout: valid=%d nodes=%zu arcs=%zu patches=%zu sing=%zu tnodes=%zu "
+                 "feature=%zu boundary=%zu excluded=%zu nonQuad=%zu nonClosing=%zu index=%d%s%s\n",
+                 layout.valid ? 1 : 0, st.nodes, st.arcs, st.patches, st.singularities,
+                 st.tJunctions, st.featureArcs, st.boundaryArcs, st.excludedArcs,
+                 st.nonQuadPatches, st.nonClosingPatches, st.totalIndex,
+                 layout.valid ? "" : " reason=", v.error.c_str());
+    const char* dest = std::getenv("CYBER_ZR_LAYOUT");
+    if (dest == nullptr || std::string(dest) == "1") {
+        return;
+    }
+    const auto write = [dest](const char* ext, const std::string& text) {
+        const std::string path = std::string(dest) + ext;
+        std::FILE* f = std::fopen(path.c_str(), "wb");
+        if (f == nullptr) {
+            std::fprintf(stderr, "[zr] layout: cannot write %s\n", path.c_str());
+            return;
+        }
+        std::fwrite(text.data(), 1, text.size(), f);
+        std::fclose(f);
+        std::fprintf(stderr, "[zr] layout: wrote %s (%zu bytes)\n", path.c_str(), text.size());
+    };
+    write(".json", layoutToJson(layout));
+    write(".obj", layoutToObj(layout));
+}
+
 int solveSeamlessReduced(accel::IBackend& backend, std::size_t nCut,
                          const std::vector<std::unordered_map<std::size_t, float>>& rows,
                          const std::vector<float>& bu, const std::vector<float>& bv,
@@ -2806,6 +2855,9 @@ int solveSeamlessReduced(accel::IBackend& backend, std::size_t nCut,
             tmesh.excludedPatches, tmesh.maxExprErr, tmesh.maxSideMismatch,
             tmesh.reason.empty() ? "" : " reason=", tmesh.reason.c_str(),
             tmesh.rejectSummary.empty() ? "" : " ", tmesh.rejectSummary.c_str());
+        if (bimdfCharts->captureGeometry) {
+            reportTopologyLayout(*bimdfCharts, tmesh);
+        }
         // Reduce every arc-length expression onto the reduced basis w (used
         // for the back-substitution and the post-solve deviation report).
         if (tmesh.ok) {
@@ -3517,6 +3569,13 @@ Parameterization solveParameterizationImpl(const Mesh& mesh, const SeamlessSetup
     std::unordered_map<Index, std::size_t> faceToCompact;
     if (std::getenv("CYBER_QC_BIMDF") != nullptr && probeCellArea == nullptr) {
         bimdfCharts = std::make_unique<bimdf::Charts>();
+        // ZRemesher topology layout (CYBER_ZR_LAYOUT): the tracer keeps the
+        // node positions and arc polylines it otherwise throws away, so the
+        // T-mesh can be promoted to a TopologyLayout. Write-only with respect
+        // to the quantizer, so the assignment is unaffected either way.
+        bimdfCharts->captureGeometry = std::getenv("CYBER_ZR_LAYOUT") != nullptr;
+        // Capacity, not the alive count: FaceIds are sparse after deletions.
+        bimdfCharts->sourceFaceCount = mesh.faceCapacity();
         bimdfCharts->nCut = nCut;
         bimdfCharts->coneIndex.assign(nCut, 0);
         bimdfCharts->vertexOfCut.assign(nCut, 0);
@@ -3583,6 +3642,7 @@ Parameterization solveParameterizationImpl(const Mesh& mesh, const SeamlessSetup
                 bimdfCharts->vertexPos[vv] = {pp.x, pp.y, pp.z};
             }
             bimdfCharts->faces.push_back(fd.cut);
+            bimdfCharts->faceOfCompact.push_back(static_cast<std::uint32_t>(fi));
             const Vec3 fn = cross(fd.e0, fd.e1);
             bimdfCharts->faceE0.push_back({fd.e0.x, fd.e0.y, fd.e0.z});
             bimdfCharts->faceN.push_back({fn.x, fn.y, fn.z});

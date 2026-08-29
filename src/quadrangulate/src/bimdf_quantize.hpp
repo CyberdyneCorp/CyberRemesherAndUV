@@ -68,6 +68,19 @@ struct Charts {
     std::vector<std::array<float, 3>> vertexPos;
     std::vector<std::array<float, 3>> faceE0;
     std::vector<std::array<float, 3>> faceN;
+    // Source mesh FaceId per compact face. Only needed to report layout
+    // geometry back in the caller's index space; may stay empty.
+    std::vector<std::uint32_t> faceOfCompact;
+    // FaceId capacity of the SOURCE mesh, so layout face ids can be
+    // range-checked in the index space faceOfCompact maps into (ids are sparse
+    // after deletions, so this is the capacity, not the alive count). 0 when
+    // unknown.
+    std::size_t sourceFaceCount = 0;
+    // Capture the traced geometry (node positions, arc polylines) into
+    // TMesh::nodeGeom / TMesh::arcGeom. Write-only with respect to the
+    // quantizer, so it cannot change an assignment — see the geometry note on
+    // TMesh below.
+    bool captureGeometry = false;
 
     [[nodiscard]] std::size_t uIx(std::size_t c) const { return c; }
     [[nodiscard]] std::size_t vIx(std::size_t c) const { return nCut + c; }
@@ -102,6 +115,43 @@ struct Patch {
     [[nodiscard]] bool isQuad() const { return side.size() == 4; }
 };
 
+// Geometric companion to the T-mesh, filled only when Charts::captureGeometry
+// is set. NOTHING in solveBimdf reads it: the quantizer works off Arc::len,
+// Arc::expr and the patches alone, so capturing geometry cannot move an
+// assignment. It exists so the graph can leave this file as a
+// `cyber::remesh::TopologyLayout` (topology_layout.hpp) that later stages —
+// singularity scoring, guides, symmetry, export — can consume without
+// dragging the solver's symbolic side along.
+enum class NodeGeomKind : std::uint8_t {
+    Cone,       // cross-field singularity
+    Crease,     // vertex on a pinned crease chain
+    Boundary,   // vertex on an open-surface boundary loop
+    TJunction,  // interior point where separatrices / chains meet
+    Regular     // plain mesh vertex a trace landed on exactly
+};
+
+struct NodeGeom {
+    NodeGeomKind kind = NodeGeomKind::TJunction;
+    int coneIndex = 0;
+    // Mesh vertex the node sits on; 0xFFFFFFFF for T-junctions.
+    std::uint32_t meshVertex = 0xFFFFFFFFu;
+    // A compact face containing the node (always set).
+    std::size_t face = 0;
+    std::array<float, 3> position{};
+};
+
+struct ArcPoint {
+    std::array<float, 3> position{};
+    std::size_t face = 0;  // compact face the point lies in
+};
+
+struct ArcGeom {
+    // Traced polyline from Arc::n0 to Arc::n1, both endpoints included. Empty
+    // when capture was off, or when the arc's trail was invalidated by a
+    // jittered retry after the arc had already been recorded.
+    std::vector<ArcPoint> points;
+};
+
 struct TMesh {
     bool ok = false;
     std::string reason;  // failure diagnostic when !ok
@@ -128,6 +178,11 @@ struct TMesh {
     std::size_t excludedPatches = 0;  // rejected orbits (locally contained)
     std::string rejectSummary;        // corner histogram of rejected orbits
     std::vector<char> arcExcluded;    // per (compact) arc: no accepted orbit covers it
+    // Traced geometry (Charts::captureGeometry). nodeGeom is indexed by node
+    // id and sized nodeCount; arcGeom is parallel to `arcs`. Both empty when
+    // capture was off.
+    std::vector<NodeGeom> nodeGeom;
+    std::vector<ArcGeom> arcGeom;
 };
 
 // zValue(i) must return the relaxed value of promoted variable i (used only

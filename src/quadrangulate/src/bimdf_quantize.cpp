@@ -152,7 +152,8 @@ ZExpr diffExpr(const ZExpr& a, const ZExpr& b, double sign) {
 // ---------------------------------------------------------------------------
 class Builder {
 public:
-    Builder(const Charts& ch, const std::vector<double>& z) : ch_(ch), z_(z) {}
+    Builder(const Charts& ch, const std::vector<double>& z)
+        : ch_(ch), z_(z), geom_(ch.captureGeometry) {}
 
     TMesh run() {
         TMesh tm;
@@ -354,10 +355,57 @@ private:
         return kNone;
     }
 
+    // ---- geometry capture (Charts::captureGeometry) ----------------------
+    // 3D position of a UV point inside a compact face, by barycentric
+    // interpolation of the face's corner positions. Weights are clamped into
+    // the triangle, so a folded (or UV-degenerate) chart yields a point ON the
+    // face rather than an extrapolation far off the surface.
+    std::array<float, 3> pos3(std::size_t face, const V2& p) const {
+        const auto& f = ch_.faces[face];
+        const V2 a = uv(f[0]), b = uv(f[1]), c = uv(f[2]);
+        const double det = (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
+        double w[3] = {1.0, 0.0, 0.0};
+        if (std::abs(det) > 1e-18) {
+            w[1] = ((p.x - a.x) * (c.y - a.y) - (p.y - a.y) * (c.x - a.x)) / det;
+            w[2] = ((b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x)) / det;
+            w[0] = 1.0 - w[1] - w[2];
+            double sum = 0.0;
+            for (double& wi : w) {
+                wi = std::clamp(wi, 0.0, 1.0);
+                sum += wi;
+            }
+            if (sum > 1e-12) {
+                for (double& wi : w) {
+                    wi /= sum;
+                }
+            } else {
+                w[0] = 1.0;
+                w[1] = w[2] = 0.0;
+            }
+        }
+        std::array<float, 3> out{0.0f, 0.0f, 0.0f};
+        for (std::size_t k = 0; k < 3; ++k) {
+            const std::array<float, 3>& q = vertexPos3(f[k]);
+            for (std::size_t j = 0; j < 3; ++j) {
+                out[j] += static_cast<float>(w[k]) * q[j];
+            }
+        }
+        return out;
+    }
+    const std::array<float, 3>& vertexPos3(std::size_t cut) const {
+        static const std::array<float, 3> kZero{0.0f, 0.0f, 0.0f};
+        const std::uint32_t v = ch_.vertexOfCut[cut];
+        return v < ch_.vertexPos.size() ? ch_.vertexPos[v] : kZero;
+    }
+
     // ---- nodes -----------------------------------------------------------
+    struct WalkState;  // defined with the tracer below
     struct Node {
         int type = 0;  // 0 = mesh vertex, 1 = interior point (T-node)
         std::uint32_t meshVertex = 0;
+        // Geometry capture only; ignored by everything else.
+        std::size_t face = kNone;
+        std::array<float, 3> position{};
     };
     std::size_t vertexNode(std::uint32_t v) {
         const auto it = vertexNode_.find(v);
@@ -365,13 +413,23 @@ private:
             return it->second;
         }
         const std::size_t id = nodes_.size();
-        nodes_.push_back(Node{0, v});
+        nodes_.push_back(Node{0, v, kNone, {}});
         vertexNode_.emplace(v, id);
         return id;
     }
-    std::size_t interiorNode() {
+    // A T-node at the walk's current level, at varying coordinate `atVar` of
+    // the current face chart.
+    std::size_t interiorNode(const WalkState& w, double atVar) {
         const std::size_t id = nodes_.size();
-        nodes_.push_back(Node{1, 0});
+        Node n{1, 0, kNone, {}};
+        if (geom_) {
+            V2 p;
+            setComp(p, constAxis(w.q), w.c);
+            setComp(p, varyAxis(w.q), atVar);
+            n.face = w.face;
+            n.position = pos3(w.face, p);
+        }
+        nodes_.push_back(n);
         return id;
     }
     bool isConeVertex(std::uint32_t v) const { return coneOfVertex_.count(v) != 0; }
@@ -1218,6 +1276,9 @@ private:
             }
         }
         curGen_.assign(walks.size(), 0);
+        if (geom_) {
+            trails_.assign(walks.size(), {});
+        }
         dependents_.assign(walks.size(), 0);
         const auto dumpDensity = [&](const char* when) {
             if (std::getenv("CYBER_QC_BIMDF_DEBUG") == nullptr) {
@@ -1272,6 +1333,7 @@ private:
                                  traceFail_.c_str());
                 }
                 ray.events.clear();
+                clearTrail(next->id);
                 ++curGen_[static_cast<std::size_t>(next->id)];  // stale trail
                 next->done = true;
                 --active;
@@ -1324,6 +1386,7 @@ private:
                 {
                     Ray& ray = rays_[static_cast<std::size_t>(next->id)];
                     ray.events.clear();
+                    clearTrail(next->id);
                     initWalk(*next);
                     ray.startAlong = next->w.s0 * comp(next->w.p, next->w.va0);
                     ray.startExpr = unitExpr(next->w.va0 == 0 ? ch_.uIx(next->launchCut)
@@ -1348,6 +1411,12 @@ private:
         return faceSegs_[face].size() < segCap_;
     }
 
+    void clearTrail(int ray) {
+        if (geom_ && static_cast<std::size_t>(ray) < trails_.size()) {
+            trails_[static_cast<std::size_t>(ray)].clear();
+        }
+    }
+
     void flushSeg(const Walk& wk, double endVar) {
         const WalkState& ws = wk.w;
         Seg s;
@@ -1369,6 +1438,20 @@ private:
         s.va0 = ws.va0;
         s.s0 = ws.s0;
         faceSegs_[ws.face].push_back(std::move(s));
+        if (geom_) {
+            // Trail of the walk itself, for the layout's arc polylines. Keyed
+            // by the same monotone curve parameter the events carry, so an arc
+            // (a curve interval between two events) slices out of it directly.
+            V2 pe = ws.p;
+            setComp(pe, varyAxis(ws.q), endVar);
+            TrailSeg t;
+            t.face = ws.face;
+            t.p0 = pos3(ws.face, ws.p);
+            t.p1 = pos3(ws.face, pe);
+            t.curve0 = ws.curve;
+            t.curve1 = ws.curve + std::abs(endVar - startVar);
+            trails_[static_cast<std::size_t>(wk.id)].push_back(t);
+        }
     }
 
     // Advance one face-step. Returns 0 = advanced, 1 = terminated,
@@ -1583,7 +1666,7 @@ private:
                     // Copy: flushSeg below appends to the same vector `hit`
                     // points into (iterator invalidation).
                     const Seg hs = *hit;
-                    const std::size_t node = interiorNode();
+                    const std::size_t node = interiorNode(w, hs.c);
                     Event ev;
                     ev.along = alongEntry + slope * (hs.c - pv);
                     ev.curve = w.curve + std::abs(hs.c - pv);
@@ -1794,7 +1877,7 @@ private:
                 hitVaryExprA = std::move(e);
             }
         }
-        const std::size_t node = interiorNode();
+        const std::size_t node = interiorNode(w, exitVar);
         // My event: my varying coordinate at the hit equals the crease's
         // pinned coordinate, transported into my chart.
         {
@@ -1867,7 +1950,7 @@ private:
         }
         const auto [chainId, edgeIdx] = it->second;
         BChain& chain = bchains_[chainId];
-        const std::size_t node = interiorNode();
+        const std::size_t node = interiorNode(w, exitVar);
         const int va = varyAxis(w.q);
         Event ev;
         ev.along = alongOf(w) + alongSlopeOf(w) * (exitVar - comp(w.p, va));
@@ -1918,7 +2001,75 @@ private:
         int srcChain = -1;
         double c0 = 0.0, c1 = 0.0;  // event curve/along bounds (diagnostics)
         double al0 = 0.0, al1 = 0.0;
+        std::vector<ArcPoint> geom;  // traced polyline (Charts::captureGeometry)
     };
+
+    static std::array<float, 3> lerp3(const std::array<float, 3>& a, const std::array<float, 3>& b,
+                                      double t) {
+        const float f = static_cast<float>(std::clamp(t, 0.0, 1.0));
+        return {a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f, a[2] + (b[2] - a[2]) * f};
+    }
+
+    // Slice a ray's trail by the arc's curve interval [c0, c1]. The trail is
+    // recorded per face crossing in the same monotone parameter the events
+    // carry, so the slice is the arc's polyline.
+    void fillRayArcGeom(ArcRec& rec, int ray) {
+        if (!geom_ || static_cast<std::size_t>(ray) >= trails_.size()) {
+            return;
+        }
+        const std::vector<TrailSeg>& trail = trails_[static_cast<std::size_t>(ray)];
+        const double c0 = rec.c0, c1 = rec.c1;
+        for (const TrailSeg& t : trail) {
+            if (t.curve1 <= c0 || t.curve0 >= c1) {
+                continue;
+            }
+            const double span = t.curve1 - t.curve0;
+            const auto at = [&](double c) {
+                return span > 1e-15 ? lerp3(t.p0, t.p1, (c - t.curve0) / span) : t.p0;
+            };
+            if (rec.geom.empty()) {
+                rec.geom.push_back({at(std::max(c0, t.curve0)), t.face});
+            }
+            rec.geom.push_back({at(std::min(c1, t.curve1)), t.face});
+        }
+    }
+
+    // Chain arcs run along mesh edges, so their polyline is the chain's own
+    // vertices between the two events, with the events themselves as ends.
+    // `vAt` is the chain's vertex-at-edge-start array and `faceAt` reports a
+    // compact face for chain edge k.
+    template <typename FaceAt>
+    void fillChainArcGeom(ArcRec& rec, const std::vector<std::uint32_t>& vAt, std::size_t nEdges,
+                          bool closed, const ChainEvent& e0, const ChainEvent& e1, bool wrap,
+                          FaceAt faceAt) {
+        if (!geom_ || vAt.empty()) {
+            return;
+        }
+        const auto push = [&](std::size_t edgeStart) {
+            const std::uint32_t v = vAt[std::min(edgeStart, vAt.size() - 1)];
+            const std::array<float, 3> p =
+                v < ch_.vertexPos.size() ? ch_.vertexPos[v] : std::array<float, 3>{};
+            rec.geom.push_back({p, faceAt(std::min(edgeStart, nEdges - 1))});
+        };
+        // Placeholder ends; the layout bridge snaps them onto the node
+        // positions, which are exact.
+        push(e0.edge);
+        const std::size_t first = e0.edge + 1;
+        const std::size_t last = e1.frac == 0.0 ? e1.edge : e1.edge + 1;  // exclusive
+        if (wrap && closed) {
+            for (std::size_t k = first; k < vAt.size(); ++k) {
+                push(k);
+            }
+            for (std::size_t k = 0; k < last && k < vAt.size(); ++k) {
+                push(k);
+            }
+        } else {
+            for (std::size_t k = first; k < last && k < vAt.size(); ++k) {
+                push(k);
+            }
+        }
+        push(e1.edge);
+    }
 
     void assembleArcs(TMesh& tm) {
         for (std::size_t r = 0; r < rays_.size(); ++r) {
@@ -1964,6 +2115,7 @@ private:
                 rec.end1.face = ev.face;
                 rec.end1.dir = quarterDir(ev.q + 2);
                 rec.end1.corner = ev.corner;
+                fillRayArcGeom(rec, static_cast<int>(r));
                 arcs_.push_back(std::move(rec));
                 prevAlong = ev.along;
                 prevExpr = &ev.expr;
@@ -1992,13 +2144,19 @@ private:
                 fillCreaseEndAnchor(chain, e1, false, rec.end1);
                 rec.end0.node = e0.node;
                 rec.end1.node = e1.node;
+                fillChainArcGeom(rec, chain.vAt, chain.edges.size(), chain.closed, e0, e1, false,
+                                 [&](std::size_t k) {
+                                     return ch_.seams[static_cast<std::size_t>(chain.edges[k].seam)]
+                                         .faceA;
+                                 });
                 arcs_.push_back(std::move(rec));
             }
         }
         for (BChain& chain : bchains_) {
             std::sort(chain.events.begin(), chain.events.end(),
                       [](const ChainEvent& a, const ChainEvent& b) { return a.along < b.along; });
-            const auto makeArc = [&](const ChainEvent& e0, const ChainEvent& e1, double len) {
+            const auto makeArc = [&](const ChainEvent& e0, const ChainEvent& e1, double len,
+                                     bool wrap) {
                 ArcRec rec;
                 rec.arc.n0 = e0.node;
                 rec.arc.n1 = e1.node;
@@ -2009,6 +2167,8 @@ private:
                 fillBoundaryEndAnchor(chain, e1, false, rec.end1);
                 rec.end0.node = e0.node;
                 rec.end1.node = e1.node;
+                fillChainArcGeom(rec, chain.vAt, chain.edges.size(), chain.closed, e0, e1, wrap,
+                                 [&](std::size_t k) { return chain.edges[k].face; });
                 arcs_.push_back(std::move(rec));
             };
             for (std::size_t i = 0; i + 1 < chain.events.size(); ++i) {
@@ -2017,7 +2177,7 @@ private:
                 if (e1.along - e0.along < 1e-9 && e0.node == e1.node) {
                     continue;
                 }
-                makeArc(e0, e1, e1.along - e0.along);
+                makeArc(e0, e1, e1.along - e0.along, false);
             }
             if (chain.closed && !chain.events.empty()) {
                 // Wrap arc closing the loop through the along origin. A
@@ -2025,7 +2185,7 @@ private:
                 // whole boundary.
                 const ChainEvent& eL = chain.events.back();
                 const ChainEvent& eF = chain.events.front();
-                makeArc(eL, eF, chain.accum.back() - eL.along + eF.along);
+                makeArc(eL, eF, chain.accum.back() - eL.along + eF.along, true);
             }
         }
         // Negative relaxed lengths are REAL on folded relaxed maps (the map is
@@ -2044,6 +2204,55 @@ private:
         for (const Node& n : nodes_) {
             if (n.type == 1) {
                 ++tm.tNodes;
+            }
+        }
+        emitNodeGeom(tm);
+    }
+
+    // Node positions and kinds for the layout. T-node geometry was captured at
+    // creation; vertex-backed nodes take their exact mesh position here, plus
+    // the first compact face that contains them (index order, so it is stable).
+    void emitNodeGeom(TMesh& tm) {
+        if (!geom_) {
+            return;
+        }
+        std::unordered_map<std::uint32_t, std::size_t> faceOfVertex;
+        for (std::size_t f = 0; f < ch_.faces.size(); ++f) {
+            for (const std::size_t cut : ch_.faces[f]) {
+                faceOfVertex.emplace(ch_.vertexOfCut[cut], f);
+            }
+        }
+        std::unordered_set<std::uint32_t> boundaryVertex;
+        for (const BChain& bc : bchains_) {
+            boundaryVertex.insert(bc.vAt.begin(), bc.vAt.end());
+        }
+        tm.nodeGeom.resize(nodes_.size());
+        for (std::size_t i = 0; i < nodes_.size(); ++i) {
+            const Node& n = nodes_[i];
+            NodeGeom& g = tm.nodeGeom[i];
+            if (n.type == 1) {
+                g.kind = NodeGeomKind::TJunction;
+                g.face = n.face == kNone ? 0 : n.face;
+                g.position = n.position;
+                continue;
+            }
+            g.meshVertex = n.meshVertex;
+            const auto itf = faceOfVertex.find(n.meshVertex);
+            g.face = itf == faceOfVertex.end() ? 0 : itf->second;
+            g.position = n.meshVertex < ch_.vertexPos.size()
+                             ? ch_.vertexPos[n.meshVertex]
+                             : std::array<float, 3>{};
+            const auto itc = coneOfVertex_.find(n.meshVertex);
+            if (itc != coneOfVertex_.end()) {
+                g.kind = NodeGeomKind::Cone;
+                g.coneIndex = itc->second;
+            } else if (chainPosOfVertex_.count(n.meshVertex) != 0 ||
+                       creaseEndCount_.count(n.meshVertex) != 0) {
+                g.kind = NodeGeomKind::Crease;
+            } else if (boundaryVertex.count(n.meshVertex) != 0) {
+                g.kind = NodeGeomKind::Boundary;
+            } else {
+                g.kind = NodeGeomKind::Regular;
             }
         }
     }
@@ -2546,6 +2755,9 @@ private:
                 // An arc no accepted orbit covers lies inside an excluded
                 // region: its integer stays with the greedy rounding.
                 tm.arcExcluded.push_back(covered[a] ? 0 : 1);
+                if (geom_) {
+                    tm.arcGeom.push_back(ArcGeom{std::move(arcs_[a].geom)});
+                }
             }
         }
         for (const Patch& p : tm.patches) {
@@ -3182,6 +3394,16 @@ private:
     std::size_t failedLaunches_ = 0;
     std::unordered_set<std::uint32_t> failedLaunchVertex_;
     std::vector<int> badCorners_;
+    // ---- geometry capture ----
+    bool geom_ = false;
+    // One walked face-crossing of a ray, in the same monotone `curve`
+    // parameter the ray's events use.
+    struct TrailSeg {
+        std::size_t face = 0;
+        std::array<float, 3> p0{}, p1{};
+        double curve0 = 0.0, curve1 = 0.0;
+    };
+    std::vector<std::vector<TrailSeg>> trails_;  // per ray, cleared on retry
 };
 
 }  // namespace

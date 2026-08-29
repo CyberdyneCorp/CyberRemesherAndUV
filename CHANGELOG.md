@@ -3,6 +3,54 @@
 > Note: releases 0.3.0, 0.4.0 and 0.5.0 were tagged without changelog entries;
 > their content is recorded in `docs/ROADMAP.md`. Entries resume here.
 
+## [Unreleased]
+
+### Added
+
+- **Topology layout — the first stage of the ZRemesher-class retopology work**
+  (`openspec/changes/add-zremesher-retopology`, Phase A). The quad topology the
+  engine produces has always been an *emergent* consequence of cross field +
+  seamless grid + isoline extraction, which is mathematically sound but leaves
+  nothing to reason about when the question is "where should the edge loops go".
+  `cyber::remesh::TopologyLayout` makes that structure explicit: nodes
+  (singularities, feature and boundary corners, T-junctions), arcs (the
+  separatrix, crease and boundary curves between them, with their traced 3D
+  polylines and lengths) and the patches those arcs bound.
+
+  The split with the existing Bi-MDF tracer is by responsibility, not by moving
+  code: `bimdf::TMesh` stays the QUANTIZATION view — arc lengths plus each arc's
+  exact symbolic length over the seamless solver's promoted variables, which is
+  meaningless outside the integer solve — and `TopologyLayout` is the GEOMETRIC
+  and COMBINATORIAL view, with no solver variables, so singularity scoring,
+  guides, symmetry, quality scoring and debug rendering can consume it without
+  dragging the solver along. Node and arc ids are shared between the two.
+
+  The tracer now optionally keeps the geometry it used to discard
+  (`Charts::captureGeometry`): T-node positions at creation, separatrix
+  polylines sliced out of the walk's trail by the same monotone curve parameter
+  its events already carry, and crease/boundary polylines from the chain
+  vertices. **Nothing in `solveBimdf` reads any of it**, so capture cannot move
+  an assignment — verified byte-identical output with capture on versus off
+  across all six corpus models.
+
+  `validateTopologyLayout` checks the layout's combinatorial invariants and
+  deliberately separates two failure classes, mirroring how the tracer already
+  treats them. A HARD violation — a bad id, a non-finite position, an arc
+  pointing at a missing node, an arc bounding no patch — means the graph is
+  corrupt and nothing may consume it. A patch whose boundary walk does not close
+  is LOCAL: it is reported by id and its arcs are excluded, exactly like a
+  rejected orbit, and the sound remainder proceeds. All six corpus models
+  validate; rocker-arm carries one contained non-closing patch out of 199, which
+  is a Phase B target.
+
+  Reachable behind `CYBER_ZR_LAYOUT` (`=1` reports the layout statistics and the
+  validation verdict; any other value is a path prefix and also writes
+  `<prefix>.json` and `<prefix>.obj`, both byte-reproducible). The public
+  `zremesher` quad method that will carry this without an env var is later in
+  the same change. `examples/21_topology_layout.py` renders the layout's arcs
+  and singularities over the quads they produced.
+
+
 ## [0.7.0] - 2026-08-25
 
 ### Added
