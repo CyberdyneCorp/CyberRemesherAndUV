@@ -3566,14 +3566,16 @@ class QuadCoverQuadrangulator final : public IQuadrangulator {
 public:
     QuadCoverQuadrangulator(int fieldIterations, float adaptivity, int holeFillMaxBoundary,
                             float featureDegrees, SeamlessLayoutOptions layout = {},
-                            std::string name = "quad-cover", bool bestOfTwo = false)
+                            std::string name = "quad-cover", bool bestOfTwo = false,
+                            ZRemesherRunReport* report = nullptr)
         : m_fieldIterations(fieldIterations),
           m_adaptivity(adaptivity),
           m_holeFillMaxBoundary(holeFillMaxBoundary),
           m_featureDegrees(featureDegrees),
           m_layout(layout),
           m_name(std::move(name)),
-          m_bestOfTwo(bestOfTwo) {}
+          m_bestOfTwo(bestOfTwo),
+          m_report(report) {}
 
     Outcome quadrangulate(Mesh& mesh, float targetEdgeLength, ProgressSink* progress,
                           const CancelToken* cancel) override {
@@ -3652,6 +3654,14 @@ public:
         }
         std::fprintf(stderr, "[zr] selected candidate: %s (score %.3f)\n", bestName.c_str(),
                      bestScore.total);
+        // Islands are solved serially, so the last island to select wins the
+        // report's single slot. Recorded rather than aggregated because the
+        // name answers "which field did this run keep", and averaging two
+        // islands' scores would answer nothing.
+        if (m_report != nullptr) {
+            m_report->selectedCandidate = bestName;
+            m_report->qualityScore = bestScore.total;
+        }
         mesh = std::move(best);
         return bestOutcome;
     }
@@ -3939,6 +3949,7 @@ private:
     SeamlessLayoutOptions m_layout;
     std::string m_name;
     bool m_bestOfTwo = false;
+    ZRemesherRunReport* m_report = nullptr;
     CrossFieldSource m_fieldSource = CrossFieldSource::Auto;
     const GuidanceField* m_guidance = nullptr;
     std::vector<std::string> m_unhonored;
@@ -3983,9 +3994,10 @@ std::unique_ptr<IQuadrangulator> makeZRemesherQuadrangulator(const ZRemesherOpti
         std::getenv("CYBER_ZR_NO_UNIFIED_SIZING") == nullptr;
     const bool bestOfTwo =
         options.quality == RemeshQualityMode::Best || std::getenv("CYBER_ZR_BEST") != nullptr;
+    layout.report = options.report != nullptr ? &options.report->layout : nullptr;
     return std::make_unique<QuadCoverQuadrangulator>(
         options.fieldIterations, clamped.adaptivity, clamped.holeFillMaxBoundary,
-        clamped.sharpEdgeDegrees, layout, "zremesher", bestOfTwo);
+        clamped.sharpEdgeDegrees, layout, "zremesher", bestOfTwo, options.report);
 }
 
 bool quadCoverAvailable() {

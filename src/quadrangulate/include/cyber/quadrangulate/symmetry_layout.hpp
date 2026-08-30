@@ -4,6 +4,7 @@
 #include <cstdint>
 
 #include "cyber/core/mesh.hpp"
+#include "cyber/core/pipeline.hpp"
 #include "cyber/core/plane.hpp"
 
 // Exact topology symmetry (openspec/changes/add-zremesher-retopology, Phase F).
@@ -104,5 +105,56 @@ MirrorReport mirrorAcross(Mesh& mesh, const Plane& plane, float tolerance = 1e-5
 // assumed from the construction.
 [[nodiscard]] bool isTopologicallySymmetric(const Mesh& mesh, const Plane& plane,
                                             float tolerance = 1e-4f);
+
+// The half-model target for a whole-model request. One rule, so a caller that
+// wants to announce the halving before the solve starts and the solve itself
+// cannot disagree about it.
+[[nodiscard]] int symmetricHalfTarget(int wholeTargetQuads);
+
+// What a forced-symmetry run did, for the caller to report or assert on.
+struct SymmetryRunReport {
+    // False when `axis` was None: the run was an ordinary remesh and every
+    // field below is meaningless rather than zero-valued.
+    bool applied = false;
+    // The whole-model target the caller asked for, and the half-model target
+    // the solve actually ran at.
+    int requestedQuads = 0;
+    int halfQuads = 0;
+    std::size_t borderSnapped = 0;
+    float maxBorderDrift = 0.0f;
+    std::size_t membranesRemoved = 0;
+    std::size_t mirroredVertices = 0;
+    std::size_t mirroredFaces = 0;
+    // Checked on the RESULT rather than assumed from the construction, because
+    // the construction is exactly what a regression would break.
+    bool topologicallySymmetric = false;
+};
+
+// Remesh `input` under forced-axis symmetry: cut it at the midplane, solve one
+// half, and mirror that half's CONNECTIVITY back across the plane.
+//
+// Every argument after `axis` is forwarded to remesh() unchanged, so this is a
+// drop-in for it. With SymmetryAxis::None it IS remesh(), byte for byte, and
+// `report->applied` is false.
+//
+// `params.targetQuadCount` names the WHOLE model, so the half is solved for
+// half of it. Without that halving the request would silently mean "per half"
+// and a symmetric run would come back at twice the size that was asked for.
+//
+// This lives here, rather than in the caller that first needed it, because the
+// CLI and the C ABI must produce the same mesh for the same request
+// (engine-bindings spec, "Parity SHALL hold"). A hundred lines of splitting,
+// border-snapping and mirroring copied into a second caller is a divergence
+// waiting to happen, not parity.
+//
+// The result's statistics are recounted after mirroring: they otherwise
+// describe the half that was solved, which is half of what the caller gets
+// back. Fails the same way remesh() does; additionally returns a
+// RunStatus::Error result when the input cannot be split at its midplane.
+[[nodiscard]] PipelineResult remeshSymmetric(
+    const Mesh& input, const Parameters& rawParams, SymmetryAxis axis,
+    SymmetryRunReport* report = nullptr, ProgressSink* progress = nullptr,
+    const CancelToken* cancel = nullptr, const QuadrangulatorFactory& quadrangulator = {},
+    const QuadrangulatorFactory& fallbackQuadrangulator = {}, const Guidance* guidance = nullptr);
 
 }  // namespace cyber::remesh

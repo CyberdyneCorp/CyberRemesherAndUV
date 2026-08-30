@@ -405,4 +405,119 @@ bool isTopologicallySymmetric(const Mesh& mesh, const Plane& plane, float tolera
     return true;
 }
 
+// ---------------------------------------------------------------------------
+// Forced-symmetry orchestration (shared by the CLI and the C ABI).
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// Mean edge length of `mesh`, or 0 when it has no edges.
+float meanEdgeLength(const Mesh& mesh) {
+    float total = 0.0f;
+    std::size_t edges = 0;
+    for (Index e = 0; e < mesh.edgeCapacity(); ++e) {
+        const EdgeId id{e};
+        if (!mesh.isAlive(id)) {
+            continue;
+        }
+        const auto [a, b] = mesh.edgeVertices(id);
+        total += length(mesh.position(b) - mesh.position(a));
+        ++edges;
+    }
+    return edges != 0 ? total / static_cast<float>(edges) : 0.0f;
+}
+
+// Recount face/vertex statistics from the mesh. After mirroring, the counts the
+// pipeline returned describe the HALF it solved, which is half of what the
+// caller is holding.
+void recountStats(const Mesh& mesh, Statistics& stats) {
+    stats.vertexCount = 0;
+    stats.quadCount = 0;
+    stats.triangleCount = 0;
+    stats.otherPolygonCount = 0;
+    for (Index v = 0; v < mesh.vertexCapacity(); ++v) {
+        stats.vertexCount += mesh.isAlive(VertexId{v}) ? 1u : 0u;
+    }
+    for (Index f = 0; f < mesh.faceCapacity(); ++f) {
+        const FaceId id{f};
+        if (!mesh.isAlive(id)) {
+            continue;
+        }
+        const std::size_t n = mesh.faceSize(id);
+        if (n == 4) {
+            ++stats.quadCount;
+        } else if (n == 3) {
+            ++stats.triangleCount;
+        } else {
+            ++stats.otherPolygonCount;
+        }
+    }
+}
+
+}  // namespace
+
+int symmetricHalfTarget(int wholeTargetQuads) { return std::max(100, wholeTargetQuads / 2); }
+
+PipelineResult remeshSymmetric(const Mesh& input, const Parameters& rawParams, SymmetryAxis axis,
+                               SymmetryRunReport* report, ProgressSink* progress,
+                               const CancelToken* cancel,
+                               const QuadrangulatorFactory& quadrangulator,
+                               const QuadrangulatorFactory& fallbackQuadrangulator,
+                               const Guidance* guidance) {
+    if (axis == SymmetryAxis::None) {
+        return remesh(input, rawParams, progress, cancel, quadrangulator, fallbackQuadrangulator,
+                      guidance);
+    }
+
+    const Plane plane = symmetryPlane(input, axis);
+    const SymmetrySplit split = splitAtPlane(input, plane, /*positiveSide=*/true);
+    if (!split.valid) {
+        PipelineResult failed;
+        failed.status = RunStatus::Error;
+        failed.parameterIssues.push_back(
+            {"symmetry", "could not split the input at its midplane", /*fatal=*/true});
+        return failed;
+    }
+
+    // The whole model is what the caller asked for, so the half is solved for
+    // half of it.
+    Parameters halfParams = rawParams;
+    halfParams.targetQuadCount = symmetricHalfTarget(rawParams.targetQuadCount);
+    if (report != nullptr) {
+        report->applied = true;
+        report->requestedQuads = rawParams.targetQuadCount;
+        report->halfQuads = halfParams.targetQuadCount;
+    }
+
+    PipelineResult result = remesh(split.half, halfParams, progress, cancel, quadrangulator,
+                                   fallbackQuadrangulator, guidance);
+    if (result.mesh.faceCount() == 0) {
+        return result;
+    }
+
+    // Weld tolerance from the ACHIEVED edge length: the remesh moves the border
+    // by a fraction of an edge, and anything inside that fraction is the
+    // centerline rather than real geometry.
+    const float edge = meanEdgeLength(result.mesh);
+    const float tolerance = edge > 0.0f ? 0.35f * edge : 1e-4f;
+
+    // The remesh's border does not land on the cut — the isoline extraction
+    // ends where the isolines end — so it is projected back before mirroring.
+    // Safe here because the half was split from the caller's input, so its only
+    // border IS the cut; the drift is reported so a wandering remesh stays
+    // visible rather than absorbed.
+    const BorderSnapReport snap = snapBorderToPlane(result.mesh, plane);
+    const MirrorReport mirror = mirrorAcross(result.mesh, plane, tolerance);
+    recountStats(result.mesh, result.stats);
+    if (report != nullptr) {
+        report->borderSnapped = snap.snapped;
+        report->maxBorderDrift = snap.maxDistance;
+        report->membranesRemoved = snap.membranesRemoved;
+        report->mirroredVertices = mirror.mirroredVertices;
+        report->mirroredFaces = mirror.mirroredFaces;
+        report->topologicallySymmetric = isTopologicallySymmetric(result.mesh, plane, tolerance);
+    }
+    return result;
+}
+
 }  // namespace cyber::remesh

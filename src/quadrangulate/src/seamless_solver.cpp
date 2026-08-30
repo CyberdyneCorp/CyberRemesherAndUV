@@ -1900,7 +1900,7 @@ std::size_t winslowUntangle(const FoldRepairContext& ctx, std::size_t nCut,
 // the layout is also written to <prefix>.json and <prefix>.obj, so it can be
 // diffed between runs and opened next to the output mesh in a viewer.
 void reportTopologyLayout(const bimdf::Charts& charts, const bimdf::TMesh& tmesh,
-                          const GeometryAnalysis& geometry) {
+                          const GeometryAnalysis& geometry, LayoutRunReport* report) {
     TopologyLayout layout = layoutFromTMesh(charts, tmesh);
     const LayoutValidation v = validateTopologyLayout(layout, charts.sourceFaceCount);
     layout.valid = v.ok;
@@ -1917,6 +1917,26 @@ void reportTopologyLayout(const bimdf::Charts& charts, const bimdf::TMesh& tmesh
         }
     }
     const LayoutStats st = layout.stats();
+    // Hand the same numbers the stderr line carries to the caller's report, so
+    // a binding can surface them without scraping a log (engine-bindings spec).
+    if (report != nullptr) {
+        ++report->layouts;
+        report->layoutsValid += layout.valid ? 1 : 0;
+        report->stats.nodes += st.nodes;
+        report->stats.arcs += st.arcs;
+        report->stats.patches += st.patches;
+        report->stats.singularities += st.singularities;
+        report->stats.tJunctions += st.tJunctions;
+        report->stats.boundaryArcs += st.boundaryArcs;
+        report->stats.featureArcs += st.featureArcs;
+        report->stats.excludedArcs += st.excludedArcs;
+        report->stats.nonQuadPatches += st.nonQuadPatches;
+        report->stats.nonClosingPatches += st.nonClosingPatches;
+        report->stats.totalIndex += st.totalIndex;
+        if (!layout.valid && report->invalidReason.empty()) {
+            report->invalidReason = v.error;
+        }
+    }
     std::fprintf(stderr,
                  "[zr] layout: valid=%d nodes=%zu arcs=%zu patches=%zu sing=%zu tnodes=%zu "
                  "feature=%zu boundary=%zu excluded=%zu nonQuad=%zu nonClosing=%zu index=%d%s%s\n",
@@ -1988,16 +2008,14 @@ void reportTopologyLayout(const bimdf::Charts& charts, const bimdf::TMesh& tmesh
     write(".obj", layoutToObj(layout));
 }
 
-int solveSeamlessReduced(accel::IBackend& backend, std::size_t nCut,
-                         const std::vector<std::unordered_map<std::size_t, float>>& rows,
-                         const std::vector<float>& bu, const std::vector<float>& bv,
-                         const std::vector<SeamRef>& seams, const std::vector<std::size_t>& gauges,
-                         std::vector<float>& u, std::vector<float>& v,
-                         const CancelToken* cancel = nullptr,
-                         SeamlessSolveCacheImpl* cache = nullptr,
-                         bimdf::Charts* bimdfCharts = nullptr,
-                         const FoldRepairContext* foldCtx = nullptr,
-                         const GeometryAnalysis* layoutGeometry = nullptr) {
+int solveSeamlessReduced(
+    accel::IBackend& backend, std::size_t nCut,
+    const std::vector<std::unordered_map<std::size_t, float>>& rows, const std::vector<float>& bu,
+    const std::vector<float>& bv, const std::vector<SeamRef>& seams,
+    const std::vector<std::size_t>& gauges, std::vector<float>& u, std::vector<float>& v,
+    const CancelToken* cancel = nullptr, SeamlessSolveCacheImpl* cache = nullptr,
+    bimdf::Charts* bimdfCharts = nullptr, const FoldRepairContext* foldCtx = nullptr,
+    const GeometryAnalysis* layoutGeometry = nullptr, LayoutRunReport* layoutReport = nullptr) {
     const std::size_t nSeam = seams.size();
     const std::size_t nUv = 2 * nCut;
     // Feature-seam integer pinning (docs/ROADMAP.md 2026-08-01 priority 1;
@@ -3008,7 +3026,7 @@ int solveSeamlessReduced(accel::IBackend& backend, std::size_t nCut,
                          tmesh.degradeWhy.fanReclass, tmesh.underservedNodes);
         }
         if (bimdfCharts->captureGeometry) {
-            reportTopologyLayout(*bimdfCharts, tmesh, *layoutGeometry);
+            reportTopologyLayout(*bimdfCharts, tmesh, *layoutGeometry, layoutReport);
         }
         // Reduce every arc-length expression onto the reduced basis w (used
         // for the back-substitution and the post-solve deviation report).
@@ -4393,7 +4411,8 @@ Parameterization solveParameterizationImpl(const Mesh& mesh, const SeamlessSetup
     // it scales to hundreds of cones (spot: ~350 seam edges), reconciling branch-point holonomy.
     if (!seams.empty()) {
         solveSeamlessReduced(backend, nCut, rows, bu0, bv0, seams, gauges, u, v, cancel, cacheImpl,
-                             bimdfCharts.get(), foldCtx.get(), layoutGeometry.get());
+                             bimdfCharts.get(), foldCtx.get(), layoutGeometry.get(),
+                             layoutOpts != nullptr ? layoutOpts->report : nullptr);
     }
     foldCensusPhase("final");
     statsGradHist("reduced");
