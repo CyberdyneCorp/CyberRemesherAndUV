@@ -906,9 +906,10 @@ bool prepareNativeSolve(const Mesh& mesh, float targetEdgeLength, float adaptivi
     }
 
     auto backend = accel::defaultBackend();
-    ctx.setup = buildSeamlessSetup(
-        work, kFieldIterations, *backend, ctx.featureBinding,
-        ctx.creaseAlignSupport.empty() ? nullptr : &ctx.creaseAlignSupport, ctx.guidance);
+    ctx.setup =
+        buildSeamlessSetup(work, kFieldIterations, *backend, ctx.featureBinding,
+                           ctx.creaseAlignSupport.empty() ? nullptr : &ctx.creaseAlignSupport,
+                           ctx.guidance, ctx.fieldSource);
     const SeamlessSetup& setup = ctx.setup;
     if (fieldStats) {
         // Cone census: total cones, how many sit off tagged feature edges (spurious flat-region
@@ -3587,26 +3588,28 @@ public:
     // pick the better field for every model — rocker-arm prefers one, spot and
     // cheburashka the other, and their crease fractions interleave, so no
     // threshold gets all three right. Choosing per input by MEASURING both is
-    // the answer, and it needs a comparable score, which is what
-    // scoreQuality provides.
+    // the answer, and it needs a comparable score, which is what scoreQuality
+    // provides.
     //
-    // The two candidates are the two cross fields the engine already has: the
-    // multiresolution orientation-derived field (the default) and the
-    // single-level smoothed one. Both then take the identical seamless solve
-    // and extraction, so the comparison isolates the field.
+    // The two candidates are the two cross fields the engine already has. Both
+    // then take the identical seamless solve and extraction, so the comparison
+    // isolates the field. The choice is threaded through the solve rather than
+    // set in the environment: an environment variable is process-global and not
+    // thread-safe, so a host remeshing two islands at once would have them
+    // fight over it.
     Outcome quadrangulateBestOfTwo(Mesh& mesh, float targetEdgeLength, ProgressSink* progress,
                                    const CancelToken* cancel) {
         const bool closedInput = isClosed(mesh);
         struct Candidate {
             const char* name;
-            const char* killSwitch;  // set while solving to select the field
+            CrossFieldSource field;
         };
         // Order is the final tie-break, so it is fixed and documented rather
         // than incidental: the shipped default goes first and only loses to a
         // strictly better score.
         static constexpr Candidate kCandidates[] = {
-            {"multires", nullptr},
-            {"single-level", "CYBER_QC_NO_CROSSFIELD_MULTIRES"},
+            {"multires", CrossFieldSource::Multiresolution},
+            {"single-level", CrossFieldSource::SingleLevel},
         };
 
         Mesh best;
@@ -3618,11 +3621,8 @@ public:
                 return {.success = false, .cancelled = true, .failureReason = {}};
             }
             Mesh trial = mesh;
-            Outcome outcome{};
-            {
-                const ScopedFieldSelect select(candidate.killSwitch);
-                outcome = quadrangulateOnce(trial, targetEdgeLength, progress, cancel);
-            }
+            m_fieldSource = candidate.field;
+            const Outcome outcome = quadrangulateOnce(trial, targetEdgeLength, progress, cancel);
             if (!outcome.success) {
                 continue;
             }
@@ -3643,10 +3643,11 @@ public:
                 bestOutcome = outcome;
             }
         }
+        m_fieldSource = CrossFieldSource::Auto;
         if (bestName.empty()) {
             // Every candidate declined: fall back to one ordinary solve so the
-            // caller sees the same failure it would have seen without
-            // candidate selection.
+            // caller sees the same failure it would have seen without candidate
+            // selection.
             return quadrangulateOnce(mesh, targetEdgeLength, progress, cancel);
         }
         std::fprintf(stderr, "[zr] selected candidate: %s (score %.3f)\n", bestName.c_str(),
@@ -3679,6 +3680,7 @@ public:
         NativeSolveContext nativeCtx;
         nativeCtx.guidance = m_guidance;  // non-null forces the native route (see the header)
         nativeCtx.layout = m_layout;      // capture likewise forces native
+        nativeCtx.fieldSource = m_fieldSource;
         // Everything the run could NOT do with the guidance, on the route it
         // actually took. Called on EVERY exit below (including the early one),
         // because an island that never reached a solver honored nothing either.
@@ -3920,43 +3922,6 @@ public:
     [[nodiscard]] std::string name() const override { return m_name; }
 
 private:
-    // Selects a cross field for the duration of one candidate solve by setting
-    // the kill switch the field code already reads, then restoring what was
-    // there. An environment variable is a poor channel for this and the right
-    // fix is to thread the choice through buildSeamlessSetup — but that
-    // signature is shared with the shipped path, and the point of this phase is
-    // to find out whether measuring both is worth the plumbing at all.
-    class ScopedFieldSelect {
-    public:
-        explicit ScopedFieldSelect(const char* name) : m_name(name) {
-            if (m_name == nullptr) {
-                return;
-            }
-            if (const char* prev = std::getenv(m_name); prev != nullptr) {
-                m_had = true;
-                m_previous = prev;
-            }
-            ::setenv(m_name, "1", 1);
-        }
-        ~ScopedFieldSelect() {
-            if (m_name == nullptr) {
-                return;
-            }
-            if (m_had) {
-                ::setenv(m_name, m_previous.c_str(), 1);
-            } else {
-                ::unsetenv(m_name);
-            }
-        }
-        ScopedFieldSelect(const ScopedFieldSelect&) = delete;
-        ScopedFieldSelect& operator=(const ScopedFieldSelect&) = delete;
-
-    private:
-        const char* m_name;
-        bool m_had = false;
-        std::string m_previous;
-    };
-
     static bool isClosed(const Mesh& mesh) {
         for (Index e = 0; e < mesh.edgeCapacity(); ++e) {
             const EdgeId edge{e};
@@ -3974,6 +3939,7 @@ private:
     SeamlessLayoutOptions m_layout;
     std::string m_name;
     bool m_bestOfTwo = false;
+    CrossFieldSource m_fieldSource = CrossFieldSource::Auto;
     const GuidanceField* m_guidance = nullptr;
     std::vector<std::string> m_unhonored;
 };

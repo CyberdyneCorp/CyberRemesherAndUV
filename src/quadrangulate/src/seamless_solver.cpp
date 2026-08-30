@@ -995,7 +995,7 @@ int SeamlessSetup::totalIndex() const {
 
 SeamlessSetup buildSeamlessSetup(const Mesh& mesh, int iterations, accel::IBackend& backend,
                                  bool featureBinding, const std::vector<char>* creaseAlignSupport,
-                                 const GuidanceField* guidance) {
+                                 const GuidanceField* guidance, CrossFieldSource fieldSource) {
     SeamlessSetup setup;
     if (mesh.faceCapacity() == 0) {
         return setup;
@@ -1007,7 +1007,10 @@ SeamlessSetup buildSeamlessSetup(const Mesh& mesh, int iterations, accel::IBacke
     // cones globally where single-level smoothing gets stuck (nefertiti
     // cyber-pure 220 -> 176 cones, sphere 35 -> 21). Kill switch restores the
     // stock single-level field.
-    if (std::getenv("CYBER_QC_NO_CROSSFIELD_MULTIRES") == nullptr) {
+    const bool multires = fieldSource == CrossFieldSource::Multiresolution ||
+                          (fieldSource == CrossFieldSource::Auto &&
+                           std::getenv("CYBER_QC_NO_CROSSFIELD_MULTIRES") == nullptr);
+    if (multires) {
         setup.field = computeCrossFieldFromOrientation(mesh, iterations, backend, 45.0f,
                                                        creaseAlignSupport, guidance);
     } else {

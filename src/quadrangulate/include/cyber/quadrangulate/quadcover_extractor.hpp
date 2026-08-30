@@ -112,6 +112,10 @@ struct NativeSolveContext {
     // the native seamless map, and the vendored Geogram quad_cover produces no
     // T-mesh at all — routing there would silently return no layout.
     SeamlessLayoutOptions layout;
+    // Which cross field this solve builds from. `Auto` keeps the shipped
+    // choice; the candidate-selection path names one explicitly so it can solve
+    // both and compare without a process-global switch.
+    CrossFieldSource fieldSource = CrossFieldSource::Auto;
     // Topology-guide accounting, read back for the run report. A requested
     // guide that was not honoured is named, never dropped.
     std::size_t topologyGuidesRequested = 0;

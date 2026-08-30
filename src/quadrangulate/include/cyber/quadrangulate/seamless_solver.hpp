@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <vector>
 
@@ -48,6 +49,20 @@ struct SeamlessSetup {
     [[nodiscard]] int totalIndex() const;
 };
 
+// Which cross field a setup is built from.
+//
+// The two differ in where they place cones: the multiresolution hierarchy
+// decides globally, which single-level smoothing can get stuck on, but it is
+// not uniformly better — measured per model, each wins on some. `Auto` keeps
+// the shipped choice (multiresolution unless CYBER_QC_NO_CROSSFIELD_MULTIRES
+// says otherwise); naming one explicitly is what lets a caller solve BOTH and
+// compare, without reaching for a process-global environment variable to do it.
+enum class CrossFieldSource : std::uint8_t {
+    Auto,
+    Multiresolution,
+    SingleLevel,
+};
+
 // Build the M1 setup: cross field (via computeCrossField, `iterations` smoothing sweeps),
 // per-edge period jumps, per-vertex singularity indices, and a cut graph. Returns
 // valid == false only for an empty/degenerate mesh.
@@ -61,7 +76,8 @@ struct SeamlessSetup {
 // field build textually unchanged.
 [[nodiscard]] SeamlessSetup buildSeamlessSetup(
     const Mesh& mesh, int iterations, accel::IBackend& backend, bool featureBinding = false,
-    const std::vector<char>* creaseAlignSupport = nullptr, const GuidanceField* guidance = nullptr);
+    const std::vector<char>* creaseAlignSupport = nullptr, const GuidanceField* guidance = nullptr,
+    CrossFieldSource fieldSource = CrossFieldSource::Auto);
 
 // Euler characteristic V - E + F of the mesh cut open along `setup.isCutEdge`: each cut
 // edge is split so the two sides no longer share it. A cut graph that opens a closed
