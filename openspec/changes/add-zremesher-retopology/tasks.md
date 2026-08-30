@@ -398,8 +398,21 @@ defective where it is contained. Evidence:
 ## Phase F — Semantic boundaries and symmetry
 
 - [ ] F1. `ConstraintField` (semantic / group / user-preserved boundaries).
-       — not attempted. The engine has no group/material input to connect yet,
-       so the type would have nothing to carry.
+       — not attempted, and the recorded reason ("the engine has no
+       group/material input to connect yet, so the type would have nothing to
+       carry") is now STALE. Phase E shipped the mechanism a semantic boundary
+       needs: a topology guide is projected to an edge path and tagged as a
+       feature (`projectGuideToPath` -> `setFeatureEdge`), after the dihedral
+       re-tag so it is never demoted, and feature edges are already pinned by
+       the seamless solve. A group or material boundary is the same shape of
+       request — take the edges where adjacent faces disagree, tag them — so it
+       is expressible today WITHOUT a new field type.
+
+       What is genuinely missing is the INPUT: per-face group/material ids have
+       nowhere to enter. That is a sibling ABI entry point (CyberRemeshParams
+       cannot grow fields without breaking compiled callers) plus deciding
+       whether the OBJ loader keeps `g`/`usemtl`. A design decision, not a
+       blocker — and much smaller than this entry implied.
 - [ ] F2. Connect groups, material boundaries and user-preserved edges to the
        field pinning, the layout and the sizing field.
        — blocked on F1 for the same reason.
@@ -441,13 +454,40 @@ defective where it is contained. Evidence:
        `--target-quads` names the WHOLE model, so the half is solved for half of
        it; without that the request would silently mean "per half".
 
-       **Known residue:** some models come back with a few boundary or
-       non-manifold edges where a membrane face had to be removed — cheburashka
-       3 and 2, a procedural sphere 0 and 2, a bumpy sphere 0 and 3; spot and
-       stanford-bunny are clean. The symmetry is exact either way (0 unmatched
-       vertices and faces); the residue is a small hole at the seam. Closing it
-       means collapsing the membrane rather than deleting it, which is
-       mesh-kernel surgery and was not attempted here.
+       **Residue CLOSED — and the cause recorded above was wrong.** This entry
+       used to say the residue was a hole left by membrane DELETION, closable
+       only by collapsing the membrane instead ("mesh-kernel surgery"). That is
+       not what was happening, and implementing the collapse would have been
+       inert: deleting a membrane cannot leave a defect in the MIRRORED result,
+       because every edge the deletion exposes has both endpoints on the plane,
+       so the mirror adds the reflected face onto that same edge and it ends at
+       exactly two faces. The mirror closes the hole the deletion opens.
+
+       The real cause was ONE TOLERANCE DOING TWO JOBS. `remeshSymmetric`
+       computed `0.35 * meanEdgeLength` and passed it both to
+       `isTopologicallySymmetric` (where a generous radius is correct — it is
+       matching a vertex to its reflection) and to `mirrorAcross`, whose first
+       loop snaps every vertex within it onto the plane. Interior surface that
+       merely came near the midplane was flattened and welded as centerline
+       instead of being mirrored.
+
+       Split into a geometric plane epsilon (1e-5 of the bounding diagonal) for
+       seam membership and the unchanged third-of-an-edge for matching:
+
+       | model | before | after |
+       |---|---|---|
+       | cheburashka `--symmetry x` | 3 boundary / 2 non-manifold | **0 / 0** (faces 1988 -> 1990) |
+       | spot `--symmetry x` | 0 / 0 | 0 / 0 |
+       | procedural sphere | 0 / 2 | **0 / 0** |
+
+       Unmatched vertices and faces stay 0 throughout — closing the seam by
+       breaking the symmetry would be a regression, not a fix.
+
+       **Measured and insufficient:** using the border set snapBorderToPlane
+       projected as the centerline ON ITS OWN. A vertex can sit on the plane
+       without being on the border, and duplicating it leaves its twin unpaired
+       (4 unmatched faces on a procedural sphere). The epsilon is why it is a
+       split rather than a swap.
 
        **A bug worth recording:** the first symmetry CHECKER reported every one
        of these meshes asymmetric. It used the tolerance as a quantization grid
@@ -457,9 +497,20 @@ defective where it is contained. Evidence:
        first version of `examples/25_symmetry.py` reproduced the identical
        mistake independently, which is how easy it is to write.
 - [ ] F4. Automatic symmetry detection, only once forced symmetry is solid.
-       — not attempted, per the design's own sequencing. Forced symmetry is
-       solid now but carries the membrane residue above; detection should wait
-       until that is closed, or it will silently apply a lossy operation.
+       — still not attempted, but NO LONGER BLOCKED: the seam residue F3 was
+       waiting on is closed (0 boundary and 0 non-manifold edges on every model
+       measured), so detection would no longer be gating a lossy operation.
+
+       The sequencing note that remains is about the DETECTOR, not the mirror. A
+       detector that fires on a nearly-but-not-symmetric model applies symmetry
+       silently and lossily, so the threshold and its calibration are the whole
+       design — and any implementation must not repeat the checker bug recorded
+       above (quantizing to a tolerance grid and comparing keys, which both
+       collides distinct vertices and misses partners across a cell boundary;
+       matching must be nearest-within-tolerance). Shipping it as
+       detect-and-REPORT first, naming the plane without applying it, is the
+       obvious way to earn confidence in the threshold before it decides
+       anything.
 
 ## Phase G — Candidate selection
 
@@ -504,9 +555,24 @@ defective where it is contained. Evidence:
        leaves 13 topological defects on cheburashka, which the score rejects
        outright rather than trading against its better uniformity.
 - [ ] G4. `Balanced` mode predicts or cheaply probes instead of solving both.
-       — not attempted. `Best` costs a second full solve, and whether a cheap
-       probe can predict the winner is only worth asking once the score itself
-       is trusted on a wider corpus.
+       — not attempted, and the recommendation is now **do not build it as
+       specified**. `Best` costs a second full solve; a `Balanced` mode would
+       have to predict its winner from something knowable before the solve. The
+       corpus has five models, and the two candidates' scores are separated by
+       0.001-0.02 on three of them (spot 2.606 vs 2.611, fandisk 2.523 vs
+       2.522, bunny 2.096 vs 2.078). A predictor fit to five points whose
+       margins are that thin is overfitting, not prediction — and crease
+       fraction, the obvious feature, was already refuted because the models'
+       crease fractions interleave.
+
+       Either it reproduces `Best`'s choice, in which case the only observable
+       difference is wall time and it is not a QUALITY mode at all, or it
+       diverges, in which case it is worse than `Best` by the score `Best`
+       exists to maximize. The honest options are to drop "balanced" from the
+       remeshing-parameters spec text (the CLI already rejects it, so nothing
+       ships inert), or to redefine it as something measurable — "Best below N
+       faces, Fast above" is a real, defensible policy that needs no predictor.
+       Left unimplemented deliberately rather than left undone.
        Gate: `Best` is never worse than either candidate by the score — true by
        construction, and pinned by a test that a candidate with fewer defects
        always wins however good the other one's angles are.
@@ -636,7 +702,23 @@ defective where it is contained. Evidence:
 
        It runs on procedural fixtures for the same reason the examples do.
 
-       Corpus ADDITIONS (character and hard-surface models) are not done, and
-       the existing `bench` gate was deliberately left alone: it is red on
-       `main` (`cylinder.singularities` 4 -> 6, unrelated to this work), and
-       adding to a red gate would bury both signals.
+       Corpus ADDITIONS (character and hard-surface models) are not done. The
+       stated blocker — "the `bench` gate is red on `main`" — was itself wrong
+       in an instructive way: the gate was not red, it was DARK. Nightly run
+       33303656569 logs `CHECK FAIL cylinder.singularities: baseline 4 -> 6`
+       and `bench check: 1 failure(s)`, and the job's conclusion is `success`,
+       because `bench.py check | tee` takes tee's exit status under a `bash -e`
+       with no `pipefail`. Nobody was reading a red gate; nobody could see it.
+
+       Fixed, and the failure diagnosed: it is not a regression. The same commit
+       and the same baselines give `cylinder singularities 4` (macOS/Clang, OK)
+       and `6` (Linux/GCC, FAIL) — the cross-toolchain nondeterminism this repo
+       already records, since the solve reads unordered-container iteration
+       order. Loosening the tolerance would have absorbed a genuine 4 -> 6
+       regression later, so baselines now carry a `toolchain` identity and a
+       mismatched run is refused instead.
+
+       EXPECT the nightly `bench` job to go red once that lands, naming the
+       mismatch; `hardening` gained a `record_bench_baselines` dispatch input so
+       the fix is one run plus a commit. P3's corpus work is unblocked by an
+       honest gate, not by this entry's original premise.
