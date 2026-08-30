@@ -150,8 +150,26 @@ def gate_symmetry_is_exact(cli, work):
         1 for f in faces
         if tuple(sorted(int(partner[i]) for i in f)) not in face_sets)
     assert unmatched_f == 0, "{0} faces have no mirror image".format(unmatched_f)
-    print("PASS: symmetry exact — 0 unmatched vertices, 0 unmatched faces "
-          "over {0} faces".format(len(faces)))
+
+    # Exact symmetry is necessary but not sufficient: the seam also has to be
+    # CLOSED. The mirror used to weld every vertex within a third of an edge of
+    # the midplane — interior surface included — which left boundary and
+    # non-manifold edges at the seam while unmatched v/f stayed at 0. Both
+    # numbers belong in the same gate; asserting only the matching passed
+    # throughout the entire time the seam was open.
+    incidence = {}
+    for f in faces:
+        for i in range(len(f)):
+            a, b = f[i], f[(i + 1) % len(f)]
+            key = (min(a, b), max(a, b))
+            incidence[key] = incidence.get(key, 0) + 1
+    boundary = sum(1 for n in incidence.values() if n == 1)
+    nonmanifold = sum(1 for n in incidence.values() if n > 2)
+    assert boundary == 0 and nonmanifold == 0, (
+        "the seam is not closed: {0} boundary edge(s), {1} non-manifold "
+        "edge(s)".format(boundary, nonmanifold))
+    print("PASS: symmetry exact — 0 unmatched vertices, 0 unmatched faces over "
+          "{0} faces; seam closed (0 boundary, 0 non-manifold)".format(len(faces)))
 
 
 def gate_topology_guide_beats_orientation(cli, work):

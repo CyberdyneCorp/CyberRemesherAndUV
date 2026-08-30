@@ -236,6 +236,7 @@ BorderSnapReport snapBorderToPlane(Mesh& mesh, const Plane& plane) {
         const Vec3 p = mesh.position(vid);
         report.maxDistance = std::max(report.maxDistance, std::abs(signedDistance(plane, p)));
         mesh.setPosition(vid, projectToPlane(plane, p));
+        report.onPlane.push_back(vid);
         ++report.snapped;
     }
     // Snapping can pull a face ENTIRELY into the plane when all of its corners
@@ -268,25 +269,12 @@ BorderSnapReport snapBorderToPlane(Mesh& mesh, const Plane& plane) {
     return report;
 }
 
-MirrorReport mirrorAcross(Mesh& mesh, const Plane& plane, float tolerance) {
-    MirrorReport report;
-    if (length(plane.normal) < 1e-12f || mesh.faceCapacity() == 0) {
-        return report;
-    }
-    // Snap first, so "on the plane" is a decidable property rather than a
-    // floating-point coincidence. Everything below depends on it.
-    for (Index v = 0; v < mesh.vertexCapacity(); ++v) {
-        const VertexId vid{v};
-        if (!mesh.isAlive(vid)) {
-            continue;
-        }
-        const Vec3 p = mesh.position(vid);
-        if (std::abs(signedDistance(plane, p)) <= tolerance) {
-            mesh.setPosition(vid, projectToPlane(plane, p));
-            ++report.weldedCenterline;
-        }
-    }
+namespace {
 
+// The shared body. `onPlane` has already been decided by the caller and every
+// vertex in it has already been projected; everything else gets a twin.
+MirrorReport mirrorWithCenterline(Mesh& mesh, const Plane& plane, const std::vector<char>& onPlane,
+                                  MirrorReport report) {
     // A twin for every off-plane vertex; on-plane vertices are their own twin,
     // which is exactly what welds the seam.
     std::unordered_map<Index, VertexId> twin;
@@ -299,7 +287,7 @@ MirrorReport mirrorAcross(Mesh& mesh, const Plane& plane, float tolerance) {
     }
     for (const VertexId vid : original) {
         const Vec3 p = mesh.position(vid);
-        if (std::abs(signedDistance(plane, p)) <= tolerance) {
+        if (vid.value < onPlane.size() && onPlane[vid.value] != 0) {
             twin.emplace(vid.value, vid);
             continue;
         }
@@ -342,6 +330,100 @@ MirrorReport mirrorAcross(Mesh& mesh, const Plane& plane, float tolerance) {
     }
     report.valid = true;
     return report;
+}
+
+// "Exactly on the plane" as a geometric tolerance, scaled to the mesh so it does
+// not depend on modelling units. Matches splitAtPlane's own 1e-5f default in
+// spirit: it admits floating-point noise from projection and nothing else.
+float planeEpsilon(const Mesh& mesh) {
+    Vec3 lo{kInf, kInf, kInf};
+    Vec3 hi{-kInf, -kInf, -kInf};
+    bool any = false;
+    for (Index v = 0; v < mesh.vertexCapacity(); ++v) {
+        const VertexId vid{v};
+        if (!mesh.isAlive(vid)) {
+            continue;
+        }
+        const Vec3 p = mesh.position(vid);
+        lo = {std::min(lo.x, p.x), std::min(lo.y, p.y), std::min(lo.z, p.z)};
+        hi = {std::max(hi.x, p.x), std::max(hi.y, p.y), std::max(hi.z, p.z)};
+        any = true;
+    }
+    if (!any) {
+        return 1e-5f;
+    }
+    return std::max(1e-6f, 1e-5f * length(hi - lo));
+}
+
+// Mark every vertex within `tolerance` of the plane, projecting it exactly onto
+// the plane first so membership is decidable rather than a float coincidence.
+std::vector<char> centerlineByDistance(Mesh& mesh, const Plane& plane, float tolerance,
+                                       std::size_t& welded) {
+    std::vector<char> onPlane(mesh.vertexCapacity(), 0);
+    for (Index v = 0; v < mesh.vertexCapacity(); ++v) {
+        const VertexId vid{v};
+        if (!mesh.isAlive(vid)) {
+            continue;
+        }
+        const Vec3 p = mesh.position(vid);
+        if (std::abs(signedDistance(plane, p)) <= tolerance) {
+            mesh.setPosition(vid, projectToPlane(plane, p));
+            onPlane[v] = 1;
+            ++welded;
+        }
+    }
+    return onPlane;
+}
+
+}  // namespace
+
+MirrorReport mirrorAcross(Mesh& mesh, const Plane& plane, float tolerance) {
+    MirrorReport report;
+    if (length(plane.normal) < 1e-12f || mesh.faceCapacity() == 0) {
+        return report;
+    }
+    const std::vector<char> onPlane =
+        centerlineByDistance(mesh, plane, tolerance, report.weldedCenterline);
+    return mirrorWithCenterline(mesh, plane, onPlane, report);
+}
+
+MirrorReport mirrorAcross(Mesh& mesh, const Plane& plane, const std::vector<VertexId>& onPlane) {
+    MirrorReport report;
+    if (length(plane.normal) < 1e-12f || mesh.faceCapacity() == 0) {
+        return report;
+    }
+    std::vector<char> mask(mesh.vertexCapacity(), 0);
+    for (const VertexId vid : onPlane) {
+        if (vid.value < mask.size() && mesh.isAlive(vid)) {
+            mask[vid.value] = 1;
+            ++report.weldedCenterline;
+        }
+    }
+    // The caller's set is the vertices it SNAPPED, which is the border. A vertex
+    // can also sit on the plane without being on the border — the extraction is
+    // free to place one there — and duplicating that one instead of welding it
+    // leaves its twin unpaired (measured: 4 unmatched faces on a procedural
+    // sphere when the set was used alone).
+    //
+    // So the membership test stays, but at a GEOMETRIC epsilon rather than the
+    // caller's weld tolerance. That distinction is the whole point: a third of
+    // an edge is the right radius for MATCHING a vertex to its reflection and
+    // far too coarse for deciding what the seam is, and conflating the two is
+    // what flattened interior surface onto the midplane.
+    const float eps = planeEpsilon(mesh);
+    for (Index v = 0; v < mesh.vertexCapacity(); ++v) {
+        const VertexId vid{v};
+        if (!mesh.isAlive(vid) || mask[v] != 0) {
+            continue;
+        }
+        const Vec3 p = mesh.position(vid);
+        if (std::abs(signedDistance(plane, p)) <= eps) {
+            mesh.setPosition(vid, projectToPlane(plane, p));
+            mask[v] = 1;
+            ++report.weldedCenterline;
+        }
+    }
+    return mirrorWithCenterline(mesh, plane, mask, report);
 }
 
 bool isTopologicallySymmetric(const Mesh& mesh, const Plane& plane, float tolerance) {
@@ -507,7 +589,13 @@ PipelineResult remeshSymmetric(const Mesh& input, const Parameters& rawParams, S
     // border IS the cut; the drift is reported so a wandering remesh stays
     // visible rather than absorbed.
     const BorderSnapReport snap = snapBorderToPlane(result.mesh, plane);
-    const MirrorReport mirror = mirrorAcross(result.mesh, plane, tolerance);
+    // The centerline is the set snapBorderToPlane just projected, NOT everything
+    // within the weld tolerance. `tolerance` is a third of an edge — the right
+    // radius for MATCHING a vertex to its reflection below, and far too coarse
+    // for deciding what the seam is. Passing it here flattened interior vertices
+    // that merely came near the midplane and welded them instead of mirroring
+    // them, which is what left the seam residue.
+    const MirrorReport mirror = mirrorAcross(result.mesh, plane, snap.onPlane);
     recountStats(result.mesh, result.stats);
     if (report != nullptr) {
         report->borderSnapped = snap.snapped;
