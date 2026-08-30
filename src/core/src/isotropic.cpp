@@ -225,13 +225,29 @@ std::array<float, 3> barycentricWeights(Vec3 p, const std::array<Vec3, 3>& tri) 
 class ScaleField {
 public:
     ScaleField(const Mesh& inputMesh, const ReferenceSurface& reference, float adaptivity,
-               float targetEdgeLength, const GuidanceField* density = nullptr)
-        : m_reference(reference), m_density(density), m_uniform(adaptivity <= 0.0f) {
+               float targetEdgeLength, const GuidanceField* density = nullptr,
+               const std::vector<float>* extraVertexScale = nullptr)
+        : m_reference(reference),
+          m_density(density),
+          // An extra per-vertex multiplier is sampled off the input surface
+          // exactly like curvature adaptivity, so its presence makes the field
+          // non-uniform even at adaptivity 0.
+          m_uniform(adaptivity <= 0.0f && extraVertexScale == nullptr) {
         if (m_uniform) {
             return;  // density-only (if any): at() applies the multiplier directly
         }
         std::vector<float> vertexScales;
-        computeTargetScales(inputMesh, adaptivity, targetEdgeLength, vertexScales);
+        if (adaptivity > 0.0f) {
+            computeTargetScales(inputMesh, adaptivity, targetEdgeLength, vertexScales);
+        } else {
+            vertexScales.assign(inputMesh.vertexCapacity(), 1.0f);
+        }
+        if (extraVertexScale != nullptr) {
+            for (Index vi = 0; vi < inputMesh.vertexCapacity() && vi < extraVertexScale->size();
+                 ++vi) {
+                vertexScales[vi] *= (*extraVertexScale)[vi];
+            }
+        }
 
         m_triangles.resize(inputMesh.faceCapacity());
         for (Index fi = 0; fi < inputMesh.faceCapacity(); ++fi) {
@@ -694,7 +710,8 @@ IsotropicStatus isotropicRemesh(Mesh& mesh, const ReferenceSurface& reference,
     const auto t0 = Clk::now();
     const ScaleField field(
         mesh, reference, options.adaptivity, options.targetEdgeLength,
-        options.density != nullptr && options.density->hasDensity() ? options.density : nullptr);
+        options.density != nullptr && options.density->hasDensity() ? options.density : nullptr,
+        options.extraVertexScale);
     // Measured once on the input: remeshing preserves surface area, so the
     // ceiling holds for every iteration.
     const std::size_t maxFaces = faceBudget(mesh, options.targetEdgeLength);

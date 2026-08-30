@@ -266,6 +266,21 @@ struct ZRemesherOptions {
     bool boundaryChains = true;
     // Recover fold-damaged node rotations by feasible-range projection.
     bool foldRepair = true;
+    // Size the solve substrate from the unified sizing field (thin-feature risk
+    // on top of the curvature adaptivity and painted density the isotropic
+    // stage already derives).
+    //
+    // OFF: measured to make thin-feature survival WORSE, which is the one thing
+    // it exists to improve. On the thin-feature fixtures
+    // (examples/23_thin_features.py) it takes survival from 2 of 3 to 1 of 3 —
+    // the fin survives without it and collapses with it — and on the corpus it
+    // adds cones (fandisk 93 -> 104, cheburashka 92 -> 106) for a slightly
+    // BETTER mean placement, i.e. more cones each sitting a little better.
+    // Refining the substrate does not stop the extraction bridging a thin gap;
+    // it just spends the budget getting there. Kept behind the flag so the
+    // field has a consumer to be re-measured through once the extraction side
+    // can act on it.
+    bool unifiedSizing = false;
 };
 std::unique_ptr<IQuadrangulator> makeZRemesherQuadrangulator(const ZRemesherOptions& options = {});
 

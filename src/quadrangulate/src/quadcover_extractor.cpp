@@ -1,5 +1,8 @@
 #include "cyber/quadrangulate/quadcover_extractor.hpp"
 
+#include "cyber/quadrangulate/geometry_analysis.hpp"
+#include "cyber/quadrangulate/sizing_field.hpp"
+
 #if defined(__APPLE__)
 #include <TargetConditionals.h>
 #endif
@@ -656,6 +659,49 @@ bool prepareNativeSolve(const Mesh& mesh, float targetEdgeLength, float adaptivi
     // Painted density sizes the solve substrate: quad-cover skips the pipeline's
     // isotropic stage, so this is where density has to enter for this backend.
     iso.density = ctx.guidance;
+    // Unified sizing (ZRemesher Phase D). The isotropic stage can derive
+    // curvature adaptivity and painted density on its own, but not feature
+    // proximity or thin-feature risk — and thin features are exactly what a
+    // uniform target destroys, because a plate thinner than one target edge
+    // gets collapsed into a single chain before the field ever sees it.
+    //
+    // The field is built on the RAW island (the surface the remesh projects
+    // onto), so its per-vertex values index the same mesh ScaleField samples
+    // from. Only the ratio to the base length is handed over; the absolute
+    // target stays `targetEdgeLength`.
+    std::vector<float> sizingScale;
+    if (ctx.layout.capture && ctx.layout.unifiedSizing) {
+        const Bvh sizingBvh(work);
+        GeometryAnalysisOptions gaOpts;
+        const GeometryAnalysis analysis =
+            analyzeGeometry(work, targetEdgeLength, &sizingBvh, gaOpts);
+        SizingParams sizingParams;
+        sizingParams.baseEdgeLength = targetEdgeLength;
+        // Curvature and density already reach this stage through `adaptivity`
+        // and `iso.density`; applying them again here would double-count.
+        sizingParams.adaptivity = 0.0f;
+        sizingParams.densityWeight = 0.0f;
+        // Feature PROXIMITY is deliberately not applied here. The design's
+        // rule (Sec. 9.3) is a thin-feature floor, h <= alpha * localFeatureSize
+        // — not a general refinement near every crease. Refining the whole
+        // neighbourhood of every crease densifies the substrate without
+        // raising the extraction target, which measured strictly worse.
+        sizingParams.featureWeight = 0.0f;
+        const SizingField sizing = buildSizingField(work, nullptr, analysis, sizingParams);
+        if (sizing.valid) {
+            sizingScale.resize(sizing.targetEdgeLength.size());
+            for (std::size_t i = 0; i < sizingScale.size(); ++i) {
+                sizingScale[i] = sizing.targetEdgeLength[i] / targetEdgeLength;
+            }
+            iso.extraVertexScale = &sizingScale;
+            if (std::getenv("CYBER_QC_DEBUG") != nullptr) {
+                std::fprintf(stderr, "[zr] sizing: target %.4f, field %.4f..%.4f\n",
+                             static_cast<double>(targetEdgeLength),
+                             static_cast<double>(sizing.minLength()),
+                             static_cast<double>(sizing.maxLength()));
+            }
+        }
+    }
     if (isotropicRemesh(work, reference, iso, nullptr, cancel) != IsotropicStatus::Success ||
         work.faceCount() == 0) {
         reason = "isotropic remesh failed (or cancelled)";
@@ -3786,6 +3832,9 @@ std::unique_ptr<IQuadrangulator> makeZRemesherQuadrangulator(const ZRemesherOpti
     layout.boundaryChains =
         options.boundaryChains && std::getenv("CYBER_ZR_NO_BOUNDARY_CHAINS") == nullptr;
     layout.foldRepair = options.foldRepair && std::getenv("CYBER_ZR_NO_FOLD_REPAIR") == nullptr;
+    layout.unifiedSizing =
+        (options.unifiedSizing || std::getenv("CYBER_ZR_UNIFIED_SIZING") != nullptr) &&
+        std::getenv("CYBER_ZR_NO_UNIFIED_SIZING") == nullptr;
     return std::make_unique<QuadCoverQuadrangulator>(options.fieldIterations, clamped.adaptivity,
                                                      clamped.holeFillMaxBoundary,
                                                      clamped.sharpEdgeDegrees, layout, "zremesher");

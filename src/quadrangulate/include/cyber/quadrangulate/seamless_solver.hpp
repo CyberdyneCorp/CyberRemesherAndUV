@@ -113,6 +113,12 @@ struct SeamlessLayoutOptions {
     // Recover a node's rotation system by projecting onto the feasible
     // corner/pass-through range instead of containing the node.
     bool foldRepair = false;
+    // Size the solve substrate from the unified sizing field — feature
+    // proximity and thin-feature risk on top of the curvature adaptivity and
+    // painted density the isotropic stage already derives. This is what keeps a
+    // plate or tube thinner than one target edge from collapsing before the
+    // field ever sees it.
+    bool unifiedSizing = false;
 };
 
 // Opaque cache for the direct (sparse-Cholesky) solve path, CYBER_QC_DIRECT

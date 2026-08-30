@@ -237,12 +237,57 @@ defective where it is contained. Evidence:
 
 ## Phase D — Unified density
 
-- [ ] D1. `SizingField` h(x) fusing painted density, curvature, feature
+- [x] D1. `SizingField` h(x) fusing painted density, curvature, feature
        proximity and local thickness into one per-face target spacing.
-- [ ] D2. Feed the sizing field into Bi-MDF arc target lengths.
-- [ ] D3. Feed it into the position field and the final projected optimization.
-- [ ] D4. Legacy behavior byte-identical when the sizing field is disabled.
+       — landed (`sizing_field.hpp/.cpp`), with per-term weights so a regression
+       is traceable to one input rather than to "the sizing field", hard scale
+       bounds (a term that could drive the target toward zero would produce an
+       unbounded quad count), and smoothing in LOG space — edge length is
+       multiplicative, and smoothing it arithmetically biases every mixed
+       neighbourhood coarser (h/2 and 2h average to 1.25h instead of h).
+- [~] D2/D3. Feed the sizing field into the consumers.
+       — the substrate consumer is WIRED and measured; **off by default,
+       because it measured worse on its own yardstick.**
+
+       The consumer that matters is the isotropic pre-remesh, which decides the
+       substrate the whole solve runs on. It could not take a per-vertex field
+       directly — it mutates the vertex set as it runs, so any per-vertex array
+       goes stale immediately, which is why painted density was already a
+       SPATIAL query. Its `ScaleField` already samples barycentrically off the
+       fixed input surface, so the wiring is an extra per-input-vertex
+       multiplier folded in there (`IsotropicOptions::extraVertexScale`, null =
+       byte-identical, verified against the pre-change build on spot and
+       fandisk).
+
+       Then measured on what it exists for. `examples/23_thin_features.py`
+       remeshes closed slabs and a fin at a target edge 3x COARSER than the
+       feature is thick and checks whether the two sides stay distinct:
+
+       | | thin plate | thinner plate | thin fin |
+       |---|---|---|---|
+       | uniform sizing | survived | COLLAPSED | survived |
+       | unified sizing | survived | COLLAPSED | **COLLAPSED** |
+
+       Unified sizing takes survival from 2 of 3 to 1 of 3 — the fin survives
+       WITHOUT it and collapses with it. On the corpus it also adds cones
+       (fandisk 93 -> 104, cheburashka 92 -> 106) for a slightly better MEAN
+       placement, i.e. more cones each sitting a little better. Refining the
+       substrate does not stop the extraction bridging a thin gap; it spends the
+       budget getting there. An earlier variant that also refined near every
+       crease was worse still (fandisk 119 cones, and the bunny's totalIndex
+       moved 8 -> 4, a topology change).
+
+       Left behind `CYBER_ZR_UNIFIED_SIZING` so the field has a consumer to be
+       re-measured through once the EXTRACTION side can act on thickness — which
+       is where the evidence says the fix has to be.
+- [x] D4. Legacy behavior byte-identical when the sizing field is disabled.
+       — verified: with `extraVertexScale` null the isotropic stage is
+       byte-identical to the pre-change build, and the corpus returns exactly to
+       its baseline numbers with the flag off.
        Gate: painted-density, target-count and thin-feature regression suites.
+       **Thin-feature gate NOT met** — and now measured rather than assumed. A
+       plate 3x thinner than the target edge collapses either way; that is a
+       real limitation of the extraction, reported instead of hidden.
 
 ## Phase E — Artist topology guides
 
