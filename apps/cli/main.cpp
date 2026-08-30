@@ -69,6 +69,7 @@ struct CliOptions {
     std::string report;
     std::string guides;                     // guidance sidecar (--guides); empty = no guidance
     std::string quadMethod = "quad-cover";  // roadmap default (2026-07-22)
+    std::string quality = "fast";           // zremesher only: fast | best
     std::string preset;                     // empty = mesh-only export (the historical behaviour)
     float cageDistance = 0.0f;              // 0 = derive from the input's bounds
     int textureSize = 0;                    // 0 = the preset's own resolution
@@ -140,6 +141,9 @@ void printUsage() {
                  "  --smooth-normal <deg>    smooth projection angle (default 0)\n"
                  "  --adaptivity <float>     0..1 curvature adaptivity (default 1)\n"
                  "  --pure-quads             quads-only output\n"
+                 "  --quality <fast|best>    zremesher only: best solves both cross-field\n"
+                 "                           candidates and keeps the better (costs a\n"
+                 "                           second solve)\n"
                  "  --quad-method <m>        zremesher | quad-cover | field-aligned |\n"
                  "                           instant-meshes |\n"
                  "                           integer | greedy (default quad-cover; falls\n"
@@ -263,6 +267,16 @@ int parseArgs(int argc, char** argv, CliOptions& options, bool& exitEarly) {
             if (!numeric("--ao-samples", options.aoSamples)) {
                 return kExitArgs;
             }
+        } else if (arg == "--quality") {
+            const auto v = next("--quality");
+            if (!v) {
+                return 2;
+            }
+            if (*v != "fast" && *v != "best") {
+                std::fprintf(stderr, "error: --quality must be fast or best\n");
+                return 2;
+            }
+            options.quality = *v;
         } else if (arg == "--guides") {
             const auto v = next("--guides");
             if (!v) {
@@ -763,6 +777,7 @@ int writeReport(const CliOptions& options, const remesh::PipelineResult& result,
         // that names the requested method while the run used another one is
         // worse than one that names neither.
         {"quadMethod", options.quadMethod},
+        {"quality", options.quality},
     };
     report["statistics"] = {
         {"vertices", result.stats.vertexCount},
@@ -963,7 +978,8 @@ int runCli(int argc, char** argv) {
     const float adaptivity = options.params.adaptivity;
     const int holeFill = options.params.holeFillMaxBoundary;
     const float sharpDegrees = options.params.sharpEdgeDegrees;
-    const auto makeQuadrangulator = [&method, adaptivity, holeFill,
+    const std::string& quality = options.quality;
+    const auto makeQuadrangulator = [&method, &quality, adaptivity, holeFill,
                                      sharpDegrees]() -> std::unique_ptr<remesh::IQuadrangulator> {
         if (method == "quad-cover") {
             // --sharp-edge (default 90) binds sharp edges into the native
@@ -982,6 +998,8 @@ int runCli(int argc, char** argv) {
             zr.adaptivity = adaptivity;
             zr.holeFillMaxBoundary = holeFill;
             zr.featureDegrees = sharpDegrees;
+            zr.quality = quality == "best" ? remesh::RemeshQualityMode::Best
+                                           : remesh::RemeshQualityMode::Fast;
             return remesh::makeZRemesherQuadrangulator(zr);
         }
         if (method == "instant-meshes") {

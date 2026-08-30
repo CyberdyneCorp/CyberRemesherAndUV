@@ -1,6 +1,7 @@
 #include "cyber/quadrangulate/quadcover_extractor.hpp"
 
 #include "cyber/quadrangulate/geometry_analysis.hpp"
+#include "cyber/quadrangulate/layout_score.hpp"
 #include "cyber/quadrangulate/sizing_field.hpp"
 #include "cyber/quadrangulate/topology_guides.hpp"
 
@@ -3564,16 +3565,98 @@ class QuadCoverQuadrangulator final : public IQuadrangulator {
 public:
     QuadCoverQuadrangulator(int fieldIterations, float adaptivity, int holeFillMaxBoundary,
                             float featureDegrees, SeamlessLayoutOptions layout = {},
-                            std::string name = "quad-cover")
+                            std::string name = "quad-cover", bool bestOfTwo = false)
         : m_fieldIterations(fieldIterations),
           m_adaptivity(adaptivity),
           m_holeFillMaxBoundary(holeFillMaxBoundary),
           m_featureDegrees(featureDegrees),
           m_layout(layout),
-          m_name(std::move(name)) {}
+          m_name(std::move(name)),
+          m_bestOfTwo(bestOfTwo) {}
 
     Outcome quadrangulate(Mesh& mesh, float targetEdgeLength, ProgressSink* progress,
                           const CancelToken* cancel) override {
+        if (m_bestOfTwo) {
+            return quadrangulateBestOfTwo(mesh, targetEdgeLength, progress, cancel);
+        }
+        return quadrangulateOnce(mesh, targetEdgeLength, progress, cancel);
+    }
+
+    // Candidate selection (ZRemesher Phase G). The repo's own roadmap records
+    // the open question this answers: no static "organic vs CAD" threshold can
+    // pick the better field for every model — rocker-arm prefers one, spot and
+    // cheburashka the other, and their crease fractions interleave, so no
+    // threshold gets all three right. Choosing per input by MEASURING both is
+    // the answer, and it needs a comparable score, which is what
+    // scoreQuality provides.
+    //
+    // The two candidates are the two cross fields the engine already has: the
+    // multiresolution orientation-derived field (the default) and the
+    // single-level smoothed one. Both then take the identical seamless solve
+    // and extraction, so the comparison isolates the field.
+    Outcome quadrangulateBestOfTwo(Mesh& mesh, float targetEdgeLength, ProgressSink* progress,
+                                   const CancelToken* cancel) {
+        const bool closedInput = isClosed(mesh);
+        struct Candidate {
+            const char* name;
+            const char* killSwitch;  // set while solving to select the field
+        };
+        // Order is the final tie-break, so it is fixed and documented rather
+        // than incidental: the shipped default goes first and only loses to a
+        // strictly better score.
+        static constexpr Candidate kCandidates[] = {
+            {"multires", nullptr},
+            {"single-level", "CYBER_QC_NO_CROSSFIELD_MULTIRES"},
+        };
+
+        Mesh best;
+        QualityScore bestScore;
+        std::string bestName;
+        Outcome bestOutcome{.success = false, .cancelled = false, .failureReason = {}};
+        for (const Candidate& candidate : kCandidates) {
+            if (cancel != nullptr && cancel->isCancelled()) {
+                return {.success = false, .cancelled = true, .failureReason = {}};
+            }
+            Mesh trial = mesh;
+            Outcome outcome{};
+            {
+                const ScopedFieldSelect select(candidate.killSwitch);
+                outcome = quadrangulateOnce(trial, targetEdgeLength, progress, cancel);
+            }
+            if (!outcome.success) {
+                continue;
+            }
+            const QualityScore score = scoreQuality(trial, nullptr, closedInput);
+            const bool take = bestName.empty() || candidateBeats(score, bestScore);
+            if (std::getenv("CYBER_QC_DEBUG") != nullptr) {
+                std::fprintf(stderr,
+                             "[zr] candidate %-12s total=%7.3f angle=%.3f uniformity=%.3f "
+                             "quads=%.3f irregular=%.1f%% defects=%zu -> %s\n",
+                             candidate.name, score.total, score.angle, score.edgeUniformity,
+                             score.quadPurity, 100.0 * score.irregularFraction,
+                             score.nonManifoldEdges + score.boundaryEdges, take ? "BEST" : "kept");
+            }
+            if (take) {
+                best = std::move(trial);
+                bestScore = score;
+                bestName = candidate.name;
+                bestOutcome = outcome;
+            }
+        }
+        if (bestName.empty()) {
+            // Every candidate declined: fall back to one ordinary solve so the
+            // caller sees the same failure it would have seen without
+            // candidate selection.
+            return quadrangulateOnce(mesh, targetEdgeLength, progress, cancel);
+        }
+        std::fprintf(stderr, "[zr] selected candidate: %s (score %.3f)\n", bestName.c_str(),
+                     bestScore.total);
+        mesh = std::move(best);
+        return bestOutcome;
+    }
+
+    Outcome quadrangulateOnce(Mesh& mesh, float targetEdgeLength, ProgressSink* progress,
+                              const CancelToken* cancel) {
         if (cancel != nullptr && cancel->isCancelled()) {
             return {.success = false, .cancelled = true, .failureReason = {}};
         }
@@ -3837,12 +3920,60 @@ public:
     [[nodiscard]] std::string name() const override { return m_name; }
 
 private:
+    // Selects a cross field for the duration of one candidate solve by setting
+    // the kill switch the field code already reads, then restoring what was
+    // there. An environment variable is a poor channel for this and the right
+    // fix is to thread the choice through buildSeamlessSetup — but that
+    // signature is shared with the shipped path, and the point of this phase is
+    // to find out whether measuring both is worth the plumbing at all.
+    class ScopedFieldSelect {
+    public:
+        explicit ScopedFieldSelect(const char* name) : m_name(name) {
+            if (m_name == nullptr) {
+                return;
+            }
+            if (const char* prev = std::getenv(m_name); prev != nullptr) {
+                m_had = true;
+                m_previous = prev;
+            }
+            ::setenv(m_name, "1", 1);
+        }
+        ~ScopedFieldSelect() {
+            if (m_name == nullptr) {
+                return;
+            }
+            if (m_had) {
+                ::setenv(m_name, m_previous.c_str(), 1);
+            } else {
+                ::unsetenv(m_name);
+            }
+        }
+        ScopedFieldSelect(const ScopedFieldSelect&) = delete;
+        ScopedFieldSelect& operator=(const ScopedFieldSelect&) = delete;
+
+    private:
+        const char* m_name;
+        bool m_had = false;
+        std::string m_previous;
+    };
+
+    static bool isClosed(const Mesh& mesh) {
+        for (Index e = 0; e < mesh.edgeCapacity(); ++e) {
+            const EdgeId edge{e};
+            if (mesh.isAlive(edge) && mesh.edgeFaceCount(edge) == 1) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     int m_fieldIterations;
     float m_adaptivity;
     int m_holeFillMaxBoundary;
     float m_featureDegrees = 40.0f;
     SeamlessLayoutOptions m_layout;
     std::string m_name;
+    bool m_bestOfTwo = false;
     const GuidanceField* m_guidance = nullptr;
     std::vector<std::string> m_unhonored;
 };
@@ -3884,9 +4015,11 @@ std::unique_ptr<IQuadrangulator> makeZRemesherQuadrangulator(const ZRemesherOpti
     layout.unifiedSizing =
         (options.unifiedSizing || std::getenv("CYBER_ZR_UNIFIED_SIZING") != nullptr) &&
         std::getenv("CYBER_ZR_NO_UNIFIED_SIZING") == nullptr;
-    return std::make_unique<QuadCoverQuadrangulator>(options.fieldIterations, clamped.adaptivity,
-                                                     clamped.holeFillMaxBoundary,
-                                                     clamped.sharpEdgeDegrees, layout, "zremesher");
+    const bool bestOfTwo =
+        options.quality == RemeshQualityMode::Best || std::getenv("CYBER_ZR_BEST") != nullptr;
+    return std::make_unique<QuadCoverQuadrangulator>(
+        options.fieldIterations, clamped.adaptivity, clamped.holeFillMaxBoundary,
+        clamped.sharpEdgeDegrees, layout, "zremesher", bestOfTwo);
 }
 
 bool quadCoverAvailable() {

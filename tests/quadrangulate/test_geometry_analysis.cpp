@@ -360,3 +360,97 @@ TEST_CASE("scoring an empty layout is zero, not a division by zero") {
     CHECK(m.meanCost == doctest::Approx(0.0));
     CHECK(m.totalIndex == 0);
 }
+
+// --- whole-result quality score (Phase G) -----------------------------------
+
+using cyber::EdgeId;
+using cyber::remesh::candidateBeats;
+using cyber::remesh::QualityScore;
+using cyber::remesh::scoreQuality;
+
+TEST_CASE("quality score: a perfect quad grid scores near the top") {
+    const Mesh mesh = flatGrid(6);
+    const QualityScore s = scoreQuality(mesh, nullptr, /*closedInput=*/false);
+    CHECK(s.faces == 36);
+    CHECK(s.nonQuadFaces == 0);
+    CHECK(s.quadPurity == doctest::Approx(1.0));
+    CHECK(s.medianAngleDegrees == doctest::Approx(90.0));
+    CHECK(s.angle == doctest::Approx(1.0));
+    CHECK(s.edgeUniformity == doctest::Approx(1.0));
+    // Every interior vertex of a regular grid has valence 4.
+    CHECK(s.irregularVertices == 0);
+    CHECK(s.topologicalDefects == doctest::Approx(0.0));
+}
+
+TEST_CASE("quality score: an open border is a defect only when the input was closed") {
+    // The same mesh is a correct answer for an open input and a broken one for a
+    // closed input, so the caller has to say which it was — the score cannot
+    // guess, and guessing would either hide real cracks or invent fake ones.
+    const Mesh mesh = flatGrid(4);
+    const QualityScore asOpen = scoreQuality(mesh, nullptr, /*closedInput=*/false);
+    const QualityScore asClosed = scoreQuality(mesh, nullptr, /*closedInput=*/true);
+    CHECK(asOpen.boundaryEdges > 0);
+    CHECK(asOpen.boundaryEdges == asClosed.boundaryEdges);
+    CHECK(asOpen.topologicalDefects == doctest::Approx(0.0));
+    CHECK(asClosed.topologicalDefects > 0.0);
+    CHECK(asClosed.total < asOpen.total);
+}
+
+TEST_CASE("quality score: topological defects dominate every aesthetic term") {
+    // The whole reason defects carry a weight of 100: a mesh with excellent
+    // angles and a crack is not a winner. A candidate that is perfect on every
+    // other axis must still lose to one with fewer defects.
+    QualityScore pretty;
+    pretty.angle = 1.0;
+    pretty.edgeUniformity = 1.0;
+    pretty.quadPurity = 1.0;
+    pretty.faces = 100;
+    pretty.boundaryEdges = 4;  // a hole
+    pretty.total = 3.0 - 100.0 * (4.0 / 100.0);
+
+    QualityScore plain;
+    plain.angle = 0.5;
+    plain.edgeUniformity = 0.5;
+    plain.quadPurity = 0.9;
+    plain.faces = 100;
+    plain.total = 1.9;
+
+    CHECK(candidateBeats(plain, pretty));
+    CHECK_FALSE(candidateBeats(pretty, plain));
+}
+
+TEST_CASE("candidate selection is deterministic and never picks a worse score") {
+    QualityScore a;
+    a.total = 2.0;
+    a.faces = 10;
+    QualityScore b;
+    b.total = 2.5;
+    b.faces = 10;
+    CHECK(candidateBeats(b, a));
+    CHECK_FALSE(candidateBeats(a, b));
+
+    // Exactly equal on everything: the incumbent is kept, so the caller's
+    // candidate ORDER is the final tie-break and the same input always selects
+    // the same candidate.
+    QualityScore same = a;
+    CHECK_FALSE(candidateBeats(same, a));
+}
+
+TEST_CASE("quality score: irregular vertices are what separate two cross fields") {
+    // The score's first version omitted this term and duly selected the same
+    // candidate on every model — the two candidates differ mostly in how many
+    // extraordinary vertices they need, so a score blind to that cannot rank
+    // them.
+    QualityScore regular;
+    regular.interiorVertices = 100;
+    regular.irregularVertices = 2;
+    QualityScore irregular;
+    irregular.interiorVertices = 100;
+    irregular.irregularVertices = 20;
+
+    const cyber::remesh::QualityWeights w;
+    CHECK(w.irregular > 0.0);
+    const double penaltyRegular = w.irregular * (2.0 / 100.0);
+    const double penaltyIrregular = w.irregular * (20.0 / 100.0);
+    CHECK(penaltyIrregular > penaltyRegular);
+}

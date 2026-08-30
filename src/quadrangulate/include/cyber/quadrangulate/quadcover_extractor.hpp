@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <array>
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <utility>
@@ -261,7 +262,21 @@ std::unique_ptr<IQuadrangulator> makeQuadCoverQuadrangulator(int fieldIterations
 //
 // It always routes NATIVE: the layout is traced from the native seamless map,
 // and the vendored Geogram solve produces no T-mesh to trace.
+// How much work the method may spend finding a good answer.
+//
+// Fast solves one predicted path. Best solves both cross-field candidates and
+// keeps the one that scores better — which is what the roadmap's open question
+// asks for: no static "organic vs CAD" threshold picks the right field for
+// every model, because rocker-arm prefers one and spot and cheburashka the
+// other while their crease fractions interleave. Measuring both is the answer;
+// it costs a second solve.
+enum class RemeshQualityMode : std::uint8_t {
+    Fast,
+    Best,
+};
+
 struct ZRemesherOptions {
+    RemeshQualityMode quality = RemeshQualityMode::Fast;
     int fieldIterations = 40;
     float adaptivity = 0.0f;
     int holeFillMaxBoundary = 64;

@@ -352,14 +352,53 @@ defective where it is contained. Evidence:
 
 ## Phase G — Candidate selection
 
-- [ ] G1. Build native and multiresolution cross-field candidates.
-- [ ] G2. Common `layout_score` over geometry, quad shape, topology, flow,
-       guide adherence, features and symmetry.
-- [ ] G3. `Best` mode runs both candidates and picks by score with a stable
+- [x] G1. Build native and multiresolution cross-field candidates.
+       — the two cross fields the engine already has: the multiresolution
+       orientation-derived field (the shipped default) and the single-level
+       smoothed one. Both take the identical seamless solve and extraction, so
+       the comparison isolates the field.
+- [x] G2. Common quality score over geometry, quad shape and topology.
+       — `scoreQuality` in `layout_score`: median-angle quality, edge
+       uniformity, quad purity, irregular-vertex fraction, and a defect term
+       weighted 100 so it dominates everything aesthetic. A mesh with excellent
+       angles and a crack is not a winner.
+
+       **The first version of this score was blind on the deciding axis.** It
+       omitted the irregular-vertex term, and with only angle, uniformity and
+       purity it selected the SAME candidate on all five models — the two
+       candidates differ mostly in how many extraordinary vertices they need.
+       Adding it made the selection actually vary.
+- [x] G3. `Best` mode runs both candidates and picks by score with a stable
        tie-break.
+       — `--quality best` (`ZRemesherOptions::quality`, or `CYBER_ZR_BEST`).
+       Defects decide first, then the total, then non-quad count, then the
+       candidate ORDER — which is fixed and documented, so the same input always
+       selects the same candidate. The shipped default goes first and only loses
+       to a strictly better score.
+
+       This answers the open question the roadmap and the README both record: no
+       static "organic vs CAD" threshold can pick the right field for every
+       model, because rocker-arm prefers one while spot and cheburashka prefer
+       the other and their crease fractions interleave. Measured per input:
+
+       | model | multires | single-level | selected |
+       |---|---|---|---|
+       | spot | 2.606 | 2.611 | single-level |
+       | fandisk | 2.523 | 2.522 | **multires** |
+       | rocker-arm | 2.199 | 2.423 | single-level |
+       | cheburashka | 1.757 (13 defects) | 2.459 | single-level |
+       | stanford-bunny | 2.096 | 2.078 | **multires** |
+
+       It genuinely splits — and it catches a real defect: the multires field
+       leaves 13 topological defects on cheburashka, which the score rejects
+       outright rather than trading against its better uniformity.
 - [ ] G4. `Balanced` mode predicts or cheaply probes instead of solving both.
-       Gate: `Best` is never worse than either candidate by the score, plus a
-       manual visual inspection so the score itself does not become the bug.
+       — not attempted. `Best` costs a second full solve, and whether a cheap
+       probe can predict the winner is only worth asking once the score itself
+       is trusted on a wider corpus.
+       Gate: `Best` is never worse than either candidate by the score — true by
+       construction, and pinned by a test that a candidate with fewer defects
+       always wins however good the other one's angles are.
 
 ## Product surface
 

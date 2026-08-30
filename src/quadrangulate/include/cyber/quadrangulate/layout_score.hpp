@@ -2,6 +2,7 @@
 
 #include <cstddef>
 
+#include "cyber/core/mesh.hpp"
 #include "cyber/quadrangulate/geometry_analysis.hpp"
 #include "cyber/quadrangulate/topology_layout.hpp"
 
@@ -85,5 +86,69 @@ struct SingularityMetrics {
 // something nobody measures.
 [[nodiscard]] double singularityCost(VertexId v, int index, const GeometryAnalysis& geometry,
                                      const SingularityWeights& weights = {});
+
+// ---------------------------------------------------------------------------
+// Whole-result quality score (Phase G)
+// ---------------------------------------------------------------------------
+//
+// One number per candidate solve, so two solves can be COMPARED rather than
+// argued about. This is what the repo's own open question needs — the roadmap
+// records that no static "organic vs CAD" threshold can pick the better field
+// solver for every model, and that choosing per input by MEASURING both is the
+// real answer. A comparable score is the missing half of that.
+//
+// Every term is normalized to roughly [0, 1] before weighting, so the weights
+// mean what they look like. Topological defects are deliberately not a term
+// among equals: a mesh with excellent angles and a crack is not a winner, so
+// they carry a weight that dominates everything aesthetic.
+struct QualityWeights {
+    double angle = 1.0;           // quad corners near 90 degrees
+    double edgeUniformity = 0.8;  // consistent edge lengths
+    double quadPurity = 1.0;      // faces that are actually quads
+    double singularity = 1.5;     // penalty, subtracted
+    // Irregular (valence != 4) interior vertices, as a fraction. This is the
+    // axis the two cross-field candidates actually differ on, so a score
+    // without it cannot tell them apart — and the first version of this score
+    // omitted it and duly picked the same candidate for every model.
+    double irregular = 2.0;            // penalty, subtracted
+    double topologicalDefect = 100.0;  // penalty, subtracted; dominates by design
+};
+
+struct QualityScore {
+    double total = 0.0;
+
+    // Positive terms, each in [0, 1].
+    double angle = 0.0;
+    double edgeUniformity = 0.0;
+    double quadPurity = 0.0;
+    // Penalties, already normalized.
+    double singularityCost = 0.0;
+    double irregularFraction = 0.0;
+    double topologicalDefects = 0.0;
+
+    // Raw counts behind the terms, for reporting.
+    std::size_t faces = 0;
+    std::size_t nonQuadFaces = 0;
+    std::size_t boundaryEdges = 0;
+    std::size_t nonManifoldEdges = 0;
+    double medianAngleDegrees = 0.0;
+    double edgeLengthCv = 0.0;
+    std::size_t irregularVertices = 0;
+    std::size_t interiorVertices = 0;
+};
+
+// Score a finished mesh. `singularity` (optional) folds in the layout's cone
+// placement cost; without it the topology terms still work off the mesh alone.
+// `closedInput` says whether a boundary edge is a DEFECT (a closed input that
+// came back with holes) or expected.
+[[nodiscard]] QualityScore scoreQuality(const Mesh& mesh, const SingularityMetrics* singularity,
+                                        bool closedInput, const QualityWeights& weights = {});
+
+// Pick the better of two scored candidates, deterministically. Defects dominate;
+// ties fall through to the total, then the cone count, then candidate order — so
+// the same inputs always select the same candidate.
+//
+// Returns true when `b` should replace `a`.
+[[nodiscard]] bool candidateBeats(const QualityScore& b, const QualityScore& a);
 
 }  // namespace cyber::remesh
