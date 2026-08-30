@@ -71,7 +71,7 @@ cross field, ~95%+ quad-dominance, strongest on box/CAD geometry),
 
 <sub>Real scanned / CAD models → quad-dominant retopology · <code>examples/09_test_models.py</code></sub>
 
-Twenty-three runnable examples drive the engine through the Python binding and
+Twenty-five runnable examples drive the engine through the Python binding and
 render what they do; [`examples/README.md`](examples/README.md) indexes them,
 and `examples/run_all.py` runs the lot into a stitched gallery.
 
@@ -175,8 +175,57 @@ wins; **neither moves the fold-robustness gate**, which is consistent with what
 Phase B found: where the layout is contained, it is genuinely defective rather
 than misclassified.
 
-Status: the layout, its validation and the public method are **done**;
-fold-robust tracing is **in progress and its gate is not met**. The plan, the
+#### Topology guides — a stroke that becomes an edge loop
+
+A flow guide has always been a *soft* request: the field is biased toward your
+stroke, the loops nearby lean that way, none of them is pinned to it. That is
+right for steering flow and wrong for "put a loop exactly **here**" — which is
+most of what a retopology artist draws: an eye, a mouth, a shoulder, a knee.
+
+A guide now carries a mode. `orientation` is the old behaviour and the default,
+so every guide authored before this existed is unchanged. `topology` says the
+stroke is meant to become a curve in the mesh — it is projected onto the surface
+as a connected edge path and handed to the same machinery that makes quads run
+along a crease.
+
+```json
+{"version": 1, "guides": [
+  {"points": [[x, y, z], ...], "radius": 0.15, "mode": "topology", "closed": true}]}
+```
+
+![Topology guides: the red loop asked for, the quads returned](examples/output/24_topology_guides.png)
+
+<sub>The red loop is the request; the quads are the answer. Measured as the fraction of the guide with an output edge both near it <em>and aligned with it</em> — requiring alignment matters, since edges crossing a guide at right angles are everywhere in a dense mesh · <code>examples/24_topology_guides.py</code></sub>
+
+| fixture | orientation | topology |
+|---|---|---|
+| sphere equator | 51.6% | **87.5%** |
+| sphere loop tilted 35° | 52.3% | **86.7%** |
+
+#### Choosing the field by measuring, not by a threshold
+
+The roadmap has long recorded that no static "organic vs CAD" threshold picks
+the better cross field for every model — rocker-arm prefers one, spot and
+cheburashka the other, and their crease fractions interleave, so no threshold
+gets all three right. `--quality best` settles it per input: solve both
+candidates, score each, keep the better.
+
+| model | multires | single-level | selected |
+|---|---|---|---|
+| spot | 2.606 | 2.611 | single-level |
+| fandisk | **2.523** | 2.522 | multires |
+| rocker-arm | 2.199 | **2.423** | single-level |
+| cheburashka | 1.757 *(13 defects)* | **2.459** | single-level |
+| stanford-bunny | **2.096** | 2.078 | multires |
+
+The score weighs angle, edge uniformity, quad purity and irregular-vertex count,
+with topological defects weighted so heavily they dominate: a mesh with
+excellent angles and a crack is not a winner. It costs a second solve, so `fast`
+remains the default.
+
+Status: the layout, its validation, the public method, topology guides and
+candidate selection are **done**; fold-robust tracing is **in progress and its
+gate is not met**, and exact topology symmetry is **not started**. The plan, the
 measurements, and the levers already refuted — with their numbers, so they are
 not retried — are in [`docs/zremesher-plan.md`](docs/zremesher-plan.md).
 

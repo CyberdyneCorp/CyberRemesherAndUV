@@ -105,11 +105,11 @@ layout over one bad patch — on rocker-arm, one patch out of 199.
 |---|---|---|
 | **A** | `TopologyLayout`, validation, debug export | byte-identical Bi-MDF output; every currently successful layout validates |
 | **B** | fold-robust tracing: orientation-independent contour following, combinatorial patch-sector classification, deterministic exact-vertex crossings | zero organic T-mesh fallbacks from folded patch sectors; negative-index cone fixture passes — **in progress, gate not met**, see below |
-| **C** | `GeometryAnalysis`, weighted singularity cost, deterministic relocation, dipole cancellation | weighted cost improves; topological defects stay zero; geometry does not regress |
-| **D** | unified `SizingField` fusing painted density, curvature, features and thickness | painted-density, target-count and thin-feature suites; byte-identical when disabled |
-| **E** | topology-affecting flow guides (orientation vs topology mode, closed loop guides) | sphere-equator, eye-loop, mouth-loop adherence |
+| **C** | `GeometryAnalysis`, weighted singularity cost, deterministic relocation, dipole cancellation | weighted cost improves without regressing the layout — **NOT met**; relocation trades layout quality for a ~1% cost gain |
+| **D** | unified `SizingField` fusing painted density, curvature, features and thickness | byte-identical when disabled — met; thin-feature suite — **NOT met**, it measured worse |
+| **E** | topology-affecting flow guides (orientation vs topology mode, closed loop guides) | sphere-equator adherence — **MET**, 52% → 87% |
 | **F** | `ConstraintField` semantic boundaries; exact forced-axis topology symmetry | mirrored *connectivity*, not merely mirrored positions |
-| **G** | quality-driven candidate selection (fast / balanced / best) over one published score | `Best` never worse than either candidate, plus manual visual inspection |
+| **G** | quality-driven candidate selection (fast / best) over one published score | `Best` never worse than either candidate — **MET**; `Balanced` not attempted |
 
 Phase B is the largest single unlock for the existing advanced solver: the
 relaxed map is not injective near high-distortion cones, and today a folded
@@ -185,6 +185,34 @@ layout is genuinely defective where it is contained:
   (winding > 2 × arc ends, not merely "fewer ends than winding"): fandisk 1,
   cheburashka 2, rocker-arm 3, bunny 37 — and the bunny's 37 are exactly its
   boundary-abandoned rays.
+
+## What each later phase measured
+
+The pattern across C, D, E and G is worth stating plainly, because it is the
+main finding of the work so far: **most of the levers the design proposes were
+already being done well, and the ones that were not needed the metric fixing
+before the lever.**
+
+| phase | built | measured | shipped |
+|---|---|---|---|
+| C1/C2 geometry analysis + singularity metric | yes | the first metric scored a cube's eight corner cones as its WORST result; they are its optimal topology | yes, after separating feature corners from feature curves |
+| C3 singularity relocation | yes | cost falls 0.2–1.5%, but excluded arcs and non-quad patches rise | no — flag-gated off |
+| C4 cancellation priority | yes | near-inert; only the bunny moved | no — flag-gated off |
+| D unified sizing | yes | thin-feature survival 2 of 3 → 1 of 3 | no — flag-gated off |
+| E topology guides | yes | guide adherence 52% → 87% | **yes** |
+| G candidate selection | yes | the first score selected the same candidate on every model | **yes**, after adding the irregular-vertex term |
+
+Three of those rows are metric bugs caught by a validity check *before* an
+optimizer was pointed at them. That is not incidental: an optimizer is only as
+good as the number it minimizes, and each of these would have driven the solver
+somewhere worse while the gate reported success.
+
+- The singularity metric charged a cube's corner cones as defects. Minimizing it
+  would have moved them off the corners, which is strictly worse topology.
+- The guide-adherence metric counted edges that CROSS the guide at right angles,
+  scoring a mesh that ignored the stroke at over 80%.
+- The candidate score omitted irregular vertices — the one axis the two cross
+  fields actually differ on — and so ranked them identically on every model.
 
 ## Current state
 
