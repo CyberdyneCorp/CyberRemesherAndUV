@@ -326,6 +326,11 @@ struct ZRemesherOptions {
     // exactly the historical behavior. Same threading contract as
     // SeamlessLayoutOptions::report: one report per remesh() call.
     ZRemesherRunReport* report = nullptr;
+    // Write the traced layout to these paths (JSON description / OBJ arc
+    // polyline). Empty means "do not write"; see SeamlessLayoutOptions for why
+    // these exist alongside the CYBER_ZR_LAYOUT env var and how they interact.
+    std::string layoutReportPath;
+    std::string layoutMeshPath;
 };
 std::unique_ptr<IQuadrangulator> makeZRemesherQuadrangulator(const ZRemesherOptions& options = {});
 
