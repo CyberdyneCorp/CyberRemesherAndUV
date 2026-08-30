@@ -61,9 +61,11 @@ you need output you can hand to a subdivision surface without repair, that is th
 number that matters. If you need the tightest median angle on organic scans,
 QuadriFlow is still ahead on four of these five.
 
-Other strategies: **`field-aligned`** (max-matching over a smoothed cross field, ~95%+
-quad-dominance, strongest on box/CAD geometry), **`instant-meshes`** (Instant-Meshes-style
-position-field extractor), and **`integer`** (experimental integer parametrization).
+Other strategies: **`zremesher`** (the quad-cover path plus the explicit
+topology-layout stage — see below), **`field-aligned`** (max-matching over a smoothed
+cross field, ~95%+ quad-dominance, strongest on box/CAD geometry),
+**`instant-meshes`** (Instant-Meshes-style position-field extractor), and
+**`integer`** (experimental integer parametrization).
 
 ![Community test models remeshed to clean quads](examples/output/09_gallery.png)
 
@@ -102,10 +104,30 @@ It is what the rest of the track — singularity placement, topology-affecting
 guides, exact symmetry, semantic boundaries, quality scoring — is built to
 consume, rather than each of them adding another branch to the quantizer.
 
+It is a first-class quad method, not an environment variable:
+
 ```sh
-# Report the layout, and write <prefix>.json + <prefix>.obj for inspection.
-CYBER_QC_BIMDF=1 CYBER_ZR_LAYOUT=/tmp/layout \
-  cyberremesh --input model.obj --output quads.obj --target-quads 2000
+cyberremesh --input model.obj --output quads.obj --quad-method zremesher --target-quads 2000
+```
+
+```python
+remesh(mesh, RemeshParams(target_quad_count=2000, quad_method="zremesher"))
+```
+
+`zremesher` is structurally the `quad-cover` path — same cross field, same
+seamless solve, same isoline extraction — with the layout stage on and the
+tracing options **the layout** wants rather than the ones the shipped
+quantizer's guided rounding wants. That distinction is the reason it is a
+separate method: `quad-cover` cannot turn boundary chains on, because they
+reshape the flow its guided rounding is tuned against, while `zremesher` can,
+because it does not use that rounding. It always routes to the native seamless
+solver, since the layout is traced from that solver's map.
+
+To inspect the layout itself, write it out (`.json` plus a polyline `.obj`):
+
+```sh
+CYBER_ZR_LAYOUT=/tmp/layout \
+  cyberremesh --input model.obj --output quads.obj --quad-method zremesher --target-quads 2000
 ```
 
 ![Topology layout drawn over the quads it produced](examples/output/21_topology_layout.png)
@@ -144,13 +166,22 @@ reports every contained region **and why it was contained**.
 
 <sub>Contained regions per model, and the reason breakdown that says which lever would move them — 178 rejected orbits at the current baseline, dominated by sector winding on closed surfaces and by open boundaries on the bunny · <code>examples/22_layout_robustness.py</code></sub>
 
-Status: the layout and its validation are **done**; fold-robust tracing is **in
-progress and its gate is not met**. The plan, the measurements and the levers
-already refuted (with their numbers, so they are not retried) are in
-[`docs/zremesher-plan.md`](docs/zremesher-plan.md). Everything here is behind
-`CYBER_ZR_*` and changes nothing about the shipped default; the public
-`zremesher` quad method that will carry it without an environment variable comes
-once the representation has settled.
+What that decoupling bought, measured on the corpus: on the one open surface
+(the Stanford bunny) separatrices reaching a boundary now terminate there
+instead of being abandoned — abandoned launches 4 → 2, with 12 more patches
+recovered at a flat rejection ratio — and fold repair cuts fold-damaged node
+rotations (bunny 17 → 11, rocker-arm 17 → 16). Both are coverage and repair
+wins; **neither moves the fold-robustness gate**, which is consistent with what
+Phase B found: where the layout is contained, it is genuinely defective rather
+than misclassified.
+
+Status: the layout, its validation and the public method are **done**;
+fold-robust tracing is **in progress and its gate is not met**. The plan, the
+measurements, and the levers already refuted — with their numbers, so they are
+not retried — are in [`docs/zremesher-plan.md`](docs/zremesher-plan.md).
+
+`quad-cover` remains the default and is untouched by any of this: choosing
+`zremesher` is what turns the layout stage on.
 
 ### Automatic UV atlas
 

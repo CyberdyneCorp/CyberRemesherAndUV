@@ -217,8 +217,36 @@ Total index is `4 * Euler characteristic`, so 8 for a genus-0 surface and 0 for
 rocker-arm's genus-1 handle — a cheap end-to-end sanity check that the layout
 agrees with the field it came from.
 
-The rollout endpoint is a public `zremesher` quad method alongside
-`quad-cover` / `field-aligned` / `instant-meshes`, with a CLI flag, a C ABI
-surface and a Python binding. Until the representation settles, the layout stays
-internal to the quadrangulate module — exposing it as stable API before the
-later phases have exercised it would freeze the wrong shape.
+## The public method
+
+`zremesher` is now a first-class quad method alongside `quad-cover` /
+`field-aligned` / `instant-meshes`: `--quad-method zremesher` on the CLI,
+`CYBER_QUAD_ZREMESHER` (4) on the C ABI, `quad_method="zremesher"` from Python.
+
+It is not a new algorithm. It is structurally the quad-cover path — same cross
+field, same seamless solve, same isoline extraction — with the topology-layout
+stage on and the tracing options **the layout** wants rather than the ones the
+shipped quantizer's guided rounding wants.
+
+That distinction is the whole reason it needs to be a method rather than another
+environment variable. Phase B measured that boundary chains fix most of the
+bunny's abandoned launches, but `quad-cover` cannot turn them on: the recovered
+regions reshape the T-mesh and its flow, and its guided rounding regresses
+across the whole mu basin. `zremesher` does not use that rounding, so for it the
+trade does not exist. `SeamlessLayoutOptions` is what carries the distinction —
+the tracer no longer reads the environment to decide, the caller decides.
+
+It always routes native, because the layout is traced from the native seamless
+map and the vendored Geogram solve produces no T-mesh at all.
+
+Controlled A/B on the zremesher path (corpus at 2000 quads, each lever toggled
+independently via `CYBER_ZR_NO_BOUNDARY_CHAINS` / `CYBER_ZR_NO_FOLD_REPAIR`):
+
+| lever | effect |
+|---|---|
+| boundary chains | bunny abandoned launches 4 → 2, 12 more patches recovered, rejection ratio 38.6% → 38.3%; every closed model bit-identical either way |
+| fold repair | degraded nodes bunny 17 → 11, rocker-arm 17 → 16, cheburashka 3 → 1; rejections unchanged everywhere |
+
+Both are coverage and repair wins. **Neither moves the fold-robustness gate** —
+which is the same conclusion Phase B reached from the other direction: where the
+layout is contained, it is genuinely defective rather than misclassified.

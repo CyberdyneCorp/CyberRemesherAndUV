@@ -167,6 +167,9 @@ class RemeshParams:
         "instant-meshes": 1,
         "integer": 2,
         "quad-cover": 3,
+        # ZRemesher-class: the quad-cover path with the explicit topology-layout
+        # stage on. See docs/zremesher-plan.md.
+        "zremesher": 4,
     }
 
     def _to_c(self) -> "_ffi.CyberRemeshParams":

@@ -50,6 +50,36 @@
   the same change. `examples/21_topology_layout.py` renders the layout's arcs
   and singularities over the quads they produced.
 
+- **A public `zremesher` quad method.** The topology-layout work is no longer
+  reachable only through environment variables: `--quad-method zremesher` on the
+  CLI, `CYBER_QUAD_ZREMESHER` (4) on the C ABI, `quad_method="zremesher"` from
+  Python. `quad-cover` remains the default and is untouched.
+
+  It is not a new algorithm — structurally it is the quad-cover path, same cross
+  field, same seamless solve, same isoline extraction, with the topology-layout
+  stage on and the tracing options **the layout** wants rather than the ones the
+  shipped quantizer's guided rounding wants. That distinction is why it has to
+  be a method rather than another flag: Phase B measured that boundary chains fix
+  most of the Stanford bunny's abandoned separatrix launches, but `quad-cover`
+  cannot turn them on, because the recovered regions reshape the flow its guided
+  rounding is tuned against. `zremesher` does not use that rounding, so for it
+  the trade does not exist.
+
+  `SeamlessLayoutOptions` is what carries it: the tracer no longer reads the
+  environment to decide what to trace, the caller does. It always routes to the
+  native seamless solver, since the layout is traced from that solver's map, and
+  it takes the same field-aligned per-island fallback `quad-cover` does.
+
+  Measured, each lever toggled independently on the corpus: boundary chains take
+  the bunny's abandoned launches 4 → 2 and recover 12 more patches at a flat
+  rejection ratio, leaving every closed model bit-identical; fold repair cuts
+  fold-damaged node rotations (bunny 17 → 11, rocker-arm 17 → 16, cheburashka
+  3 → 1) with rejections unchanged. Both are coverage and repair wins, and
+  **neither moves the fold-robustness gate**.
+
+  The run report now names the EFFECTIVE quad method — after any
+  build-capability fallback — which it did not carry at all before.
+
 - **Layout-containment diagnostics, and two fold-repair levers** (Phase B of the
   same change, in progress). The tracer reported *that* it contained a region
   but never *why*, which made the fold-robustness work guesswork. It now reports

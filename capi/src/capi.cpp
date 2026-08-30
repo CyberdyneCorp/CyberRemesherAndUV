@@ -523,7 +523,8 @@ CyberStatus remeshShared(const CyberMesh* in, const CyberRemeshParams* params,
         // IS present, pass field-aligned as the per-island fallback the pipeline uses if
         // quad-cover declines an island.
         int quadMethod = params->quadMethod;
-        if (quadMethod == CYBER_QUAD_QUADCOVER && !cyber::remesh::quadCoverAvailable()) {
+        if ((quadMethod == CYBER_QUAD_QUADCOVER || quadMethod == CYBER_QUAD_ZREMESHER) &&
+            !cyber::remesh::quadCoverAvailable()) {
             quadMethod = CYBER_QUAD_FIELD_ALIGNED;
         }
         // quad-cover closes holes DURING extraction, so the pipeline's post-pass
@@ -554,10 +555,19 @@ CyberStatus remeshShared(const CyberMesh* in, const CyberRemeshParams* params,
                 return cyber::remesh::makeQuadCoverQuadrangulator(40, 0.0f, holeFillMaxBoundary,
                                                                   sharpEdgeDegrees);
             }
+            if (method == CYBER_QUAD_ZREMESHER) {
+                // Uniform for the same reason quad-cover is (see above): the
+                // layout stage does not change what adaptivity costs a seamless
+                // global-grid method.
+                cyber::remesh::ZRemesherOptions zr;
+                zr.holeFillMaxBoundary = holeFillMaxBoundary;
+                zr.featureDegrees = sharpEdgeDegrees;
+                return cyber::remesh::makeZRemesherQuadrangulator(zr);
+            }
             return cyber::remesh::makeFieldAlignedQuadrangulator();
         };
         cyber::remesh::QuadrangulatorFactory fallback;
-        if (quadMethod == CYBER_QUAD_QUADCOVER) {
+        if (quadMethod == CYBER_QUAD_QUADCOVER || quadMethod == CYBER_QUAD_ZREMESHER) {
             fallback = []() { return cyber::remesh::makeFieldAlignedQuadrangulator(); };
         }
         cyber::remesh::PipelineResult result = cyber::remesh::remesh(

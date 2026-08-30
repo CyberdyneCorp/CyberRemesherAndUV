@@ -127,7 +127,10 @@ def _run_quad_method():
     with open(obj_path, "w") as fh:
         fh.write(_CUBE_OBJ)
 
-    for method in ("field-aligned", "instant-meshes"):
+    # zremesher is included: the engine-bindings spec requires every quad method
+    # reachable from the CLI to be reachable from Python, and a method that is
+    # only in the enum is not actually bound.
+    for method in ("field-aligned", "instant-meshes", "zremesher"):
         with Mesh.load_obj(obj_path) as mesh:
             result = remesh(mesh, RemeshParams(target_quad_count=200, quad_method=method))
             with result:

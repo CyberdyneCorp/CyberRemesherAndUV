@@ -86,6 +86,14 @@ struct Charts {
     // of containing the node. Changes the traced T-mesh, so it is opt-in until
     // measured to win on the corpus.
     bool foldRepair = false;
+    // QGP boundary arc chains: rays terminate ON an open boundary loop, which
+    // becomes boundary arcs and boundary nodes, instead of being abandoned.
+    // Off for the shipped quantizer — the recovered regions reshape its flow
+    // and the guided rounding regresses across the whole mu basin — but ON for
+    // the layout, which does not use the guided rounding and for which an
+    // abandoned launch is simply a hole in the graph. Measured on the bunny:
+    // abandoned launches 20 -> 1, rejected orbits 47 -> 39.
+    bool boundaryChains = false;
 
     [[nodiscard]] std::size_t uIx(std::size_t c) const { return c; }
     [[nodiscard]] std::size_t vIx(std::size_t c) const { return nCut + c; }

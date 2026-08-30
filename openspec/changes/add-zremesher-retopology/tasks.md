@@ -154,9 +154,33 @@ defective where it is contained. Evidence:
 
 ## Product surface
 
-- [ ] P1. Public `zremesher` quad method: CLI `--quad-method zremesher` plus
+- [x] P1. Public `zremesher` quad method: CLI `--quad-method zremesher` plus
        its flags, C API and Python binding, documented in `examples/README.md`
        and `docs/`.
+       — landed. Structurally the quad-cover path with the topology-layout stage
+       on and the tracing options the LAYOUT wants rather than the ones the
+       shipped quantizer's guided rounding wants. This is what unblocked the
+       boundary decoupling Phase B measured but could not use: `quad-cover`
+       cannot turn boundary chains on (they reshape the flow its guided rounding
+       is tuned against), `zremesher` can, because it does not use that
+       rounding. Reachable as `--quad-method zremesher`,
+       `CYBER_QUAD_ZREMESHER` (4) on the C ABI, and `quad_method="zremesher"`
+       from Python; it always routes native, since the layout is traced from the
+       native seamless map. `SeamlessLayoutOptions` replaces reading the
+       environment deep inside the tracer, so the option is a caller's choice
+       rather than a process-wide flag. Kill switches
+       `CYBER_ZR_NO_BOUNDARY_CHAINS` / `CYBER_ZR_NO_FOLD_REPAIR` A/B each lever
+       without a rebuild. The run report now names the EFFECTIVE quad method
+       (after any build-capability fallback), which it did not before.
+
+       Controlled A/B on the zremesher path, corpus at 2000 quads. Boundary
+       chains touch only the one open surface — bunny abandoned launches 4 -> 2
+       and 12 more patches recovered, at a flat rejection RATIO (38.6% -> 38.3%);
+       every closed model is bit-identical with them on or off. Fold repair cuts
+       degraded nodes (bunny 17 -> 11, rocker-arm 17 -> 16, cheburashka 3 -> 1)
+       with rejections unchanged. So both levers are coverage and repair wins,
+       and **neither moves the Phase B gate** — consistent with the Phase B
+       finding that the layout is genuinely defective where it is contained.
 - [ ] P2. Example scripts demonstrating the layout, topology guides, symmetry
        and quality modes on the bundled corpus.
 - [ ] P3. Benchmark corpus additions (character and hard-surface) and the

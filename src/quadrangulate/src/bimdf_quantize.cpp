@@ -175,7 +175,7 @@ public:
         // regresses across the whole mu basin (ears 19 -> 37/33/31 at mu
         // 0.75/1.0/1.25, sing 94 -> 115-129) — round-3's containment of the
         // boundary neighborhoods is load-bearing for the round-4 result.
-        if (std::getenv("CYBER_QC_BIMDF_BARC") != nullptr) {
+        if (ch_.boundaryChains || std::getenv("CYBER_QC_BIMDF_BARC") != nullptr) {
             buildBoundaryChains();
         }
         if (!traceRays(tm)) {

@@ -72,9 +72,10 @@ layout survives the foldovers the relaxed parameterization genuinely has near
 high-distortion cones: it sweeps the corpus and reports every contained region
 *and why it was contained* (sector winding / corner count / side mismatch /
 abandoned cone), which is the breakdown that says which lever would move the
-numbers. Both shell out to the built `cyberremesh` CLI rather than the Python
-binding, because the layout is still behind `CYBER_ZR_*` until the public
-`zremesher` quad method lands.
+numbers. Both shell out to the built `cyberremesh` CLI rather than the Python binding,
+because they read the tracer's own diagnostics off stderr. The method itself is
+bound everywhere — `--quad-method zremesher`, or
+`RemeshParams(quad_method="zremesher")` from Python.
 
 ```sh
 examples/run.sh examples/22_layout_robustness.py          # one cell per model

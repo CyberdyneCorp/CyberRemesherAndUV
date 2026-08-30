@@ -935,7 +935,7 @@ SeamlessUv computeSeamlessUvNative(const Mesh& mesh, float targetEdgeLength, flo
     const auto tSolve0 = tick();
     const Parameterization param =
         solveParameterization(work, setup, targetEdgeLength * spacingMul, *backend, cancel,
-                              &prep.solveCache, prep.guidance);
+                              &prep.solveCache, prep.guidance, &prep.layout);
     if (!param.valid) {
         logNative(false, "parameterization invalid (or cancelled)");
         return uv;
@@ -1296,10 +1296,14 @@ SeamlessUv computeSeamlessUv(const Mesh& mesh, float targetEdgeLength, float har
     // do not patch). Routing a guided island there would silently drop the
     // input, which is precisely the failure mode this feature exists to avoid.
     const bool guided = ctx != nullptr && ctx->guidance != nullptr;
+    // A requested topology layout forces native for the same reason: the layout
+    // is traced from the native seamless map, and the vendored solve produces no
+    // T-mesh to trace, so routing there returns no layout at all.
+    const bool wantLayout = ctx != nullptr && ctx->layout.capture;
     const bool routeNative =
-        haveNative &&
-        (guided || (std::getenv("CYBER_QC_NO_ROUTE") == nullptr && routeThresh > 0.0f &&
-                    creaseEdgeFraction(mesh, 45.0f) >= routeThresh));
+        haveNative && (guided || wantLayout ||
+                       (std::getenv("CYBER_QC_NO_ROUTE") == nullptr && routeThresh > 0.0f &&
+                        creaseEdgeFraction(mesh, 45.0f) >= routeThresh));
 
     if (routeNative) {
         SeamlessUv native = computeSeamlessUvNative(mesh, targetEdgeLength, harnessAdaptivity,
@@ -3464,11 +3468,14 @@ std::size_t cancelValenceDipoles(std::vector<Vec3>& vertices,
 class QuadCoverQuadrangulator final : public IQuadrangulator {
 public:
     QuadCoverQuadrangulator(int fieldIterations, float adaptivity, int holeFillMaxBoundary,
-                            float featureDegrees)
+                            float featureDegrees, SeamlessLayoutOptions layout = {},
+                            std::string name = "quad-cover")
         : m_fieldIterations(fieldIterations),
           m_adaptivity(adaptivity),
           m_holeFillMaxBoundary(holeFillMaxBoundary),
-          m_featureDegrees(featureDegrees) {}
+          m_featureDegrees(featureDegrees),
+          m_layout(layout),
+          m_name(std::move(name)) {}
 
     Outcome quadrangulate(Mesh& mesh, float targetEdgeLength, ProgressSink* progress,
                           const CancelToken* cancel) override {
@@ -3493,6 +3500,7 @@ public:
         // parameterization + extraction.
         NativeSolveContext nativeCtx;
         nativeCtx.guidance = m_guidance;  // non-null forces the native route (see the header)
+        nativeCtx.layout = m_layout;      // capture likewise forces native
         // Everything the run could NOT do with the guidance, on the route it
         // actually took. Called on EVERY exit below (including the early one),
         // because an island that never reached a solver honored nothing either.
@@ -3731,13 +3739,15 @@ public:
         return m_unhonored;
     }
 
-    [[nodiscard]] std::string name() const override { return "quad-cover"; }
+    [[nodiscard]] std::string name() const override { return m_name; }
 
 private:
     int m_fieldIterations;
     float m_adaptivity;
     int m_holeFillMaxBoundary;
     float m_featureDegrees = 40.0f;
+    SeamlessLayoutOptions m_layout;
+    std::string m_name;
     const GuidanceField* m_guidance = nullptr;
     std::vector<std::string> m_unhonored;
 };
@@ -3759,6 +3769,26 @@ std::unique_ptr<IQuadrangulator> makeQuadCoverQuadrangulator(int fieldIterations
     const Parameters clamped = validate(raw).params;
     return std::make_unique<QuadCoverQuadrangulator>(
         fieldIterations, clamped.adaptivity, clamped.holeFillMaxBoundary, clamped.sharpEdgeDegrees);
+}
+
+std::unique_ptr<IQuadrangulator> makeZRemesherQuadrangulator(const ZRemesherOptions& options) {
+    // Same clamping discipline as quad-cover: these arguments reach the solve
+    // without passing through remesh()'s validation.
+    Parameters raw;
+    raw.adaptivity = options.adaptivity;
+    raw.holeFillMaxBoundary = options.holeFillMaxBoundary;
+    raw.sharpEdgeDegrees = options.featureDegrees;
+    const Parameters clamped = validate(raw).params;
+    SeamlessLayoutOptions layout;
+    layout.capture = true;  // the layout stage is what makes this method zremesher
+    // Kill switches, so each lever can be A/B'd on the corpus without a rebuild
+    // (repo convention: every lever that changes output has one).
+    layout.boundaryChains =
+        options.boundaryChains && std::getenv("CYBER_ZR_NO_BOUNDARY_CHAINS") == nullptr;
+    layout.foldRepair = options.foldRepair && std::getenv("CYBER_ZR_NO_FOLD_REPAIR") == nullptr;
+    return std::make_unique<QuadCoverQuadrangulator>(options.fieldIterations, clamped.adaptivity,
+                                                     clamped.holeFillMaxBoundary,
+                                                     clamped.sharpEdgeDegrees, layout, "zremesher");
 }
 
 bool quadCoverAvailable() {

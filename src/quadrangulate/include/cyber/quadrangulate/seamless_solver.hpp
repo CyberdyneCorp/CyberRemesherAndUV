@@ -91,6 +91,30 @@ struct Parameterization {
     bool valid = false;
 };
 
+// Topology-layout options for the seamless solve (ZRemesher, Phase A/B).
+//
+// These select what the T-MESH TRACER does, which the shipped quantizer and the
+// layout want differently: the quantizer's defaults are tuned for its guided
+// rounding, while the layout wants the most complete graph it can get and does
+// not use that rounding at all. Keeping them here — rather than reading the
+// environment deep inside the tracer — is what lets the `zremesher` method own
+// its own tracing without changing the shipped path.
+//
+// A default-constructed instance (or a null pointer) reproduces today's
+// behaviour exactly; the CYBER_ZR_* / CYBER_QC_BIMDF_BARC environment variables
+// still force each option on for support and A/B work.
+struct SeamlessLayoutOptions {
+    // Keep the traced node positions and arc polylines, and report/validate the
+    // resulting TopologyLayout.
+    bool capture = false;
+    // Terminate separatrices on open-surface boundary loops instead of
+    // abandoning them (QGP boundary arcs).
+    bool boundaryChains = false;
+    // Recover a node's rotation system by projecting onto the feasible
+    // corner/pass-through range instead of containing the node.
+    bool foldRepair = false;
+};
+
 // Opaque cache for the direct (sparse-Cholesky) solve path, CYBER_QC_DIRECT
 // (docs/ROADMAP.md perf entry). The pinned Poisson operator and the reduced
 // integer-phase operator depend only on (mesh, setup) — never on `spacing` —
@@ -109,11 +133,16 @@ struct SeamlessSolveCache {
 // grid spacing becomes spacing / sqrt(density), i.e. the RHS is scaled per
 // face. It touches the RHS ONLY — exactly like `spacing` itself — so the
 // cached factorizations in `cache` stay valid across density changes.
+//
+// `layout` (optional) selects the tracer's layout options — see
+// SeamlessLayoutOptions. Null keeps the environment-driven defaults, which is
+// byte-identical to the shipped behaviour.
 [[nodiscard]] Parameterization solveParameterization(const Mesh& mesh, const SeamlessSetup& setup,
                                                      float spacing, accel::IBackend& backend,
                                                      const CancelToken* cancel = nullptr,
                                                      SeamlessSolveCache* cache = nullptr,
-                                                     const GuidanceField* density = nullptr);
+                                                     const GuidanceField* density = nullptr,
+                                                     const SeamlessLayoutOptions* layout = nullptr);
 
 // Relaxed-only calibration probe: runs solveParameterization's assembly + the initial
 // relaxed Poisson solve at `spacing` (no ARAP polish, no integer phase) and returns the

@@ -3489,8 +3489,8 @@ namespace {
 Parameterization solveParameterizationImpl(const Mesh& mesh, const SeamlessSetup& setup,
                                            float spacing, accel::IBackend& backend,
                                            const CancelToken* cancel, double* probeCellArea,
-                                           SeamlessSolveCache* cache,
-                                           const GuidanceField* density) {
+                                           SeamlessSolveCache* cache, const GuidanceField* density,
+                                           const SeamlessLayoutOptions* layoutOpts) {
     Parameterization out;
     if (!setup.valid || spacing <= 0.0f || mesh.faceCapacity() == 0) {
         return out;
@@ -3578,18 +3578,22 @@ Parameterization solveParameterizationImpl(const Mesh& mesh, const SeamlessSetup
     // when the opt-in flag is set; the default path is untouched.
     std::unique_ptr<bimdf::Charts> bimdfCharts;
     std::unordered_map<Index, std::size_t> faceToCompact;
-    if (std::getenv("CYBER_QC_BIMDF") != nullptr && probeCellArea == nullptr) {
+    const bool wantLayout =
+        (layoutOpts != nullptr && layoutOpts->capture) || std::getenv("CYBER_ZR_LAYOUT") != nullptr;
+    if ((std::getenv("CYBER_QC_BIMDF") != nullptr || wantLayout) && probeCellArea == nullptr) {
         bimdfCharts = std::make_unique<bimdf::Charts>();
         // ZRemesher topology layout (CYBER_ZR_LAYOUT): the tracer keeps the
         // node positions and arc polylines it otherwise throws away, so the
         // T-mesh can be promoted to a TopologyLayout. Write-only with respect
         // to the quantizer, so the assignment is unaffected either way.
-        bimdfCharts->captureGeometry = std::getenv("CYBER_ZR_LAYOUT") != nullptr;
+        bimdfCharts->captureGeometry = wantLayout;
         // Capacity, not the alive count: FaceIds are sparse after deletions.
         bimdfCharts->sourceFaceCount = mesh.faceCapacity();
         // Phase B fold repair, opt-in until measured on the corpus: it changes
         // the traced T-mesh and therefore the quantization.
-        bimdfCharts->foldRepair = std::getenv("CYBER_ZR_FOLD_REPAIR") != nullptr;
+        bimdfCharts->foldRepair = (layoutOpts != nullptr && layoutOpts->foldRepair) ||
+                                  std::getenv("CYBER_ZR_FOLD_REPAIR") != nullptr;
+        bimdfCharts->boundaryChains = layoutOpts != nullptr && layoutOpts->boundaryChains;
         bimdfCharts->nCut = nCut;
         bimdfCharts->coneIndex.assign(nCut, 0);
         bimdfCharts->vertexOfCut.assign(nCut, 0);
@@ -4270,16 +4274,19 @@ Parameterization solveParameterizationImpl(const Mesh& mesh, const SeamlessSetup
 
 Parameterization solveParameterization(const Mesh& mesh, const SeamlessSetup& setup, float spacing,
                                        accel::IBackend& backend, const CancelToken* cancel,
-                                       SeamlessSolveCache* cache, const GuidanceField* density) {
-    return solveParameterizationImpl(mesh, setup, spacing, backend, cancel, nullptr, cache,
-                                     density);
+                                       SeamlessSolveCache* cache, const GuidanceField* density,
+                                       const SeamlessLayoutOptions* layout) {
+    return solveParameterizationImpl(mesh, setup, spacing, backend, cancel, nullptr, cache, density,
+                                     layout);
 }
 
 double relaxedCellArea(const Mesh& mesh, const SeamlessSetup& setup, float spacing,
                        accel::IBackend& backend, const CancelToken* cancel,
                        SeamlessSolveCache* cache, const GuidanceField* density) {
     double cells = -1.0;
-    (void)solveParameterizationImpl(mesh, setup, spacing, backend, cancel, &cells, cache, density);
+    // The calibration probe never traces a T-mesh, so it needs no layout options.
+    (void)solveParameterizationImpl(mesh, setup, spacing, backend, cancel, &cells, cache, density,
+                                    nullptr);
     return cells;
 }
 

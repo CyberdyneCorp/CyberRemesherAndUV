@@ -140,7 +140,8 @@ void printUsage() {
                  "  --smooth-normal <deg>    smooth projection angle (default 0)\n"
                  "  --adaptivity <float>     0..1 curvature adaptivity (default 1)\n"
                  "  --pure-quads             quads-only output\n"
-                 "  --quad-method <m>        quad-cover | field-aligned | instant-meshes |\n"
+                 "  --quad-method <m>        zremesher | quad-cover | field-aligned |\n"
+                 "                           instant-meshes |\n"
                  "                           integer | greedy (default quad-cover; falls\n"
                  "                           back to field-aligned without a UV solver)\n"
                  "  --hole-fill <int>        max hole boundary to fill (default 64)\n"
@@ -305,8 +306,8 @@ int parseArgs(int argc, char** argv, CliOptions& options, bool& exitEarly) {
             if (!v) {
                 return kExitArgs;
             }
-            if (*v != "quad-cover" && *v != "field-aligned" && *v != "instant-meshes" &&
-                *v != "integer" && *v != "greedy") {
+            if (*v != "zremesher" && *v != "quad-cover" && *v != "field-aligned" &&
+                *v != "instant-meshes" && *v != "integer" && *v != "greedy") {
                 std::fprintf(stderr, "error: unknown --quad-method '%s'\n", v->c_str());
                 return kExitArgs;
             }
@@ -729,6 +730,10 @@ int writeReport(const CliOptions& options, const remesh::PipelineResult& result,
         {"adaptivity", options.params.adaptivity},
         {"pureQuads", options.params.pureQuads},
         {"holeFillMaxBoundary", options.params.holeFillMaxBoundary},
+        // The EFFECTIVE method, after any build-capability fallback: a report
+        // that names the requested method while the run used another one is
+        // worse than one that names neither.
+        {"quadMethod", options.quadMethod},
     };
     report["statistics"] = {
         {"vertices", result.stats.vertexCount},
@@ -916,7 +921,7 @@ int runCli(int argc, char** argv) {
     // documented default. Falls back to field-aligned when no seamless-UV
     // solver is available so solver-less builds still produce output.
     std::string method = options.quadMethod;
-    if (method == "quad-cover" && !remesh::quadCoverAvailable()) {
+    if ((method == "quad-cover" || method == "zremesher") && !remesh::quadCoverAvailable()) {
         if (!options.quiet) {
             std::fprintf(stderr,
                          "warning: no seamless-UV solver in this build; "
@@ -924,6 +929,8 @@ int runCli(int argc, char** argv) {
         }
         method = "field-aligned";
     }
+    // The report must name what actually ran, not what was asked for.
+    options.quadMethod = method;
     const float adaptivity = options.params.adaptivity;
     const int holeFill = options.params.holeFillMaxBoundary;
     const float sharpDegrees = options.params.sharpEdgeDegrees;
@@ -937,6 +944,16 @@ int runCli(int argc, char** argv) {
             // historical knife-edge-only binding with --sharp-edge 40 or
             // CYBER_QC_FEATURE_DEG=40.
             return remesh::makeQuadCoverQuadrangulator(40, adaptivity, holeFill, sharpDegrees);
+        }
+        if (method == "zremesher") {
+            // Structurally the quad-cover path with the explicit topology-layout
+            // stage on, and the tracing options the layout wants rather than the
+            // ones the shipped quantizer's guided rounding wants.
+            remesh::ZRemesherOptions zr;
+            zr.adaptivity = adaptivity;
+            zr.holeFillMaxBoundary = holeFill;
+            zr.featureDegrees = sharpDegrees;
+            return remesh::makeZRemesherQuadrangulator(zr);
         }
         if (method == "instant-meshes") {
             return remesh::makeInstantMeshesQuadrangulator();
@@ -955,9 +972,10 @@ int runCli(int argc, char** argv) {
     // instead of failing outright). Only wired for the quad-cover method; other methods
     // keep their single-quadrangulator behavior.
     const remesh::QuadrangulatorFactory fallbackFactory =
-        method == "quad-cover" ? remesh::QuadrangulatorFactory(
-                                     []() { return remesh::makeFieldAlignedQuadrangulator(); })
-                               : remesh::QuadrangulatorFactory{};
+        (method == "quad-cover" || method == "zremesher") ? remesh::QuadrangulatorFactory([]() {
+            return remesh::makeFieldAlignedQuadrangulator();
+        })
+                                                          : remesh::QuadrangulatorFactory{};
     remesh::PipelineResult result =
         remesh::remesh(source.mesh, options.params, &sink, &cancel, makeQuadrangulator,
                        fallbackFactory, rawGuidance.empty() ? nullptr : &rawGuidance);

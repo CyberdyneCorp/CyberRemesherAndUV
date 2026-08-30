@@ -106,6 +106,11 @@ struct NativeSolveContext {
     // env var the user set). Read back by the quadrangulator and reported per
     // island — never swallowed.
     std::string guidanceUnhonoredReason;
+    // Topology-layout options for this solve (ZRemesher). `capture` FORCES the
+    // native route for the same reason guidance does: the layout is traced from
+    // the native seamless map, and the vendored Geogram quad_cover produces no
+    // T-mesh at all — routing there would silently return no layout.
+    SeamlessLayoutOptions layout;
 };
 
 // Compute a seamless integer-grid UV for `mesh`. Milestone 1 obtains it out-of-process
@@ -235,6 +240,34 @@ std::unique_ptr<IQuadrangulator> makeQuadCoverQuadrangulator(int fieldIterations
                                                              float adaptivity = 0.0f,
                                                              int holeFillMaxBoundary = 64,
                                                              float featureDegrees = 40.0f);
+
+// ZRemesher-class retopology (openspec/changes/add-zremesher-retopology,
+// docs/zremesher-plan.md). Structurally the quad-cover path — same cross field,
+// same seamless solve, same isoline extraction — with the explicit
+// TopologyLayout stage turned on and the tracing options the LAYOUT wants
+// rather than the ones the shipped quantizer's guided rounding wants.
+//
+// Concretely that means boundary chains on, so a separatrix reaching an open
+// boundary terminates there and becomes a boundary arc instead of being
+// abandoned (measured on the Stanford bunny: abandoned launches 20 -> 1,
+// contained regions 47 -> 39), and fold repair on. Neither is safe to flip for
+// `quad-cover` — they reshape the flow its guided rounding is tuned against —
+// which is exactly why the layout needs its own method rather than another
+// environment variable on the old one.
+//
+// It always routes NATIVE: the layout is traced from the native seamless map,
+// and the vendored Geogram solve produces no T-mesh to trace.
+struct ZRemesherOptions {
+    int fieldIterations = 40;
+    float adaptivity = 0.0f;
+    int holeFillMaxBoundary = 64;
+    float featureDegrees = 40.0f;
+    // Terminate separatrices on open boundaries instead of abandoning them.
+    bool boundaryChains = true;
+    // Recover fold-damaged node rotations by feasible-range projection.
+    bool foldRepair = true;
+};
+std::unique_ptr<IQuadrangulator> makeZRemesherQuadrangulator(const ZRemesherOptions& options = {});
 
 // Whether a seamless-UV solver is available for the quad-cover method: true when the
 // in-process solver is linked (built with -DCYBER_WITH_QUADCOVER=ON) or the
