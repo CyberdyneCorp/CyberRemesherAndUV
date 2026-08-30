@@ -68,10 +68,9 @@ struct CliOptions {
     std::string bakeMaps;  // --bake csv override of the preset's map set
     std::string output;
     std::string report;
-    std::string guides;
-    std::string layoutReport;  // --layout-report <path>: the layout as JSON
-    std::string layoutMesh;    // --layout-mesh <path>: its arcs as an OBJ polyline // guidance
-                             // sidecar (--guides); empty = no guidance
+    std::string guides;                     // guidance sidecar (--guides); empty = no guidance
+    std::string layoutReport;               // --layout-report <path>: the layout as JSON
+    std::string layoutMesh;                 // --layout-mesh <path>: its arcs as an OBJ polyline
     std::string quadMethod = "quad-cover";  // roadmap default (2026-07-22)
     std::string quality = "fast";           // zremesher only: fast | best
     std::string symmetry = "none";          // none | x | y | z
