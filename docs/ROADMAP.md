@@ -102,6 +102,36 @@ to a single quarter, is one it structurally cannot fix. Forcing
 clearly worse: **rejected orbits bunny 47 → 69, cheburashka 12 → 23, rocker-arm
 37 → 39**, fandisk sector rejections 2 → 4. Do not retry without new evidence.
 
+### The Bi-MDF injection blocker, quantified (2026-08-30)
+
+Re-measuring Phase B end to end found that **recovering rejected orbits does not
+change the output at all** — a lever that took the bunny's contained regions
+from 84 to 66 left the result byte-identical on every model.
+
+The cause is the injectability of arc lengths, not tracing. An assignment
+reaches the mesh only through injection, which needs an arc's symbolic length to
+reduce onto the INTEGER free variables:
+
+| model | arcs | non-injectable | injected |
+|---|---|---|---|
+| cube | 12 | **0** | works |
+| stanford-bunny | 585 | 432 (74%) | 0 |
+| rocker-arm | 736 | 653 (89%) | 0 |
+| cheburashka | 648 | 616 (95%) | 0 |
+| fandisk | 644 | 610 (95%) | 0 |
+| spot | 438 | **438 (100%)** | 0 |
+
+On a crease-pinned cube every arc runs between pinned crease isolines and the
+machinery works perfectly. On organics a separatrix arc runs between T-nodes at
+continuous positions, so its length is not expressible in the integer basis.
+This is the joint half-integer lattice blocker recorded in the 2026-08-03
+`feat/bimdf-tail` entry below; what is new is how total it is.
+
+**Consequence for planning:** no amount of tracing robustness can make the
+Bi-MDF path affect organic output while 74–100% of arcs are non-injectable. The
+half-integer lattice is the blocker, and everything downstream of it is
+diagnostic until it moves.
+
 ### Where the measurements say the next lever is
 
 The classifier is largely producing the RIGHT answer; the layout is genuinely

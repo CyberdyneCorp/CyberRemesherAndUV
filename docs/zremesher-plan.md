@@ -164,6 +164,41 @@ it made things clearly worse — rejected orbits bunny 47 → 69, cheburashka
 index and the developed geometry genuinely disagree, forcing either side
 corrupts the neighbouring orbits. Do not retry this without new evidence.
 
+### Re-assessed: the Phase B gate measures something with no output effect
+
+Re-measuring B end to end produced the finding that reframes the phase.
+
+**Recovering rejected orbits does not change the output.** A lever that took the
+bunny's contained regions from 84 down to 66 left the result mesh
+**byte-identical** and the quality score unchanged to three decimals, on every
+model tried.
+
+The cause is upstream of tracing. A Bi-MDF assignment only reaches the mesh
+through INJECTION, and injection requires an arc's symbolic length to reduce
+onto the INTEGER free variables:
+
+| model | arcs | non-injectable | injected |
+|---|---|---|---|
+| cube | 12 | **0** | works |
+| stanford-bunny | 585 | 432 (74%) | 0 |
+| rocker-arm | 736 | 653 (89%) | 0 |
+| cheburashka | 648 | 616 (95%) | 0 |
+| fandisk | 644 | 610 (95%) | 0 |
+| spot | 438 | **438 (100%)** | 0 |
+
+On a crease-pinned cube every arc runs between pinned crease isolines, so its
+length *is* an integer combination and the machinery works perfectly. On an
+organic mesh a separatrix arc runs between T-nodes at continuous positions, so
+its length cannot be written in the integer basis and the arc is dropped. This
+is the joint half-integer lattice blocker the ROADMAP already records; the
+measurement of how total it is, is new.
+
+So the Phase B gate — "zero fallbacks caused by folded patch sectors" — cannot
+move the output on organics: even a perfect zero-rejection T-mesh still has
+74–100% of its arcs non-injectable. **Every lever measured inert for that
+reason, not because the levers were wrong.** Replace the gate with the
+injectability one before doing further tracing work.
+
 ### Where the next lever is
 
 The evidence says the classifier is largely producing the right answer and the

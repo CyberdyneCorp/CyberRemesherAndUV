@@ -63,10 +63,64 @@ its own gate is measured green.
        Measured: degraded nodes rocker-arm 17 -> 13, bunny 11 -> 5; reclass
        failures rocker-arm 15 -> 11, bunny 8 -> 2; **rejected orbits
        unchanged** (37, 47) and output byte-identical. The gate is NOT met.
-- [ ] B3. Deterministic exact-vertex crossing rules (ties broken by a stable
+- [x] B3. Deterministic exact-vertex crossing rules (ties broken by a stable
        key, never by floating-point sign).
-       Gate: zero organic T-mesh fallbacks caused by folded patch sectors on
-       spot / fandisk / nefertiti; synthetic negative-index cone fixture passes.
+       — **not needed.** The hard-failure path this would replace
+       (`"exact hit on regular vertex"`) fires ZERO times across the whole
+       corpus at 2000 quads. The tracer's existing rule — only cone and
+       crease-chain vertices are events, a near-hit on a plain regular vertex
+       passes through — already covers it. Recorded rather than implemented, so
+       nobody spends the effort twice.
+
+### Phase B re-assessed: the gate was measuring something with no output effect
+
+Re-measuring B end to end produced the finding that reframes the whole phase.
+
+**Recovering rejected orbits does not change the output at all.** Sweeping a
+recovery lever until the bunny's contained regions fell from 84 to 66 left the
+result mesh **byte-identical**, and the quality score unchanged to three
+decimals, on every model tried.
+
+The reason is upstream of tracing entirely. The Bi-MDF assignment only reaches
+the mesh through INJECTION, and injection needs an arc's symbolic length to
+reduce onto the INTEGER free variables. Measured per model:
+
+| model | arcs | non-injectable | injected |
+|---|---|---|---|
+| cube | 12 | **0** | works |
+| stanford-bunny | 585 | 432 (74%) | 0 |
+| rocker-arm | 736 | 653 (89%) | 0 |
+| cheburashka | 648 | 616 (95%) | 0 |
+| fandisk | 644 | 610 (95%) | 0 |
+| spot | 438 | **438 (100%)** | 0 |
+
+On a crease-pinned cube every arc runs between pinned crease isolines, so its
+length IS an integer combination and the machinery works perfectly. On an
+organic mesh a separatrix arc runs between T-nodes whose positions are
+continuous, so its length is not expressible in the integer basis and the arc is
+dropped. This is the joint half-integer lattice blocker the ROADMAP already
+records; what is new here is the measurement of how total it is.
+
+**Consequence: the Phase B gate as written ("zero fallbacks caused by folded
+patch sectors") cannot change output on organics**, because even a perfect,
+zero-rejection T-mesh would still have 74-100% of its arcs non-injectable. Every
+lever measured inert on output for that reason, not because the levers were
+wrong. The gate should be replaced by the injectability one before any further
+tracing work is done.
+
+**Also measured and reverted: a bigon (two-corner) patch template.** Two-corner
+orbits are the single largest rejected shape (bunny 26 of 72, rocker-arm 15 of
+35) and the tracer's surgery deliberately KEEPS them as genuine thin strips,
+which the templates then refuse for having fewer than three corners. A lune's
+constraint is just "both sides carry the same length" — one of the quad
+template's two pairs — so it looks like a cheap recovery. Implemented, it
+recovered 5 orbits on the bunny with byte-identical output, and then FAILED its
+own smallest correctness fixture: on two lunes sharing two arcs the solve
+returned 11 and 7 half-cells instead of an equal pair, because the T-join parity
+pass breaks a lone balance edge and `maxSideViolation` does not audit non-quads.
+Reverted rather than shipped: a quantizer path that fails its own correctness
+test, for zero measured benefit, is not worth the risk. A real attempt needs the
+paper's template treatment, not one inner edge.
 
 ### REFUTED in Phase B (do not retry without new evidence)
 
