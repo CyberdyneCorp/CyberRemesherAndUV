@@ -538,7 +538,8 @@ const char* statusName(remesh::RunStatus status) {
 // ---- guidance sidecar (--guides) ---------------------------------------
 //
 // {"version": 1,
-//  "guides": [{"points": [[x,y,z], ...], "strength": 1.0, "radius": 0.15}],
+//  "guides": [{"points": [[x,y,z], ...], "strength": 1.0, "radius": 0.15,
+//              "mode": "orientation" | "topology", "closed": false}],
 //  "density": {"perVertex": [...]}}      (or "perFace")
 //
 // Anything wrong with the file is exit 2 naming the file and the offending
@@ -593,6 +594,34 @@ bool parseGuide(const nlohmann::json& g, const std::string& where, remesh::Guida
     if (!readNumberField(g, "strength", where, guide.strength, error) ||
         !readNumberField(g, "radius", where, guide.radius, error)) {
         return false;
+    }
+    // Guide mode. Absent means orientation, which is what every guide written
+    // before this field existed meant, so an older sidecar keeps its behaviour
+    // exactly. An unrecognised value is an error rather than a fallback: a
+    // typo'd "topolgy" silently biasing the field instead of cutting a loop is
+    // the failure this whole feature exists to avoid.
+    if (const auto it = g.find("mode"); it != g.end()) {
+        if (!it->is_string()) {
+            error = where + ": \"mode\" must be a string";
+            return false;
+        }
+        const std::string mode = it->get<std::string>();
+        if (mode == "orientation") {
+            guide.mode = remesh::GuideMode::Orientation;
+        } else if (mode == "topology") {
+            guide.mode = remesh::GuideMode::Topology;
+        } else {
+            error =
+                where + ": \"mode\" must be \"orientation\" or \"topology\", got \"" + mode + "\"";
+            return false;
+        }
+    }
+    if (const auto it = g.find("closed"); it != g.end()) {
+        if (!it->is_boolean()) {
+            error = where + ": \"closed\" must be a boolean";
+            return false;
+        }
+        guide.closed = it->get<bool>();
     }
     for (const auto& p : g["points"]) {
         std::vector<float> xyz;

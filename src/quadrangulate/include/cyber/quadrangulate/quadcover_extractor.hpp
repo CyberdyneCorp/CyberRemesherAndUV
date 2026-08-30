@@ -111,6 +111,10 @@ struct NativeSolveContext {
     // the native seamless map, and the vendored Geogram quad_cover produces no
     // T-mesh at all — routing there would silently return no layout.
     SeamlessLayoutOptions layout;
+    // Topology-guide accounting, read back for the run report. A requested
+    // guide that was not honoured is named, never dropped.
+    std::size_t topologyGuidesRequested = 0;
+    std::size_t topologyGuidesHonored = 0;
 };
 
 // Compute a seamless integer-grid UV for `mesh`. Milestone 1 obtains it out-of-process

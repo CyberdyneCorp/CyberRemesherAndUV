@@ -38,6 +38,7 @@ so quad-dominance reads at a glance.
 | `21_topology_layout.py` | the explicit topology layout behind a remesh — separatrix arcs, singularities and patches drawn over the quads | `output/21_topology_layout.png` |
 | `22_layout_robustness.py` | how the layout survives a folded relaxed map — contained regions and why each was contained (`--full` for the whole sweep) | `output/22_layout_robustness.png` |
 | `23_thin_features.py` | do plates, fins and tubes survive a target edge coarser than they are thick | text report |
+| `24_topology_guides.py` | `mode="topology"` guides — a stroke that becomes an actual edge loop, not just a field bias | `output/24_topology_guides.png` |
 | `run_all.py` | runs all of the above + a stitched `output/gallery.png` | `output/gallery.png` |
 
 `08_load_model.py` loads a mesh and converts it to quads. It defaults to a

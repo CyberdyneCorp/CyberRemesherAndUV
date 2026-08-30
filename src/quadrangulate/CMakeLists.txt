@@ -9,6 +9,7 @@ add_library(cyber_quadrangulate STATIC
     src/geometry_analysis.cpp
     src/layout_score.cpp
     src/sizing_field.cpp
+    src/topology_guides.cpp
     src/topology_layout.cpp
     src/topology_layout_build.cpp
     src/sparse_cholesky.cpp

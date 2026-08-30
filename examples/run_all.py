@@ -34,6 +34,7 @@ EXAMPLES = [
     ("20_seam_paths", "20_seam_paths.png"),
     ("21_topology_layout", "21_topology_layout.png"),
     ("22_layout_robustness", "22_layout_robustness.png"),
+    ("24_topology_guides", "24_topology_guides.png"),
 ]
 
 

@@ -50,6 +50,43 @@
   the same change. `examples/21_topology_layout.py` renders the layout's arcs
   and singularities over the quads they produced.
 
+- **Topology guides — a stroke that becomes an edge loop, not just a field
+  bias.** A flow guide has always been a soft request: the cross field is biased
+  toward the stroke, the loops nearby lean that way, and none of them is pinned
+  to it. That is right for steering flow and wrong for "put a loop exactly HERE",
+  which is most of what a retopology artist draws — an eye, a mouth, a shoulder,
+  a knee.
+
+  A guide now carries a mode. `orientation` is the old behaviour and is the
+  default, so every guide authored before this field existed is unchanged.
+  `topology` says the stroke is meant to become a curve in the mesh.
+
+  The mechanism reuses creases rather than growing a parallel one: a pinned
+  crease already IS "run an edge loop along this curve", so a topology guide is
+  projected onto the solve mesh as a connected edge path and handed to that
+  machinery. Projection snaps each guide point to its nearest vertex and then
+  JOINS consecutive snaps by shortest edge paths — joining is what makes the
+  result connected, since a stroke sampled more coarsely than the mesh would
+  otherwise leave gaps no edge chain can follow. It is deterministic, it reports
+  how far it had to stray, and it declines rather than returning a broken path.
+  A guide that cannot be projected is reported by name, never dropped.
+
+  Measured on the RESULT, as the fraction of the guide with an output edge both
+  near it and ALIGNED with it:
+
+  | fixture | orientation | topology |
+  |---|---|---|
+  | sphere equator | 51.6% | **87.5%** |
+  | sphere loop tilted 35° | 52.3% | **86.7%** |
+
+  Requiring alignment is what makes that number honest. Edges crossing the guide
+  at right angles are everywhere in a dense mesh, and counting them scored the
+  ignore-the-stroke case above 80%.
+
+  Reachable from the CLI sidecar today (`"mode": "topology"`, `"closed": true`);
+  an unrecognised mode is an error rather than a silent fallback.
+  `examples/24_topology_guides.py` renders it.
+
 - **A public `zremesher` quad method.** The topology-layout work is no longer
   reachable only through environment variables: `--quad-method zremesher` on the
   CLI, `CYBER_QUAD_ZREMESHER` (4) on the C ABI, `quad_method="zremesher"` from

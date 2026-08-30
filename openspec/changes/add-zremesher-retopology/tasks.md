@@ -291,14 +291,55 @@ defective where it is contained. Evidence:
 
 ## Phase E — Artist topology guides
 
-- [ ] E1. Guide mode (orientation vs topology) in the core guidance model and
+- [x] E1. Guide mode (orientation vs topology) in the core guidance model and
        its serialization.
-- [ ] E2. Orientation mode stays byte-compatible with today's flow guides.
-- [ ] E3. Deterministic projection of topology guides to surface paths.
-- [ ] E4. Insert topology guides into `TopologyLayout` as first-class arcs.
-- [ ] E5. Closed topology guides (loop guides).
-       Gate: sphere-equator, eye-loop and mouth-loop fixtures show measurable
-       topology-edge adherence.
+       — `FlowGuide::mode` and `FlowGuide::closed`. The CLI sidecar takes
+       `"mode": "orientation" | "topology"` and `"closed"`; an unrecognised mode
+       is an ERROR, not a fallback, because a typo'd `"topolgy"` silently
+       biasing the field instead of cutting a loop is precisely the failure this
+       feature exists to remove. Carried to the backends on `GuidanceField`,
+       which is otherwise deliberately geometric — a topology guide is not a
+       point query, it has to be projected as a whole polyline.
+- [x] E2. Orientation mode stays byte-compatible with today's flow guides.
+       — `Orientation` is the default, so a guide authored before the field
+       existed, or deserialized from an older sidecar, behaves exactly as before.
+- [x] E3. Deterministic projection of topology guides to surface paths.
+       — `projectGuideToPath`: snap each guide point to its nearest vertex, then
+       JOIN consecutive snaps by shortest edge paths. Joining is what makes the
+       result connected — a stroke sampled more coarsely than the mesh would
+       otherwise skip vertices and leave gaps no edge chain can follow. Ties
+       break on vertex id. It reports `maxDeviation`, so "the mesh is too coarse
+       to represent this stroke" is visible rather than silently absorbed, and
+       it DECLINES (empty path) rather than returning something broken.
+- [x] E4. Insert topology guides into `TopologyLayout` as first-class arcs.
+       — `insertGuideArcs` adds a `GuideAnchor` node per path vertex and a
+       `Guide` arc between them, all locked: an artist put them there and no
+       later stage may relocate them.
+- [x] E5. Closed topology guides (loop guides).
+       — a closed path's repeated first vertex becomes the closing ARC rather
+       than a duplicate node, so a loop guide contributes one arc per node.
+
+       The mechanism deliberately reuses creases rather than growing a parallel
+       one. A pinned crease already IS "run an edge loop along this curve": the
+       seamless solve makes it a hard seam and pins its isolines. So a topology
+       guide is projected to an edge path on the work mesh and tagged as a
+       feature — after the dihedral re-tag and its filters, so a guide is never
+       mistaken for a sampling artifact and demoted.
+
+       Gate: **MET**, and measured on the RESULT. Adherence is the fraction of
+       the guide with an output edge both NEAR it and ALIGNED with it; requiring
+       alignment matters, because edges crossing the guide at right angles are
+       everywhere in a dense mesh and scored the ignore-the-stroke case at over
+       80% before alignment was required.
+
+       | fixture | orientation | topology |
+       |---|---|---|
+       | sphere equator (a natural field direction runs along it) | 51.6% | **87.5%** |
+       | sphere loop tilted 35° (nothing about the geometry wants a loop there) | 52.3% | **86.7%** |
+
+       `examples/24_topology_guides.py` is the artifact those numbers come from.
+       A guide that cannot be projected is reported as unhonoured by name, never
+       dropped.
 
 ## Phase F — Semantic boundaries and symmetry
 

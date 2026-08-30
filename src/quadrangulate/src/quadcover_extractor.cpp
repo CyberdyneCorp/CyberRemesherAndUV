@@ -2,6 +2,7 @@
 
 #include "cyber/quadrangulate/geometry_analysis.hpp"
 #include "cyber/quadrangulate/sizing_field.hpp"
+#include "cyber/quadrangulate/topology_guides.hpp"
 
 #if defined(__APPLE__)
 #include <TargetConditionals.h>
@@ -852,6 +853,54 @@ bool prepareNativeSolve(const Mesh& mesh, float targetEdgeLength, float adaptivi
                 }
             }
             std::fclose(f);
+        }
+    }
+
+    // Topology guides (ZRemesher Phase E). An orientation guide biases the field
+    // and is already handled inside the field solve; a TOPOLOGY guide asks for
+    // an actual edge loop, which is exactly what a pinned crease already is —
+    // the seamless solve makes it a hard seam and pins its isolines, so quads
+    // run along it. So the guide is projected to a connected edge path on the
+    // work mesh and tagged as a feature, handing it to that machinery rather
+    // than growing a parallel one that would need its own calibration.
+    //
+    // Tagged AFTER the dihedral re-tag and its filters, so a guide is never
+    // mistaken for a sampling artifact and demoted.
+    ctx.topologyGuidesRequested = 0;
+    ctx.topologyGuidesHonored = 0;
+    if (ctx.guidance != nullptr && ctx.guidance->topologyGuideCount() != 0) {
+        for (const FlowGuide& guide : ctx.guidance->sourceGuides()) {
+            if (guide.mode != GuideMode::Topology) {
+                continue;
+            }
+            ++ctx.topologyGuidesRequested;
+            const GuidePath path = projectGuideToPath(work, guide);
+            if (path.edges.empty()) {
+                continue;  // reported below, never silently dropped
+            }
+            for (const EdgeId e : path.edges) {
+                if (work.isAlive(e) && work.edgeFaceCount(e) == 2) {
+                    work.setFeatureEdge(e, true);
+                }
+            }
+            ++ctx.topologyGuidesHonored;
+            if (std::getenv("CYBER_QC_DEBUG") != nullptr) {
+                std::fprintf(stderr,
+                             "[zr] topology guide: %zu vertices, %zu edges, closed=%d, "
+                             "maxDeviation=%.4f\n",
+                             path.vertices.size(), path.edges.size(), path.closed ? 1 : 0,
+                             static_cast<double>(path.maxDeviation));
+            }
+        }
+        // A topology guide that could not be projected is a guide the run did
+        // not honour, and the pipeline's contract is that such a thing is
+        // reported by name rather than dropped.
+        if (ctx.topologyGuidesHonored < ctx.topologyGuidesRequested) {
+            ctx.guidanceUnhonoredReason =
+                "topology guides: " +
+                std::to_string(ctx.topologyGuidesRequested - ctx.topologyGuidesHonored) + " of " +
+                std::to_string(ctx.topologyGuidesRequested) +
+                " could not be projected onto a connected edge path of the solve mesh";
         }
     }
 
