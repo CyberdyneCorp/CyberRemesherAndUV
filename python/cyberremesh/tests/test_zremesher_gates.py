@@ -29,14 +29,25 @@ _TIMEOUT = 1800
 
 
 def _find_cli():
+    """The most recently built ``cyberremesh``, or None.
+
+    Newest wins deliberately. A build tree usually holds several configurations
+    (cpu-headless, cpu-headless-debug, ...) and taking whichever one os.walk
+    reached first tested whatever was there — a stale binary then reports a
+    missing feature as a failure of the feature, which is exactly how these
+    gates read as red on an up-to-date checkout.
+    """
     build = os.path.join(_REPO, "build")
     if not os.path.isdir(build):
         return None
+    found = []
     for root, _dirs, files in os.walk(build):
         candidate = os.path.join(root, "cyberremesh")
         if "cyberremesh" in files and os.access(candidate, os.X_OK):
-            return candidate
-    return None
+            found.append(candidate)
+    if not found:
+        return None
+    return max(found, key=os.path.getmtime)
 
 
 def _have_numpy():

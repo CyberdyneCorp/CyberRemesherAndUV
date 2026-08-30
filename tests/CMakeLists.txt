@@ -339,7 +339,8 @@ if(TARGET cyber_capi_shared AND Python3_FOUND)
                  test_library_lookup test_host_process_hygiene
                  test_io_formats test_subdivide test_loop_subdivide test_examples
                  test_unwrap_seams test_retopo_ops test_isotropic_remesh
-                 test_reference_nan_guard test_zremesher_gates)
+                 test_reference_nan_guard test_zremesher_gates
+                 test_zremesher_bindings)
         add_test(NAME python_${_pyt}
             COMMAND ${Python3_EXECUTABLE} ${_pydir}/${_pyt}.py)
         set_tests_properties(python_${_pyt} PROPERTIES
@@ -352,6 +353,9 @@ if(TARGET cyber_capi_shared AND Python3_FOUND)
     # The ZRemesher gates run six full solves (two of them a best-of-two, which
     # is two solves each), so they need the same headroom.
     set_tests_properties(python_test_zremesher_gates PROPERTIES TIMEOUT 1800)
+    # The binding gates run a best-of-two (two solves), two guided solves and a
+    # CLI/Python parity pair, so they need the same headroom.
+    set_tests_properties(python_test_zremesher_bindings PROPERTIES TIMEOUT 1800)
 endif()
 
 # Benchmark count-matching regression tests. Pure control flow — no engine, no
