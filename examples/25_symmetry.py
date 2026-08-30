@@ -40,7 +40,14 @@ import common as c  # noqa: E402
 _REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MODELS_DIR = os.path.join(_REPO, "examples", "models")
 
-MODELS = ["cheburashka", "spot"]
+CORPUS = ["cheburashka", "spot"]
+# `examples/models/` is git-ignored — 09_test_models.py downloads it on demand —
+# so CI has no corpus. These stand in: the mirror operates on the SHAPE, so an
+# input whose own tessellation is not symmetric is still a valid fixture.
+PROCEDURAL = [
+    ("sphere", lambda path: c.uv_sphere_obj(path, rings=32, segments=48, radius=1.0)),
+    ("bumpy sphere", lambda path: c.bumpy_sphere_obj(path, rings=32, segments=48)),
+]
 TARGET = 2000
 
 
@@ -113,17 +120,22 @@ def run(cli, src, out, symmetric):
 
 def main() -> None:
     cli = find_cli()
-    available = [m for m in MODELS if os.path.exists(os.path.join(MODELS_DIR, f"{m}.obj"))]
-    if not available:
-        sys.exit("corpus models absent (examples/models/ is downloaded on demand)")
-
-    fig = plt.figure(figsize=(5.0 * 2 * len(available), 5.6), dpi=130)
-    panel = 0
     print(f"{'model':<14} {'mode':<10} {'faces':>6} {'unmatched v':>12} {'unmatched f':>12} "
           f"{'boundary':>9} {'nonmanif':>9}")
     with tempfile.TemporaryDirectory() as work:
-        for model in available:
-            src = os.path.join(MODELS_DIR, f"{model}.obj")
+        if all(os.path.exists(os.path.join(MODELS_DIR, f"{m}.obj")) for m in CORPUS):
+            sources = [(m, os.path.join(MODELS_DIR, f"{m}.obj")) for m in CORPUS]
+        else:
+            print("corpus models absent (downloaded on demand) — using procedural stand-ins")
+            sources = []
+            for name, make in PROCEDURAL:
+                path = os.path.join(work, name.replace(" ", "_") + ".obj")
+                make(path)
+                sources.append((name, path))
+
+        fig = plt.figure(figsize=(5.0 * 2 * len(sources), 5.6), dpi=130)
+        panel = 0
+        for model, src in sources:
             src_verts, _ = read_obj(src)
             plane_x = 0.5 * (float(src_verts[:, 0].min()) + float(src_verts[:, 0].max()))
             for symmetric in (False, True):
@@ -142,7 +154,7 @@ def main() -> None:
                 bnd, nm = mesh_defects(faces)
                 print(f"{model:<14} {label:<10} {len(faces):>6} {uv:>12} {uf:>12} "
                       f"{bnd:>9} {nm:>9}")
-                ax = fig.add_subplot(1, 2 * len(available), panel + 1, projection="3d")
+                ax = fig.add_subplot(1, 2 * len(sources), panel + 1, projection="3d")
                 panel += 1
                 c._draw(ax, {"positions": verts, "faces": faces},
                         f"{model} — {label}\n"

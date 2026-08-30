@@ -441,11 +441,13 @@ defective where it is contained. Evidence:
        `--target-quads` names the WHOLE model, so the half is solved for half of
        it; without that the request would silently mean "per half".
 
-       **Known residue:** cheburashka comes back with 3 boundary and 2
-       non-manifold edges — a small hole where a membrane face was removed.
-       spot and stanford-bunny are clean. Closing that hole means collapsing the
-       membrane rather than deleting it, which is mesh-kernel surgery and was
-       not attempted here.
+       **Known residue:** some models come back with a few boundary or
+       non-manifold edges where a membrane face had to be removed — cheburashka
+       3 and 2, a procedural sphere 0 and 2, a bumpy sphere 0 and 3; spot and
+       stanford-bunny are clean. The symmetry is exact either way (0 unmatched
+       vertices and faces); the residue is a small hole at the seam. Closing it
+       means collapsing the membrane rather than deleting it, which is
+       mesh-kernel surgery and was not attempted here.
 
        **A bug worth recording:** the first symmetry CHECKER reported every one
        of these meshes asymmetric. It used the tolerance as a quantization grid

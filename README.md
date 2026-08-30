@@ -253,9 +253,12 @@ cyberremesh --input head.obj --output low.obj --quad-method zremesher \
 | cheburashka | `--symmetry x` | 1988 | **0** | **0** |
 
 `--target-quads` names the whole model, so the half is solved for half of it.
-One known residue: cheburashka comes back with 3 boundary and 2 non-manifold
-edges, a small hole where a face the border-snap flattened into the plane was
-removed; spot and the bunny are clean.
+
+Known residue: some models come back with a handful of boundary or non-manifold
+edges — cheburashka 3 and 2, a procedural sphere 0 and 2 — where a face the
+border-snap flattened into the plane had to be removed. spot and the bunny are
+clean. The symmetry itself is exact either way; the residue is a small hole at
+the seam, and closing it means collapsing the membrane rather than deleting it.
 
 Status: the layout, its validation, the public method, topology guides,
 candidate selection and forced symmetry are **done**; fold-robust tracing is **in progress and its
