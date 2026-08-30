@@ -118,6 +118,30 @@
   an unrecognised mode is an error rather than a silent fallback.
   `examples/24_topology_guides.py` renders it.
 
+- **Swift reaches the ZRemesher surface too, and is now RUN rather than only
+  compiled.** The package had no `zremesher` quad method at all — it was never
+  added when the method shipped — and no guidance support of any kind. It gains
+  `QuadMethod.zremesher`, `ZRemesherParameters`, `ZRemesherReport`,
+  `ZRemesherQuality` / `SymmetryAxis` / `GuideMode`, `FlowGuide`, `Guidance`,
+  and `Mesh.remesh(params:zremesher:guidance:)` over `cyber_remesh_zremesher`,
+  with the same reject-don't-reinterpret rule as the other bindings.
+
+  A new `CyberRemesherTests` target asserts it at runtime, and the CI lane runs
+  it. Compiling never proved the marshalling worked: a pointer that dies before
+  the engine reads it, the candidate name decoded out of a C `char[32]`, and a
+  guide mode dropped on the way across all compile perfectly. Swift now reports
+  the same numbers the Python gate does for the same fixture (orientation 706
+  vertices vs topology 831, candidate `single-level`).
+
+- **`swift_abi_parity` was checking less than it looked.** Its struct-literal
+  scan used `[^()]*`, which cannot match a literal containing a nested call —
+  so `CyberRemeshParams(... Int32(clamping: targetQuads) ...)`, the only such
+  literal in the package, was skipped entirely and never validated. It also
+  read the `1` in a ternary `flag ? 1 : 0` as a field name, so any literal
+  built from a `Bool` reported false positives. Now depth-counted with
+  identifier-shaped labels; verified by mutation that it catches a bogus field
+  in both kinds of literal.
+
 - **The ZRemesher surface reaches the bindings, not just the CLI.** The public
   method shipped everywhere; its parameters did not. Quality mode, symmetry and
   guide mode were CLI-only, and the layout statistics and the selected candidate

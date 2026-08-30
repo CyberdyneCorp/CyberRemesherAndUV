@@ -23,6 +23,15 @@ public struct QuadMethod: RawRepresentable, Equatable, Sendable {
     /// QuadCover seamless-UV isoline extractor — the engine default. Falls back
     /// to field-aligned in builds with no seamless-UV solver.
     public static let quadCover = QuadMethod(rawValue: Int32(CYBER_QUAD_QUADCOVER))
+    /// ZRemesher-class retopology: structurally the quad-cover path with the
+    /// explicit topology-layout stage on.
+    ///
+    /// Selecting it here runs it through plain `cyber_remesh`, which carries no
+    /// ZRemesher controls and returns no run report. To reach the quality mode,
+    /// the symmetry axis, guide modes or the layout statistics, use
+    /// ``Mesh/remesh(params:zremesher:guidance:)`` instead — that is the
+    /// entry point the CLI and the other bindings are at parity with.
+    public static let zremesher = QuadMethod(rawValue: Int32(CYBER_QUAD_ZREMESHER))
 }
 
 /// User-facing remeshing parameters — a Swift mirror of `CyberRemeshParams`.
@@ -122,14 +131,14 @@ final class RemeshControlBox {
 // C function pointers must be context-free top-level closures; the engine's
 // `user` pointer carries the RemeshControlBox back to us. The stage label the
 // ABI also passes is unused here — progress is reported as a bare fraction.
-private let remeshProgressCb: CyberProgressCb = { fraction, _stage, user in
+let remeshProgressCb: CyberProgressCb = { fraction, _stage, user in
     guard let user else { return }
     Unmanaged<RemeshControlBox>.fromOpaque(user)
         .takeUnretainedValue()
         .reportProgress(Double(fraction))
 }
 
-private let remeshCancelCb: CyberCancelCb = { user in
+let remeshCancelCb: CyberCancelCb = { user in
     guard let user else { return 0 }
     return Unmanaged<RemeshControlBox>.fromOpaque(user).takeUnretainedValue().isCancelled ? 1 : 0
 }

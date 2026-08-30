@@ -34,11 +34,14 @@ swift/
       CyberRuntime.swift            # engine version / status strings / last error
       Mesh.swift                    # RAII wrapper over the opaque CyberMesh
       Remesh.swift                  # async remesh + AsyncStream progress + cancel
+      ZRemesher.swift               # ZRemesher params/report, guides + guide modes
       SoftSelection.swift           # per-vertex weight field + weighted ops
       Document.swift                # persisted Target/EditMesh + named slots
       SeamPath.swift                # UV Path tool: seam sets + routed paths
       StrokeInterpretation.swift    # gesture grammar over cyber_stroke_interpret
       InputForwarding.swift         # UIKit + PencilKit stroke capture
+  Tests/
+    CyberRemesherTests/             # runtime parity checks (macOS lane; `swift test`)
 ```
 
 ## Building / consuming
@@ -71,6 +74,20 @@ let quadMesh = try await op.value()          // throws .cancelled if the Task ca
 progressTask.cancel()
 try quadMesh.saveOBJ(to: "model_quads.obj")
 
+// ZRemesher-class retopology: quality mode, symmetry, guide modes, run report.
+// `params.quadMethod` is ignored on this path — the call IS the method.
+let result = try await mesh.remesh(
+    params: RemeshParameters(targetQuads: 2000),
+    zremesher: ZRemesherParameters(quality: .best, symmetry: .x),
+    guidance: Guidance(guides: [
+        FlowGuide(points: eyeLoop, radius: 0.05, mode: .topology, closed: true)
+    ])
+).value()
+print(result.report.singularities,
+      result.report.selectedCandidate,        // which cross field `.best` kept
+      result.report.topologicallySymmetric)   // checked on the result, not assumed
+for warning in result.guidanceWarnings { print(warning) }
+
 // soft selection: paint a weight field, then move it, re-snapping to the Target
 try quadMesh.selectSphere(SphereRegion(center: (0, 1, 0), radius: 0.4))
 try quadMesh.transformSelection(identityAffine, snapper: snapper)
@@ -90,6 +107,29 @@ if interpretation.action(0) == .insertLoop {
     // apply it with the cyber_retopo_* ops
 }
 ```
+
+## ZRemesher parity
+
+`QuadMethod.zremesher` reaches the method through plain `cyber_remesh`, which
+carries no ZRemesher controls and returns no report.
+`remesh(params:zremesher:guidance:)` is the parity entry point
+(`cyber_remesh_zremesher`): everything the headless CLI can ask of the
+ZRemesher path is reachable there, and it is the only path that forwards
+`adaptivity` the way the CLI always has.
+
+`targetQuads` names the **whole** model under `symmetry`, so the half is solved
+for half of it.
+
+Unknown values are rejected, never reinterpreted — an unknown quality mode,
+symmetry axis or guide mode throws `.invalidParameter` rather than quietly
+becoming something else. A symmetry axis clamped to `.none` would hand back an
+asymmetric mesh for a symmetry request.
+
+`Tests/CyberRemesherTests` asserts these at runtime against the same properties
+the Python binding gates assert, so the two surfaces cannot drift apart
+silently. `swift build` alone never caught a marshalling bug: a pointer that
+dies before the engine reads it, a `char[32]` decoded wrong and a dropped guide
+mode all compile perfectly.
 
 ## What the C ABI does *not* provide
 

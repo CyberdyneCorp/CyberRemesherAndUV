@@ -68,6 +68,24 @@ jobs:
           swift build \
             -Xcc -I"${GITHUB_WORKSPACE}/capi/include" \
             -Xlinker -L"${GITHUB_WORKSPACE}/build/swift/capi"
+      # Compiling proved the package references symbols that exist; it never
+      # proved the marshalling works. A pointer that dies before the engine
+      # reads it, a char[32] decoded wrong, or a guide mode dropped on the way
+      # across all compile perfectly — so the Swift surface is now RUN, against
+      # the same properties the Python binding gates assert.
+      - name: swift test
+        working-directory: swift
+        run: |
+          set -euo pipefail
+          # -rpath, not DYLD_LIBRARY_PATH: the xctest bundle records the engine
+          # as @rpath/libcyber_capi.0.dylib, and dyld resolves that from the
+          # binary's rpath list. DYLD_LIBRARY_PATH does not satisfy an @rpath
+          # install name, so the bundle fails to dlopen and the run dies with
+          # "Exited with unexpected signal code 5" before a single test starts.
+          swift test \
+            -Xcc -I"${GITHUB_WORKSPACE}/capi/include" \
+            -Xlinker -L"${GITHUB_WORKSPACE}/build/swift/capi" \
+            -Xlinker -rpath -Xlinker "${GITHUB_WORKSPACE}/build/swift/capi"
 
   # The GPU backends, compiled. Every other lane builds cpu-headless, where
   # CYBER_ENABLE_CUDA/OPENCL/METAL are all OFF, so cuda_backend.cu,

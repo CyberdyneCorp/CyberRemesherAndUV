@@ -27,3 +27,8 @@ dist/
 # Example byproducts: meshes written next to the committed figures.
 examples/output/*.obj
 examples/output/*.mtl
+
+# SwiftPM build products (swift/.build). The package is built by CI and
+# locally against the CMake-produced dylib; nothing here is an input.
+swift/.build/
+.swiftpm/
