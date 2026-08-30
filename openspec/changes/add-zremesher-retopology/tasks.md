@@ -593,9 +593,26 @@ defective where it is contained. Evidence:
          `ZRemesherOptions` / `SeamlessLayoutOptions`. Null keeps the historical
          behavior exactly (report to stderr and discard).
 
+       **Swift was behind too, and the guard could not see it.** The package
+       had no `zremesher` quad method at all — never added when the method
+       shipped — and no guidance support of any kind. `swift_abi_parity` stayed
+       green the whole time, because it proves the Swift sources reference only
+       symbols that EXIST; a symbol nobody references is invisible to it. Swift
+       now carries the same surface, and `swift test` RUNS it: compiling proved
+       nothing about the marshalling, and the package had never been executed
+       by this repository at all.
+
+       Two defects in `swift_abi_parity` itself, both found by fixing Swift:
+       its struct-literal scan used `[^()]*`, so the one literal containing a
+       nested call was skipped entirely and never validated, and it read the
+       `1` in a ternary `flag ? 1 : 0` as a field name. Depth-counted now, with
+       identifier-shaped labels, and mutation-verified on both literal kinds.
+
        Gate: MET. `python_test_zremesher_bindings` asserts both spec scenarios
        plus the rejections, and the CLI and Python produce the same output for
-       the same request.
+       the same request; `CyberRemesherTests` asserts the same properties from
+       Swift and reports the same numbers (orientation 706v vs topology 831v,
+       candidate single-level).
 - [x] P2. Example scripts demonstrating the layout, topology guides, symmetry
        and quality modes on the bundled corpus.
        — five: `21_topology_layout` (the layout drawn over the quads),
