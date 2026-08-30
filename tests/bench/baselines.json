@@ -86,5 +86,6 @@
       "vertices": 616
     }
   },
-  "solver": "native+geogram"
+  "solver": "native+geogram",
+  "toolchain": "Darwin/arm64/clang"
 }

@@ -28,6 +28,11 @@ on:
         required: false
         default: ""
         type: string
+      record_bench_baselines:
+        description: "Record bench baselines on THIS runner's toolchain and upload them as an artifact (does not gate)"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -115,6 +120,14 @@ jobs:
         run: ./build/cpu-headless/apps/cli/cyberremesh --version
       - name: Benchmark regression check
         run: |
+          # pipefail, or this gate LIES. `bench.py check | tee` takes tee's exit
+          # status, and the default `bash -e` then sees success — so a real
+          # regression reported green. Observed on run 33303656569: the log says
+          # "CHECK FAIL cylinder.singularities: baseline 4 -> 6" and
+          # "bench check: 1 failure(s)", and the job's conclusion is `success`.
+          # The step below already treats a SKIP as fatal; the FAILURE case was
+          # the one going unnoticed.
+          set -euo pipefail
           python3 tools/bench/bench.py check \
             --cyber-binary build/cpu-headless/apps/cli/cyberremesh \
             --cache-dir build/cpu-headless/bench-cache | tee bench.log
@@ -122,6 +135,25 @@ jobs:
             echo "::error::bench check SKIPPED — the gate did not run"
             exit 1
           fi
+
+      # The baselines are toolchain-specific (the solve reads unordered-container
+      # iteration order), so a SKIP above means this runner has none of its own.
+      # Re-run this workflow with record_bench_baselines=true to produce them,
+      # then commit the artifact. Deliberately never gates: recording on a run
+      # that is already failing would bless whatever it happened to measure.
+      - name: Record bench baselines for this toolchain
+        if: ${{ inputs.record_bench_baselines }}
+        run: |
+          set -euo pipefail
+          python3 tools/bench/bench.py record \
+            --cyber-binary build/cpu-headless/apps/cli/cyberremesh \
+            --cache-dir build/cpu-headless/bench-cache
+      - name: Upload recorded baselines
+        if: ${{ inputs.record_bench_baselines }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-baselines-${{ runner.os }}
+          path: tests/bench/baselines.json
 
   # TSan over the bridge server and the threaded solver paths. The BridgeServer
   # stop/accept race closed in the third hardening round is only observable here;
