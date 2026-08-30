@@ -22,6 +22,85 @@ They are a record of what was measured when, not a description of the current
 code: where a number here disagrees with `tests/bench/baselines.json` or the
 README, the baselines are authoritative.
 
+## Update — 2026-08-30 (later): three gates were not measuring what they claimed
+
+Working the remaining ZRemesher items produced more corrections than features.
+Three landed; the more valuable output is that **four recorded claims were
+false**, one of which had been steering decisions for weeks.
+
+**The `bench` gate was not red. It was dark.** `tasks.md` P3 blocked corpus
+additions on "the bench gate is red on `main` (`cylinder.singularities` 4 -> 6),
+and adding to a red gate would bury both signals". Nightly run 33303656569 job
+`bench` logs exactly that failure — and its conclusion is `success`.
+`bench.py check ... | tee bench.log` takes tee's exit status, and the step runs
+under the default `bash -e` with no `pipefail`, so a FAILING check reported
+green. The step's own comment says a skip "reading that as a pass is how the gate
+stayed dark"; it then did precisely that for the failure case. Nobody was
+ignoring a red gate. Nobody could see it.
+
+**And that failure is not a regression.** Same commit, same baselines:
+
+| host | cylinder singularities | result |
+|---|---|---|
+| macOS / Clang | 4 | `bench check: OK` |
+| Linux / GCC | 6 | `CHECK FAIL` |
+
+This is the cross-toolchain nondeterminism recorded in the 2026-08-23 entry —
+the solve reads unordered-container iteration order. The obvious fix, loosening
+the `singularities` tolerance (25% of a count of 4 is +/-1), would also have
+absorbed a genuine 4 -> 6 regression later. Baselines now carry a `toolchain`
+identity and a mismatched run is REFUSED, the same way this file already refuses
+a mismatched `-DCYBER_WITH_QUADCOVER` build. **Expect `bench` to go red on the
+next nightly**, naming the mismatch; that is the first honest signal it has
+produced, and `hardening` gained a `record_bench_baselines` dispatch input so
+clearing it is one run plus a commit.
+
+**The symmetry seam residue had the wrong cause recorded.** `tasks.md` F3 said it
+was a hole left by deleting a membrane face, closable only by collapsing the
+membrane — "mesh-kernel surgery". Deleting a membrane cannot leave a defect in
+the MIRRORED result: every edge the deletion exposes has both endpoints on the
+plane, so the mirror adds the reflected face onto that same edge and it ends at
+two faces. The collapse would have been inert. The real cause was
+`remeshSymmetric` computing `0.35 * meanEdgeLength` and passing it to BOTH
+`isTopologicallySymmetric` (correct — it is matching a vertex to its reflection)
+and `mirrorAcross`, whose first loop snaps everything within it onto the plane.
+Interior surface that merely came near the midplane was welded as centerline.
+Split into a geometric plane epsilon and the unchanged matching radius:
+cheburashka 3 boundary / 2 non-manifold -> **0 / 0**, procedural sphere 0 / 2 ->
+**0 / 0**, unmatched vertices and faces staying at 0 throughout.
+
+Worth recording: the first attempt at that fix — using the border set
+`snapBorderToPlane` projected as the centerline, with no epsilon — was itself a
+regression (4 unmatched faces on a sphere, because a vertex can sit on the plane
+without being on the border). It is a tolerance SPLIT, not a swap.
+
+**`ConstraintField` is not blocked.** The recorded reason ("the engine has no
+group/material input to connect yet") is stale: Phase E ships the mechanism a
+semantic boundary needs — project a curve to an edge path, tag it as a feature,
+and the seamless solve already pins feature edges. Only the input plumbing is
+missing, which is a sibling ABI entry point plus an OBJ-loader decision.
+
+Also landed: the CLI can finally emit what it traces (`--layout-report`,
+`--layout-mesh`, and a `zremesher` block in the JSON report), closing the
+inversion where every binding returned the run report as a value while the CLI
+that owns the flags could only print it. `CYBER_ZR_LAYOUT` writing files had no
+test at all before this — the gates set it to `"1"` (stderr only), so the
+file-writing path the examples depend on could have been refactored away with a
+fully green suite.
+
+Not built, deliberately: a `balanced` quality mode. The two candidates' scores
+differ by 0.001-0.02 on three of five models; a predictor fit to that is
+overfitting, and crease fraction was already refuted as the feature. Either it
+reproduces `Best` (a speed mode, not a quality mode) or it diverges (worse by
+the score `Best` maximizes).
+
+Still the largest open item, and now its own change
+(`openspec/changes/add-injectable-layout`): **the layout does not reach the
+output on organic meshes** — 74-100% of arcs cannot reduce onto the integer
+basis. That is why every Phase B lever measured byte-identical, and its gate is
+deliberately two numbers, because injectable-fraction alone can be driven to 1.0
+without changing a single mesh.
+
 ## Update — 2026-08-30: the ZRemesher track reaches the bindings, and a CLI/Python divergence is closed
 
 Phases C-G, the public method and the release gates landed in #36; this entry
