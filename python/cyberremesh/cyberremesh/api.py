@@ -753,7 +753,7 @@ class Mesh:
     :meth:`close` or garbage collection.
     """
 
-    __slots__ = ("_handle", "_stats", "guidance_warnings")
+    __slots__ = ("_handle", "_stats", "guidance_warnings", "zremesher_report")
 
     def __init__(self, handle: Optional[int] = None):
         if handle is None:
@@ -765,6 +765,10 @@ class Mesh:
         # Guidance the engine could not honor (see remesh()). Always present so
         # callers can read it unconditionally.
         self.guidance_warnings: List[str] = []
+        # The ZRemesher run report (see remesh()), or None when the mesh did
+        # not come from that path. Always present so callers can test it
+        # without hasattr.
+        self.zremesher_report: Optional["ZRemesherReport"] = None
 
     # -- lifetime -----------------------------------------------------------
     @property
@@ -807,6 +811,7 @@ class Mesh:
         copy = type(self)(handle=out.value)
         copy._stats = self._stats
         copy.guidance_warnings = list(self.guidance_warnings)
+        copy.zremesher_report = self.zremesher_report
         return copy
 
     def __copy__(self) -> "Mesh":
@@ -1808,11 +1813,164 @@ class FlowGuide:
     ``radius`` is a world-space distance and must be greater than 0 — a
     zero-radius guide could never be honored, so it is rejected rather than
     silently ignored.
+
+    ``mode`` says what the stroke is ASKING for, and the two requests are
+    genuinely different. ``"orientation"`` (the default, and exactly the
+    historical behavior) says "line the field up this way around here" — a soft
+    bias competing with the smoothness term, so nearby loops lean toward the
+    stroke without any one of them being pinned to it. ``"topology"`` says "put
+    an actual edge loop HERE": the stroke is projected to an edge path and
+    pinned, so it becomes a curve in the layout. An unrecognised mode is an
+    error, never a fallback — a typo'd ``"topolgy"`` silently biasing the field
+    instead of cutting a loop is the failure this exists to remove.
+
+    ``closed`` marks a polyline that closes back on its first point: what an
+    eye, mouth, shoulder, knee or wrist loop is.
     """
 
     points: Sequence[Sequence[float]]
     strength: float = 1.0
     radius: float = 0.0
+    mode: str = "orientation"
+    closed: bool = False
+
+    _MODES = {"orientation": 0, "topology": 1}
+
+    def _mode_code(self) -> int:
+        try:
+            return self._MODES[self.mode]
+        except (KeyError, TypeError):
+            raise ValueError(
+                "FlowGuide.mode must be one of {0}, got {1!r}".format(
+                    sorted(self._MODES), self.mode
+                )
+            ) from None
+
+
+@dataclass
+class ZRemesherParams:
+    """The ZRemesher-only controls, mirroring ``CyberZRemesherParams``.
+
+    Separate from :class:`RemeshParams` for the same reason the C structs are
+    separate: these apply only to the ZRemesher path, and folding them into the
+    canonical parameter set would break every compiled caller of the C ABI.
+
+    Pass one to :func:`remesh` together with ``quad_method="zremesher"``.
+    """
+
+    #: ``"fast"`` solves one predicted path. ``"best"`` solves BOTH
+    #: cross-field candidates and keeps the one that scores better — no static
+    #: "organic vs CAD" threshold picks the right field for every model, so the
+    #: answer is to measure both. It costs a second full solve.
+    quality: str = "fast"
+    #: ``"none"``, ``"x"``, ``"y"`` or ``"z"``. Solves one half and mirrors its
+    #: CONNECTIVITY, so the halves are exact reflections rather than merely
+    #: similar shapes. ``target_quad_count`` names the WHOLE model.
+    symmetry: str = "none"
+    #: Size the solve substrate from the unified sizing field. Off by default,
+    #: and deliberately: it was MEASURED to make thin-feature survival worse,
+    #: which is the one thing it exists to improve. Exposed so the measurement
+    #: can be repeated, not because it is recommended.
+    unified_sizing: bool = False
+    #: Terminate separatrices reaching an open boundary there instead of
+    #: abandoning them.
+    boundary_chains: bool = True
+    #: Recover fold-damaged node rotations by feasible-range projection instead
+    #: of containing the node.
+    fold_repair: bool = True
+
+    _QUALITY = {"fast": 0, "best": 1}
+    _SYMMETRY = {"none": 0, "x": 1, "y": 2, "z": 3}
+
+    def _to_c(self) -> "_ffi.CyberZRemesherParams":
+        try:
+            quality = self._QUALITY[self.quality]
+        except (KeyError, TypeError):
+            raise ValueError(
+                "quality must be one of {0}, got {1!r}".format(sorted(self._QUALITY), self.quality)
+            ) from None
+        try:
+            symmetry = self._SYMMETRY[self.symmetry]
+        except (KeyError, TypeError):
+            raise ValueError(
+                "symmetry must be one of {0}, got {1!r}".format(
+                    sorted(self._SYMMETRY), self.symmetry
+                )
+            ) from None
+        return _ffi.CyberZRemesherParams(
+            quality=quality,
+            symmetry=symmetry,
+            unified_sizing=1 if self.unified_sizing else 0,
+            boundary_chains=1 if self.boundary_chains else 0,
+            fold_repair=1 if self.fold_repair else 0,
+        )
+
+
+@dataclass
+class ZRemesherReport:
+    """What a ZRemesher run produced — the layout, the candidate, the symmetry.
+
+    Reachable as :attr:`Mesh.zremesher_report` on the result of a ``remesh``
+    call that used ``quad_method="zremesher"``. Every number here was
+    previously visible only on the engine's stderr.
+
+    Layout counts are SUMMED over the islands the run solved: a multi-island
+    mesh has no single layout, and "how many singularities did this produce"
+    means all of them.
+    """
+
+    layouts: int = 0
+    layouts_valid: int = 0
+    nodes: int = 0
+    arcs: int = 0
+    patches: int = 0
+    singularities: int = 0
+    t_junctions: int = 0
+    feature_arcs: int = 0
+    boundary_arcs: int = 0
+    excluded_arcs: int = 0
+    non_closing_patches: int = 0
+    #: Sum of singularity indices; ``4 * Euler characteristic`` for a valid field.
+    total_index: int = 0
+    #: The cross field ``quality="best"`` kept (``"multires"`` or
+    #: ``"single-level"``). Empty under ``"fast"``, which selects nothing — an
+    #: empty name means "no selection ran", never "selection failed".
+    selected_candidate: str = ""
+    quality_score: float = 0.0
+    symmetry_applied: bool = False
+    #: Checked on the RESULT, not assumed from the construction.
+    topologically_symmetric: bool = False
+    mirrored_vertices: int = 0
+    mirrored_faces: int = 0
+    border_snapped: int = 0
+    membranes_removed: int = 0
+    max_border_drift: float = 0.0
+
+    @classmethod
+    def _from_c(cls, c: "_ffi.CyberZRemesherReport") -> "ZRemesherReport":
+        return cls(
+            layouts=int(c.layouts),
+            layouts_valid=int(c.layouts_valid),
+            nodes=int(c.layout_nodes),
+            arcs=int(c.layout_arcs),
+            patches=int(c.layout_patches),
+            singularities=int(c.singularities),
+            t_junctions=int(c.t_junctions),
+            feature_arcs=int(c.feature_arcs),
+            boundary_arcs=int(c.boundary_arcs),
+            excluded_arcs=int(c.excluded_arcs),
+            non_closing_patches=int(c.non_closing_patches),
+            total_index=int(c.total_index),
+            selected_candidate=c.selected_candidate.decode("utf-8", "replace"),
+            quality_score=float(c.quality_score),
+            symmetry_applied=bool(c.symmetry_applied),
+            topologically_symmetric=bool(c.topologically_symmetric),
+            mirrored_vertices=int(c.mirrored_vertices),
+            mirrored_faces=int(c.mirrored_faces),
+            border_snapped=int(c.border_snapped),
+            membranes_removed=int(c.membranes_removed),
+            max_border_drift=float(c.max_border_drift),
+        )
 
 
 def remesh(
@@ -1823,6 +1981,7 @@ def remesh(
     guides: Optional[Sequence[FlowGuide]] = None,
     density: Optional[Sequence[float]] = None,
     density_per_face: bool = False,
+    zremesher: Optional[ZRemesherParams] = None,
 ) -> Mesh:
     """Run the automatic quad-remeshing pipeline on ``mesh``.
 
@@ -1847,9 +2006,21 @@ def remesh(
     messages are attached to the result as ``Mesh.guidance_warnings`` AND
     re-raised through :func:`warnings.warn`, so a script that ignores the
     attribute still sees them.
+
+    ``zremesher`` — optional :class:`ZRemesherParams` (quality mode, symmetry
+    axis, sizing levers). Requires ``params.quad_method == "zremesher"``; the
+    combination is rejected rather than reinterpreted, because silently
+    ignoring a symmetry request would hand back an asymmetric mesh. Any run on
+    that method attaches a :class:`ZRemesherReport` to the result as
+    ``Mesh.zremesher_report``, whether or not ``zremesher`` was supplied.
     """
     if params is None:
         params = RemeshParams()
+    is_zremesher = params.quad_method == "zremesher"
+    if zremesher is not None and not is_zremesher:
+        raise ValueError(
+            'zremesher=... requires quad_method="zremesher", got {0!r}'.format(params.quad_method)
+        )
 
     lib = _ffi.get_lib()
 
@@ -1890,20 +2061,18 @@ def remesh(
     c_params = params._to_c()
     out_handle = ctypes.c_void_p()
 
-    if guides is None and density is None:
-        status = lib.cyber_remesh(
-            mesh.handle,
-            ctypes.byref(c_params),
-            progress_cb,
-            cancel_cb,
-            None,
-            ctypes.byref(out_handle),
-        )
-    else:
-        # Every buffer below must stay alive across the call, so the point
-        # arrays are held in `keepalive` rather than built inline.
-        keepalive: List[object] = []
-        c_guides = (_ffi.CyberFlowGuide * len(guides or []))()
+    # Guidance always travels as CyberGuidanceEx, whose guides carry their mode.
+    # The plain CyberFlowGuide has no mode field and cannot grow one without
+    # misreading every compiled caller's array, so the "ex" form is what the
+    # bindings use — orientation-mode guides through it are byte-identical to
+    # the older path.
+    #
+    # Every buffer below must stay alive across the call, so the point arrays
+    # are held in `keepalive` rather than built inline.
+    keepalive: List[object] = []
+    c_guidance = None
+    if guides is not None or density is not None:
+        c_guides = (_ffi.CyberFlowGuideEx * len(guides or []))()
         for i, guide in enumerate(guides or []):
             flat = [float(c) for point in guide.points for c in point]
             point_count = len(guide.points)
@@ -1921,9 +2090,12 @@ def remesh(
             c_guides[i].point_count = point_count
             c_guides[i].strength = float(guide.strength)
             c_guides[i].radius = float(guide.radius)
-        c_guidance = _ffi.CyberGuidance()
+            c_guides[i].mode = guide._mode_code()
+            c_guides[i].closed = 1 if guide.closed else 0
+        keepalive.append(c_guides)
+        c_guidance = _ffi.CyberGuidanceEx()
         c_guidance.guides = (
-            ctypes.cast(c_guides, ctypes.POINTER(_ffi.CyberFlowGuide)) if guides else None
+            ctypes.cast(c_guides, ctypes.POINTER(_ffi.CyberFlowGuideEx)) if guides else None
         )
         c_guidance.guide_count = len(guides or [])
         density_buf = None
@@ -1943,13 +2115,44 @@ def remesh(
         else:
             c_guidance.vertex_density = ptr
             c_guidance.vertex_density_count = count
-        status = lib.cyber_remesh_guided(
+
+    c_report = None
+    if is_zremesher:
+        # The ZRemesher entry point, not cyber_remesh with quadMethod=4: it is
+        # the only one that carries quality, symmetry and the run report — and
+        # the only one that forwards adaptivity, which is where the plain call
+        # differed from the CLI for the same request.
+        c_zr = (zremesher or ZRemesherParams())._to_c()
+        c_report = _ffi.CyberZRemesherReport()
+        status = lib.cyber_remesh_zremesher(
+            mesh.handle,
+            ctypes.byref(c_params),
+            ctypes.byref(c_zr),
+            ctypes.byref(c_guidance) if c_guidance is not None else None,
+            progress_cb,
+            cancel_cb,
+            warning_cb,
+            None,
+            ctypes.byref(out_handle),
+            ctypes.byref(c_report),
+        )
+    elif c_guidance is not None:
+        status = lib.cyber_remesh_guided_ex(
             mesh.handle,
             ctypes.byref(c_params),
             ctypes.byref(c_guidance),
             progress_cb,
             cancel_cb,
             warning_cb,
+            None,
+            ctypes.byref(out_handle),
+        )
+    else:
+        status = lib.cyber_remesh(
+            mesh.handle,
+            ctypes.byref(c_params),
+            progress_cb,
+            cancel_cb,
             None,
             ctypes.byref(out_handle),
         )
@@ -1960,6 +2163,8 @@ def remesh(
 
     result = Mesh(handle=out_handle.value)
     result.guidance_warnings = list(guidance_warnings)
+    if c_report is not None:
+        result.zremesher_report = ZRemesherReport._from_c(c_report)
     for message in guidance_warnings:
         warnings.warn(f"cyberremesh guidance: {message}", stacklevel=2)
     # Statistics are fetched from the result mesh (the C ABI has no out-stats).

@@ -23,7 +23,9 @@ from ctypes import (
     CFUNCTYPE,
     POINTER,
     Structure,
+    c_char,
     c_char_p,
+    c_double,
     c_float,
     c_int32,
     c_size_t,
@@ -136,6 +138,81 @@ class CyberGuidance(Structure):
     # Layout MUST match CyberGuidance in capi/include/cyber_capi.h.
     _fields_ = [
         ("guides", POINTER(CyberFlowGuide)),
+        ("guide_count", c_size_t),
+        ("vertex_density", POINTER(c_float)),
+        ("vertex_density_count", c_size_t),
+        ("face_density", POINTER(c_float)),
+        ("face_density_count", c_size_t),
+    ]
+
+
+class CyberZRemesherParams(Structure):
+    """Mirror of ``CyberZRemesherParams`` — the ZRemesher-only controls.
+
+    Separate from :class:`CyberRemeshParams` for the same reason it is separate
+    in the header: growing that struct would break every already-compiled
+    caller of the C ABI.
+    """
+
+    # Layout MUST match CyberZRemesherParams in capi/include/cyber_capi.h.
+    _fields_ = [
+        ("quality", c_int32),  # 0 = fast, 1 = best
+        ("symmetry", c_int32),  # 0 = none, 1 = x, 2 = y, 3 = z
+        ("unified_sizing", c_int32),
+        ("boundary_chains", c_int32),
+        ("fold_repair", c_int32),
+    ]
+
+
+class CyberZRemesherReport(Structure):
+    """Mirror of ``CyberZRemesherReport`` — what a ZRemesher run produced."""
+
+    # Layout MUST match CyberZRemesherReport in capi/include/cyber_capi.h.
+    _fields_ = [
+        ("layouts", c_size_t),
+        ("layouts_valid", c_size_t),
+        ("layout_nodes", c_size_t),
+        ("layout_arcs", c_size_t),
+        ("layout_patches", c_size_t),
+        ("singularities", c_size_t),
+        ("t_junctions", c_size_t),
+        ("feature_arcs", c_size_t),
+        ("boundary_arcs", c_size_t),
+        ("excluded_arcs", c_size_t),
+        ("non_closing_patches", c_size_t),
+        ("total_index", c_int32),
+        ("selected_candidate", c_char * 32),
+        ("quality_score", c_double),
+        ("symmetry_applied", c_int32),
+        ("topologically_symmetric", c_int32),
+        ("mirrored_vertices", c_size_t),
+        ("mirrored_faces", c_size_t),
+        ("border_snapped", c_size_t),
+        ("membranes_removed", c_size_t),
+        ("max_border_drift", c_float),
+    ]
+
+
+class CyberFlowGuideEx(Structure):
+    """Mirror of ``CyberFlowGuideEx`` — a flow guide that names its mode."""
+
+    # Layout MUST match CyberFlowGuideEx in capi/include/cyber_capi.h.
+    _fields_ = [
+        ("points", POINTER(c_float)),
+        ("point_count", c_size_t),
+        ("strength", c_float),
+        ("radius", c_float),
+        ("mode", c_int32),  # 0 = orientation, 1 = topology
+        ("closed", c_int32),
+    ]
+
+
+class CyberGuidanceEx(Structure):
+    """Mirror of ``CyberGuidanceEx`` — mode-bearing guides plus density."""
+
+    # Layout MUST match CyberGuidanceEx in capi/include/cyber_capi.h.
+    _fields_ = [
+        ("guides", POINTER(CyberFlowGuideEx)),
         ("guide_count", c_size_t),
         ("vertex_density", POINTER(c_float)),
         ("vertex_density_count", c_size_t),
@@ -933,6 +1010,43 @@ def _declare(lib: ctypes.CDLL) -> None:
         POINTER(c_void_p),
     ]
     lib.cyber_remesh_guided.restype = c_int32
+
+    # CyberStatus cyber_remesh_guided_ex(const CyberMesh* in, const CyberRemeshParams*,
+    #                                    const CyberGuidanceEx*, CyberProgressCb,
+    #                                    CyberCancelCb, CyberWarningCb, void* user,
+    #                                    CyberMesh** out)
+    lib.cyber_remesh_guided_ex.argtypes = [
+        c_void_p,
+        POINTER(CyberRemeshParams),
+        POINTER(CyberGuidanceEx),
+        PROGRESS_CB,
+        CANCEL_CB,
+        WARNING_CB,
+        c_void_p,
+        POINTER(c_void_p),
+    ]
+    lib.cyber_remesh_guided_ex.restype = c_int32
+
+    # -- ZRemesher-class retopology -----------------------------------------
+    lib.cyber_default_zremesher_params.argtypes = [POINTER(CyberZRemesherParams)]
+    lib.cyber_default_zremesher_params.restype = None
+    # CyberStatus cyber_remesh_zremesher(const CyberMesh* in, const CyberRemeshParams*,
+    #                                    const CyberZRemesherParams*, const CyberGuidanceEx*,
+    #                                    CyberProgressCb, CyberCancelCb, CyberWarningCb,
+    #                                    void* user, CyberMesh** out, CyberZRemesherReport*)
+    lib.cyber_remesh_zremesher.argtypes = [
+        c_void_p,
+        POINTER(CyberRemeshParams),
+        POINTER(CyberZRemesherParams),
+        POINTER(CyberGuidanceEx),
+        PROGRESS_CB,
+        CANCEL_CB,
+        WARNING_CB,
+        c_void_p,
+        POINTER(c_void_p),
+        POINTER(CyberZRemesherReport),
+    ]
+    lib.cyber_remesh_zremesher.restype = c_int32
 
     # -- surface baking ------------------------------------------------------
     lib.cyber_default_bake_params.argtypes = [POINTER(CyberBakeParams)]
