@@ -6,6 +6,8 @@ add_library(cyber_quadrangulate STATIC
     src/quad_extract.cpp
     src/seamless_solver.cpp
     src/bimdf_quantize.cpp
+    src/geometry_analysis.cpp
+    src/layout_score.cpp
     src/topology_layout.cpp
     src/topology_layout_build.cpp
     src/sparse_cholesky.cpp

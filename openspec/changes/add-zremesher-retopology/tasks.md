@@ -103,9 +103,46 @@ defective where it is contained. Evidence:
 
 ## Phase C — Topology quality
 
-- [ ] C1. `GeometryAnalysis` (normalized curvature, thin-feature risk,
+- [x] C1. `GeometryAnalysis` (normalized curvature, thin-feature risk,
        feature/boundary influence) computed once per solve and cached.
-- [ ] C2. Layout-aware weighted singularity cost + metric reporting.
+       — landed (`geometry_analysis.hpp/.cpp`). Per-vertex salience, all
+       normalized to [0, 1] so the optimizer's weights are comparable to each
+       other rather than to arbitrary units. Curvature is the widest angle
+       between any two face normals around a vertex over pi — a proxy for both
+       principal curvatures at once, since Gaussian curvature alone reports a
+       cylinder as flat. Feature and boundary influence are multi-source
+       Dijkstra over mesh edges (surface distance, not straight-line, so the far
+       side of a thin plate is not "near" a crease on the front), with ties
+       broken on vertex id. Thickness is the BVH opposing-surface probe from the
+       design's Sec. 9.2: an inward ray fan, nearest hit wins, stepped off the
+       surface so it cannot re-hit its own triangles. Without a BVH thickness is
+       INFINITE, not zero — zero would read as "infinitely thin" and make every
+       cone look catastrophic.
+- [x] C2. Layout-aware weighted singularity cost + metric reporting.
+       — landed (`layout_score.hpp/.cpp`). Quad meshes require extraordinary
+       vertices, so counting them is the wrong primary metric: two layouts with
+       the same count differ entirely by WHERE the cones sit. The cost is a
+       weighted sum of the salience terms, each scaled by |index|. Reported per
+       solve alongside the layout stats, and the same `singularityCost` the
+       relocation pass will evaluate candidates with — a relocation optimizing a
+       different cost than the metric would be optimizing something nobody
+       measures.
+
+       Baseline at 2000 quads (`--quad-method zremesher`):
+
+       | model | cones | weighted cost | mean | worst | featureInfluence mean / max |
+       |---|---|---|---|---|---|
+       | spot | 59 | 137.2 | 2.33 | 10.08 | 0.118 / 1.000 |
+       | rocker-arm | 107 | 306.2 | 2.86 | 12.64 | 0.254 / 1.000 |
+       | stanford-bunny | 87 | 324.6 | 3.73 | 12.82 | 0.423 / 1.000 |
+       | fandisk | 93 | 374.6 | 4.03 | 13.39 | 0.412 / 1.000 |
+       | cheburashka | 92 | 434.5 | 4.72 | 20.72 | 0.509 / 1.000 |
+
+       The metric already ranks the corpus the way inspection does — spot's
+       cones sit in smooth regions, cheburashka's sit on features. **Every model
+       has featureInfluence max = 1.000**: at least one cone sits exactly on a
+       feature edge, which is the design's own example of a badly placed cone
+       and the concrete thing C3 has to fix.
 - [ ] C3. Deterministic local singularity relocation under a hard total-index
        invariant, rebuilding dependent cut/layout data.
 - [ ] C4. Conservative dipole cancellation on the layout.

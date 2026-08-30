@@ -23,6 +23,8 @@
 #include "cyber/accel/buffer.hpp"
 #include "cyber/accel/primitives.hpp"
 #include "cyber/core/math.hpp"
+#include "cyber/quadrangulate/geometry_analysis.hpp"
+#include "cyber/quadrangulate/layout_score.hpp"
 #include "sparse_cholesky.hpp"
 #include "topology_layout_build.hpp"
 
@@ -1805,7 +1807,8 @@ std::size_t winslowUntangle(const FoldRepairContext& ctx, std::size_t nCut,
 // (CYBER_ZR_LAYOUT). With a value other than "1" the value is a path prefix and
 // the layout is also written to <prefix>.json and <prefix>.obj, so it can be
 // diffed between runs and opened next to the output mesh in a viewer.
-void reportTopologyLayout(const bimdf::Charts& charts, const bimdf::TMesh& tmesh) {
+void reportTopologyLayout(const bimdf::Charts& charts, const bimdf::TMesh& tmesh,
+                          const GeometryAnalysis& geometry) {
     TopologyLayout layout = layoutFromTMesh(charts, tmesh);
     const LayoutValidation v = validateTopologyLayout(layout, charts.sourceFaceCount);
     layout.valid = v.ok;
@@ -1829,6 +1832,18 @@ void reportTopologyLayout(const bimdf::Charts& charts, const bimdf::TMesh& tmesh
                  st.tJunctions, st.featureArcs, st.boundaryArcs, st.excludedArcs, st.nonQuadPatches,
                  st.nonClosingPatches, st.totalIndex,
                  layout.valid ? "" : " reason=", v.error.c_str());
+    // Where the cones ended up, not just how many there are. A layout with the
+    // same cone count can be far better or far worse depending on whether they
+    // sit in broad smooth regions or on creases, silhouettes and thin features
+    // — so the weighted cost is the Phase C headline, and the raw count is
+    // deliberately not the primary number.
+    //
+    const SingularityMetrics sing = scoreSingularities(layout, geometry);
+    std::fprintf(stderr,
+                 "[zr] singularities: count=%zu weightedCost=%.2f mean=%.2f worst=%.2f "
+                 "featureInfluence(mean=%.3f max=%.3f) totalIndex=%d\n",
+                 sing.count, sing.weightedCost, sing.meanCost, sing.worstCost,
+                 sing.featureInfluenceMean, sing.featureInfluenceMax, sing.totalIndex);
     const char* dest = std::getenv("CYBER_ZR_LAYOUT");
     if (dest == nullptr || std::string(dest) == "1") {
         return;
@@ -1856,7 +1871,8 @@ int solveSeamlessReduced(accel::IBackend& backend, std::size_t nCut,
                          const CancelToken* cancel = nullptr,
                          SeamlessSolveCacheImpl* cache = nullptr,
                          bimdf::Charts* bimdfCharts = nullptr,
-                         const FoldRepairContext* foldCtx = nullptr) {
+                         const FoldRepairContext* foldCtx = nullptr,
+                         const GeometryAnalysis* layoutGeometry = nullptr) {
     const std::size_t nSeam = seams.size();
     const std::size_t nUv = 2 * nCut;
     // Feature-seam integer pinning (docs/ROADMAP.md 2026-08-01 priority 1;
@@ -2867,7 +2883,7 @@ int solveSeamlessReduced(accel::IBackend& backend, std::size_t nCut,
                          tmesh.degradeWhy.fanReclass, tmesh.underservedNodes);
         }
         if (bimdfCharts->captureGeometry) {
-            reportTopologyLayout(*bimdfCharts, tmesh);
+            reportTopologyLayout(*bimdfCharts, tmesh, *layoutGeometry);
         }
         // Reduce every arc-length expression onto the reduced basis w (used
         // for the back-substitution and the post-solve deviation report).
@@ -3577,6 +3593,9 @@ Parameterization solveParameterizationImpl(const Mesh& mesh, const SeamlessSetup
     // and seam-side face indices for the motorcycle-graph tracer. Built only
     // when the opt-in flag is set; the default path is untouched.
     std::unique_ptr<bimdf::Charts> bimdfCharts;
+    // Per-vertex salience for the layout's singularity metric; only built when
+    // a layout is actually requested.
+    std::unique_ptr<GeometryAnalysis> layoutGeometry;
     std::unordered_map<Index, std::size_t> faceToCompact;
     const bool wantLayout =
         (layoutOpts != nullptr && layoutOpts->capture) || std::getenv("CYBER_ZR_LAYOUT") != nullptr;
@@ -3594,6 +3613,15 @@ Parameterization solveParameterizationImpl(const Mesh& mesh, const SeamlessSetup
         bimdfCharts->foldRepair = (layoutOpts != nullptr && layoutOpts->foldRepair) ||
                                   std::getenv("CYBER_ZR_FOLD_REPAIR") != nullptr;
         bimdfCharts->boundaryChains = layoutOpts != nullptr && layoutOpts->boundaryChains;
+        // Where the cones land is what the Phase C metric scores, so the
+        // salience fields are computed here, on the work mesh the solve is
+        // actually running against.
+        //
+        // No BVH: the thickness probe needs one over the SOURCE surface, and
+        // this is the isotropic work mesh mid-solve. thinFeatureRisk therefore
+        // stays zero and its term drops out of the cost rather than being
+        // guessed at.
+        layoutGeometry = std::make_unique<GeometryAnalysis>(analyzeGeometry(mesh, spacing));
         bimdfCharts->nCut = nCut;
         bimdfCharts->coneIndex.assign(nCut, 0);
         bimdfCharts->vertexOfCut.assign(nCut, 0);
@@ -4240,7 +4268,7 @@ Parameterization solveParameterizationImpl(const Mesh& mesh, const SeamlessSetup
     // it scales to hundreds of cones (spot: ~350 seam edges), reconciling branch-point holonomy.
     if (!seams.empty()) {
         solveSeamlessReduced(backend, nCut, rows, bu0, bv0, seams, gauges, u, v, cancel, cacheImpl,
-                             bimdfCharts.get(), foldCtx.get());
+                             bimdfCharts.get(), foldCtx.get(), layoutGeometry.get());
     }
     foldCensusPhase("final");
     statsGradHist("reduced");
