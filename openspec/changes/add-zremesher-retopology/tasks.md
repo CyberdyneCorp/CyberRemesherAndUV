@@ -179,11 +179,61 @@ defective where it is contained. Evidence:
        BVH over the SOURCE surface and the metric runs on the work mesh
        mid-solve; boundary fires only on the bunny, the one open surface, which
        is correct.
-- [ ] C3. Deterministic local singularity relocation under a hard total-index
+- [~] C3. Deterministic local singularity relocation under a hard total-index
        invariant, rebuilding dependent cut/layout data.
-- [ ] C4. Conservative dipole cancellation on the layout.
+       — BUILT and MEASURED behind `CYBER_ZR_RELOCATE`; **not enabled**, because
+       the gate as written is not sufficient.
+
+       The implementation is small because it reuses the calibrated dipole
+       machinery rather than duplicating it: that pass already walks a path from
+       a cone and forces each vertex to a TARGET index, with a disk-topology
+       guard, a structured-curvature guard, a frozen-jump relax and a
+       verify-and-revert. Cancellation ends the path at a -1 cone with target 0;
+       relocation ends it at a REGULAR vertex with target +1. Only the endpoint
+       target and the BFS predicate differ, so every guard is shared. Candidates
+       are the surviving +1 cones, worst-placed first, moving only to a strictly
+       better vertex, with stable id tie-breaks.
+
+       The stated gate is MET: weighted cost falls on every model, the cone
+       COUNT is unchanged, `totalIndex` is unchanged (Poincare-Hopf, pinned by a
+       test), the layout still validates, and the cube — whose eight corner
+       cones are optimal — is correctly left untouched.
+
+       | model | cost before | after | relocated |
+       |---|---|---|---|
+       | spot | 133.20 | 132.87 | few |
+       | fandisk | 258.63 | 254.91 | 5 |
+       | rocker-arm | 262.17 | 258.29 | 12 |
+       | cheburashka | 326.49 | 324.42 | 6 |
+       | stanford-bunny | 280.62 | 278.72 | few |
+       | cube | 16.00 | 16.00 | 0 (correct) |
+
+       **But the layout gets worse where the metric gets better**: excluded arcs
+       rocker-arm 76 -> 94 and cheburashka 26 -> 28, non-quad patches fandisk
+       24 -> 29 and rocker-arm 13 -> 20. Trading layout quality for a 0.2-1.5%
+       metric gain is not a win, and it shows the C gate ("cost improves, defects
+       stay zero") does not capture what actually degraded. The honest fix is
+       Phase G's combined score, which weighs layout quality alongside cone
+       placement; relocation should be re-evaluated against THAT, not against
+       the singularity cost alone.
+
+       The rejection counters say why the ceiling is low: `rejectedCurv`
+       dominates (rocker-arm 38 of 50 candidates, cheburashka 34 of 40). The
+       structured-curvature guard is refusing to move cones the geometry
+       demands — the same conclusion Phase B reached from the other direction.
+- [~] C4. Conservative dipole cancellation on the layout.
+       — the field-level pass already exists and is corpus-calibrated
+       (`annihilateFieldDipoles`). What Phase C adds is choosing WHICH pairs to
+       cancel by placement: under `CYBER_ZR_CONE_PRIORITY` the +1 cones are
+       walked worst-placed first, so the cones the metric charges most get first
+       claim on a partner instead of whichever had the lowest vertex id.
+       **Measured near-inert**: fandisk 258.63 -> 258.49, rocker-arm
+       262.17 -> 261.92, spot and cheburashka unchanged, and only the bunny
+       moved materially (280.62 -> 273.00, two fewer cones). Most pairs are not
+       contested, so the order rarely decides anything. Kept flag-gated with the
+       numbers recorded rather than presented as a win.
        Gate: weighted singularity cost improves, raw topological defects stay
-       zero, geometry metrics do not regress materially.
+       zero, geometry metrics do not regress materially. **NOT met** — see C3.
 
 ## Phase D — Unified density
 

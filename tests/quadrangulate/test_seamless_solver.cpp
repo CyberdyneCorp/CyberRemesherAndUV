@@ -725,3 +725,43 @@ TEST_CASE("isoline extraction: a boundary loop is closed once, never twice") {
     // The sweep must actually have run; an empty loop would assert nothing.
     REQUIRE(checked == 6);
 }
+
+// Singularity relocation (ZRemesher Phase C3) moves a cone to a better-placed
+// vertex through the same path edit the dipole cancellation uses. The invariant
+// that makes it safe is Poincare-Hopf: the SUM of cross-field indices is
+// 4 * Euler characteristic and cannot change, whatever the pass does. A
+// relocation that altered it would have created or destroyed topology rather
+// than moved it, and every downstream stage — the cut graph, the seam
+// transitions, the quantizer — would be reasoning about a field that no longer
+// matches the surface.
+TEST_CASE("singularity relocation preserves the total index") {
+    const Mesh sphere = makeSphere();
+    auto backend = cyber::accel::selectBackend(cyber::accel::BackendKind::Cpu);
+    REQUIRE(backend != nullptr);
+
+    const remesh::SeamlessSetup base = remesh::buildSeamlessSetup(sphere, 20, *backend);
+    REQUIRE(base.valid);
+
+    const cyber::test::ScopedEnv relocate("CYBER_ZR_RELOCATE", "1");
+    const remesh::SeamlessSetup moved = remesh::buildSeamlessSetup(sphere, 20, *backend);
+    REQUIRE(moved.valid);
+
+    // 4 * chi for a sphere is 8, and relocation may not touch it.
+    CHECK(moved.totalIndex() == base.totalIndex());
+    CHECK(moved.totalIndex() == 8);
+}
+
+TEST_CASE("singularity relocation is deterministic") {
+    const Mesh sphere = makeSphere();
+    auto backend = cyber::accel::selectBackend(cyber::accel::BackendKind::Cpu);
+    REQUIRE(backend != nullptr);
+
+    const cyber::test::ScopedEnv relocate("CYBER_ZR_RELOCATE", "1");
+    const remesh::SeamlessSetup first = remesh::buildSeamlessSetup(sphere, 20, *backend);
+    REQUIRE(first.valid);
+    for (int i = 0; i < 3; ++i) {
+        const remesh::SeamlessSetup again = remesh::buildSeamlessSetup(sphere, 20, *backend);
+        REQUIRE(again.valid);
+        CHECK(again.singularityIndex == first.singularityIndex);
+    }
+}

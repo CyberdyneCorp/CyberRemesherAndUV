@@ -367,6 +367,30 @@ void annihilateFieldDipoles(const Mesh& mesh, CrossField& field,
         return;
     }
 
+    // Cancellation order decides WHICH pairs survive when partners are
+    // contested: the pass walks the +1 cones and gives each the nearest free -1,
+    // so whoever goes first wins the partner. Historically that order was vertex
+    // id — arbitrary with respect to quality.
+    //
+    // Under CYBER_ZR_CONE_PRIORITY the worst-PLACED cones go first instead, so
+    // the cones the layout metric charges most get the chance to be removed
+    // rather than whichever happened to have the lowest id. Same guards, same
+    // count of cancellations available, different choice of which.
+    if (std::getenv("CYBER_ZR_CONE_PRIORITY") != nullptr) {
+        // Salience only — no target edge length and no BVH here, so the thin
+        // term is absent and the ranking rests on curvature and feature
+        // proximity, which is what this pass can actually act on.
+        const GeometryAnalysis salience = analyzeGeometry(mesh, 0.0f);
+        std::stable_sort(plusCones.begin(), plusCones.end(), [&salience](VertexId a, VertexId b) {
+            const double ca = singularityCost(a, 1, salience);
+            const double cb = singularityCost(b, 1, salience);
+            if (ca != cb) {
+                return ca > cb;  // worst placed first
+            }
+            return a.value < b.value;  // stable tie-break
+        });
+    }
+
     const std::vector<char> pinned = fieldPinnedFaces(mesh, creaseAlignSupport);
 
     // An edge the cancellation path (and the jump system) may use: interior, non-feature, and
@@ -459,14 +483,28 @@ void annihilateFieldDipoles(const Mesh& mesh, CrossField& field,
     std::vector<char> edgeSeen(mesh.edgeCapacity(), 0);
 
     int pairsTried = 0, cancelled = 0, rejectedEdit = 0, rejectedRelax = 0, rejectedTopo = 0,
-        rejectedCurv = 0;
+        rejectedCurv = 0, relocated = 0;
 
     // Progressive matching: tight pairs first (they are the least ambiguous field noise), the
     // pairing radius widening per inner round; failed pairs are retried in later outer rounds
     // because a neighbouring cancellation changes the local field they were rejected on.
     constexpr int kMaxRounds = 4;
     std::set<std::pair<Index, Index>> failedPairs;
-    const auto cancelOnePair = [&](VertexId v0, int depthLimit) {
+    // Salience for relocation targets, computed once (curvature + feature
+    // proximity; no BVH here, so the thin term is absent).
+    std::unique_ptr<GeometryAnalysis> salience;
+    const auto placementCost = [&](VertexId v) {
+        return salience ? singularityCost(v, 1, *salience) : 0.0;
+    };
+
+    // One path edit. In CANCEL mode the path runs from a +1 cone to a -1 cone
+    // and both end at index 0. In RELOCATE mode it runs from a +1 cone to a
+    // REGULAR vertex that is a better place to sit, and the +1 moves there:
+    // same region, same disk-topology and curvature guards, same frozen-jump
+    // relax, same verify-and-revert. Only the endpoint's target index differs,
+    // which is why relocation costs a parameter here rather than a second
+    // implementation of all of that.
+    const auto cancelOnePair = [&](VertexId v0, int depthLimit, bool relocate) {
         // BFS over usable edges to the nearest unmatched -1 cone within depthLimit hops.
         std::fill(parent.begin(), parent.end(), kInvalidIndex);
         std::vector<char> visited(mesh.vertexCapacity(), 0);
@@ -491,7 +529,13 @@ void annihilateFieldDipoles(const Mesh& mesh, CrossField& field,
                 }
                 visited[w.value] = 1;
                 parent[w.value] = e.value;
-                if (kOrig[w.value] == -1 && !matched[w.value]) {
+                // Cancel: the nearest free -1. Relocate: the nearest regular
+                // vertex that is a STRICTLY better place for this cone, so a
+                // move can never be a lateral shuffle.
+                const bool isTarget = relocate ? (kOrig[w.value] == 0 && !matched[w.value] &&
+                                                  placementCost(w) < placementCost(v0) - 1e-6)
+                                               : (kOrig[w.value] == -1 && !matched[w.value]);
+                if (isTarget) {
                     vEnd = w;
                     break;
                 }
@@ -689,7 +733,10 @@ void annihilateFieldDipoles(const Mesh& mesh, CrossField& field,
                 jump[e.value] -= dq;
             }
         }
-        if (editOk && kj(path.back()) != 0) {
+        // The endpoint absorbs the cone in relocate mode, and cancels it in
+        // cancel mode.
+        const int endWant = relocate ? kOrig[vEnd.value] + 1 : 0;
+        if (editOk && kj(path.back()) != endWant) {
             editOk = false;
         }
         if (!editOk) {
@@ -772,7 +819,7 @@ void annihilateFieldDipoles(const Mesh& mesh, CrossField& field,
             }
             bool verifyOk = true;
             for (const VertexId u : regionVerts) {
-                const int want = (u == v0 || u == vEnd) ? 0 : kOrig[u.value];
+                const int want = (u == v0) ? 0 : (u == vEnd) ? endWant : kOrig[u.value];
                 if (vertexIndex(mesh, field, u) != want) {
                     verifyOk = false;
                     break;
@@ -789,10 +836,16 @@ void annihilateFieldDipoles(const Mesh& mesh, CrossField& field,
                 ++rejectedRelax;
             } else {
                 kOrig[v0.value] = 0;
-                kOrig[vEnd.value] = 0;
+                kOrig[vEnd.value] = endWant;
                 matched[v0.value] = 1;
+                // Marked either way: in relocate mode this stops the same cone
+                // being walked again within a run, which would let it oscillate
+                // between two vertices of nearly equal cost.
                 matched[vEnd.value] = 1;
                 ++cancelled;
+                if (relocate) {
+                    ++relocated;
+                }
                 ok = true;
             }
         }
@@ -814,7 +867,7 @@ void annihilateFieldDipoles(const Mesh& mesh, CrossField& field,
         bool progress = false;
         for (int d = 1; d <= radius; ++d) {
             for (const VertexId v0 : plusCones) {
-                if (!matched[v0.value] && cancelOnePair(v0, d)) {
+                if (!matched[v0.value] && cancelOnePair(v0, d, false)) {
                     progress = true;
                 }
             }
@@ -825,12 +878,48 @@ void annihilateFieldDipoles(const Mesh& mesh, CrossField& field,
         failedPairs.clear();  // neighbouring cancellations changed the field: retry rejects
     }
 
+    // Relocation (CYBER_ZR_RELOCATE): a cone that could not be cancelled is
+    // still somewhere, and where it sits is what the layout metric charges.
+    // Move the survivors that sit worst, worst first, to the nearest strictly
+    // better vertex. Cancellation runs first because removing a cone always
+    // beats moving it.
+    if (std::getenv("CYBER_ZR_RELOCATE") != nullptr) {
+        salience = std::make_unique<GeometryAnalysis>(analyzeGeometry(mesh, 0.0f));
+        std::vector<VertexId> survivors;
+        for (const VertexId v : plusCones) {
+            if (!matched[v.value] && kOrig[v.value] == 1) {
+                survivors.push_back(v);
+            }
+        }
+        std::stable_sort(survivors.begin(), survivors.end(), [&](VertexId a, VertexId b) {
+            const double ca = placementCost(a);
+            const double cb = placementCost(b);
+            return ca != cb ? ca > cb : a.value < b.value;
+        });
+        failedPairs.clear();
+        for (int round = 0; round < kMaxRounds; ++round) {
+            bool progress = false;
+            for (int d = 1; d <= radius; ++d) {
+                for (const VertexId v0 : survivors) {
+                    if (!matched[v0.value] && cancelOnePair(v0, d, true)) {
+                        progress = true;
+                    }
+                }
+            }
+            if (!progress) {
+                break;
+            }
+            failedPairs.clear();
+        }
+    }
+
     if (std::getenv("CYBER_QC_DEBUG") != nullptr) {
         std::fprintf(stderr,
                      "[qc] dipole merge: +cones=%zu pairsTried=%d cancelled=%d "
-                     "rejectedEdit=%d rejectedRelax=%d rejectedTopo=%d rejectedCurv=%d\n",
+                     "rejectedEdit=%d rejectedRelax=%d rejectedTopo=%d rejectedCurv=%d "
+                     "relocated=%d\n",
                      plusCones.size(), pairsTried, cancelled, rejectedEdit, rejectedRelax,
-                     rejectedTopo, rejectedCurv);
+                     rejectedTopo, rejectedCurv, relocated);
     }
 
     // Blocking census (CYBER_QC_FIELD_STATS): for each +cone still unmatched, is its failure a
