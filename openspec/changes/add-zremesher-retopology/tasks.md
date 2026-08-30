@@ -540,7 +540,30 @@ defective where it is contained. Evidence:
        with rejections unchanged. So both levers are coverage and repair wins,
        and **neither moves the Phase B gate** — consistent with the Phase B
        finding that the layout is genuinely defective where it is contained.
-- [ ] P2. Example scripts demonstrating the layout, topology guides, symmetry
+- [x] P2. Example scripts demonstrating the layout, topology guides, symmetry
        and quality modes on the bundled corpus.
-- [ ] P3. Benchmark corpus additions (character and hard-surface) and the
-       release gates from the design's acceptance table.
+       — five: `21_topology_layout` (the layout drawn over the quads),
+       `22_layout_robustness` (contained regions and WHY each was contained),
+       `23_thin_features` (do plates and fins survive a coarse target),
+       `24_topology_guides` (a stroke that becomes an edge loop) and
+       `25_symmetry` (mirrored connectivity). All in `examples/README.md`; the
+       four that render are in the stitched gallery and the CTest smoke test.
+       Each falls back to procedural fixtures when `examples/models/` is absent,
+       because it is git-ignored and CI therefore has no corpus — a lesson CI
+       taught twice.
+- [~] P3. Benchmark corpus additions and the release gates.
+       — the GATES landed as `python_test_zremesher_gates`, registered with
+       CTest. The examples REPORT what they measure; this ASSERTS it, so a later
+       change cannot silently undo any of it:
+       * every layout the tracer produces validates,
+       * `--symmetry x` gives 0 unmatched vertices and 0 unmatched faces,
+       * a topology guide beats an orientation guide by more than 20 points of
+         adherence (measured 59% -> 100% on the gate's own fixture),
+       * `--quality best` names a selected candidate.
+
+       It runs on procedural fixtures for the same reason the examples do.
+
+       Corpus ADDITIONS (character and hard-surface models) are not done, and
+       the existing `bench` gate was deliberately left alone: it is red on
+       `main` (`cylinder.singularities` 4 -> 6, unrelated to this work), and
+       adding to a red gate would bury both signals.
