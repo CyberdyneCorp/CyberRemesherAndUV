@@ -1,7 +1,11 @@
 # remeshing-parameters Specification
 
 ## Purpose
-TBD - created by archiving change bootstrap-v1-platform. Update Purpose after archive.
+The canonical parameter set for automatic remeshing, its validation at every
+entry point, and the documented meaning of each knob. It exists to make the
+parameters trustworthy: every entry point validates the same way and reports
+what it clamped, and no parameter is inert — one that cannot change the output
+is a bug, not a placeholder, so it is either wired through or rejected.
 ## Requirements
 ### Requirement: Canonical parameter set
 The remesher SHALL expose exactly these user-facing parameters, defined once in a single source of truth consumed by GUI, CLI, and network entry points:

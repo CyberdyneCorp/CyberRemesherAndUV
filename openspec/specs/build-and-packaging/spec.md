@@ -1,7 +1,13 @@
 # build-and-packaging Specification
 
 ## Purpose
-TBD - created by archiving change bootstrap-v1-platform. Update Purpose after archive.
+What it takes for a build of this engine to be one you can ship: the C++20
+CMake configuration, the permissive-only dependency policy, the test gates that
+must pass before publishing, the platform packages produced, and the single
+source of truth for the version. It exists because the release rules are only
+real if they are enforced — these requirements are backed by tests, not prose,
+so a package cannot quietly carry an unaudited dependency, a stale version or
+an unexercised binary.
 ## Requirements
 ### Requirement: C++20 CMake build
 The project SHALL build with CMake (presets for every platform/backend combination) as strict C++20 with warnings-as-errors on the project's own code. The core engine SHALL compile with no GUI, GPU, or platform SDK present (CPU-only headless configuration).

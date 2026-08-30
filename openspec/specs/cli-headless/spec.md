@@ -1,7 +1,12 @@
 # cli-headless Specification
 
 ## Purpose
-TBD - created by archiving change bootstrap-v1-platform. Update Purpose after archive.
+The batch face of the engine: a dedicated binary that runs the full pipeline
+with no window, no GPU and no interaction, so the same code an artist drives
+can run in CI, on a farm and inside another tool's build step. It exists to
+make automation a first-class path rather than a scripted GUI — arguments are
+validated, exit codes distinguish the ways a run can end, and every run can
+emit a machine-readable report instead of prose on a terminal.
 ## Requirements
 ### Requirement: Dedicated headless binary
 The CLI SHALL be a separate binary linking only the core engine and acceleration layers (no windowing, no GUI toolkit), suitable for servers and CI. It SHALL accept input/output paths, every canonical remeshing parameter, backend selection, and report options.

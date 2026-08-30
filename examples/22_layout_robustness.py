@@ -59,7 +59,17 @@ OUTPUT_DIR = os.environ.get(
     "CYBER_EXAMPLES_OUTPUT", os.path.join(_REPO, "examples", "output")
 )
 
-MODELS = ["spot", "fandisk", "rocker-arm", "cheburashka", "stanford-bunny", "cube"]
+# The corpus is the real measurement, but `examples/models/` is git-ignored
+# (09_test_models.py downloads it on demand), so CI has none. The procedural
+# stand-ins cover the same regimes — a creased CAD solid that traces cleanly, an
+# organic surface, and a genus-1 shape — so the sweep still exercises the tracer
+# and still reports honest numbers, just on synthetic input.
+CORPUS = ["spot", "fandisk", "rocker-arm", "cheburashka", "stanford-bunny", "cube"]
+PROCEDURAL = [
+    ("cube", lambda path: _common().cube_obj(path, subdiv=14)),
+    ("bumpy sphere", lambda path: _common().bumpy_sphere_obj(path, rings=36, segments=54)),
+    ("torus knot", lambda path: _common().torus_knot_obj(path)),
+]
 TARGETS = [1000, 2000, 4000, 8000]
 ADAPTIVITY = [0.0, 0.5]
 
@@ -83,6 +93,26 @@ _WHY = re.compile(
 )
 
 
+def _common():
+    """`common` is imported lazily: the text report must work without it."""
+    import common
+    return common
+
+
+def resolve_sources(workdir):
+    """(name, path) per sweep row — the corpus when complete, else procedural."""
+    if all(os.path.exists(os.path.join(MODELS_DIR, f"{m}.obj")) for m in CORPUS):
+        return [(m, os.path.join(MODELS_DIR, f"{m}.obj")) for m in CORPUS]
+    print("corpus models absent (examples/models/ is downloaded on demand) — "
+          "sweeping procedural stand-ins instead")
+    out = []
+    for name, make in PROCEDURAL:
+        path = os.path.join(workdir, name.replace(" ", "_") + ".obj")
+        make(path)
+        out.append((name, path))
+    return out
+
+
 def find_cli() -> str:
     for root, _dirs, files in os.walk(os.path.join(_REPO, "build")):
         if "cyberremesh" in files and os.access(os.path.join(root, "cyberremesh"), os.X_OK):
@@ -93,14 +123,13 @@ def find_cli() -> str:
     )
 
 
-def run_case(cli: str, model: str, target: int, adaptivity: float, workdir: str):
+def run_case(cli: str, src: str, target: int, adaptivity: float, workdir: str):
     """One sweep cell. Returns a dict of counters, or None if the run failed.
 
     A solve may reach the tracer several times (the target-count calibration
     re-solves at adjusted spacings). The LAST report is the one whose layout the
     pipeline actually used, so that is what is recorded.
     """
-    src = os.path.join(MODELS_DIR, f"{model}.obj")
     out = os.path.join(workdir, "out.obj")
     env = dict(os.environ)
     env["CYBER_QC_BIMDF"] = "1"
@@ -148,16 +177,13 @@ def run_case(cli: str, model: str, target: int, adaptivity: float, workdir: str)
     return row
 
 
-def sweep(cli: str, targets, adaptivity):
+def sweep(cli: str, targets, adaptivity, workdir):
     rows = []
-    with tempfile.TemporaryDirectory() as workdir:
-        for model in MODELS:
-            if not os.path.exists(os.path.join(MODELS_DIR, f"{model}.obj")):
-                print(f"  {model}: SKIP (model not present)")
-                continue
+    if True:
+        for model, src in resolve_sources(workdir):
             for target in targets:
                 for adapt in adaptivity:
-                    row = run_case(cli, model, target, adapt, workdir)
+                    row = run_case(cli, src, target, adapt, workdir)
                     if row is None:
                         print(f"  {model} @{target} a={adapt}: remesh FAILED")
                         continue
@@ -215,7 +241,10 @@ def draw(rows, summary, path):
     traced = [r for r in rows if r.get("traced")]
     if not traced:
         return
-    models = [m for m in MODELS if any(r["model"] == m for r in traced)]
+    models = []
+    for r in traced:
+        if r["model"] not in models:
+            models.append(r["model"])
     metrics = [("rejected", "rejected orbits", "#d62728"),
                ("nonClosing", "non-closing patches", "#ff7f0e"),
                ("failedRays", "abandoned launches", "#8c8c8c")]
@@ -276,9 +305,10 @@ def main() -> None:
     cli = find_cli()
     targets = TARGETS if args.full else QUICK_TARGETS
     adaptivity = ADAPTIVITY if args.full else QUICK_ADAPTIVITY
-    print(f"layout robustness sweep: {len(MODELS)} models x {len(targets)} targets "
-          f"x {len(adaptivity)} adaptivity")
-    rows = sweep(cli, targets, adaptivity)
+    with tempfile.TemporaryDirectory() as workdir:
+        print(f"layout robustness sweep: {len(targets)} targets "
+              f"x {len(adaptivity)} adaptivity per model")
+        rows = sweep(cli, targets, adaptivity, workdir)
     summary = summarise(rows)
     if not summary:
         sys.exit("no sweep cell reached the tracer")

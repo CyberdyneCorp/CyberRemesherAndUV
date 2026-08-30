@@ -1,7 +1,13 @@
 # viewport-rendering Specification
 
 ## Purpose
-TBD - created by archiving change bootstrap-v1-platform. Update Purpose after archive.
+What the artist actually looks at: a render hardware interface with Metal and
+Vulkan backends, the previews each remeshing and retopology stage needs,
+wireframe on every platform, camera navigation, and multi-viewport. It exists to
+keep rendering behind one interface so the shells and the platform backends can
+move independently, and to hold a performance floor — a viewport that stutters
+while a stroke is being drawn makes the retopology tools unusable however
+correct the geometry is.
 ## Requirements
 ### Requirement: Render hardware interface with Metal and Vulkan backends
 The viewport SHALL render through a thin render-hardware-interface with exactly two backends: Metal (macOS, iPadOS/iOS) and Vulkan (Windows, Linux, Android). No OpenGL backend SHALL exist. All rendering features SHALL work identically on both backends; techniques unavailable on mobile GPUs (e.g. geometry shaders) SHALL NOT be used.

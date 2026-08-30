@@ -32,7 +32,12 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-      - run: npm install -g @fission-ai/openspec@latest
+      # Pin the version, for the same reason the clang-format gate is pinned:
+      # `@latest` means a release of the validator can turn this red on a PR
+      # that changed nothing. 1.11.0 added the placeholder-Purpose check that
+      # first caught the TBD sections every spec was still carrying. Bump this
+      # deliberately, so new checks arrive with a commit that addresses them.
+      - run: npm install -g @fission-ai/openspec@1.11.0
       - run: openspec validate --all --strict
 
   # The SwiftPM package binds cyber_capi.h directly, and only an Apple toolchain

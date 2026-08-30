@@ -1,7 +1,13 @@
 # mesh-core Specification
 
 ## Purpose
-TBD - created by archiving change bootstrap-v1-platform. Update Purpose after archive.
+The half-edge mesh kernel everything else is built on: the representation, the
+structural invariants that hold after every operator, non-manifold input
+carried without data loss, feature tagging, spatial acceleration and generic
+attributes. It exists to make correctness structural rather than per-caller — an
+operator either preserves the invariants or is a no-op — and to make results
+deterministic, because a remesher whose output moves between runs cannot be
+regression-tested at all.
 ## Requirements
 ### Requirement: Half-edge mesh kernel
 The core SHALL provide a half-edge mesh data structure supporting triangles, quads, and n-gons with O(1) adjacency queries (vertex→outgoing half-edges, face→boundary loop, edge→adjacent faces), implemented in pure C++20 with no UI-toolkit or platform dependency.

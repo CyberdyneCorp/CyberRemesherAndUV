@@ -1,7 +1,13 @@
 # uv-editing Specification
 
 ## Purpose
-TBD - created by archiving change bootstrap-v1-platform. Update Purpose after archive.
+The UV half of the workflow, from seams to a packed layout: marking seams on
+the 3D mesh, gesture unwrap, manipulating UVs on the model and in 2D, packing,
+distortion visualization, auto-routed seam paths, and a one-call automatic
+atlas. It exists to cover both ends of the same job — the automatic atlas for
+"just give me UVs", the seam and path tools for the cuts an artist wants placed
+deliberately — over one seam model, so a routed seam and a hand-marked one are
+indistinguishable to everything downstream.
 ## Requirements
 ### Requirement: Seam editing on the 3D mesh
 In the UV stage, Pencil strokes over EditMesh edges SHALL create, extend, or delete seams (partial strokes allowed); Erase SHALL delete seams under the stroke; fully cut islands SHALL be visually distinguished (color change). Drawing over an existing seam SHALL sew it back.

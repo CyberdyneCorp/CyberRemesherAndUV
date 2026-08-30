@@ -1,7 +1,13 @@
 # engine-bindings Specification
 
 ## Purpose
-TBD - created by archiving change bootstrap-v1-platform. Update Purpose after archive.
+The exported surface of the engine and the discipline that keeps it honest: a
+C ABI facade covering the whole capability set, Python bindings that reach all
+of it, and a Swift package for iPad. It exists because the bindings are not a
+convenience layer — Python is the integration-test harness the suite actually
+runs, so a capability that is unreachable from a binding is untested, and
+parity between the CLI, C and Python surfaces is a release rule rather than an
+aspiration.
 ## Requirements
 ### Requirement: Full-surface C ABI facade
 The library SHALL be exposed through a versioned C ABI (opaque handles, plain C types, integer error codes, C function-pointer callbacks) covering the **entire library surface**, not only the headless pipeline: mesh I/O and inspection, the remeshing pipeline with canonical parameters, the document/session layer (create/open/save documents, Target/EditMesh access, stage switching), the tool command layer (invoke any retopo/UV/bake action, inject synthetic input — stroke point sequences, taps, modifier chords), undo/redo, UV unwrap/pack, baking, diagnostics, and compute-backend selection. No C++ types SHALL cross the boundary. The ABI SHALL carry a runtime-queryable semantic version; minor releases SHALL be additive only.

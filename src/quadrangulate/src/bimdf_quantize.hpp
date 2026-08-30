@@ -166,12 +166,12 @@ struct TMesh {
     // Diagnostics.
     std::size_t coneNodes = 0, creaseNodes = 0, tNodes = 0;
     std::size_t raysTraced = 0, raySteps = 0;
-    double maxExprErr = 0.0;        // max |expr(z_relaxed) - len| over arcs
-    double maxSideMismatch = 0.0;   // max |sum(side k) - sum(side k+2)| relaxed
-    double minArcLen = 0.0;         // most negative relaxed arc length (fold diagnostic)
-    std::size_t prunedChains = 0;   // stub crease chains dropped (phase-only pins)
-    std::size_t failedRays = 0;     // separatrix launches abandoned at folded cones
-    std::size_t degradedNodes = 0;  // nodes with fold-damaged sector windings
+    double maxExprErr = 0.0;         // max |expr(z_relaxed) - len| over arcs
+    double maxSideMismatch = 0.0;    // max |sum(side k) - sum(side k+2)| relaxed
+    double minArcLen = 0.0;          // most negative relaxed arc length (fold diagnostic)
+    std::size_t prunedChains = 0;    // stub crease chains dropped (phase-only pins)
+    std::size_t failedRays = 0;      // separatrix launches abandoned at folded cones
+    std::size_t degradedNodes = 0;   // nodes with fold-damaged sector windings
     std::size_t repairedNodes = 0;   // fold-damaged fans fixed by signed-angle sectors
     std::size_t projectedNodes = 0;  // of those, fixed by the feasible-rotation projection
     // Where the degraded nodes came from. The first two ZERO every sector at
@@ -211,7 +211,7 @@ struct TMesh {
         std::size_t failedCone = 0;    // touches a cone with an abandoned launch
     };
     RejectCounts rejectWhy;
-    std::vector<char> arcExcluded;    // per (compact) arc: no accepted orbit covers it
+    std::vector<char> arcExcluded;  // per (compact) arc: no accepted orbit covers it
     // Traced geometry (Charts::captureGeometry). nodeGeom is indexed by node
     // id and sized nodeCount; arcGeom is parallel to `arcs`. Both empty when
     // capture was off.

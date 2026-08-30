@@ -1,7 +1,12 @@
 # application-shell Specification
 
 ## Purpose
-TBD - created by archiving change bootstrap-v1-platform. Update Purpose after archive.
+The toolkit-free document model the desktop and tablet shells are built on:
+the stage structure a session moves through, what an input model may be, and
+the undo, autosave and cancellation behaviour every stage inherits. It exists
+so the shells stay thin — a shell chooses widgets and gestures, never what a
+document *is* or when work is safe to interrupt — and so an artist can leave
+mid-operation without losing or corrupting a document.
 ## Requirements
 ### Requirement: Stage structure
 The application SHALL organize work into four stages — **Remesh** (automatic), **Retopo**, **UV**, **Bake** — over a single shared document (Target + EditMesh + parameters + bake state). Stage switching SHALL be instant and lossless; the core actions keep coherent semantics across stages.

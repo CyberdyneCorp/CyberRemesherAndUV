@@ -127,9 +127,9 @@ std::size_t LayoutPatch::arcCount() const {
 }
 
 std::size_t TopologyLayout::singularityCount() const {
-    return static_cast<std::size_t>(std::count_if(nodes.begin(), nodes.end(), [](const LayoutNode& n) {
-        return n.kind == LayoutNodeKind::Singularity;
-    }));
+    return static_cast<std::size_t>(
+        std::count_if(nodes.begin(), nodes.end(),
+                      [](const LayoutNode& n) { return n.kind == LayoutNodeKind::Singularity; }));
 }
 
 std::size_t TopologyLayout::nonQuadPatchCount() const {

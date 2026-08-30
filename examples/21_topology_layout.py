@@ -39,13 +39,26 @@ import numpy as np  # noqa: E402
 
 import common as c  # noqa: E402
 
-# Models chosen to show three different layout regimes: a CAD part whose layout
-# is pinned to its creases, a smooth organic surface where the layout is pure
-# separatrix structure, and a higher-genus mechanical part.
-MODELS = [
+# Three layout regimes: a CAD part whose layout is pinned to its creases, a
+# smooth organic surface where the layout is pure separatrix structure, and a
+# higher-genus part whose handle constrains it.
+#
+# The corpus models are the good demo, but `examples/models/` is git-ignored —
+# 09_test_models.py downloads it on demand — so CI has no corpus. The
+# procedural stand-ins cover the same three regimes, so the example (and its
+# CTest smoke run) exercises the layout either way.
+CORPUS = [
     ("fandisk", 2000, "CAD — layout pinned to creases"),
     ("spot", 2000, "organic — pure separatrix structure"),
     ("rocker-arm", 2000, "genus 1 — handles constrain the layout"),
+]
+PROCEDURAL = [
+    ("cube", 2000, "CAD — layout pinned to creases",
+     lambda path: c.cube_obj(path, subdiv=14)),
+    ("bumpy sphere", 2000, "organic — pure separatrix structure",
+     lambda path: c.bumpy_sphere_obj(path, rings=36, segments=54)),
+    ("torus knot", 2000, "genus 1 — the handle constrains the layout",
+     lambda path: c.torus_knot_obj(path)),
 ]
 
 NODE_STYLE = {
@@ -90,9 +103,28 @@ def read_obj(path):
     return np.asarray(positions, dtype=float), faces, lines
 
 
-def build_layout(cli: str, model: str, target: int, workdir: str):
-    """Remeshes `model` with layout capture on. Returns (report, out, layout)."""
-    src = os.path.join(MODELS_DIR, f"{model}.obj")
+def resolve_sources(workdir):
+    """The corpus trio when it is all present, else the procedural stand-ins.
+
+    All-or-nothing rather than per-slot: a half-corpus run would compare a real
+    model against a synthetic one in the same figure and read as if they were
+    the same kind of thing.
+    """
+    if all(os.path.exists(os.path.join(MODELS_DIR, f"{m}.obj")) for m, _t, _b in CORPUS):
+        return [(m, os.path.join(MODELS_DIR, f"{m}.obj"), t, b) for m, t, b in CORPUS]
+    print("corpus models absent (examples/models/ is downloaded on demand) — "
+          "using procedural stand-ins")
+    out = []
+    for name, target, blurb, make in PROCEDURAL:
+        path = os.path.join(workdir, name.replace(" ", "_") + ".obj")
+        make(path)
+        out.append((name, path, target, blurb))
+    return out
+
+
+def build_layout(cli: str, name: str, src: str, target: int, workdir: str):
+    """Remeshes `src` with layout capture on. Returns (report, out, layout)."""
+    model = name.replace(" ", "_")
     out = os.path.join(workdir, f"{model}_quads.obj")
     prefix = os.path.join(workdir, f"{model}_layout")
     env = dict(os.environ)
@@ -139,15 +171,12 @@ def draw(ax, quads_path, layout_obj, layout_json, title):
 
 def main() -> None:
     cli = find_cli()
-    fig = plt.figure(figsize=(5.0 * len(MODELS), 5.4), dpi=130)
-    rendered = 0
     with tempfile.TemporaryDirectory() as workdir:
-        for col, (model, target, blurb) in enumerate(MODELS):
-            src = os.path.join(MODELS_DIR, f"{model}.obj")
-            if not os.path.exists(src):
-                print(f"{model:<14} SKIP (model not present)")
-                continue
-            report, quads, layout_obj = build_layout(cli, model, target, workdir)
+        sources = resolve_sources(workdir)
+        fig = plt.figure(figsize=(5.0 * len(sources), 5.4), dpi=130)
+        rendered = 0
+        for col, (model, src, target, blurb) in enumerate(sources):
+            report, quads, layout_obj = build_layout(cli, model, src, target, workdir)
             if report is None:
                 print(f"{model:<14} SKIP (no layout traced)")
                 continue
@@ -160,7 +189,7 @@ def main() -> None:
                 f"feature arcs {st['featureArcs']:>3}  non-quad patches {st['nonQuadPatches']:>3}  "
                 f"non-closing {st['nonClosingPatches']:>2}  total index {st['totalIndex']:>3}"
             )
-            ax = fig.add_subplot(1, len(MODELS), col + 1, projection="3d")
+            ax = fig.add_subplot(1, len(sources), col + 1, projection="3d")
             draw(ax, quads, layout_obj, report,
                  f"{model} — {blurb}\n{st['singularities']} singularities, "
                  f"{st['arcs']} arcs, {st['patches']} patches")

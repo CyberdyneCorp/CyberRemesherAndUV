@@ -61,13 +61,7 @@ enum class LayoutNodeKind : std::uint8_t {
     Regular
 };
 
-enum class LayoutArcKind : std::uint8_t {
-    Separatrix,
-    Feature,
-    Boundary,
-    Guide,
-    Symmetry
-};
+enum class LayoutArcKind : std::uint8_t { Separatrix, Feature, Boundary, Guide, Symmetry };
 
 struct LayoutNode {
     LayoutNodeId id = kInvalidLayoutId;

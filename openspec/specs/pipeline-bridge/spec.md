@@ -1,7 +1,13 @@
 # pipeline-bridge Specification
 
 ## Purpose
-TBD - created by archiving change add-claycore-bridge. Update Purpose after archive.
+Where this engine meets the half of the pipeline it does not own. It ingests a
+sculpt through a versioned interchange format, bakes against an abstract field
+evaluator, and conforms an existing EditMesh onto an updated Target. It exists
+to keep that boundary a *format and an interface* rather than a dependency:
+there is no build or link dependency on any sculpting or volumetric engine, and
+a handoff declaring a version this engine does not support is refused by name
+rather than read with the unknown parts dropped.
 ## Requirements
 ### Requirement: Sculpt handoff ingest
 The engine SHALL accept a versioned sculpt handoff — a triangle mesh with

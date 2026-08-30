@@ -20,11 +20,11 @@
 #include <vector>
 
 #include "bimdf_quantize.hpp"
-#include "topology_layout_build.hpp"
 #include "cyber/accel/buffer.hpp"
 #include "cyber/accel/primitives.hpp"
 #include "cyber/core/math.hpp"
 #include "sparse_cholesky.hpp"
+#include "topology_layout_build.hpp"
 
 // Native QuadCover seamless-UV — Milestone 1 (docs/native-miq-plan.md): the frame-field
 // setup a seamless parameterization is solved on. Reuses the per-face CrossField; adds
@@ -1826,8 +1826,8 @@ void reportTopologyLayout(const bimdf::Charts& charts, const bimdf::TMesh& tmesh
                  "[zr] layout: valid=%d nodes=%zu arcs=%zu patches=%zu sing=%zu tnodes=%zu "
                  "feature=%zu boundary=%zu excluded=%zu nonQuad=%zu nonClosing=%zu index=%d%s%s\n",
                  layout.valid ? 1 : 0, st.nodes, st.arcs, st.patches, st.singularities,
-                 st.tJunctions, st.featureArcs, st.boundaryArcs, st.excludedArcs,
-                 st.nonQuadPatches, st.nonClosingPatches, st.totalIndex,
+                 st.tJunctions, st.featureArcs, st.boundaryArcs, st.excludedArcs, st.nonQuadPatches,
+                 st.nonClosingPatches, st.totalIndex,
                  layout.valid ? "" : " reason=", v.error.c_str());
     const char* dest = std::getenv("CYBER_ZR_LAYOUT");
     if (dest == nullptr || std::string(dest) == "1") {
@@ -2852,8 +2852,7 @@ int solveSeamlessReduced(accel::IBackend& backend, std::size_t nCut,
             tmesh.ok ? 1 : 0, tmesh.nodeCount, tmesh.arcs.size(), tmesh.patches.size(),
             tmesh.coneNodes, tmesh.tNodes, tmesh.raysTraced, tmesh.raySteps, tmesh.failedRays,
             tmesh.degradedNodes, tmesh.repairedNodes, tmesh.projectedNodes, tmesh.twinMerges,
-            tmesh.spurCollapses,
-            tmesh.excludedPatches, tmesh.maxExprErr, tmesh.maxSideMismatch,
+            tmesh.spurCollapses, tmesh.excludedPatches, tmesh.maxExprErr, tmesh.maxSideMismatch,
             tmesh.reason.empty() ? "" : " reason=", tmesh.reason.c_str(),
             tmesh.rejectSummary.empty() ? "" : " ", tmesh.rejectSummary.c_str());
         if (tmesh.excludedPatches != 0) {

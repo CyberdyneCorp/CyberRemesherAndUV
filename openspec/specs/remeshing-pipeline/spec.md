@@ -1,7 +1,13 @@
 # remeshing-pipeline Specification
 
 ## Purpose
-TBD - created by archiving change bootstrap-v1-platform. Update Purpose after archive.
+The automatic path from triangles to an all-quad mesh: the stages, how islands
+are parameterized, how quads are extracted, and the cleanup and pure-quad
+options applied to the result. It exists to make the pipeline's behaviour
+inspectable rather than emergent — output is toolchain-independent, target
+counts are computed under a guard, an island that fails is reported instead of
+silently dropped, and cleanup policies are explicit choices rather than
+incidental side effects.
 ## Requirements
 ### Requirement: Pipeline stages
 The automatic remesher SHALL execute, in order: (1) derive the target edge length from total surface area and the target quad count; (2) split the input into islands (accounting for every face — see mesh-core); (3) adaptively isotropic-remesh each island; (4) compute a frame-field-guided global parameterization per island; (5) extract quad-dominant faces by tracing integer UV isolines; (6) run cleanup passes; (7) merge per-island results deterministically (stable island order). Islands SHALL be processed in parallel where the solver permits.

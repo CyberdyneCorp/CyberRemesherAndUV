@@ -227,7 +227,7 @@ TEST_CASE("layout: promoting a T-mesh preserves its graph") {
     for (const auto& e : ends) {
         addArc(e[0], e[1], 3.0, true);
     }
-    const std::size_t quads[6][4] = {{0, 5, 1, 4}, {2, 7, 3, 6},  {0, 9, 2, 8},
+    const std::size_t quads[6][4] = {{0, 5, 1, 4},   {2, 7, 3, 6},  {0, 9, 2, 8},
                                      {1, 11, 3, 10}, {4, 10, 6, 8}, {5, 11, 7, 9}};
     for (const auto& q : quads) {
         cyber::remesh::bimdf::Patch p;

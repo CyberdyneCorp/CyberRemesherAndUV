@@ -2147,11 +2147,11 @@ private:
                 fillCreaseEndAnchor(chain, e1, false, rec.end1);
                 rec.end0.node = e0.node;
                 rec.end1.node = e1.node;
-                fillChainArcGeom(rec, chain.vAt, chain.edges.size(), chain.closed, e0, e1, false,
-                                 [&](std::size_t k) {
-                                     return ch_.seams[static_cast<std::size_t>(chain.edges[k].seam)]
-                                         .faceA;
-                                 });
+                fillChainArcGeom(
+                    rec, chain.vAt, chain.edges.size(), chain.closed, e0, e1, false,
+                    [&](std::size_t k) {
+                        return ch_.seams[static_cast<std::size_t>(chain.edges[k].seam)].faceA;
+                    });
                 arcs_.push_back(std::move(rec));
             }
         }
@@ -2242,9 +2242,8 @@ private:
             g.meshVertex = n.meshVertex;
             const auto itf = faceOfVertex.find(n.meshVertex);
             g.face = itf == faceOfVertex.end() ? 0 : itf->second;
-            g.position = n.meshVertex < ch_.vertexPos.size()
-                             ? ch_.vertexPos[n.meshVertex]
-                             : std::array<float, 3>{};
+            g.position = n.meshVertex < ch_.vertexPos.size() ? ch_.vertexPos[n.meshVertex]
+                                                             : std::array<float, 3>{};
             const auto itc = coneOfVertex_.find(n.meshVertex);
             if (itc != coneOfVertex_.end()) {
                 g.kind = NodeGeomKind::Cone;
@@ -3137,9 +3136,8 @@ private:
             // at a cone whose separatrices were not all traced.
             {
                 const auto itCone0 = coneOfVertex_.find(v);
-                expectedTotal =
-                    4 - liftHolonomyIndex(qcum, itCone0 != coneOfVertex_.end() ? itCone0->second
-                                                                              : 0);
+                expectedTotal = 4 - liftHolonomyIndex(
+                                        qcum, itCone0 != coneOfVertex_.end() ? itCone0->second : 0);
             }
             // QEx Algorithm 8 (Ebke et al. 2013): split the wedge fan into
             // maximal uniform-sign runs. A negative run is a fold-back whose
@@ -3193,9 +3191,9 @@ private:
             // the fan's own seam holonomy) and does not depend on how many
             // separatrices the tracer managed to place, so it is the target.
             const long long liftTarget =
-                foldRepair_ ? std::max<long long>(expectedTotal,
-                                                  static_cast<long long>(lst.size()) + nPh)
-                            : static_cast<long long>(lst.size()) + nPh;
+                foldRepair_
+                    ? std::max<long long>(expectedTotal, static_cast<long long>(lst.size()) + nPh)
+                    : static_cast<long long>(lst.size()) + nPh;
             long long turns = 0;
             while (turns < static_cast<long long>(negIdx.size()) && rawQ + 4 * turns < liftTarget) {
                 ++turns;
@@ -3522,8 +3520,7 @@ private:
 // wrap gap (range [1, wrapMax]); every other sector is a corner (1) or a
 // pass-through (2). Deterministic: ties in the fractional excess break by
 // ascending index.
-bool projectSectors(const std::vector<double>& gq, int total, int wrapMax,
-                           std::vector<int>& sect) {
+bool projectSectors(const std::vector<double>& gq, int total, int wrapMax, std::vector<int>& sect) {
     const std::size_t nE = gq.size();
     if (nE == 0) {
         return false;
