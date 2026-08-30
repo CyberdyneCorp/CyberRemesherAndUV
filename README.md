@@ -69,7 +69,7 @@ position-field extractor), and **`integer`** (experimental integer parametrizati
 
 <sub>Real scanned / CAD models → quad-dominant retopology · <code>examples/09_test_models.py</code></sub>
 
-Twenty-one runnable examples drive the engine through the Python binding and
+Twenty-three runnable examples drive the engine through the Python binding and
 render what they do; [`examples/README.md`](examples/README.md) indexes them,
 and `examples/run_all.py` runs the lot into a stitched gallery.
 
@@ -86,6 +86,71 @@ stage is a clean-room reimplementation with no code copied. Every licence and
 copyright notice is reproduced in
 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md), which ships inside each
 release artifact.
+
+### Topology layout — the ZRemesher-class track
+
+The quad topology above is *emergent*: a smooth field, a seamless grid, and the
+isolines read off it. That is mathematically sound, and it leaves nothing to
+point at when the question is the one an artist actually asks — **where should
+the edge loops go, and where do the extraordinary vertices belong?**
+
+`TopologyLayout` makes that structure a first-class artifact instead of a side
+effect: **nodes** (singularities, feature and boundary corners, T-junctions),
+**arcs** (the separatrix, crease and boundary curves between them, carrying
+their traced 3D polylines and lengths) and the **patches** those arcs bound.
+It is what the rest of the track — singularity placement, topology-affecting
+guides, exact symmetry, semantic boundaries, quality scoring — is built to
+consume, rather than each of them adding another branch to the quantizer.
+
+```sh
+# Report the layout, and write <prefix>.json + <prefix>.obj for inspection.
+CYBER_QC_BIMDF=1 CYBER_ZR_LAYOUT=/tmp/layout \
+  cyberremesh --input model.obj --output quads.obj --target-quads 2000
+```
+
+![Topology layout drawn over the quads it produced](examples/output/21_topology_layout.png)
+
+<sub>The layout's separatrix arcs (blue) and singularities (red) over the mesh they produced — pinned to creases on a CAD part, pure separatrix structure on an organic surface, constrained by the handle on a genus-1 part · <code>examples/21_topology_layout.py</code></sub>
+
+The layout is validated against explicit combinatorial invariants, and the
+validator separates two failure classes on purpose. A **hard** violation — a bad
+id, a non-finite position, an arc pointing at a missing node — means the graph is
+corrupt and nothing may consume it. A patch whose boundary walk does not close is
+**local**: it is reported by id and its arcs are excluded, exactly as the tracer
+already contains a rejected orbit, and the sound remainder proceeds. Collapsing
+the two would throw away a whole model's layout over one bad patch.
+
+All six corpus models produce a valid layout. Total index is `4 × Euler
+characteristic` — 8 for a genus-0 surface, 0 for rocker-arm's handle — which is a
+free end-to-end check that the layout agrees with the field it came from:
+
+| model | nodes | arcs | patches | singularities | non-closing | total index |
+|---|---|---|---|---|---|---|
+| spot | 222 | 322 | 117 | 46 | 0 | 8 |
+| fandisk | 165 | 243 | 75 | 38 | 0 | 8 |
+| rocker-arm | 489 | 692 | 199 | 98 | 1 | 0 |
+| stanford-bunny | 628 | 771 | 189 | 133 | 0 | 8 |
+
+Building the layout **cannot change the quantized result** — the tracer's
+geometry capture is write-only with respect to the solver, verified
+byte-identical with capture on versus off across the corpus.
+
+The next milestone is making the tracing robust to the foldovers the relaxed
+parameterization genuinely has near high-distortion cones. That work is
+measured, not asserted: `examples/22_layout_robustness.py` sweeps the corpus and
+reports every contained region **and why it was contained**.
+
+![Layout robustness under folded relaxed maps](examples/output/22_layout_robustness.png)
+
+<sub>Contained regions per model, and the reason breakdown that says which lever would move them — 178 rejected orbits at the current baseline, dominated by sector winding on closed surfaces and by open boundaries on the bunny · <code>examples/22_layout_robustness.py</code></sub>
+
+Status: the layout and its validation are **done**; fold-robust tracing is **in
+progress and its gate is not met**. The plan, the measurements and the levers
+already refuted (with their numbers, so they are not retried) are in
+[`docs/zremesher-plan.md`](docs/zremesher-plan.md). Everything here is behind
+`CYBER_ZR_*` and changes nothing about the shipped default; the public
+`zremesher` quad method that will carry it without an environment variable comes
+once the representation has settled.
 
 ### Automatic UV atlas
 
@@ -628,9 +693,12 @@ an unrecognised value always means "default behaviour".
 | `CYBER_QC_NO_OPEN_CLEANUP` | Turns off the open-surface extraction cleanup (hole filling), restoring pre-0.2.5 behaviour on open surfaces. |
 | `CYBER_BASE_RELAX_ITERS` | Overrides the base-relax iteration count before subdivision. |
 
-`src/quadrangulate` carries a further set of `CYBER_QC_*` levers used by the
-benchmark and the plans in `docs/`; they are developer instrumentation, not part
-of the supported surface, and are documented at their call sites.
+`src/quadrangulate` carries a further set of `CYBER_QC_*` and `CYBER_ZR_*`
+levers used by the benchmark and the plans in `docs/` — including
+`CYBER_ZR_LAYOUT` (report the topology layout; a path prefix also writes it as
+JSON and a polyline OBJ) and `CYBER_ZR_FOLD_REPAIR`. They are developer
+instrumentation, not part of the supported surface, and are documented at their
+call sites.
 
 ## Layout
 
@@ -641,7 +709,7 @@ src/app/         document model, tools, undo (toolkit-free)
 src/render/      viewport renderer (Metal | Vulkan)
 src/accel/       compute backends: cpu | metal | cuda | opencl
 src/core/        mesh kernel, io, remeshing pipeline orchestration
-src/quadrangulate/  cross field, seamless UV, isoline extraction, quantization
+src/quadrangulate/  cross field, seamless UV, isoline extraction, quantization, topology layout
 src/retopo/      manual retopology: strokes, snapping, relax, subdivide, conform
 src/uv/          seams, LSCM unwrap, packing, automatic atlas
 src/bake/        normal / AO / curvature / cavity bakes

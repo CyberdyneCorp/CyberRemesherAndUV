@@ -63,6 +63,25 @@ license is set upstream). Pick your own with `--models spot fandisk …`:
 examples/run.sh examples/09_test_models.py --models spot rocker-arm --target-quads 6000
 ```
 
+`21_topology_layout.py` and `22_layout_robustness.py` cover the ZRemesher-class
+retopology track (plan: [`../docs/zremesher-plan.md`](../docs/zremesher-plan.md)).
+The first draws the **topology layout** — the separatrix arcs, singularities and
+patches the quads were read off — over the mesh they produced, so the loop
+scaffolding is visible instead of implicit. The second measures how well that
+layout survives the foldovers the relaxed parameterization genuinely has near
+high-distortion cones: it sweeps the corpus and reports every contained region
+*and why it was contained* (sector winding / corner count / side mismatch /
+abandoned cone), which is the breakdown that says which lever would move the
+numbers. Both shell out to the built `cyberremesh` CLI rather than the Python
+binding, because the layout is still behind `CYBER_ZR_*` until the public
+`zremesher` quad method lands.
+
+```sh
+examples/run.sh examples/22_layout_robustness.py          # one cell per model
+examples/run.sh examples/22_layout_robustness.py --full   # 4 target counts x 2 adaptivity
+CYBER_ZR_FOLD_REPAIR=1 examples/run.sh examples/22_layout_robustness.py
+```
+
 `10_vs_reference.py` compares CyberRemesher against
 [QuadriFlow](https://github.com/hjwdzh/QuadriFlow) — a field-based/integer-grid
 quad remesher (Instant Meshes lineage) — at matched density and uniform sizing.

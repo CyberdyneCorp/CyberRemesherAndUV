@@ -22,6 +22,107 @@ They are a record of what was measured when, not a description of the current
 code: where a number here disagrees with `tests/bench/baselines.json` or the
 README, the baselines are authoritative.
 
+## Update — 2026-08-29 (branch `feat/zremesher-topology-layout`): the layout is now a first-class artifact; Phase B measured, one lever refuted
+
+New campaign: **ZRemesher-class automatic retopology**
+(`openspec/changes/add-zremesher-retopology`, plan in
+[`zremesher-plan.md`](zremesher-plan.md)). The engine already owns the
+machinery — 4-RoSy fields, crease alignment, guides, painted density, seamless
+UV, isoline extraction, pure-quad post, Bi-MDF quantization. What it does not
+own is **intentional global topology layout**: the quad topology is an emergent
+consequence of field + grid + extraction, so there is nothing to point at and
+say "these are the loops, this is where the extraordinary vertices went".
+
+### Phase A — `TopologyLayout` landed, gate MET
+
+`cyber::remesh::TopologyLayout` (nodes / arcs / patches with traced 3D
+polylines) is now the reusable intermediate every later stage consumes. The
+split with the existing tracer is by RESPONSIBILITY, not by moving 3000 lines:
+`bimdf::TMesh` stays the quantization view (arc lengths + exact symbolic lengths
+over the solver's promoted variables), `TopologyLayout` is the
+geometric/combinatorial view with no solver variables. Ids are shared.
+
+Geometry capture (`Charts::captureGeometry`) is **write-only with respect to
+`solveBimdf`**, which is what makes the gate meaningful: output is
+byte-identical with capture on vs off on all six corpus models. Validation
+separates HARD violations (corrupt graph) from LOCAL ones (a patch whose
+boundary walk does not close, contained per-patch like a rejected orbit). All
+six corpus layouts validate; rocker-arm carries one contained non-closing patch
+of 199.
+
+| model | nodes | arcs | patches | singularities | feature arcs | non-quad | non-closing | total index |
+|---|---|---|---|---|---|---|---|---|
+| cube | 8 | 12 | 6 | 8 | 12 | 0 | 0 | 8 |
+| spot | 222 | 322 | 117 | 46 | 0 | 15 | 0 | 8 |
+| fandisk | 165 | 243 | 75 | 38 | 21 | 8 | 0 | 8 |
+| rocker-arm | 489 | 692 | 199 | 98 | 0 | 10 | 1 | 0 |
+| cheburashka | 551 | 824 | 282 | 114 | 9 | 23 | 0 | 8 |
+| stanford-bunny | 628 | 771 | 189 | 133 | 3 | 33 | 0 | 8 |
+
+Total index is `4 × Euler characteristic` — 8 for genus 0, 0 for rocker-arm's
+handle — a free end-to-end check that the layout agrees with its field.
+`CYBER_ZR_LAYOUT=1` reports it; a path prefix also writes `<prefix>.json` and
+`<prefix>.obj`. `examples/21_topology_layout.py` renders it over the quads.
+
+### Phase B — instrumented, two levers landed, gate NOT met
+
+The tracer reported *that* it contained a region but never *why*, which made
+fold-robustness work guesswork. It now reports the rejection reason per orbit
+and the degradation site per node, plus how many nodes are genuinely
+**unseatable** (winding > 2 × arc ends, so no in-range sector assignment exists).
+`examples/22_layout_robustness.py` is the artifact the numbers come from.
+
+Baseline, corpus at 2000 quads, adaptivity 0: **178 rejected orbits, 1
+non-closing patch, 57 abandoned launches**; reasons 88 sector winding, 52 corner
+count, 9 side mismatch, 29 abandoned cone.
+
+Two levers behind `CYBER_ZR_FOLD_REPAIR`, both strictly better estimates and
+**output-neutral on the corpus**:
+
+- **Feasible-rotation projection.** The [1,2] corner/pass-through range is what
+  a rotation system around a node must satisfy, but largest-remainder rounding
+  ignores that constraint — so nodes were being contained on the strength of an
+  assignment nobody would have chosen.
+- **Winding lift target.** QEx Alg. 8's lift targeted the number of incident arc
+  ends. At a negative-index cone that undercounts badly: a valence-5 cone with
+  two surviving ends lifted to 2, not 5.
+
+Measured: degraded nodes rocker-arm 17 → 13 and bunny 11 → 5, reclassification
+failures rocker-arm 15 → 11 and bunny 8 → 2, **rejected orbits unchanged** (37,
+47), output byte-identical. The gate is not met.
+
+### REFUTED — overriding the developed winding with the topological one
+
+The reasoning was sound: the winding is the fan's seam holonomy lifted to the
+field's cone index, the developed angle sum only measures a map that folds, and
+Alg. 8 recovers a lost turn **only** by charging +2π to a NEGATIVE run — so the
+dominant corpus failure, a valence-5 cone whose *fold-free* wedge fan develops
+to a single quarter, is one it structurally cannot fix. Forcing
+`measuredTotal = expectedTotal + nPh` and rescaling the gaps onto it made things
+clearly worse: **rejected orbits bunny 47 → 69, cheburashka 12 → 23, rocker-arm
+37 → 39**, fandisk sector rejections 2 → 4. Do not retry without new evidence.
+
+### Where the measurements say the next lever is
+
+The classifier is largely producing the RIGHT answer; the layout is genuinely
+defective where it is contained.
+
+- The residual is an **index/geometry disagreement** at negative-index cones,
+  not an orientation problem. The guide's framing ("tracing must not depend on
+  the embedding being globally orientation-preserving") is right and the tracer
+  already honours it — these failures are a different animal, living upstream in
+  the field's cone index or in the parameterization.
+- On the bunny, **37 of 57 abandoned launches are `ray reached an open
+  boundary`**, not fold damage. Boundary chains already exist
+  (`CYBER_QC_BIMDF_BARC`) and take abandoned launches 20 → 1 and rejected orbits
+  47 → 39; they are off by default because they regress the *guided rounding* —
+  a quantization concern the layout does not share. Decoupling the layout's
+  tracing options from the shipped quantizer's belongs with the public
+  `zremesher` method, which owns its own quantization decisions.
+- Genuinely unseatable nodes are rare with the right criterion: fandisk 1,
+  cheburashka 2, rocker-arm 3, bunny 37 — and the bunny's 37 are exactly its
+  boundary-abandoned rays.
+
 ## Update — 2026-08-24: the median-angle win against QuadriFlow no longer reproduces
 
 Measured with `examples/11_benchmark.py` on the shipped default (`quad-cover`,
