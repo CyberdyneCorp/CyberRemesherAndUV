@@ -169,6 +169,103 @@ TEST_CASE("geometry analysis: without a BVH the thickness field is simply unknow
     }
 }
 
+TEST_CASE("geometry analysis: a crease polyline has corners only where it turns") {
+    // A strip folded twice, so the fold lines run straight across it. Every
+    // vertex INSIDE a fold line has two collinear feature edges and is not a
+    // corner; the vertices where a fold meets the strip's border have one, and
+    // are.
+    std::vector<Vec3> p;
+    for (int x = 0; x <= 3; ++x) {
+        for (int y = 0; y <= 1; ++y) {
+            p.push_back(Vec3{static_cast<float>(x), static_cast<float>(y), 0.0f});
+        }
+    }
+    std::vector<std::vector<Index>> f;
+    for (int x = 0; x < 3; ++x) {
+        const auto a = static_cast<Index>(x * 2);
+        f.push_back({a, a + 2, a + 3, a + 1});
+    }
+    Mesh mesh = Mesh::fromIndexed(p, f);
+    // Tag the middle rung (x == 1) as a feature: two edges of it exist, running
+    // in +y, and they share the vertex at (1, 0)-(1, 1).
+    for (Index e = 0; e < mesh.edgeCapacity(); ++e) {
+        const cyber::EdgeId edge{e};
+        if (!mesh.isAlive(edge)) {
+            continue;
+        }
+        const auto [a, b] = mesh.edgeVertices(edge);
+        const Vec3 pa = mesh.position(a);
+        const Vec3 pb = mesh.position(b);
+        if (pa.x == 1.0f && pb.x == 1.0f) {
+            mesh.setFeatureEdge(edge, true);
+        }
+    }
+    const GeometryAnalysis g = analyzeGeometry(mesh, 1.0f);
+    REQUIRE(g.valid);
+    // The rung's two endpoints each carry ONE feature edge -> crease endpoints,
+    // so both are junctions.
+    for (Index v = 0; v < mesh.vertexCapacity(); ++v) {
+        const VertexId vid{v};
+        if (!mesh.isAlive(vid)) {
+            continue;
+        }
+        const bool onRung = mesh.position(vid).x == 1.0f;
+        CHECK(g.featureCorner[v] == doctest::Approx(onRung ? 1.0 : 0.0));
+    }
+}
+
+TEST_CASE("a cone at a feature CORNER is not charged as badly placed") {
+    // The calibration this protects: a cube's eight corner cones are its
+    // OPTIMAL topology — the surface branches there and the quads must too — so
+    // a metric that charges them as defects would drive an optimizer to make
+    // the cube worse. Only a cone sitting on a crease CURVE, interrupting a
+    // loop that should run along it, is a defect.
+    GeometryAnalysis g;
+    g.valid = true;
+    g.normalizedCurvature.assign(2, 0.0f);
+    g.featureInfluence.assign(2, 1.0f);  // both sit on a feature
+    g.boundaryInfluence.assign(2, 0.0f);
+    g.thinFeatureRisk.assign(2, 0.0f);
+    g.featureCorner.assign(2, 0.0f);
+    g.featureCorner[0] = 1.0f;  // ...but vertex 0 is at a junction
+
+    const SingularityWeights w;
+    const double atCorner = singularityCost(VertexId{0}, 1, g, w);
+    const double onCurve = singularityCost(VertexId{1}, 1, g, w);
+    CHECK(atCorner == doctest::Approx(w.count));
+    CHECK(onCurve == doctest::Approx(w.count + w.featureProximity));
+    CHECK(onCurve > atCorner);
+}
+
+TEST_CASE("the cost split accounts for the whole weighted cost") {
+    // The split is what says how much of the cost relocation could ever win, so
+    // it has to add up exactly: a term silently dropped would overstate the
+    // headroom.
+    GeometryAnalysis g;
+    g.valid = true;
+    g.normalizedCurvature = {0.5f};
+    g.featureInfluence = {0.25f};
+    g.boundaryInfluence = {0.75f};
+    g.thinFeatureRisk = {0.125f};
+    g.featureCorner = {0.0f};
+
+    TopologyLayout layout;
+    LayoutNode n;
+    n.id = 0;
+    n.kind = LayoutNodeKind::Singularity;
+    n.singularityIndex = -1;
+    n.vertex = VertexId{0};
+    n.face = FaceId{0};
+    layout.nodes.push_back(n);
+
+    const auto m = scoreSingularities(layout, g);
+    const double summed =
+        m.countCost + m.curvatureCost + m.featureCost + m.thinCost + m.boundaryCost;
+    CHECK(summed == doctest::Approx(m.weightedCost));
+    CHECK(m.countCost > 0.0);
+    CHECK(m.weightedCost > m.countCost);  // there IS headroom here
+}
+
 TEST_CASE("geometry analysis is deterministic") {
     const Mesh mesh = flatGrid(5);
     const Bvh bvh(mesh);

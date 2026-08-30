@@ -52,6 +52,24 @@ struct SingularityMetrics {
     double thinFeaturePenalty = 0.0;
     // Sum of cross-field indices; invariant under any legal relocation.
     int totalIndex = 0;
+
+    // How the cost is distributed, which is what says whether relocation has
+    // anything to work with. `onFeature` counts cones sitting exactly on a
+    // feature edge — the design's own example of a badly placed cone — and
+    // `onFeatureCost` is their share of the total. A large share means moving
+    // them is worth machinery; a small one means the ceiling is low however
+    // good the optimizer is.
+    std::size_t onFeature = 0;
+    double onFeatureCost = 0.0;
+
+    // The cost split by term. `countCost` is the irreducible part — every cone
+    // charges it wherever it sits — so it bounds what ANY relocation can win:
+    // an optimizer can only ever move the difference between the total and it.
+    double countCost = 0.0;
+    double curvatureCost = 0.0;
+    double featureCost = 0.0;
+    double thinCost = 0.0;
+    double boundaryCost = 0.0;
 };
 
 // Score every singularity node of `layout` against `geometry`. Nodes whose

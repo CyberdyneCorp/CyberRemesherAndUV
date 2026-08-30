@@ -1841,9 +1841,42 @@ void reportTopologyLayout(const bimdf::Charts& charts, const bimdf::TMesh& tmesh
     const SingularityMetrics sing = scoreSingularities(layout, geometry);
     std::fprintf(stderr,
                  "[zr] singularities: count=%zu weightedCost=%.2f mean=%.2f worst=%.2f "
-                 "featureInfluence(mean=%.3f max=%.3f) totalIndex=%d\n",
+                 "featureInfluence(mean=%.3f max=%.3f) onFeature=%zu (%.1f%% of cost) "
+                 "totalIndex=%d\n",
                  sing.count, sing.weightedCost, sing.meanCost, sing.worstCost,
-                 sing.featureInfluenceMean, sing.featureInfluenceMax, sing.totalIndex);
+                 sing.featureInfluenceMean, sing.featureInfluenceMax, sing.onFeature,
+                 sing.weightedCost > 0.0 ? 100.0 * sing.onFeatureCost / sing.weightedCost : 0.0,
+                 sing.totalIndex);
+    // Crease-fragmentation check for the metric itself. The feature term can
+    // only tell a cone ON a crease from a cone AT a corner if the crease
+    // polylines are intact; where the isotropic pre-remesh has shattered them,
+    // every fragment END looks like a corner and the term goes inert. Reported
+    // so a reader can see when the feature term is trustworthy.
+    {
+        std::size_t featureVerts = 0, cornerVerts = 0;
+        for (std::size_t iv = 0; iv < geometry.featureInfluence.size(); ++iv) {
+            if (geometry.featureInfluence[iv] >= 1.0f - 1e-6f) {
+                ++featureVerts;
+                cornerVerts += geometry.featureCorner[iv] >= 0.5f ? 1u : 0u;
+            }
+        }
+        if (featureVerts != 0) {
+            std::fprintf(
+                stderr,
+                "[zr] creases: featureVertices=%zu junctions=%zu (%.0f%% — a high "
+                "share means shattered crease polylines, and an inert feature term)\n",
+                featureVerts, cornerVerts,
+                100.0 * static_cast<double>(cornerVerts) / static_cast<double>(featureVerts));
+        }
+    }
+    std::fprintf(
+        stderr,
+        "[zr] cost split: count=%.1f curvature=%.1f feature=%.1f thin=%.1f "
+        "boundary=%.1f | movable=%.1f%% (the count term is irreducible, so it "
+        "bounds what relocation can win)\n",
+        sing.countCost, sing.curvatureCost, sing.featureCost, sing.thinCost, sing.boundaryCost,
+        sing.weightedCost > 0.0 ? 100.0 * (sing.weightedCost - sing.countCost) / sing.weightedCost
+                                : 0.0);
     const char* dest = std::getenv("CYBER_ZR_LAYOUT");
     if (dest == nullptr || std::string(dest) == "1") {
         return;

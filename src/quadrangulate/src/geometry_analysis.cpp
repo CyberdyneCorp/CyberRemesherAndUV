@@ -188,6 +188,43 @@ std::vector<float> thicknessField(const Mesh& mesh, const Bvh& bvh,
     return out;
 }
 
+// A feature JUNCTION: a crease endpoint (one incident feature edge), a meeting
+// of three or more creases, or a sharp turn in an otherwise two-edge crease
+// polyline. Cones are expected at these; cones along a smooth crease are not.
+std::vector<float> featureCornerField(const Mesh& mesh, float cornerDegrees) {
+    std::vector<float> out(mesh.vertexCapacity(), 0.0f);
+    const float cosLimit = std::cos((180.0f - cornerDegrees) * kPi / 180.0f);
+    for (Index v = 0; v < mesh.vertexCapacity(); ++v) {
+        const VertexId vid{v};
+        if (!mesh.isAlive(vid)) {
+            continue;
+        }
+        std::vector<VertexId> across;
+        for (const EdgeId e : mesh.vertexEdges(vid)) {
+            if (!mesh.isAlive(e) || !mesh.isFeatureEdge(e)) {
+                continue;
+            }
+            const auto [a, b] = mesh.edgeVertices(e);
+            across.push_back(a == vid ? b : a);
+        }
+        if (across.empty()) {
+            continue;
+        }
+        if (across.size() != 2) {
+            out[v] = 1.0f;  // endpoint, or three-plus creases meeting
+            continue;
+        }
+        // Two creases: a corner only if the polyline actually turns here.
+        const Vec3 p = mesh.position(vid);
+        const Vec3 d0 = normalized(mesh.position(across[0]) - p);
+        const Vec3 d1 = normalized(mesh.position(across[1]) - p);
+        if (dot(d0, d1) > cosLimit) {
+            out[v] = 1.0f;
+        }
+    }
+    return out;
+}
+
 float bboxDiagonal(const Mesh& mesh) {
     Vec3 lo{kInf, kInf, kInf};
     Vec3 hi{-kInf, -kInf, -kInf};
@@ -212,6 +249,7 @@ float GeometryAnalysis::curvatureAt(VertexId v) const {
 }
 float GeometryAnalysis::featureAt(VertexId v) const { return safeGet(featureInfluence, v, 0.0f); }
 float GeometryAnalysis::boundaryAt(VertexId v) const { return safeGet(boundaryInfluence, v, 0.0f); }
+float GeometryAnalysis::cornerAt(VertexId v) const { return safeGet(featureCorner, v, 0.0f); }
 float GeometryAnalysis::thinRiskAt(VertexId v) const { return safeGet(thinFeatureRisk, v, 0.0f); }
 
 GeometryAnalysis analyzeGeometry(const Mesh& mesh, float targetEdgeLength, const Bvh* bvh,
@@ -227,6 +265,7 @@ GeometryAnalysis analyzeGeometry(const Mesh& mesh, float targetEdgeLength, const
     out.normalizedCurvature = curvatureField(mesh, fn);
     out.featureInfluence = proximityField(mesh, verticesOnEdgesWhere(mesh, true), radius);
     out.boundaryInfluence = proximityField(mesh, verticesOnEdgesWhere(mesh, false), radius);
+    out.featureCorner = featureCornerField(mesh, options.featureCornerDegrees);
 
     out.thickness.assign(mesh.vertexCapacity(), kInf);
     out.thinFeatureRisk.assign(mesh.vertexCapacity(), 0.0f);

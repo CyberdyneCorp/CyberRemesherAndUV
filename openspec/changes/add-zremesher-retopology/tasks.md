@@ -138,11 +138,47 @@ defective where it is contained. Evidence:
        | fandisk | 93 | 374.6 | 4.03 | 13.39 | 0.412 / 1.000 |
        | cheburashka | 92 | 434.5 | 4.72 | 20.72 | 0.509 / 1.000 |
 
-       The metric already ranks the corpus the way inspection does — spot's
-       cones sit in smooth regions, cheburashka's sit on features. **Every model
-       has featureInfluence max = 1.000**: at least one cone sits exactly on a
-       feature edge, which is the design's own example of a badly placed cone
-       and the concrete thing C3 has to fix.
+       **The first version of this metric was WRONG, caught by a validity check
+       before any optimizer chased it.** It scored a cube's eight corner cones
+       at mean 6.00 — the worst of the whole corpus — and called 100% of that
+       cost badly placed. But eight corner cones ARE a cube's optimal topology;
+       an optimizer minimizing that metric would have been driven to make the
+       cube worse.
+
+       The fix is to separate the two very different things "a cone near a
+       feature" can mean. A cone on a crease CURVE interrupts a loop that should
+       run along it, and is a defect. A cone at a feature JUNCTION — a crease
+       endpoint, three creases meeting, or a sharp turn — is not: the surface
+       branches there and the quads must too. `GeometryAnalysis::featureCorner`
+       marks junctions, and the feature term is charged only off them. Cube mean
+       6.00 -> 2.00, and the residue is honest (a cube corner really is a
+       high-curvature point; the cone there is simply required).
+
+       The corner test is validated by the cube itself: **8 junctions out of 140
+       feature vertices**, which is exactly its eight real corners. On the other
+       models the junction share also measures crease FRAGMENTATION — fandisk 83
+       of 313, matching the known "205 crease edges -> 83 fragments" finding
+       exactly; cheburashka 62%; rocker-arm 83%. Where creases are shattered the
+       feature term is correspondingly less trustworthy, and the solve now
+       reports that share so a reader can tell.
+
+       Cost split at 2000 quads, which is what says whether C3 has anything to
+       win — the count term is irreducible, so it bounds any relocation:
+
+       | model | count | curvature | feature | boundary | movable |
+       |---|---|---|---|---|---|
+       | cube | 8.0 | 8.0 | 0.0 | 0.0 | 50% |
+       | spot | 62.0 | 45.2 | 26.0 | 0.0 | 54% |
+       | rocker-arm | 110.0 | 79.6 | 72.5 | 0.0 | 58% |
+       | fandisk | 100.0 | 96.4 | 62.2 | 0.0 | 61% |
+       | cheburashka | 104.0 | 103.5 | 119.0 | 0.0 | 68% |
+       | stanford-bunny | 88.0 | 62.9 | 107.2 | 22.6 | 69% |
+
+       **50-69% of the weighted cost is movable**, so relocation has a real
+       target. The thin term is 0 throughout because the thickness probe needs a
+       BVH over the SOURCE surface and the metric runs on the work mesh
+       mid-solve; boundary fires only on the bunny, the one open surface, which
+       is correct.
 - [ ] C3. Deterministic local singularity relocation under a hard total-index
        invariant, rebuilding dependent cut/layout data.
 - [ ] C4. Conservative dipole cancellation on the layout.

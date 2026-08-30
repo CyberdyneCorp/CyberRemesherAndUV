@@ -38,6 +38,10 @@ struct GeometryAnalysisOptions {
     // multiple of the target edge length — i.e. when fewer than this many quads
     // would span the feature. thinFeatureRisk ramps 0 -> 1 below it.
     float thinFeatureFactor = 4.0f;
+
+    // A vertex with exactly two feature edges is a feature CORNER rather than a
+    // point along a crease once the polyline turns by more than this.
+    float featureCornerDegrees = 60.0f;
 };
 
 struct GeometryAnalysis {
@@ -52,6 +56,17 @@ struct GeometryAnalysis {
     std::vector<float> featureInfluence;
     // Same, from open-surface boundary vertices.
     std::vector<float> boundaryInfluence;
+    // 1 where the vertex is a feature JUNCTION — a crease endpoint, or a point
+    // where three or more creases meet, or a sharp turn in a crease polyline.
+    //
+    // This is what separates the two very different things "a cone near a
+    // feature" can mean. A cone sitting ON a crease curve interrupts a loop
+    // that should run along it, and is a defect. A cone sitting AT a feature
+    // corner is not: the surface genuinely branches there and the quads must
+    // too. A cube's eight corner cones are the OPTIMAL topology for a cube, and
+    // a metric that scores them as badly placed would drive an optimizer to
+    // make the cube worse.
+    std::vector<float> featureCorner;
     // Distance to the opposing surface along -n, in world units. Infinity where
     // no opposing surface was found (an open sheet, or a probe that escaped).
     std::vector<float> thickness;
@@ -66,6 +81,7 @@ struct GeometryAnalysis {
     [[nodiscard]] float curvatureAt(VertexId v) const;
     [[nodiscard]] float featureAt(VertexId v) const;
     [[nodiscard]] float boundaryAt(VertexId v) const;
+    [[nodiscard]] float cornerAt(VertexId v) const;
     [[nodiscard]] float thinRiskAt(VertexId v) const;
 };
 
