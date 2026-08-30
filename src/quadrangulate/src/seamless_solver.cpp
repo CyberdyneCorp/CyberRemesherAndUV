@@ -1900,7 +1900,7 @@ std::size_t winslowUntangle(const FoldRepairContext& ctx, std::size_t nCut,
 // the layout is also written to <prefix>.json and <prefix>.obj, so it can be
 // diffed between runs and opened next to the output mesh in a viewer.
 void reportTopologyLayout(const bimdf::Charts& charts, const bimdf::TMesh& tmesh,
-                          const GeometryAnalysis& geometry, LayoutRunReport* report) {
+                          const GeometryAnalysis& geometry, const SeamlessLayoutOptions* opts) {
     TopologyLayout layout = layoutFromTMesh(charts, tmesh);
     const LayoutValidation v = validateTopologyLayout(layout, charts.sourceFaceCount);
     layout.valid = v.ok;
@@ -1919,6 +1919,7 @@ void reportTopologyLayout(const bimdf::Charts& charts, const bimdf::TMesh& tmesh
     const LayoutStats st = layout.stats();
     // Hand the same numbers the stderr line carries to the caller's report, so
     // a binding can surface them without scraping a log (engine-bindings spec).
+    LayoutRunReport* report = opts != nullptr ? opts->report : nullptr;
     if (report != nullptr) {
         ++report->layouts;
         report->layoutsValid += layout.valid ? 1 : 0;
@@ -1989,12 +1990,27 @@ void reportTopologyLayout(const bimdf::Charts& charts, const bimdf::TMesh& tmesh
         sing.countCost, sing.curvatureCost, sing.featureCost, sing.thinCost, sing.boundaryCost,
         sing.weightedCost > 0.0 ? 100.0 * (sing.weightedCost - sing.countCost) / sing.weightedCost
                                 : 0.0);
-    const char* dest = std::getenv("CYBER_ZR_LAYOUT");
-    if (dest == nullptr || std::string(dest) == "1") {
-        return;
+    // Explicit paths win over the environment. `CYBER_ZR_LAYOUT` keeps working
+    // exactly as before — value "1" means stderr only, anything else is a path
+    // PREFIX that gets ".json"/".obj" appended — because the examples and the
+    // release gates drive it that way.
+    std::string jsonPath;
+    std::string objPath;
+    if (opts != nullptr && (!opts->reportPath.empty() || !opts->meshPath.empty())) {
+        jsonPath = opts->reportPath;
+        objPath = opts->meshPath;
+    } else {
+        const char* dest = std::getenv("CYBER_ZR_LAYOUT");
+        if (dest == nullptr || std::string(dest) == "1") {
+            return;
+        }
+        jsonPath = std::string(dest) + ".json";
+        objPath = std::string(dest) + ".obj";
     }
-    const auto write = [dest](const char* ext, const std::string& text) {
-        const std::string path = std::string(dest) + ext;
+    const auto write = [](const std::string& path, const std::string& text) {
+        if (path.empty()) {
+            return;
+        }
         std::FILE* f = std::fopen(path.c_str(), "wb");
         if (f == nullptr) {
             std::fprintf(stderr, "[zr] layout: cannot write %s\n", path.c_str());
@@ -2004,18 +2020,21 @@ void reportTopologyLayout(const bimdf::Charts& charts, const bimdf::TMesh& tmesh
         std::fclose(f);
         std::fprintf(stderr, "[zr] layout: wrote %s (%zu bytes)\n", path.c_str(), text.size());
     };
-    write(".json", layoutToJson(layout));
-    write(".obj", layoutToObj(layout));
+    write(jsonPath, layoutToJson(layout));
+    write(objPath, layoutToObj(layout));
 }
 
-int solveSeamlessReduced(
-    accel::IBackend& backend, std::size_t nCut,
-    const std::vector<std::unordered_map<std::size_t, float>>& rows, const std::vector<float>& bu,
-    const std::vector<float>& bv, const std::vector<SeamRef>& seams,
-    const std::vector<std::size_t>& gauges, std::vector<float>& u, std::vector<float>& v,
-    const CancelToken* cancel = nullptr, SeamlessSolveCacheImpl* cache = nullptr,
-    bimdf::Charts* bimdfCharts = nullptr, const FoldRepairContext* foldCtx = nullptr,
-    const GeometryAnalysis* layoutGeometry = nullptr, LayoutRunReport* layoutReport = nullptr) {
+int solveSeamlessReduced(accel::IBackend& backend, std::size_t nCut,
+                         const std::vector<std::unordered_map<std::size_t, float>>& rows,
+                         const std::vector<float>& bu, const std::vector<float>& bv,
+                         const std::vector<SeamRef>& seams, const std::vector<std::size_t>& gauges,
+                         std::vector<float>& u, std::vector<float>& v,
+                         const CancelToken* cancel = nullptr,
+                         SeamlessSolveCacheImpl* cache = nullptr,
+                         bimdf::Charts* bimdfCharts = nullptr,
+                         const FoldRepairContext* foldCtx = nullptr,
+                         const GeometryAnalysis* layoutGeometry = nullptr,
+                         const SeamlessLayoutOptions* layoutOptions = nullptr) {
     const std::size_t nSeam = seams.size();
     const std::size_t nUv = 2 * nCut;
     // Feature-seam integer pinning (docs/ROADMAP.md 2026-08-01 priority 1;
@@ -3026,7 +3045,7 @@ int solveSeamlessReduced(
                          tmesh.degradeWhy.fanReclass, tmesh.underservedNodes);
         }
         if (bimdfCharts->captureGeometry) {
-            reportTopologyLayout(*bimdfCharts, tmesh, *layoutGeometry, layoutReport);
+            reportTopologyLayout(*bimdfCharts, tmesh, *layoutGeometry, layoutOptions);
         }
         // Reduce every arc-length expression onto the reduced basis w (used
         // for the back-substitution and the post-solve deviation report).
@@ -4411,8 +4430,7 @@ Parameterization solveParameterizationImpl(const Mesh& mesh, const SeamlessSetup
     // it scales to hundreds of cones (spot: ~350 seam edges), reconciling branch-point holonomy.
     if (!seams.empty()) {
         solveSeamlessReduced(backend, nCut, rows, bu0, bv0, seams, gauges, u, v, cancel, cacheImpl,
-                             bimdfCharts.get(), foldCtx.get(), layoutGeometry.get(),
-                             layoutOpts != nullptr ? layoutOpts->report : nullptr);
+                             bimdfCharts.get(), foldCtx.get(), layoutGeometry.get(), layoutOpts);
     }
     foldCensusPhase("final");
     statsGradHist("reduced");

@@ -142,6 +142,37 @@
   identifier-shaped labels; verified by mutation that it catches a bogus field
   in both kinds of literal.
 
+- **The CLI emits the topology layout.** `--layout-report <path>` and
+  `--layout-mesh <path>` write the layout as JSON and as an OBJ arc polyline,
+  and the run report gains a `zremesher` block (layout counts, selected
+  candidate, quality score). Both flags are zremesher-only and a usage error
+  elsewhere: turning the layout stage on forces the native seamless route, so
+  honouring them on another method would silently change that method's output.
+  `CYBER_ZR_LAYOUT` is unchanged — explicit paths simply win over it.
+
+### Fixed
+
+- **The symmetry seam was welding surface, not centerline.** `--symmetry`
+  produced exactly mirrored connectivity but left boundary and non-manifold
+  edges at the seam (cheburashka 3 and 2). The recorded cause — a hole left by
+  membrane deletion — was wrong; the mirror closes that hole. The real cause was
+  one tolerance doing two jobs: `0.35 * meanEdgeLength` was passed both to the
+  reflection MATCHING, where it is correct, and to the mirror's seam test, where
+  it flattened interior surface that merely came near the midplane. Split into a
+  geometric plane epsilon and the unchanged matching radius: cheburashka
+  3/2 -> 0/0, procedural sphere 0/2 -> 0/0, with unmatched vertices and faces
+  staying at 0.
+
+- **The benchmark gate reported success while failing.** `bench.py check | tee`
+  takes tee's exit status, and the step ran under `bash -e` with no `pipefail`,
+  so a failing check was green. Nightly run 33303656569 logs
+  `CHECK FAIL cylinder.singularities: baseline 4 -> 6` with job conclusion
+  `success`. The failure is not a regression — the same commit gives 4 on
+  macOS/Clang and 6 on Linux/GCC, since the solve reads unordered-container
+  iteration order — so baselines now carry a `toolchain` identity and a
+  mismatched run is refused rather than compared. Loosening the tolerance would
+  have absorbed a genuine 4 -> 6 regression later.
+
 - **The ZRemesher surface reaches the bindings, not just the CLI.** The public
   method shipped everywhere; its parameters did not. Quality mode, symmetry and
   guide mode were CLI-only, and the layout statistics and the selected candidate

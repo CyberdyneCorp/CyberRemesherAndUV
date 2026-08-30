@@ -150,8 +150,26 @@ def gate_symmetry_is_exact(cli, work):
         1 for f in faces
         if tuple(sorted(int(partner[i]) for i in f)) not in face_sets)
     assert unmatched_f == 0, "{0} faces have no mirror image".format(unmatched_f)
-    print("PASS: symmetry exact — 0 unmatched vertices, 0 unmatched faces "
-          "over {0} faces".format(len(faces)))
+
+    # Exact symmetry is necessary but not sufficient: the seam also has to be
+    # CLOSED. The mirror used to weld every vertex within a third of an edge of
+    # the midplane — interior surface included — which left boundary and
+    # non-manifold edges at the seam while unmatched v/f stayed at 0. Both
+    # numbers belong in the same gate; asserting only the matching passed
+    # throughout the entire time the seam was open.
+    incidence = {}
+    for f in faces:
+        for i in range(len(f)):
+            a, b = f[i], f[(i + 1) % len(f)]
+            key = (min(a, b), max(a, b))
+            incidence[key] = incidence.get(key, 0) + 1
+    boundary = sum(1 for n in incidence.values() if n == 1)
+    nonmanifold = sum(1 for n in incidence.values() if n > 2)
+    assert boundary == 0 and nonmanifold == 0, (
+        "the seam is not closed: {0} boundary edge(s), {1} non-manifold "
+        "edge(s)".format(boundary, nonmanifold))
+    print("PASS: symmetry exact — 0 unmatched vertices, 0 unmatched faces over "
+          "{0} faces; seam closed (0 boundary, 0 non-manifold)".format(len(faces)))
 
 
 def gate_topology_guide_beats_orientation(cli, work):
@@ -232,6 +250,75 @@ def gate_quality_best_selects(cli, work):
     print("PASS: " + selected[-1].strip())
 
 
+def gate_cli_reports_and_exports_the_layout(cli, work):
+    """The CLI must EMIT what it traces, not just print it.
+
+    Two spec scenarios in one run (cli-headless): the JSON report names the
+    method, quality mode, selected candidate and layout node/arc/patch counts,
+    and layout export is reachable from the command line.
+
+    Also covers `CYBER_ZR_LAYOUT`, which had NO test at all — the other gates
+    set it to "1" (stderr only, no file write), so the file-writing path that
+    examples/21 and 22 depend on could be refactored away with a fully green
+    suite. It shares an implementation with the flags, so both are asserted here.
+    """
+    src = os.path.join(work, "cli_report.obj")
+    _sphere_obj(src)
+    out = os.path.join(work, "cli_report_out.obj")
+    run_report = os.path.join(work, "run.json")
+    layout_json = os.path.join(work, "layout.json")
+    layout_obj = os.path.join(work, "layout.obj")
+
+    proc = _run(cli, ["--input", src, "--output", out, "--quad-method", "zremesher",
+                      "--quality", "best", "--target-quads", "800",
+                      "--report", run_report,
+                      "--layout-report", layout_json, "--layout-mesh", layout_obj,
+                      "--quiet"])
+    assert proc.returncode == 0, proc.stderr[-2000:]
+
+    with open(run_report) as fh:
+        report = json.load(fh)
+    assert "zremesher" in report, "the run report carries no zremesher block"
+    zr = report["zremesher"]
+    for key in ("layouts", "nodes", "arcs", "patches"):
+        assert zr.get(key, 0) > 0, "report zremesher.{0} is {1}".format(key, zr.get(key))
+    assert zr["layouts"] == zr["layoutsValid"], (
+        "{0} of {1} layouts failed validation".format(
+            zr["layouts"] - zr["layoutsValid"], zr["layouts"]))
+    assert zr.get("selectedCandidate") in ("multires", "single-level"), (
+        "--quality best named {0!r} in the report".format(zr.get("selectedCandidate")))
+    assert report["parameters"]["quality"] == "best"
+    assert report["parameters"]["quadMethod"] == "zremesher"
+
+    for path in (layout_json, layout_obj):
+        assert os.path.getsize(path) > 0, "layout export wrote nothing to " + path
+    with open(layout_json) as fh:
+        exported = json.load(fh)
+    assert exported.get("nodes"), "the exported layout has no nodes"
+
+    # Rejected, not ignored: the layout stage forces the native seamless route,
+    # so honouring these flags on another method would change that method's mesh.
+    bad = _run(cli, ["--input", src, "--output", out, "--quad-method", "quad-cover",
+                     "--target-quads", "800", "--layout-report", layout_json, "--quiet"])
+    assert bad.returncode != 0, "--layout-report was accepted on quad-cover"
+    assert "zremesher" in bad.stderr, "the rejection does not say what is required"
+
+    # The env var still writes files. Nothing asserted this before.
+    env_prefix = os.path.join(work, "envlayout")
+    proc = _run(cli, ["--input", src, "--output", out, "--quad-method", "zremesher",
+                      "--target-quads", "800", "--quiet"],
+                {"CYBER_ZR_LAYOUT": env_prefix})
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    for ext in (".json", ".obj"):
+        path = env_prefix + ext
+        assert os.path.exists(path) and os.path.getsize(path) > 0, (
+            "CYBER_ZR_LAYOUT wrote no " + ext + " (the examples depend on this)")
+
+    print("PASS: report names {0} (score {1:.3f}) over {2} layout(s); "
+          "flags and CYBER_ZR_LAYOUT both wrote artifacts".format(
+              zr["selectedCandidate"], zr["qualityScore"], zr["layouts"]))
+
+
 def main():
     cli = _find_cli()
     if cli is None:
@@ -245,6 +332,7 @@ def main():
         gate_symmetry_is_exact(cli, work)
         gate_topology_guide_beats_orientation(cli, work)
         gate_quality_best_selects(cli, work)
+        gate_cli_reports_and_exports_the_layout(cli, work)
     print("all ZRemesher gates passed")
     return 0
 

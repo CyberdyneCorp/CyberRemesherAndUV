@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <vector>
 
 #include "cyber/core/mesh.hpp"
 #include "cyber/core/pipeline.hpp"
@@ -75,6 +76,10 @@ struct SymmetrySplit {
 struct BorderSnapReport {
     std::size_t snapped = 0;
     float maxDistance = 0.0f;
+    // Exactly the vertices this projected onto the plane. Handed to
+    // mirrorAcross so "on the plane" is a KNOWN set rather than a distance
+    // test — see the overload below for why that distinction matters.
+    std::vector<VertexId> onPlane;
     // Faces the snap pulled ENTIRELY into the plane. Those are membranes, not
     // surface — in the mirrored result they would sit inside the model as an
     // internal wall — so they are removed.
@@ -98,6 +103,23 @@ struct MirrorReport {
 // `tolerance` of the plane are snapped exactly onto it first, so "on the plane"
 // is a decidable property rather than a floating-point coincidence.
 MirrorReport mirrorAcross(Mesh& mesh, const Plane& plane, float tolerance = 1e-5f);
+
+// Mirror using a KNOWN centerline instead of a distance test.
+//
+// The tolerance overload decides "on the plane" by measuring, which is fine
+// when the caller has no better information and wrong when it does. After
+// snapBorderToPlane the caller knows exactly which vertices were projected, and
+// re-deriving that set by distance is not merely redundant — it is a different,
+// larger set. remeshSymmetric was passing 0.35 * mean edge length (the weld
+// tolerance it needs for isTopologicallySymmetric), so every INTERIOR vertex
+// that happened to lie within a third of an edge of the midplane was flattened
+// onto it and then treated as its own twin. Those vertices are surface, not
+// centerline: welding them instead of mirroring them is what left the seam
+// residue (cheburashka: 3 boundary and 2 non-manifold edges).
+//
+// Vertices in `onPlane` are shared by both halves; every other vertex gets a
+// reflected twin regardless of how close to the plane it sits.
+MirrorReport mirrorAcross(Mesh& mesh, const Plane& plane, const std::vector<VertexId>& onPlane);
 
 // Whether `mesh` is symmetric across `plane` in CONNECTIVITY: every vertex has a
 // mirror partner and every face's mirror image is also a face. This is the

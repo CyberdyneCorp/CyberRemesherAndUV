@@ -3995,6 +3995,8 @@ std::unique_ptr<IQuadrangulator> makeZRemesherQuadrangulator(const ZRemesherOpti
     const bool bestOfTwo =
         options.quality == RemeshQualityMode::Best || std::getenv("CYBER_ZR_BEST") != nullptr;
     layout.report = options.report != nullptr ? &options.report->layout : nullptr;
+    layout.reportPath = options.layoutReportPath;
+    layout.meshPath = options.layoutMeshPath;
     return std::make_unique<QuadCoverQuadrangulator>(
         options.fieldIterations, clamped.adaptivity, clamped.holeFillMaxBoundary,
         clamped.sharpEdgeDegrees, layout, "zremesher", bestOfTwo, options.report);

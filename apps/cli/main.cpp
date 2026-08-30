@@ -69,6 +69,8 @@ struct CliOptions {
     std::string output;
     std::string report;
     std::string guides;                     // guidance sidecar (--guides); empty = no guidance
+    std::string layoutReport;               // --layout-report <path>: the layout as JSON
+    std::string layoutMesh;                 // --layout-mesh <path>: its arcs as an OBJ polyline
     std::string quadMethod = "quad-cover";  // roadmap default (2026-07-22)
     std::string quality = "fast";           // zremesher only: fast | best
     std::string symmetry = "none";          // none | x | y | z
@@ -156,6 +158,10 @@ void printUsage() {
                  "  --patch-policy <p>       keep-largest | keep-all | min-faces:<N>\n"
                  "  --report <path.json>     machine-readable run report\n"
                  "  --guides <path.json>     flow-guide / painted-density sidecar\n"
+                 "  --layout-report <path>   zremesher only: write the topology layout\n"
+                 "                           (nodes, arcs, patches) as JSON\n"
+                 "  --layout-mesh <path>     zremesher only: write the layout's arcs as\n"
+                 "                           an OBJ polyline, to open beside the output\n"
                  "  --preset <name|path>     export a per-DCC bundle (mesh + baked maps)\n"
                  "  --cage <float>           bake cage distance (default: 1%% of the\n"
                  "                           input's bounding-box diagonal)\n"
@@ -297,6 +303,18 @@ int parseArgs(int argc, char** argv, CliOptions& options, bool& exitEarly) {
                 return kExitArgs;
             }
             options.guides = *v;
+        } else if (arg == "--layout-report") {
+            const auto v = next("--layout-report");
+            if (!v) {
+                return kExitArgs;
+            }
+            options.layoutReport = *v;
+        } else if (arg == "--layout-mesh") {
+            const auto v = next("--layout-mesh");
+            if (!v) {
+                return kExitArgs;
+            }
+            options.layoutMesh = *v;
         } else if (arg == "--report") {
             const auto v = next("--report");
             if (!v) {
@@ -376,6 +394,23 @@ int parseArgs(int argc, char** argv, CliOptions& options, bool& exitEarly) {
             printUsage();
             return kExitArgs;
         }
+    }
+    // Layout export is a zremesher-only capability, and asking for it on another
+    // method is an ERROR rather than a no-op. Turning the layout stage on is
+    // what forces the native seamless route (quadcover_extractor.cpp: the
+    // layout is traced from the native map), so honouring these flags elsewhere
+    // would silently change that method's routing and therefore its output mesh
+    // — a flag that quietly changes the result it was only supposed to describe.
+    //
+    // Checked after the loop, not inside it: --layout-report may precede
+    // --quad-method on the command line.
+    if ((!options.layoutReport.empty() || !options.layoutMesh.empty()) &&
+        options.quadMethod != "zremesher") {
+        std::fprintf(stderr,
+                     "error: --layout-report / --layout-mesh need --quad-method zremesher "
+                     "(got '%s')\n",
+                     options.quadMethod.c_str());
+        return kExitArgs;
     }
     // --input and --target are two names for the same slot; taking both would
     // leave the engine silently choosing one, so it is an argument error.
@@ -771,7 +806,8 @@ void addGuidanceToReport(nlohmann::json& report, const remesh::ValidatedGuidance
 // path is exit 6, never silently skipped (spec).
 int writeReport(const CliOptions& options, const remesh::PipelineResult& result,
                 double elapsedSeconds, const PresetOutcome& presetOutcome,
-                const remesh::ValidatedGuidance& guidance, const HandoffOutcome& handoffOutcome) {
+                const remesh::ValidatedGuidance& guidance, const HandoffOutcome& handoffOutcome,
+                const remesh::ZRemesherRunReport& zremesher) {
     nlohmann::json report;
     report["tool"] = "cyberremesh";
     report["version"] = std::string(cyber::version());
@@ -817,6 +853,36 @@ int writeReport(const CliOptions& options, const remesh::PipelineResult& result,
                                            {"inputFaces", diag.inputFaces},
                                            {"stage", diag.stage},
                                            {"reason", diag.reason}});
+    }
+    // Emitted only when a layout was actually traced — the same "report the
+    // feature only when it ran" convention the preset and guidance blocks use.
+    // `layouts` is the honest guard: the zremesher method always captures, so a
+    // zero here means the run fell back to another quadrangulator, and claiming
+    // an all-zero layout would read as "traced nothing" rather than "not traced".
+    if (zremesher.layout.layouts != 0) {
+        const auto& st = zremesher.layout.stats;
+        report["zremesher"] = {
+            {"layouts", zremesher.layout.layouts},
+            {"layoutsValid", zremesher.layout.layoutsValid},
+            {"nodes", st.nodes},
+            {"arcs", st.arcs},
+            {"patches", st.patches},
+            {"singularities", st.singularities},
+            {"tJunctions", st.tJunctions},
+            {"featureArcs", st.featureArcs},
+            {"boundaryArcs", st.boundaryArcs},
+            {"excludedArcs", st.excludedArcs},
+            {"nonQuadPatches", st.nonQuadPatches},
+            {"nonClosingPatches", st.nonClosingPatches},
+            {"totalIndex", st.totalIndex},
+            // Empty under --quality fast, which solves one predicted path and
+            // therefore selects nothing.
+            {"selectedCandidate", zremesher.selectedCandidate},
+            {"qualityScore", zremesher.qualityScore},
+        };
+        if (!zremesher.layout.invalidReason.empty()) {
+            report["zremesher"]["invalidReason"] = zremesher.layout.invalidReason;
+        }
     }
     addPresetToReport(report, presetOutcome);
     addHandoffToReport(report, handoffOutcome);
@@ -994,7 +1060,14 @@ int runCli(int argc, char** argv) {
     const int holeFill = options.params.holeFillMaxBoundary;
     const float sharpDegrees = options.params.sharpEdgeDegrees;
     const std::string& quality = options.quality;
-    const auto makeQuadrangulator = [&method, &quality, adaptivity, holeFill,
+    // One report for the whole run, filled by the zremesher path and serialized
+    // into the JSON report below. The factory is called once per island and the
+    // counts accumulate across them, which is exactly what the report documents.
+    remesh::ZRemesherRunReport zrReport;
+    const std::string& layoutReportPath = options.layoutReport;
+    const std::string& layoutMeshPath = options.layoutMesh;
+    const auto makeQuadrangulator = [&method, &quality, &zrReport, &layoutReportPath,
+                                     &layoutMeshPath, adaptivity, holeFill,
                                      sharpDegrees]() -> std::unique_ptr<remesh::IQuadrangulator> {
         if (method == "quad-cover") {
             // --sharp-edge (default 90) binds sharp edges into the native
@@ -1015,6 +1088,9 @@ int runCli(int argc, char** argv) {
             zr.featureDegrees = sharpDegrees;
             zr.quality = quality == "best" ? remesh::RemeshQualityMode::Best
                                            : remesh::RemeshQualityMode::Fast;
+            zr.report = &zrReport;
+            zr.layoutReportPath = layoutReportPath;
+            zr.layoutMeshPath = layoutMeshPath;
             return remesh::makeZRemesherQuadrangulator(zr);
         }
         if (method == "instant-meshes") {
@@ -1177,8 +1253,8 @@ int runCli(int argc, char** argv) {
         std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
 
     if (!options.report.empty()) {
-        const int reportStatus =
-            writeReport(options, result, elapsed, presetOutcome, validatedGuidance, handoffOutcome);
+        const int reportStatus = writeReport(options, result, elapsed, presetOutcome,
+                                             validatedGuidance, handoffOutcome, zrReport);
         if (reportStatus != kExitOk) {
             return reportStatus;
         }

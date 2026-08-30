@@ -146,12 +146,38 @@ reshape the flow its guided rounding is tuned against, while `zremesher` can,
 because it does not use that rounding. It always routes to the native seamless
 solver, since the layout is traced from that solver's map.
 
-To inspect the layout itself, write it out (`.json` plus a polyline `.obj`):
+To inspect the layout itself, write it out — the JSON description and a polyline
+`.obj` you can open beside the result:
 
 ```sh
-CYBER_ZR_LAYOUT=/tmp/layout \
-  cyberremesh --input model.obj --output quads.obj --quad-method zremesher --target-quads 2000
+cyberremesh --input model.obj --output quads.obj --quad-method zremesher \
+            --target-quads 2000 \
+            --layout-report layout.json --layout-mesh layout.obj --report run.json
 ```
+
+Both flags are zremesher-only and a usage error on any other method: turning the
+layout stage on forces the native seamless route, so honouring them elsewhere
+would silently change *that* method's mesh — a flag altering the result it was
+only meant to describe.
+
+`run.json` carries the same numbers as a value, so a pipeline reads them instead
+of scraping stderr:
+
+```json
+"zremesher": { "layouts": 4, "layoutsValid": 4,
+               "nodes": 1388, "arcs": 2104, "patches": 766,
+               "singularities": 284, "tJunctions": 1104, "totalIndex": 32,
+               "selectedCandidate": "multires", "qualityScore": 2.617 }
+```
+
+That is spot at 2000 quads under `--quality best`. The counts **sum** over every
+layout the run traced — one per island, and one per candidate when `best` solves
+both — which is why `layouts` is 4 and the index is 32 rather than the 8 a single
+genus-0 layout carries. The exported `.json`/`.obj` are overwritten per layout,
+so the artifact describes the *last* one while the report describes all of them;
+they are not expected to agree.
+
+(`CYBER_ZR_LAYOUT=<prefix>` still works and is what the examples use.)
 
 ![Topology layout drawn over the quads it produced](examples/output/21_topology_layout.png)
 
@@ -273,22 +299,42 @@ cyberremesh --input head.obj --output low.obj --quad-method zremesher \
 | spot | plain | 1672 | 1377 | 1661 |
 | spot | `--symmetry x` | 1568 | **0** | **0** |
 | cheburashka | plain | 1721 | 1590 | 1698 |
-| cheburashka | `--symmetry x` | 1988 | **0** | **0** |
+| cheburashka | `--symmetry x` | 1990 | **0** | **0** |
 
 `--target-quads` names the whole model, so the half is solved for half of it.
 
-Known residue: some models come back with a handful of boundary or non-manifold
-edges — cheburashka 3 and 2, a procedural sphere 0 and 2 — where a face the
-border-snap flattened into the plane had to be removed. spot and the bunny are
-clean. The symmetry itself is exact either way; the residue is a small hole at
-the seam, and closing it means collapsing the membrane rather than deleting it.
+The seam is closed as well as symmetric — 0 boundary and 0 non-manifold edges on
+every model measured (cheburashka was 3 and 2, a procedural sphere 0 and 2).
+
+This entry used to attribute that residue to a hole left by deleting a membrane
+face, closable only by collapsing it instead. That was wrong, and building the
+collapse would have changed nothing: the mirror *closes* the hole a deletion
+opens, because every edge the deletion exposes has both endpoints on the plane.
+The real cause was one tolerance doing two jobs — a third of an edge length,
+correct for matching a vertex to its reflection and far too coarse for deciding
+what the seam is, so interior surface that merely came near the midplane was
+flattened onto it and welded as centerline. Split into a geometric plane epsilon
+and the unchanged matching radius.
 
 Status: the layout, its validation, the public method, topology guides,
-candidate selection, forced symmetry and the binding surface for all of it are
-**done**; fold-robust tracing is **in progress and its gate is not met**;
-semantic (group / material) boundaries and automatic symmetry detection are
-**not started**. The plan, the measurements, and the levers already refuted —
-with their numbers, so they are not retried — are in
+candidate selection, forced symmetry (seam included), the binding surface for all
+of it and the CLI's own report and export are **done**.
+
+Still open, and each for a stated reason rather than for lack of attention:
+automatic symmetry detection is **unblocked but not started**; semantic
+(group / material) boundaries turn out to need only input plumbing, since Phase E
+already ships the project-a-curve-and-pin-it mechanism a group boundary would
+reuse; a `balanced` quality mode is **deliberately not built** — with five corpus
+models and margins of 0.001–0.02 between the two candidates, a predictor is
+overfitting rather than prediction; and the layout does not yet reach the output
+on organic meshes at all, which is scoped as its own change
+([`openspec/changes/add-injectable-layout/`](openspec/changes/add-injectable-layout/)).
+
+That last one is the honest headline: 74–100% of layout arcs on organic models
+cannot reduce onto the solver's integer basis, so the quantized layout never
+reaches the mesh — which is why every fold-robustness lever measured
+byte-identical. The plan, the measurements, and the levers already refuted — with
+their numbers, so they are not retried — are in
 [`docs/zremesher-plan.md`](docs/zremesher-plan.md).
 
 `quad-cover` remains the default and is untouched by any of this: choosing
@@ -838,7 +884,8 @@ an unrecognised value always means "default behaviour".
 `src/quadrangulate` carries a further set of `CYBER_QC_*` and `CYBER_ZR_*`
 levers used by the benchmark and the plans in `docs/` — including
 `CYBER_ZR_LAYOUT` (report the topology layout; a path prefix also writes it as
-JSON and a polyline OBJ) and `CYBER_ZR_FOLD_REPAIR`. They are developer
+JSON and a polyline OBJ — `--layout-report` / `--layout-mesh` are the supported
+surface for that) and `CYBER_ZR_FOLD_REPAIR`. They are developer
 instrumentation, not part of the supported surface, and are documented at their
 call sites.
 

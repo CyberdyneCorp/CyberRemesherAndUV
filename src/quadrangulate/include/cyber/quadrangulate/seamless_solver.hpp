@@ -166,6 +166,20 @@ struct SeamlessLayoutOptions {
     // across a run's islands without synchronization; two CONCURRENT remesh()
     // calls need two reports.
     LayoutRunReport* report = nullptr;
+    // Where to WRITE the traced layout: `reportPath` gets the JSON description,
+    // `meshPath` an OBJ polyline of its arcs. Empty means "do not write".
+    //
+    // These exist so layout export can be a caller's choice rather than a
+    // process-wide environment variable read from inside the solver. The
+    // `CYBER_ZR_LAYOUT` env var still works and is still what the examples and
+    // the release gates use; a non-empty path here simply wins over it.
+    //
+    // Note both files are OVERWRITTEN once per traced layout, while `report`
+    // SUMS across them. On a multi-island mesh, or under `quality best` (which
+    // solves two candidates), the files therefore describe the LAST layout
+    // traced while the report describes all of them. Do not assert they agree.
+    std::string reportPath;
+    std::string meshPath;
 };
 
 // Opaque cache for the direct (sparse-Cholesky) solve path, CYBER_QC_DIRECT

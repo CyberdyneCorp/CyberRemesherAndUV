@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import platform
 import shlex
 import subprocess
 import sys
@@ -158,6 +160,46 @@ def _violates(kind: str, tolerance: float, direction: str,
 SKIP_EXIT = 77
 
 
+def toolchain_identity() -> str:
+    """The platform + compiler family the numbers were produced on.
+
+    The solver is not reproducible ACROSS TOOLCHAINS: iteration order in
+    unordered containers differs between libstdc++ and libc++, and the solve
+    reads that order, so the same commit gives different cone counts on Clang
+    and on GCC. Measured on 7f65dca with identical baselines and sources:
+
+        macOS / Clang   cylinder singularities 4   -> bench check: OK
+        Linux / GCC     cylinder singularities 6   -> CHECK FAIL (tol rel 0.25)
+
+    That is not a regression, and loosening the tolerance to absorb it would be
+    the wrong fix — it would also absorb a genuine 4 -> 6 regression later. The
+    honest handling is the one this file already applies to the solver build:
+    baselines carry the identity they were recorded under, and a run that does
+    not match is REFUSED rather than silently compared.
+
+    Deliberately coarse — platform plus compiler family, not version — because a
+    patch-level compiler bump does not reorder a hash map, and pinning to the
+    version would make every baseline single-use.
+    """
+    system = platform.system()
+    machine = platform.machine()
+    family = "unknown"
+    if sys.platform == "darwin":
+        family = "clang"
+    else:
+        for env_var in ("CXX", "CC"):
+            value = os.environ.get(env_var, "")
+            if "clang" in value:
+                family = "clang"
+                break
+            if "gcc" in value or "g++" in value:
+                family = "gcc"
+                break
+        else:
+            family = "gcc"  # the platform default this project builds with on Linux
+    return f"{system}/{machine}/{family}"
+
+
 def solver_identity(cyber_binary: Path) -> str:
     """The seamless-UV solver the binary carries, from `cyberremesh --version`.
 
@@ -207,13 +249,17 @@ def record_baselines(results: list[dict], solver: str) -> None:
                    "corpus. Regenerate deliberately after intentional solver "
                    "changes; the diff is the review artifact.",
         "solver": solver,
+        # The toolchain these numbers came from. Without it a baseline recorded
+        # on Clang silently gates a GCC run against incomparable cone counts.
+        "toolchain": toolchain_identity(),
         "results": {
             row["mesh"]: row["metrics"] for row in results if row.get("ok")
         },
     }
     BASELINES.parent.mkdir(parents=True, exist_ok=True)
     BASELINES.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
-    print(f"wrote {BASELINES} ({len(payload['results'])} meshes, solver {solver})")
+    print(f"wrote {BASELINES} ({len(payload['results'])} meshes, "
+          f"solver {solver}, toolchain {payload['toolchain']})")
 
 
 def main() -> int:
@@ -264,13 +310,26 @@ def main() -> int:
     # (including the portable leg of the nightly sanitizer lane, which runs the
     # whole ctest set). Skip instead, and say which build would be gated.
     if args.command == "check":
-        recorded = json.loads(BASELINES.read_text()).get("solver", "")
+        baselines = json.loads(BASELINES.read_text())
+        recorded = baselines.get("solver", "")
         current = solver_identity(args.cyber_binary)
         if recorded and current and recorded != current:
             print(f"bench check SKIPPED: baselines were recorded on the "
                   f"'{recorded}' build, this binary is '{current}'. Configure "
                   f"with the same -DCYBER_WITH_QUADCOVER setting to gate on "
                   f"them, or re-record deliberately.")
+            return SKIP_EXIT
+        # Same refusal, one axis out: the solver is not reproducible across
+        # toolchains (see toolchain_identity). Baselines with no recorded
+        # toolchain predate this check and are compared as before, so adding the
+        # key does not retroactively skip every existing baseline file.
+        recorded_host = baselines.get("toolchain", "")
+        current_host = toolchain_identity()
+        if recorded_host and recorded_host != current_host:
+            print(f"bench check SKIPPED: baselines were recorded on "
+                  f"'{recorded_host}', this run is '{current_host}'. The solve "
+                  f"reads unordered-container iteration order, so the two are "
+                  f"not comparable — re-record on this toolchain to gate on it.")
             return SKIP_EXIT
 
     results = benchmark(meshes, solvers, args.cache_dir / "out", args.samples,
