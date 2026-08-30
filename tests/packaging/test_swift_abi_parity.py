@@ -149,6 +149,54 @@ def undeclared_symbol_uses(
     return bad
 
 
+def balanced_args(code: str, open_index: int) -> str | None:
+    """The argument text of the parenthesised group starting at `open_index`.
+
+    A regex cannot do this: `[^()]*` stops at the first nested paren, so any
+    literal containing a call — `Int32(clamping: n)` — was skipped entirely and
+    never checked. Depth counting reads the whole literal instead.
+    """
+    depth = 0
+    for i in range(open_index, len(code)):
+        if code[i] == "(":
+            depth += 1
+        elif code[i] == ")":
+            depth -= 1
+            if depth == 0:
+                return code[open_index + 1:i]
+    return None  # unbalanced (truncated source); nothing to check
+
+
+def argument_labels(args: str) -> list[str]:
+    """Top-level `label:` names in a Swift argument list.
+
+    Nested groups are skipped so an inner call's labels are not attributed to
+    the outer struct, and a label must start like an identifier: the `1` in a
+    ternary `flag ? 1 : 0` is not a field name, and reporting it as one was a
+    false positive that failed any literal built from a Bool.
+    """
+    labels = []
+    depth = 0
+    token = ""
+    for ch in args:
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        elif depth == 0 and ch == ":":
+            candidate = token.strip().split()[-1] if token.strip() else ""
+            if re.fullmatch(r"[A-Za-z_]\w*", candidate):
+                labels.append(candidate)
+            token = ""
+            continue
+        elif depth == 0 and ch == ",":
+            token = ""
+            continue
+        if depth == 0:
+            token += ch
+    return labels
+
+
 def bad_struct_fields(
     sources: dict[Path, str], struct_fields: dict[str, set[str]]
 ) -> list[tuple[Path, str, str]]:
@@ -156,8 +204,11 @@ def bad_struct_fields(
     bad = []
     for path, code in sources.items():
         for name, fields in struct_fields.items():
-            for call in re.finditer(re.escape(name) + r"\s*\((?P<args>[^()]*)\)", code):
-                for label in re.findall(r"(\w+)\s*:", call.group("args")):
+            for match in re.finditer(re.escape(name) + r"\s*\(", code):
+                args = balanced_args(code, match.end() - 1)
+                if args is None:
+                    continue
+                for label in argument_labels(args):
                     if label not in fields:
                         bad.append((path, name, label))
     return bad

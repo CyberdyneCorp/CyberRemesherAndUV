@@ -108,7 +108,7 @@ layout over one bad patch — on rocker-arm, one patch out of 199.
 | **C** | `GeometryAnalysis`, weighted singularity cost, deterministic relocation, dipole cancellation | weighted cost improves without regressing the layout — **NOT met**; relocation trades layout quality for a ~1% cost gain |
 | **D** | unified `SizingField` fusing painted density, curvature, features and thickness | byte-identical when disabled — met; thin-feature suite — **NOT met**, it measured worse |
 | **E** | topology-affecting flow guides (orientation vs topology mode, closed loop guides) | sphere-equator adherence — **MET**, 52% → 87% |
-| **F** | `ConstraintField` semantic boundaries; exact forced-axis topology symmetry | mirrored *connectivity*, not merely mirrored positions |
+| **F** | `ConstraintField` semantic boundaries; exact forced-axis topology symmetry | mirrored *connectivity*, not merely mirrored positions — **MET** for forced symmetry (0 unmatched vertices and faces on every corpus model; small seam residue where a membrane face had to be removed). `ConstraintField` **not attempted**: the engine has no group/material input to connect yet, so the type would carry nothing. Automatic detection waits on the seam residue |
 | **G** | quality-driven candidate selection (fast / best) over one published score | `Best` never worse than either candidate — **MET**; `Balanced` not attempted |
 
 Phase B is the largest single unlock for the existing advanced solver: the

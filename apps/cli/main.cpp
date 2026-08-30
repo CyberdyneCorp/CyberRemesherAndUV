@@ -1046,91 +1046,41 @@ int runCli(int argc, char** argv) {
     // floating-point ties put them, and the halves end up with different edge
     // counts that no amount of position averaging reconciles. Constructing the
     // second half from the first makes the symmetry exact by definition.
+    //
+    // The sequencing itself lives in remeshSymmetric() so the C ABI runs the
+    // SAME code and produces the same mesh for the same request, rather than a
+    // second copy of it drifting away from this one.
     const remesh::SymmetryAxis symAxis = options.symmetry == "x"   ? remesh::SymmetryAxis::X
                                          : options.symmetry == "y" ? remesh::SymmetryAxis::Y
                                          : options.symmetry == "z" ? remesh::SymmetryAxis::Z
                                                                    : remesh::SymmetryAxis::None;
-    const cyber::Plane symPlane = remesh::symmetryPlane(source.mesh, symAxis);
-    remesh::SymmetrySplit symSplit;
-    if (symAxis != remesh::SymmetryAxis::None) {
-        symSplit = remesh::splitAtPlane(source.mesh, symPlane, /*positiveSide=*/true);
-        if (!symSplit.valid) {
-            std::fprintf(stderr,
-                         "error: --symmetry %s could not split the input at its %s midplane\n",
-                         options.symmetry.c_str(), options.symmetry.c_str());
-            return 1;
-        }
-        source.mesh = std::move(symSplit.half);
-        // --target-quads names the WHOLE model, so the half is solved for half
-        // of it. Without this the request would silently mean "per half" and a
-        // symmetric run would come back at twice the size the user asked for.
-        const int wholeTarget = options.params.targetQuadCount;
-        options.params.targetQuadCount = std::max(100, wholeTarget / 2);
-        if (!options.quiet) {
-            std::fprintf(stderr,
-                         "symmetry: solving one half across the %s midplane at %d quads "
-                         "(half of the requested %d)\n",
-                         options.symmetry.c_str(), options.params.targetQuadCount, wholeTarget);
-        }
+    if (symAxis != remesh::SymmetryAxis::None && !options.quiet) {
+        // Announced BEFORE the solve: it is the long stage, and "why is this
+        // running at half the quads I asked for" should not have to wait for it.
+        std::fprintf(stderr,
+                     "symmetry: solving one half across the %s midplane at %d quads "
+                     "(half of the requested %d)\n",
+                     options.symmetry.c_str(),
+                     remesh::symmetricHalfTarget(options.params.targetQuadCount),
+                     options.params.targetQuadCount);
     }
-
-    remesh::PipelineResult result =
-        remesh::remesh(source.mesh, options.params, &sink, &cancel, makeQuadrangulator,
-                       fallbackFactory, rawGuidance.empty() ? nullptr : &rawGuidance);
-    if (symAxis != remesh::SymmetryAxis::None && result.mesh.faceCount() != 0) {
-        // Weld tolerance from the achieved edge length: the remesh moves the
-        // border by a fraction of an edge, and anything within that is the
-        // centerline rather than real geometry.
-        float edge = 0.0f;
-        std::size_t edges = 0;
-        for (cyber::Index e = 0; e < result.mesh.edgeCapacity(); ++e) {
-            const cyber::EdgeId id{e};
-            if (!result.mesh.isAlive(id)) {
-                continue;
-            }
-            const auto [a, b] = result.mesh.edgeVertices(id);
-            edge += cyber::length(result.mesh.position(b) - result.mesh.position(a));
-            ++edges;
-        }
-        const float tolerance = edges != 0 ? 0.35f * edge / static_cast<float>(edges) : 1e-4f;
-        // The remesh's border does not land on the cut — the isoline extraction
-        // ends where the isolines end — so it is projected back before
-        // mirroring. Safe here because the input was split from a closed mesh,
-        // so its only border IS the cut; the drift is reported so a wandering
-        // remesh is visible rather than absorbed.
-        const remesh::BorderSnapReport snap = remesh::snapBorderToPlane(result.mesh, symPlane);
-        const remesh::MirrorReport mirror = remesh::mirrorAcross(result.mesh, symPlane, tolerance);
-        if (!options.quiet) {
-            std::fprintf(
-                stderr,
-                "symmetry: snapped %zu border vertices to the midplane (max drift "
-                "%.4f, %zu membranes removed), mirrored %zu vertices and %zu faces; "
-                "topologically symmetric: %s\n",
-                snap.snapped, static_cast<double>(snap.maxDistance), snap.membranesRemoved,
-                mirror.mirroredVertices, mirror.mirroredFaces,
-                remesh::isTopologicallySymmetric(result.mesh, symPlane, tolerance) ? "yes" : "NO");
-        }
-        result.stats.vertexCount = 0;
-        result.stats.quadCount = 0;
-        result.stats.triangleCount = 0;
-        result.stats.otherPolygonCount = 0;
-        for (cyber::Index v = 0; v < result.mesh.vertexCapacity(); ++v) {
-            result.stats.vertexCount += result.mesh.isAlive(cyber::VertexId{v}) ? 1u : 0u;
-        }
-        for (cyber::Index f = 0; f < result.mesh.faceCapacity(); ++f) {
-            const cyber::FaceId id{f};
-            if (!result.mesh.isAlive(id)) {
-                continue;
-            }
-            const std::size_t n = result.mesh.faceSize(id);
-            if (n == 4) {
-                ++result.stats.quadCount;
-            } else if (n == 3) {
-                ++result.stats.triangleCount;
-            } else {
-                ++result.stats.otherPolygonCount;
-            }
-        }
+    remesh::SymmetryRunReport symReport;
+    remesh::PipelineResult result = remesh::remeshSymmetric(
+        source.mesh, options.params, symAxis, &symReport, &sink, &cancel, makeQuadrangulator,
+        fallbackFactory, rawGuidance.empty() ? nullptr : &rawGuidance);
+    if (symAxis != remesh::SymmetryAxis::None && !symReport.applied) {
+        std::fprintf(stderr, "error: --symmetry %s could not split the input at its %s midplane\n",
+                     options.symmetry.c_str(), options.symmetry.c_str());
+        return 1;
+    }
+    if (symReport.applied && !options.quiet) {
+        std::fprintf(stderr,
+                     "symmetry: snapped %zu border vertices to the midplane (max drift "
+                     "%.4f, %zu membranes removed), mirrored %zu vertices and %zu faces; "
+                     "topologically symmetric: %s\n",
+                     symReport.borderSnapped, static_cast<double>(symReport.maxBorderDrift),
+                     symReport.membranesRemoved, symReport.mirroredVertices,
+                     symReport.mirroredFaces, symReport.topologicallySymmetric ? "yes" : "NO");
     }
     // remesh() re-validated an already-clamped copy and therefore found nothing
     // to warn about; carry the clamps found above so the console warnings and

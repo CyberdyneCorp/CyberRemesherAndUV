@@ -279,6 +279,24 @@ enum class RemeshQualityMode : std::uint8_t {
     Best,
 };
 
+// What a ZRemesher run produced, for callers that cannot read stderr.
+//
+// The layout statistics and the candidate selection were reportable only as
+// `[zr] layout:` / `[zr] selected candidate:` lines. That is enough for a human
+// at a terminal and nothing at all for the C ABI and the Python bindings, which
+// are required to surface both (engine-bindings spec, "ZRemesher is reachable
+// from every binding"). The release gate had to scrape stderr for the same
+// reason; with this it can ask.
+struct ZRemesherRunReport {
+    LayoutRunReport layout;
+    // The cross field `Best` kept ("multires" / "single-level"), and its score.
+    // Empty and 0 under `Fast`, which solves one predicted path and therefore
+    // never selects anything — an empty name means "no selection ran", never
+    // "the selection failed".
+    std::string selectedCandidate;
+    double qualityScore = 0.0;
+};
+
 struct ZRemesherOptions {
     RemeshQualityMode quality = RemeshQualityMode::Fast;
     int fieldIterations = 40;
@@ -304,6 +322,10 @@ struct ZRemesherOptions {
     // field has a consumer to be re-measured through once the extraction side
     // can act on it.
     bool unifiedSizing = false;
+    // Caller-owned sink for the run report above; null discards it, which is
+    // exactly the historical behavior. Same threading contract as
+    // SeamlessLayoutOptions::report: one report per remesh() call.
+    ZRemesherRunReport* report = nullptr;
 };
 std::unique_ptr<IQuadrangulator> makeZRemesherQuadrangulator(const ZRemesherOptions& options = {});
 

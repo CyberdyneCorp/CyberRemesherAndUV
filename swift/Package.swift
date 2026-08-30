@@ -49,5 +49,23 @@ let package = Package(
                 .linkedLibrary("cyber_capi")
             ]
         ),
+
+        // Runtime parity checks. The `swift-package` CI job compiled this
+        // package but never RAN it, so the Swift layer's marshalling was
+        // unverified: pointer lifetimes across the C call, the `char[32]`
+        // candidate name, and whether a guide mode actually reaches the engine
+        // all compile perfectly while being wrong. These assert the same
+        // properties the Python binding gates assert, so the two surfaces
+        // cannot drift apart silently.
+        //
+        // Skips itself when the engine library is not loadable, the same way
+        // the Python suite exits 77 rather than passing vacuously.
+        .testTarget(
+            name: "CyberRemesherTests",
+            dependencies: ["CyberRemesher"],
+            swiftSettings: [
+                .unsafeFlags(["-Xcc", "-I\(capiHeaderSearchPath)"])
+            ]
+        ),
     ]
 )

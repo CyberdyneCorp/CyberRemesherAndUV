@@ -1242,6 +1242,95 @@ TEST_CASE("cyber_remesh_guided reports an impossible guidance count instead of a
     std::filesystem::remove(objPath, ec);
 }
 
+// The same impossible-count trap on the "ex" entry points, which carry their
+// own guidance conversion. UBSan is the real assertion here: `src + SIZE_MAX`
+// is undefined behavior before the allocator ever sees the request, so the
+// count is bounded ahead of the pointer arithmetic rather than after it.
+TEST_CASE("the ex entry points report an impossible guidance count instead of aborting") {
+    std::filesystem::path objPath;
+    CyberMesh* input = makeCapiBox(objPath);
+    REQUIRE(input != nullptr);
+    CyberRemeshParams params{};
+    cyber_default_params(&params);
+    params.targetQuads = 200;
+
+    const float density[8] = {1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f};
+    CyberGuidanceEx guidance{};
+    guidance.vertex_density = density;
+    guidance.vertex_density_count = std::numeric_limits<size_t>::max();
+
+    CyberMesh* out = reinterpret_cast<CyberMesh*>(0x1);  // must be overwritten with null
+    CHECK(cyber_remesh_guided_ex(input, &params, &guidance, nullptr, nullptr, nullptr, nullptr,
+                                 &out) == CYBER_ERR_INVALID_PARAM);
+    CHECK(out == nullptr);
+
+    out = reinterpret_cast<CyberMesh*>(0x1);
+    CHECK(cyber_remesh_zremesher(input, &params, nullptr, &guidance, nullptr, nullptr, nullptr,
+                                 nullptr, &out, nullptr) == CYBER_ERR_INVALID_PARAM);
+    CHECK(out == nullptr);
+
+    cyber_mesh_free(input);
+    std::error_code ec;
+    std::filesystem::remove(objPath, ec);
+}
+
+// Rejected, never reinterpreted. A symmetry axis quietly clamped to "none"
+// hands back an asymmetric mesh for a symmetry request, and a typo'd guide mode
+// quietly biases the field instead of cutting a loop — both are worse than an
+// error, so each is CYBER_ERR_INVALID_PARAM with *out left null.
+TEST_CASE("cyber_remesh_zremesher rejects unknown modes rather than reinterpreting them") {
+    std::filesystem::path objPath;
+    CyberMesh* input = makeCapiBox(objPath);
+    REQUIRE(input != nullptr);
+    CyberRemeshParams params{};
+    cyber_default_params(&params);
+    params.targetQuads = 200;
+
+    CyberZRemesherParams zr{};
+    cyber_default_zremesher_params(&zr);
+
+    SUBCASE("unknown quality mode") {
+        zr.quality = 7;
+        CyberMesh* out = reinterpret_cast<CyberMesh*>(0x1);
+        CHECK(cyber_remesh_zremesher(input, &params, &zr, nullptr, nullptr, nullptr, nullptr,
+                                     nullptr, &out, nullptr) == CYBER_ERR_INVALID_PARAM);
+        CHECK(out == nullptr);
+    }
+    SUBCASE("unknown symmetry axis") {
+        zr.symmetry = 9;
+        CyberMesh* out = reinterpret_cast<CyberMesh*>(0x1);
+        CHECK(cyber_remesh_zremesher(input, &params, &zr, nullptr, nullptr, nullptr, nullptr,
+                                     nullptr, &out, nullptr) == CYBER_ERR_INVALID_PARAM);
+        CHECK(out == nullptr);
+    }
+    SUBCASE("unknown guide mode") {
+        const float points[6] = {0.1f, 0.1f, 0.0f, 0.9f, 0.9f, 0.0f};
+        CyberFlowGuideEx guide{};
+        guide.points = points;
+        guide.point_count = 2;
+        guide.strength = 1.0f;
+        guide.radius = 0.5f;
+        guide.mode = 42;
+        CyberGuidanceEx guidance{};
+        guidance.guides = &guide;
+        guidance.guide_count = 1;
+
+        CyberMesh* out = reinterpret_cast<CyberMesh*>(0x1);
+        CHECK(cyber_remesh_zremesher(input, &params, &zr, &guidance, nullptr, nullptr, nullptr,
+                                     nullptr, &out, nullptr) == CYBER_ERR_INVALID_PARAM);
+        CHECK(out == nullptr);
+        // And on the general guided path, which accepts modes on any method.
+        out = reinterpret_cast<CyberMesh*>(0x1);
+        CHECK(cyber_remesh_guided_ex(input, &params, &guidance, nullptr, nullptr, nullptr, nullptr,
+                                     &out) == CYBER_ERR_INVALID_PARAM);
+        CHECK(out == nullptr);
+    }
+
+    cyber_mesh_free(input);
+    std::error_code ec;
+    std::filesystem::remove(objPath, ec);
+}
+
 TEST_CASE("cyber_remesh_guided reports unhonored guidance through the warning callback") {
     std::filesystem::path objPath;
     CyberMesh* input = makeCapiBox(objPath);

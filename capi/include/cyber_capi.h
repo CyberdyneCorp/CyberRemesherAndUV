@@ -246,6 +246,178 @@ CyberStatus cyber_remesh_guided(const CyberMesh* in, const CyberRemeshParams* pa
                                 CyberCancelCb cancel, CyberWarningCb warning, void* user,
                                 CyberMesh** out);
 
+/* ---- ZRemesher-class retopology -------------------------------------- */
+
+/* The ZRemesher controls that have no home in CyberRemeshParams.
+ *
+ * A separate struct, and a separate entry point, rather than new fields on
+ * CyberRemeshParams: growing that struct changes its size and breaks every
+ * already-compiled caller of this ABI. Same reasoning as
+ * cyber_retopo_subdivide vs cyber_retopo_subdivide_ex.
+ *
+ * Fill with cyber_default_zremesher_params, then override. Every field is
+ * validated by cyber_remesh_zremesher and an out-of-domain value is REJECTED
+ * (CYBER_ERR_INVALID_PARAM), never silently clamped to a mode that does
+ * something else — "quality 7" must not quietly mean "fast". */
+typedef struct CyberZRemesherParams {
+    /* CYBER_ZR_QUALITY_FAST / CYBER_ZR_QUALITY_BEST. */
+    int quality;
+    /* CYBER_ZR_SYMMETRY_NONE / _X / _Y / _Z. Solves one half and mirrors its
+     * CONNECTIVITY, so the two halves are exact reflections rather than
+     * merely similar shapes. targetQuads names the WHOLE model. */
+    int symmetry;
+    /* Non-zero: size the solve substrate from the unified sizing field
+     * (local feature size / thickness on top of curvature and painted
+     * density). OFF by default, and deliberately: it was MEASURED to make
+     * thin-feature survival worse, which is the one thing it exists to
+     * improve. Exposed so the measurement can be repeated, not because it is
+     * recommended. */
+    int unifiedSizing;
+    /* Non-zero: terminate separatrices that reach an open boundary there
+     * instead of abandoning them. On by default. */
+    int boundaryChains;
+    /* Non-zero: recover fold-damaged node rotations by feasible-range
+     * projection instead of containing the node. On by default. */
+    int foldRepair;
+} CyberZRemesherParams;
+
+/* Solve one predicted path. */
+#define CYBER_ZR_QUALITY_FAST 0
+/* Solve BOTH cross-field candidates and keep the one that scores better. No
+ * static "organic vs CAD" threshold picks the right field for every model, so
+ * the answer is to measure both; it costs a second full solve. */
+#define CYBER_ZR_QUALITY_BEST 1
+
+#define CYBER_ZR_SYMMETRY_NONE 0
+#define CYBER_ZR_SYMMETRY_X 1
+#define CYBER_ZR_SYMMETRY_Y 2
+#define CYBER_ZR_SYMMETRY_Z 3
+
+/* Fills params with the engine defaults. No-op on NULL. */
+void cyber_default_zremesher_params(CyberZRemesherParams* params);
+
+/* What a ZRemesher run produced. Everything here was previously reachable
+ * only by reading the engine's stderr, which no binding can do.
+ *
+ * Layout counts are SUMMED over the islands a run solved: a multi-island mesh
+ * has no single layout, and "how many singularities did this remesh produce"
+ * means all of them. */
+typedef struct CyberZRemesherReport {
+    /* Topology layouts traced, and how many of those passed validation. A run
+     * where layouts != layoutsValid produced output from a layout that failed
+     * its own invariants, and deserves inspection. */
+    size_t layouts;
+    size_t layoutsValid;
+    size_t layoutNodes;
+    size_t layoutArcs;
+    size_t layoutPatches;
+    size_t singularities;
+    size_t tJunctions;
+    size_t featureArcs;
+    size_t boundaryArcs;
+    /* Arcs the tracer contained (excluded from later stages) and patches whose
+     * boundary walk did not close. Both are containment, not failure: the
+     * sound remainder still produced the mesh. */
+    size_t excludedArcs;
+    size_t nonClosingPatches;
+    /* Sum of singularity indices; 4 * Euler characteristic for a valid field. */
+    int totalIndex;
+
+    /* The cross field CYBER_ZR_QUALITY_BEST kept, NUL-terminated ("multires"
+     * or "single-level"), and its score. Empty under _FAST, which solves one
+     * predicted path and therefore selects nothing — an empty name means "no
+     * selection ran", never "selection failed". */
+    char selectedCandidate[32];
+    double qualityScore;
+
+    /* Forced symmetry. `symmetryApplied` is zero when none was requested.
+     * `topologicallySymmetric` is CHECKED on the result rather than assumed
+     * from the construction, because the construction is what a regression
+     * would break. */
+    int symmetryApplied;
+    int topologicallySymmetric;
+    size_t mirroredVertices;
+    size_t mirroredFaces;
+    size_t borderSnapped;
+    size_t membranesRemoved;
+    float maxBorderDrift;
+} CyberZRemesherReport;
+
+/* What a flow guide is asking for. */
+#define CYBER_GUIDE_ORIENTATION 0
+/* "Put an actual edge loop HERE": the stroke becomes a curve in the layout,
+ * not merely a bias on the field around it. */
+#define CYBER_GUIDE_TOPOLOGY 1
+
+/* A flow guide that can also name its MODE. CyberFlowGuide keeps its four
+ * fields — callers pass arrays of it and stride by sizeof, so adding a field
+ * there would misread every existing caller's array. */
+typedef struct CyberFlowGuideEx {
+    const float* points;
+    size_t point_count;
+    float strength;
+    float radius;
+    /* CYBER_GUIDE_ORIENTATION (the default, and byte-identical to a
+     * CyberFlowGuide) or CYBER_GUIDE_TOPOLOGY. An unrecognised value is
+     * REJECTED: a typo'd mode that silently biased the field instead of
+     * cutting a loop is precisely the failure this exists to remove. */
+    int mode;
+    /* Non-zero: the polyline closes back on its first point. What an eye,
+     * mouth, shoulder or wrist loop is — a continuous ring rather than an
+     * open chain. */
+    int closed;
+} CyberFlowGuideEx;
+
+/* Painted guidance carrying mode-bearing guides. Identical to CyberGuidance
+ * apart from the guide type. */
+typedef struct CyberGuidanceEx {
+    const CyberFlowGuideEx* guides;
+    size_t guide_count;
+    const float* vertex_density;
+    size_t vertex_density_count;
+    const float* face_density;
+    size_t face_density_count;
+} CyberGuidanceEx;
+
+/* Runs the pipeline with mode-bearing guidance, on any quad method.
+ *
+ * Exactly cyber_remesh_guided with CyberGuidanceEx in place of CyberGuidance,
+ * so a topology guide is not the ZRemesher method's private feature — the
+ * headless CLI attaches guide modes to whatever method is selected, and a
+ * binding must be able to do the same (engine-bindings spec, "Parity SHALL
+ * hold"). Guides that are all CYBER_GUIDE_ORIENTATION produce byte-identical
+ * output to cyber_remesh_guided.
+ *
+ * Returns CYBER_ERR_INVALID_PARAM on an unknown guide mode or an array whose
+ * pointer and count disagree; *out is left NULL in that case. */
+CyberStatus cyber_remesh_guided_ex(const CyberMesh* in, const CyberRemeshParams* params,
+                                   const CyberGuidanceEx* guidance, CyberProgressCb progress,
+                                   CyberCancelCb cancel, CyberWarningCb warning, void* user,
+                                   CyberMesh** out);
+
+/* Runs the ZRemesher-class retopology path.
+ *
+ * This is the parity entry point: every ZRemesher capability the headless CLI
+ * offers is reachable here, and therefore from every binding built on this
+ * ABI. `params->quadMethod` is IGNORED — this entry point IS the ZRemesher
+ * method — but every other CyberRemeshParams field applies, adaptivity
+ * included (which is where cyber_remesh with CYBER_QUAD_ZREMESHER differed
+ * from the CLI, and no longer does).
+ *
+ * `zr` may be NULL for the defaults. `guidance`, `report`, `warning`,
+ * `progress` and `cancel` may each be NULL. On success *out receives a newly
+ * allocated result handle (release with cyber_mesh_free).
+ *
+ * Returns CYBER_ERR_INVALID_PARAM for an unknown quality mode, symmetry axis
+ * or guide mode, and for a guidance array whose pointer and count disagree;
+ * *out is left NULL in that case. `report` is filled on success and left
+ * untouched otherwise. */
+CyberStatus cyber_remesh_zremesher(const CyberMesh* in, const CyberRemeshParams* params,
+                                   const CyberZRemesherParams* zr, const CyberGuidanceEx* guidance,
+                                   CyberProgressCb progress, CyberCancelCb cancel,
+                                   CyberWarningCb warning, void* user, CyberMesh** out,
+                                   CyberZRemesherReport* report);
+
 /* ---- isotropic (triangle) remeshing ---------------------------------- */
 
 /* Adaptive isotropic remeshing parameters (POD mirror of the useful subset of

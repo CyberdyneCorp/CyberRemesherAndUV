@@ -11,6 +11,7 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <exception>
 #include <filesystem>
 #include <fstream>
@@ -42,6 +43,7 @@
 #include "cyber/quadrangulate/field_quadrangulator.hpp"
 #include "cyber/quadrangulate/position_field.hpp"
 #include "cyber/quadrangulate/quadcover_extractor.hpp"
+#include "cyber/quadrangulate/symmetry_layout.hpp"
 #include "cyber/retopo/actions.hpp"
 #include "cyber/retopo/adjacency.hpp"
 #include "cyber/retopo/boundary.hpp"
@@ -635,6 +637,23 @@ CyberStatus remeshShared(const CyberMesh* in, const CyberRemeshParams* params,
     }
 }
 
+// Copy `count` floats from `src` into `dst`, refusing a count no allocation
+// could satisfy.
+//
+// The bound check has to happen BEFORE the pointer arithmetic, not after. A
+// count a binding marshalled from a signed -1 arrives here as SIZE_MAX, and
+// `src + SIZE_MAX` is undefined behavior in its own right — UBSan reports
+// "addition of unsigned offset ... overflowed" — so the allocator never gets
+// the chance to refuse it. The observable ABI behavior is unchanged: the caller
+// still gets an argument error rather than an abort.
+bool assignFloats(const float* src, std::size_t count, std::vector<float>& dst) {
+    if (count > dst.max_size()) {
+        return false;
+    }
+    dst.assign(src, src + count);
+    return true;
+}
+
 // CyberGuidance -> cyber::remesh::Guidance. Rejects arrays whose pointer is
 // null while the count is not (and vice versa) rather than reading garbage;
 // value-level validation is validateGuidance's job inside the pipeline.
@@ -663,9 +682,93 @@ bool toGuidance(const CyberGuidance& in, cyber::remesh::Guidance& out) {
     if ((in.face_density == nullptr) != (in.face_density_count == 0)) {
         return false;
     }
-    out.density.vertexValues.assign(in.vertex_density, in.vertex_density + in.vertex_density_count);
-    out.density.faceValues.assign(in.face_density, in.face_density + in.face_density_count);
+    return assignFloats(in.vertex_density, in.vertex_density_count, out.density.vertexValues) &&
+           assignFloats(in.face_density, in.face_density_count, out.density.faceValues);
+}
+
+// CyberGuidanceEx -> cyber::remesh::Guidance. Same pointer/count discipline as
+// toGuidance, plus the guide MODE, which is validated here rather than clamped:
+// a typo'd mode that silently biased the field instead of cutting a loop is the
+// exact failure topology guides exist to remove. `reason` names what was wrong.
+bool toGuidanceEx(const CyberGuidanceEx& in, cyber::remesh::Guidance& out, std::string& reason) {
+    if ((in.guides == nullptr) != (in.guide_count == 0)) {
+        reason = "guide array pointer/count mismatch";
+        return false;
+    }
+    for (size_t i = 0; i < in.guide_count; ++i) {
+        const CyberFlowGuideEx& g = in.guides[i];
+        if (g.points == nullptr && g.point_count != 0) {
+            reason = "guide " + std::to_string(i) + ": point array pointer/count mismatch";
+            return false;
+        }
+        if (g.mode != CYBER_GUIDE_ORIENTATION && g.mode != CYBER_GUIDE_TOPOLOGY) {
+            reason = "guide " + std::to_string(i) + ": unknown mode " + std::to_string(g.mode);
+            return false;
+        }
+        cyber::remesh::FlowGuide guide;
+        guide.strength = g.strength;
+        guide.radius = g.radius;
+        guide.mode = g.mode == CYBER_GUIDE_TOPOLOGY ? cyber::remesh::GuideMode::Topology
+                                                    : cyber::remesh::GuideMode::Orientation;
+        guide.closed = g.closed != 0;
+        guide.points.reserve(g.point_count);
+        for (size_t k = 0; k < g.point_count; ++k) {
+            guide.points.push_back(
+                cyber::Vec3{g.points[3 * k], g.points[3 * k + 1], g.points[3 * k + 2]});
+        }
+        out.guides.push_back(std::move(guide));
+    }
+    if ((in.vertex_density == nullptr) != (in.vertex_density_count == 0)) {
+        reason = "vertex density array pointer/count mismatch";
+        return false;
+    }
+    if ((in.face_density == nullptr) != (in.face_density_count == 0)) {
+        reason = "face density array pointer/count mismatch";
+        return false;
+    }
+    if (!assignFloats(in.vertex_density, in.vertex_density_count, out.density.vertexValues)) {
+        reason = "vertex density count is larger than any allocation could hold";
+        return false;
+    }
+    if (!assignFloats(in.face_density, in.face_density_count, out.density.faceValues)) {
+        reason = "face density count is larger than any allocation could hold";
+        return false;
+    }
     return true;
+}
+
+// Flatten the two C++ run reports into the flat POD the ABI hands back.
+void fillZRemesherReport(const cyber::remesh::ZRemesherRunReport& zr,
+                         const cyber::remesh::SymmetryRunReport& sym, CyberZRemesherReport& out) {
+    out = CyberZRemesherReport{};
+    out.layouts = zr.layout.layouts;
+    out.layoutsValid = zr.layout.layoutsValid;
+    out.layoutNodes = zr.layout.stats.nodes;
+    out.layoutArcs = zr.layout.stats.arcs;
+    out.layoutPatches = zr.layout.stats.patches;
+    out.singularities = zr.layout.stats.singularities;
+    out.tJunctions = zr.layout.stats.tJunctions;
+    out.featureArcs = zr.layout.stats.featureArcs;
+    out.boundaryArcs = zr.layout.stats.boundaryArcs;
+    out.excludedArcs = zr.layout.stats.excludedArcs;
+    out.nonClosingPatches = zr.layout.stats.nonClosingPatches;
+    out.totalIndex = zr.layout.stats.totalIndex;
+    // Truncating copy into the fixed buffer: the ABI hands back a value, not a
+    // pointer into engine memory whose lifetime the caller would have to track.
+    // The candidate names are short and fixed by the engine, so this never
+    // truncates in practice — it is bounded so that it cannot overrun if one
+    // day they are not.
+    const std::size_t n = std::min(zr.selectedCandidate.size(), sizeof(out.selectedCandidate) - 1);
+    std::memcpy(out.selectedCandidate, zr.selectedCandidate.data(), n);
+    out.selectedCandidate[n] = '\0';
+    out.qualityScore = zr.qualityScore;
+    out.symmetryApplied = sym.applied ? 1 : 0;
+    out.topologicallySymmetric = sym.topologicallySymmetric ? 1 : 0;
+    out.mirroredVertices = sym.mirroredVertices;
+    out.mirroredFaces = sym.mirroredFaces;
+    out.borderSnapped = sym.borderSnapped;
+    out.membranesRemoved = sym.membranesRemoved;
+    out.maxBorderDrift = sym.maxBorderDrift;
 }
 
 }  // namespace
@@ -703,6 +806,196 @@ CyberStatus cyber_remesh_guided(const CyberMesh* in, const CyberRemeshParams* pa
     }
     return remeshShared(in, params, converted.empty() ? nullptr : &converted, progress, cancel,
                         warning, user, out);
+}
+
+CyberStatus cyber_remesh_guided_ex(const CyberMesh* in, const CyberRemeshParams* params,
+                                   const CyberGuidanceEx* guidance, CyberProgressCb progress,
+                                   CyberCancelCb cancel, CyberWarningCb warning, void* user,
+                                   CyberMesh** out) {
+    if (guidance == nullptr) {
+        return remeshShared(in, params, nullptr, progress, cancel, warning, user, out);
+    }
+    cyber::remesh::Guidance converted;
+    std::string reason;
+    const CyberStatus conversion =
+        guarded("cyber_remesh_guided_ex", CYBER_ERR_INVALID_PARAM, [&]() -> CyberStatus {
+            if (!toGuidanceEx(*guidance, converted, reason)) {
+                setError("cyber_remesh_guided_ex: " + reason);
+                return CYBER_ERR_INVALID_PARAM;
+            }
+            return CYBER_OK;
+        });
+    if (conversion != CYBER_OK) {
+        if (out != nullptr) {
+            *out = nullptr;
+        }
+        return conversion;
+    }
+    return remeshShared(in, params, converted.empty() ? nullptr : &converted, progress, cancel,
+                        warning, user, out);
+}
+
+void cyber_default_zremesher_params(CyberZRemesherParams* params) {
+    if (params == nullptr) {
+        return;
+    }
+    // Mirror the C++ defaults rather than restating them, so the two cannot
+    // drift (remeshing-parameters spec: "defaults and valid ranges live here").
+    const cyber::remesh::ZRemesherOptions defaults;
+    params->quality = defaults.quality == cyber::remesh::RemeshQualityMode::Best
+                          ? CYBER_ZR_QUALITY_BEST
+                          : CYBER_ZR_QUALITY_FAST;
+    params->symmetry = CYBER_ZR_SYMMETRY_NONE;
+    params->unifiedSizing = defaults.unifiedSizing ? 1 : 0;
+    params->boundaryChains = defaults.boundaryChains ? 1 : 0;
+    params->foldRepair = defaults.foldRepair ? 1 : 0;
+}
+
+CyberStatus cyber_remesh_zremesher(const CyberMesh* in, const CyberRemeshParams* params,
+                                   const CyberZRemesherParams* zr, const CyberGuidanceEx* guidance,
+                                   CyberProgressCb progress, CyberCancelCb cancel,
+                                   CyberWarningCb warning, void* user, CyberMesh** out,
+                                   CyberZRemesherReport* report) {
+    if (in == nullptr || params == nullptr || out == nullptr) {
+        setError("cyber_remesh_zremesher: null argument");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    *out = nullptr;
+
+    CyberZRemesherParams zrParams;
+    cyber_default_zremesher_params(&zrParams);
+    if (zr != nullptr) {
+        zrParams = *zr;
+    }
+    // Rejected, not clamped: "quality 7" must not quietly become "fast", and a
+    // symmetry axis the caller misspelled must not quietly become "none" —
+    // that would hand back an asymmetric mesh for a symmetry request.
+    if (zrParams.quality != CYBER_ZR_QUALITY_FAST && zrParams.quality != CYBER_ZR_QUALITY_BEST) {
+        setError("cyber_remesh_zremesher: unknown quality mode " +
+                 std::to_string(zrParams.quality));
+        return CYBER_ERR_INVALID_PARAM;
+    }
+    if (zrParams.symmetry < CYBER_ZR_SYMMETRY_NONE || zrParams.symmetry > CYBER_ZR_SYMMETRY_Z) {
+        setError("cyber_remesh_zremesher: unknown symmetry axis " +
+                 std::to_string(zrParams.symmetry));
+        return CYBER_ERR_INVALID_PARAM;
+    }
+
+    cyber::remesh::Guidance converted;
+    if (guidance != nullptr) {
+        std::string reason;
+        // toGuidanceEx allocates from caller-supplied counts (a count marshalled
+        // as a signed -1 arrives here as SIZE_MAX), so the conversion is
+        // guarded: a count the allocator refuses is an argument error, never an
+        // abort.
+        const CyberStatus conversion =
+            guarded("cyber_remesh_zremesher", CYBER_ERR_INVALID_PARAM, [&]() -> CyberStatus {
+                if (!toGuidanceEx(*guidance, converted, reason)) {
+                    setError("cyber_remesh_zremesher: " + reason);
+                    return CYBER_ERR_INVALID_PARAM;
+                }
+                return CYBER_OK;
+            });
+        if (conversion != CYBER_OK) {
+            return conversion;
+        }
+    }
+
+    try {
+        const cyber::remesh::Parameters cppParams = toParameters(*params);
+        const cyber::CancelToken token;
+        token.setPoll([cancel, user]() { return cancel != nullptr && cancel(user) != 0; });
+        cyber::ProgressSink sink = makeSink(progress, cancel, user, token);
+
+        cyber::remesh::ZRemesherRunReport zrReport;
+        cyber::remesh::ZRemesherOptions options;
+        options.quality = zrParams.quality == CYBER_ZR_QUALITY_BEST
+                              ? cyber::remesh::RemeshQualityMode::Best
+                              : cyber::remesh::RemeshQualityMode::Fast;
+        // Unlike cyber_remesh's CYBER_QUAD_ZREMESHER branch, adaptivity is
+        // FORWARDED here. The CLI has always forwarded it, so a run driven from
+        // Python and the same run driven from the CLI produced different meshes
+        // — which is precisely what the parity requirement forbids.
+        options.adaptivity = cppParams.adaptivity;
+        options.holeFillMaxBoundary = cppParams.holeFillMaxBoundary;
+        options.featureDegrees = cppParams.sharpEdgeDegrees;
+        options.unifiedSizing = zrParams.unifiedSizing != 0;
+        options.boundaryChains = zrParams.boundaryChains != 0;
+        options.foldRepair = zrParams.foldRepair != 0;
+        options.report = &zrReport;
+
+        const cyber::remesh::SymmetryAxis axis =
+            zrParams.symmetry == CYBER_ZR_SYMMETRY_X   ? cyber::remesh::SymmetryAxis::X
+            : zrParams.symmetry == CYBER_ZR_SYMMETRY_Y ? cyber::remesh::SymmetryAxis::Y
+            : zrParams.symmetry == CYBER_ZR_SYMMETRY_Z ? cyber::remesh::SymmetryAxis::Z
+                                                       : cyber::remesh::SymmetryAxis::None;
+
+        cyber::remesh::SymmetryRunReport symReport;
+        const cyber::remesh::Guidance* guidancePtr = converted.empty() ? nullptr : &converted;
+        cyber::remesh::PipelineResult result = cyber::remesh::remeshSymmetric(
+            in->mesh, cppParams, axis, &symReport, &sink, &token,
+            [&options]() { return cyber::remesh::makeZRemesherQuadrangulator(options); },
+            []() { return cyber::remesh::makeFieldAlignedQuadrangulator(); }, guidancePtr);
+
+        if (warning != nullptr) {
+            for (const auto& issue : result.parameterIssues) {
+                warning((issue.parameter + ": " + issue.message).c_str(), user);
+            }
+            for (const auto& row : result.islandGuidance) {
+                if (row.guidesHonored && (row.densityHonored || !row.reason.empty())) {
+                    continue;
+                }
+                if (row.reason.empty() && row.guidesInRange == 0) {
+                    continue;
+                }
+                std::string message =
+                    "island " + std::to_string(row.islandIndex) + ": " +
+                    std::to_string(row.guidesInRange) + " guide(s) in range, guides " +
+                    (row.guidesHonored ? "honored" : "NOT honored") + ", density " +
+                    (row.densityHonored ? "honored" : "NOT honored");
+                if (!row.reason.empty()) {
+                    message += " (" + row.reason + ")";
+                }
+                warning(message.c_str(), user);
+            }
+        }
+
+        switch (result.status) {
+            case cyber::remesh::RunStatus::Success:
+            case cyber::remesh::RunStatus::Partial: {
+                auto handle = std::make_unique<CyberMesh>();
+                handle->mesh = std::move(result.mesh);
+                handle->stats = result.stats;
+                if (report != nullptr) {
+                    fillZRemesherReport(zrReport, symReport, *report);
+                }
+                clearError();
+                *out = handle.release();
+                return CYBER_OK;
+            }
+            case cyber::remesh::RunStatus::Cancelled:
+                setError("cyber_remesh_zremesher: cancelled");
+                return CYBER_ERR_CANCELLED;
+            case cyber::remesh::RunStatus::Error:
+                break;
+        }
+
+        for (const auto& issue : result.parameterIssues) {
+            if (issue.fatal) {
+                setError("cyber_remesh_zremesher: invalid parameter '" + issue.parameter +
+                         "': " + issue.message);
+                return CYBER_ERR_INVALID_PARAM;
+            }
+        }
+        setError(result.error.empty() ? "cyber_remesh_zremesher: pipeline error" : result.error);
+        return CYBER_ERR_RUNTIME;
+    } catch (const std::exception& e) {
+        setError(std::string("cyber_remesh_zremesher: ") + e.what());
+        return CYBER_ERR_RUNTIME;
+    } catch (...) {
+        setError("cyber_remesh_zremesher: unknown error");
+        return CYBER_ERR_RUNTIME;
+    }
 }
 
 CyberStatus cyber_mesh_stats(const CyberMesh* mesh, CyberStats* out) {

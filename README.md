@@ -114,6 +114,29 @@ cyberremesh --input model.obj --output quads.obj --quad-method zremesher --targe
 remesh(mesh, RemeshParams(target_quad_count=2000, quad_method="zremesher"))
 ```
 
+Everything the CLI can ask of it, Python can ask of it too — the quality mode,
+the symmetry axis, guide modes — and the run report comes back as a value
+rather than as a line on stderr:
+
+```python
+from cyberremesh import FlowGuide, RemeshParams, ZRemesherParams, remesh
+
+out = remesh(
+    mesh,
+    RemeshParams(target_quad_count=2000, quad_method="zremesher"),
+    zremesher=ZRemesherParams(quality="best", symmetry="x"),
+    guides=[FlowGuide(points=eye_loop, radius=0.05, mode="topology", closed=True)],
+)
+r = out.zremesher_report
+print(r.singularities, r.selected_candidate, r.topologically_symmetric)
+```
+
+An unknown quality mode, symmetry axis or guide mode is rejected, never
+reinterpreted: a symmetry axis quietly clamped to `"none"` would hand back an
+asymmetric mesh for a symmetry request. On the C ABI the same surface is
+`cyber_remesh_zremesher` with `CyberZRemesherParams` / `CyberZRemesherReport`,
+plus `cyber_remesh_guided_ex` for mode-bearing guides on any quad method.
+
 `zremesher` is structurally the `quad-cover` path — same cross field, same
 seamless solve, same isoline extraction — with the layout stage on and the
 tracing options **the layout** wants rather than the ones the shipped
@@ -261,10 +284,12 @@ clean. The symmetry itself is exact either way; the residue is a small hole at
 the seam, and closing it means collapsing the membrane rather than deleting it.
 
 Status: the layout, its validation, the public method, topology guides,
-candidate selection and forced symmetry are **done**; fold-robust tracing is **in progress and its
-gate is not met**, and exact topology symmetry is **not started**. The plan, the
-measurements, and the levers already refuted — with their numbers, so they are
-not retried — are in [`docs/zremesher-plan.md`](docs/zremesher-plan.md).
+candidate selection, forced symmetry and the binding surface for all of it are
+**done**; fold-robust tracing is **in progress and its gate is not met**;
+semantic (group / material) boundaries and automatic symmetry detection are
+**not started**. The plan, the measurements, and the levers already refuted —
+with their numbers, so they are not retried — are in
+[`docs/zremesher-plan.md`](docs/zremesher-plan.md).
 
 `quad-cover` remains the default and is untouched by any of this: choosing
 `zremesher` is what turns the layout stage on.

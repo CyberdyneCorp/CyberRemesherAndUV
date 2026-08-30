@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <string>
 #include <vector>
 
 #include "cyber/accel/backend.hpp"
@@ -10,6 +11,7 @@
 #include "cyber/core/mesh.hpp"
 #include "cyber/core/progress.hpp"
 #include "cyber/quadrangulate/crossfield.hpp"
+#include "cyber/quadrangulate/topology_layout.hpp"
 
 // Native QuadCover-style seamless integer-grid parameterizer (docs/native-miq-plan.md).
 // The path to dropping the vendored Geogram quad_cover dependency: reuse our own 4-RoSy
@@ -119,6 +121,22 @@ struct Parameterization {
 // A default-constructed instance (or a null pointer) reproduces today's
 // behaviour exactly; the CYBER_ZR_* / CYBER_QC_BIMDF_BARC environment variables
 // still force each option on for support and A/B work.
+// What the layout stage found over a whole run, accumulated across the islands
+// the pipeline solved (one layout per island solve, and one per candidate when
+// candidate selection runs both).
+//
+// `stats` SUMS the per-layout statistics rather than keeping the last one: a
+// multi-island run has no single layout to report, and a caller asking "how
+// many singularities did this remesh produce" means all of them.
+struct LayoutRunReport {
+    std::size_t layouts = 0;       // layouts traced
+    std::size_t layoutsValid = 0;  // of those, how many passed validation
+    LayoutStats stats;             // summed over every traced layout
+    // The first hard violation seen, empty when every layout validated. First
+    // rather than last because it is the one that explains the rest.
+    std::string invalidReason;
+};
+
 struct SeamlessLayoutOptions {
     // Keep the traced node positions and arc polylines, and report/validate the
     // resulting TopologyLayout.
@@ -135,6 +153,19 @@ struct SeamlessLayoutOptions {
     // plate or tube thinner than one target edge from collapsing before the
     // field ever sees it.
     bool unifiedSizing = false;
+    // Where to accumulate what the layout stage found, for callers that cannot
+    // read stderr. The layout was reportable only as a `[zr] layout:` line,
+    // which is fine for a human at a terminal and useless to the C ABI and the
+    // Python bindings — both of which are required to surface the layout
+    // statistics (engine-bindings spec, "ZRemesher is reachable from every
+    // binding"). Null keeps the historical behavior exactly: report to stderr
+    // and discard.
+    //
+    // Caller-owned, and written only from the solve it was passed to. Islands
+    // are quadrangulated serially by the pipeline, so one report accumulates
+    // across a run's islands without synchronization; two CONCURRENT remesh()
+    // calls need two reports.
+    LayoutRunReport* report = nullptr;
 };
 
 // Opaque cache for the direct (sparse-Cholesky) solve path, CYBER_QC_DIRECT
