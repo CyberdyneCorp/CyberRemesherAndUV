@@ -61,8 +61,7 @@ public:
         for (long long dx = -1; dx <= 1; ++dx) {
             for (long long dy = -1; dy <= 1; ++dy) {
                 for (long long dz = -1; dz <= 1; ++dz) {
-                    const auto it =
-                        m_cells.find({centre[0] + dx, centre[1] + dy, centre[2] + dz});
+                    const auto it = m_cells.find({centre[0] + dx, centre[1] + dy, centre[2] + dz});
                     if (it == m_cells.end()) {
                         continue;
                     }
