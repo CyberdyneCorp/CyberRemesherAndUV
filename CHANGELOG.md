@@ -149,6 +149,15 @@
 
 ### Fixed
 
+- **Guidance counts were bounded after the pointer arithmetic, not before.**
+  `toGuidance` built its density range as `src + count` and relied on the
+  allocator to refuse an impossible request — but a count a binding marshalled
+  from a signed `-1` arrives as `SIZE_MAX`, and `src + SIZE_MAX` is undefined
+  behavior in its own right, so the allocator never got the chance. The ABI
+  already returned `CYBER_ERR_INVALID_ARG`; it reached that answer *through*
+  UB, which UBSan reported on the sanitizer lane. Now bounded against
+  `max_size()` first. Observable behavior unchanged.
+
 - **`cyber_remesh` with `CYBER_QUAD_ZREMESHER` ignored `adaptivity`.** It left
   the ZRemesher option at its `0.0` default while the CLI has always forwarded
   the parameter, and the default is `1.0` — so the same request produced a
