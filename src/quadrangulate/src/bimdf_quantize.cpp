@@ -153,7 +153,7 @@ ZExpr diffExpr(const ZExpr& a, const ZExpr& b, double sign) {
 class Builder {
 public:
     Builder(const Charts& ch, const std::vector<double>& z)
-        : ch_(ch), z_(z), geom_(ch.captureGeometry) {}
+        : ch_(ch), z_(z), geom_(ch.captureGeometry), foldRepair_(ch.foldRepair) {}
 
     TMesh run() {
         TMesh tm;
@@ -190,6 +190,9 @@ public:
         tm.failedRays = failedLaunches_;
         tm.degradedNodes = degradedNodes_;
         tm.repairedNodes = repairedNodes_;
+        tm.projectedNodes = projectedNodes_;
+        tm.degradeWhy = degradeWhy_;
+        tm.underservedNodes = underservedNodes_;
         if (!patchesOk) {
             return tm;
         }
@@ -2612,6 +2615,9 @@ private:
             sectors.assign(nodes_.size(), {});
             degradedNodes_ = 0;
             repairedNodes_ = 0;
+            projectedNodes_ = 0;
+            degradeWhy_ = {};
+            underservedNodes_ = 0;
             for (std::size_t a = 0; a < arcs_.size(); ++a) {
                 if (arcDead_[a]) {
                     continue;
@@ -2674,6 +2680,12 @@ private:
             // quantized as a quad with a kinked side instead of failing the
             // build, so it is contained like any other fold-damaged region.
             bool accept = orbit.cleanSectors && corners >= 3 && corners <= 6;
+            // First reason that fires, for the diagnostic histogram.
+            if (!orbit.cleanSectors) {
+                ++tm.rejectWhy.sectors;
+            } else if (corners < 3 || corners > 6) {
+                ++tm.rejectWhy.corners;
+            }
             if (accept && corners == 4) {
                 // Relaxed-consistency guard: a 4-corner orbit whose relaxed
                 // opposite side sums disagree is not a geometric quad (it
@@ -2692,12 +2704,16 @@ private:
                 constexpr double kSideTol = 0.75;
                 accept = std::abs(sideSum[0] - sideSum[2]) <= kSideTol &&
                          std::abs(sideSum[1] - sideSum[3]) <= kSideTol;
+                if (!accept) {
+                    ++tm.rejectWhy.sideMismatch;
+                }
             }
             if (accept && !failedNodes.empty()) {
                 for (const auto& [arcId, qq] : runs) {
                     if (failedNodes.count(arcs_[arcId].arc.n0) != 0 ||
                         failedNodes.count(arcs_[arcId].arc.n1) != 0) {
                         accept = false;
+                        ++tm.rejectWhy.failedCone;
                         break;
                     }
                 }
@@ -2880,6 +2896,29 @@ private:
     // rotations; no metric angle sums (fold-proof). sect[i] is the sector
     // between ends lst[i-1 (cyclic)] and lst[i]; validated to sum to the
     // node's total quarter winding (4 - cone index).
+    // A T-node's INTERIOR sectors were historically never checked — only its
+    // wrap gap — so a T-node could return a 0- or 3-quarter interior sector,
+    // poison every orbit through it, and never be counted as degraded.
+    static bool anyInteriorOutOfRange(const std::vector<int>& sect) {
+        for (std::size_t i = 1; i < sect.size(); ++i) {
+            if (sect[i] < 1 || sect[i] > 2) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // A node is UNDER-SERVED when no in-range sector assignment exists at all:
+    // its winding exceeds what its sectors can carry. Its wide sectors are then
+    // CORRECT and the orbit tracer poisons them anyway, so counting these
+    // separates "the classifier was confused by a fold" from "the layout is
+    // genuinely missing separatrices here". The criterion is INFEASIBILITY,
+    // not merely "fewer ends than the winding": a T-node with 3 ends and
+    // winding 4 seats fine as 1, 1, 2.
+    static bool isUnderserved(int winding, std::size_t ends, int phantoms) {
+        return winding > 2 * (static_cast<int>(ends) + phantoms);
+    }
+
     bool buildRotation(std::size_t n, std::vector<EndRef>& lst, std::vector<int>& sect, TMesh& tm) {
         const Node& node = nodes_[n];
         int expectedTotal = 4;
@@ -3071,6 +3110,7 @@ private:
                     // stay invalid, the orbits touching it are rejected and
                     // excluded downstream.
                     ++degradedNodes_;
+                    ++degradeWhy_.boundaryFan;
                     sect.assign(lst.size(), 0);
                     return true;
                 }
@@ -3089,6 +3129,17 @@ private:
                 }
                 f = nbr.face;
                 cornerCut = nextCorner;
+            }
+            // The fan's TRUE winding, known before any angle arithmetic: the
+            // seam holonomy accumulated by the closed fan walk, lifted to the
+            // recorded cone index. The lift below needs it as its target — the
+            // number of arc ends is only a lower bound, and a badly wrong one
+            // at a cone whose separatrices were not all traced.
+            {
+                const auto itCone0 = coneOfVertex_.find(v);
+                expectedTotal =
+                    4 - liftHolonomyIndex(qcum, itCone0 != coneOfVertex_.end() ? itCone0->second
+                                                                              : 0);
             }
             // QEx Algorithm 8 (Ebke et al. 2013): split the wedge fan into
             // maximal uniform-sign runs. A negative run is a fold-back whose
@@ -3130,9 +3181,23 @@ private:
             }
             const long long rawQ =
                 std::llround(totalAngle / (0.5 * kPiD));  // exact mod-4 residue carrier
+            // Lift target. Historically this was the number of incident arc
+            // ends, on the reasoning that every end needs at least one
+            // quarter. That undercounts badly at a NEGATIVE-index cone: a
+            // valence-5 cone whose fold cost it three of its five separatrices
+            // has two ends, so the lift stopped at 2 and the corrected total
+            // came out one quarter instead of five — measured across the
+            // corpus as the dominant source of poisoned sectors, and exactly
+            // the negative-index-cone failure the fold-robustness work is
+            // about. The winding is a TOPOLOGICAL quantity (4 - index, from
+            // the fan's own seam holonomy) and does not depend on how many
+            // separatrices the tracer managed to place, so it is the target.
+            const long long liftTarget =
+                foldRepair_ ? std::max<long long>(expectedTotal,
+                                                  static_cast<long long>(lst.size()) + nPh)
+                            : static_cast<long long>(lst.size()) + nPh;
             long long turns = 0;
-            while (turns < static_cast<long long>(negIdx.size()) &&
-                   rawQ + 4 * turns < static_cast<long long>(lst.size()) + nPh) {
+            while (turns < static_cast<long long>(negIdx.size()) && rawQ + 4 * turns < liftTarget) {
                 ++turns;
             }
             std::stable_sort(negIdx.begin(), negIdx.end(), [&](std::size_t a, std::size_t b) {
@@ -3171,6 +3236,7 @@ private:
                                      n, v, e.arc, end.face, fan.size());
                     }
                     ++degradedNodes_;
+                    ++degradeWhy_.unanchoredEnd;
                     sect.assign(lst.size(), 0);
                     return true;
                 }
@@ -3221,6 +3287,9 @@ private:
                 return true;
             }
         }
+        if (isUnderserved(expectedTotal, lst.size(), nPh)) {
+            ++underservedNodes_;
+        }
         // Sector quarters between cyclically-consecutive ends. Mod-4 diffs
         // telescope to 0 around the cycle and lose the cone holonomy, so the
         // non-wrap gaps are taken mod 4 and the wrap gap is derived from the
@@ -3237,12 +3306,16 @@ private:
         const int wrapMax = lst.size() == 1 ? 4 : 2;
         bool valid = sect[0] >= 1 && sect[0] <= wrapMax;
         if (node.type == 1) {
+            if (anyInteriorOutOfRange(sect)) {
+                ++degradeWhy_.tNodeInterior;
+            }
             if (!valid) {
                 // Winding inconsistency (fold-damaged neighborhood): keep the
                 // rotation as ordered; the orbits touching it are counted as
                 // non-quad patches downstream instead of failing the whole
                 // build.
                 ++degradedNodes_;
+                ++degradeWhy_.tNodeWinding;
                 if (std::getenv("CYBER_QC_BIMDF_DEBUG") != nullptr) {
                     std::fprintf(stderr,
                                  "[qc] bimdf rotation mismatch: node=%zu type=%d ends=%zu sum=%d "
@@ -3296,6 +3369,22 @@ private:
         }
         phantomBump(&gq, nullptr);
         const std::size_t nE = lst.size();
+        // REFUTED (measured, corpus at 2000 quads): overriding `measuredTotal`
+        // with the topological winding — expectedTotal + nPh, rescaling the
+        // gaps onto it — and letting the projection below seat it. The
+        // reasoning was sound (the winding is the fan's seam holonomy lifted
+        // to the field's cone index, while the developed angle sum measures a
+        // map that folds; and QEx Alg. 8 can only recover a lost turn by
+        // charging +2pi to a NEGATIVE run, so the dominant failure — a
+        // valence-5 cone whose FOLD-FREE fan develops to a single quarter —
+        // is one it structurally cannot fix). It made things worse:
+        // rejected orbits bunny 47 -> 69, cheburashka 12 -> 23, rocker-arm
+        // 37 -> 39, fandisk sectors 2 -> 4. Where the recorded index and the
+        // developed geometry genuinely disagree, forcing either one corrupts
+        // the neighbouring orbits, which is what the largest-remainder
+        // comment below already warned. The disagreement is upstream — in the
+        // field's cone index or in the parameterization — not in this
+        // classifier.
         if (measuredTotal == static_cast<int>(nE) + nPh && nE > 0) {
             // One quarter per end (plus the phantom quarters merged twins
             // left on their survivors) is the ONLY assignment with every
@@ -3342,6 +3431,21 @@ private:
         for (std::size_t i = 1; repaired && i < nE; ++i) {
             repaired = sect[i] >= 1 && sect[i] <= 2;
         }
+        if (!repaired && foldRepair_ && projectSectors(gq, measuredTotal, wrapMax, sect)) {
+            // Feasible-rotation projection: the [1,2] corner/pass-through
+            // range is not only a validity check, it is what a rotation system
+            // around a node MUST satisfy. Largest-remainder rounding minimizes
+            // per-gap error while ignoring that constraint, so it can land out
+            // of range even when an in-range assignment exists — and then the
+            // node is contained on the strength of an assignment nobody would
+            // have chosen. When the measured winding admits any in-range
+            // assignment, the closest one is a strictly better estimate.
+            // Infeasible windings (T outside [nE, sum of the upper bounds])
+            // are real fold damage and still fall through to containment.
+            ++projectedNodes_;
+            ++repairedNodes_;
+            return true;
+        }
         if (repaired) {
             ++repairedNodes_;
         } else {
@@ -3349,6 +3453,7 @@ private:
             // the corrupted quarter arithmetic); orbits touching it are
             // counted as non-quad patches downstream.
             ++degradedNodes_;
+            ++degradeWhy_.fanReclass;
             if (std::getenv("CYBER_QC_BIMDF_DEBUG") != nullptr) {
                 std::fprintf(stderr,
                              "[qc] bimdf rotation mismatch: node=%zu type=%d ends=%zu "
@@ -3391,11 +3496,15 @@ private:
     std::size_t badPatches_ = 0;
     std::size_t degradedNodes_ = 0;
     std::size_t repairedNodes_ = 0;
+    std::size_t projectedNodes_ = 0;
+    TMesh::DegradeCounts degradeWhy_;
+    std::size_t underservedNodes_ = 0;
     std::size_t failedLaunches_ = 0;
     std::unordered_set<std::uint32_t> failedLaunchVertex_;
     std::vector<int> badCorners_;
     // ---- geometry capture ----
     bool geom_ = false;
+    bool foldRepair_ = false;
     // One walked face-crossing of a ray, in the same monotone `curve`
     // parameter the ray's events use.
     struct TrailSeg {
@@ -3407,6 +3516,46 @@ private:
 };
 
 }  // namespace
+
+// Closest in-range sector assignment to the measured gaps `gq` with the
+// given total, or false when no such assignment exists. Sector 0 is the
+// wrap gap (range [1, wrapMax]); every other sector is a corner (1) or a
+// pass-through (2). Deterministic: ties in the fractional excess break by
+// ascending index.
+bool projectSectors(const std::vector<double>& gq, int total, int wrapMax,
+                           std::vector<int>& sect) {
+    const std::size_t nE = gq.size();
+    if (nE == 0) {
+        return false;
+    }
+    const auto upper = [wrapMax](std::size_t i) { return i == 0 ? wrapMax : 2; };
+    int room = 0;
+    for (std::size_t i = 0; i < nE; ++i) {
+        room += upper(i) - 1;
+    }
+    const int lo = static_cast<int>(nE);
+    if (total < lo || total > lo + room) {
+        return false;  // no in-range assignment sums to this winding
+    }
+    sect.assign(nE, 1);
+    int remaining = total - lo;
+    // Hand out the surplus quarters to the gaps that measured widest.
+    std::vector<std::size_t> order(nE);
+    for (std::size_t i = 0; i < nE; ++i) {
+        order[i] = i;
+    }
+    std::stable_sort(order.begin(), order.end(),
+                     [&gq](std::size_t a, std::size_t b) { return gq[a] > gq[b]; });
+    for (const std::size_t i : order) {
+        if (remaining <= 0) {
+            break;
+        }
+        const int take = std::min(remaining, upper(i) - 1);
+        sect[i] += take;
+        remaining -= take;
+    }
+    return remaining == 0;
+}
 
 TMesh buildTMesh(const Charts& charts, const std::vector<double>& zRelaxed) {
     Builder b(charts, zRelaxed);

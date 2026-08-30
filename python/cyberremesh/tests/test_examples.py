@@ -39,6 +39,7 @@ _EXAMPLE_SCRIPTS = [
     ("14_uv_atlas.py", "14_uv_atlas.png"),
     ("16_subdivide.py", "16_subdivide.png"),
     ("21_topology_layout.py", "21_topology_layout.png"),
+    ("22_layout_robustness.py", "22_layout_robustness.png"),
 ]
 
 # Generous: these run the real pipeline, and CI runners are slow.

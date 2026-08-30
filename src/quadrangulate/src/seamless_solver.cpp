@@ -2847,14 +2847,26 @@ int solveSeamlessReduced(accel::IBackend& backend, std::size_t nCut,
         std::fprintf(
             stderr,
             "[qc] bimdf tmesh: ok=%d nodes=%zu arcs=%zu patches=%zu cones=%zu "
-            "tnodes=%zu rays=%zu steps=%zu failedRays=%zu degraded=%zu repaired=%zu "
+            "tnodes=%zu rays=%zu steps=%zu failedRays=%zu degraded=%zu repaired=%zu(proj %zu) "
             "twinMerges=%zu spurs=%zu excluded=%zu exprErr=%.2e sideMismatch=%.3f%s%s%s%s\n",
             tmesh.ok ? 1 : 0, tmesh.nodeCount, tmesh.arcs.size(), tmesh.patches.size(),
             tmesh.coneNodes, tmesh.tNodes, tmesh.raysTraced, tmesh.raySteps, tmesh.failedRays,
-            tmesh.degradedNodes, tmesh.repairedNodes, tmesh.twinMerges, tmesh.spurCollapses,
+            tmesh.degradedNodes, tmesh.repairedNodes, tmesh.projectedNodes, tmesh.twinMerges,
+            tmesh.spurCollapses,
             tmesh.excludedPatches, tmesh.maxExprErr, tmesh.maxSideMismatch,
             tmesh.reason.empty() ? "" : " reason=", tmesh.reason.c_str(),
             tmesh.rejectSummary.empty() ? "" : " ", tmesh.rejectSummary.c_str());
+        if (tmesh.excludedPatches != 0) {
+            std::fprintf(stderr,
+                         "[qc] bimdf reject why: sectors=%zu corners=%zu sideMismatch=%zu "
+                         "failedCone=%zu | degrade: boundaryFan=%zu unanchored=%zu "
+                         "tnode=%zu tnodeInterior=%zu reclass=%zu | underserved=%zu\n",
+                         tmesh.rejectWhy.sectors, tmesh.rejectWhy.corners,
+                         tmesh.rejectWhy.sideMismatch, tmesh.rejectWhy.failedCone,
+                         tmesh.degradeWhy.boundaryFan, tmesh.degradeWhy.unanchoredEnd,
+                         tmesh.degradeWhy.tNodeWinding, tmesh.degradeWhy.tNodeInterior,
+                         tmesh.degradeWhy.fanReclass, tmesh.underservedNodes);
+        }
         if (bimdfCharts->captureGeometry) {
             reportTopologyLayout(*bimdfCharts, tmesh);
         }
@@ -3576,6 +3588,9 @@ Parameterization solveParameterizationImpl(const Mesh& mesh, const SeamlessSetup
         bimdfCharts->captureGeometry = std::getenv("CYBER_ZR_LAYOUT") != nullptr;
         // Capacity, not the alive count: FaceIds are sparse after deletions.
         bimdfCharts->sourceFaceCount = mesh.faceCapacity();
+        // Phase B fold repair, opt-in until measured on the corpus: it changes
+        // the traced T-mesh and therefore the quantization.
+        bimdfCharts->foldRepair = std::getenv("CYBER_ZR_FOLD_REPAIR") != nullptr;
         bimdfCharts->nCut = nCut;
         bimdfCharts->coneIndex.assign(nCut, 0);
         bimdfCharts->vertexOfCut.assign(nCut, 0);

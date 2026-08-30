@@ -104,7 +104,7 @@ layout over one bad patch — on rocker-arm, one patch out of 199.
 | Phase | Content | Gate |
 |---|---|---|
 | **A** | `TopologyLayout`, validation, debug export | byte-identical Bi-MDF output; every currently successful layout validates |
-| **B** | fold-robust tracing: orientation-independent contour following, combinatorial patch-sector classification, deterministic exact-vertex crossings | zero organic T-mesh fallbacks from folded patch sectors; negative-index cone fixture passes |
+| **B** | fold-robust tracing: orientation-independent contour following, combinatorial patch-sector classification, deterministic exact-vertex crossings | zero organic T-mesh fallbacks from folded patch sectors; negative-index cone fixture passes — **in progress, gate not met**, see below |
 | **C** | `GeometryAnalysis`, weighted singularity cost, deterministic relocation, dipole cancellation | weighted cost improves; topological defects stay zero; geometry does not regress |
 | **D** | unified `SizingField` fusing painted density, curvature, features and thickness | painted-density, target-count and thin-feature suites; byte-identical when disabled |
 | **E** | topology-affecting flow guides (orientation vs topology mode, closed loop guides) | sphere-equator, eye-loop, mouth-loop adherence |
@@ -115,6 +115,76 @@ Phase B is the largest single unlock for the existing advanced solver: the
 relaxed map is not injective near high-distortion cones, and today a folded
 patch sector is what makes an organic mesh fall back from the global quantizer
 to per-translation greedy rounding.
+
+## Phase B: what the measurements actually say
+
+Phase B started with instrumentation, because the tracer reported *that* it
+contained a region but never *why*. It now reports both the rejection reason per
+orbit (sector winding / corner count / side mismatch / abandoned cone) and the
+degradation site per node (boundary fan / unanchored end / T-node winding /
+T-node interior / fan reclassification), plus how many nodes are genuinely
+**unseatable** — winding greater than twice their arc ends, so no in-range
+sector assignment exists at all. `examples/22_layout_robustness.py` is the
+artifact those numbers come from.
+
+Baseline, corpus at 2000 quads, adaptivity 0: 178 rejected orbits, 1
+non-closing patch, 57 abandoned launches. Reasons: 88 sector winding, 52 corner
+count, 9 side mismatch, 29 abandoned cone.
+
+Two levers landed behind `CYBER_ZR_FOLD_REPAIR`, both output-neutral on the
+corpus:
+
+* **Feasible-rotation projection.** The [1,2] corner/pass-through range is not
+  merely a validity check — it is what a rotation system around a node must
+  satisfy. Largest-remainder rounding minimizes per-gap error while ignoring
+  that constraint, so it can land out of range when an in-range assignment
+  exists. The projection takes the closest in-range assignment; infeasible
+  windings still fall through to containment.
+* **Winding lift target.** QEx Algorithm 8's lift targeted the number of
+  incident arc ends. At a negative-index cone that undercounts badly: a
+  valence-5 cone with two surviving ends lifted to 2 instead of 5. It now
+  targets the topological winding.
+
+Result: degraded nodes rocker-arm 17 → 13 and bunny 11 → 5, reclassification
+failures rocker-arm 15 → 11 and bunny 8 → 2 — and **rejected orbits unchanged**.
+The gate is not met.
+
+### Refuted: overriding the developed winding with the topological one
+
+The reasoning was sound. The winding is a topological quantity — the fan's seam
+holonomy lifted to the field's cone index — while the developed angle sum only
+measures a map that folds. And QEx Algorithm 8 can recover a lost turn *only* by
+charging +2π to a NEGATIVE run, so the dominant corpus failure is one it
+structurally cannot fix: a valence-5 cone whose **fold-free** wedge fan develops
+to a single quarter, with no negative run to charge.
+
+Forcing `measuredTotal` to the topological winding and rescaling the gaps onto
+it made things clearly worse — rejected orbits bunny 47 → 69, cheburashka
+12 → 23, rocker-arm 37 → 39, fandisk sector rejections 2 → 4. Where the recorded
+index and the developed geometry genuinely disagree, forcing either side
+corrupts the neighbouring orbits. Do not retry this without new evidence.
+
+### Where the next lever is
+
+The evidence says the classifier is largely producing the right answer and the
+layout is genuinely defective where it is contained:
+
+* The residual is an **index/geometry disagreement**, not an orientation
+  problem. The guide's framing — "topological tracing must not depend on the
+  embedding being globally orientation-preserving" — is right, and the tracer
+  already honours it; these failures are a different animal, and they live
+  upstream in the field's cone index or in the parameterization.
+* On the bunny, 37 of 57 abandoned launches are `ray reached an open boundary`,
+  not fold damage. Boundary chains already exist (`CYBER_QC_BIMDF_BARC`) and
+  take abandoned launches 20 → 1 and rejected orbits 47 → 39. They are off by
+  default because they regress the *guided rounding* — a quantization concern
+  the layout does not share. Decoupling the layout's tracing options from the
+  shipped quantizer's is the fix, and it belongs with the public `zremesher`
+  method, which owns its own quantization decisions.
+* Genuinely unseatable nodes are rare once measured with the right criterion
+  (winding > 2 × arc ends, not merely "fewer ends than winding"): fandisk 1,
+  cheburashka 2, rocker-arm 3, bunny 37 — and the bunny's 37 are exactly its
+  boundary-abandoned rays.
 
 ## Current state
 

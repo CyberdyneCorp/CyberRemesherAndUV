@@ -40,14 +40,66 @@ its own gate is measured green.
 
 ## Phase B — Organic robustness
 
-- [ ] B1. Make separatrix / contour tracing independent of UV triangle
-       orientation (combinatorial quarter-frame transport, not signed UV area).
-- [ ] B2. Replace fold-sensitive patch-sector classification with a
-       quarter-frame / combinatorial classification.
+- [x] B0. Measurement first. `examples/22_layout_robustness.py` sweeps the
+       corpus x target counts x adaptivity and reports, per cell, the T-mesh
+       and layout counters plus a breakdown of WHY each orbit was contained
+       (sector winding / corner count / side mismatch / abandoned cone), which
+       the tracer did not previously expose. Baseline at 2000 quads,
+       adaptivity 0: 178 rejected orbits, 1 non-closing patch, 57 abandoned
+       launches; reasons 88 sectors, 52 corners, 9 side mismatch, 29 abandoned
+       cone. Without this the phase is guesswork.
+- [~] B1/B2. Fold-robust classification, behind `CYBER_ZR_FOLD_REPAIR`
+       (`Charts::foldRepair`). Two levers landed, both output-neutral on the
+       corpus and both strictly better estimates:
+       * **Feasible-rotation projection** (`projectSectors`, unit-tested). The
+         [1,2] corner/pass-through range is what a rotation system around a
+         node requires, so when the measured winding admits any in-range
+         assignment, the closest one beats an out-of-range largest-remainder
+         rounding. Infeasible windings still fall through to containment.
+       * **Winding lift target**. The QEx Alg. 8 lift targeted the number of
+         incident arc ends; at a negative-index cone that undercounts badly
+         (a valence-5 cone with two surviving ends lifted to 2, not 5). It now
+         targets the topological winding.
+       Measured: degraded nodes rocker-arm 17 -> 13, bunny 11 -> 5; reclass
+       failures rocker-arm 15 -> 11, bunny 8 -> 2; **rejected orbits
+       unchanged** (37, 47) and output byte-identical. The gate is NOT met.
 - [ ] B3. Deterministic exact-vertex crossing rules (ties broken by a stable
        key, never by floating-point sign).
        Gate: zero organic T-mesh fallbacks caused by folded patch sectors on
        spot / fandisk / nefertiti; synthetic negative-index cone fixture passes.
+
+### REFUTED in Phase B (do not retry without new evidence)
+
+- **Overriding the developed winding with the topological one.** The reasoning
+  was sound: the winding is the fan's seam holonomy lifted to the field's cone
+  index, the developed angle sum only measures a map that folds, and QEx
+  Alg. 8 recovers a lost turn *only* by charging +2pi to a NEGATIVE run — so
+  the dominant corpus failure, a valence-5 cone whose **fold-free** wedge fan
+  develops to a single quarter, is one it structurally cannot fix. Forcing
+  `measuredTotal = expectedTotal + nPh` and rescaling the gaps onto it made
+  things clearly worse: rejected orbits bunny 47 -> 69, cheburashka 12 -> 23,
+  rocker-arm 37 -> 39, fandisk sector rejections 2 -> 4.
+
+### What the measurements say the next lever is
+
+The classifier is largely producing the RIGHT answer; the layout is genuinely
+defective where it is contained. Evidence:
+
+- The dominant residual is a cone where the recorded field index and the
+  developed fan geometry **disagree outright** (index -1, winding 5, versus a
+  fold-free fan developing to 1 quarter). Forcing either side over the other
+  corrupts neighbouring orbits, so the disagreement is upstream — in the
+  field's cone index or in the parameterization — not in this classifier.
+- On the bunny, 37 of 57 abandoned launches are `ray reached an open boundary`,
+  not fold damage. Boundary chains already exist (`CYBER_QC_BIMDF_BARC`) and
+  take failed launches 20 -> 1 and rejected orbits 47 -> 39, but they are off
+  by default because they regress the *guided rounding*. Decoupling the
+  layout's tracing options from the shipped quantizer's is the fix, and it
+  belongs with the public `zremesher` method (P1), which owns its own
+  quantization decisions.
+- Nodes that are genuinely UNSEATABLE (winding > 2x their arc ends) are few
+  once measured correctly: fandisk 1, cheburashka 2, rocker-arm 3, bunny 37 —
+  and the bunny's 37 are exactly its boundary-abandoned rays.
 
 ## Phase C — Topology quality
 

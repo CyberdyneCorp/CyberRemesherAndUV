@@ -33,6 +33,7 @@ EXAMPLES = [
     ("19_export_presets", "19_export_presets.png"),
     ("20_seam_paths", "20_seam_paths.png"),
     ("21_topology_layout", "21_topology_layout.png"),
+    ("22_layout_robustness", "22_layout_robustness.png"),
 ]
 
 

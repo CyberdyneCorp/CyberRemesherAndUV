@@ -36,6 +36,7 @@ so quad-dominance reads at a glance.
 | `19_export_presets.py` | per-DCC export presets — one bake, four bundles, only the normal green channel differing | `output/19_export_presets.png` |
 | `20_seam_paths.py` | auto-routed UV seam paths — valley-biased routing vs the uniform-cost shortest path | `output/20_seam_paths.png` |
 | `21_topology_layout.py` | the explicit topology layout behind a remesh — separatrix arcs, singularities and patches drawn over the quads | `output/21_topology_layout.png` |
+| `22_layout_robustness.py` | how the layout survives a folded relaxed map — contained regions and why each was contained (`--full` for the whole sweep) | `output/22_layout_robustness.png` |
 | `run_all.py` | runs all of the above + a stitched `output/gallery.png` | `output/gallery.png` |
 
 `08_load_model.py` loads a mesh and converts it to quads. It defaults to a

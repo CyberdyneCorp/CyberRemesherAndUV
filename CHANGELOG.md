@@ -50,6 +50,40 @@
   the same change. `examples/21_topology_layout.py` renders the layout's arcs
   and singularities over the quads they produced.
 
+- **Layout-containment diagnostics, and two fold-repair levers** (Phase B of the
+  same change, in progress). The tracer reported *that* it contained a region
+  but never *why*, which made the fold-robustness work guesswork. It now reports
+  the rejection reason per orbit (sector winding / corner count / side mismatch /
+  abandoned cone), the degradation site per node (boundary fan / unanchored end /
+  T-node winding / T-node interior / fan reclassification) and how many nodes are
+  genuinely unseatable — winding greater than twice their arc ends, so no
+  in-range sector assignment exists at all.
+
+  `examples/22_layout_robustness.py` is the artifact those numbers come from: it
+  sweeps the corpus against target counts and adaptivity and prints what it
+  measures, met or not. Baseline at 2000 quads: 178 rejected orbits, 1
+  non-closing patch, 57 abandoned launches; reasons 88 sector winding, 52 corner
+  count, 9 side mismatch, 29 abandoned cone.
+
+  Behind `CYBER_ZR_FOLD_REPAIR`, two levers that are strictly better estimates
+  and output-neutral on the corpus: a **feasible-rotation projection** (the
+  [1,2] corner/pass-through range is what a rotation system around a node
+  requires, so when the winding admits any in-range assignment the closest one
+  beats an out-of-range rounding) and a corrected **winding lift target** (QEx
+  Algorithm 8's lift targeted the number of incident arc ends, which undercounts
+  badly at a negative-index cone — a valence-5 cone with two surviving ends
+  lifted to 2 instead of 5). Measured: degraded nodes rocker-arm 17 → 13 and
+  bunny 11 → 5, reclassification failures rocker-arm 15 → 11 and bunny 8 → 2,
+  **rejected orbits unchanged** and output byte-identical. The Phase B gate is
+  not met.
+
+  Recorded as refuted, with numbers, so it is not retried: overriding the
+  developed winding with the topological one made things clearly worse (rejected
+  orbits bunny 47 → 69, cheburashka 12 → 23). The measurements point the next
+  lever upstream — the residual is an index/geometry disagreement at
+  negative-index cones, and 37 of the bunny's 57 abandoned launches are open
+  boundaries, not fold damage at all.
+
 
 ## [0.7.0] - 2026-08-25
 
