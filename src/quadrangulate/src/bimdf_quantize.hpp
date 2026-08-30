@@ -68,6 +68,32 @@ struct Charts {
     std::vector<std::array<float, 3>> vertexPos;
     std::vector<std::array<float, 3>> faceE0;
     std::vector<std::array<float, 3>> faceN;
+    // Source mesh FaceId per compact face. Only needed to report layout
+    // geometry back in the caller's index space; may stay empty.
+    std::vector<std::uint32_t> faceOfCompact;
+    // FaceId capacity of the SOURCE mesh, so layout face ids can be
+    // range-checked in the index space faceOfCompact maps into (ids are sparse
+    // after deletions, so this is the capacity, not the alive count). 0 when
+    // unknown.
+    std::size_t sourceFaceCount = 0;
+    // Capture the traced geometry (node positions, arc polylines) into
+    // TMesh::nodeGeom / TMesh::arcGeom. Write-only with respect to the
+    // quantizer, so it cannot change an assignment — see the geometry note on
+    // TMesh below.
+    bool captureGeometry = false;
+    // Phase B fold repair: recover a node's rotation system by projecting the
+    // measured sector gaps onto the feasible corner/pass-through range instead
+    // of containing the node. Changes the traced T-mesh, so it is opt-in until
+    // measured to win on the corpus.
+    bool foldRepair = false;
+    // QGP boundary arc chains: rays terminate ON an open boundary loop, which
+    // becomes boundary arcs and boundary nodes, instead of being abandoned.
+    // Off for the shipped quantizer — the recovered regions reshape its flow
+    // and the guided rounding regresses across the whole mu basin — but ON for
+    // the layout, which does not use the guided rounding and for which an
+    // abandoned launch is simply a hole in the graph. Measured on the bunny:
+    // abandoned launches 20 -> 1, rejected orbits 47 -> 39.
+    bool boundaryChains = false;
 
     [[nodiscard]] std::size_t uIx(std::size_t c) const { return c; }
     [[nodiscard]] std::size_t vIx(std::size_t c) const { return nCut + c; }
@@ -102,6 +128,43 @@ struct Patch {
     [[nodiscard]] bool isQuad() const { return side.size() == 4; }
 };
 
+// Geometric companion to the T-mesh, filled only when Charts::captureGeometry
+// is set. NOTHING in solveBimdf reads it: the quantizer works off Arc::len,
+// Arc::expr and the patches alone, so capturing geometry cannot move an
+// assignment. It exists so the graph can leave this file as a
+// `cyber::remesh::TopologyLayout` (topology_layout.hpp) that later stages —
+// singularity scoring, guides, symmetry, export — can consume without
+// dragging the solver's symbolic side along.
+enum class NodeGeomKind : std::uint8_t {
+    Cone,       // cross-field singularity
+    Crease,     // vertex on a pinned crease chain
+    Boundary,   // vertex on an open-surface boundary loop
+    TJunction,  // interior point where separatrices / chains meet
+    Regular     // plain mesh vertex a trace landed on exactly
+};
+
+struct NodeGeom {
+    NodeGeomKind kind = NodeGeomKind::TJunction;
+    int coneIndex = 0;
+    // Mesh vertex the node sits on; 0xFFFFFFFF for T-junctions.
+    std::uint32_t meshVertex = 0xFFFFFFFFu;
+    // A compact face containing the node (always set).
+    std::size_t face = 0;
+    std::array<float, 3> position{};
+};
+
+struct ArcPoint {
+    std::array<float, 3> position{};
+    std::size_t face = 0;  // compact face the point lies in
+};
+
+struct ArcGeom {
+    // Traced polyline from Arc::n0 to Arc::n1, both endpoints included. Empty
+    // when capture was off, or when the arc's trail was invalidated by a
+    // jittered retry after the arc had already been recorded.
+    std::vector<ArcPoint> points;
+};
+
 struct TMesh {
     bool ok = false;
     std::string reason;  // failure diagnostic when !ok
@@ -111,13 +174,29 @@ struct TMesh {
     // Diagnostics.
     std::size_t coneNodes = 0, creaseNodes = 0, tNodes = 0;
     std::size_t raysTraced = 0, raySteps = 0;
-    double maxExprErr = 0.0;        // max |expr(z_relaxed) - len| over arcs
-    double maxSideMismatch = 0.0;   // max |sum(side k) - sum(side k+2)| relaxed
-    double minArcLen = 0.0;         // most negative relaxed arc length (fold diagnostic)
-    std::size_t prunedChains = 0;   // stub crease chains dropped (phase-only pins)
-    std::size_t failedRays = 0;     // separatrix launches abandoned at folded cones
-    std::size_t degradedNodes = 0;  // nodes with fold-damaged sector windings
-    std::size_t repairedNodes = 0;  // fold-damaged fans fixed by signed-angle sectors
+    double maxExprErr = 0.0;         // max |expr(z_relaxed) - len| over arcs
+    double maxSideMismatch = 0.0;    // max |sum(side k) - sum(side k+2)| relaxed
+    double minArcLen = 0.0;          // most negative relaxed arc length (fold diagnostic)
+    std::size_t prunedChains = 0;    // stub crease chains dropped (phase-only pins)
+    std::size_t failedRays = 0;      // separatrix launches abandoned at folded cones
+    std::size_t degradedNodes = 0;   // nodes with fold-damaged sector windings
+    std::size_t repairedNodes = 0;   // fold-damaged fans fixed by signed-angle sectors
+    std::size_t projectedNodes = 0;  // of those, fixed by the feasible-rotation projection
+    // Where the degraded nodes came from. The first two ZERO every sector at
+    // the node, which poisons every orbit through it; the last two keep an
+    // ordering and only poison when a sector lands outside [1, 2].
+    struct DegradeCounts {
+        std::size_t boundaryFan = 0;    // open-surface fan: no closed winding to classify
+        std::size_t unanchoredEnd = 0;  // arc end's wedge missing from the closed fan walk
+        std::size_t tNodeWinding = 0;   // T-node sector sum disagrees with the winding
+        std::size_t tNodeInterior = 0;  // T-node interior sector outside [1, 2]
+        std::size_t fanReclass = 0;     // signed-angle reclassification stayed out of range
+    };
+    DegradeCounts degradeWhy;
+    // Nodes carrying fewer arc ends than their winding. Their wide sectors are
+    // CORRECT, not fold damage — the layout is genuinely missing separatrices
+    // there (abandoned launches, or ends consumed by twin-arc surgery).
+    std::size_t underservedNodes = 0;
     std::size_t twinMerges = 0;     // coincident twin-arc pairs merged (bigon collapse)
     std::size_t spurCollapses = 0;  // dangling out-and-back arcs removed
     // Local containment: an orbit that fails validation (or touches a cone
@@ -127,12 +206,41 @@ struct TMesh {
     // valid remainder of the T-mesh proceeds.
     std::size_t excludedPatches = 0;  // rejected orbits (locally contained)
     std::string rejectSummary;        // corner histogram of rejected orbits
-    std::vector<char> arcExcluded;    // per (compact) arc: no accepted orbit covers it
+    // Why those orbits were rejected. Diagnostic only — the four reasons are
+    // checked in this order and the first one that fires is counted, so they
+    // sum to excludedPatches. Which one dominates is what decides whether a
+    // model's containment is a FOLD problem (sectors / sideMismatch) or a
+    // COVERAGE problem (failedCone, typically an open boundary the tracer was
+    // not allowed to terminate on).
+    struct RejectCounts {
+        std::size_t sectors = 0;       // fold-damaged sector winding
+        std::size_t corners = 0;       // corner count outside [3, 6]
+        std::size_t sideMismatch = 0;  // 4 corners, opposite relaxed sides disagree
+        std::size_t failedCone = 0;    // touches a cone with an abandoned launch
+    };
+    RejectCounts rejectWhy;
+    std::vector<char> arcExcluded;  // per (compact) arc: no accepted orbit covers it
+    // Traced geometry (Charts::captureGeometry). nodeGeom is indexed by node
+    // id and sized nodeCount; arcGeom is parallel to `arcs`. Both empty when
+    // capture was off.
+    std::vector<NodeGeom> nodeGeom;
+    std::vector<ArcGeom> arcGeom;
 };
 
 // zValue(i) must return the relaxed value of promoted variable i (used only
 // for the expr(z) == len self-check diagnostics).
 TMesh buildTMesh(const Charts& charts, const std::vector<double>& zRelaxed);
+
+// Closest in-range sector assignment around one layout node to the measured
+// quarter gaps `gq`, summing to `total`. Sector 0 is the wrap gap (range
+// [1, wrapMax]); every other sector must be a corner (1) or a pass-through
+// (2), which is what a rotation system around a node requires. Returns false
+// when no such assignment exists — an infeasible winding is real fold damage,
+// and the node is contained rather than forced into range.
+//
+// Exposed for testing; the tracer calls it under Charts::foldRepair.
+[[nodiscard]] bool projectSectors(const std::vector<double>& gq, int total, int wrapMax,
+                                  std::vector<int>& sect);
 
 struct BimdfResult {
     bool ok = false;

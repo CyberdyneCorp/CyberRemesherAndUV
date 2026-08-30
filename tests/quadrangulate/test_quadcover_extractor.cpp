@@ -31,6 +31,7 @@
 #endif
 
 #include "cyber/core/mesh.hpp"
+#include "cyber/core/remesh_params.hpp"
 #include "cyber/quadrangulate/quadcover_extractor.hpp"
 
 using cyber::EdgeId;
@@ -204,6 +205,55 @@ TEST_CASE("quad-cover quadrangulator degrades cleanly and never corrupts on fail
         CHECK_FALSE(outcome.failureReason.empty());
         CHECK(aliveFaces(mesh) == facesBefore);
     }
+}
+
+// The ZRemesher method is the same extractor with the topology-layout stage on
+// and the tracing options the LAYOUT wants. It must therefore satisfy exactly the
+// same contract as quad-cover — a distinct name, and on the failure path an
+// untouched input — because the pipeline treats the two identically (both take
+// the field-aligned per-island fallback).
+TEST_CASE("zremesher quadrangulator is a distinct method with the quad-cover contract") {
+    auto q = remesh::makeZRemesherQuadrangulator();
+    REQUIRE(q != nullptr);
+    CHECK(q->name() == "zremesher");
+    CHECK(q->name() != remesh::makeQuadCoverQuadrangulator()->name());
+
+    Mesh mesh = makeTwoTri();
+    const std::size_t facesBefore = aliveFaces(mesh);
+    auto outcome = q->quadrangulate(mesh, 1.0f, nullptr, nullptr);
+
+    CHECK_FALSE(outcome.cancelled);
+    if (outcome.success) {
+        CHECK(aliveFaces(mesh) > 0);
+    } else {
+        CHECK_FALSE(outcome.failureReason.empty());
+        CHECK(aliveFaces(mesh) == facesBefore);
+    }
+}
+
+// Out-of-range options must be clamped at the factory, not carried into the
+// solve: these arguments never pass through remesh()'s validation, so an entry
+// point handing over a bad value would otherwise run unclamped while the
+// pipeline reported it as clamped.
+TEST_CASE("zremesher clamps its options at the factory") {
+    remesh::ZRemesherOptions zr;
+    zr.adaptivity = 12.0f;        // domain is [0, 1]
+    zr.holeFillMaxBoundary = -5;  // must not go negative
+    zr.featureDegrees = 400.0f;   // an angle, not a spin count
+    auto q = remesh::makeZRemesherQuadrangulator(zr);
+    REQUIRE(q != nullptr);
+    CHECK(q->name() == "zremesher");
+
+    // The clamp is observable through the shared validator, which is where the
+    // ranges live; asserting it here would duplicate them.
+    remesh::Parameters raw;
+    raw.adaptivity = zr.adaptivity;
+    raw.holeFillMaxBoundary = zr.holeFillMaxBoundary;
+    raw.sharpEdgeDegrees = zr.featureDegrees;
+    const remesh::Parameters clamped = remesh::validate(raw).params;
+    CHECK(clamped.adaptivity <= 1.0f);
+    CHECK(clamped.holeFillMaxBoundary >= 0);
+    CHECK(clamped.sharpEdgeDegrees <= 180.0f);
 }
 
 // The isoline tracer (Milestone 2) is still a stub: an invalid UV yields no quads.

@@ -14,6 +14,7 @@
 #include <numeric>
 #include <queue>
 #include <set>
+#include <string>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -22,7 +23,10 @@
 #include "cyber/accel/buffer.hpp"
 #include "cyber/accel/primitives.hpp"
 #include "cyber/core/math.hpp"
+#include "cyber/quadrangulate/geometry_analysis.hpp"
+#include "cyber/quadrangulate/layout_score.hpp"
 #include "sparse_cholesky.hpp"
+#include "topology_layout_build.hpp"
 
 // Native QuadCover seamless-UV — Milestone 1 (docs/native-miq-plan.md): the frame-field
 // setup a seamless parameterization is solved on. Reuses the per-face CrossField; adds
@@ -363,6 +367,30 @@ void annihilateFieldDipoles(const Mesh& mesh, CrossField& field,
         return;
     }
 
+    // Cancellation order decides WHICH pairs survive when partners are
+    // contested: the pass walks the +1 cones and gives each the nearest free -1,
+    // so whoever goes first wins the partner. Historically that order was vertex
+    // id — arbitrary with respect to quality.
+    //
+    // Under CYBER_ZR_CONE_PRIORITY the worst-PLACED cones go first instead, so
+    // the cones the layout metric charges most get the chance to be removed
+    // rather than whichever happened to have the lowest id. Same guards, same
+    // count of cancellations available, different choice of which.
+    if (std::getenv("CYBER_ZR_CONE_PRIORITY") != nullptr) {
+        // Salience only — no target edge length and no BVH here, so the thin
+        // term is absent and the ranking rests on curvature and feature
+        // proximity, which is what this pass can actually act on.
+        const GeometryAnalysis salience = analyzeGeometry(mesh, 0.0f);
+        std::stable_sort(plusCones.begin(), plusCones.end(), [&salience](VertexId a, VertexId b) {
+            const double ca = singularityCost(a, 1, salience);
+            const double cb = singularityCost(b, 1, salience);
+            if (ca != cb) {
+                return ca > cb;  // worst placed first
+            }
+            return a.value < b.value;  // stable tie-break
+        });
+    }
+
     const std::vector<char> pinned = fieldPinnedFaces(mesh, creaseAlignSupport);
 
     // An edge the cancellation path (and the jump system) may use: interior, non-feature, and
@@ -455,14 +483,28 @@ void annihilateFieldDipoles(const Mesh& mesh, CrossField& field,
     std::vector<char> edgeSeen(mesh.edgeCapacity(), 0);
 
     int pairsTried = 0, cancelled = 0, rejectedEdit = 0, rejectedRelax = 0, rejectedTopo = 0,
-        rejectedCurv = 0;
+        rejectedCurv = 0, relocated = 0;
 
     // Progressive matching: tight pairs first (they are the least ambiguous field noise), the
     // pairing radius widening per inner round; failed pairs are retried in later outer rounds
     // because a neighbouring cancellation changes the local field they were rejected on.
     constexpr int kMaxRounds = 4;
     std::set<std::pair<Index, Index>> failedPairs;
-    const auto cancelOnePair = [&](VertexId v0, int depthLimit) {
+    // Salience for relocation targets, computed once (curvature + feature
+    // proximity; no BVH here, so the thin term is absent).
+    std::unique_ptr<GeometryAnalysis> salience;
+    const auto placementCost = [&](VertexId v) {
+        return salience ? singularityCost(v, 1, *salience) : 0.0;
+    };
+
+    // One path edit. In CANCEL mode the path runs from a +1 cone to a -1 cone
+    // and both end at index 0. In RELOCATE mode it runs from a +1 cone to a
+    // REGULAR vertex that is a better place to sit, and the +1 moves there:
+    // same region, same disk-topology and curvature guards, same frozen-jump
+    // relax, same verify-and-revert. Only the endpoint's target index differs,
+    // which is why relocation costs a parameter here rather than a second
+    // implementation of all of that.
+    const auto cancelOnePair = [&](VertexId v0, int depthLimit, bool relocate) {
         // BFS over usable edges to the nearest unmatched -1 cone within depthLimit hops.
         std::fill(parent.begin(), parent.end(), kInvalidIndex);
         std::vector<char> visited(mesh.vertexCapacity(), 0);
@@ -487,7 +529,13 @@ void annihilateFieldDipoles(const Mesh& mesh, CrossField& field,
                 }
                 visited[w.value] = 1;
                 parent[w.value] = e.value;
-                if (kOrig[w.value] == -1 && !matched[w.value]) {
+                // Cancel: the nearest free -1. Relocate: the nearest regular
+                // vertex that is a STRICTLY better place for this cone, so a
+                // move can never be a lateral shuffle.
+                const bool isTarget = relocate ? (kOrig[w.value] == 0 && !matched[w.value] &&
+                                                  placementCost(w) < placementCost(v0) - 1e-6)
+                                               : (kOrig[w.value] == -1 && !matched[w.value]);
+                if (isTarget) {
                     vEnd = w;
                     break;
                 }
@@ -685,7 +733,10 @@ void annihilateFieldDipoles(const Mesh& mesh, CrossField& field,
                 jump[e.value] -= dq;
             }
         }
-        if (editOk && kj(path.back()) != 0) {
+        // The endpoint absorbs the cone in relocate mode, and cancels it in
+        // cancel mode.
+        const int endWant = relocate ? kOrig[vEnd.value] + 1 : 0;
+        if (editOk && kj(path.back()) != endWant) {
             editOk = false;
         }
         if (!editOk) {
@@ -768,7 +819,7 @@ void annihilateFieldDipoles(const Mesh& mesh, CrossField& field,
             }
             bool verifyOk = true;
             for (const VertexId u : regionVerts) {
-                const int want = (u == v0 || u == vEnd) ? 0 : kOrig[u.value];
+                const int want = (u == v0) ? 0 : (u == vEnd) ? endWant : kOrig[u.value];
                 if (vertexIndex(mesh, field, u) != want) {
                     verifyOk = false;
                     break;
@@ -785,10 +836,16 @@ void annihilateFieldDipoles(const Mesh& mesh, CrossField& field,
                 ++rejectedRelax;
             } else {
                 kOrig[v0.value] = 0;
-                kOrig[vEnd.value] = 0;
+                kOrig[vEnd.value] = endWant;
                 matched[v0.value] = 1;
+                // Marked either way: in relocate mode this stops the same cone
+                // being walked again within a run, which would let it oscillate
+                // between two vertices of nearly equal cost.
                 matched[vEnd.value] = 1;
                 ++cancelled;
+                if (relocate) {
+                    ++relocated;
+                }
                 ok = true;
             }
         }
@@ -810,7 +867,7 @@ void annihilateFieldDipoles(const Mesh& mesh, CrossField& field,
         bool progress = false;
         for (int d = 1; d <= radius; ++d) {
             for (const VertexId v0 : plusCones) {
-                if (!matched[v0.value] && cancelOnePair(v0, d)) {
+                if (!matched[v0.value] && cancelOnePair(v0, d, false)) {
                     progress = true;
                 }
             }
@@ -821,12 +878,48 @@ void annihilateFieldDipoles(const Mesh& mesh, CrossField& field,
         failedPairs.clear();  // neighbouring cancellations changed the field: retry rejects
     }
 
+    // Relocation (CYBER_ZR_RELOCATE): a cone that could not be cancelled is
+    // still somewhere, and where it sits is what the layout metric charges.
+    // Move the survivors that sit worst, worst first, to the nearest strictly
+    // better vertex. Cancellation runs first because removing a cone always
+    // beats moving it.
+    if (std::getenv("CYBER_ZR_RELOCATE") != nullptr) {
+        salience = std::make_unique<GeometryAnalysis>(analyzeGeometry(mesh, 0.0f));
+        std::vector<VertexId> survivors;
+        for (const VertexId v : plusCones) {
+            if (!matched[v.value] && kOrig[v.value] == 1) {
+                survivors.push_back(v);
+            }
+        }
+        std::stable_sort(survivors.begin(), survivors.end(), [&](VertexId a, VertexId b) {
+            const double ca = placementCost(a);
+            const double cb = placementCost(b);
+            return ca != cb ? ca > cb : a.value < b.value;
+        });
+        failedPairs.clear();
+        for (int round = 0; round < kMaxRounds; ++round) {
+            bool progress = false;
+            for (int d = 1; d <= radius; ++d) {
+                for (const VertexId v0 : survivors) {
+                    if (!matched[v0.value] && cancelOnePair(v0, d, true)) {
+                        progress = true;
+                    }
+                }
+            }
+            if (!progress) {
+                break;
+            }
+            failedPairs.clear();
+        }
+    }
+
     if (std::getenv("CYBER_QC_DEBUG") != nullptr) {
         std::fprintf(stderr,
                      "[qc] dipole merge: +cones=%zu pairsTried=%d cancelled=%d "
-                     "rejectedEdit=%d rejectedRelax=%d rejectedTopo=%d rejectedCurv=%d\n",
+                     "rejectedEdit=%d rejectedRelax=%d rejectedTopo=%d rejectedCurv=%d "
+                     "relocated=%d\n",
                      plusCones.size(), pairsTried, cancelled, rejectedEdit, rejectedRelax,
-                     rejectedTopo, rejectedCurv);
+                     rejectedTopo, rejectedCurv, relocated);
     }
 
     // Blocking census (CYBER_QC_FIELD_STATS): for each +cone still unmatched, is its failure a
@@ -902,7 +995,7 @@ int SeamlessSetup::totalIndex() const {
 
 SeamlessSetup buildSeamlessSetup(const Mesh& mesh, int iterations, accel::IBackend& backend,
                                  bool featureBinding, const std::vector<char>* creaseAlignSupport,
-                                 const GuidanceField* guidance) {
+                                 const GuidanceField* guidance, CrossFieldSource fieldSource) {
     SeamlessSetup setup;
     if (mesh.faceCapacity() == 0) {
         return setup;
@@ -914,7 +1007,10 @@ SeamlessSetup buildSeamlessSetup(const Mesh& mesh, int iterations, accel::IBacke
     // cones globally where single-level smoothing gets stuck (nefertiti
     // cyber-pure 220 -> 176 cones, sphere 35 -> 21). Kill switch restores the
     // stock single-level field.
-    if (std::getenv("CYBER_QC_NO_CROSSFIELD_MULTIRES") == nullptr) {
+    const bool multires = fieldSource == CrossFieldSource::Multiresolution ||
+                          (fieldSource == CrossFieldSource::Auto &&
+                           std::getenv("CYBER_QC_NO_CROSSFIELD_MULTIRES") == nullptr);
+    if (multires) {
         setup.field = computeCrossFieldFromOrientation(mesh, iterations, backend, 45.0f,
                                                        creaseAlignSupport, guidance);
     } else {
@@ -1799,6 +1895,99 @@ std::size_t winslowUntangle(const FoldRepairContext& ctx, std::size_t nCut,
     return foldCount();
 }
 
+// Promote the traced T-mesh to a TopologyLayout, validate it, and report it
+// (CYBER_ZR_LAYOUT). With a value other than "1" the value is a path prefix and
+// the layout is also written to <prefix>.json and <prefix>.obj, so it can be
+// diffed between runs and opened next to the output mesh in a viewer.
+void reportTopologyLayout(const bimdf::Charts& charts, const bimdf::TMesh& tmesh,
+                          const GeometryAnalysis& geometry) {
+    TopologyLayout layout = layoutFromTMesh(charts, tmesh);
+    const LayoutValidation v = validateTopologyLayout(layout, charts.sourceFaceCount);
+    layout.valid = v.ok;
+    layout.invalidReason = v.error;
+    layout.nonClosingPatches = v.nonClosingPatches;
+    // A patch whose boundary walk does not close is contained the way a
+    // rejected orbit is: its arcs are marked excluded so no later stage
+    // injects against them, and the sound remainder proceeds.
+    for (const LayoutPatchId p : layout.nonClosingPatches) {
+        for (const auto& side : layout.patches[p].sides) {
+            for (const LayoutArcId a : side) {
+                layout.arcs[a].excluded = true;
+            }
+        }
+    }
+    const LayoutStats st = layout.stats();
+    std::fprintf(stderr,
+                 "[zr] layout: valid=%d nodes=%zu arcs=%zu patches=%zu sing=%zu tnodes=%zu "
+                 "feature=%zu boundary=%zu excluded=%zu nonQuad=%zu nonClosing=%zu index=%d%s%s\n",
+                 layout.valid ? 1 : 0, st.nodes, st.arcs, st.patches, st.singularities,
+                 st.tJunctions, st.featureArcs, st.boundaryArcs, st.excludedArcs, st.nonQuadPatches,
+                 st.nonClosingPatches, st.totalIndex,
+                 layout.valid ? "" : " reason=", v.error.c_str());
+    // Where the cones ended up, not just how many there are. A layout with the
+    // same cone count can be far better or far worse depending on whether they
+    // sit in broad smooth regions or on creases, silhouettes and thin features
+    // — so the weighted cost is the Phase C headline, and the raw count is
+    // deliberately not the primary number.
+    //
+    const SingularityMetrics sing = scoreSingularities(layout, geometry);
+    std::fprintf(stderr,
+                 "[zr] singularities: count=%zu weightedCost=%.2f mean=%.2f worst=%.2f "
+                 "featureInfluence(mean=%.3f max=%.3f) onFeature=%zu (%.1f%% of cost) "
+                 "totalIndex=%d\n",
+                 sing.count, sing.weightedCost, sing.meanCost, sing.worstCost,
+                 sing.featureInfluenceMean, sing.featureInfluenceMax, sing.onFeature,
+                 sing.weightedCost > 0.0 ? 100.0 * sing.onFeatureCost / sing.weightedCost : 0.0,
+                 sing.totalIndex);
+    // Crease-fragmentation check for the metric itself. The feature term can
+    // only tell a cone ON a crease from a cone AT a corner if the crease
+    // polylines are intact; where the isotropic pre-remesh has shattered them,
+    // every fragment END looks like a corner and the term goes inert. Reported
+    // so a reader can see when the feature term is trustworthy.
+    {
+        std::size_t featureVerts = 0, cornerVerts = 0;
+        for (std::size_t iv = 0; iv < geometry.featureInfluence.size(); ++iv) {
+            if (geometry.featureInfluence[iv] >= 1.0f - 1e-6f) {
+                ++featureVerts;
+                cornerVerts += geometry.featureCorner[iv] >= 0.5f ? 1u : 0u;
+            }
+        }
+        if (featureVerts != 0) {
+            std::fprintf(
+                stderr,
+                "[zr] creases: featureVertices=%zu junctions=%zu (%.0f%% — a high "
+                "share means shattered crease polylines, and an inert feature term)\n",
+                featureVerts, cornerVerts,
+                100.0 * static_cast<double>(cornerVerts) / static_cast<double>(featureVerts));
+        }
+    }
+    std::fprintf(
+        stderr,
+        "[zr] cost split: count=%.1f curvature=%.1f feature=%.1f thin=%.1f "
+        "boundary=%.1f | movable=%.1f%% (the count term is irreducible, so it "
+        "bounds what relocation can win)\n",
+        sing.countCost, sing.curvatureCost, sing.featureCost, sing.thinCost, sing.boundaryCost,
+        sing.weightedCost > 0.0 ? 100.0 * (sing.weightedCost - sing.countCost) / sing.weightedCost
+                                : 0.0);
+    const char* dest = std::getenv("CYBER_ZR_LAYOUT");
+    if (dest == nullptr || std::string(dest) == "1") {
+        return;
+    }
+    const auto write = [dest](const char* ext, const std::string& text) {
+        const std::string path = std::string(dest) + ext;
+        std::FILE* f = std::fopen(path.c_str(), "wb");
+        if (f == nullptr) {
+            std::fprintf(stderr, "[zr] layout: cannot write %s\n", path.c_str());
+            return;
+        }
+        std::fwrite(text.data(), 1, text.size(), f);
+        std::fclose(f);
+        std::fprintf(stderr, "[zr] layout: wrote %s (%zu bytes)\n", path.c_str(), text.size());
+    };
+    write(".json", layoutToJson(layout));
+    write(".obj", layoutToObj(layout));
+}
+
 int solveSeamlessReduced(accel::IBackend& backend, std::size_t nCut,
                          const std::vector<std::unordered_map<std::size_t, float>>& rows,
                          const std::vector<float>& bu, const std::vector<float>& bv,
@@ -1807,7 +1996,8 @@ int solveSeamlessReduced(accel::IBackend& backend, std::size_t nCut,
                          const CancelToken* cancel = nullptr,
                          SeamlessSolveCacheImpl* cache = nullptr,
                          bimdf::Charts* bimdfCharts = nullptr,
-                         const FoldRepairContext* foldCtx = nullptr) {
+                         const FoldRepairContext* foldCtx = nullptr,
+                         const GeometryAnalysis* layoutGeometry = nullptr) {
     const std::size_t nSeam = seams.size();
     const std::size_t nUv = 2 * nCut;
     // Feature-seam integer pinning (docs/ROADMAP.md 2026-08-01 priority 1;
@@ -2798,14 +2988,28 @@ int solveSeamlessReduced(accel::IBackend& backend, std::size_t nCut,
         std::fprintf(
             stderr,
             "[qc] bimdf tmesh: ok=%d nodes=%zu arcs=%zu patches=%zu cones=%zu "
-            "tnodes=%zu rays=%zu steps=%zu failedRays=%zu degraded=%zu repaired=%zu "
+            "tnodes=%zu rays=%zu steps=%zu failedRays=%zu degraded=%zu repaired=%zu(proj %zu) "
             "twinMerges=%zu spurs=%zu excluded=%zu exprErr=%.2e sideMismatch=%.3f%s%s%s%s\n",
             tmesh.ok ? 1 : 0, tmesh.nodeCount, tmesh.arcs.size(), tmesh.patches.size(),
             tmesh.coneNodes, tmesh.tNodes, tmesh.raysTraced, tmesh.raySteps, tmesh.failedRays,
-            tmesh.degradedNodes, tmesh.repairedNodes, tmesh.twinMerges, tmesh.spurCollapses,
-            tmesh.excludedPatches, tmesh.maxExprErr, tmesh.maxSideMismatch,
+            tmesh.degradedNodes, tmesh.repairedNodes, tmesh.projectedNodes, tmesh.twinMerges,
+            tmesh.spurCollapses, tmesh.excludedPatches, tmesh.maxExprErr, tmesh.maxSideMismatch,
             tmesh.reason.empty() ? "" : " reason=", tmesh.reason.c_str(),
             tmesh.rejectSummary.empty() ? "" : " ", tmesh.rejectSummary.c_str());
+        if (tmesh.excludedPatches != 0) {
+            std::fprintf(stderr,
+                         "[qc] bimdf reject why: sectors=%zu corners=%zu sideMismatch=%zu "
+                         "failedCone=%zu | degrade: boundaryFan=%zu unanchored=%zu "
+                         "tnode=%zu tnodeInterior=%zu reclass=%zu | underserved=%zu\n",
+                         tmesh.rejectWhy.sectors, tmesh.rejectWhy.corners,
+                         tmesh.rejectWhy.sideMismatch, tmesh.rejectWhy.failedCone,
+                         tmesh.degradeWhy.boundaryFan, tmesh.degradeWhy.unanchoredEnd,
+                         tmesh.degradeWhy.tNodeWinding, tmesh.degradeWhy.tNodeInterior,
+                         tmesh.degradeWhy.fanReclass, tmesh.underservedNodes);
+        }
+        if (bimdfCharts->captureGeometry) {
+            reportTopologyLayout(*bimdfCharts, tmesh, *layoutGeometry);
+        }
         // Reduce every arc-length expression onto the reduced basis w (used
         // for the back-substitution and the post-solve deviation report).
         if (tmesh.ok) {
@@ -3426,8 +3630,8 @@ namespace {
 Parameterization solveParameterizationImpl(const Mesh& mesh, const SeamlessSetup& setup,
                                            float spacing, accel::IBackend& backend,
                                            const CancelToken* cancel, double* probeCellArea,
-                                           SeamlessSolveCache* cache,
-                                           const GuidanceField* density) {
+                                           SeamlessSolveCache* cache, const GuidanceField* density,
+                                           const SeamlessLayoutOptions* layoutOpts) {
     Parameterization out;
     if (!setup.valid || spacing <= 0.0f || mesh.faceCapacity() == 0) {
         return out;
@@ -3514,9 +3718,35 @@ Parameterization solveParameterizationImpl(const Mesh& mesh, const SeamlessSetup
     // and seam-side face indices for the motorcycle-graph tracer. Built only
     // when the opt-in flag is set; the default path is untouched.
     std::unique_ptr<bimdf::Charts> bimdfCharts;
+    // Per-vertex salience for the layout's singularity metric; only built when
+    // a layout is actually requested.
+    std::unique_ptr<GeometryAnalysis> layoutGeometry;
     std::unordered_map<Index, std::size_t> faceToCompact;
-    if (std::getenv("CYBER_QC_BIMDF") != nullptr && probeCellArea == nullptr) {
+    const bool wantLayout =
+        (layoutOpts != nullptr && layoutOpts->capture) || std::getenv("CYBER_ZR_LAYOUT") != nullptr;
+    if ((std::getenv("CYBER_QC_BIMDF") != nullptr || wantLayout) && probeCellArea == nullptr) {
         bimdfCharts = std::make_unique<bimdf::Charts>();
+        // ZRemesher topology layout (CYBER_ZR_LAYOUT): the tracer keeps the
+        // node positions and arc polylines it otherwise throws away, so the
+        // T-mesh can be promoted to a TopologyLayout. Write-only with respect
+        // to the quantizer, so the assignment is unaffected either way.
+        bimdfCharts->captureGeometry = wantLayout;
+        // Capacity, not the alive count: FaceIds are sparse after deletions.
+        bimdfCharts->sourceFaceCount = mesh.faceCapacity();
+        // Phase B fold repair, opt-in until measured on the corpus: it changes
+        // the traced T-mesh and therefore the quantization.
+        bimdfCharts->foldRepair = (layoutOpts != nullptr && layoutOpts->foldRepair) ||
+                                  std::getenv("CYBER_ZR_FOLD_REPAIR") != nullptr;
+        bimdfCharts->boundaryChains = layoutOpts != nullptr && layoutOpts->boundaryChains;
+        // Where the cones land is what the Phase C metric scores, so the
+        // salience fields are computed here, on the work mesh the solve is
+        // actually running against.
+        //
+        // No BVH: the thickness probe needs one over the SOURCE surface, and
+        // this is the isotropic work mesh mid-solve. thinFeatureRisk therefore
+        // stays zero and its term drops out of the cost rather than being
+        // guessed at.
+        layoutGeometry = std::make_unique<GeometryAnalysis>(analyzeGeometry(mesh, spacing));
         bimdfCharts->nCut = nCut;
         bimdfCharts->coneIndex.assign(nCut, 0);
         bimdfCharts->vertexOfCut.assign(nCut, 0);
@@ -3583,6 +3813,7 @@ Parameterization solveParameterizationImpl(const Mesh& mesh, const SeamlessSetup
                 bimdfCharts->vertexPos[vv] = {pp.x, pp.y, pp.z};
             }
             bimdfCharts->faces.push_back(fd.cut);
+            bimdfCharts->faceOfCompact.push_back(static_cast<std::uint32_t>(fi));
             const Vec3 fn = cross(fd.e0, fd.e1);
             bimdfCharts->faceE0.push_back({fd.e0.x, fd.e0.y, fd.e0.z});
             bimdfCharts->faceN.push_back({fn.x, fn.y, fn.z});
@@ -4162,7 +4393,7 @@ Parameterization solveParameterizationImpl(const Mesh& mesh, const SeamlessSetup
     // it scales to hundreds of cones (spot: ~350 seam edges), reconciling branch-point holonomy.
     if (!seams.empty()) {
         solveSeamlessReduced(backend, nCut, rows, bu0, bv0, seams, gauges, u, v, cancel, cacheImpl,
-                             bimdfCharts.get(), foldCtx.get());
+                             bimdfCharts.get(), foldCtx.get(), layoutGeometry.get());
     }
     foldCensusPhase("final");
     statsGradHist("reduced");
@@ -4196,16 +4427,19 @@ Parameterization solveParameterizationImpl(const Mesh& mesh, const SeamlessSetup
 
 Parameterization solveParameterization(const Mesh& mesh, const SeamlessSetup& setup, float spacing,
                                        accel::IBackend& backend, const CancelToken* cancel,
-                                       SeamlessSolveCache* cache, const GuidanceField* density) {
-    return solveParameterizationImpl(mesh, setup, spacing, backend, cancel, nullptr, cache,
-                                     density);
+                                       SeamlessSolveCache* cache, const GuidanceField* density,
+                                       const SeamlessLayoutOptions* layout) {
+    return solveParameterizationImpl(mesh, setup, spacing, backend, cancel, nullptr, cache, density,
+                                     layout);
 }
 
 double relaxedCellArea(const Mesh& mesh, const SeamlessSetup& setup, float spacing,
                        accel::IBackend& backend, const CancelToken* cancel,
                        SeamlessSolveCache* cache, const GuidanceField* density) {
     double cells = -1.0;
-    (void)solveParameterizationImpl(mesh, setup, spacing, backend, cancel, &cells, cache, density);
+    // The calibration probe never traces a T-mesh, so it needs no layout options.
+    (void)solveParameterizationImpl(mesh, setup, spacing, backend, cancel, &cells, cache, density,
+                                    nullptr);
     return cells;
 }
 

@@ -112,7 +112,9 @@ class CyberRemeshParams(Structure):
         ("adaptivity", c_float),
         ("pure_quads", c_int32),  # C int (0/1)
         ("hole_fill_max_boundary", c_int32),
-        ("quad_method", c_int32),  # 0 = field-aligned, 1 = Instant-Meshes extractor
+        # 0 = field-aligned, 1 = Instant-Meshes, 2 = integer, 3 = quad-cover,
+        # 4 = zremesher
+        ("quad_method", c_int32),
     ]
 
 

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <vector>
 
@@ -48,6 +49,20 @@ struct SeamlessSetup {
     [[nodiscard]] int totalIndex() const;
 };
 
+// Which cross field a setup is built from.
+//
+// The two differ in where they place cones: the multiresolution hierarchy
+// decides globally, which single-level smoothing can get stuck on, but it is
+// not uniformly better — measured per model, each wins on some. `Auto` keeps
+// the shipped choice (multiresolution unless CYBER_QC_NO_CROSSFIELD_MULTIRES
+// says otherwise); naming one explicitly is what lets a caller solve BOTH and
+// compare, without reaching for a process-global environment variable to do it.
+enum class CrossFieldSource : std::uint8_t {
+    Auto,
+    Multiresolution,
+    SingleLevel,
+};
+
 // Build the M1 setup: cross field (via computeCrossField, `iterations` smoothing sweeps),
 // per-edge period jumps, per-vertex singularity indices, and a cut graph. Returns
 // valid == false only for an empty/degenerate mesh.
@@ -61,7 +76,8 @@ struct SeamlessSetup {
 // field build textually unchanged.
 [[nodiscard]] SeamlessSetup buildSeamlessSetup(
     const Mesh& mesh, int iterations, accel::IBackend& backend, bool featureBinding = false,
-    const std::vector<char>* creaseAlignSupport = nullptr, const GuidanceField* guidance = nullptr);
+    const std::vector<char>* creaseAlignSupport = nullptr, const GuidanceField* guidance = nullptr,
+    CrossFieldSource fieldSource = CrossFieldSource::Auto);
 
 // Euler characteristic V - E + F of the mesh cut open along `setup.isCutEdge`: each cut
 // edge is split so the two sides no longer share it. A cut graph that opens a closed
@@ -91,6 +107,36 @@ struct Parameterization {
     bool valid = false;
 };
 
+// Topology-layout options for the seamless solve (ZRemesher, Phase A/B).
+//
+// These select what the T-MESH TRACER does, which the shipped quantizer and the
+// layout want differently: the quantizer's defaults are tuned for its guided
+// rounding, while the layout wants the most complete graph it can get and does
+// not use that rounding at all. Keeping them here — rather than reading the
+// environment deep inside the tracer — is what lets the `zremesher` method own
+// its own tracing without changing the shipped path.
+//
+// A default-constructed instance (or a null pointer) reproduces today's
+// behaviour exactly; the CYBER_ZR_* / CYBER_QC_BIMDF_BARC environment variables
+// still force each option on for support and A/B work.
+struct SeamlessLayoutOptions {
+    // Keep the traced node positions and arc polylines, and report/validate the
+    // resulting TopologyLayout.
+    bool capture = false;
+    // Terminate separatrices on open-surface boundary loops instead of
+    // abandoning them (QGP boundary arcs).
+    bool boundaryChains = false;
+    // Recover a node's rotation system by projecting onto the feasible
+    // corner/pass-through range instead of containing the node.
+    bool foldRepair = false;
+    // Size the solve substrate from the unified sizing field — feature
+    // proximity and thin-feature risk on top of the curvature adaptivity and
+    // painted density the isotropic stage already derives. This is what keeps a
+    // plate or tube thinner than one target edge from collapsing before the
+    // field ever sees it.
+    bool unifiedSizing = false;
+};
+
 // Opaque cache for the direct (sparse-Cholesky) solve path, CYBER_QC_DIRECT
 // (docs/ROADMAP.md perf entry). The pinned Poisson operator and the reduced
 // integer-phase operator depend only on (mesh, setup) — never on `spacing` —
@@ -109,11 +155,16 @@ struct SeamlessSolveCache {
 // grid spacing becomes spacing / sqrt(density), i.e. the RHS is scaled per
 // face. It touches the RHS ONLY — exactly like `spacing` itself — so the
 // cached factorizations in `cache` stay valid across density changes.
+//
+// `layout` (optional) selects the tracer's layout options — see
+// SeamlessLayoutOptions. Null keeps the environment-driven defaults, which is
+// byte-identical to the shipped behaviour.
 [[nodiscard]] Parameterization solveParameterization(const Mesh& mesh, const SeamlessSetup& setup,
                                                      float spacing, accel::IBackend& backend,
                                                      const CancelToken* cancel = nullptr,
                                                      SeamlessSolveCache* cache = nullptr,
-                                                     const GuidanceField* density = nullptr);
+                                                     const GuidanceField* density = nullptr,
+                                                     const SeamlessLayoutOptions* layout = nullptr);
 
 // Relaxed-only calibration probe: runs solveParameterization's assembly + the initial
 // relaxed Poisson solve at `spacing` (no ARAP polish, no integer phase) and returns the

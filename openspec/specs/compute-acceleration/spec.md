@@ -1,7 +1,13 @@
 # compute-acceleration Specification
 
 ## Purpose
-TBD - created by archiving change bootstrap-v1-platform. Update Purpose after archive.
+One interface over the engine's heavy primitives with four implementations —
+CPU, Metal, CUDA, OpenCL — and the rule that decides between them. The CPU
+backend is always compiled in and defines the correct result; the GPU backends
+are accelerators and never functional requirements. It exists so a feature is
+never gated on hardware: every capability completes on the CPU alone, a
+compiled-in backend whose device is missing is skipped rather than fatal, and a
+host can bound the worker fan-out it is willing to give up.
 ## Requirements
 ### Requirement: Backend abstraction with mandatory CPU reference
 Compute-intensive engine work SHALL dispatch through a single backend abstraction exposing typed device buffers and a fixed primitive set (parallel map, reduce, scan, sort, BVH build/traverse, sparse matrix–vector multiply, closest-point projection, ray casting). A CPU backend SHALL always be compiled in, SHALL implement every primitive, and SHALL define correct results. GPU backends are optional accelerators, never functional requirements.

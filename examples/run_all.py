@@ -32,6 +32,10 @@ EXAMPLES = [
     ("18_sculpt_handoff", "18_sculpt_handoff.png"),
     ("19_export_presets", "19_export_presets.png"),
     ("20_seam_paths", "20_seam_paths.png"),
+    ("21_topology_layout", "21_topology_layout.png"),
+    ("22_layout_robustness", "22_layout_robustness.png"),
+    ("24_topology_guides", "24_topology_guides.png"),
+    ("25_symmetry", "25_symmetry.png"),
 ]
 
 

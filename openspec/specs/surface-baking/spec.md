@@ -1,7 +1,12 @@
 # surface-baking Specification
 
 ## Purpose
-TBD - created by archiving change bootstrap-v1-platform. Update Purpose after archive.
+Transferring detail from a high-resolution Target onto the remeshed low-poly
+result: normal, ambient occlusion, curvature and cavity maps, the editable cage
+that controls the projection, and the component links that decide what bakes
+against what. It exists because baking is where a retopology result becomes
+usable — and because it is the most expensive stage in a run, it must be
+accelerated, cancellable and previewable rather than a blind wait.
 ## Requirements
 ### Requirement: Bakeable map types
 The bake stage SHALL bake from the Target onto the EditMesh's UV layout: tangent-space normal maps, ambient occlusion, displacement/height, and color maps (from Target vertex colors, including polypaint, or from a Target texture when the Target has its own UVs — texture-to-texture baking). Output resolution SHALL be user-selectable up to at least 4096².

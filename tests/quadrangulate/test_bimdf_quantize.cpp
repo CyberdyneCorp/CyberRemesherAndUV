@@ -223,3 +223,63 @@ TEST_CASE("bimdf enforces the min-one collapse guard on degenerate arcs") {
     CHECK(r.raisedToMin > 0);
     CHECK(classValue(r, 8) == 1);
 }
+
+// --- feasible-rotation projection (ZRemesher Phase B) ----------------------
+//
+// The sector quarters around a layout node are what a rotation system needs:
+// the wrap gap in [1, wrapMax] and every other sector a corner (1) or a
+// pass-through (2). Largest-remainder rounding minimizes per-gap error while
+// ignoring that constraint, so it can land out of range even when an in-range
+// assignment exists; the projection is what recovers the node in that case.
+
+using cyber::remesh::bimdf::projectSectors;
+
+TEST_CASE("projectSectors seats a feasible winding at the widest gaps") {
+    std::vector<int> sect;
+    // Four ends, winding 6: two sectors must take the extra quarter, and they
+    // must be the two that measured widest.
+    const std::vector<double> gq = {1.1, 1.9, 1.05, 1.95};
+    REQUIRE(projectSectors(gq, 6, 2, sect));
+    REQUIRE(sect.size() == 4);
+    CHECK(sect[0] == 1);
+    CHECK(sect[1] == 2);
+    CHECK(sect[2] == 1);
+    CHECK(sect[3] == 2);
+    CHECK(sect[0] + sect[1] + sect[2] + sect[3] == 6);
+}
+
+TEST_CASE("projectSectors respects the wider wrap bound") {
+    std::vector<int> sect;
+    // A single end carries the whole winding in its wrap sector.
+    const std::vector<double> gq = {4.0};
+    REQUIRE(projectSectors(gq, 4, 4, sect));
+    REQUIRE(sect.size() == 1);
+    CHECK(sect[0] == 4);
+    // With the ordinary wrap bound the same winding is unseatable.
+    CHECK_FALSE(projectSectors(gq, 4, 2, sect));
+}
+
+TEST_CASE("projectSectors refuses an infeasible winding") {
+    std::vector<int> sect;
+    const std::vector<double> gq = {1.0, 1.0, 1.0};
+    // Below the floor: three sectors cannot sum to less than three.
+    CHECK_FALSE(projectSectors(gq, 2, 2, sect));
+    // Above the ceiling: 2 + 2 + 2 = 6 is the most three sectors can carry.
+    CHECK_FALSE(projectSectors(gq, 7, 2, sect));
+    // Both bounds are inclusive.
+    CHECK(projectSectors(gq, 3, 2, sect));
+    CHECK(projectSectors(gq, 6, 2, sect));
+}
+
+TEST_CASE("projectSectors is deterministic under ties") {
+    // Equal gaps: the surplus must always land on the same sectors, so a
+    // layout does not change shape between runs.
+    const std::vector<double> gq = {1.5, 1.5, 1.5, 1.5};
+    std::vector<int> first;
+    REQUIRE(projectSectors(gq, 6, 2, first));
+    for (int i = 0; i < 8; ++i) {
+        std::vector<int> again;
+        REQUIRE(projectSectors(gq, 6, 2, again));
+        CHECK(again == first);
+    }
+}

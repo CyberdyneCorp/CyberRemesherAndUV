@@ -35,6 +35,11 @@ so quad-dominance reads at a glance.
 | `18_sculpt_handoff.py` | versioned sculpt handoff end to end, from a synthetic producer | `output/18_sculpt_handoff.png` |
 | `19_export_presets.py` | per-DCC export presets — one bake, four bundles, only the normal green channel differing | `output/19_export_presets.png` |
 | `20_seam_paths.py` | auto-routed UV seam paths — valley-biased routing vs the uniform-cost shortest path | `output/20_seam_paths.png` |
+| `21_topology_layout.py` | the explicit topology layout behind a remesh — separatrix arcs, singularities and patches drawn over the quads | `output/21_topology_layout.png` |
+| `22_layout_robustness.py` | how the layout survives a folded relaxed map — contained regions and why each was contained (`--full` for the whole sweep) | `output/22_layout_robustness.png` |
+| `23_thin_features.py` | do plates, fins and tubes survive a target edge coarser than they are thick | text report |
+| `24_topology_guides.py` | `mode="topology"` guides — a stroke that becomes an actual edge loop, not just a field bias | `output/24_topology_guides.png` |
+| `25_symmetry.py` | `--symmetry x` — mirrored CONNECTIVITY, verified by matching every vertex and face to its reflection | `output/25_symmetry.png` |
 | `run_all.py` | runs all of the above + a stitched `output/gallery.png` | `output/gallery.png` |
 
 `08_load_model.py` loads a mesh and converts it to quads. It defaults to a
@@ -59,6 +64,26 @@ license is set upstream). Pick your own with `--models spot fandisk …`:
 
 ```sh
 examples/run.sh examples/09_test_models.py --models spot rocker-arm --target-quads 6000
+```
+
+`21_topology_layout.py` and `22_layout_robustness.py` cover the ZRemesher-class
+retopology track (plan: [`../docs/zremesher-plan.md`](../docs/zremesher-plan.md)).
+The first draws the **topology layout** — the separatrix arcs, singularities and
+patches the quads were read off — over the mesh they produced, so the loop
+scaffolding is visible instead of implicit. The second measures how well that
+layout survives the foldovers the relaxed parameterization genuinely has near
+high-distortion cones: it sweeps the corpus and reports every contained region
+*and why it was contained* (sector winding / corner count / side mismatch /
+abandoned cone), which is the breakdown that says which lever would move the
+numbers. Both shell out to the built `cyberremesh` CLI rather than the Python binding,
+because they read the tracer's own diagnostics off stderr. The method itself is
+bound everywhere — `--quad-method zremesher`, or
+`RemeshParams(quad_method="zremesher")` from Python.
+
+```sh
+examples/run.sh examples/22_layout_robustness.py          # one cell per model
+examples/run.sh examples/22_layout_robustness.py --full   # 4 target counts x 2 adaptivity
+CYBER_ZR_FOLD_REPAIR=1 examples/run.sh examples/22_layout_robustness.py
 ```
 
 `10_vs_reference.py` compares CyberRemesher against

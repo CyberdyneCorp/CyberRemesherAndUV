@@ -420,6 +420,25 @@ def main() -> int:
     check("empty guide list is byte-identical to no --guides",
           plain_out.read_bytes() == empty_out.read_bytes())
 
+    # The zremesher method must be selectable, produce a mesh, and NAME ITSELF in
+    # the report — a report that names the requested method while the run used
+    # another one is worse than one that names neither.
+    zr_out = plain_dir / "zr.obj"
+    zr_report = plain_dir / "zr.json"
+    r = run("--input", str(sphere), "--output", str(zr_out), "--target-quads", "300",
+            "--quad-method", "zremesher", "--report", str(zr_report), "--quiet")
+    check("zremesher run exit 0", r.returncode == 0, r.stderr)
+    check("zremesher wrote a mesh", zr_out.exists() and zr_out.stat().st_size > 0)
+    zr_json = json.loads(zr_report.read_text())
+    check("report names the effective quad method",
+          zr_json["parameters"].get("quadMethod") == "zremesher",
+          zr_json.get("parameters"))
+
+    # An unknown method is a usage error, not a silent fallback.
+    r = run("--input", str(sphere), "--output", str(plain_dir / "bad.obj"),
+            "--target-quads", "300", "--quad-method", "not-a-method", "--quiet")
+    check("unknown quad method is rejected", r.returncode != 0, r.stdout + r.stderr)
+
     # A density of 1.0 everywhere must be a no-op on the SHIPPED DEFAULT method
     # (quad-cover), not just on field-aligned: supplying one used to switch the
     # seamless-UV route and change the mesh (remeshing-pipeline spec, "A density

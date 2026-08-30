@@ -41,6 +41,12 @@ float segmentDistanceSq(Vec3 p, Vec3 a, Vec3 b) {
 
 }  // namespace
 
+std::size_t Guidance::topologyGuideCount() const {
+    return static_cast<std::size_t>(
+        std::count_if(guides.begin(), guides.end(),
+                      [](const FlowGuide& g) { return g.mode == GuideMode::Topology; }));
+}
+
 bool DensityField::isNeutral() const {
     if (empty()) {
         return false;
@@ -55,10 +61,17 @@ GuidanceField::~GuidanceField() = default;
 GuidanceField::GuidanceField(GuidanceField&&) noexcept = default;
 GuidanceField& GuidanceField::operator=(GuidanceField&&) noexcept = default;
 
+std::size_t GuidanceField::topologyGuideCount() const {
+    return static_cast<std::size_t>(
+        std::count_if(m_sourceGuides.begin(), m_sourceGuides.end(),
+                      [](const FlowGuide& g) { return g.mode == GuideMode::Topology; }));
+}
+
 GuidanceField::GuidanceField(const Mesh& target, const Guidance& guidance) {
     if (guidance.empty()) {
         return;
     }
+    m_sourceGuides = guidance.guides;
     m_surface = std::make_unique<ReferenceSurface>(target, 0.0f);
 
     // Guides: snap every point onto the Target so a stroke drawn slightly off

@@ -1,5 +1,10 @@
 #include "cyber/quadrangulate/quadcover_extractor.hpp"
 
+#include "cyber/quadrangulate/geometry_analysis.hpp"
+#include "cyber/quadrangulate/layout_score.hpp"
+#include "cyber/quadrangulate/sizing_field.hpp"
+#include "cyber/quadrangulate/topology_guides.hpp"
+
 #if defined(__APPLE__)
 #include <TargetConditionals.h>
 #endif
@@ -656,6 +661,49 @@ bool prepareNativeSolve(const Mesh& mesh, float targetEdgeLength, float adaptivi
     // Painted density sizes the solve substrate: quad-cover skips the pipeline's
     // isotropic stage, so this is where density has to enter for this backend.
     iso.density = ctx.guidance;
+    // Unified sizing (ZRemesher Phase D). The isotropic stage can derive
+    // curvature adaptivity and painted density on its own, but not feature
+    // proximity or thin-feature risk — and thin features are exactly what a
+    // uniform target destroys, because a plate thinner than one target edge
+    // gets collapsed into a single chain before the field ever sees it.
+    //
+    // The field is built on the RAW island (the surface the remesh projects
+    // onto), so its per-vertex values index the same mesh ScaleField samples
+    // from. Only the ratio to the base length is handed over; the absolute
+    // target stays `targetEdgeLength`.
+    std::vector<float> sizingScale;
+    if (ctx.layout.capture && ctx.layout.unifiedSizing) {
+        const Bvh sizingBvh(work);
+        GeometryAnalysisOptions gaOpts;
+        const GeometryAnalysis analysis =
+            analyzeGeometry(work, targetEdgeLength, &sizingBvh, gaOpts);
+        SizingParams sizingParams;
+        sizingParams.baseEdgeLength = targetEdgeLength;
+        // Curvature and density already reach this stage through `adaptivity`
+        // and `iso.density`; applying them again here would double-count.
+        sizingParams.adaptivity = 0.0f;
+        sizingParams.densityWeight = 0.0f;
+        // Feature PROXIMITY is deliberately not applied here. The design's
+        // rule (Sec. 9.3) is a thin-feature floor, h <= alpha * localFeatureSize
+        // — not a general refinement near every crease. Refining the whole
+        // neighbourhood of every crease densifies the substrate without
+        // raising the extraction target, which measured strictly worse.
+        sizingParams.featureWeight = 0.0f;
+        const SizingField sizing = buildSizingField(work, nullptr, analysis, sizingParams);
+        if (sizing.valid) {
+            sizingScale.resize(sizing.targetEdgeLength.size());
+            for (std::size_t i = 0; i < sizingScale.size(); ++i) {
+                sizingScale[i] = sizing.targetEdgeLength[i] / targetEdgeLength;
+            }
+            iso.extraVertexScale = &sizingScale;
+            if (std::getenv("CYBER_QC_DEBUG") != nullptr) {
+                std::fprintf(stderr, "[zr] sizing: target %.4f, field %.4f..%.4f\n",
+                             static_cast<double>(targetEdgeLength),
+                             static_cast<double>(sizing.minLength()),
+                             static_cast<double>(sizing.maxLength()));
+            }
+        }
+    }
     if (isotropicRemesh(work, reference, iso, nullptr, cancel) != IsotropicStatus::Success ||
         work.faceCount() == 0) {
         reason = "isotropic remesh failed (or cancelled)";
@@ -809,10 +857,59 @@ bool prepareNativeSolve(const Mesh& mesh, float targetEdgeLength, float adaptivi
         }
     }
 
+    // Topology guides (ZRemesher Phase E). An orientation guide biases the field
+    // and is already handled inside the field solve; a TOPOLOGY guide asks for
+    // an actual edge loop, which is exactly what a pinned crease already is —
+    // the seamless solve makes it a hard seam and pins its isolines, so quads
+    // run along it. So the guide is projected to a connected edge path on the
+    // work mesh and tagged as a feature, handing it to that machinery rather
+    // than growing a parallel one that would need its own calibration.
+    //
+    // Tagged AFTER the dihedral re-tag and its filters, so a guide is never
+    // mistaken for a sampling artifact and demoted.
+    ctx.topologyGuidesRequested = 0;
+    ctx.topologyGuidesHonored = 0;
+    if (ctx.guidance != nullptr && ctx.guidance->topologyGuideCount() != 0) {
+        for (const FlowGuide& guide : ctx.guidance->sourceGuides()) {
+            if (guide.mode != GuideMode::Topology) {
+                continue;
+            }
+            ++ctx.topologyGuidesRequested;
+            const GuidePath path = projectGuideToPath(work, guide);
+            if (path.edges.empty()) {
+                continue;  // reported below, never silently dropped
+            }
+            for (const EdgeId e : path.edges) {
+                if (work.isAlive(e) && work.edgeFaceCount(e) == 2) {
+                    work.setFeatureEdge(e, true);
+                }
+            }
+            ++ctx.topologyGuidesHonored;
+            if (std::getenv("CYBER_QC_DEBUG") != nullptr) {
+                std::fprintf(stderr,
+                             "[zr] topology guide: %zu vertices, %zu edges, closed=%d, "
+                             "maxDeviation=%.4f\n",
+                             path.vertices.size(), path.edges.size(), path.closed ? 1 : 0,
+                             static_cast<double>(path.maxDeviation));
+            }
+        }
+        // A topology guide that could not be projected is a guide the run did
+        // not honour, and the pipeline's contract is that such a thing is
+        // reported by name rather than dropped.
+        if (ctx.topologyGuidesHonored < ctx.topologyGuidesRequested) {
+            ctx.guidanceUnhonoredReason =
+                "topology guides: " +
+                std::to_string(ctx.topologyGuidesRequested - ctx.topologyGuidesHonored) + " of " +
+                std::to_string(ctx.topologyGuidesRequested) +
+                " could not be projected onto a connected edge path of the solve mesh";
+        }
+    }
+
     auto backend = accel::defaultBackend();
-    ctx.setup = buildSeamlessSetup(
-        work, kFieldIterations, *backend, ctx.featureBinding,
-        ctx.creaseAlignSupport.empty() ? nullptr : &ctx.creaseAlignSupport, ctx.guidance);
+    ctx.setup =
+        buildSeamlessSetup(work, kFieldIterations, *backend, ctx.featureBinding,
+                           ctx.creaseAlignSupport.empty() ? nullptr : &ctx.creaseAlignSupport,
+                           ctx.guidance, ctx.fieldSource);
     const SeamlessSetup& setup = ctx.setup;
     if (fieldStats) {
         // Cone census: total cones, how many sit off tagged feature edges (spurious flat-region
@@ -935,7 +1032,7 @@ SeamlessUv computeSeamlessUvNative(const Mesh& mesh, float targetEdgeLength, flo
     const auto tSolve0 = tick();
     const Parameterization param =
         solveParameterization(work, setup, targetEdgeLength * spacingMul, *backend, cancel,
-                              &prep.solveCache, prep.guidance);
+                              &prep.solveCache, prep.guidance, &prep.layout);
     if (!param.valid) {
         logNative(false, "parameterization invalid (or cancelled)");
         return uv;
@@ -1296,10 +1393,14 @@ SeamlessUv computeSeamlessUv(const Mesh& mesh, float targetEdgeLength, float har
     // do not patch). Routing a guided island there would silently drop the
     // input, which is precisely the failure mode this feature exists to avoid.
     const bool guided = ctx != nullptr && ctx->guidance != nullptr;
+    // A requested topology layout forces native for the same reason: the layout
+    // is traced from the native seamless map, and the vendored solve produces no
+    // T-mesh to trace, so routing there returns no layout at all.
+    const bool wantLayout = ctx != nullptr && ctx->layout.capture;
     const bool routeNative =
-        haveNative &&
-        (guided || (std::getenv("CYBER_QC_NO_ROUTE") == nullptr && routeThresh > 0.0f &&
-                    creaseEdgeFraction(mesh, 45.0f) >= routeThresh));
+        haveNative && (guided || wantLayout ||
+                       (std::getenv("CYBER_QC_NO_ROUTE") == nullptr && routeThresh > 0.0f &&
+                        creaseEdgeFraction(mesh, 45.0f) >= routeThresh));
 
     if (routeNative) {
         SeamlessUv native = computeSeamlessUvNative(mesh, targetEdgeLength, harnessAdaptivity,
@@ -3464,14 +3565,99 @@ std::size_t cancelValenceDipoles(std::vector<Vec3>& vertices,
 class QuadCoverQuadrangulator final : public IQuadrangulator {
 public:
     QuadCoverQuadrangulator(int fieldIterations, float adaptivity, int holeFillMaxBoundary,
-                            float featureDegrees)
+                            float featureDegrees, SeamlessLayoutOptions layout = {},
+                            std::string name = "quad-cover", bool bestOfTwo = false)
         : m_fieldIterations(fieldIterations),
           m_adaptivity(adaptivity),
           m_holeFillMaxBoundary(holeFillMaxBoundary),
-          m_featureDegrees(featureDegrees) {}
+          m_featureDegrees(featureDegrees),
+          m_layout(layout),
+          m_name(std::move(name)),
+          m_bestOfTwo(bestOfTwo) {}
 
     Outcome quadrangulate(Mesh& mesh, float targetEdgeLength, ProgressSink* progress,
                           const CancelToken* cancel) override {
+        if (m_bestOfTwo) {
+            return quadrangulateBestOfTwo(mesh, targetEdgeLength, progress, cancel);
+        }
+        return quadrangulateOnce(mesh, targetEdgeLength, progress, cancel);
+    }
+
+    // Candidate selection (ZRemesher Phase G). The repo's own roadmap records
+    // the open question this answers: no static "organic vs CAD" threshold can
+    // pick the better field for every model — rocker-arm prefers one, spot and
+    // cheburashka the other, and their crease fractions interleave, so no
+    // threshold gets all three right. Choosing per input by MEASURING both is
+    // the answer, and it needs a comparable score, which is what scoreQuality
+    // provides.
+    //
+    // The two candidates are the two cross fields the engine already has. Both
+    // then take the identical seamless solve and extraction, so the comparison
+    // isolates the field. The choice is threaded through the solve rather than
+    // set in the environment: an environment variable is process-global and not
+    // thread-safe, so a host remeshing two islands at once would have them
+    // fight over it.
+    Outcome quadrangulateBestOfTwo(Mesh& mesh, float targetEdgeLength, ProgressSink* progress,
+                                   const CancelToken* cancel) {
+        const bool closedInput = isClosed(mesh);
+        struct Candidate {
+            const char* name;
+            CrossFieldSource field;
+        };
+        // Order is the final tie-break, so it is fixed and documented rather
+        // than incidental: the shipped default goes first and only loses to a
+        // strictly better score.
+        static constexpr Candidate kCandidates[] = {
+            {"multires", CrossFieldSource::Multiresolution},
+            {"single-level", CrossFieldSource::SingleLevel},
+        };
+
+        Mesh best;
+        QualityScore bestScore;
+        std::string bestName;
+        Outcome bestOutcome{.success = false, .cancelled = false, .failureReason = {}};
+        for (const Candidate& candidate : kCandidates) {
+            if (cancel != nullptr && cancel->isCancelled()) {
+                return {.success = false, .cancelled = true, .failureReason = {}};
+            }
+            Mesh trial = mesh;
+            m_fieldSource = candidate.field;
+            const Outcome outcome = quadrangulateOnce(trial, targetEdgeLength, progress, cancel);
+            if (!outcome.success) {
+                continue;
+            }
+            const QualityScore score = scoreQuality(trial, nullptr, closedInput);
+            const bool take = bestName.empty() || candidateBeats(score, bestScore);
+            if (std::getenv("CYBER_QC_DEBUG") != nullptr) {
+                std::fprintf(stderr,
+                             "[zr] candidate %-12s total=%7.3f angle=%.3f uniformity=%.3f "
+                             "quads=%.3f irregular=%.1f%% defects=%zu -> %s\n",
+                             candidate.name, score.total, score.angle, score.edgeUniformity,
+                             score.quadPurity, 100.0 * score.irregularFraction,
+                             score.nonManifoldEdges + score.boundaryEdges, take ? "BEST" : "kept");
+            }
+            if (take) {
+                best = std::move(trial);
+                bestScore = score;
+                bestName = candidate.name;
+                bestOutcome = outcome;
+            }
+        }
+        m_fieldSource = CrossFieldSource::Auto;
+        if (bestName.empty()) {
+            // Every candidate declined: fall back to one ordinary solve so the
+            // caller sees the same failure it would have seen without candidate
+            // selection.
+            return quadrangulateOnce(mesh, targetEdgeLength, progress, cancel);
+        }
+        std::fprintf(stderr, "[zr] selected candidate: %s (score %.3f)\n", bestName.c_str(),
+                     bestScore.total);
+        mesh = std::move(best);
+        return bestOutcome;
+    }
+
+    Outcome quadrangulateOnce(Mesh& mesh, float targetEdgeLength, ProgressSink* progress,
+                              const CancelToken* cancel) {
         if (cancel != nullptr && cancel->isCancelled()) {
             return {.success = false, .cancelled = true, .failureReason = {}};
         }
@@ -3493,6 +3679,8 @@ public:
         // parameterization + extraction.
         NativeSolveContext nativeCtx;
         nativeCtx.guidance = m_guidance;  // non-null forces the native route (see the header)
+        nativeCtx.layout = m_layout;      // capture likewise forces native
+        nativeCtx.fieldSource = m_fieldSource;
         // Everything the run could NOT do with the guidance, on the route it
         // actually took. Called on EVERY exit below (including the early one),
         // because an island that never reached a solver honored nothing either.
@@ -3731,13 +3919,27 @@ public:
         return m_unhonored;
     }
 
-    [[nodiscard]] std::string name() const override { return "quad-cover"; }
+    [[nodiscard]] std::string name() const override { return m_name; }
 
 private:
+    static bool isClosed(const Mesh& mesh) {
+        for (Index e = 0; e < mesh.edgeCapacity(); ++e) {
+            const EdgeId edge{e};
+            if (mesh.isAlive(edge) && mesh.edgeFaceCount(edge) == 1) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     int m_fieldIterations;
     float m_adaptivity;
     int m_holeFillMaxBoundary;
     float m_featureDegrees = 40.0f;
+    SeamlessLayoutOptions m_layout;
+    std::string m_name;
+    bool m_bestOfTwo = false;
+    CrossFieldSource m_fieldSource = CrossFieldSource::Auto;
     const GuidanceField* m_guidance = nullptr;
     std::vector<std::string> m_unhonored;
 };
@@ -3759,6 +3961,31 @@ std::unique_ptr<IQuadrangulator> makeQuadCoverQuadrangulator(int fieldIterations
     const Parameters clamped = validate(raw).params;
     return std::make_unique<QuadCoverQuadrangulator>(
         fieldIterations, clamped.adaptivity, clamped.holeFillMaxBoundary, clamped.sharpEdgeDegrees);
+}
+
+std::unique_ptr<IQuadrangulator> makeZRemesherQuadrangulator(const ZRemesherOptions& options) {
+    // Same clamping discipline as quad-cover: these arguments reach the solve
+    // without passing through remesh()'s validation.
+    Parameters raw;
+    raw.adaptivity = options.adaptivity;
+    raw.holeFillMaxBoundary = options.holeFillMaxBoundary;
+    raw.sharpEdgeDegrees = options.featureDegrees;
+    const Parameters clamped = validate(raw).params;
+    SeamlessLayoutOptions layout;
+    layout.capture = true;  // the layout stage is what makes this method zremesher
+    // Kill switches, so each lever can be A/B'd on the corpus without a rebuild
+    // (repo convention: every lever that changes output has one).
+    layout.boundaryChains =
+        options.boundaryChains && std::getenv("CYBER_ZR_NO_BOUNDARY_CHAINS") == nullptr;
+    layout.foldRepair = options.foldRepair && std::getenv("CYBER_ZR_NO_FOLD_REPAIR") == nullptr;
+    layout.unifiedSizing =
+        (options.unifiedSizing || std::getenv("CYBER_ZR_UNIFIED_SIZING") != nullptr) &&
+        std::getenv("CYBER_ZR_NO_UNIFIED_SIZING") == nullptr;
+    const bool bestOfTwo =
+        options.quality == RemeshQualityMode::Best || std::getenv("CYBER_ZR_BEST") != nullptr;
+    return std::make_unique<QuadCoverQuadrangulator>(
+        options.fieldIterations, clamped.adaptivity, clamped.holeFillMaxBoundary,
+        clamped.sharpEdgeDegrees, layout, "zremesher", bestOfTwo);
 }
 
 bool quadCoverAvailable() {

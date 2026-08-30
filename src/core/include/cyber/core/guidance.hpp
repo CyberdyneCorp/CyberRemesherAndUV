@@ -37,10 +37,34 @@ inline constexpr float kGuideStrengthMax = 1.0f;
 inline constexpr float kDensityMin = 0.25f;
 inline constexpr float kDensityMax = 4.0f;
 
+// What a guide is asking for (remeshing-pipeline spec, "Flow guides constrain
+// the cross field").
+//
+// The two are genuinely different requests, and conflating them is why "the
+// loops didn't follow my stroke" is ambiguous today. An ORIENTATION guide says
+// "line the field up this way around here" — a soft bias that competes with the
+// smoothness term, so the loops nearby lean toward the stroke without any one
+// of them being pinned to it. A TOPOLOGY guide says "put an actual edge loop
+// HERE" — the stroke is meant to become a curve in the layout, not merely to
+// influence the field around it.
+//
+// Orientation is the default, and is exactly today's behaviour: an existing
+// guide, deserialized from an older schema or constructed without naming a
+// mode, is an orientation guide and produces byte-identical output.
+enum class GuideMode : std::uint8_t {
+    Orientation,
+    Topology,
+};
+
 struct FlowGuide {
     std::vector<Vec3> points;  // ordered polyline, at least 2 points
     float strength = 1.0f;     // [kGuideStrengthMin, kGuideStrengthMax]
     float radius = 0.0f;       // world-space influence radius, must be > 0
+    GuideMode mode = GuideMode::Orientation;
+    // The polyline closes back on its first point. Closed guides are what an
+    // eye, mouth, shoulder, knee or wrist loop is; they ask for a continuous
+    // ring rather than an open chain.
+    bool closed = false;
 };
 
 // Painted sizing multiplier on the Target. Exactly one of the two arrays is
@@ -65,6 +89,8 @@ struct Guidance {
     DensityField density;
 
     [[nodiscard]] bool empty() const { return guides.empty() && density.empty(); }
+    // Guides asking for an actual edge loop, as opposed to a field bias.
+    [[nodiscard]] std::size_t topologyGuideCount() const;
 };
 
 // A guide's contribution at a point: `weight` in [0,1] (0 = out of range) and
@@ -97,6 +123,17 @@ public:
     [[nodiscard]] bool empty() const { return !hasGuides() && !hasDensity(); }
     [[nodiscard]] std::size_t guideCount() const { return m_guides.size(); }
 
+    // The guides as authored, kept alongside the resolved sampler.
+    //
+    // The sampler is deliberately geometric — that is what lets it survive
+    // triangulate / weld / island split / isotropic remesh without index
+    // remapping. But a TOPOLOGY guide is not a point query: it has to be
+    // projected onto the solve mesh as a whole polyline, and a backend has to
+    // know which guides asked for that. So the authored list rides along,
+    // read-only, for the backends that need the curve rather than the field.
+    [[nodiscard]] const std::vector<FlowGuide>& sourceGuides() const { return m_sourceGuides; }
+    [[nodiscard]] std::size_t topologyGuideCount() const;
+
     // Largest distance a supplied guide point had to move to reach the Target.
     // Reported rather than silently absorbed: a stroke drawn far off-surface
     // is a user error worth naming.
@@ -118,6 +155,7 @@ public:
     [[nodiscard]] float densityAt(Vec3 p) const;
 
 private:
+    std::vector<FlowGuide> m_sourceGuides;
     struct Segment {
         Vec3 a{}, b{};
         Vec3 normal{};  // Target normal at the segment midpoint (zero if unknown)

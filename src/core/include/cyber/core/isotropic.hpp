@@ -1,5 +1,7 @@
 #pragma once
 
+#include <vector>
+
 #include "cyber/core/guidance.hpp"
 #include "cyber/core/mesh.hpp"
 #include "cyber/core/progress.hpp"
@@ -28,6 +30,16 @@ struct IsotropicOptions {
     // halves the edge length there. Null leaves the sizing arithmetic
     // untouched, which is what keeps unguided runs byte-identical.
     const GuidanceField* density = nullptr;
+    // Extra per-vertex target multiplier, indexed by the INPUT mesh's VertexId
+    // and sampled the same way curvature adaptivity is: barycentrically off the
+    // fixed input surface, never off the evolving mesh. This is how a caller
+    // hands over sizing this stage cannot derive on its own — feature proximity
+    // and thin-feature risk, which is what keeps a plate or a tube from
+    // collapsing when the target edge is longer than the feature is thick.
+    //
+    // Null leaves the sizing arithmetic untouched, which is what keeps every
+    // existing run byte-identical.
+    const std::vector<float>* extraVertexScale = nullptr;
 };
 
 enum class IsotropicStatus { Success, Cancelled, InvalidInput };

@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <array>
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <utility>
@@ -106,6 +107,19 @@ struct NativeSolveContext {
     // env var the user set). Read back by the quadrangulator and reported per
     // island — never swallowed.
     std::string guidanceUnhonoredReason;
+    // Topology-layout options for this solve (ZRemesher). `capture` FORCES the
+    // native route for the same reason guidance does: the layout is traced from
+    // the native seamless map, and the vendored Geogram quad_cover produces no
+    // T-mesh at all — routing there would silently return no layout.
+    SeamlessLayoutOptions layout;
+    // Which cross field this solve builds from. `Auto` keeps the shipped
+    // choice; the candidate-selection path names one explicitly so it can solve
+    // both and compare without a process-global switch.
+    CrossFieldSource fieldSource = CrossFieldSource::Auto;
+    // Topology-guide accounting, read back for the run report. A requested
+    // guide that was not honoured is named, never dropped.
+    std::size_t topologyGuidesRequested = 0;
+    std::size_t topologyGuidesHonored = 0;
 };
 
 // Compute a seamless integer-grid UV for `mesh`. Milestone 1 obtains it out-of-process
@@ -235,6 +249,63 @@ std::unique_ptr<IQuadrangulator> makeQuadCoverQuadrangulator(int fieldIterations
                                                              float adaptivity = 0.0f,
                                                              int holeFillMaxBoundary = 64,
                                                              float featureDegrees = 40.0f);
+
+// ZRemesher-class retopology (openspec/changes/add-zremesher-retopology,
+// docs/zremesher-plan.md). Structurally the quad-cover path — same cross field,
+// same seamless solve, same isoline extraction — with the explicit
+// TopologyLayout stage turned on and the tracing options the LAYOUT wants
+// rather than the ones the shipped quantizer's guided rounding wants.
+//
+// Concretely that means boundary chains on, so a separatrix reaching an open
+// boundary terminates there and becomes a boundary arc instead of being
+// abandoned (measured on the Stanford bunny: abandoned launches 20 -> 1,
+// contained regions 47 -> 39), and fold repair on. Neither is safe to flip for
+// `quad-cover` — they reshape the flow its guided rounding is tuned against —
+// which is exactly why the layout needs its own method rather than another
+// environment variable on the old one.
+//
+// It always routes NATIVE: the layout is traced from the native seamless map,
+// and the vendored Geogram solve produces no T-mesh to trace.
+// How much work the method may spend finding a good answer.
+//
+// Fast solves one predicted path. Best solves both cross-field candidates and
+// keeps the one that scores better — which is what the roadmap's open question
+// asks for: no static "organic vs CAD" threshold picks the right field for
+// every model, because rocker-arm prefers one and spot and cheburashka the
+// other while their crease fractions interleave. Measuring both is the answer;
+// it costs a second solve.
+enum class RemeshQualityMode : std::uint8_t {
+    Fast,
+    Best,
+};
+
+struct ZRemesherOptions {
+    RemeshQualityMode quality = RemeshQualityMode::Fast;
+    int fieldIterations = 40;
+    float adaptivity = 0.0f;
+    int holeFillMaxBoundary = 64;
+    float featureDegrees = 40.0f;
+    // Terminate separatrices on open boundaries instead of abandoning them.
+    bool boundaryChains = true;
+    // Recover fold-damaged node rotations by feasible-range projection.
+    bool foldRepair = true;
+    // Size the solve substrate from the unified sizing field (thin-feature risk
+    // on top of the curvature adaptivity and painted density the isotropic
+    // stage already derives).
+    //
+    // OFF: measured to make thin-feature survival WORSE, which is the one thing
+    // it exists to improve. On the thin-feature fixtures
+    // (examples/23_thin_features.py) it takes survival from 2 of 3 to 1 of 3 —
+    // the fin survives without it and collapses with it — and on the corpus it
+    // adds cones (fandisk 93 -> 104, cheburashka 92 -> 106) for a slightly
+    // BETTER mean placement, i.e. more cones each sitting a little better.
+    // Refining the substrate does not stop the extraction bridging a thin gap;
+    // it just spends the budget getting there. Kept behind the flag so the
+    // field has a consumer to be re-measured through once the extraction side
+    // can act on it.
+    bool unifiedSizing = false;
+};
+std::unique_ptr<IQuadrangulator> makeZRemesherQuadrangulator(const ZRemesherOptions& options = {});
 
 // Whether a seamless-UV solver is available for the quad-cover method: true when the
 // in-process solver is linked (built with -DCYBER_WITH_QUADCOVER=ON) or the

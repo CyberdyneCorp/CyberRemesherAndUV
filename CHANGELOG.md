@@ -3,6 +3,186 @@
 > Note: releases 0.3.0, 0.4.0 and 0.5.0 were tagged without changelog entries;
 > their content is recorded in `docs/ROADMAP.md`. Entries resume here.
 
+## [Unreleased]
+
+### Added
+
+- **Topology layout — the first stage of the ZRemesher-class retopology work**
+  (`openspec/changes/add-zremesher-retopology`, Phase A). The quad topology the
+  engine produces has always been an *emergent* consequence of cross field +
+  seamless grid + isoline extraction, which is mathematically sound but leaves
+  nothing to reason about when the question is "where should the edge loops go".
+  `cyber::remesh::TopologyLayout` makes that structure explicit: nodes
+  (singularities, feature and boundary corners, T-junctions), arcs (the
+  separatrix, crease and boundary curves between them, with their traced 3D
+  polylines and lengths) and the patches those arcs bound.
+
+  The split with the existing Bi-MDF tracer is by responsibility, not by moving
+  code: `bimdf::TMesh` stays the QUANTIZATION view — arc lengths plus each arc's
+  exact symbolic length over the seamless solver's promoted variables, which is
+  meaningless outside the integer solve — and `TopologyLayout` is the GEOMETRIC
+  and COMBINATORIAL view, with no solver variables, so singularity scoring,
+  guides, symmetry, quality scoring and debug rendering can consume it without
+  dragging the solver along. Node and arc ids are shared between the two.
+
+  The tracer now optionally keeps the geometry it used to discard
+  (`Charts::captureGeometry`): T-node positions at creation, separatrix
+  polylines sliced out of the walk's trail by the same monotone curve parameter
+  its events already carry, and crease/boundary polylines from the chain
+  vertices. **Nothing in `solveBimdf` reads any of it**, so capture cannot move
+  an assignment — verified byte-identical output with capture on versus off
+  across all six corpus models.
+
+  `validateTopologyLayout` checks the layout's combinatorial invariants and
+  deliberately separates two failure classes, mirroring how the tracer already
+  treats them. A HARD violation — a bad id, a non-finite position, an arc
+  pointing at a missing node, an arc bounding no patch — means the graph is
+  corrupt and nothing may consume it. A patch whose boundary walk does not close
+  is LOCAL: it is reported by id and its arcs are excluded, exactly like a
+  rejected orbit, and the sound remainder proceeds. All six corpus models
+  validate; rocker-arm carries one contained non-closing patch out of 199, which
+  is a Phase B target.
+
+  Reachable behind `CYBER_ZR_LAYOUT` (`=1` reports the layout statistics and the
+  validation verdict; any other value is a path prefix and also writes
+  `<prefix>.json` and `<prefix>.obj`, both byte-reproducible). The public
+  `zremesher` quad method that will carry this without an env var is later in
+  the same change. `examples/21_topology_layout.py` renders the layout's arcs
+  and singularities over the quads they produced.
+
+- **Exact symmetry (`--symmetry x|y|z`) — mirrored CONNECTIVITY.** For
+  retopology the requirement is `left topology == mirrored right topology`, not
+  `left shape ~= right shape`. The second is what remeshing a symmetric model
+  and hoping gives you: a field solve on a symmetric surface is not a symmetric
+  function of it, so cones land wherever iteration order and floating-point ties
+  put them and the halves come back with different edge counts.
+
+  So it is obtained by construction: cut at the midplane, solve one half, mirror
+  the connectivity, weld the centerline. Matching every vertex and face to its
+  reflection, spot goes from 1377 unmatched vertices and 1661 unmatched faces to
+  **0 and 0**; cheburashka from 1590 and 1698 to **0 and 0**.
+
+  Three pieces, each with a failure mode that had to be handled. The split clips
+  faces the plane passes through, so the border is on the plane rather than
+  ragged. The border is then projected back onto the plane after remeshing —
+  necessary because the extraction's border does NOT land on the cut, it ends
+  where the isolines end and drifts up to ~3 edge lengths, which no distance
+  tolerance can absorb; projecting every border vertex is correct precisely
+  because the input was closed, so the half's only border IS the cut. Faces the
+  projection flattens into the plane are membranes that would sit inside the
+  model as an internal wall, and are removed.
+
+  `--target-quads` names the whole model, so the half is solved for half of it.
+  Known residue: cheburashka comes back with 3 boundary and 2 non-manifold edges
+  where a membrane was removed; spot and stanford-bunny are clean.
+
+  The plane math moved from `retopo` to `cyber/core/plane.hpp` so the remesher
+  and the interactive tools share one definition without either depending on the
+  other; `retopo::Plane` and friends are re-exported, so every existing caller
+  is unchanged.
+
+- **Topology guides — a stroke that becomes an edge loop, not just a field
+  bias.** A flow guide has always been a soft request: the cross field is biased
+  toward the stroke, the loops nearby lean that way, and none of them is pinned
+  to it. That is right for steering flow and wrong for "put a loop exactly HERE",
+  which is most of what a retopology artist draws — an eye, a mouth, a shoulder,
+  a knee.
+
+  A guide now carries a mode. `orientation` is the old behaviour and is the
+  default, so every guide authored before this field existed is unchanged.
+  `topology` says the stroke is meant to become a curve in the mesh.
+
+  The mechanism reuses creases rather than growing a parallel one: a pinned
+  crease already IS "run an edge loop along this curve", so a topology guide is
+  projected onto the solve mesh as a connected edge path and handed to that
+  machinery. Projection snaps each guide point to its nearest vertex and then
+  JOINS consecutive snaps by shortest edge paths — joining is what makes the
+  result connected, since a stroke sampled more coarsely than the mesh would
+  otherwise leave gaps no edge chain can follow. It is deterministic, it reports
+  how far it had to stray, and it declines rather than returning a broken path.
+  A guide that cannot be projected is reported by name, never dropped.
+
+  Measured on the RESULT, as the fraction of the guide with an output edge both
+  near it and ALIGNED with it:
+
+  | fixture | orientation | topology |
+  |---|---|---|
+  | sphere equator | 51.6% | **87.5%** |
+  | sphere loop tilted 35° | 52.3% | **86.7%** |
+
+  Requiring alignment is what makes that number honest. Edges crossing the guide
+  at right angles are everywhere in a dense mesh, and counting them scored the
+  ignore-the-stroke case above 80%.
+
+  Reachable from the CLI sidecar today (`"mode": "topology"`, `"closed": true`);
+  an unrecognised mode is an error rather than a silent fallback.
+  `examples/24_topology_guides.py` renders it.
+
+- **A public `zremesher` quad method.** The topology-layout work is no longer
+  reachable only through environment variables: `--quad-method zremesher` on the
+  CLI, `CYBER_QUAD_ZREMESHER` (4) on the C ABI, `quad_method="zremesher"` from
+  Python. `quad-cover` remains the default and is untouched.
+
+  It is not a new algorithm — structurally it is the quad-cover path, same cross
+  field, same seamless solve, same isoline extraction, with the topology-layout
+  stage on and the tracing options **the layout** wants rather than the ones the
+  shipped quantizer's guided rounding wants. That distinction is why it has to
+  be a method rather than another flag: Phase B measured that boundary chains fix
+  most of the Stanford bunny's abandoned separatrix launches, but `quad-cover`
+  cannot turn them on, because the recovered regions reshape the flow its guided
+  rounding is tuned against. `zremesher` does not use that rounding, so for it
+  the trade does not exist.
+
+  `SeamlessLayoutOptions` is what carries it: the tracer no longer reads the
+  environment to decide what to trace, the caller does. It always routes to the
+  native seamless solver, since the layout is traced from that solver's map, and
+  it takes the same field-aligned per-island fallback `quad-cover` does.
+
+  Measured, each lever toggled independently on the corpus: boundary chains take
+  the bunny's abandoned launches 4 → 2 and recover 12 more patches at a flat
+  rejection ratio, leaving every closed model bit-identical; fold repair cuts
+  fold-damaged node rotations (bunny 17 → 11, rocker-arm 17 → 16, cheburashka
+  3 → 1) with rejections unchanged. Both are coverage and repair wins, and
+  **neither moves the fold-robustness gate**.
+
+  The run report now names the EFFECTIVE quad method — after any
+  build-capability fallback — which it did not carry at all before.
+
+- **Layout-containment diagnostics, and two fold-repair levers** (Phase B of the
+  same change, in progress). The tracer reported *that* it contained a region
+  but never *why*, which made the fold-robustness work guesswork. It now reports
+  the rejection reason per orbit (sector winding / corner count / side mismatch /
+  abandoned cone), the degradation site per node (boundary fan / unanchored end /
+  T-node winding / T-node interior / fan reclassification) and how many nodes are
+  genuinely unseatable — winding greater than twice their arc ends, so no
+  in-range sector assignment exists at all.
+
+  `examples/22_layout_robustness.py` is the artifact those numbers come from: it
+  sweeps the corpus against target counts and adaptivity and prints what it
+  measures, met or not. Baseline at 2000 quads: 178 rejected orbits, 1
+  non-closing patch, 57 abandoned launches; reasons 88 sector winding, 52 corner
+  count, 9 side mismatch, 29 abandoned cone.
+
+  Behind `CYBER_ZR_FOLD_REPAIR`, two levers that are strictly better estimates
+  and output-neutral on the corpus: a **feasible-rotation projection** (the
+  [1,2] corner/pass-through range is what a rotation system around a node
+  requires, so when the winding admits any in-range assignment the closest one
+  beats an out-of-range rounding) and a corrected **winding lift target** (QEx
+  Algorithm 8's lift targeted the number of incident arc ends, which undercounts
+  badly at a negative-index cone — a valence-5 cone with two surviving ends
+  lifted to 2 instead of 5). Measured: degraded nodes rocker-arm 17 → 13 and
+  bunny 11 → 5, reclassification failures rocker-arm 15 → 11 and bunny 8 → 2,
+  **rejected orbits unchanged** and output byte-identical. The Phase B gate is
+  not met.
+
+  Recorded as refuted, with numbers, so it is not retried: overriding the
+  developed winding with the topological one made things clearly worse (rejected
+  orbits bunny 47 → 69, cheburashka 12 → 23). The measurements point the next
+  lever upstream — the residual is an index/geometry disagreement at
+  negative-index cones, and 37 of the bunny's 57 abandoned launches are open
+  boundaries, not fold damage at all.
+
+
 ## [0.7.0] - 2026-08-25
 
 ### Added

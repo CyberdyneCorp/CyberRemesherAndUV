@@ -61,15 +61,17 @@ you need output you can hand to a subdivision surface without repair, that is th
 number that matters. If you need the tightest median angle on organic scans,
 QuadriFlow is still ahead on four of these five.
 
-Other strategies: **`field-aligned`** (max-matching over a smoothed cross field, ~95%+
-quad-dominance, strongest on box/CAD geometry), **`instant-meshes`** (Instant-Meshes-style
-position-field extractor), and **`integer`** (experimental integer parametrization).
+Other strategies: **`zremesher`** (the quad-cover path plus the explicit
+topology-layout stage — see below), **`field-aligned`** (max-matching over a smoothed
+cross field, ~95%+ quad-dominance, strongest on box/CAD geometry),
+**`instant-meshes`** (Instant-Meshes-style position-field extractor), and
+**`integer`** (experimental integer parametrization).
 
 ![Community test models remeshed to clean quads](examples/output/09_gallery.png)
 
 <sub>Real scanned / CAD models → quad-dominant retopology · <code>examples/09_test_models.py</code></sub>
 
-Twenty-one runnable examples drive the engine through the Python binding and
+Twenty-six runnable examples drive the engine through the Python binding and
 render what they do; [`examples/README.md`](examples/README.md) indexes them,
 and `examples/run_all.py` runs the lot into a stitched gallery.
 
@@ -86,6 +88,186 @@ stage is a clean-room reimplementation with no code copied. Every licence and
 copyright notice is reproduced in
 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md), which ships inside each
 release artifact.
+
+### Topology layout — the ZRemesher-class track
+
+The quad topology above is *emergent*: a smooth field, a seamless grid, and the
+isolines read off it. That is mathematically sound, and it leaves nothing to
+point at when the question is the one an artist actually asks — **where should
+the edge loops go, and where do the extraordinary vertices belong?**
+
+`TopologyLayout` makes that structure a first-class artifact instead of a side
+effect: **nodes** (singularities, feature and boundary corners, T-junctions),
+**arcs** (the separatrix, crease and boundary curves between them, carrying
+their traced 3D polylines and lengths) and the **patches** those arcs bound.
+It is what the rest of the track — singularity placement, topology-affecting
+guides, exact symmetry, semantic boundaries, quality scoring — is built to
+consume, rather than each of them adding another branch to the quantizer.
+
+It is a first-class quad method, not an environment variable:
+
+```sh
+cyberremesh --input model.obj --output quads.obj --quad-method zremesher --target-quads 2000
+```
+
+```python
+remesh(mesh, RemeshParams(target_quad_count=2000, quad_method="zremesher"))
+```
+
+`zremesher` is structurally the `quad-cover` path — same cross field, same
+seamless solve, same isoline extraction — with the layout stage on and the
+tracing options **the layout** wants rather than the ones the shipped
+quantizer's guided rounding wants. That distinction is the reason it is a
+separate method: `quad-cover` cannot turn boundary chains on, because they
+reshape the flow its guided rounding is tuned against, while `zremesher` can,
+because it does not use that rounding. It always routes to the native seamless
+solver, since the layout is traced from that solver's map.
+
+To inspect the layout itself, write it out (`.json` plus a polyline `.obj`):
+
+```sh
+CYBER_ZR_LAYOUT=/tmp/layout \
+  cyberremesh --input model.obj --output quads.obj --quad-method zremesher --target-quads 2000
+```
+
+![Topology layout drawn over the quads it produced](examples/output/21_topology_layout.png)
+
+<sub>The layout's separatrix arcs (blue) and singularities (red) over the mesh they produced — pinned to creases on a CAD part, pure separatrix structure on an organic surface, constrained by the handle on a genus-1 part · <code>examples/21_topology_layout.py</code></sub>
+
+The layout is validated against explicit combinatorial invariants, and the
+validator separates two failure classes on purpose. A **hard** violation — a bad
+id, a non-finite position, an arc pointing at a missing node — means the graph is
+corrupt and nothing may consume it. A patch whose boundary walk does not close is
+**local**: it is reported by id and its arcs are excluded, exactly as the tracer
+already contains a rejected orbit, and the sound remainder proceeds. Collapsing
+the two would throw away a whole model's layout over one bad patch.
+
+All six corpus models produce a valid layout. Total index is `4 × Euler
+characteristic` — 8 for a genus-0 surface, 0 for rocker-arm's handle — which is a
+free end-to-end check that the layout agrees with the field it came from:
+
+| model | nodes | arcs | patches | singularities | non-closing | total index |
+|---|---|---|---|---|---|---|
+| spot | 222 | 322 | 117 | 46 | 0 | 8 |
+| fandisk | 165 | 243 | 75 | 38 | 0 | 8 |
+| rocker-arm | 489 | 692 | 199 | 98 | 1 | 0 |
+| stanford-bunny | 628 | 771 | 189 | 133 | 0 | 8 |
+
+Building the layout **cannot change the quantized result** — the tracer's
+geometry capture is write-only with respect to the solver, verified
+byte-identical with capture on versus off across the corpus.
+
+The next milestone is making the tracing robust to the foldovers the relaxed
+parameterization genuinely has near high-distortion cones. That work is
+measured, not asserted: `examples/22_layout_robustness.py` sweeps the corpus and
+reports every contained region **and why it was contained**.
+
+![Layout robustness under folded relaxed maps](examples/output/22_layout_robustness.png)
+
+<sub>Contained regions per model, and the reason breakdown that says which lever would move them — 178 rejected orbits at the current baseline, dominated by sector winding on closed surfaces and by open boundaries on the bunny · <code>examples/22_layout_robustness.py</code></sub>
+
+What that decoupling bought, measured on the corpus: on the one open surface
+(the Stanford bunny) separatrices reaching a boundary now terminate there
+instead of being abandoned — abandoned launches 4 → 2, with 12 more patches
+recovered at a flat rejection ratio — and fold repair cuts fold-damaged node
+rotations (bunny 17 → 11, rocker-arm 17 → 16). Both are coverage and repair
+wins; **neither moves the fold-robustness gate**, which is consistent with what
+Phase B found: where the layout is contained, it is genuinely defective rather
+than misclassified.
+
+#### Topology guides — a stroke that becomes an edge loop
+
+A flow guide has always been a *soft* request: the field is biased toward your
+stroke, the loops nearby lean that way, none of them is pinned to it. That is
+right for steering flow and wrong for "put a loop exactly **here**" — which is
+most of what a retopology artist draws: an eye, a mouth, a shoulder, a knee.
+
+A guide now carries a mode. `orientation` is the old behaviour and the default,
+so every guide authored before this existed is unchanged. `topology` says the
+stroke is meant to become a curve in the mesh — it is projected onto the surface
+as a connected edge path and handed to the same machinery that makes quads run
+along a crease.
+
+```json
+{"version": 1, "guides": [
+  {"points": [[x, y, z], ...], "radius": 0.15, "mode": "topology", "closed": true}]}
+```
+
+![Topology guides: the red loop asked for, the quads returned](examples/output/24_topology_guides.png)
+
+<sub>The red loop is the request; the quads are the answer. Measured as the fraction of the guide with an output edge both near it <em>and aligned with it</em> — requiring alignment matters, since edges crossing a guide at right angles are everywhere in a dense mesh · <code>examples/24_topology_guides.py</code></sub>
+
+| fixture | orientation | topology |
+|---|---|---|
+| sphere equator | 51.6% | **87.5%** |
+| sphere loop tilted 35° | 52.3% | **86.7%** |
+
+#### Choosing the field by measuring, not by a threshold
+
+The roadmap has long recorded that no static "organic vs CAD" threshold picks
+the better cross field for every model — rocker-arm prefers one, spot and
+cheburashka the other, and their crease fractions interleave, so no threshold
+gets all three right. `--quality best` settles it per input: solve both
+candidates, score each, keep the better.
+
+| model | multires | single-level | selected |
+|---|---|---|---|
+| spot | 2.606 | 2.611 | single-level |
+| fandisk | **2.523** | 2.522 | multires |
+| rocker-arm | 2.199 | **2.423** | single-level |
+| cheburashka | 1.757 *(13 defects)* | **2.459** | single-level |
+| stanford-bunny | **2.096** | 2.078 | multires |
+
+The score weighs angle, edge uniformity, quad purity and irregular-vertex count,
+with topological defects weighted so heavily they dominate: a mesh with
+excellent angles and a crack is not a winner. It costs a second solve, so `fast`
+remains the default.
+
+#### Exact symmetry — mirrored connectivity, not mirrored shape
+
+For retopology the requirement is `left topology == mirrored right topology`,
+not `left shape ≈ right shape`. The second is what you get by remeshing a
+symmetric model and hoping: a field solve on a symmetric surface is not a
+symmetric function of it, so cones land wherever iteration order and
+floating-point ties put them, and the halves come back with different edge
+counts. No amount of position averaging fixes that — the connectivity already
+differs.
+
+`--symmetry x|y|z` gets it by construction: cut at the midplane, solve one half,
+mirror the connectivity, weld the centerline.
+
+```sh
+cyberremesh --input head.obj --output low.obj --quad-method zremesher \
+            --symmetry x --target-quads 4000
+```
+
+![Exact symmetry: mirrored connectivity versus a plain remesh](examples/output/25_symmetry.png)
+
+<sub>Matching every vertex and face to its reflection · <code>examples/25_symmetry.py</code></sub>
+
+| model | mode | faces | unmatched vertices | unmatched faces |
+|---|---|---|---|---|
+| spot | plain | 1672 | 1377 | 1661 |
+| spot | `--symmetry x` | 1568 | **0** | **0** |
+| cheburashka | plain | 1721 | 1590 | 1698 |
+| cheburashka | `--symmetry x` | 1988 | **0** | **0** |
+
+`--target-quads` names the whole model, so the half is solved for half of it.
+
+Known residue: some models come back with a handful of boundary or non-manifold
+edges — cheburashka 3 and 2, a procedural sphere 0 and 2 — where a face the
+border-snap flattened into the plane had to be removed. spot and the bunny are
+clean. The symmetry itself is exact either way; the residue is a small hole at
+the seam, and closing it means collapsing the membrane rather than deleting it.
+
+Status: the layout, its validation, the public method, topology guides,
+candidate selection and forced symmetry are **done**; fold-robust tracing is **in progress and its
+gate is not met**, and exact topology symmetry is **not started**. The plan, the
+measurements, and the levers already refuted — with their numbers, so they are
+not retried — are in [`docs/zremesher-plan.md`](docs/zremesher-plan.md).
+
+`quad-cover` remains the default and is untouched by any of this: choosing
+`zremesher` is what turns the layout stage on.
 
 ### Automatic UV atlas
 
@@ -628,9 +810,12 @@ an unrecognised value always means "default behaviour".
 | `CYBER_QC_NO_OPEN_CLEANUP` | Turns off the open-surface extraction cleanup (hole filling), restoring pre-0.2.5 behaviour on open surfaces. |
 | `CYBER_BASE_RELAX_ITERS` | Overrides the base-relax iteration count before subdivision. |
 
-`src/quadrangulate` carries a further set of `CYBER_QC_*` levers used by the
-benchmark and the plans in `docs/`; they are developer instrumentation, not part
-of the supported surface, and are documented at their call sites.
+`src/quadrangulate` carries a further set of `CYBER_QC_*` and `CYBER_ZR_*`
+levers used by the benchmark and the plans in `docs/` — including
+`CYBER_ZR_LAYOUT` (report the topology layout; a path prefix also writes it as
+JSON and a polyline OBJ) and `CYBER_ZR_FOLD_REPAIR`. They are developer
+instrumentation, not part of the supported surface, and are documented at their
+call sites.
 
 ## Layout
 
@@ -641,7 +826,7 @@ src/app/         document model, tools, undo (toolkit-free)
 src/render/      viewport renderer (Metal | Vulkan)
 src/accel/       compute backends: cpu | metal | cuda | opencl
 src/core/        mesh kernel, io, remeshing pipeline orchestration
-src/quadrangulate/  cross field, seamless UV, isoline extraction, quantization
+src/quadrangulate/  cross field, seamless UV, isoline extraction, quantization, topology layout
 src/retopo/      manual retopology: strokes, snapping, relax, subdivide, conform
 src/uv/          seams, LSCM unwrap, packing, automatic atlas
 src/bake/        normal / AO / curvature / cavity bakes

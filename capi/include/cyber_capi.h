@@ -163,7 +163,9 @@ typedef struct CyberRemeshParams {
                                 * 1 = Instant-Meshes position-field extractor,
                                 * 2 = integer-parametrization extractor,
                                 * 3 = QuadCover seamless-UV isoline extractor (default;
-                                *     falls back to field-aligned where no solver is present) */
+                                *     falls back to field-aligned where no solver is present),
+                                * 4 = ZRemesher-class retopology (quad-cover plus the
+                                *     explicit topology-layout stage) */
 } CyberRemeshParams;
 
 /* Quadrangulator selection values for CyberRemeshParams.quadMethod. */
@@ -175,6 +177,13 @@ typedef struct CyberRemeshParams {
  * out-of-process when the CYBER_QUADCOVER_CLI environment variable points at a built
  * autoremesher_cli. When neither is present the engine falls back to field-aligned. */
 #define CYBER_QUAD_QUADCOVER 3
+/* ZRemesher-class retopology: structurally the quad-cover path, with the explicit
+ * TopologyLayout stage on and the tracing options the LAYOUT wants rather than the
+ * ones the shipped quantizer's guided rounding wants (boundary chains, so a
+ * separatrix reaching an open boundary terminates there instead of being abandoned;
+ * fold repair). Always routes to the native seamless solver, because the layout is
+ * traced from its map. Falls back to field-aligned where no solver is present. */
+#define CYBER_QUAD_ZREMESHER 4
 
 /* Fills params with the engine defaults. No-op on NULL. */
 void cyber_default_params(CyberRemeshParams* params);

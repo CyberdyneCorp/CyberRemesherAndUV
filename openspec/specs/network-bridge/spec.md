@@ -1,7 +1,12 @@
 # network-bridge Specification
 
 ## Purpose
-TBD - created by archiving change bootstrap-v1-platform. Update Purpose after archive.
+An opt-in local-network protocol so another application can drive this engine
+in place, plus the reference client that exercises it. It exists for the tablet
+and DCC-plugin cases where the mesh already lives in another process and
+copying it through files is the wrong shape. Opt-in, versioned and local by
+default: a bridge that is on when nobody asked for it is a security problem,
+not a feature.
 ## Requirements
 ### Requirement: Opt-in local-network protocol
 The application SHALL offer a documented, versioned local-network protocol, disabled by default and enabled per session by explicit user action. When enabled it SHALL bind to the local network only; no cloud endpoint or external relay SHALL exist. The UI SHALL show a visible indicator whenever the bridge is listening.

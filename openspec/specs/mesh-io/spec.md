@@ -1,7 +1,12 @@
 # mesh-io Specification
 
 ## Purpose
-TBD - created by archiving change bootstrap-v1-platform. Update Purpose after archive.
+Getting meshes in and out: the import and export formats, correct handling of
+polygons at their authored arity, unit and scale normalization, and the named
+export presets that package a result for a specific target application. It
+exists so format handling never silently degrades the data — a quad stays a
+quad, a failure is reported by name rather than producing a plausible-looking
+partial mesh, and a preset that would lose a field you set refuses to load.
 ## Requirements
 ### Requirement: Import formats
 The system SHALL import meshes from OBJ, PLY, STL, glTF 2.0 (.gltf/.glb), and

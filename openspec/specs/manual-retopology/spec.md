@@ -1,7 +1,13 @@
 # manual-retopology Specification
 
 ## Purpose
-TBD - created by archiving change bootstrap-v1-platform. Update Purpose after archive.
+Retopology by hand: the Target/EditMesh scene model, the stroke grammar for
+drawing quads onto a surface, and the build, pin, symmetry, relax and
+visibility tools that operate on the result. It exists for the cases automatic
+remeshing cannot own — deliberate edge flow around a face, a deforming joint, a
+production topology standard — and it shares the mesh kernel and snapping with
+the automatic path so hand-built and generated geometry are the same kind of
+thing.
 ## Requirements
 ### Requirement: Target and EditMesh scene model
 A retopology document SHALL contain one read-only **Target** (the imported high-poly reference, with vertex colors when present) and one **EditMesh** (the low-poly mesh under construction). EditMesh vertices SHALL continuously snap to the Target surface as they are created or moved; snapping SHALL use the accelerated closest-point path. An optional vertex-snap modifier SHALL snap EditMesh vertices to Target *vertices* instead of the surface. A 2D image MAY be loaded as a flat snapping target.
