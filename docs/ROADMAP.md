@@ -22,6 +22,58 @@ They are a record of what was measured when, not a description of the current
 code: where a number here disagrees with `tests/bench/baselines.json` or the
 README, the baselines are authoritative.
 
+## Update — 2026-08-30: the ZRemesher track reaches the bindings, and a CLI/Python divergence is closed
+
+Phases C-G, the public method and the release gates landed in #36; this entry
+records what came after, which is the part that made the track usable from
+anything other than a terminal.
+
+**The surface was CLI-shaped.** `--quad-method zremesher` was reachable from the
+C ABI and Python, but its parameters were not: quality mode, symmetry axis and
+guide mode were all CLI-only, and the layout statistics and the selected
+candidate were emitted as `[zr]` lines on stderr and nowhere else. The
+engine-bindings spec asks for the parameters and the report as well, and neither
+of its two scenarios ("Python drives the ZRemesher path", "Topology guides from
+Python") could be written against what existed. The release gate scraping stderr
+for `[zr] selected candidate:` was the symptom.
+
+Closed by SIBLING entry points rather than by growing shipped structs —
+`CyberRemeshParams` and `CyberFlowGuide` travel as arrays that callers stride by
+`sizeof`, so a new field misreads every already-compiled caller:
+`CyberZRemesherParams`, `CyberZRemesherReport`, `CyberFlowGuideEx` /
+`CyberGuidanceEx`, `cyber_remesh_zremesher` and `cyber_remesh_guided_ex`, with
+`ZRemesherParams` / `ZRemesherReport` / `FlowGuide.mode` mirroring them in
+Python. Unknown values are rejected, not clamped: a symmetry axis silently
+becoming "none" hands back an asymmetric mesh for a symmetry request.
+
+**A divergence the parity work surfaced.** `cyber_remesh` with
+`CYBER_QUAD_ZREMESHER` never forwarded `adaptivity` — it ran the option at its
+`0.0` default while the CLI has always passed the parameter through, and the
+default is `1.0`. The same request therefore produced a different mesh from
+Python than from the CLI. Free to fix, because the method is unreleased.
+
+**And a lesson about the fixture, not the code.** The first version of the
+regression test compared CLI and Python on a *sphere* and passed with the bug
+deliberately reintroduced. A sphere has constant curvature, so adaptivity 0 and
+adaptivity 1 size it identically — the fixture was blind on the one axis it
+existed to measure. On a torus the same test fails under mutation (CLI 696
+vertices vs Python 698) and passes on the fix. This is the second time on this
+track that a measurement was blind on its deciding axis; the first was the
+quality score, which selected the same candidate on all five models until the
+irregular-vertex term was added.
+
+| surface | quality | symmetry | guide mode | layout stats / score |
+|---|---|---|---|---|
+| CLI | ✅ | ✅ | ✅ | stderr only |
+| C ABI | ✅ `cyber_remesh_zremesher` | ✅ | ✅ `CyberGuidanceEx` | ✅ `CyberZRemesherReport` |
+| Python | ✅ `ZRemesherParams` | ✅ | ✅ `FlowGuide.mode` | ✅ `Mesh.zremesher_report` |
+
+Still open on the track: the layout export and the selected candidate are not on
+the CLI's own flags or JSON report (env var `CYBER_ZR_LAYOUT` and stderr
+respectively), `ConstraintField` semantic boundaries and automatic symmetry
+detection are not attempted, and the `bench` gate remains red on `main` from
+before this work (`cylinder.singularities` 4 -> 6).
+
 ## Update — 2026-08-29 (branch `feat/zremesher-topology-layout`): the layout is now a first-class artifact; Phase B measured, one lever refuted
 
 New campaign: **ZRemesher-class automatic retopology**

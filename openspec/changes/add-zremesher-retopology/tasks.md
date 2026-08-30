@@ -540,6 +540,62 @@ defective where it is contained. Evidence:
        with rejections unchanged. So both levers are coverage and repair wins,
        and **neither moves the Phase B gate** — consistent with the Phase B
        finding that the layout is genuinely defective where it is contained.
+- [x] P1b. Binding PARITY: the C ABI and Python expose the ZRemesher parameters
+       and the run report, not just the method.
+       — P1 shipped the METHOD everywhere and stopped there. The spec asks for
+       more ("The C ABI and the Python bindings SHALL expose the ZRemesher quad
+       method AND ITS PARAMETERS ... and SHALL expose the layout statistics and
+       quality score"), and neither of the spec's two scenarios could be written
+       against what existed: quality mode, symmetry and guide mode were all
+       CLI-only, and the layout statistics and the selected candidate went to
+       stderr and nowhere else.
+
+       The ABI grows by SIBLINGS, never by new fields on shipped structs —
+       `CyberRemeshParams` and `CyberFlowGuide` are passed as arrays that
+       callers stride by `sizeof`, so a new field misreads every compiled
+       caller. Same reasoning the header already records for
+       `cyber_retopo_subdivide_ex`. So:
+       * `CyberZRemesherParams` (quality, symmetry, unified sizing, boundary
+         chains, fold repair) + `cyber_default_zremesher_params`,
+       * `CyberFlowGuideEx` / `CyberGuidanceEx` — a guide that names its mode
+         and whether it closes,
+       * `CyberZRemesherReport` — layout counts summed over the run's islands,
+         the selected candidate and its score, and the symmetry outcome,
+       * `cyber_remesh_zremesher` (the parity entry point) and
+         `cyber_remesh_guided_ex` (mode-bearing guides on ANY quad method,
+         because the CLI can attach one to any method).
+
+       Values are REJECTED, not clamped: an unknown quality mode, symmetry axis
+       or guide mode is `CYBER_ERR_INVALID_PARAM`. A symmetry axis silently
+       clamped to "none" would hand back an asymmetric mesh for a symmetry
+       request, which is worse than failing.
+
+       Python mirrors all of it: `ZRemesherParams`, `ZRemesherReport`,
+       `FlowGuide.mode` / `.closed`, and `remesh(..., zremesher=...)` attaching
+       `Mesh.zremesher_report`. `zremesher=` with any other `quad_method` is a
+       `ValueError` rather than a silent reinterpretation.
+
+       **A parity BUG this surfaced and fixed.** `cyber_remesh` with
+       `CYBER_QUAD_ZREMESHER` never forwarded `adaptivity` — it left the
+       ZRemesher option at its 0.0 default while the CLI has always passed the
+       parameter through. Default adaptivity is 1.0, so the SAME request gave a
+       different mesh from Python than from the CLI. `cyber_remesh_zremesher`
+       forwards it, and Python routes `quad_method="zremesher"` through that
+       entry point, so the two now agree. Free to fix: the method is unreleased.
+
+       Two supporting pieces, both of which had to exist for this to be real
+       rather than a second implementation:
+       * `remeshSymmetric` — the ~100 lines of split / border-snap / mirror /
+         recount that lived in `apps/cli/main.cpp` now live in
+         `symmetry_layout`, and the CLI calls it. Copying them into the ABI
+         would have been a divergence waiting to happen, not parity.
+       * `ZRemesherRunReport` / `LayoutRunReport` — caller-owned sinks on
+         `ZRemesherOptions` / `SeamlessLayoutOptions`. Null keeps the historical
+         behavior exactly (report to stderr and discard).
+
+       Gate: MET. `python_test_zremesher_bindings` asserts both spec scenarios
+       plus the rejections, and the CLI and Python produce the same output for
+       the same request.
 - [x] P2. Example scripts demonstrating the layout, topology guides, symmetry
        and quality modes on the bundled corpus.
        — five: `21_topology_layout` (the layout drawn over the quads),

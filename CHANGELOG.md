@@ -118,6 +118,48 @@
   an unrecognised mode is an error rather than a silent fallback.
   `examples/24_topology_guides.py` renders it.
 
+- **The ZRemesher surface reaches the bindings, not just the CLI.** The public
+  method shipped everywhere; its parameters did not. Quality mode, symmetry and
+  guide mode were CLI-only, and the layout statistics and the selected candidate
+  went to stderr and nowhere else — so neither of the engine-bindings spec's
+  scenarios could even be written. The C ABI gains `CyberZRemesherParams`,
+  `CyberZRemesherReport`, `CyberFlowGuideEx` / `CyberGuidanceEx`,
+  `cyber_default_zremesher_params`, `cyber_remesh_zremesher` (the parity entry
+  point) and `cyber_remesh_guided_ex` (mode-bearing guides on *any* quad method,
+  because the CLI can attach one to any method).
+
+  By SIBLINGS, never by new fields on shipped structs: `CyberRemeshParams` and
+  `CyberFlowGuide` are passed as arrays that callers stride by `sizeof`, so a
+  new field misreads every already-compiled caller's array — the same reasoning
+  the header already records for `cyber_retopo_subdivide_ex`.
+
+  Python mirrors all of it: `ZRemesherParams`, `ZRemesherReport`,
+  `FlowGuide.mode` / `.closed`, and `remesh(..., zremesher=...)` attaching
+  `Mesh.zremesher_report`. Unknown values are **rejected, never reinterpreted** —
+  a symmetry axis quietly clamped to `"none"` hands back an asymmetric mesh for
+  a symmetry request, and a typo'd `"topolgy"` quietly biases the field instead
+  of cutting a loop.
+
+  Two supporting changes made this one implementation rather than two:
+  `remeshSymmetric()` lifts the split / border-snap / mirror / recount sequence
+  out of `apps/cli/main.cpp` into `symmetry_layout` so the CLI and the ABI run
+  the same code, and `ZRemesherRunReport` / `LayoutRunReport` are caller-owned
+  sinks on the options structs (null keeps the historical stderr-only behavior
+  exactly).
+
+### Fixed
+
+- **`cyber_remesh` with `CYBER_QUAD_ZREMESHER` ignored `adaptivity`.** It left
+  the ZRemesher option at its `0.0` default while the CLI has always forwarded
+  the parameter, and the default is `1.0` — so the same request produced a
+  different mesh from Python than from the CLI. `cyber_remesh_zremesher`
+  forwards it and Python routes `quad_method="zremesher"` through that entry
+  point. Regression test: `python_test_zremesher_bindings` runs both surfaces on
+  a **torus** and compares counts. The fixture is not a sphere on purpose —
+  constant curvature is sized identically at adaptivity 0 and 1, so a sphere
+  passes whether or not the parameter is forwarded (verified by mutation: torus
+  CLI 696v vs Python 698v; sphere identical either way).
+
 - **A public `zremesher` quad method.** The topology-layout work is no longer
   reachable only through environment variables: `--quad-method zremesher` on the
   CLI, `CYBER_QUAD_ZREMESHER` (4) on the C ABI, `quad_method="zremesher"` from

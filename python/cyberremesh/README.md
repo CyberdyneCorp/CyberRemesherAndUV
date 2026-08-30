@@ -126,14 +126,54 @@ preset from an unsupported schema raises `IncompatibleVersionError`.
   surfaces where flow matters more than raw dominance.
 - `"integer"` — the experimental integer-parametrization extractor
   (watertight/manifold; degrades at coarse target counts).
+- `"zremesher"` — the ZRemesher-class retopology path: structurally
+  `"quad-cover"` with the explicit topology-layout stage on. This is the one
+  with artist controls (below).
 
 ```python
 RemeshParams(target_quad_count=5000, pure_quads=True, quad_method="instant-meshes")
 ```
 
+### ZRemesher controls
+
+`quad_method="zremesher"` accepts a `ZRemesherParams`, and always attaches a
+`ZRemesherReport` to the result:
+
+```python
+from cyberremesh import FlowGuide, RemeshParams, ZRemesherParams, remesh
+
+out = remesh(
+    mesh,
+    RemeshParams(target_quad_count=2000, quad_method="zremesher"),
+    zremesher=ZRemesherParams(
+        quality="best",   # solve BOTH cross-field candidates, keep the better
+        symmetry="x",     # solve one half, mirror the CONNECTIVITY
+    ),
+    guides=[FlowGuide(points=eye_loop, radius=0.05,
+                      mode="topology",  # become an edge loop, not just a bias
+                      closed=True)],
+)
+
+r = out.zremesher_report
+r.singularities, r.nodes, r.arcs, r.patches   # the traced layout, summed over islands
+r.selected_candidate, r.quality_score          # which field "best" kept, and why
+r.topologically_symmetric                      # checked on the result, not assumed
+```
+
+`target_quad_count` names the **whole** model under `symmetry`, so the half is
+solved for half of it.
+
+Unknown values are rejected, never reinterpreted — a symmetry axis silently
+clamped to `"none"` would hand back an asymmetric mesh for a symmetry request,
+and a typo'd `mode="topolgy"` would quietly bias the field instead of cutting a
+loop. Both raise `ValueError`. Passing `zremesher=` with any other
+`quad_method` is likewise an error rather than a silent switch.
+
+`FlowGuide.mode` works on **every** quad method, not only this one.
+
 ## Tests
 
-`tests/test_api.py` runs as a plain script. When the native library is absent it
+`tests/test_api.py` and `tests/test_zremesher_bindings.py` run as plain scripts. When the native library is absent it
 exits **77** — CTest's `SKIP_RETURN_CODE`, which `tests/CMakeLists.txt` sets — so
 the run shows as "Skipped" rather than a vacuous pass. Treat 0 as pass, 77 as
 skip and anything else as failure:
