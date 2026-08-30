@@ -94,18 +94,37 @@ def _torus_obj(path, major=1.0, minor=0.35, u=64, v=32):
 
 
 def _find_cli():
-    """The most recently built ``cyberremesh``, or None.
+    """The ``cyberremesh`` built alongside the library this process loaded.
 
-    Newest wins deliberately: a build tree usually holds several configurations,
-    and picking whichever one os.walk happens to reach first silently tests a
-    stale binary — which reports a missing feature as a failure of the feature.
+    Pairing matters more than freshness here. This file compares CLI output
+    against Python output, and a Release CLI and a Debug library disagree for
+    reasons that have nothing to do with the bindings — different optimization
+    settings move the floating-point solve, so the counts differ and the parity
+    gate fails for a configuration mismatch it invented itself. (That is not
+    hypothetical: building the sanitizer preset made the Debug CLI the newest
+    binary in the tree, and a "newest wins" search then compared it against the
+    Release library.)
+
+    CTest sets CYBER_CAPI_LIB to the shared library under test, so the build
+    root is derivable from it. Only when that is absent does this fall back to
+    the newest CLI in build/ — and never to whichever one os.walk reached
+    first, which silently tests a stale binary and reports a missing feature as
+    a failure of the feature.
     """
+    lib = os.environ.get("CYBER_CAPI_LIB")
+    if lib:
+        # <build>/capi/libcyber_capi.* -> <build>/apps/cli/cyberremesh
+        root = os.path.dirname(os.path.dirname(os.path.abspath(lib)))
+        paired = os.path.join(root, "apps", "cli", "cyberremesh")
+        if os.access(paired, os.X_OK):
+            return paired
+
     build = os.path.join(_REPO, "build")
     if not os.path.isdir(build):
         return None
     found = []
-    for root, _dirs, files in os.walk(build):
-        candidate = os.path.join(root, "cyberremesh")
+    for base, _dirs, files in os.walk(build):
+        candidate = os.path.join(base, "cyberremesh")
         if "cyberremesh" in files and os.access(candidate, os.X_OK):
             found.append(candidate)
     if not found:

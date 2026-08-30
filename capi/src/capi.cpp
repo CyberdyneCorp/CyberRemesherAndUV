@@ -637,6 +637,23 @@ CyberStatus remeshShared(const CyberMesh* in, const CyberRemeshParams* params,
     }
 }
 
+// Copy `count` floats from `src` into `dst`, refusing a count no allocation
+// could satisfy.
+//
+// The bound check has to happen BEFORE the pointer arithmetic, not after. A
+// count a binding marshalled from a signed -1 arrives here as SIZE_MAX, and
+// `src + SIZE_MAX` is undefined behavior in its own right — UBSan reports
+// "addition of unsigned offset ... overflowed" — so the allocator never gets
+// the chance to refuse it. The observable ABI behavior is unchanged: the caller
+// still gets an argument error rather than an abort.
+bool assignFloats(const float* src, std::size_t count, std::vector<float>& dst) {
+    if (count > dst.max_size()) {
+        return false;
+    }
+    dst.assign(src, src + count);
+    return true;
+}
+
 // CyberGuidance -> cyber::remesh::Guidance. Rejects arrays whose pointer is
 // null while the count is not (and vice versa) rather than reading garbage;
 // value-level validation is validateGuidance's job inside the pipeline.
@@ -665,9 +682,8 @@ bool toGuidance(const CyberGuidance& in, cyber::remesh::Guidance& out) {
     if ((in.face_density == nullptr) != (in.face_density_count == 0)) {
         return false;
     }
-    out.density.vertexValues.assign(in.vertex_density, in.vertex_density + in.vertex_density_count);
-    out.density.faceValues.assign(in.face_density, in.face_density + in.face_density_count);
-    return true;
+    return assignFloats(in.vertex_density, in.vertex_density_count, out.density.vertexValues) &&
+           assignFloats(in.face_density, in.face_density_count, out.density.faceValues);
 }
 
 // CyberGuidanceEx -> cyber::remesh::Guidance. Same pointer/count discipline as
@@ -710,8 +726,14 @@ bool toGuidanceEx(const CyberGuidanceEx& in, cyber::remesh::Guidance& out, std::
         reason = "face density array pointer/count mismatch";
         return false;
     }
-    out.density.vertexValues.assign(in.vertex_density, in.vertex_density + in.vertex_density_count);
-    out.density.faceValues.assign(in.face_density, in.face_density + in.face_density_count);
+    if (!assignFloats(in.vertex_density, in.vertex_density_count, out.density.vertexValues)) {
+        reason = "vertex density count is larger than any allocation could hold";
+        return false;
+    }
+    if (!assignFloats(in.face_density, in.face_density_count, out.density.faceValues)) {
+        reason = "face density count is larger than any allocation could hold";
+        return false;
+    }
     return true;
 }
 
