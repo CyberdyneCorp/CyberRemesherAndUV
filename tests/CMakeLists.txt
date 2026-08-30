@@ -20,6 +20,7 @@ add_executable(cyber_tests
     quadrangulate/test_geometry_analysis.cpp
     quadrangulate/test_sizing_field.cpp
     quadrangulate/test_topology_guides.cpp
+    quadrangulate/test_symmetry_layout.cpp
     quadrangulate/test_sparse_cholesky.cpp
     quadrangulate/test_stable_angle.cpp
     quadrangulate/test_quad_cleanup.cpp

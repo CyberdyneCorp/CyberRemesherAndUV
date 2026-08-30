@@ -50,6 +50,37 @@
   the same change. `examples/21_topology_layout.py` renders the layout's arcs
   and singularities over the quads they produced.
 
+- **Exact symmetry (`--symmetry x|y|z`) — mirrored CONNECTIVITY.** For
+  retopology the requirement is `left topology == mirrored right topology`, not
+  `left shape ~= right shape`. The second is what remeshing a symmetric model
+  and hoping gives you: a field solve on a symmetric surface is not a symmetric
+  function of it, so cones land wherever iteration order and floating-point ties
+  put them and the halves come back with different edge counts.
+
+  So it is obtained by construction: cut at the midplane, solve one half, mirror
+  the connectivity, weld the centerline. Matching every vertex and face to its
+  reflection, spot goes from 1377 unmatched vertices and 1661 unmatched faces to
+  **0 and 0**; cheburashka from 1590 and 1698 to **0 and 0**.
+
+  Three pieces, each with a failure mode that had to be handled. The split clips
+  faces the plane passes through, so the border is on the plane rather than
+  ragged. The border is then projected back onto the plane after remeshing —
+  necessary because the extraction's border does NOT land on the cut, it ends
+  where the isolines end and drifts up to ~3 edge lengths, which no distance
+  tolerance can absorb; projecting every border vertex is correct precisely
+  because the input was closed, so the half's only border IS the cut. Faces the
+  projection flattens into the plane are membranes that would sit inside the
+  model as an internal wall, and are removed.
+
+  `--target-quads` names the whole model, so the half is solved for half of it.
+  Known residue: cheburashka comes back with 3 boundary and 2 non-manifold edges
+  where a membrane was removed; spot and stanford-bunny are clean.
+
+  The plane math moved from `retopo` to `cyber/core/plane.hpp` so the remesher
+  and the interactive tools share one definition without either depending on the
+  other; `retopo::Plane` and friends are re-exported, so every existing caller
+  is unchanged.
+
 - **Topology guides — a stroke that becomes an edge loop, not just a field
   bias.** A flow guide has always been a soft request: the cross field is biased
   toward the stroke, the loops nearby lean that way, and none of them is pinned

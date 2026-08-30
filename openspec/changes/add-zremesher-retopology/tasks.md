@@ -398,11 +398,66 @@ defective where it is contained. Evidence:
 ## Phase F — Semantic boundaries and symmetry
 
 - [ ] F1. `ConstraintField` (semantic / group / user-preserved boundaries).
+       — not attempted. The engine has no group/material input to connect yet,
+       so the type would have nothing to carry.
 - [ ] F2. Connect groups, material boundaries and user-preserved edges to the
        field pinning, the layout and the sizing field.
-- [ ] F3. Forced X/Y/Z exact half-mesh solve producing mirrored connectivity,
+       — blocked on F1 for the same reason.
+- [x] F3. Forced X/Y/Z exact half-mesh solve producing mirrored connectivity,
        not merely mirrored positions.
+       — landed as `--symmetry x|y|z`. Cut the input at the midplane, solve one
+       half, mirror the CONNECTIVITY. The second half is then exact by
+       definition rather than by luck: a field solve on a symmetric surface is
+       not a symmetric function of it, so solving the whole mesh gives matching
+       SHAPE at best while the halves carry different edge counts.
+
+       Three pieces, each with its own failure mode handled:
+       * `splitAtPlane` clips faces the plane passes through
+         (Sutherland-Hodgman against the half-space, exact for any face shape
+         without triangulating first), so the border is on the plane rather than
+         ragged.
+       * `snapBorderToPlane` projects the remeshed half's border back onto the
+         plane. This is needed because the extraction's border does NOT land on
+         the cut — it ends where the isolines end, drifting up to ~3 edge
+         lengths (spot: 0.28). Distance-tolerance snapping cannot fix a drift
+         that large; projecting every BORDER vertex can, and is correct
+         precisely because the input was closed so the half's only border is the
+         cut. Faces the snap pulls entirely into the plane are membranes — they
+         would sit inside the model as an internal wall and cannot be paired —
+         and are removed.
+       * `mirrorAcross` duplicates every off-plane vertex and face with reversed
+         winding, sharing the on-plane vertices so the seam is welded rather
+         than doubled.
+
+       Measured, matching every vertex and face to its reflection:
+
+       | model | mode | faces | unmatched v | unmatched f |
+       |---|---|---|---|---|
+       | spot | plain | 1672 | 1377 | 1661 |
+       | spot | `--symmetry x` | 1568 | **0** | **0** |
+       | cheburashka | plain | 1721 | 1590 | 1698 |
+       | cheburashka | `--symmetry x` | 1988 | **0** | **0** |
+
+       `--target-quads` names the WHOLE model, so the half is solved for half of
+       it; without that the request would silently mean "per half".
+
+       **Known residue:** cheburashka comes back with 3 boundary and 2
+       non-manifold edges — a small hole where a membrane face was removed.
+       spot and stanford-bunny are clean. Closing that hole means collapsing the
+       membrane rather than deleting it, which is mesh-kernel surgery and was
+       not attempted here.
+
+       **A bug worth recording:** the first symmetry CHECKER reported every one
+       of these meshes asymmetric. It used the tolerance as a quantization grid
+       and compared keys, which fails two opposite ways at once — two distinct
+       vertices inside a cell collide onto one entry, and a partner just across
+       a cell boundary is missed. Matching must be nearest-within-tolerance. The
+       first version of `examples/25_symmetry.py` reproduced the identical
+       mistake independently, which is how easy it is to write.
 - [ ] F4. Automatic symmetry detection, only once forced symmetry is solid.
+       — not attempted, per the design's own sequencing. Forced symmetry is
+       solid now but carries the membrane residue above; detection should wait
+       until that is closed, or it will silently apply a lossy operation.
 
 ## Phase G — Candidate selection
 

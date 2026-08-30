@@ -71,7 +71,7 @@ cross field, ~95%+ quad-dominance, strongest on box/CAD geometry),
 
 <sub>Real scanned / CAD models → quad-dominant retopology · <code>examples/09_test_models.py</code></sub>
 
-Twenty-five runnable examples drive the engine through the Python binding and
+Twenty-six runnable examples drive the engine through the Python binding and
 render what they do; [`examples/README.md`](examples/README.md) indexes them,
 and `examples/run_all.py` runs the lot into a stitched gallery.
 
@@ -223,8 +223,42 @@ with topological defects weighted so heavily they dominate: a mesh with
 excellent angles and a crack is not a winner. It costs a second solve, so `fast`
 remains the default.
 
-Status: the layout, its validation, the public method, topology guides and
-candidate selection are **done**; fold-robust tracing is **in progress and its
+#### Exact symmetry — mirrored connectivity, not mirrored shape
+
+For retopology the requirement is `left topology == mirrored right topology`,
+not `left shape ≈ right shape`. The second is what you get by remeshing a
+symmetric model and hoping: a field solve on a symmetric surface is not a
+symmetric function of it, so cones land wherever iteration order and
+floating-point ties put them, and the halves come back with different edge
+counts. No amount of position averaging fixes that — the connectivity already
+differs.
+
+`--symmetry x|y|z` gets it by construction: cut at the midplane, solve one half,
+mirror the connectivity, weld the centerline.
+
+```sh
+cyberremesh --input head.obj --output low.obj --quad-method zremesher \
+            --symmetry x --target-quads 4000
+```
+
+![Exact symmetry: mirrored connectivity versus a plain remesh](examples/output/25_symmetry.png)
+
+<sub>Matching every vertex and face to its reflection · <code>examples/25_symmetry.py</code></sub>
+
+| model | mode | faces | unmatched vertices | unmatched faces |
+|---|---|---|---|---|
+| spot | plain | 1672 | 1377 | 1661 |
+| spot | `--symmetry x` | 1568 | **0** | **0** |
+| cheburashka | plain | 1721 | 1590 | 1698 |
+| cheburashka | `--symmetry x` | 1988 | **0** | **0** |
+
+`--target-quads` names the whole model, so the half is solved for half of it.
+One known residue: cheburashka comes back with 3 boundary and 2 non-manifold
+edges, a small hole where a face the border-snap flattened into the plane was
+removed; spot and the bunny are clean.
+
+Status: the layout, its validation, the public method, topology guides,
+candidate selection and forced symmetry are **done**; fold-robust tracing is **in progress and its
 gate is not met**, and exact topology symmetry is **not started**. The plan, the
 measurements, and the levers already refuted — with their numbers, so they are
 not retried — are in [`docs/zremesher-plan.md`](docs/zremesher-plan.md).

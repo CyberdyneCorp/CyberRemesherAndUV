@@ -8,6 +8,7 @@
 #include "cyber/core/bvh.hpp"
 #include "cyber/core/math.hpp"
 #include "cyber/core/mesh.hpp"
+#include "cyber/core/plane.hpp"
 
 // Target/EditMesh snapping (manual-retopology spec, "Target and EditMesh scene
 // model"): EditMesh vertices continuously snap to the Target surface via the
@@ -15,29 +16,14 @@
 // Target *vertex* instead, and a flat plane models a loaded 2D image target.
 namespace cyber::retopo {
 
-// An oriented plane (point + unit normal). Models both the flat image-snapping
-// target and the symmetry plane so the two share one projection path.
-struct Plane {
-    Vec3 point{0.0f, 0.0f, 0.0f};
-    Vec3 normal{0.0f, 1.0f, 0.0f};
-};
-
-// Signed distance from `p` to the plane (positive on the normal side).
-[[nodiscard]] inline float signedDistance(const Plane& plane, Vec3 p) {
-    return dot(p - plane.point, normalized(plane.normal));
-}
-
-// Orthogonal projection of `p` onto the plane.
-[[nodiscard]] inline Vec3 projectToPlane(const Plane& plane, Vec3 p) {
-    const Vec3 n = normalized(plane.normal);
-    return p - n * dot(p - plane.point, n);
-}
-
-// Reflection of `p` across the plane.
-[[nodiscard]] inline Vec3 mirrorAcrossPlane(const Plane& plane, Vec3 p) {
-    const Vec3 n = normalized(plane.normal);
-    return p - n * (2.0f * dot(p - plane.point, n));
-}
+// The plane and its three operations moved to core (cyber/core/plane.hpp) so the
+// automatic remesher can mirror across the same plane these tools snap to,
+// without either module depending on the other. Re-exported here so every
+// existing `retopo::Plane` / `retopo::signedDistance` caller is unchanged.
+using cyber::mirrorAcrossPlane;
+using cyber::Plane;
+using cyber::projectToPlane;
+using cyber::signedDistance;
 
 // Result of snapping to the Target surface.
 struct SurfaceHit {

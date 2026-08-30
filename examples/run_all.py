@@ -35,6 +35,7 @@ EXAMPLES = [
     ("21_topology_layout", "21_topology_layout.png"),
     ("22_layout_robustness", "22_layout_robustness.png"),
     ("24_topology_guides", "24_topology_guides.png"),
+    ("25_symmetry", "25_symmetry.png"),
 ]
 
 

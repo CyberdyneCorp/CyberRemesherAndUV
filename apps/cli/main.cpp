@@ -38,6 +38,7 @@
 #include "cyber/quadrangulate/field_quadrangulator.hpp"
 #include "cyber/quadrangulate/position_field.hpp"
 #include "cyber/quadrangulate/quadcover_extractor.hpp"
+#include "cyber/quadrangulate/symmetry_layout.hpp"
 #include "parse_number.hpp"
 
 #ifdef CYBER_CLI_HAVE_PRESETS
@@ -70,6 +71,7 @@ struct CliOptions {
     std::string guides;                     // guidance sidecar (--guides); empty = no guidance
     std::string quadMethod = "quad-cover";  // roadmap default (2026-07-22)
     std::string quality = "fast";           // zremesher only: fast | best
+    std::string symmetry = "none";          // none | x | y | z
     std::string preset;                     // empty = mesh-only export (the historical behaviour)
     float cageDistance = 0.0f;              // 0 = derive from the input's bounds
     int textureSize = 0;                    // 0 = the preset's own resolution
@@ -141,6 +143,8 @@ void printUsage() {
                  "  --smooth-normal <deg>    smooth projection angle (default 0)\n"
                  "  --adaptivity <float>     0..1 curvature adaptivity (default 1)\n"
                  "  --pure-quads             quads-only output\n"
+                 "  --symmetry <none|x|y|z>  solve one half and mirror its CONNECTIVITY,\n"
+                 "                           so the result is exactly symmetric\n"
                  "  --quality <fast|best>    zremesher only: best solves both cross-field\n"
                  "                           candidates and keeps the better (costs a\n"
                  "                           second solve)\n"
@@ -277,6 +281,16 @@ int parseArgs(int argc, char** argv, CliOptions& options, bool& exitEarly) {
                 return 2;
             }
             options.quality = *v;
+        } else if (arg == "--symmetry") {
+            const auto v = next("--symmetry");
+            if (!v) {
+                return 2;
+            }
+            if (*v != "none" && *v != "x" && *v != "y" && *v != "z") {
+                std::fprintf(stderr, "error: --symmetry must be none, x, y or z\n");
+                return 2;
+            }
+            options.symmetry = *v;
         } else if (arg == "--guides") {
             const auto v = next("--guides");
             if (!v) {
@@ -778,6 +792,7 @@ int writeReport(const CliOptions& options, const remesh::PipelineResult& result,
         // worse than one that names neither.
         {"quadMethod", options.quadMethod},
         {"quality", options.quality},
+        {"symmetry", options.symmetry},
     };
     report["statistics"] = {
         {"vertices", result.stats.vertexCount},
@@ -1023,9 +1038,100 @@ int runCli(int argc, char** argv) {
             return remesh::makeFieldAlignedQuadrangulator();
         })
                                                           : remesh::QuadrangulatorFactory{};
+    // Forced symmetry (--symmetry): solve ONE HALF and mirror its connectivity.
+    //
+    // Solving the whole mesh and hoping the numerics come back symmetric gives
+    // matching SHAPE at best: a field solve on a symmetric surface is not a
+    // symmetric function of it, cones land where iteration order and
+    // floating-point ties put them, and the halves end up with different edge
+    // counts that no amount of position averaging reconciles. Constructing the
+    // second half from the first makes the symmetry exact by definition.
+    const remesh::SymmetryAxis symAxis = options.symmetry == "x"   ? remesh::SymmetryAxis::X
+                                         : options.symmetry == "y" ? remesh::SymmetryAxis::Y
+                                         : options.symmetry == "z" ? remesh::SymmetryAxis::Z
+                                                                   : remesh::SymmetryAxis::None;
+    const cyber::Plane symPlane = remesh::symmetryPlane(source.mesh, symAxis);
+    remesh::SymmetrySplit symSplit;
+    if (symAxis != remesh::SymmetryAxis::None) {
+        symSplit = remesh::splitAtPlane(source.mesh, symPlane, /*positiveSide=*/true);
+        if (!symSplit.valid) {
+            std::fprintf(stderr,
+                         "error: --symmetry %s could not split the input at its %s midplane\n",
+                         options.symmetry.c_str(), options.symmetry.c_str());
+            return 1;
+        }
+        source.mesh = std::move(symSplit.half);
+        // --target-quads names the WHOLE model, so the half is solved for half
+        // of it. Without this the request would silently mean "per half" and a
+        // symmetric run would come back at twice the size the user asked for.
+        const int wholeTarget = options.params.targetQuadCount;
+        options.params.targetQuadCount = std::max(100, wholeTarget / 2);
+        if (!options.quiet) {
+            std::fprintf(stderr,
+                         "symmetry: solving one half across the %s midplane at %d quads "
+                         "(half of the requested %d)\n",
+                         options.symmetry.c_str(), options.params.targetQuadCount, wholeTarget);
+        }
+    }
+
     remesh::PipelineResult result =
         remesh::remesh(source.mesh, options.params, &sink, &cancel, makeQuadrangulator,
                        fallbackFactory, rawGuidance.empty() ? nullptr : &rawGuidance);
+    if (symAxis != remesh::SymmetryAxis::None && result.mesh.faceCount() != 0) {
+        // Weld tolerance from the achieved edge length: the remesh moves the
+        // border by a fraction of an edge, and anything within that is the
+        // centerline rather than real geometry.
+        float edge = 0.0f;
+        std::size_t edges = 0;
+        for (cyber::Index e = 0; e < result.mesh.edgeCapacity(); ++e) {
+            const cyber::EdgeId id{e};
+            if (!result.mesh.isAlive(id)) {
+                continue;
+            }
+            const auto [a, b] = result.mesh.edgeVertices(id);
+            edge += cyber::length(result.mesh.position(b) - result.mesh.position(a));
+            ++edges;
+        }
+        const float tolerance = edges != 0 ? 0.35f * edge / static_cast<float>(edges) : 1e-4f;
+        // The remesh's border does not land on the cut — the isoline extraction
+        // ends where the isolines end — so it is projected back before
+        // mirroring. Safe here because the input was split from a closed mesh,
+        // so its only border IS the cut; the drift is reported so a wandering
+        // remesh is visible rather than absorbed.
+        const remesh::BorderSnapReport snap = remesh::snapBorderToPlane(result.mesh, symPlane);
+        const remesh::MirrorReport mirror = remesh::mirrorAcross(result.mesh, symPlane, tolerance);
+        if (!options.quiet) {
+            std::fprintf(
+                stderr,
+                "symmetry: snapped %zu border vertices to the midplane (max drift "
+                "%.4f, %zu membranes removed), mirrored %zu vertices and %zu faces; "
+                "topologically symmetric: %s\n",
+                snap.snapped, static_cast<double>(snap.maxDistance), snap.membranesRemoved,
+                mirror.mirroredVertices, mirror.mirroredFaces,
+                remesh::isTopologicallySymmetric(result.mesh, symPlane, tolerance) ? "yes" : "NO");
+        }
+        result.stats.vertexCount = 0;
+        result.stats.quadCount = 0;
+        result.stats.triangleCount = 0;
+        result.stats.otherPolygonCount = 0;
+        for (cyber::Index v = 0; v < result.mesh.vertexCapacity(); ++v) {
+            result.stats.vertexCount += result.mesh.isAlive(cyber::VertexId{v}) ? 1u : 0u;
+        }
+        for (cyber::Index f = 0; f < result.mesh.faceCapacity(); ++f) {
+            const cyber::FaceId id{f};
+            if (!result.mesh.isAlive(id)) {
+                continue;
+            }
+            const std::size_t n = result.mesh.faceSize(id);
+            if (n == 4) {
+                ++result.stats.quadCount;
+            } else if (n == 3) {
+                ++result.stats.triangleCount;
+            } else {
+                ++result.stats.otherPolygonCount;
+            }
+        }
+    }
     // remesh() re-validated an already-clamped copy and therefore found nothing
     // to warn about; carry the clamps found above so the console warnings and
     // the report's warnings[] still name them.
