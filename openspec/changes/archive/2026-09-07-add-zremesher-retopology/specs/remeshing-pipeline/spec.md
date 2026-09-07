@@ -9,7 +9,7 @@ The seamless path SHALL build an explicit topology layout — nodes
 symmetry anchors), arcs between them, and the patches those arcs bound — as a
 first-class intermediate artifact, separate from the quantizer that consumes
 it. The layout SHALL be reusable by singularity scoring, guides, symmetry,
-semantic groups, extraction, quality scoring and debug export. Building the
+extraction, quality scoring and debug export. Building the
 layout SHALL NOT change the quantized result: for every input that quantizes
 successfully today, the output SHALL be byte-identical.
 

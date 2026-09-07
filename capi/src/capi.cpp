@@ -23,6 +23,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <unordered_set>
 #include <vector>
 
@@ -156,6 +157,32 @@ std::string& errorSlot() {
 void setError(std::string message) { errorSlot() = std::move(message); }
 void clearError() { errorSlot().clear(); }
 
+// A C caller can put ANY integer in an enum-typed PARAMETER -- which is
+// precisely what the "unknown mode" rejections below exist to catch. But
+// reading that value THROUGH the enum type in order to check it is itself
+// undefined: an unfixed C enum's value range is inferred from its enumerators,
+// so loading 7 out of a two-value enum lets the compiler assume something
+// false. UBSan reports it at the comparison, which means the validation could
+// never be written the obvious way -- `cyber_retopo_subdivide_ex` tripped
+// exactly that on the nightly sanitizer lane, from a binding test that passes
+// mode=7 on purpose.
+//
+// Struct fields already dodge this: CyberFlowGuideEx::mode and
+// CyberZRemesherParams::quality/symmetry are declared `int` for exactly this
+// reason, so reading them is ordinary. Function parameters are the gap, because
+// there the enum type is part of the signature callers compile against.
+//
+// Taking the argument BY REFERENCE (never by value -- the copy is itself the
+// load) and reading its object representation yields the integer the caller
+// actually passed, which is what each of these checks wanted all along.
+template <typename Enum>
+long long enumCode(const Enum& value) {
+    static_assert(std::is_enum_v<Enum>, "enumCode is for enums crossing the C boundary");
+    std::underlying_type_t<Enum> raw{};
+    std::memcpy(&raw, &value, sizeof(raw));
+    return static_cast<long long>(raw);
+}
+
 // Exception containment for the entry points that are NOT routed through
 // runMeshEdit / runDocumentOp / runSelectionOp: any body that allocates can
 // throw (std::bad_alloc, and std::length_error for a count a binding
@@ -280,7 +307,7 @@ CyberBackend toCBackend(cyber::accel::BackendKind kind) {
 
 // nullopt for CYBER_BACKEND_AUTO and for any value outside the enum (a C
 // caller can pass an int).
-std::optional<cyber::accel::BackendKind> fromCBackend(CyberBackend backend) {
+std::optional<cyber::accel::BackendKind> fromCBackend(long long backend) {
     switch (backend) {
         case CYBER_BACKEND_CPU:
             return cyber::accel::BackendKind::Cpu;
@@ -296,7 +323,7 @@ std::optional<cyber::accel::BackendKind> fromCBackend(CyberBackend backend) {
     return std::nullopt;
 }
 
-const char* backendLabel(CyberBackend backend) {
+const char* backendLabel(long long backend) {
     switch (backend) {
         case CYBER_BACKEND_AUTO:
             return "auto";
@@ -328,11 +355,12 @@ size_t cyber_available_backends(CyberBackend* out, size_t max_backends) {
 
 CyberStatus cyber_set_backend(CyberBackend backend) {
     return guarded("cyber_set_backend", CYBER_ERR_RUNTIME, [&]() -> CyberStatus {
-        const std::optional<cyber::accel::BackendKind> kind = fromCBackend(backend);
+        const long long requested = enumCode(backend);
+        const std::optional<cyber::accel::BackendKind> kind = fromCBackend(requested);
         if (!kind) {
-            if (backend != CYBER_BACKEND_AUTO) {
+            if (requested != CYBER_BACKEND_AUTO) {
                 setError(std::string("cyber_set_backend: unknown backend value ") +
-                         std::to_string(static_cast<int>(backend)));
+                         std::to_string(requested));
                 return CYBER_ERR_INVALID_ARG;
             }
             // AUTO: drop the override; the next call re-resolves best-first.
@@ -344,7 +372,7 @@ CyberStatus cyber_set_backend(CyberBackend backend) {
         // "run on the GPU" silently mean "run on the CPU". Report it instead.
         const std::shared_ptr<cyber::accel::IBackend> selected = cyber::accel::selectBackend(*kind);
         if (!selected || selected->kind() != *kind) {
-            setError(std::string("cyber_set_backend: backend '") + backendLabel(backend) +
+            setError(std::string("cyber_set_backend: backend '") + backendLabel(requested) +
                      "' is not available in this build or on this machine");
             return CYBER_ERR_INVALID_ARG;
         }
@@ -3163,7 +3191,7 @@ void reprojectAll(CyberMesh* mesh, const CyberSnapper* snapper) {
     }
 }
 
-cyber::retopo::LoopSubdivideMode toLoopMode(CyberLoopSubdivideMode mode) {
+cyber::retopo::LoopSubdivideMode toLoopMode(long long mode) {
     return mode == CYBER_LOOP_SUBDIVIDE_LINEAR ? cyber::retopo::LoopSubdivideMode::Linear
                                                : cyber::retopo::LoopSubdivideMode::Smooth;
 }
@@ -3184,11 +3212,12 @@ CyberStatus cyber_retopo_subdivide_ex(CyberMesh* mesh, const CyberSnapper* snapp
             setError("cyber_retopo_subdivide: mesh has no faces");
             return CYBER_ERR_EMPTY;
         }
-        if (mode != CYBER_SUBDIV_LINEAR && mode != CYBER_SUBDIV_CATMULL_CLARK) {
+        const long long subdivMode = enumCode(mode);
+        if (subdivMode != CYBER_SUBDIV_LINEAR && subdivMode != CYBER_SUBDIV_CATMULL_CLARK) {
             setError("cyber_retopo_subdivide: unknown subdivision mode");
             return CYBER_ERR_INVALID_ARG;
         }
-        cyber::retopo::subdivideAll(mesh->mesh, mode == CYBER_SUBDIV_CATMULL_CLARK
+        cyber::retopo::subdivideAll(mesh->mesh, subdivMode == CYBER_SUBDIV_CATMULL_CLARK
                                                     ? cyber::retopo::SubdivisionMode::CatmullClark
                                                     : cyber::retopo::SubdivisionMode::Linear);
         // Reprojection: linear subdivision alone only inserts vertices on
@@ -3215,7 +3244,7 @@ CyberStatus cyber_retopo_loop_subdivide(CyberMesh* mesh, CyberLoopSubdivideMode 
                                         const CyberSnapper* snapper, size_t* out_faces) {
     return runMeshEdit(mesh, "cyber_retopo_loop_subdivide", [&] {
         cyber::retopo::LoopSubdivideResult result =
-            cyber::retopo::loopSubdivide(mesh->mesh, toLoopMode(mode));
+            cyber::retopo::loopSubdivide(mesh->mesh, toLoopMode(enumCode(mode)));
         if (result.error == cyber::retopo::LoopSubdivideError::EmptyMesh) {
             setError("cyber_retopo_loop_subdivide: mesh has no faces");
             return CYBER_ERR_EMPTY;
@@ -3343,7 +3372,7 @@ CyberStatus cyber_mesh_isotropic_remesh(CyberMesh* mesh, const CyberIsotropicPar
 
 namespace {
 
-cyber::retopo::Falloff toFalloff(CyberFalloff falloff) {
+cyber::retopo::Falloff toFalloff(long long falloff) {
     switch (falloff) {
         case CYBER_FALLOFF_LINEAR:
             return cyber::retopo::Falloff::Linear;
@@ -3415,7 +3444,7 @@ CyberStatus cyber_retopo_selection_line(CyberMesh* mesh, const float anchor[3], 
         region.viewDir = toVec3(view_dir);
         region.snapAngle = snap_angle != 0;
         region.snapDegrees = snap_degrees;
-        region.falloff = toFalloff(falloff);
+        region.falloff = toFalloff(enumCode(falloff));
         if (cyber::lengthSquared(region.end - region.anchor) <= 0.0f) {
             setError("cyber_retopo_selection_line: degenerate line");
             return CYBER_ERR_INVALID_ARG;
@@ -3441,7 +3470,7 @@ CyberStatus cyber_retopo_selection_sphere(CyberMesh* mesh, const float center[3]
         cyber::retopo::SphereRegion region;
         region.center = toVec3(center);
         region.radius = radius;
-        region.falloff = toFalloff(falloff);
+        region.falloff = toFalloff(enumCode(falloff));
         cyber::retopo::selectSphere(mesh->mesh, mesh->selection, region);
         return CYBER_OK;
     });
@@ -3460,7 +3489,7 @@ CyberStatus cyber_retopo_selection_paint(CyberMesh* mesh, const float center[3],
             setError("cyber_retopo_selection_paint: non-finite center or pressure");
             return CYBER_ERR_INVALID_ARG;
         }
-        const cyber::retopo::PaintBrush brush{radius, subtract != 0, toFalloff(falloff)};
+        const cyber::retopo::PaintBrush brush{radius, subtract != 0, toFalloff(enumCode(falloff))};
         cyber::retopo::paintSelection(mesh->mesh, mesh->selection, {toVec3(center), pressure},
                                       brush);
         return CYBER_OK;
@@ -3481,7 +3510,7 @@ CyberStatus cyber_retopo_selection_paint_stroke(CyberMesh* mesh, const float* sa
             const float* s = samples_xyzp + i * 4;
             dabs.push_back({cyber::Vec3{s[0], s[1], s[2]}, s[3]});
         }
-        const cyber::retopo::PaintBrush brush{radius, subtract != 0, toFalloff(falloff)};
+        const cyber::retopo::PaintBrush brush{radius, subtract != 0, toFalloff(enumCode(falloff))};
         cyber::retopo::paintSelectionStroke(mesh->mesh, mesh->selection, dabs, brush);
         return CYBER_OK;
     });

@@ -19,8 +19,9 @@ campaign and shipped as 0.5.0.
 
 The dated entries below are the working log of how it got there, newest first.
 They are a record of what was measured when, not a description of the current
-code: where a number here disagrees with `tests/bench/baselines.json` or the
-README, the baselines are authoritative.
+code: where a number here disagrees with this host's
+`tests/bench/baselines-<System>-<machine>-<compiler>.json` or the README, the
+baselines are authoritative.
 
 ## Update — 2026-08-30 (later): three gates were not measuring what they claimed
 
@@ -455,6 +456,14 @@ build prints `bench check SKIPPED` — which reads like a pass in a green ctest 
 CI still never enables it: `ci.yml` installs no TBB and never sets
 `CYBER_WITH_QUADCOVER`. Turning that lane on is the open follow-up, and it is what
 would have caught all of the above early.
+
+> **Closed in 0.8.0.** The nightly `hardening` workflow does build with
+> `CYBER_WITH_QUADCOVER=ON` and does treat a skip as fatal — but it was still
+> dark, one axis out: baselines recorded on `Darwin/arm64/clang` against a
+> `Linux/x86_64/gcc` runner, so `check` refused and skipped every night.
+> Baselines are now one file per toolchain and `Linux-x86_64-gcc` is recorded,
+> so the gate runs for real (`bench check: OK`) and ctest's `bench` case passes
+> instead of reporting `Skipped`.
 
 ## Update — 2026-08-23: authoring track and mesh I/O shipped
 

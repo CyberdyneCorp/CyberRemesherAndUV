@@ -3,7 +3,7 @@
 > Note: releases 0.3.0, 0.4.0 and 0.5.0 were tagged without changelog entries;
 > their content is recorded in `docs/ROADMAP.md`. Entries resume here.
 
-## [Unreleased]
+## [0.8.0] - 2026-09-07
 
 ### Added
 
@@ -149,6 +149,70 @@
   elsewhere: turning the layout stage on forces the native seamless route, so
   honouring them on another method would silently change that method's output.
   `CYBER_ZR_LAYOUT` is unchanged — explicit paths simply win over it.
+
+### Fixed
+
+- **The nightly `hardening` workflow was red on every lane, and had been since
+  before 0.7.0 shipped.** Push CI stayed green throughout, so the sanitizer,
+  fuzz, thread and bench gates rotted unobserved across two releases. All five
+  causes are closed and each lane is verified green locally.
+
+  - *A PLY header could size an allocation from an attacker-controlled count.*
+    happly fills its element buffers from the header's DECLARED count before
+    reading a single datum, so an 823-byte file declaring 37 777 777 777
+    vertices asked the allocator for ~151 GB — found by the mesh-IO fuzz
+    campaign, which is precisely the shape its target forbids. `importPly` now
+    pre-flights the header and refuses a file that cannot hold what it declares,
+    mirroring the guard binary STL has always had (`fileSize != 84 + count *
+    50`). The bound is a LOWER bound on bytes-per-element, so it can only reject
+    a file already short of its own claim. The fuzzer's input is checked in as
+    `tests/fuzz/corpus/mesh/ply_declared_count_bomb.bin` and replays on every CI
+    leg; two regression tests cover the refusal and a well-formed binary PLY.
+
+  - *Validating an enum argument was itself undefined behaviour.* A C caller can
+    put any int in an enum-typed parameter — which is what "reject an unknown
+    mode" exists to catch — but READING it through the enum type to check it
+    lets the compiler assume the value is one of the enumerators. UBSan reported
+    it on `cyber_retopo_subdivide_ex` from a binding test that passes `mode=7`
+    on purpose. A new `enumCode` helper takes the argument by reference (never
+    by value: the copy is the load) and reads its object representation, applied
+    to the four genuinely enum-typed parameters. The struct fields were never
+    affected — `CyberFlowGuideEx::mode` and `CyberZRemesherParams::quality` /
+    `symmetry` are declared `int` for exactly this reason.
+
+  - *The TSan lane could not compile the tree.* GCC 13 mis-analyses the inlined
+    memmove behind `std::vector<EqRow> eqs{{...}}` in `debugTernaryCsp` and
+    reports a bogus `-Warray-bounds`, then `-Wstringop-overflow` on the same
+    memmove once the first is silenced. It fires only under TSan, whose
+    instrumentation changes the inlining. Suppressed at that one site, guarded
+    on GCC, exactly as `sparse_cholesky.cpp` already does for the same bug.
+    Behind it the lane was hitting a second wall: kernel 6.8 runners set
+    `vm.mmap_rnd_bits=32`, more ASLR entropy than TSan's shadow mapping can
+    place itself around, so the workflow now lowers it. The suite passes 4/4
+    with no races.
+
+  - *The bench gate was dark, and the workflow read dark as failure.* Baselines
+    were recorded on `Darwin/arm64/clang` while CI runs `Linux/x86_64/gcc`;
+    `check` correctly refused to compare across toolchains (the solve reads
+    unordered-container iteration order) and skipped, which the job — also
+    correctly — treats as fatal. Neither half was wrong, but together they could
+    never go green. Baselines are now one file per toolchain
+    (`baselines-<system>-<machine>-<compiler>.json`), so each host gates against
+    numbers it can reproduce. `Linux-x86_64-gcc` is recorded and the gate is
+    live: `bench check: OK`, and ctest's `bench` now PASSES where it used to
+    report `Skipped`.
+
+  - *`build_hygiene` failed for anyone with a git worktree open.* The CMake
+    scanner walked `.claude/worktrees/`, a second full checkout of this repo,
+    and reported its vendored Eigen and QuadriFlow files as project violations.
+    Dot-directories are now excluded.
+
+- **A sanitizer build could not pass the PNG decompression-bomb test.** The
+  ~1 ms decode is asserted to finish inside 500 ms, which is right for a normal
+  build and impossible for an ASan+UBSan Debug one. The budget is now scaled
+  rather than dropped, so the check stays discriminating: the uncapped inflate
+  it exists to catch costs ~900 ms uninstrumented and lands far above the
+  relaxed bound instrumented.
 
 ### Fixed
 

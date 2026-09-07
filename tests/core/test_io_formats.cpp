@@ -416,6 +416,62 @@ TEST_CASE("a PLY list property cannot commit more memory than the file carries")
     }
 }
 
+TEST_CASE("a PLY element count cannot commit more memory than the file carries") {
+    // The sibling case above guards a LIST COUNT read out of the data section.
+    // This is the other half, and the one the mesh-IO fuzz campaign actually
+    // found: the ELEMENT COUNT in the header. happly sizes its buffers from it
+    // before reading a single datum, so an 823-byte file declaring 37 777 777
+    // 777 vertices asked the allocator for ~151 GB and the nightly fuzz lane
+    // died on an out-of-memory rather than the typed error the target demands.
+    //
+    // Byte-for-byte the header the fuzzer produced; the corpus keeps the input
+    // itself as ply_declared_count_bomb.bin.
+    const std::string text =
+        "ply\nformat ascii 1.0\n"
+        "element vertex 37777777777\n"
+        "property float x\nproperty float y\nproperty float z\n"
+        "element face 1\nproperty list uchar int vertex_indices\nend_header\n";
+    const fs::path path = tempDir() / "count_bomb.ply";
+    std::ofstream(path, std::ios::binary | std::ios::trunc) << text;
+
+    const long before = peakResidentKb();
+    auto result = io::importMesh(path);
+    const long after = peakResidentKb();
+    REQUIRE(!result.ok());
+    CHECK(result.error().code == io::ErrorCode::ParseError);
+    if (before > 0) {
+        CHECK(after - before < 256L * 1024L);  // KiB
+    }
+}
+
+TEST_CASE("a PLY whose declared counts DO fit is still imported") {
+    // The guard is a lower bound on bytes-per-element, so it must never reject
+    // a legitimate file -- including a binary one, where the bound is the sum of
+    // the property widths rather than the ASCII minimum.
+    std::string text =
+        "ply\nformat binary_little_endian 1.0\n"
+        "element vertex 3\nproperty float x\nproperty float y\nproperty float z\n"
+        "element face 1\nproperty list uchar int vertex_indices\nend_header\n";
+    const std::array<std::array<float, 3>, 3> corners{
+        {{0.0f, 0.0f, 0.0f}, {1.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f}}};
+    for (const auto& corner : corners) {
+        for (const float v : corner) {
+            appendLittleEndian<float>(text, v);
+        }
+    }
+    text.push_back(static_cast<char>(3));
+    for (int i = 0; i < 3; ++i) {
+        appendLittleEndian<std::int32_t>(text, i);
+    }
+    const fs::path path = tempDir() / "well_formed.ply";
+    std::ofstream(path, std::ios::binary | std::ios::trunc) << text;
+
+    const auto result = io::importMesh(path);
+    REQUIRE(result.ok());
+    CHECK(result.value().mesh.vertexCount() == 3);
+    CHECK(result.value().mesh.faceCount() == 1);
+}
+
 TEST_CASE("cross-format pipeline: OBJ -> PLY -> STL keeps geometry") {
     const Mesh cube = makeCorpusCube();
     const fs::path obj = tempDir() / "chain.obj";

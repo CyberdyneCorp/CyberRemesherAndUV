@@ -5,7 +5,7 @@
 ### Requirement: ZRemesher parameters are canonical and validated
 
 The canonical parameter set SHALL gain the ZRemesher controls — quality mode
-(fast / balanced / best), adaptive sizing toggle and weights, local-feature-size
+(fast / best), adaptive sizing toggle and weights, local-feature-size
 preservation toggle, symmetry axis and mode, and the default guide mode — and
 each SHALL be validated at every entry point with the same clamp-and-report
 discipline as the existing parameters. No ZRemesher parameter SHALL be inert:

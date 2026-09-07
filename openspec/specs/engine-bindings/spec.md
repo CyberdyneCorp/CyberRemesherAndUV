@@ -8,7 +8,9 @@ convenience layer — Python is the integration-test harness the suite actually
 runs, so a capability that is unreachable from a binding is untested, and
 parity between the CLI, C and Python surfaces is a release rule rather than an
 aspiration.
+
 ## Requirements
+
 ### Requirement: Full-surface C ABI facade
 The library SHALL be exposed through a versioned C ABI (opaque handles, plain C types, integer error codes, C function-pointer callbacks) covering the **entire library surface**, not only the headless pipeline: mesh I/O and inspection, the remeshing pipeline with canonical parameters, the document/session layer (create/open/save documents, Target/EditMesh access, stage switching), the tool command layer (invoke any retopo/UV/bake action, inject synthetic input — stroke point sequences, taps, modifier chords), undo/redo, UV unwrap/pack, baking, diagnostics, and compute-backend selection. No C++ types SHALL cross the boundary. The ABI SHALL carry a runtime-queryable semantic version; minor releases SHALL be additive only.
 
@@ -370,3 +372,23 @@ where it is reachable instead, so the gap is visible rather than assumed absent.
 - **WHEN** the target edge length is zero, negative or non-finite, or the iteration count is below one
 - **THEN** the call SHALL return the invalid-parameter status naming the field, and the mesh SHALL be left exactly as it was
 
+### Requirement: ZRemesher is reachable from every binding
+
+The C ABI and the Python bindings SHALL expose the ZRemesher quad method and
+its parameters — quality mode, adaptive sizing, local-feature-size
+preservation, symmetry, guide mode — and SHALL expose the layout statistics and
+quality score from the run report. Parity SHALL hold: any ZRemesher capability
+reachable from the CLI SHALL be reachable from Python.
+
+#### Scenario: Python drives the ZRemesher path
+
+- **WHEN** a Python caller requests the ZRemesher quad method with a quality
+  mode and a symmetry axis
+- **THEN** the remesh SHALL run through that path and the returned report SHALL
+  carry the layout statistics and the quality score
+
+#### Scenario: Topology guides from Python
+
+- **WHEN** a Python caller supplies a closed guide in topology mode
+- **THEN** the binding SHALL forward the guide mode, and the report SHALL
+  record the achieved guide adherence

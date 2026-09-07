@@ -153,7 +153,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: bench-baselines-${{ runner.os }}
-          path: tests/bench/baselines.json
+          path: tests/bench/baselines-*.json
 
   # TSan over the bridge server and the threaded solver paths. The BridgeServer
   # stop/accept race closed in the third hardening round is only observable here;
@@ -165,6 +165,14 @@ jobs:
         with:
           submodules: recursive
       - uses: lukka/get-cmake@latest
+      # Ubuntu 24.04 runners ship kernel 6.8 with vm.mmap_rnd_bits=32, which is
+      # more ASLR entropy than TSan's shadow mapping can place itself around: it
+      # dies with "FATAL: ThreadSanitizer: unexpected memory mapping" before
+      # main(). Nothing to do with this code -- it kills any TSan binary on the
+      # runner. This lane never reached the point of noticing, because it failed
+      # to COMPILE first (a GCC 13 false positive, now suppressed at its site).
+      - name: Make room for TSan's shadow mapping
+        run: sudo sysctl -w vm.mmap_rnd_bits=28
       - name: Configure (TSan)
         run: |
           cmake -S . -B build/tsan -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \

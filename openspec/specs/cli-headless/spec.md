@@ -7,7 +7,9 @@ can run in CI, on a farm and inside another tool's build step. It exists to
 make automation a first-class path rather than a scripted GUI — arguments are
 validated, exit codes distinguish the ways a run can end, and every run can
 emit a machine-readable report instead of prose on a terminal.
+
 ## Requirements
+
 ### Requirement: Dedicated headless binary
 The CLI SHALL be a separate binary linking only the core engine and acceleration layers (no windowing, no GUI toolkit), suitable for servers and CI. It SHALL accept input/output paths, every canonical remeshing parameter, backend selection, and report options.
 
@@ -72,3 +74,23 @@ used a field evaluator, which sampled maps came from the field.
 - **WHEN** `cyber` runs with a handoff Target, a remesh preset, and bake map selection
 - **THEN** it SHALL produce the low-poly mesh and requested maps in one invocation and the report SHALL record the handoff version
 
+### Requirement: ZRemesher quad method on the CLI
+
+The headless binary SHALL accept `--quad-method zremesher` alongside the
+existing methods, together with flags for quality mode, adaptive sizing,
+symmetry, guide mode and layout export. Unknown values SHALL be rejected with a
+usage error rather than silently falling back, and the machine-readable report
+SHALL name the method, the quality mode, the selected candidate and the layout
+statistics.
+
+#### Scenario: Method is selectable and reported
+
+- **WHEN** the CLI is run with `--quad-method zremesher`
+- **THEN** the run SHALL use the ZRemesher path and the JSON report SHALL name
+  the method, quality mode, selected candidate and layout node/arc/patch counts
+
+#### Scenario: Layout export from the CLI
+
+- **WHEN** layout export is requested on the command line
+- **THEN** the CLI SHALL write the layout report and polyline mesh to the
+  requested paths and exit successfully
