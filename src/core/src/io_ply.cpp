@@ -60,6 +60,13 @@ constexpr std::uintmax_t kMaxHeaderBytes = 1u << 20;
 struct PlyElement {
     std::uintmax_t count = 0;
     std::uintmax_t minBytes = 0;
+    // Cleared when this element declares something we cannot size. Per-element
+    // and NOT global: a first version made one unparseable count abandon the
+    // whole check, and the fuzzer immediately produced a header whose first
+    // element count was mutated to "z" and whose THIRD still declared
+    // 37 777 777 777. Giving up on the file because one line is unreadable
+    // hands the rest of it a free pass.
+    bool bounded = true;
 };
 
 bool parseElementCount(const std::string& text, std::uintmax_t& out) {
@@ -77,8 +84,7 @@ bool parseElementCount(const std::string& text, std::uintmax_t& out) {
 
 // The minimum bytes one instance of the element being declared costs, added to
 // the element the property line belongs to.
-void accumulateProperty(std::istringstream& words, bool ascii, PlyElement& element,
-                        bool& understood) {
+void accumulateProperty(std::istringstream& words, bool ascii, PlyElement& element) {
     std::string type;
     words >> type;
     if (type == "list") {
@@ -88,7 +94,7 @@ void accumulateProperty(std::istringstream& words, bool ascii, PlyElement& eleme
     }
     const std::uintmax_t size = ascii ? kMinAsciiProperty : plyBinaryTypeSize(type);
     if (size == 0) {
-        understood = false;
+        element.bounded = false;
         return;
     }
     element.minBytes += size;
@@ -109,12 +115,11 @@ std::optional<std::string> plyHeaderExceedsFile(const std::filesystem::path& pat
     bool ascii = false;
     bool sawFormat = false;
     bool ended = false;
-    bool understood = true;
     std::vector<PlyElement> elements;
     std::uintmax_t headerBytes = 0;
     std::string line;
 
-    while (understood && headerBytes <= kMaxHeaderBytes && std::getline(file, line)) {
+    while (headerBytes <= kMaxHeaderBytes && std::getline(file, line)) {
         headerBytes += line.size() + 1;  // the delimiter getline consumed
         if (!line.empty() && line.back() == '\r') {
             line.pop_back();
@@ -133,24 +138,24 @@ std::optional<std::string> plyHeaderExceedsFile(const std::filesystem::path& pat
             std::string count;
             words >> name >> count;
             PlyElement element;
-            understood = parseElementCount(count, element.count);
+            element.bounded = parseElementCount(count, element.count);
             elements.push_back(element);
         } else if (keyword == "property" && !elements.empty()) {
-            accumulateProperty(words, ascii, elements.back(), understood);
+            accumulateProperty(words, ascii, elements.back());
         } else if (keyword == "end_header") {
             ended = true;
             break;
         }
     }
 
-    if (!understood || !ended || !sawFormat || headerBytes > fileSize) {
+    if (!ended || !sawFormat || headerBytes > fileSize) {
         return std::nullopt;
     }
 
     const std::uintmax_t payload = fileSize - headerBytes;
     std::uintmax_t needed = 0;
     for (const PlyElement& element : elements) {
-        if (element.minBytes == 0 || element.count == 0) {
+        if (!element.bounded || element.minBytes == 0 || element.count == 0) {
             continue;
         }
         // Ordered to compare rather than multiply: the product is what overflows.

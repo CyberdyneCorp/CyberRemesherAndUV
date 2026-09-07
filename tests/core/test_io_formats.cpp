@@ -444,6 +444,33 @@ TEST_CASE("a PLY element count cannot commit more memory than the file carries")
     }
 }
 
+TEST_CASE("an unreadable PLY element count does not excuse the elements after it") {
+    // The first version of the guard above abandoned the whole check the moment
+    // it met a count it could not parse, on the reasoning that it should not
+    // judge a header it did not fully understand. The fuzzer found the hole in
+    // one 120-second campaign: mutate the FIRST element's count to a
+    // non-number, and the third element's 37 777 777 777 sails through
+    // unbounded. Giving up on a file because one line is unreadable hands the
+    // rest of it a free pass, so the bail-out is per-element.
+    const std::string text =
+        "ply\nformat ascii 1.0\n"
+        "element mangled z\n"           // count is not a number
+        "element vertex 37777777777\n"  // ... and this one still is
+        "property float x\nproperty float y\nproperty float z\n"
+        "end_header\n";
+    const fs::path path = tempDir() / "unreadable_then_bomb.ply";
+    std::ofstream(path, std::ios::binary | std::ios::trunc) << text;
+
+    const long before = peakResidentKb();
+    auto result = io::importMesh(path);
+    const long after = peakResidentKb();
+    REQUIRE(!result.ok());
+    CHECK(result.error().code == io::ErrorCode::ParseError);
+    if (before > 0) {
+        CHECK(after - before < 256L * 1024L);  // KiB
+    }
+}
+
 TEST_CASE("a PLY whose declared counts DO fit is still imported") {
     // The guard is a lower bound on bytes-per-element, so it must never reject
     // a legitimate file -- including a binary one, where the bound is the sum of
