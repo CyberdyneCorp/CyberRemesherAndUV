@@ -103,6 +103,43 @@ The mesh target's first input byte selects the parser (`.obj .ply .stl .gltf
 .glb .fbx`), so keep the byte when copying a finding — strip it and you are
 replaying a different format.
 
+**Run campaigns locally rather than waiting on the nightly.** The fuzzers build
+here and a 15-minute local campaign closes the loop in minutes instead of a
+CI queue:
+
+```bash
+CC=clang CXX=clang++ cmake -S . -B build/fuzz -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+  -DCYBER_BUILD_FUZZERS=ON -DCYBER_WITH_QUADCOVER=OFF \
+  -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined,fuzzer-no-link -fno-omit-frame-pointer -g"
+cmake --build build/fuzz --target cyber_fuzz_png cyber_fuzz_meshIo
+
+# COPY the corpus first -- see below.
+cp -r tests/fuzz/corpus/mesh /tmp/wcorpus
+./build/fuzz/tests/cyber_fuzz_meshIo /tmp/wcorpus \
+  -max_total_time=900 -max_len=65536 -artifact_prefix=/tmp/findings/
+```
+
+**Never point a campaign at `tests/fuzz/corpus/` directly.** libFuzzer treats
+the corpus argument as an OUTPUT directory and writes every interesting input it
+generates into it — one 15-minute run left 1876 untracked files in the
+checked-in corpus. Copy it somewhere scratch and fuzz the copy; promote only the
+crash artifacts you mean to keep. (The CI job passes the corpus dir directly,
+which is fine there because the checkout is thrown away.)
+
+Cleaning up afterwards with `git clean` will also delete any NEW seed you have
+added but not yet `git add`ed. Stage the seed first.
+
+**A guard in front of a vendored parser must never fail open.** Four consecutive
+fuzz findings against the PLY element-count guard were all the same mistake in
+different clothes: the guard deferred ("a header I do not fully understand")
+whenever it disagreed with happly, and an adversary controls whether it
+disagrees. It must (a) match the parser's own rules — happly matches header
+keywords with `startsWith` and reads counts with `istringstream >> size_t`,
+which take leading digits and ignore trailing garbage — and (b) keep any
+REMAINING disagreement harmless, which here means bounding against the whole
+file size when the header end is unknown. A bound no legitimate file can exceed
+is always available; use it rather than giving up.
+
 Parsers must never size an allocation from an attacker-controlled count.
 `importBinaryStl` is the reference shape (`fileSize != 84 + count * 50`), and
 `importPly` pre-flights the header the same way.

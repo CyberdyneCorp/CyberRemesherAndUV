@@ -52,39 +52,57 @@ std::uintmax_t plyBinaryTypeSize(const std::string& type) {
     return 0;
 }
 
-// In ASCII a property is at minimum one digit plus its separator.
+// In ASCII a property is at minimum one digit plus its separator. With no
+// readable `format` line we cannot tell ASCII from binary, and the smallest a
+// binary property can be is one byte, so that is the universal floor.
 constexpr std::uintmax_t kMinAsciiProperty = 2;
+constexpr std::uintmax_t kMinUnknownProperty = 1;
+
+// happly matches header keywords with a PREFIX test, not by token equality, so
+// `end_headerelefent face 1` ends the header for it. Mirroring that exactly is
+// half of not diverging from the parser we are guarding; the other half is the
+// fileSize fallback below, which keeps a divergence harmless rather than fatal.
+bool startsWith(const std::string& line, std::string_view prefix) {
+    return line.rfind(prefix, 0) == 0;
+}
 // A header is small, and refusing to scan forever is itself part of the guard.
 constexpr std::uintmax_t kMaxHeaderBytes = 1u << 20;
 
 struct PlyElement {
     std::uintmax_t count = 0;
     std::uintmax_t minBytes = 0;
-    // Cleared when this element declares something we cannot size. Per-element
-    // and NOT global: a first version made one unparseable count abandon the
+    // Cleared when this element declares a property we cannot size. Per-element
+    // and NOT global: a first version made one unreadable line abandon the
     // whole check, and the fuzzer immediately produced a header whose first
-    // element count was mutated to "z" and whose THIRD still declared
-    // 37 777 777 777. Giving up on the file because one line is unreadable
-    // hands the rest of it a free pass.
+    // element was mutated and whose THIRD still declared 37 777 777 777.
+    // Giving up on the file because one line is unreadable hands the rest of
+    // it a free pass.
     bool bounded = true;
 };
 
+// happly reads the count as `std::istringstream iss(token); iss >> count;`
+// into a size_t, which takes the leading digits and stops at the first
+// character that is not one. Mirror that EXACTLY rather than validating more
+// strictly: every version of this guard that parsed more carefully than the
+// parser it guards ended up rejecting a count happly accepted, skipping the
+// element, and letting the allocation through. A count of "3777777777\0...7"
+// is 3 777 777 777 to happly, and it has to be that here too.
+//
+// On failure `>>` stores 0 (C++11), and on overflow it stores the maximum --
+// both of which are then what happly itself will act on, so agreeing with it is
+// the whole point.
 bool parseElementCount(const std::string& text, std::uintmax_t& out) {
-    if (text.empty() || !std::all_of(text.begin(), text.end(),
-                                     [](unsigned char c) { return std::isdigit(c) != 0; })) {
-        return false;
-    }
-    try {
-        out = std::stoull(text);
-    } catch (const std::exception&) {
-        return false;  // longer than 64 bits: not a count any file can satisfy
-    }
+    std::istringstream iss(text);
+    std::size_t value = 0;
+    iss >> value;
+    out = value;
     return true;
 }
 
 // The minimum bytes one instance of the element being declared costs, added to
 // the element the property line belongs to.
-void accumulateProperty(std::istringstream& words, bool ascii, PlyElement& element) {
+void accumulateProperty(std::istringstream& words, bool ascii, bool sawFormat,
+                        PlyElement& element) {
     std::string type;
     words >> type;
     if (type == "list") {
@@ -92,7 +110,10 @@ void accumulateProperty(std::istringstream& words, bool ascii, PlyElement& eleme
         // are bounded by the same file-size argument once they are read.
         words >> type;
     }
-    const std::uintmax_t size = ascii ? kMinAsciiProperty : plyBinaryTypeSize(type);
+    std::uintmax_t size = kMinUnknownProperty;
+    if (sawFormat) {
+        size = ascii ? kMinAsciiProperty : plyBinaryTypeSize(type);
+    }
     if (size == 0) {
         element.bounded = false;
         return;
@@ -120,7 +141,13 @@ std::optional<std::string> plyHeaderExceedsFile(const std::filesystem::path& pat
     std::string line;
 
     while (headerBytes <= kMaxHeaderBytes && std::getline(file, line)) {
-        headerBytes += line.size() + 1;  // the delimiter getline consumed
+        // +1 for the delimiter getline consumed -- except on a final line that
+        // has none, where it overshoots. That matters only because the running
+        // total is compared against the file size below, and a header with no
+        // end_header is read to EOF, so the overshoot is exactly the case the
+        // fallback exists for. Clamped rather than conditionalised: this is a
+        // lower-bound argument, and a byte of slack cannot weaken it.
+        headerBytes = std::min(headerBytes + line.size() + 1, fileSize);
         if (!line.empty() && line.back() == '\r') {
             line.pop_back();
         }
@@ -128,31 +155,38 @@ std::optional<std::string> plyHeaderExceedsFile(const std::filesystem::path& pat
         std::string keyword;
         words >> keyword;
 
-        if (keyword == "format") {
+        if (startsWith(line, "format")) {
             std::string encoding;
             words >> encoding;
             ascii = encoding == "ascii";
             sawFormat = true;
-        } else if (keyword == "element") {
+        } else if (startsWith(line, "element")) {
             std::string name;
             std::string count;
             words >> name >> count;
             PlyElement element;
-            element.bounded = parseElementCount(count, element.count);
+            parseElementCount(count, element.count);
             elements.push_back(element);
-        } else if (keyword == "property" && !elements.empty()) {
-            accumulateProperty(words, ascii, elements.back());
-        } else if (keyword == "end_header") {
+        } else if (startsWith(line, "property") && !elements.empty()) {
+            accumulateProperty(words, ascii, sawFormat, elements.back());
+        } else if (startsWith(line, "end_header")) {
             ended = true;
             break;
         }
     }
 
-    if (!ended || !sawFormat || headerBytes > fileSize) {
-        return std::nullopt;
-    }
-
-    const std::uintmax_t payload = fileSize - headerBytes;
+    // Not finding `end_header` used to abandon the check, and that is exactly
+    // how the second fuzz round got through: happly's prefix match accepted
+    // `end_headerelefent face 1` as the end of the header, this token-equality
+    // test did not, so the guard deferred and happly allocated 226 GB.
+    //
+    // The lesson generalises past that one line. ANY disagreement with the
+    // parser about where the header stops must stay harmless, so when the end
+    // is unknown the bound falls back to the WHOLE FILE. No legitimate file can
+    // contain an element needing more bytes than the file itself, whatever the
+    // header turns out to say, so this cannot reject valid input -- it is
+    // simply a weaker bound than the precise one.
+    const std::uintmax_t payload = ended ? fileSize - headerBytes : fileSize;
     std::uintmax_t needed = 0;
     for (const PlyElement& element : elements) {
         if (!element.bounded || element.minBytes == 0 || element.count == 0) {

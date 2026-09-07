@@ -471,6 +471,81 @@ TEST_CASE("an unreadable PLY element count does not excuse the elements after it
     }
 }
 
+TEST_CASE("a PLY header the guard cannot terminate is still bounded") {
+    // happly matches header keywords with a PREFIX test, so
+    // `end_headerelefent face 1` ends the header for it. A guard that required
+    // token equality did not see an end_header at all, deferred to "a header we
+    // do not understand", and let happly allocate 226 GB -- the third fuzz
+    // finding in this family, and the one that showed the shape of the mistake:
+    // the guard was failing OPEN whenever it disagreed with the parser it
+    // guards.
+    //
+    // Two changes are pinned here. The keyword match now mirrors happly's, and
+    // -- the part that matters -- an unterminated header falls back to bounding
+    // against the whole file, which no legitimate file can exceed however the
+    // header is eventually read.
+    const std::string text =
+        "ply\nformat ascii 1.0\n"
+        "element vertex 37777777777\n"
+        "property float x\nproperty float y\nproperty float z\n"
+        "end_headerelefent face 1\n";
+    const fs::path path = tempDir() / "unterminated_header.ply";
+    std::ofstream(path, std::ios::binary | std::ios::trunc) << text;
+
+    const long before = peakResidentKb();
+    auto result = io::importMesh(path);
+    const long after = peakResidentKb();
+    REQUIRE(!result.ok());
+    CHECK(result.error().code == io::ErrorCode::ParseError);
+    if (before > 0) {
+        CHECK(after - before < 256L * 1024L);  // KiB
+    }
+}
+
+TEST_CASE("a PLY with no end_header at all is bounded against the whole file") {
+    // The fallback stated on its own: strip the terminator entirely and the
+    // declared count must still be refused, because it exceeds the file.
+    const std::string text =
+        "ply\nformat ascii 1.0\n"
+        "element vertex 37777777777\n"
+        "property float x\nproperty float y\nproperty float z\n";
+    const fs::path path = tempDir() / "no_end_header.ply";
+    std::ofstream(path, std::ios::binary | std::ios::trunc) << text;
+
+    auto result = io::importMesh(path);
+    REQUIRE(!result.ok());
+    CHECK(result.error().code == io::ErrorCode::ParseError);
+}
+
+TEST_CASE("a PLY count with trailing garbage is read the way happly reads it") {
+    // happly parses the count with `istringstream >> size_t`: leading digits,
+    // stop at the first character that is not one. A guard that instead
+    // demanded the whole token be digits rejected "3777777777\0...7", marked
+    // the element unsizable, skipped it -- and happly went on to reserve
+    // 3 777 777 777 entries. Every finding in this family was this same
+    // mistake: parsing MORE strictly than the parser being guarded means
+    // disagreeing with it, and an attacker chooses when you disagree.
+    std::string text =
+        "ply\nformat ascii 1.0\n"
+        "element vertex 3777777777";
+    text.append(4, '\0');  // happly stops here; a stricter parser does not
+    text += "7\n";
+    text +=
+        "property float x\nproperty float y\nproperty float z\n"
+        "end_header\n";
+    const fs::path path = tempDir() / "count_trailing_garbage.ply";
+    std::ofstream(path, std::ios::binary | std::ios::trunc) << text;
+
+    const long before = peakResidentKb();
+    auto result = io::importMesh(path);
+    const long after = peakResidentKb();
+    REQUIRE(!result.ok());
+    CHECK(result.error().code == io::ErrorCode::ParseError);
+    if (before > 0) {
+        CHECK(after - before < 256L * 1024L);  // KiB
+    }
+}
+
 TEST_CASE("a PLY whose declared counts DO fit is still imported") {
     // The guard is a lower bound on bytes-per-element, so it must never reject
     // a legitimate file -- including a binary one, where the bound is the sum of
