@@ -1044,10 +1044,18 @@ yourself.
 - `.clang-format` is enforced in CI (`ci.yml`, pinned to clang-format 18).
   `.clang-tidy` configures editors and local runs; it is **not** a merge gate.
 - `.github/workflows/hardening.yml` — nightly (and manually triggerable)
-  ASan/UBSan, TSan and libFuzzer lanes, plus the opt-in `gpu-parity` lane for a
-  self-hosted runner with a GPU. The cheap half, replaying the checked-in
-  corpus under `tests/fuzz/corpus`, runs on every CI leg as the
-  `fuzz_corpus_replay` ctest case.
+  ASan/UBSan, TSan, libFuzzer and benchmark-regression lanes, plus the opt-in
+  `gpu-parity` lane for a self-hosted runner with a GPU. The cheap half,
+  replaying the checked-in corpus under `tests/fuzz/corpus`, runs on every CI
+  leg as the `fuzz_corpus_replay` ctest case.
+
+  **These lanes are nightly, so they rot while push CI stays green — check them
+  before a release, not after.** They were red on every lane for weeks across
+  two tagged versions before anyone looked (`gh run list --workflow hardening`).
+  The bench lane in particular gates against
+  `tests/bench/baselines-<System>-<machine>-<compiler>.json`, one file per
+  toolchain, and a `bench check SKIPPED` is treated as a failure on purpose: a
+  skip means the gate did not run.
 - The GPU backends are compiled on every PR (`ci.yml`: `gpu-backends-compile`
   for CUDA + OpenCL, `gpu-metal-compile` report-only for Metal). Those lanes
   catch build breakage only — a hosted runner has no device, and the parity case

@@ -211,8 +211,16 @@ def _project_cmake_files() -> "list[Path]":
              + list(REPO.rglob("*.cmake.in")))
     ours = []
     for path in sorted(found):
-        rel = path.relative_to(REPO).as_posix()
-        if any(rel == d or rel.startswith(d + "/") for d in SKIPPED_DIRS):
+        rel = path.relative_to(REPO)
+        # Dot-directories are never project source, and one of them is a whole
+        # second copy of this repo: `git worktree` checkouts under .claude/
+        # duplicate every CMakeLists here, INCLUDING the vendored ones the
+        # SKIPPED_DIRS prefixes are written to exclude — so a developer with a
+        # worktree open failed this gate on Eigen and QuadriFlow.
+        if any(part.startswith(".") for part in rel.parts):
+            continue
+        posix = rel.as_posix()
+        if any(posix == d or posix.startswith(d + "/") for d in SKIPPED_DIRS):
             continue
         ours.append(path)
     return ours

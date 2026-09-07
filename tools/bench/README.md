@@ -18,7 +18,8 @@ python3 tools/bench/bench.py run --corpus all --results results.json
 # Re-record CI baselines after an intentional solver change (diff = review artifact)
 python3 tools/bench/bench.py record
 
-# What ctest runs (test name: bench) — compares against tests/bench/baselines.json
+# What ctest runs (test name: bench) — compares against this host's
+# tests/bench/baselines-<System>-<machine>-<compiler>.json
 python3 tools/bench/bench.py check
 ```
 
@@ -38,13 +39,24 @@ python3 tools/bench/bench.py check
 Distances are sampling approximations (100k points/side by default) — stable
 for trend tracking, not certified bounds.
 
-## Which solver the baselines gate
+## Which solver and which toolchain the baselines gate
 
-`baselines.json` records the solver the run used (`native` or `native+geogram`)
-and `check` refuses to compare across the two — the build option picks genuinely
-different quads, so a baseline recorded on one is not a gate on the other. A
-default build resolves only the native solver, so `check` **skips**, which is
-easy to mistake for a pass. Look for `bench check SKIPPED` in the log.
+Each baseline file records the solver the run used (`native` or
+`native+geogram`) and `check` refuses to compare across the two — the build
+option picks genuinely different quads, so a baseline recorded on one is not a
+gate on the other. A default build resolves only the native solver, so `check`
+**skips**, which is easy to mistake for a pass. Look for `bench check SKIPPED`
+in the log.
+
+The toolchain is the second axis, and it is settled by WHICH FILE is read:
+baselines live at `tests/bench/baselines-<System>-<machine>-<compiler>.json`,
+one per toolchain, because the solve reads unordered-container iteration order
+and libstdc++ and libc++ genuinely disagree (cylinder singularities 4 on
+macOS/Clang, 6 on Linux/GCC). `check` reads only the file matching the current
+host and skips when there is none; `record` writes that host's file. A single
+shared file could only ever gate the machine it was recorded on — which is how
+the nightly lane stayed dark for weeks, correctly refusing to compare macOS
+numbers against a Linux runner.
 
 To build the gated configuration:
 

@@ -1,0 +1,13 @@
+ply
+format ascii 1.0
+element vertex 37777777777
+property float x
+property float y
+property float z
+element face 1
+property list uchar int vert7777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777
+property float x
+property short yenet":{"version":"2.0"},"scenes":[{"nodes":[0]}],"nodes":[{"met":{"version":"2.0"},"scenes":[{"nodes":[0]}],"nodes"
+property float z
+element face 1
+property list uchar int vert77777777777777777777777777777777777777777777777777

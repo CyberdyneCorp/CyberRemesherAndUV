@@ -41,7 +41,7 @@ except ImportError as exc:  # numpy / scipy absent
 BENCH_DIR = Path(__file__).resolve().parent
 REPO = BENCH_DIR.parent.parent
 DEFAULT_CACHE = REPO / ".bench-cache"
-BASELINES = REPO / "tests" / "bench" / "baselines.json"
+BASELINES_DIR = REPO / "tests" / "bench"
 DEFAULT_CYBER = REPO / "build" / "cpu-headless" / "apps" / "cli" / "cyberremesh"
 
 # metric -> (kind, tolerance, direction). direction: 'both' fails on any drift
@@ -200,6 +200,21 @@ def toolchain_identity() -> str:
     return f"{system}/{machine}/{family}"
 
 
+def baselines_path(identity: str) -> Path:
+    """The baseline file for one toolchain.
+
+    ONE FILE PER TOOLCHAIN, because the solve is not reproducible across them
+    (see toolchain_identity). A single shared file can only ever gate the host
+    it was recorded on, and every other host is left comparing numbers it can
+    never reproduce — so `check` skipped. That is how the nightly bench lane
+    came to be dark for weeks: baselines recorded on Darwin/arm64/clang, CI
+    running Linux/x86_64/gcc, `check` correctly refusing, and the workflow
+    (correctly) treating a skip as a failure. Giving each toolchain its own file
+    lets both gate for real.
+    """
+    return BASELINES_DIR / f"baselines-{identity.replace('/', '-')}.json"
+
+
 def solver_identity(cyber_binary: Path) -> str:
     """The seamless-UV solver the binary carries, from `cyberremesh --version`.
 
@@ -218,8 +233,8 @@ def solver_identity(cyber_binary: Path) -> str:
     return ""
 
 
-def check_against_baselines(results: list[dict]) -> int:
-    baselines = json.loads(BASELINES.read_text())["results"]
+def check_against_baselines(results: list[dict], path: Path) -> int:
+    baselines = json.loads(path.read_text())["results"]
     failures = 0
     for row in results:
         key = row["mesh"]
@@ -256,9 +271,10 @@ def record_baselines(results: list[dict], solver: str) -> None:
             row["mesh"]: row["metrics"] for row in results if row.get("ok")
         },
     }
-    BASELINES.parent.mkdir(parents=True, exist_ok=True)
-    BASELINES.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
-    print(f"wrote {BASELINES} ({len(payload['results'])} meshes, "
+    path = baselines_path(payload["toolchain"])
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    print(f"wrote {path} ({len(payload['results'])} meshes, "
           f"solver {solver}, toolchain {payload['toolchain']})")
 
 
@@ -310,26 +326,26 @@ def main() -> int:
     # (including the portable leg of the nightly sanitizer lane, which runs the
     # whole ctest set). Skip instead, and say which build would be gated.
     if args.command == "check":
-        baselines = json.loads(BASELINES.read_text())
+        # The toolchain axis is now settled by WHICH FILE is read rather than by
+        # comparing a field inside one, so a host either has baselines or does
+        # not. Nothing to re-record on an unrelated machine to make CI green.
+        current_host = toolchain_identity()
+        path = baselines_path(current_host)
+        if not path.exists():
+            print(f"bench check SKIPPED: no baselines recorded for "
+                  f"'{current_host}' ({path.name}). The solve reads "
+                  f"unordered-container iteration order, so numbers from "
+                  f"another toolchain are not comparable — run `bench.py "
+                  f"record` on this one to gate it.")
+            return SKIP_EXIT
+        baselines = json.loads(path.read_text())
         recorded = baselines.get("solver", "")
         current = solver_identity(args.cyber_binary)
         if recorded and current and recorded != current:
-            print(f"bench check SKIPPED: baselines were recorded on the "
+            print(f"bench check SKIPPED: {path.name} was recorded on the "
                   f"'{recorded}' build, this binary is '{current}'. Configure "
                   f"with the same -DCYBER_WITH_QUADCOVER setting to gate on "
                   f"them, or re-record deliberately.")
-            return SKIP_EXIT
-        # Same refusal, one axis out: the solver is not reproducible across
-        # toolchains (see toolchain_identity). Baselines with no recorded
-        # toolchain predate this check and are compared as before, so adding the
-        # key does not retroactively skip every existing baseline file.
-        recorded_host = baselines.get("toolchain", "")
-        current_host = toolchain_identity()
-        if recorded_host and recorded_host != current_host:
-            print(f"bench check SKIPPED: baselines were recorded on "
-                  f"'{recorded_host}', this run is '{current_host}'. The solve "
-                  f"reads unordered-container iteration order, so the two are "
-                  f"not comparable — re-record on this toolchain to gate on it.")
             return SKIP_EXIT
 
     results = benchmark(meshes, solvers, args.cache_dir / "out", args.samples,
@@ -341,7 +357,7 @@ def main() -> int:
         record_baselines(results, solver_identity(args.cyber_binary))
         return 0
     if args.command == "check":
-        failures = check_against_baselines(results)
+        failures = check_against_baselines(results, baselines_path(toolchain_identity()))
         print("bench check:", "OK" if failures == 0 else f"{failures} failure(s)")
         return 1 if failures else 0
     return 0 if all(r.get("ok") for r in results) else 1

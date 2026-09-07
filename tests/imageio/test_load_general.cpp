@@ -19,7 +19,23 @@
 // test so no external tooling is required. (The orchestrator additionally
 // verifies against a real PIL-written dynamic-Huffman PNG.)
 
+#if defined(__has_feature)
+#if __has_feature(address_sanitizer) || __has_feature(undefined_behavior_sanitizer) || \
+    __has_feature(thread_sanitizer)
+#define CYBER_TEST_INSTRUMENTED 1
+#endif
+#endif
+#if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__)
+#define CYBER_TEST_INSTRUMENTED 1
+#endif
+
 namespace {
+
+#if defined(CYBER_TEST_INSTRUMENTED)
+constexpr double kInflateBudgetMs = 10000.0;
+#else
+constexpr double kInflateBudgetMs = 500.0;
+#endif
 
 using Bytes = std::vector<std::uint8_t>;
 
@@ -403,7 +419,14 @@ TEST_CASE("loadPng rejects a decompression bomb without inflating it") {
     // Inflating the bomb in full costs ~900 ms and ~256 MiB; capped at the two
     // bytes the header declares it takes ~1 ms. The bound keeps a regression a
     // failing test rather than a memory-hungry hang.
-    CHECK(elapsedMs < 500.0);
+    //
+    // The budget is scaled on a sanitizer build rather than dropped. ASan+UBSan
+    // on a Debug tree runs this decode one to two orders of magnitude slower, so
+    // the 500 ms wall clocked ~1 ms of real work and still failed the nightly
+    // lane every night. A 20x budget keeps the check discriminating: the
+    // uncapped inflate this exists to catch costs ~900 ms UNINSTRUMENTED, so
+    // instrumented it lands far above 10 s, nowhere near the relaxed bound.
+    CHECK(elapsedMs < kInflateBudgetMs);
 }
 
 TEST_CASE("loadPng accepts a stream that exactly fills the declared size") {

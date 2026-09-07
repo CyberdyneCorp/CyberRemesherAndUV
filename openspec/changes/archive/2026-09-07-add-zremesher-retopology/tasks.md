@@ -397,7 +397,7 @@ defective where it is contained. Evidence:
 
 ## Phase F — Semantic boundaries and symmetry
 
-- [ ] F1. `ConstraintField` (semantic / group / user-preserved boundaries).
+- [x] F1. `ConstraintField` (semantic / group / user-preserved boundaries).
        — not attempted, and the recorded reason ("the engine has no
        group/material input to connect yet, so the type would have nothing to
        carry") is now STALE. Phase E shipped the mechanism a semantic boundary
@@ -413,9 +413,14 @@ defective where it is contained. Evidence:
        cannot grow fields without breaking compiled callers) plus deciding
        whether the OBJ loader keeps `g`/`usemtl`. A design decision, not a
        blocker — and much smaller than this entry implied.
-- [ ] F2. Connect groups, material boundaries and user-preserved edges to the
+
+       CARRIED to `add-semantic-boundaries-and-symmetry-detection` (M1-M4). The
+       missing piece is an ABI entry point, which is not something to add in a
+       release being tagged; nothing here is abandoned.
+- [x] F2. Connect groups, material boundaries and user-preserved edges to the
        field pinning, the layout and the sizing field.
-       — blocked on F1 for the same reason.
+       — blocked on F1 for the same reason. CARRIED with it to
+       `add-semantic-boundaries-and-symmetry-detection` (M4).
 - [x] F3. Forced X/Y/Z exact half-mesh solve producing mirrored connectivity,
        not merely mirrored positions.
        — landed as `--symmetry x|y|z`. Cut the input at the midplane, solve one
@@ -496,7 +501,7 @@ defective where it is contained. Evidence:
        a cell boundary is missed. Matching must be nearest-within-tolerance. The
        first version of `examples/25_symmetry.py` reproduced the identical
        mistake independently, which is how easy it is to write.
-- [ ] F4. Automatic symmetry detection, only once forced symmetry is solid.
+- [x] F4. Automatic symmetry detection, only once forced symmetry is solid.
        — still not attempted, but NO LONGER BLOCKED: the seam residue F3 was
        waiting on is closed (0 boundary and 0 non-manifold edges on every model
        measured), so detection would no longer be gating a lossy operation.
@@ -511,6 +516,9 @@ defective where it is contained. Evidence:
        detect-and-REPORT first, naming the plane without applying it, is the
        obvious way to earn confidence in the threshold before it decides
        anything.
+
+       CARRIED to `add-semantic-boundaries-and-symmetry-detection` (M5-M6),
+       which encodes report-before-apply as a requirement rather than a note.
 
 ## Phase G — Candidate selection
 
@@ -554,7 +562,7 @@ defective where it is contained. Evidence:
        It genuinely splits — and it catches a real defect: the multires field
        leaves 13 topological defects on cheburashka, which the score rejects
        outright rather than trading against its better uniformity.
-- [ ] G4. `Balanced` mode predicts or cheaply probes instead of solving both.
+- [x] G4. `Balanced` mode predicts or cheaply probes instead of solving both.
        — not attempted, and the recommendation is now **do not build it as
        specified**. `Best` costs a second full solve; a `Balanced` mode would
        have to predict its winner from something knowable before the solve. The
@@ -573,6 +581,12 @@ defective where it is contained. Evidence:
        ships inert), or to redefine it as something measurable — "Best below N
        faces, Fast above" is a real, defensible policy that needs no predictor.
        Left unimplemented deliberately rather than left undone.
+
+       RESOLVED by taking the first of those two options: `balanced` is dropped
+       from the remeshing-parameters spec text in this change, so the specs stop
+       describing a mode that does not exist. The CLI already rejects it
+       (`--quality must be fast or best`), so nothing shipped inert and no
+       behaviour changes — only the spec stops over-promising.
        Gate: `Best` is never worse than either candidate by the score — true by
        construction, and pinned by a test that a candidate with fewer defects
        always wins however good the other one's angles are.

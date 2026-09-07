@@ -3779,6 +3779,20 @@ std::size_t debugSubMeshDiffRoundTrip(const Mesh& mesh, const PositionField& fie
     return mismatch;
 }
 
+// GCC 13 mis-analyses the inlined memmove behind `std::vector<EqRow> eqs{{...}}`
+// -- one 24-byte element copied out of an initializer_list -- and reports a
+// bogus -Warray-bounds against <stl_algobase.h> ("forming offset 24 is out of
+// the bounds [0, 24]"), and -Wstringop-overflow on the same memmove once the
+// first is silenced -- two names for one mis-analysis. It only fires under
+// TSan, whose instrumentation changes the inlining these run on, which is why
+// the nightly thread lane was the only build that could not compile the tree.
+// Suppressed around this one self-test so -Werror stays on everywhere else,
+// exactly as sparse_cholesky.cpp already does for the same GCC bug.
+#if defined(__GNUC__) && !defined(__clang__) && __GNUC__ >= 12
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Warray-bounds"
+#pragma GCC diagnostic ignored "-Wstringop-overflow"
+#endif
 bool debugTernaryCsp() {
     // Case A — a face that is loop-closed (v0+v1+v2==0) but flipped (area < 0);
     // the solver must find a satisfying, non-flipped ternary assignment.
@@ -3838,6 +3852,9 @@ bool debugTernaryCsp() {
     }
     return true;
 }
+#if defined(__GNUC__) && !defined(__clang__) && __GNUC__ >= 12
+#pragma GCC diagnostic pop
+#endif
 
 bool debugMinCostFlow() {
     // Case 1: two disjoint s->t paths, cheap (cost 2) and expensive (cost 6);

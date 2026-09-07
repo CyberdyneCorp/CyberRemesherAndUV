@@ -180,6 +180,28 @@ def _test_quad_input_is_refused_by_name(tmpdir):
     print("PASS: a quad input raises UnsupportedTopologyError naming the face")
 
 
+def _test_out_of_range_mode_is_defined_behaviour(tmpdir):
+    """An FFI caller can put any int in an enum-typed C parameter.
+
+    Reading that value THROUGH the enum type to check or switch on it is
+    undefined -- the compiler infers the value range from the enumerators -- and
+    UBSan reports it. `cyber_retopo_subdivide_ex` failed the nightly sanitizer
+    lane on exactly this, from the sibling test that passes mode=7 on purpose;
+    `cyber_retopo_loop_subdivide` reads its mode the same way and had the same
+    defect with no test to catch it.
+    """
+    from cyberremesh import Mesh
+
+    path = _write(tmpdir, "tet_oob.obj", _TET_OBJ)
+    with Mesh.load(path) as mesh:
+        before = mesh.face_count
+        # Not a rejection: this mode SELECTS between two placements and an
+        # unknown value falls back to smooth, so the call succeeds. The point is
+        # that reading it is defined -- clean under -fsanitize=undefined.
+        assert mesh.loop_subdivide(7) == before * 4
+    print("PASS: an out-of-range loop-subdivision mode reads as defined behaviour")
+
+
 def main() -> int:
     if not cyberremesh.is_available():
         print("SKIP: cyber_capi shared library not loadable")
@@ -191,6 +213,7 @@ def main() -> int:
         _test_default_mode_is_named_smooth(tmpdir)
         _test_open_mesh_keeps_its_boundary(tmpdir)
         _test_quad_input_is_refused_by_name(tmpdir)
+        _test_out_of_range_mode_is_defined_behaviour(tmpdir)
     print("all loop-subdivision binding tests passed")
     return 0
 
