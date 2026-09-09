@@ -2500,6 +2500,10 @@ Reduce spurious singularities (36% irregular → target < 10%) for angle parity.
   vertices 38→31% but wrecked edge-length CV (bunny 0.21→0.46) by shearing quads;
   gated to preserve geometry it becomes a no-op. Triangle-pair merge was also
   neutral. Local post-hoc surgery can't fix this without wrecking shape.
+- ⛔ **4b. DROPPED 2026-09-09 — see the re-prioritisation note under
+  "Sequencing".** Not refuted, and not parked: deliberately not built, because
+  it spends a multi-session extractor rewrite on 2–4° of median angle while the
+  axis that decides the product — validity — is already won 0 defects to 80/722.
 - ◻ **4b. Global integer parametrization** (QuadriFlow's method): spanning-tree
   integer integration + min-cost-flow holonomy resolution, producing clean
   topology *and* geometry from the start. The remaining real lever — a large,
@@ -2520,6 +2524,43 @@ overlaps 4b.
 ---
 
 ## Sequencing
+
+> ### Re-prioritised 2026-09-09: the objective changed, so the sequence did
+>
+> The project's direction is now **be the engine other people embed**, and this
+> file was written to answer a different question — "are we better than
+> QuadriFlow?" — measured on four axes against one reference implementation.
+> That question is still worth answering, but it is no longer what decides what
+> gets built next, and the phase order below optimises for the old one.
+>
+> **Phase 4b is DROPPED.** Global integer parametrization is, by this file's own
+> assessment, "a large, high-risk extractor rewrite, genuinely multi-session",
+> and it exists to close a median-angle gap of roughly 2–4°. For an embedded
+> engine the product claim is *"returns a valid mesh, always"* — and that is the
+> axis already won outright: **0 topological defects on all six corpus models
+> against QuadriFlow's 80 on the bunny and 722 on the flat CAD cube**, where it
+> tears the surface and returns holes. Two degrees of median angle is invisible
+> to an artist; a torn mesh is not. Phase 4a's local shortcuts remain proven
+> dead ends, so dropping 4b closes Phase 4 rather than parking it.
+>
+> **Kept, and now the top quality items:**
+>
+> - **Feature-following (0/5).** The axis where recent work actually moved the
+>   number — crease-polyline preservation and crease-aligned fields (c1/c2)
+>   took feature error down 5–11% — and the one that is visible on the CAD and
+>   hard-surface work an embedding host will send us.
+> - **Open surfaces becoming first-class.** Scans and sculpts have boundaries;
+>   `hole_fill_max_boundary=0` keeps the rim, but the isoline-graph cleanup that
+>   gives closed surfaces their quad quality is still opt-in and partial on open
+>   ones (`CYBER_QC_OPEN_CLEANUP`).
+>
+> **Ahead of both, and not on this file at all,** is the consumer-facing work
+> that decides whether anyone *can* embed the engine: the ABI contract, the
+> guarded host-callback boundaries, and a first-party Rust binding. Those are
+> tracked in `openspec/changes/`, not here, because this file measures output
+> quality and they are not about output.
+>
+> The phase order below is retained as the record of what was measured and why.
 
 `1 → 2 → 3 → 4 → 5`. Phases 1–3 are where we *actually beat* QuadriFlow and are
 lower-risk — bank them first. Phase 4 is the expensive median-angle parity fight;
