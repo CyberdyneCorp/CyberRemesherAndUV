@@ -1,0 +1,15 @@
+[package]
+name = "cyberremesh"
+description = "Quad remeshing, retopology, UV and baking — safe Rust bindings to the CyberRemesher engine."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = []
+require-quadcover = ["cyberremesh-sys/require-quadcover"]
+
+[dependencies]
+cyberremesh-sys.workspace = true

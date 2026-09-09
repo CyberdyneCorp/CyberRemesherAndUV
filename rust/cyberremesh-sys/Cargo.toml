@@ -1,0 +1,23 @@
+[package]
+name = "cyberremesh-sys"
+description = "Raw FFI bindings to the CyberRemesher C ABI. Prefer the `cyberremesh` crate."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+links = "cyber_capi"
+
+[features]
+default = []
+# Turn a missing in-process QuadCover solver into a CONFIGURE ERROR rather than
+# a silent fallback to the portable quadrangulator. Off by default on purpose:
+# the dependency (OpenMP + TBB) is not reliably present on a fresh macOS or
+# Windows checkout, and a crate that fails to configure there will be judged
+# broken rather than strict. The engine's own release workflow takes the same
+# position -- it sets REQUIRE on Linux only.
+require-quadcover = []
+
+[build-dependencies]
+bindgen = "0.70"
+cmake = "0.1"

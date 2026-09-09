@@ -46,6 +46,45 @@ jobs:
   # divergence stays hidden until release day. tests/packaging/test_swift_abi_parity.py
   # (ctest: swift_abi_parity) catches missing symbols on every platform; this
   # catches everything else — types, ownership, concurrency, platform #ifs.
+  rust-crate:
+    # The first-party Rust binding. Linux only for now: the crate's build script
+    # compiles the engine through CMake, so this leg costs a full engine build,
+    # and the C ABI it binds is already gated on macOS and Windows by
+    # build-test. What this adds is the BINDING -- bindgen's layout assertions
+    # over all 26 structs, and the safe wrapper run against a real library.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: lukka/get-cmake@latest
+      - name: Install the vendored field solver's dependencies
+        run: sudo apt-get update && sudo apt-get install -y libtbb-dev
+      - name: Toolchain
+        run: rustup component add clippy rustfmt
+      - name: Format
+        working-directory: rust
+        run: cargo fmt --all --check
+      # `forbid(clippy::undocumented_unsafe_blocks)` is the crate's own rule:
+      # one of two places in the tree allowed `unsafe`, so every block states
+      # why it is sound or the build fails.
+      - name: Clippy
+        working-directory: rust
+        run: cargo clippy --all-targets -- -D warnings
+      # Builds the engine as a side effect, which is what makes the layout
+      # assertions and the ABI check meaningful -- they run against a library
+      # built from this commit rather than a stale one.
+      - name: Test
+        working-directory: rust
+        run: cargo test --all
+      # The feature that turns a missing in-process solver into a configure
+      # error rather than a silent fallback. Exercised on the one platform where
+      # the engine's own release lane requires it, so a break in the feature
+      # wiring is caught here rather than by a consumer.
+      - name: Test with require-quadcover
+        working-directory: rust
+        run: cargo test --all --features require-quadcover
+
   swift-package:
     runs-on: macos-14
     steps:
