@@ -112,7 +112,7 @@ public:
         return cyber::length(p - m_center) - m_radius;
     }
     [[nodiscard]] Vec3 gradient(Vec3 p) const override { return cyber::normalized(p - m_center); }
-    [[nodiscard]] float occlusion(Vec3, Vec3, float) const override {
+    [[nodiscard]] float openness(Vec3, Vec3, float) const override {
         return 1.0f;  // a lone convex sphere occludes nothing
     }
 
@@ -127,14 +127,14 @@ class FlatField : public bake::FieldEvaluator {
 public:
     [[nodiscard]] float distance(Vec3 p) const override { return p.z; }
     [[nodiscard]] Vec3 gradient(Vec3) const override { return Vec3{0, 0, 1}; }
-    [[nodiscard]] float occlusion(Vec3, Vec3, float) const override { return 1.0f; }
+    [[nodiscard]] float openness(Vec3, Vec3, float) const override { return 1.0f; }
 };
 
 // Half-occluded everywhere, so an AO bake through the evaluator has to carry
 // the evaluator's answer rather than a ray budget's.
 class HalfOccludedField : public FlatField {
 public:
-    [[nodiscard]] float occlusion(Vec3, Vec3, float) const override { return 0.25f; }
+    [[nodiscard]] float openness(Vec3, Vec3, float) const override { return 0.25f; }
 };
 
 // ---- hostile / sloppy evaluator doubles --------------------------------
@@ -191,14 +191,14 @@ public:
 // silently clamped to 1.0, i.e. "fully open", which is a plausible map.
 class OutOfRangeOpennessField : public FlatField {
 public:
-    [[nodiscard]] float occlusion(Vec3, Vec3, float) const override { return 4.0f; }
+    [[nodiscard]] float openness(Vec3, Vec3, float) const override { return 4.0f; }
 };
 
 // Openness a hair outside [0,1]: float slack, not a broken host. Must still
 // clamp rather than fail the bake.
 class SlightlyOverOpenField : public FlatField {
 public:
-    [[nodiscard]] float occlusion(Vec3, Vec3, float) const override { return 1.0f + 1e-5f; }
+    [[nodiscard]] float openness(Vec3, Vec3, float) const override { return 1.0f + 1e-5f; }
 };
 
 // Finite ON the surface and non-finite off it -- the shape of a grid field
@@ -571,7 +571,7 @@ TEST_CASE("an openness outside [0,1] fails the bake, and float slack still clamp
     const OutOfRangeOpennessField broken;
     const bake::BakeResult bad = bakeWithField(broken, bake::BakeMap::AmbientOcclusion);
     CHECK(bad.fieldContractViolated);
-    CHECK(bad.fieldContractMessage.find("occlusion") != std::string::npos);
+    CHECK(bad.fieldContractMessage.find("openness") != std::string::npos);
 
     const SlightlyOverOpenField slack;
     const bake::BakeResult ok = bakeWithField(slack, bake::BakeMap::AmbientOcclusion);

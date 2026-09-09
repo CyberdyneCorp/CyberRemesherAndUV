@@ -362,7 +362,7 @@ def make_field(FieldEvaluator):
             n = math.sqrt(p[0] ** 2 + p[1] ** 2 + p[2] ** 2) + 1e-9
             return (p[0] / n, p[1] / n, p[2] / n)
 
-        def occlusion(self, p, n, radius):
+        def openness(self, p, n, radius):
             # Openness in [0,1]: the blob occludes itself in its analytic
             # valleys, so the local radius is the AO term.
             return max(0.1, min(1.0, 0.55 + 1.8 * (_blob_radius(p) - 1.0)))

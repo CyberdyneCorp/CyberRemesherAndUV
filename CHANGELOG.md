@@ -7,6 +7,59 @@
 
 ### Added
 
+- **ABI 1.2** — three entry points across two additive bumps, nothing removed
+  or reshaped, soname unchanged throughout. The additive-only rule exercised on
+  itself rather than asserted: a test pins that clients compiled against 1.0 and
+  1.1 are both still served.
+
+- **`cyber_seamless_solver()` — which solver a build actually carries.**
+  `"native+geogram"` with the in-process Geogram QuadCover solver compiled in,
+  `"native"` without. The difference is invisible and consequential: a build
+  without it does not fail, it routes to the portable quadrangulator and returns
+  GENUINELY DIFFERENT QUADS, and nothing announced that.
+
+  `cyberremesh --version` has printed this since 0.5.0, which is no help to a
+  host that embeds the library and never runs the CLI — so an embedder had no
+  way to learn which engine it had linked, and a build misconfiguration surfaced
+  only as output quality nobody could explain. Found because an embedder built
+  a type to report it, discovered nothing could construct it, and deleted the
+  type.
+
+  `seamless_solver()` from Python, `CyberRuntime.seamlessSolver` from Swift.
+
+- **`cyber_mesh_topology_generation()` makes the element-id contract checkable.**
+  The ELEMENT-ID STABILITY rules in `cyber_capi.h` were exact and were PROSE
+  ONLY — `snap_all` keeps every id, `subdivide*` reassigns all of them,
+  `triangulate` keeps vertices and splits faces — so a host holding a vertex id
+  had no way to ask whether it still meant that vertex. A stale annotation (a
+  pin, a loop tag, a mapping back into the host's own scene) silently pointed at
+  whatever now holds that index.
+
+  The counter is bumped from `runEdit`'s existing `EditScope`, which is the same
+  distinction the documented rules draw — so it cannot drift from the contract
+  without the scope itself being wrong. A positions-only edit leaves it alone; a
+  structural one moves it and never moves back. It errs in the SAFE direction
+  only (a failed op bumps it conservatively), so equal values prove your ids are
+  good and differing values only mean don't assume. A clone carries its source's
+  value, because a clone's ids ARE the source's ids.
+
+  `Mesh.topology_generation` from Python.
+
+- **`cyber_set_max_import_vertices()` — an opt-in import resource ceiling.**
+  Hostile input was already refused structurally (a declared element count is
+  checked against the bytes the file carries), but a *legitimate* 200M-vertex
+  file was simply attempted and a host had no way to say "not on this device".
+
+  Documented as a RESOURCE bound and explicitly distinct from the hostility
+  check, because conflating the two gives you a limit fit for neither. Off by
+  default: the engine cannot know a host's budget, and a value chosen here would
+  be too small for a workstation and useless on a phone. What it bounds is
+  stated honestly — the returned mesh, not the peak parse allocation, which is
+  the useful boundary anyway since loading is the cheap half and this refuses
+  the mesh before the remeshing pipeline spends orders of magnitude more on it.
+
+  `set_max_import_vertices()` / `max_import_vertices()` from Python.
+
 - **The C ABI carries its own version, distinct from the engine's.**
   `engine-bindings` has required this since the bootstrap change — *"The ABI
   SHALL carry a runtime-queryable semantic version; minor releases SHALL be
@@ -49,6 +102,25 @@
   client a value outside the range it compiled against is undefined on the
   client's side — the same hazard `enumCode()` exists for, from the other
   direction. New states arrive as new fields or new entry points.
+
+### Changed
+
+- **`FieldEvaluator::occlusion` is now `openness`, in C++ and Python.** It was
+  named for the INVERSE of what it returns, so an implementer following the name
+  computed occlusion and got a plausible inverted AO map — light where it should
+  be dark, and plausible enough to ship. `CYBER_BAKE_AO`'s comment said
+  "ambient occlusion / openness", naming both and committing to neither; it now
+  states the polarity where the map is chosen, which is where a host decides
+  what to feed it.
+
+  The C ABI's struct field keeps the name `occlusion`, frozen by ABI 1.0 —
+  nothing about the C++ interface is part of that ABI. A Python subclass still
+  defining `occlusion` keeps working and gets a `DeprecationWarning`; the shim
+  FORWARDS rather than inverting, because a pre-rename subclass was already
+  returning openness. The rename changed the name, not the quantity, and
+  inverting in the shim would flip a map that was correct before.
+
+  Breaking for a C++ implementer of `FieldEvaluator` (a pure virtual moved).
 
 ### Fixed
 

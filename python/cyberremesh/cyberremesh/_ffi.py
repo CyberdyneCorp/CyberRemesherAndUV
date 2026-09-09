@@ -864,6 +864,17 @@ def _declare(lib: ctypes.CDLL) -> None:
     # CyberStatus cyber_abi_check(int compiled_major, int compiled_minor)
     lib.cyber_abi_check.argtypes = [c_int32, c_int32]
     lib.cyber_abi_check.restype = c_int32
+    # CyberStatus cyber_set_max_import_vertices(uint64_t) / uint64_t getter
+    lib.cyber_set_max_import_vertices.argtypes = [c_uint64]
+    lib.cyber_set_max_import_vertices.restype = c_int32
+    lib.cyber_max_import_vertices.argtypes = []
+    lib.cyber_max_import_vertices.restype = c_uint64
+    # const char* cyber_seamless_solver(void)
+    lib.cyber_seamless_solver.argtypes = []
+    lib.cyber_seamless_solver.restype = c_char_p
+    # uint64_t cyber_mesh_topology_generation(const CyberMesh*)
+    lib.cyber_mesh_topology_generation.argtypes = [c_void_p]
+    lib.cyber_mesh_topology_generation.restype = c_uint64
 
     lib.cyber_last_error.argtypes = []
     lib.cyber_last_error.restype = c_char_p

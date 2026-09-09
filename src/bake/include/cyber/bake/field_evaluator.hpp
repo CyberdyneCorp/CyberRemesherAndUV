@@ -37,7 +37,12 @@ public:
     // Openness at `p` with outward normal `n` over a hemisphere of `radius`:
     // 1 = fully open, 0 = fully occluded. Evaluators that already maintain an
     // occlusion cache answer this far more cheaply than any ray budget.
-    [[nodiscard]] virtual float occlusion(Vec3 p, Vec3 n, float radius) const = 0;
+    // Named for what it RETURNS. It was `occlusion`, which is the inverse of
+    // the value, so an implementer following the name computed the opposite of
+    // what the bake wanted and got a plausible inverted map -- light where it
+    // should be dark. The C ABI's struct field keeps the old name, frozen by
+    // ABI 1.0; nothing about the C++ interface is part of that ABI.
+    [[nodiscard]] virtual float openness(Vec3 p, Vec3 n, float radius) const = 0;
 
     // Mean curvature at `p`: half the divergence of the normalized gradient,
     // by central differences over a step `h`. Non-pure so implementers get a

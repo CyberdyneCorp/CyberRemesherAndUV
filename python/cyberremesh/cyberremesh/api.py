@@ -108,7 +108,7 @@ def version() -> str:
 #: The C ABI this binding was written against. Mirrors CYBER_ABI_VERSION_* in
 #: cyber_capi.h; ``check_abi()`` compares it against the loaded library.
 ABI_VERSION_MAJOR = 1
-ABI_VERSION_MINOR = 0
+ABI_VERSION_MINOR = 2
 
 
 def abi_version() -> tuple:
@@ -121,6 +121,34 @@ def abi_version() -> tuple:
     major, minor = ctypes.c_int(), ctypes.c_int()
     _ffi.get_lib().cyber_abi_version(ctypes.byref(major), ctypes.byref(minor))
     return (major.value, minor.value)
+
+
+def seamless_solver() -> str:
+    """Which seamless-UV solver this build carries: "native+geogram" or "native".
+
+    The difference is invisible and consequential: a build without the vendored
+    Geogram solver does not fail, it routes to the portable quadrangulator and
+    returns genuinely different quads. Assert this at startup if your build is
+    supposed to have it.
+    """
+    return _ffi.get_lib().cyber_seamless_solver().decode("utf-8")
+
+
+def max_import_vertices() -> int:
+    """The current import vertex ceiling, or 0 when none is set."""
+    return int(_ffi.get_lib().cyber_max_import_vertices())
+
+
+def set_max_import_vertices(max_vertices: int) -> None:
+    """Refuse to import a mesh FILE carrying more than ``max_vertices``.
+
+    A RESOURCE bound, not a hostility bound. Hostile input is already refused
+    structurally -- a declared element count is checked against the bytes the
+    file carries -- and needs no number. This bounds a LEGITIMATE file too big
+    for your budget. 0 (the default) is off, because the engine cannot know your
+    budget; a ceiling that is never reached is not a ceiling.
+    """
+    _check(_ffi.get_lib().cyber_set_max_import_vertices(int(max_vertices)))
 
 
 def check_abi(major: int = ABI_VERSION_MAJOR, minor: int = ABI_VERSION_MINOR) -> None:
@@ -1600,6 +1628,18 @@ class Mesh:
         return int(_ffi.get_lib().cyber_mesh_face_count(self.handle))
 
     @property
+    def topology_generation(self) -> int:
+        """Counter that changes whenever this mesh's element ids MAY have moved.
+
+        Equal counters prove the ids you hold still mean what they meant;
+        differing ones only mean you must not assume. Record it beside any
+        id-keyed state -- pins, tags, your own mapping back into a scene -- and
+        compare before trusting that state. See the ELEMENT-ID STABILITY block
+        in cyber_capi.h for which operations reassign what.
+        """
+        return int(_ffi.get_lib().cyber_mesh_topology_generation(self.handle))
+
+    @property
     def stats(self) -> Optional[Statistics]:
         """Statistics from the run that produced this mesh, if any."""
         return self._stats
@@ -2428,8 +2468,16 @@ class FieldEvaluator:
     def gradient(self, p: Tuple[float, float, float]) -> Tuple[float, float, float]:
         raise NotImplementedError
 
-    def occlusion(self, p: Tuple[float, float, float],
-                  n: Tuple[float, float, float], radius: float) -> float:
+    def openness(self, p: Tuple[float, float, float],
+                 n: Tuple[float, float, float], radius: float) -> float:
+        """OPENNESS at ``p``: 1.0 fully open, 0.0 fully occluded.
+
+        Named for what it returns. It was ``occlusion``, which is the inverse of
+        the value, so an implementer following the name computed the opposite of
+        what the bake wanted and got a plausible inverted map -- light where it
+        should be dark. A subclass still defining ``occlusion`` keeps working
+        and gets a warning; the shim is in ``_trampoline_openness``.
+        """
         raise NotImplementedError
 
     # -- ctypes plumbing ----------------------------------------------------
@@ -2463,9 +2511,31 @@ class FieldEvaluator:
             self._record(exc)
             out[0], out[1], out[2] = _NAN, _NAN, _NAN
 
+    def _openness_impl(self):
+        """The override to call, preferring the correct name.
+
+        A subclass written against the old `occlusion` name is still calling it
+        `occlusion` while MEANING openness -- the rename did not change what the
+        bake asks for, only what it is called -- so the shim forwards rather
+        than inverting. Inverting here would silently flip a map that was
+        correct before.
+        """
+        own = type(self)
+        if own.openness is not FieldEvaluator.openness:
+            return self.openness
+        if getattr(own, "occlusion", None) is not None:
+            warnings.warn(
+                "FieldEvaluator.occlusion is renamed to openness (same value, "
+                "1.0 = fully open); override openness instead",
+                DeprecationWarning, stacklevel=3,
+            )
+            return self.occlusion
+        return self.openness  # raises NotImplementedError, which is the truth
+
     def _trampoline_occlusion(self, _user, p, n, radius) -> float:
         try:
-            return float(self.occlusion((p[0], p[1], p[2]), (n[0], n[1], n[2]), float(radius)))
+            impl = self._openness_impl()
+            return float(impl((p[0], p[1], p[2]), (n[0], n[1], n[2]), float(radius)))
         except BaseException as exc:  # noqa: BLE001
             self._record(exc)
             return _NAN

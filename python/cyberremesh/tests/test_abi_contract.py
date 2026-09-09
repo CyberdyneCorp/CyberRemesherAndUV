@@ -111,6 +111,33 @@ def gate_the_soname_tracks_the_abi_major():
     print("PASS: SOVERSION, the loader and the header agree on ABI major %d" % abi_major)
 
 
+def gate_the_minor_bump_serves_the_previous_minor():
+    """This change bumped the ABI minor 1.0 -> 1.1 by ADDING two entry points.
+
+    That is the additive-only rule exercised on itself rather than asserted: a
+    host compiled against 1.0 -- before cyber_mesh_topology_generation and
+    cyber_set_max_import_vertices existed -- must still be served, because
+    nothing it knew about was taken away.
+    """
+    major, minor = _header_abi()
+    assert (major, minor) == (1, 2), (major, minor)
+    for older in (0, 1, 2):
+        cyberremesh.check_abi(1, older)  # every earlier minor, still served
+    print("PASS: ABI 1.2 still serves clients compiled against 1.0 and 1.1")
+
+
+def gate_the_new_entry_points_are_reachable():
+    # Parity: engine-bindings requires anything the C ABI can do to be reachable
+    # from Python, so an addition that skips the binding is only half-added.
+    assert cyberremesh.max_import_vertices() == 0
+    cyberremesh.set_max_import_vertices(1_000_000)
+    assert cyberremesh.max_import_vertices() == 1_000_000
+    cyberremesh.set_max_import_vertices(0)
+    assert cyberremesh.seamless_solver() in ("native", "native+geogram"), \
+        cyberremesh.seamless_solver()
+    print("PASS: the 1.1/1.2 additions are reachable from Python")
+
+
 def main():
     if not cyberremesh.is_available():
         print("SKIP: cyber_capi shared library not loadable")
@@ -120,6 +147,8 @@ def main():
     gate_the_compatibility_rule_is_the_engine_s()
     gate_the_abi_is_not_the_engine_version()
     gate_the_soname_tracks_the_abi_major()
+    gate_the_minor_bump_serves_the_previous_minor()
+    gate_the_new_entry_points_are_reachable()
     print("all ABI contract gates passed")
     return 0
 
