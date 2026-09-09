@@ -1030,7 +1030,7 @@ There are **two** version numbers and they answer different questions.
 
 ```c
 #define CYBER_ABI_VERSION_MAJOR 1     /* the SHAPE of cyber_capi.h */
-#define CYBER_ABI_VERSION_MINOR 1
+#define CYBER_ABI_VERSION_MINOR 2
 
 void       cyber_abi_version(int* major, int* minor);
 CyberStatus cyber_abi_check(int compiled_major, int compiled_minor);

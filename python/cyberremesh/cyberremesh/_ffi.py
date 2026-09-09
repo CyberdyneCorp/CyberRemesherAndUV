@@ -869,6 +869,9 @@ def _declare(lib: ctypes.CDLL) -> None:
     lib.cyber_set_max_import_vertices.restype = c_int32
     lib.cyber_max_import_vertices.argtypes = []
     lib.cyber_max_import_vertices.restype = c_uint64
+    # const char* cyber_seamless_solver(void)
+    lib.cyber_seamless_solver.argtypes = []
+    lib.cyber_seamless_solver.restype = c_char_p
     # uint64_t cyber_mesh_topology_generation(const CyberMesh*)
     lib.cyber_mesh_topology_generation.argtypes = [c_void_p]
     lib.cyber_mesh_topology_generation.restype = c_uint64

@@ -16,6 +16,11 @@
 - [x] F6. The header is a CMake configure dependency: `file(STRINGS)` reads at
       configure time, so without it an ABI bump left a stale SOVERSION and a
       stale library VERSION in an existing build tree, disagreeing silently.
+- [x] F8. `cyber_seamless_solver()` (ABI 1.2). Which solver a build carries was
+      reachable only from the CLI, so a host that embeds the library could not
+      learn it -- and the fallback to the portable quadrangulator is silent and
+      changes the output. Found by an embedder writing a type to report it and
+      finding nothing could construct it.
 - [ ] F7. Peak-bounded parsing for the formats that declare their counts.
       DEFERRED: the ceiling bounds the RESULT, which is the useful boundary
       (loading is the cheap half; the pipeline is where the cost is), and a

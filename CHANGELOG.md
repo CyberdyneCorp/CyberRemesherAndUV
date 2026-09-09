@@ -7,9 +7,25 @@
 
 ### Added
 
-- **ABI 1.1** — two entry points, nothing removed or reshaped, soname unchanged.
-  The additive-only rule exercised on itself rather than asserted: a test pins
-  that a client compiled against 1.0 is still served.
+- **ABI 1.2** — three entry points across two additive bumps, nothing removed
+  or reshaped, soname unchanged throughout. The additive-only rule exercised on
+  itself rather than asserted: a test pins that clients compiled against 1.0 and
+  1.1 are both still served.
+
+- **`cyber_seamless_solver()` — which solver a build actually carries.**
+  `"native+geogram"` with the in-process Geogram QuadCover solver compiled in,
+  `"native"` without. The difference is invisible and consequential: a build
+  without it does not fail, it routes to the portable quadrangulator and returns
+  GENUINELY DIFFERENT QUADS, and nothing announced that.
+
+  `cyberremesh --version` has printed this since 0.5.0, which is no help to a
+  host that embeds the library and never runs the CLI — so an embedder had no
+  way to learn which engine it had linked, and a build misconfiguration surfaced
+  only as output quality nobody could explain. Found because an embedder built
+  a type to report it, discovered nothing could construct it, and deleted the
+  type.
+
+  `seamless_solver()` from Python, `CyberRuntime.seamlessSolver` from Swift.
 
 - **`cyber_mesh_topology_generation()` makes the element-id contract checkable.**
   The ELEMENT-ID STABILITY rules in `cyber_capi.h` were exact and were PROSE

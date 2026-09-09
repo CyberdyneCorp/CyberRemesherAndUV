@@ -321,6 +321,15 @@ uint64_t cyber_max_import_vertices(void) {
     return importVertexCeiling().load(std::memory_order_relaxed);
 }
 
+const char* cyber_seamless_solver(void) {
+    // The string is owned by a function-local static so the pointer outlives
+    // every call, as the header promises. quadCoverSolverBuild() returns by
+    // value and is already linked in -- the CLI has printed it since 0.5.0, it
+    // was simply never reachable from the ABI.
+    static const std::string build = cyber::remesh::quadCoverSolverBuild();
+    return build.c_str();
+}
+
 uint64_t cyber_mesh_topology_generation(const CyberMesh* mesh) {
     return mesh == nullptr ? 0u : mesh->topologyGeneration;
 }

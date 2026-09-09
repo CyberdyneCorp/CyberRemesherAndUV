@@ -211,3 +211,26 @@ TEST_CASE("the import ceiling refuses a legitimate file over the host's budget")
     std::error_code ec;
     std::filesystem::remove(objPath, ec);
 }
+
+TEST_CASE("the solver a build carries is reachable from the ABI") {
+    // The difference is invisible and consequential: a build without the
+    // vendored Geogram solver does not fail, it routes to the portable
+    // quadrangulator and returns genuinely different quads. `cyberremesh
+    // --version` has printed this since 0.5.0, which is no help to a host that
+    // embeds the library and never runs the CLI.
+    const char* solver = cyber_seamless_solver();
+    REQUIRE(solver != nullptr);
+    const std::string name = solver;
+    CHECK((name == "native" || name == "native+geogram"));
+
+    // Static storage: the pointer must outlive the call, and a second call must
+    // hand back the same string rather than a fresh buffer.
+    CHECK(cyber_seamless_solver() == solver);
+
+#ifdef CYBER_TESTS_HAVE_QUADCOVER
+    // This test binary links the vendored solver, so the ABI must say so --
+    // otherwise the query reports something other than what was built, which is
+    // worse than not having it.
+    CHECK(name == "native+geogram");
+#endif
+}

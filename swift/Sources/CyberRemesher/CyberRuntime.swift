@@ -41,8 +41,18 @@ public enum CyberRuntime {
         return (Int(major), Int(minor))
     }
 
+    /// Which seamless-UV solver the linked build carries.
+    ///
+    /// `"native+geogram"` when the in-process Geogram QuadCover solver is
+    /// compiled in, `"native"` when it is not. Worth asserting at startup: a
+    /// build without it does not fail, it routes to the portable quadrangulator
+    /// and returns genuinely different quads, and nothing else says so.
+    public static var seamlessSolver: String {
+        String(cString: cyber_seamless_solver())
+    }
+
     /// The ABI this Swift package was written against.
-    public static let abiVersionCompiledAgainst = (major: 1, minor: 0)
+    public static let abiVersionCompiledAgainst = (major: 1, minor: 2)
 
     /// Throw if the loaded library cannot serve this package's compiled ABI.
     public static func checkABI() throws {

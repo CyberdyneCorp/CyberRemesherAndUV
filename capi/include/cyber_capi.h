@@ -92,7 +92,7 @@ typedef enum CyberStatus {
  * Do not compare these numbers by hand: cyber_abi_check() applies the rule
  * above in one place, so every binding gets the same answer. */
 #define CYBER_ABI_VERSION_MAJOR 1
-#define CYBER_ABI_VERSION_MINOR 1
+#define CYBER_ABI_VERSION_MINOR 2
 
 /* The ABI this build implements. Cannot fail; either pointer may be NULL. */
 void cyber_abi_version(int* major, int* minor);
@@ -110,6 +110,26 @@ CyberStatus cyber_abi_check(int compiled_major, int compiled_minor);
 /* Engine semantic version -- the BEHAVIOUR, not the shape (see the ABI block
  * above). Mirrors the CMake project() version. */
 void cyber_version(int* major, int* minor, int* patch);
+
+/* Which seamless-UV solver THIS BUILD carries. Static string, never NULL:
+ * "native+geogram" when the in-process Geogram QuadCover solver is compiled in
+ * (-DCYBER_WITH_QUADCOVER=ON), "native" when it is not.
+ *
+ * Worth querying because the difference is invisible and consequential: a build
+ * without the vendored solver does not fail, it routes to the portable
+ * quadrangulator and returns GENUINELY DIFFERENT QUADS. Nothing else announces
+ * that. `cyberremesh --version` has always printed this, which is no help to a
+ * host that embeds the library and never runs the CLI -- so an embedder had no
+ * way to find out which engine it had linked, and a build misconfiguration
+ * surfaced only as output quality nobody could explain.
+ *
+ * This reports what the build HAS, not what it was asked for. Configure with
+ * -DCYBER_REQUIRE_QUADCOVER=ON to make a missing solver a configure failure
+ * instead of a silent fallback; that flag is the release lane's choice on Linux
+ * and is deliberately not set on macOS, where the dependency is not reliably
+ * present. Do not compare this string to decide behaviour -- it names a build,
+ * and the set of names may grow. */
+const char* cyber_seamless_solver(void);
 
 /* Human-readable, static string for a status code. Never NULL. */
 const char* cyber_status_string(CyberStatus status);

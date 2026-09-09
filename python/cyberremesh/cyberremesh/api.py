@@ -108,7 +108,7 @@ def version() -> str:
 #: The C ABI this binding was written against. Mirrors CYBER_ABI_VERSION_* in
 #: cyber_capi.h; ``check_abi()`` compares it against the loaded library.
 ABI_VERSION_MAJOR = 1
-ABI_VERSION_MINOR = 1
+ABI_VERSION_MINOR = 2
 
 
 def abi_version() -> tuple:
@@ -121,6 +121,17 @@ def abi_version() -> tuple:
     major, minor = ctypes.c_int(), ctypes.c_int()
     _ffi.get_lib().cyber_abi_version(ctypes.byref(major), ctypes.byref(minor))
     return (major.value, minor.value)
+
+
+def seamless_solver() -> str:
+    """Which seamless-UV solver this build carries: "native+geogram" or "native".
+
+    The difference is invisible and consequential: a build without the vendored
+    Geogram solver does not fail, it routes to the portable quadrangulator and
+    returns genuinely different quads. Assert this at startup if your build is
+    supposed to have it.
+    """
+    return _ffi.get_lib().cyber_seamless_solver().decode("utf-8")
 
 
 def max_import_vertices() -> int:

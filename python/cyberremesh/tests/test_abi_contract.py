@@ -120,10 +120,10 @@ def gate_the_minor_bump_serves_the_previous_minor():
     nothing it knew about was taken away.
     """
     major, minor = _header_abi()
-    assert (major, minor) == (1, 1), (major, minor)
-    cyberremesh.check_abi(1, 0)   # the previous minor, still served
-    cyberremesh.check_abi(1, 1)
-    print("PASS: ABI 1.1 still serves a client compiled against 1.0")
+    assert (major, minor) == (1, 2), (major, minor)
+    for older in (0, 1, 2):
+        cyberremesh.check_abi(1, older)  # every earlier minor, still served
+    print("PASS: ABI 1.2 still serves clients compiled against 1.0 and 1.1")
 
 
 def gate_the_new_entry_points_are_reachable():
@@ -133,7 +133,9 @@ def gate_the_new_entry_points_are_reachable():
     cyberremesh.set_max_import_vertices(1_000_000)
     assert cyberremesh.max_import_vertices() == 1_000_000
     cyberremesh.set_max_import_vertices(0)
-    print("PASS: the 1.1 additions are reachable from Python")
+    assert cyberremesh.seamless_solver() in ("native", "native+geogram"), \
+        cyberremesh.seamless_solver()
+    print("PASS: the 1.1/1.2 additions are reachable from Python")
 
 
 def main():
