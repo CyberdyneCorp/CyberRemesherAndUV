@@ -1923,6 +1923,12 @@ never took effect on the default path.
 - Open surfaces are still not first-class: `hole_fill_max_boundary=0` now keeps
   the rim, but the isoline graph cleanup that gives closed surfaces their quad
   quality remains opt-in on open ones (`CYBER_QC_OPEN_CLEANUP`, partial).
+  <!-- True when written; SUPERSEDED 2026-07-24, when that cleanup shipped
+       default-on as (c8) and the opt-IN flag became the opt-OUT
+       CYBER_QC_NO_OPEN_CLEANUP. Left in place because a changelog records what
+       was believed at a release, but flagged because this sentence was read
+       back as current twice in 2026-09 and became a false claim in ROADMAP.md
+       on the strength of it. -->
 - Feature-following trails QuadriFlow (fandisk 2.0x, cheburashka 2.0x,
   rocker-arm 1.5x); the cause is un-pinned integer-grid phase and the fix needs
   per-feature-edge integer constraints in the parameterization.
