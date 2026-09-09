@@ -2549,10 +2549,26 @@ overlaps 4b.
 >   number — crease-polyline preservation and crease-aligned fields (c1/c2)
 >   took feature error down 5–11% — and the one that is visible on the CAD and
 >   hard-surface work an embedding host will send us.
-> - **Open surfaces becoming first-class.** Scans and sculpts have boundaries;
->   `hole_fill_max_boundary=0` keeps the rim, but the isoline-graph cleanup that
->   gives closed surfaces their quad quality is still opt-in and partial on open
->   ones (`CYBER_QC_OPEN_CLEANUP`).
+> - **Open surfaces.** ~~The isoline-graph cleanup that gives closed surfaces
+>   their quad quality is still opt-in and partial on open ones
+>   (`CYBER_QC_OPEN_CLEANUP`).~~ **RETRACTED 2026-09-09, the same day it was
+>   written and by the same author.** That claim was already false when
+>   this note was added: the cleanup SHIPPED on 2026-07-24 as (c8) and is
+>   DEFAULT ON, opted out of with `CYBER_QC_NO_OPEN_CLEANUP` — the flag named
+>   above has not existed in the source since. On the open paraboloid at 1200
+>   quads it took faces 136 → ~1920 and median 52.8° → 68.7° with edge CV 0.442
+>   → 0.312. It is the thing that lets an open surface trace at all.
+>
+>   Written by reading `CHANGELOG.md` and the top of this file rather than the
+>   source, then repeated twice as a live gap before anyone grepped for the
+>   flag. Which is this file's own recurring failure aimed at itself: the
+>   CONCLUSION ("open surfaces deserve attention") was defensible, so nobody
+>   re-read the justification under it — including me, having just written it.
+>
+>   What remains here is a real question and a smaller one than the retracted
+>   claim implies: `hole_fill_max_boundary=0` keeps a rim, and whether an open
+>   surface's rim wants further treatment is unmeasured. Measure before
+>   proposing; do not inherit the sentence above.
 >
 > **Ahead of both, and not on this file at all,** is the consumer-facing work
 > that decides whether anyone *can* embed the engine: the ABI contract, the
