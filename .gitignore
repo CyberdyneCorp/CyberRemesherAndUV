@@ -32,3 +32,6 @@ examples/output/*.mtl
 # locally against the CMake-produced dylib; nothing here is an input.
 swift/.build/
 .swiftpm/
+
+# Rust build output (rust/ workspace)
+rust/target/

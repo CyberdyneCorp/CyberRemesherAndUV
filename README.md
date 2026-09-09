@@ -1063,6 +1063,7 @@ full increment rules, including why appending an enumerator is *not* additive.
 
 Python: `cyberremesh.abi_version()` / `check_abi()`. Swift:
 `CyberRuntime.abiVersionComponents` / `CyberRuntime.checkABI()`.
+Rust: `cyberremesh::check_abi()` / `abi()` — see [`rust/README.md`](rust/README.md).
 
 #### Two things an embedder should wire up
 

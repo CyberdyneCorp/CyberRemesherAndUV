@@ -1,0 +1,13 @@
+[workspace]
+resolver = "2"
+members = ["cyberremesh-sys", "cyberremesh"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.77"
+license = "MIT"
+repository = "https://github.com/CyberdyneCorp/CyberRemesherAndUV"
+
+[workspace.dependencies]
+cyberremesh-sys = { path = "cyberremesh-sys", version = "0.1.0" }
