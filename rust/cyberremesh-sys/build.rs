@@ -181,6 +181,22 @@ fn build_engine(engine: &Path) -> PathBuf {
 /// only when it finds OpenMP and TBB (`cmake/QuadCoverSolver.cmake`), so the
 /// artifact's existence is ground truth — and a platform conditional would be a
 /// guess that is wrong on any Linux box missing TBB.
+/// VERIFIED to the logic, NOT to the wiring, and the difference is worth
+/// stating rather than letting "verified" cover both.
+///
+/// The predicate below was checked standalone against three trees: a real build
+/// (reports built), a directory holding other quadrangulate artifacts but not
+/// the solver (reports not-built), and a missing directory (reports not-built).
+/// The middle case is the one that matters -- it is what a genuine fallback
+/// actually leaves behind, and a check that only asked whether the directory
+/// existed would pass the first two and miss it.
+///
+/// What is NOT verified is that this function's output reaches a terminal:
+/// making the build script re-run needs `cargo clean` and a full C++ rebuild,
+/// and the reference implementation reported hiding the artifact twice, seeing
+/// no warning, and finding that cargo had simply not re-run the script at all.
+/// Silence read as a pass, twice. So: the logic holds; the plumbing is
+/// unobserved.
 fn announce_the_solver_this_build_got(build: &Path) {
     let solver = build.join("src/quadrangulate");
     let found = ["libcyber_quadcover_solver.a", "cyber_quadcover_solver.lib"]
