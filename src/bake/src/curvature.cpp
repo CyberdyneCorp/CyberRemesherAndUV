@@ -225,7 +225,11 @@ float curvatureScale(const std::vector<float>& curvature, const std::vector<floa
     samples.reserve(curvature.size());
     for (std::size_t i = 0; i < curvature.size(); ++i) {
         const float w = weighted ? weights[i] : 1.0f;
-        if (curvature[i] != 0.0f && w > 0.0f) {
+        // isfinite FIRST: `NaN != 0.0f` is true, so a non-finite sample used to
+        // pass this filter and reach weightedPercentile's std::sort, where a
+        // comparator on NaN violates strict weak ordering -- undefined
+        // behaviour in the sort itself, not merely a poisoned auto range.
+        if (std::isfinite(curvature[i]) && curvature[i] != 0.0f && w > 0.0f) {
             samples.emplace_back(std::fabs(curvature[i]), w);
         }
     }

@@ -1024,6 +1024,46 @@ dependencies its build gave it (with the vendored field: `libgomp`, `libtbb`,
 the same build tree, `add_subdirectory()` also exposes the `cyber::*` targets
 (`cyber::core`, `cyber::uv`, …). Python bindings live in `python/cyberremesh/`.
 
+#### The ABI contract
+
+There are **two** version numbers and they answer different questions.
+
+```c
+#define CYBER_ABI_VERSION_MAJOR 1     /* the SHAPE of cyber_capi.h */
+#define CYBER_ABI_VERSION_MINOR 0
+
+void       cyber_abi_version(int* major, int* minor);
+CyberStatus cyber_abi_check(int compiled_major, int compiled_minor);
+void       cyber_version(int* major, int* minor, int* patch);   /* the ENGINE */
+```
+
+`CYBER_ABI_VERSION_*` describes the surface — which entry points exist, what
+every struct's layout is, what the header's promises are. It is what decides
+whether your compiled calls link and mean what you built against.
+`cyber_version()` describes the behaviour behind that surface. **A matching ABI
+does not promise the same mesh:** pin the engine version, or a commit, if you
+need reproducible output.
+
+Assert at startup with the constants your translation unit compiled against,
+and let the engine apply the rule — same major, library minor at least yours:
+
+```c
+if (cyber_abi_check(CYBER_ABI_VERSION_MAJOR, CYBER_ABI_VERSION_MINOR) != CYBER_OK) {
+    fprintf(stderr, "%s\n", cyber_last_error());   /* names both versions */
+    return 1;                                       /* YOUR call, not ours */
+}
+```
+
+Do not compare the numbers yourself — that comparison is the part hosts get
+wrong. The library never aborts, exits or logs on a mismatch, because it runs
+inside your process. Minor releases are additive only; the header states the
+full increment rules, including why appending an enumerator is *not* additive.
+`SOVERSION` carries the ABI major, so the soname changes when the surface breaks
+(`libcyber_capi.so.1`) rather than tracking the project's `0.x`.
+
+Python: `cyberremesh.abi_version()` / `check_abi()`. Swift:
+`CyberRuntime.abiVersionComponents` / `CyberRuntime.checkABI()`.
+
 The shared library exports **only its `cyber_*` C ABI** — a linker version script
 on ELF, an exported-symbols list on Mach-O — so the ~4000 vendored
 Geogram/stb/tinygltf/tinyobj/AutoRemesher definitions linked in from the static

@@ -66,9 +66,51 @@ def main() -> int:
                 white = float(cav.to_numpy()[8, 8, 0])
                 assert abs(white - 1.0) < 0.02, ("flat cavity", white)
         print("PASS bake: normal map points up; curvature/cavity read neutral on a flat Target")
+
+        _gate_a_raising_evaluator_raises(obj.name)
     finally:
         os.unlink(obj.name)
     return 0
+
+
+class _RaisingField(cyberremesh.FieldEvaluator):
+    """An evaluator whose distance() raises, which host code does by accident."""
+
+    def distance(self, p):
+        raise ValueError("the host's SDF blew up")
+
+    def gradient(self, p):
+        return (0.0, 0.0, 1.0)
+
+    def occlusion(self, p, n, radius):
+        return 1.0
+
+
+def _gate_a_raising_evaluator_raises(obj_path):
+    """An exception in a callback must surface, not become a plausible map.
+
+    A Python exception cannot cross the C boundary, so the trampolines used to
+    swallow it and substitute a value: 0.0 for distance, (0,0,1) for gradient,
+    1.0 for occlusion. Every one of those is PLAUSIBLE, and 0.0 is worse than
+    plausible -- |0.0| <= the tracer's epsilon, so a distance callback that
+    raised reported a HIT at the cage origin and bake_field returned an image
+    that looked measured. The substitute is NaN now, which the engine's field
+    guard rejects, and the original exception is re-raised once the C call has
+    unwound.
+    """
+    field = _RaisingField()
+    params = cyberremesh.BakeParams(width=8, height=8)
+    with cyberremesh.Mesh.load(obj_path) as low:
+        try:
+            cyberremesh.bake_field(low, cyberremesh.BakeMap.NORMAL, field, params)
+        except ValueError as exc:
+            assert "blew up" in str(exc), str(exc)
+        else:
+            raise AssertionError("a raising field evaluator produced an image")
+    # The slot is cleared, so a later bake with a working field is not poisoned
+    # by the previous failure.
+    assert field._pending_error is None
+    print("PASS bake_field: a raising evaluator raises instead of baking a fabricated map")
 
 
 if __name__ == "__main__":

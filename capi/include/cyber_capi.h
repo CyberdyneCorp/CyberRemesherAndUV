@@ -45,7 +45,70 @@ typedef enum CyberStatus {
     CYBER_ERR_UNSUPPORTED_TOPOLOGY
 } CyberStatus;
 
-/* Engine semantic version (mirrors the CMake project() version). */
+/* ---- ABI contract ---------------------------------------------------------
+ *
+ * TWO version numbers, and conflating them is the mistake this block exists to
+ * prevent.
+ *
+ * CYBER_ABI_VERSION_* describes the SHAPE OF THIS HEADER: which entry points
+ * exist, what their signatures are, the layout of every struct, the numeric
+ * value of every enumerator, and the promises the comments make. It is what
+ * decides whether a compiled caller can talk to a given build of the library.
+ *
+ * cyber_version() describes the ENGINE: the behaviour behind that shape. It
+ * moves when the quads change, when quality improves, when a solver is
+ * replaced. A MATCHING ABI DOES NOT PROMISE THE SAME MESH -- pin the engine
+ * version (or a commit) if you need reproducible output, and check the ABI if
+ * you need the calls to link and mean what you compiled against.
+ *
+ * The two are deliberately independent: the ABI minor may sit still across
+ * several engine releases, and an engine release that touches no declaration
+ * leaves it alone.
+ *
+ * COMPATIBILITY RULE: a library serves a client when the MAJORS are equal and
+ * the library's MINOR is >= the client's. Minor releases are additive only, so
+ * everything a 1.x client compiled against is still present in 1.y (y > x).
+ * The reverse does not hold: a 1.2 client asking a 1.0 library for a 1.2 entry
+ * point is refused, because the entry point genuinely is not there.
+ *
+ * MAJOR (breaking) covers: any change to a struct's size or field order --
+ * appending included, because in-params travel as arrays the caller strides by
+ * sizeof and out-params are written into the caller's buffer; changing an
+ * existing enumerator's value or inserting mid-enum; changing or removing a
+ * prototype or macro; changing the ownership or lifetime of a pointer; and
+ * breaking a promise this header makes in prose.
+ *
+ * MINOR (additive) covers: a new sibling entry point, a new struct used only by
+ * new entry points, a new macro, and a new accepted value for an existing int
+ * field.
+ *
+ * Appending an ENUMERATOR is deliberately NOT listed as additive. An unfixed C
+ * enum's value range is inferred from its enumerators, so handing a client a
+ * value outside the range it compiled against is undefined on the client's
+ * side -- see the note above enumCode() in capi.cpp, which is the same hazard
+ * from the other direction. New states arrive as new int-valued fields or new
+ * entry points instead.
+ *
+ * Do not compare these numbers by hand: cyber_abi_check() applies the rule
+ * above in one place, so every binding gets the same answer. */
+#define CYBER_ABI_VERSION_MAJOR 1
+#define CYBER_ABI_VERSION_MINOR 0
+
+/* The ABI this build implements. Cannot fail; either pointer may be NULL. */
+void cyber_abi_version(int* major, int* minor);
+
+/* Applies the compatibility rule to the ABI a caller COMPILED against -- pass
+ * CYBER_ABI_VERSION_MAJOR / _MINOR as seen by your translation unit, which is
+ * the whole point: the header you built with answers, not the header you are
+ * reading now. Returns CYBER_OK when this library can serve that client, or
+ * CYBER_ERR_INCOMPATIBLE_VERSION with both versions in cyber_last_error().
+ *
+ * We own the rule; the HOST owns the reaction. This never aborts, exits or
+ * logs -- a library that kills its host is unusable inside a DCC. */
+CyberStatus cyber_abi_check(int compiled_major, int compiled_minor);
+
+/* Engine semantic version -- the BEHAVIOUR, not the shape (see the ABI block
+ * above). Mirrors the CMake project() version. */
 void cyber_version(int* major, int* minor, int* patch);
 
 /* Human-readable, static string for a status code. Never NULL. */

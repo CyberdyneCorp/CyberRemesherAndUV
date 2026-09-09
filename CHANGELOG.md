@@ -3,6 +3,98 @@
 > Note: releases 0.3.0, 0.4.0 and 0.5.0 were tagged without changelog entries;
 > their content is recorded in `docs/ROADMAP.md`. Entries resume here.
 
+## [Unreleased]
+
+### Added
+
+- **The C ABI carries its own version, distinct from the engine's.**
+  `engine-bindings` has required this since the bootstrap change — *"The ABI
+  SHALL carry a runtime-queryable semantic version; minor releases SHALL be
+  additive only"*, with a `Scenario: ABI version query` for a 1.x client loading
+  a 1.y library. Nothing implemented it, and the scenario could not be written
+  as a test because there was no ABI version to compile against.
+
+  `CYBER_ABI_VERSION_MAJOR` / `_MINOR` are declared in `cyber_capi.h` — in the
+  header rather than in CMake, because a consumer vendoring the source (or
+  running bindgen over it) reads the header and never sees a CMake variable;
+  CMake now READS them, inverting the direction used for the project version.
+  `cyber_abi_version()` reports what a build implements. `cyber_abi_check()`
+  applies the compatibility rule — same major, library minor at least the
+  client's — in ONE place, because the comparison is the part hosts get wrong:
+  demanding exact equality refuses the compatible case the spec names, and
+  inverting the direction accepts the incompatible one. A mismatch is
+  `CYBER_ERR_INCOMPATIBLE_VERSION` (already in the enum, already meaning
+  exactly this) with both versions in `cyber_last_error()`. We own the rule; the
+  host owns the reaction — no abort, no exit, no logging, because the library
+  runs inside someone else's process.
+
+  `cyber_version()` is untouched and still reports the ENGINE. The header says
+  in capitals that **a matching ABI does not promise the same mesh**, which is
+  the trap the two numbers exist to separate.
+
+  Reachable as `abi_version()` / `check_abi()` from Python and
+  `CyberRuntime.abiVersionComponents` / `checkABI()` from Swift.
+
+  **`SOVERSION` is now the ABI major, not the project major.** While it tracked
+  the project it was 0 for every release, so `libcyber_capi.so.0` named v0.7.0
+  and v0.8.0 alike and a host linking one and loading the other got no error.
+  That is not hypothetical: v0.5.0 → v0.6.0 grew `CyberAtlasResult`, an **out**
+  param, so the callee wrote two fields past an older caller's buffer under an
+  unchanged soname. The shared library is `libcyber_capi.so.1.0.0` with
+  `SONAME libcyber_capi.so.1`; the Python loader's `_SOVERSION` moved with it,
+  since the two were declarations of one number that nothing compared.
+
+  Appending an enumerator is deliberately NOT classified as an additive minor.
+  An unfixed C enum's value range is inferred from its enumerators, so handing a
+  client a value outside the range it compiled against is undefined on the
+  client's side — the same hazard `enumCode()` exists for, from the other
+  direction. New states arrive as new fields or new entry points.
+
+### Fixed
+
+- **The field-evaluator boundary failed open in five places.**
+  `CyberFieldEvaluator` is where HOST code returns values into ours, and only
+  `occlusion` was defended — by a silent clamp. Each of the others handed back
+  an image that looked like a real map:
+
+  - A **NaN distance** defeated the guard completely. `std::fmax(NaN, epsilon)`
+    returns `epsilon`, so the march neither hit nor stopped: it spent all 96
+    steps per texel and arrived at a miss indistinguishable from empty space.
+  - A **non-finite gradient** reached `normalized()`, which maps it to
+    `{0,0,0}`, so a zero "normal" was encoded into the map as though measured.
+  - The **C ABI pre-seeded the gradient out-param with `{0,0,1}`**, so a
+    callback that returned without writing — the ordinary shape for a grid field
+    asked about a point outside its own domain — produced a plausible +Z normal.
+  - The **Python trampolines swallowed exceptions** and substituted `0.0`,
+    `(0,0,1)` and `1.0`. `|0.0| <= epsilon`, so a `distance()` that raised
+    reported a HIT at the cage origin and `bake_field` returned an image.
+  - **`curvature()`'s interface default probes `gradient()` six times OFF the
+    surface**, outside any wrapper — the fifth site, and the one a guard around
+    the three virtuals does not reach. Those NaNs were laundered to `{0,0,0}`
+    and the default returned a FINITE curvature computed from nothing, so every
+    check downstream saw a healthy number.
+
+  The boundary is now two-tier, split by whether a CORRECT field can produce the
+  value. A **contract violation** — NaN distance, non-finite gradient or
+  curvature, openness outside [0,1] beyond float slack — fails the whole bake
+  with `CYBER_ERR_INVALID_PARAM` naming the callback and the point. An
+  **undefined sample** — an infinite distance, which is the ordinary "nothing
+  here" answer from a field covering a bounded region, or a zero-length
+  gradient, which is what an SDF has on its medial axis — ends the march for
+  that texel, which takes the neutral value an un-hit cage ray writes, and is
+  counted on `BakeResult::fieldUndefinedSamples`.
+
+  NaN being fatal while infinity is not looks arbitrary and is not: infinity
+  exits the march honestly through `t <= maxT`, and NaN never stopped it.
+
+  No behaviour change for a well-behaved field — the existing field-bake suite
+  pins that and is unmodified.
+
+- **`curvatureScale` admitted non-finite samples into a `std::sort`.**
+  `NaN != 0.0f` is true, so a NaN passed the filter and reached
+  `weightedPercentile`, where comparing it violates strict weak ordering — UB in
+  the sort itself, not merely a poisoned auto range.
+
 ## [0.8.0] - 2026-09-07
 
 ### Added
