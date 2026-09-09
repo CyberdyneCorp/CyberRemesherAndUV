@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cmath>
+#include <limits>
 
 #include "cyber/core/math.hpp"
 
@@ -51,9 +52,23 @@ public:
         const Vec3 dx{h, 0.0f, 0.0f};
         const Vec3 dy{0.0f, h, 0.0f};
         const Vec3 dz{0.0f, 0.0f, h};
-        const float spread = (normalized(gradient(p + dx)).x - normalized(gradient(p - dx)).x) +
-                             (normalized(gradient(p + dy)).y - normalized(gradient(p - dy)).y) +
-                             (normalized(gradient(p + dz)).z - normalized(gradient(p - dz)).z);
+        const Vec3 probes[6] = {gradient(p + dx), gradient(p - dx), gradient(p + dy),
+                                gradient(p - dy), gradient(p + dz), gradient(p - dz)};
+        // These six probes sit OFF the surface, so they are the one place a
+        // field is asked about points it may not cover -- a grid SDF fitted
+        // tight to the mesh answers nothing outside its AABB, and a hit on a
+        // silhouette is within h of the boundary. Propagate that rather than
+        // launder it: normalized() maps a non-finite vector to {0,0,0}, which
+        // would turn "I do not know" into a finite curvature computed from
+        // nothing, past every guard downstream.
+        for (const Vec3& g : probes) {
+            if (!std::isfinite(g.x) || !std::isfinite(g.y) || !std::isfinite(g.z)) {
+                return std::numeric_limits<float>::quiet_NaN();
+            }
+        }
+        const float spread = (normalized(probes[0]).x - normalized(probes[1]).x) +
+                             (normalized(probes[2]).y - normalized(probes[3]).y) +
+                             (normalized(probes[4]).z - normalized(probes[5]).z);
         return spread / (4.0f * h);  // 0.5 * (spread / 2h)
     }
 };

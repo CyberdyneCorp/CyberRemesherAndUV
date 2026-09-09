@@ -263,6 +263,37 @@ void cyber_version(int* major, int* minor, int* patch) {
     }
 }
 
+void cyber_abi_version(int* major, int* minor) {
+    if (major != nullptr) {
+        *major = CYBER_ABI_VERSION_MAJOR;
+    }
+    if (minor != nullptr) {
+        *minor = CYBER_ABI_VERSION_MINOR;
+    }
+}
+
+CyberStatus cyber_abi_check(int compiled_major, int compiled_minor) {
+    // One implementation of the rule, because the comparison is the part hosts
+    // get wrong: demanding exact equality (which refuses the compatible case),
+    // comparing a patch that does not exist, or inverting the direction.
+    //
+    // Same major, and this library's minor at least the client's. A client
+    // compiled against a LOWER minor is served -- minors are additive, so
+    // everything it knows about is still here. A HIGHER minor is refused
+    // because the entry points it was compiled against genuinely are absent.
+    if (compiled_major == CYBER_ABI_VERSION_MAJOR &&
+        compiled_minor <= CYBER_ABI_VERSION_MINOR) {
+        clearError();
+        return CYBER_OK;
+    }
+    setError("cyber_abi_check: this library implements ABI " +
+             std::to_string(CYBER_ABI_VERSION_MAJOR) + "." +
+             std::to_string(CYBER_ABI_VERSION_MINOR) +
+             " and cannot serve a client compiled against ABI " +
+             std::to_string(compiled_major) + "." + std::to_string(compiled_minor));
+    return CYBER_ERR_INCOMPATIBLE_VERSION;
+}
+
 const char* cyber_status_string(CyberStatus status) {
     switch (status) {
         case CYBER_OK:
@@ -4983,7 +5014,13 @@ public:
     }
     [[nodiscard]] cyber::Vec3 gradient(cyber::Vec3 p) const override {
         const float xyz[3] = {p.x, p.y, p.z};
-        float g[3] = {0.0f, 0.0f, 1.0f};
+        // Pre-seeded with NaN, not {0,0,1}. A callback that returns without
+        // writing -- the ordinary shape for a grid field asked about a point
+        // outside its domain -- used to hand back a perfectly plausible +Z
+        // normal, so a forgetful or out-of-range callback produced a bake that
+        // looked right. NaN is rejected by the field guard instead.
+        const float nan = std::numeric_limits<float>::quiet_NaN();
+        float g[3] = {nan, nan, nan};
         m_c.gradient(m_c.user, xyz, g);
         return cyber::Vec3{g[0], g[1], g[2]};
     }
@@ -5115,6 +5152,14 @@ CyberStatus cyber_bake_field(const CyberMesh* low, const CyberMesh* high, CyberB
         const cyber::Mesh empty;
         cyber::bake::BakeResult result =
             cyber::bake::bake(low->mesh, high == nullptr ? empty : high->mesh, m, p);
+        // Checked BEFORE the empty-image case, because a violated contract also
+        // empties the image and "the low-poly needs UVs" would be the wrong
+        // diagnosis by a mile -- it points the host at its mesh when the fault
+        // is in its callbacks.
+        if (result.fieldContractViolated) {
+            setError("cyber_bake_field: " + result.fieldContractMessage);
+            return CYBER_ERR_INVALID_PARAM;
+        }
         if (result.image.pixels.empty()) {
             setError("cyber_bake_field: empty result (the low-poly needs UVs)");
             return CYBER_ERR_EMPTY;

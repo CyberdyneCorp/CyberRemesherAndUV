@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <string>
 #include <vector>
 
 #include "cyber/bake/field_evaluator.hpp"
@@ -95,6 +96,17 @@ struct BakeResult {
     Image image;
     bool cancelled = false;
     std::size_t texelsCovered = 0;  // texels touched by the UV layout
+    // Set when a FIELD EVALUATOR broke its contract -- a NaN distance, a
+    // non-finite gradient or curvature, an openness outside [0,1]. The bake is
+    // abandoned and `image` is empty: a host's broken callback must not come
+    // back as a plausible map. Empty message when nothing was violated.
+    bool fieldContractViolated = false;
+    std::string fieldContractMessage;
+    // Samples a CORRECT field left undefined -- an infinite distance (the
+    // ordinary "nothing here" sentinel) or a zero-length gradient (no gradient
+    // exists on an SDF's medial axis). Not a failure; counted so a host can see
+    // how much of its field the bake could not reach.
+    std::size_t fieldUndefinedSamples = 0;
 };
 
 // Bakes `map` from `highPoly` onto the per-corner "uv" layout of `lowPoly`.

@@ -8,11 +8,16 @@ ctypes callback marshalling behind normal Python objects and exceptions.
 from __future__ import annotations
 
 import ctypes
+import math
 import warnings
 from dataclasses import dataclass
 from typing import Callable, List, Optional, Sequence, Tuple
 
 from . import _ffi
+
+# The value a failed field callback returns: the engine's guard rejects a
+# non-finite sample, where every plausible substitute was silently accepted.
+_NAN = math.nan
 
 # NumPy is an optional dependency: when present, meshes gain an ndarray
 # ``positions`` accessor; when absent, that helper is simply not defined.
@@ -98,6 +103,34 @@ def version() -> str:
         ctypes.byref(major), ctypes.byref(minor), ctypes.byref(patch)
     )
     return f"{major.value}.{minor.value}.{patch.value}"
+
+
+#: The C ABI this binding was written against. Mirrors CYBER_ABI_VERSION_* in
+#: cyber_capi.h; ``check_abi()`` compares it against the loaded library.
+ABI_VERSION_MAJOR = 1
+ABI_VERSION_MINOR = 0
+
+
+def abi_version() -> tuple:
+    """Return the loaded library's C ABI version as ``(major, minor)``.
+
+    Distinct from :func:`version`, which reports the ENGINE. The ABI describes
+    the shape of the C surface -- which calls exist and what their structs look
+    like -- and a matching ABI does not promise the same mesh.
+    """
+    major, minor = ctypes.c_int(), ctypes.c_int()
+    _ffi.get_lib().cyber_abi_version(ctypes.byref(major), ctypes.byref(minor))
+    return (major.value, minor.value)
+
+
+def check_abi(major: int = ABI_VERSION_MAJOR, minor: int = ABI_VERSION_MINOR) -> None:
+    """Raise :class:`CyberError` if the loaded library cannot serve this binding.
+
+    The rule lives in the engine (``cyber_abi_check``) rather than here, so a
+    Python host gets the same answer as a C or Rust one. Defaults to the version
+    this binding was written against, which is the useful call at import time.
+    """
+    _check(_ffi.get_lib().cyber_abi_check(int(major), int(minor)))
 
 
 def is_available() -> bool:
@@ -2376,6 +2409,8 @@ class FieldEvaluator:
     """
 
     def __init__(self) -> None:
+        # Set BEFORE the trampolines, which reference it on their failure path.
+        self._pending_error: Optional[BaseException] = None
         self._c_distance = _ffi.FIELD_DISTANCE_CB(self._trampoline_distance)
         self._c_gradient = _ffi.FIELD_GRADIENT_CB(self._trampoline_gradient)
         self._c_occlusion = _ffi.FIELD_OCCLUSION_CB(self._trampoline_occlusion)
@@ -2401,24 +2436,39 @@ class FieldEvaluator:
     # An exception raised inside a ctypes callback cannot propagate across the
     # C frames, so each trampoline degrades to a neutral value rather than
     # letting the bake read uninitialised memory.
+    # An exception cannot cross the C boundary, so these three used to swallow it
+    # and substitute a value -- 0.0, (0,0,1), 1.0. Every one of those is
+    # PLAUSIBLE, which is the problem: |0.0| <= epsilon, so a distance callback
+    # that raised reported a HIT at the cage origin and the bake came back
+    # looking like a real map. The substitute now is a quiet NaN, which the
+    # engine's field guard rejects, and the original exception is re-raised by
+    # bake_field once the call has unwound. First failure wins; later texels
+    # cannot overwrite the cause.
+    def _record(self, exc: BaseException) -> None:
+        if self._pending_error is None:
+            self._pending_error = exc
+
     def _trampoline_distance(self, _user, p) -> float:
         try:
             return float(self.distance((p[0], p[1], p[2])))
-        except Exception:
-            return 0.0
+        except BaseException as exc:  # noqa: BLE001 - must not cross the boundary
+            self._record(exc)
+            return _NAN
 
     def _trampoline_gradient(self, _user, p, out) -> None:
         try:
             g = self.gradient((p[0], p[1], p[2]))
-        except Exception:
-            g = (0.0, 0.0, 1.0)
-        out[0], out[1], out[2] = float(g[0]), float(g[1]), float(g[2])
+            out[0], out[1], out[2] = float(g[0]), float(g[1]), float(g[2])
+        except BaseException as exc:  # noqa: BLE001
+            self._record(exc)
+            out[0], out[1], out[2] = _NAN, _NAN, _NAN
 
     def _trampoline_occlusion(self, _user, p, n, radius) -> float:
         try:
             return float(self.occlusion((p[0], p[1], p[2]), (n[0], n[1], n[2]), float(radius)))
-        except Exception:
-            return 1.0
+        except BaseException as exc:  # noqa: BLE001
+            self._record(exc)
+            return _NAN
 
 
 def bake_field(low: "Mesh", bake_map: int, field: FieldEvaluator,
@@ -2445,6 +2495,16 @@ def bake_field(low: "Mesh", bake_map: int, field: FieldEvaluator,
         ctypes.byref(field._c_struct),
         ctypes.byref(out),
     )
+    # The evaluator's own exception outranks whatever status the engine returned:
+    # a callback that raised is the CAUSE, and the status is a consequence of the
+    # NaN it substituted. Re-raised here, after the C call has unwound, because
+    # an exception may not cross the boundary.
+    pending = field._pending_error
+    field._pending_error = None
+    if pending is not None:
+        if out.value:
+            _ffi.get_lib().cyber_image_free(ctypes.c_void_p(out.value))
+        raise pending
     _check(status)
     if not out.value:
         raise CyberError(_ffi.STATUS_ERROR, _last_error() or "bake produced no image")

@@ -467,9 +467,12 @@ class CyberFieldEvaluator(Structure):
 # Library discovery
 # ---------------------------------------------------------------------------
 
-# SOVERSION is the project's major version (capi/CMakeLists.txt), which is what
-# an install leaves next to the unversioned developer symlink.
-_SOVERSION = 0
+# SOVERSION is the C ABI's major version (capi/CMakeLists.txt reads it from
+# CYBER_ABI_VERSION_MAJOR in cyber_capi.h), which is what an install leaves next
+# to the unversioned developer symlink. It is NOT the project's major version --
+# it tracked that until 0.9.0, when every release was still 0.x and the soname
+# was therefore 0 for all of them.
+_SOVERSION = 1
 
 
 def _lib_filenames() -> List[str]:
@@ -855,6 +858,12 @@ def _declare(lib: ctypes.CDLL) -> None:
     # void cyber_version(int* major, int* minor, int* patch)
     lib.cyber_version.argtypes = [POINTER(c_int32), POINTER(c_int32), POINTER(c_int32)]
     lib.cyber_version.restype = None
+    # void cyber_abi_version(int* major, int* minor)
+    lib.cyber_abi_version.argtypes = [POINTER(c_int32), POINTER(c_int32)]
+    lib.cyber_abi_version.restype = None
+    # CyberStatus cyber_abi_check(int compiled_major, int compiled_minor)
+    lib.cyber_abi_check.argtypes = [c_int32, c_int32]
+    lib.cyber_abi_check.restype = c_int32
 
     lib.cyber_last_error.argtypes = []
     lib.cyber_last_error.restype = c_char_p

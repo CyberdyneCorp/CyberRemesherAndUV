@@ -57,6 +57,10 @@ from .api import (
     is_available,
     remesh,
     version,
+    abi_version,
+    check_abi,
+    ABI_VERSION_MAJOR,
+    ABI_VERSION_MINOR,
     write_bundle,
 )
 
@@ -72,6 +76,10 @@ __all__ = [
     "CyberError",
     "is_available",
     "version",
+    "abi_version",
+    "check_abi",
+    "ABI_VERSION_MAJOR",
+    "ABI_VERSION_MINOR",
     "HAVE_NUMPY",
     "BakeMap",
     "BakeParams",

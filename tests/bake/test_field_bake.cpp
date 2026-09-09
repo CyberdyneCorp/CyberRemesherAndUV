@@ -5,9 +5,11 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <vector>
 
 #include "cyber/bake/bake.hpp"
+#include "cyber/bake/curvature.hpp"
 #include "cyber/bake/field_evaluator.hpp"
 #include "cyber/core/mesh.hpp"
 
@@ -133,6 +135,86 @@ public:
 class HalfOccludedField : public FlatField {
 public:
     [[nodiscard]] float occlusion(Vec3, Vec3, float) const override { return 0.25f; }
+};
+
+// ---- hostile / sloppy evaluator doubles --------------------------------
+//
+// The doubles above are all exactly Lipschitz-1 and never fail, which is right
+// for testing that the bridge computes the correct answer -- and is why nothing
+// here covered a HOST getting it wrong. These cover that: an evaluator is host
+// code and its returns are not ours to trust.
+//
+// The split under test is TIER 1 (no correct field can do this -> the whole
+// bake fails) against TIER 2 (a correct field does hit this -> one texel is a
+// counted miss). See the GuardedField comment in src/bake/src/bake.cpp.
+
+// Distance goes NaN once the march is under way. NaN is the value that used to
+// defeat the guard entirely: std::fmax(NaN, epsilon) is epsilon, so the march
+// neither hit nor stopped -- it spent all 96 steps and returned a miss
+// indistinguishable from empty space.
+class NanDistanceField : public FlatField {
+public:
+    [[nodiscard]] float distance(Vec3 p) const override {
+        return p.z > 0.02f ? p.z : std::numeric_limits<float>::quiet_NaN();
+    }
+};
+
+// An INFINITE distance is the ordinary "nothing here" sentinel for a field
+// fitted to a bounded region. Tier 2: a miss, not a failure.
+class InfiniteDistanceField : public FlatField {
+public:
+    [[nodiscard]] float distance(Vec3) const override {
+        return std::numeric_limits<float>::infinity();
+    }
+};
+
+// A gradient that is non-finite where the surface actually is. Before the
+// guard, normalized() mapped it to {0,0,0} and a zero "normal" was encoded into
+// the map as though it were a measurement.
+class NanGradientField : public FlatField {
+public:
+    [[nodiscard]] Vec3 gradient(Vec3) const override {
+        const float nan = std::numeric_limits<float>::quiet_NaN();
+        return Vec3{nan, nan, nan};
+    }
+};
+
+// A ZERO gradient is what a correct SDF returns on its medial axis, so this is
+// Tier 2 however unhelpful it is: a counted miss, never a fabricated normal.
+class ZeroGradientField : public FlatField {
+public:
+    [[nodiscard]] Vec3 gradient(Vec3) const override { return Vec3{0.0f, 0.0f, 0.0f}; }
+};
+
+// Openness of 4.0 -- the shape of a host that returned a distance, or inverted
+// the convention on a value that is already the inverted one. It used to be
+// silently clamped to 1.0, i.e. "fully open", which is a plausible map.
+class OutOfRangeOpennessField : public FlatField {
+public:
+    [[nodiscard]] float occlusion(Vec3, Vec3, float) const override { return 4.0f; }
+};
+
+// Openness a hair outside [0,1]: float slack, not a broken host. Must still
+// clamp rather than fail the bake.
+class SlightlyOverOpenField : public FlatField {
+public:
+    [[nodiscard]] float occlusion(Vec3, Vec3, float) const override { return 1.0f + 1e-5f; }
+};
+
+// Finite ON the surface and non-finite off it -- the shape of a grid field
+// fitted tight to the mesh, which answers nothing outside its own AABB. The
+// interface's DEFAULT curvature() probes gradient() six times OFF the surface,
+// which is the fifth callback site and the one a wrapper around the three
+// virtuals does not cover.
+class OffSurfaceHoleField : public FlatField {
+public:
+    [[nodiscard]] Vec3 gradient(Vec3 p) const override {
+        if (std::fabs(p.z) > 1e-4f) {
+            const float nan = std::numeric_limits<float>::quiet_NaN();
+            return Vec3{nan, nan, nan};
+        }
+        return Vec3{0, 0, 1};
+    }
 };
 
 Mesh makePlaneWithUv(float z) {
@@ -423,4 +505,106 @@ TEST_CASE("an evaluator leaves the non-field maps on the raycast path unchanged"
     params.field = &field;
     const bake::BakeResult withField = bake::bake(low, high, bake::BakeMap::Position, params);
     CHECK(pixelChecksum(withField.image.pixels) == pixelChecksum(plain.image.pixels));
+}
+
+// ---- the host-callback boundary ----------------------------------------
+
+namespace {
+
+bake::BakeResult bakeWithField(const bake::FieldEvaluator& field, bake::BakeMap map) {
+    const Mesh low = makePlaneWithUv(0.0f);
+    bake::BakeParams params;
+    params.width = 8;
+    params.height = 8;
+    params.cageDistance = 0.05f;
+    params.field = &field;
+    const Mesh empty;
+    return bake::bake(low, empty, map, params);
+}
+
+}  // namespace
+
+TEST_CASE("a NaN distance fails the bake instead of shading a plausible miss") {
+    const NanDistanceField field;
+    const bake::BakeResult r = bakeWithField(field, bake::BakeMap::Normal);
+    CHECK(r.fieldContractViolated);
+    CHECK(r.fieldContractMessage.find("distance") != std::string::npos);
+    CHECK(r.fieldContractMessage.find("NaN") != std::string::npos);
+    // Abandoned, not half-written: a partial map is the plausible artefact.
+    CHECK(r.image.pixels.empty());
+    CHECK(r.texelsCovered == 0);
+}
+
+TEST_CASE("a non-finite gradient fails the bake and is not laundered to a zero normal") {
+    const NanGradientField field;
+    const bake::BakeResult r = bakeWithField(field, bake::BakeMap::Normal);
+    CHECK(r.fieldContractViolated);
+    CHECK(r.fieldContractMessage.find("gradient") != std::string::npos);
+    CHECK(r.image.pixels.empty());
+}
+
+TEST_CASE("an infinite distance is a counted miss, not a contract violation") {
+    // The distinction that looks arbitrary and is not: +inf is the ordinary
+    // "nothing here" answer from a field fitted to a bounded region, and it
+    // exits the march honestly. NaN did not even stop it.
+    const InfiniteDistanceField field;
+    const bake::BakeResult r = bakeWithField(field, bake::BakeMap::Normal);
+    CHECK_FALSE(r.fieldContractViolated);
+    CHECK(r.fieldUndefinedSamples > 0);
+    CHECK_FALSE(r.image.pixels.empty());
+}
+
+TEST_CASE("a zero-length gradient is a counted miss, not a fabricated normal") {
+    // A correct SDF has no gradient on its medial axis, so failing here would
+    // make the engine unembeddable against real quantized fields.
+    const ZeroGradientField field;
+    const bake::BakeResult r = bakeWithField(field, bake::BakeMap::Normal);
+    CHECK_FALSE(r.fieldContractViolated);
+    CHECK(r.fieldUndefinedSamples > 0);
+    REQUIRE_FALSE(r.image.pixels.empty());
+    // Every covered texel took the neutral padding an un-hit cage ray writes,
+    // rather than a zero vector encoded as though it were measured.
+    CHECK(r.image.at(4, 4, 2) == doctest::Approx(1.0f));
+}
+
+TEST_CASE("an openness outside [0,1] fails the bake, and float slack still clamps") {
+    const OutOfRangeOpennessField broken;
+    const bake::BakeResult bad = bakeWithField(broken, bake::BakeMap::AmbientOcclusion);
+    CHECK(bad.fieldContractViolated);
+    CHECK(bad.fieldContractMessage.find("occlusion") != std::string::npos);
+
+    const SlightlyOverOpenField slack;
+    const bake::BakeResult ok = bakeWithField(slack, bake::BakeMap::AmbientOcclusion);
+    CHECK_FALSE(ok.fieldContractViolated);
+    REQUIRE_FALSE(ok.image.pixels.empty());
+    CHECK(ok.image.at(4, 4, 0) == doctest::Approx(1.0f));
+}
+
+TEST_CASE("a non-finite gradient OFF the surface fails the curvature bake") {
+    // The fifth callback site. curvature()'s interface default probes gradient()
+    // at six points off the surface; before this change normalized() turned
+    // those NaNs into {0,0,0} and the default returned a FINITE curvature
+    // computed from nothing, so every guard downstream saw a healthy number.
+    const OffSurfaceHoleField field;
+    const bake::BakeResult r = bakeWithField(field, bake::BakeMap::Curvature);
+    CHECK(r.fieldContractViolated);
+    CHECK(r.fieldContractMessage.find("curvature") != std::string::npos);
+    CHECK(r.image.pixels.empty());
+}
+
+TEST_CASE("curvatureScale ignores a non-finite sample") {
+    // `NaN != 0.0f` is TRUE, so a NaN used to pass the filter and reach
+    // weightedPercentile's std::sort, where comparing it violates strict weak
+    // ordering -- UB in the sort, not merely a poisoned auto range.
+    //
+    // The NaN's POSITION matters and this is why the obvious fixture is
+    // worthless: at the default 0.95 percentile over four samples the target
+    // index is 3.8, so {1,2,NaN,4} returns 4.0 with or without the fix and
+    // asserts nothing. It has to land at or after the cut.
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    CHECK(bake::curvatureScale({1.0f, 2.0f, 4.0f, nan}) == doctest::Approx(4.0f));
+    CHECK(bake::curvatureScale({1.0f, 2.0f, nan, 4.0f}) == doctest::Approx(4.0f));
+    // All non-finite: the filter admitted every one, so the percentile itself
+    // came back NaN and became the auto range for the whole image.
+    CHECK(bake::curvatureScale({nan, nan}) == doctest::Approx(0.0f));
 }

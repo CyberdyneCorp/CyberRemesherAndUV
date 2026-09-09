@@ -1526,6 +1526,52 @@ TEST_CASE("capi bakes through a C field evaluator") {
     std::filesystem::remove(objPath, ec);
 }
 
+namespace {
+
+// A callback trio that breaks the contract the way host code actually does:
+// gradient() returns without writing anything. That is the ordinary shape for a
+// grid field asked about a point outside its own domain.
+float contractDistance(void*, const float p[3]) { return p[2]; }
+void forgetfulGradient(void*, const float[3], float[3]) { /* writes nothing */ }
+float openEverywhere(void*, const float[3], const float[3], float) { return 1.0f; }
+
+}  // namespace
+
+TEST_CASE("capi rejects a field whose gradient callback writes nothing") {
+    // The out-param used to be pre-seeded with {0,0,1}, so a callback that
+    // returned without writing handed back a perfectly plausible +Z normal and
+    // the bake came out looking like a real map. It is seeded with NaN now, and
+    // the field guard refuses it.
+    const std::filesystem::path objPath = writeUvPlaneObj();
+    CyberMesh* low = nullptr;
+    REQUIRE(cyber_mesh_load_obj(objPath.string().c_str(), &low) == CYBER_OK);
+
+    CyberBakeParams params{};
+    cyber_default_bake_params(&params);
+    params.width = 8;
+    params.height = 8;
+
+    CyberFieldEvaluator field{};
+    field.distance = &contractDistance;
+    field.gradient = &forgetfulGradient;
+    field.occlusion = &openEverywhere;
+    field.user = nullptr;
+
+    CyberImage* image = nullptr;
+    CHECK(cyber_bake_field(low, nullptr, CYBER_BAKE_NORMAL, &params, &field, &image) ==
+          CYBER_ERR_INVALID_PARAM);
+    CHECK(image == nullptr);
+    // The message must name the CALLBACK, not the mesh: before the guard, an
+    // emptied image was reported as "the low-poly needs UVs", which sends the
+    // host looking at its geometry for a fault in its own code.
+    const std::string message = cyber_last_error();
+    CHECK(message.find("gradient") != std::string::npos);
+
+    cyber_mesh_free(low);
+    std::error_code ec;
+    std::filesystem::remove(objPath, ec);
+}
+
 TEST_CASE("capi conform re-snaps onto a new Target and reports max/RMS deviation") {
     // The EditMesh sits at z = 0; the new Target is the same plane lifted 0.25.
     const std::filesystem::path editPath = writeUvPlaneObj();

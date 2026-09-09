@@ -38,6 +38,20 @@ if(TARGET cyber_exportbundle)
     target_compile_definitions(cyber_capi PRIVATE CYBER_CAPI_WITH_EXPORTBUNDLE)
 endif()
 
+# The ABI version is declared in cyber_capi.h and READ here, inverting the
+# direction used for the project version below. The header is what a vendoring
+# consumer parses (and what bindgen turns into constants), so it has to be the
+# single source; a value defined in CMake would be invisible to them.
+foreach(_part MAJOR MINOR)
+    file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/include/cyber_capi.h" _cyber_abi_line
+         REGEX "^#define[ \t]+CYBER_ABI_VERSION_${_part}[ \t]+[0-9]+")
+    string(REGEX MATCH "[0-9]+$" CYBER_ABI_VERSION_${_part} "${_cyber_abi_line}")
+    if(NOT DEFINED CYBER_ABI_VERSION_${_part} OR CYBER_ABI_VERSION_${_part} STREQUAL "")
+        message(FATAL_ERROR
+            "could not read CYBER_ABI_VERSION_${_part} from capi/include/cyber_capi.h")
+    endif()
+endforeach()
+
 # The C-facing version mirrors the CMake project() version.
 target_compile_definitions(cyber_capi PRIVATE
     CYBER_CAPI_VERSION_MAJOR=${PROJECT_VERSION_MAJOR}
@@ -76,8 +90,19 @@ if(CYBER_BUILD_CAPI_SHARED)
         OUTPUT_NAME cyber_capi
         EXPORT_NAME capi           # find_package(CyberRemesher) -> cyber::capi
         POSITION_INDEPENDENT_CODE ON
-        VERSION ${PROJECT_VERSION}
-        SOVERSION ${PROJECT_VERSION_MAJOR})
+        # SOVERSION is the ABI major, NOT the project major. While it tracked
+        # the project major it was 0 for every release, so v0.7.0 and v0.8.0
+        # were both libcyber_capi.so.0 -- and v0.5.0 -> v0.6.0 genuinely did
+        # grow CyberAtlasResult, an OUT param, so the callee wrote two fields
+        # past an old caller's buffer under an unchanged soname. The soname
+        # exists to make exactly that a load-time failure.
+        # Both describe the ABI, so the file name and its own soname share a
+        # leading component: libcyber_capi.so.1.0.0 with soname .so.1. Pairing
+        # the PROJECT version with an ABI soname would give
+        # libcyber_capi.so.0.8.0 carrying soname .so.1, which agree on nothing.
+        # The project version is still reported, by cyber_version().
+        VERSION ${CYBER_ABI_VERSION_MAJOR}.${CYBER_ABI_VERSION_MINOR}.0
+        SOVERSION ${CYBER_ABI_VERSION_MAJOR})
     target_compile_definitions(cyber_capi_shared PRIVATE
         CYBER_CAPI_VERSION_MAJOR=${PROJECT_VERSION_MAJOR}
         CYBER_CAPI_VERSION_MINOR=${PROJECT_VERSION_MINOR}

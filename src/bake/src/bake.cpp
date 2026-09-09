@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstdint>
 #include <optional>
+#include <string>
 
 #include "cyber/accel/backend.hpp"
 #include "cyber/accel/primitives.hpp"
@@ -602,7 +603,117 @@ struct FieldHit {
     Vec3 normal;
 };
 
-FieldHit traceField(const FieldEvaluator& field, const Texel& tx, const BakeParams& params) {
+// ---- the host-callback boundary ------------------------------------------
+//
+// A FieldEvaluator is HOST code, and its return values are not ours to trust.
+// The split below is by "can a CORRECT field return this?", not by convenience.
+//
+// TIER 1 -- CONTRACT VIOLATION, which no correct field can produce: a NaN
+// distance, a non-finite gradient, a non-finite curvature, an openness outside
+// [0,1] beyond float slack. The WHOLE BAKE fails, naming the callback and the
+// point. Sanitizing these quietly is the fails-open pattern: it conceals the
+// host's bug and hands back an image that looks like a real map. paramsUsable()
+// already takes this position for a non-finite BakeParams member, and its
+// comment is the precedent -- substituting a default "would hide the caller's
+// bug just as well as the NaN did".
+//
+// TIER 2 -- LEGITIMATELY UNDEFINED, which a correct field does hit: an INFINITE
+// distance, the ordinary "nothing here" answer from a grid field asked outside
+// its domain; and a ZERO-LENGTH gradient, because a signed distance field has
+// no gradient on its medial axis and curvature() probes six points OFF the
+// surface where that skeleton is reachable. These end the march for one texel,
+// which then takes the same neutral padding an un-hit cage ray already writes,
+// and are COUNTED rather than hidden.
+//
+// Why NaN is Tier 1 while infinity is Tier 2, which looks arbitrary and is not:
+// std::fmax(NaN, epsilon) returns epsilon, so a NaN distance never even stopped
+// the march. It burned all 96 steps for every texel and arrived at a laundered
+// miss indistinguishable from empty space. Infinity, by contrast, exits the
+// march honestly through `t <= maxT`.
+class GuardedField {
+public:
+    explicit GuardedField(const FieldEvaluator& field) : m_field(field) {}
+
+    [[nodiscard]] bool violated() const { return m_violated; }
+    [[nodiscard]] const std::string& message() const { return m_message; }
+    [[nodiscard]] std::size_t undefinedSamples() const { return m_undefined; }
+
+    // Finite distance, or nullopt when the march must end for this texel.
+    [[nodiscard]] std::optional<float> distance(Vec3 p) {
+        const float d = m_field.distance(p);
+        if (std::isnan(d)) {
+            violate("distance", p, "returned NaN");
+            return std::nullopt;
+        }
+        if (std::isinf(d)) {
+            ++m_undefined;
+            return std::nullopt;
+        }
+        return d;
+    }
+
+    // Unit normal, or nullopt when the field has no gradient there.
+    [[nodiscard]] std::optional<Vec3> unitGradient(Vec3 p) {
+        const Vec3 g = m_field.gradient(p);
+        if (!isFinite(g)) {
+            violate("gradient", p, "returned a non-finite vector");
+            return std::nullopt;
+        }
+        if (!(length(g) > 0.0f)) {
+            ++m_undefined;  // the medial axis: undefined, not wrong
+            return std::nullopt;
+        }
+        return normalized(g);
+    }
+
+    [[nodiscard]] float openness(Vec3 p, Vec3 n, float radius) {
+        const float o = m_field.occlusion(p + n * 0.0f, n, radius);
+        if (!std::isfinite(o)) {
+            violate("occlusion", p, "returned a non-finite openness");
+            return 0.0f;
+        }
+        // Was a silent clamp. A value far outside [0,1] is not float slack, it
+        // is a host that inverted the convention or returned a distance by
+        // mistake -- and openness IS the inverted one, so the plausible-looking
+        // failure is exactly the one to refuse. Slack still clamps.
+        constexpr float kSlack = 1e-3f;
+        if (o < -kSlack || o > 1.0f + kSlack) {
+            violate("occlusion", p, "returned an openness outside [0,1]");
+            return 0.0f;
+        }
+        return std::clamp(o, 0.0f, 1.0f);
+    }
+
+    [[nodiscard]] float curvature(Vec3 p, float h) {
+        const float c = m_field.curvature(p, h);
+        if (!std::isfinite(c)) {
+            // Reachable through the interface default, which probes gradient()
+            // six times OFF the surface and now propagates a non-finite probe
+            // instead of letting normalized() launder it to {0,0,0}.
+            violate("curvature", p, "returned a non-finite value");
+            return 0.0f;
+        }
+        return c;
+    }
+
+private:
+    void violate(const char* callback, Vec3 p, const char* what) {
+        if (m_violated) {
+            return;  // first offence wins; it is the cause, the rest are echoes
+        }
+        m_violated = true;
+        m_message = std::string("field evaluator contract violated: ") + callback + " " + what +
+                    " at (" + std::to_string(p.x) + ", " + std::to_string(p.y) + ", " +
+                    std::to_string(p.z) + ")";
+    }
+
+    const FieldEvaluator& m_field;
+    bool m_violated = false;
+    std::string m_message;
+    std::size_t m_undefined = 0;
+};
+
+FieldHit traceField(GuardedField& field, const Texel& tx, const BakeParams& params) {
     constexpr int kMaxSteps = 96;
     const float maxT = 2.0f * params.cageDistance;
     // Surface tolerance scaled to the cage so the tracer's precision follows
@@ -614,9 +725,17 @@ FieldHit traceField(const FieldEvaluator& field, const Texel& tx, const BakePara
     float t = 0.0f;
     for (int step = 0; step < kMaxSteps && t <= maxT; ++step) {
         const Vec3 p = origin + dir * t;
-        const float d = field.distance(p);
+        const std::optional<float> sample = field.distance(p);
+        if (!sample) {
+            return {};  // violation, or the field says there is nothing here
+        }
+        const float d = *sample;
         if (std::fabs(d) <= epsilon) {
-            return {true, p, normalized(field.gradient(p))};
+            const std::optional<Vec3> n = field.unitGradient(p);
+            if (!n) {
+                return {};  // no gradient here: a miss, never a fabricated normal
+            }
+            return {true, p, *n};
         }
         // |d| because the cage origin can start inside the field (a bulge that
         // pokes through the low-poly); marching by the magnitude converges from
@@ -628,8 +747,9 @@ FieldHit traceField(const FieldEvaluator& field, const Texel& tx, const BakePara
 
 // The field shading pass. Only the four maps fieldSupports() covers reach here.
 void shadeFromField(BakeResult& result, const std::vector<Texel>& texels,
-                    const FieldEvaluator& field, BakeMap map, const BakeParams& params,
+                    const FieldEvaluator& rawField, BakeMap map, const BakeParams& params,
                     const CancelToken* cancel) {
+    GuardedField field(rawField);
     const bool curvatureMap = map == BakeMap::Curvature || map == BakeMap::Cavity;
     // Central-difference step for the evaluator's curvature default, tied to the
     // cage the same way the trace tolerance is.
@@ -645,6 +765,16 @@ void shadeFromField(BakeResult& result, const std::vector<Texel>& texels,
         hits[i] = traceField(field, texels[i], params);
         if (curvatureMap && hits[i].valid) {
             samples[i] = field.curvature(hits[i].position, curvatureStep);
+        }
+        // Checked per texel rather than once at the end: a violated contract
+        // means every later sample is being taken from a field we have already
+        // caught misbehaving, and there is no point paying for them.
+        if (field.violated()) {
+            result.fieldContractViolated = true;
+            result.fieldContractMessage = field.message();
+            result.image = Image{};
+            result.texelsCovered = 0;
+            return;
         }
     }
 
@@ -673,8 +803,15 @@ void shadeFromField(BakeResult& result, const std::vector<Texel>& texels,
             case BakeMap::AmbientOcclusion: {
                 const Vec3 n = hit.valid ? hit.normal : tx.normal;
                 const Vec3 p = hit.valid ? hit.position : tx.position;
-                result.image.at(tx.px, tx.py, 0) = std::clamp(
-                    field.occlusion(p + n * params.aoBias, n, params.aoRadius), 0.0f, 1.0f);
+                result.image.at(tx.px, tx.py, 0) =
+                    field.openness(p + n * params.aoBias, n, params.aoRadius);
+                if (field.violated()) {
+                    result.fieldContractViolated = true;
+                    result.fieldContractMessage = field.message();
+                    result.image = Image{};
+                    result.texelsCovered = 0;
+                    return;
+                }
                 break;
             }
             default: {  // Curvature | Cavity — fieldSupports() gates the rest out
@@ -684,6 +821,7 @@ void shadeFromField(BakeResult& result, const std::vector<Texel>& texels,
             }
         }
     }
+    result.fieldUndefinedSamples = field.undefinedSamples();
 }
 
 }  // namespace

@@ -2,12 +2,13 @@
 // strings, and access to the thread-local last-error message used by
 // `CyberError`.
 //
-// The C ABI carries NO separate "ABI version" symbol — `cyber_version` reports
-// the engine's semantic version (mirroring the CMake project version) and that
-// is the only compatibility signal available. Compatibility gating for the
-// versioned data formats lives with those formats: the sculpt-handoff bridge
-// declares `CYBER_HANDOFF_VERSION_*` and fails an unsupported file with
-// `CYBER_ERR_INCOMPATIBLE_VERSION`.
+// TWO version numbers, and they answer different questions. `cyber_abi_version`
+// reports the ABI — the shape of the C surface, which decides whether compiled
+// calls link and mean what they were compiled against. `cyber_version` reports
+// the ENGINE, the behaviour behind that shape; a matching ABI does not promise
+// the same mesh. Compatibility gating for the versioned data formats lives with
+// those formats: the sculpt-handoff bridge declares `CYBER_HANDOFF_VERSION_*`
+// and fails an unsupported file with `CYBER_ERR_INCOMPATIBLE_VERSION`.
 
 import CCyberRemesher
 
@@ -26,6 +27,28 @@ public enum CyberRuntime {
     public static var version: String {
         let components = versionComponents
         return "\(components.major).\(components.minor).\(components.patch)"
+    }
+
+    /// C ABI version of the linked library, as `(major, minor)`.
+    ///
+    /// Distinct from ``version``: this describes the SURFACE, not the
+    /// behaviour. Use ``checkABI()`` rather than comparing these by hand — the
+    /// compatibility rule lives in the engine so every binding agrees.
+    public static var abiVersionComponents: (major: Int, minor: Int) {
+        var major: Int32 = 0
+        var minor: Int32 = 0
+        cyber_abi_version(&major, &minor)
+        return (Int(major), Int(minor))
+    }
+
+    /// The ABI this Swift package was written against.
+    public static let abiVersionCompiledAgainst = (major: 1, minor: 0)
+
+    /// Throw if the loaded library cannot serve this package's compiled ABI.
+    public static func checkABI() throws {
+        let compiled = abiVersionCompiledAgainst
+        try CyberError.check(
+            cyber_abi_check(Int32(compiled.major), Int32(compiled.minor)))
     }
 
     /// Version of the sculpt-handoff interchange format this build writes and
