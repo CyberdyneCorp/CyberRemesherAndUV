@@ -64,6 +64,18 @@ enum class PolygonPolicy { Preserve, Triangulate };
 
 struct ImportOptions {
     PolygonPolicy polygons = PolygonPolicy::Preserve;
+    // A RESOURCE ceiling, not a hostility bound, and the difference decides
+    // what it is good for. Hostile input is already refused structurally: a
+    // declared element count is checked against the bytes the file actually
+    // carries, so a small file making a large claim is provably lying and no
+    // number here is involved. What this bounds is a LEGITIMATE file too big
+    // for the host's budget -- a 200M-vertex scan on a tablet.
+    //
+    // 0 means no ceiling, which is the default because the engine cannot know
+    // the host's budget and a number picked here would either be too small for
+    // a workstation or useless on a phone. An embedder sets its own; a ceiling
+    // that is never reached is not a ceiling.
+    std::size_t maxVertices = 0;
 };
 
 struct ImportedMesh {

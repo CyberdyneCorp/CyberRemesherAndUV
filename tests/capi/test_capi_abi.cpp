@@ -10,11 +10,27 @@
 #include <doctest.h>
 
 #include <cstddef>
+#include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <string>
+#include <vector>
 
 #include "cyber_capi.h"
+
+namespace {
+
+// A 4-vertex quad, written to a temp file. Small on purpose: the import-ceiling
+// case needs a vertex count it can sit a ceiling either side of.
+std::filesystem::path writeAbiPlaneObj() {
+    const std::filesystem::path path =
+        std::filesystem::temp_directory_path() / "cyber_abi_plane.obj";
+    std::ofstream f(path, std::ios::trunc);
+    f << "v 0 0 0\nv 1 0 0\nv 1 1 0\nv 0 1 0\nf 1 2 3 4\n";
+    return path;
+}
+
+}  // namespace
 
 TEST_CASE("the ABI version is reported and is independent of the engine version") {
     int abiMajor = -1;
@@ -120,3 +136,78 @@ TEST_CASE("the header states the ABI contract where a consumer reads it") {
     CHECK(enumNote != std::string::npos);
 }
 #endif
+
+TEST_CASE("the topology generation makes the element-id contract checkable") {
+    // The ELEMENT-ID STABILITY rules were exact and were PROSE ONLY: a host
+    // holding a vertex id had no way to ask whether it still meant that vertex.
+    const std::filesystem::path objPath = writeAbiPlaneObj();
+    CyberMesh* mesh = nullptr;
+    REQUIRE(cyber_mesh_load(objPath.string().c_str(), &mesh) == CYBER_OK);
+
+    const uint64_t fresh = cyber_mesh_topology_generation(mesh);
+
+    // A positions-only edit keeps every id, so it must NOT move the counter --
+    // otherwise a host drops valid annotations on every drag.
+    std::vector<float> positions(cyber_mesh_copy_positions(mesh, nullptr, 0));
+    REQUIRE(cyber_mesh_copy_positions(mesh, positions.data(), positions.size()) ==
+            positions.size());
+    positions[1] += 0.01f;
+    REQUIRE(cyber_mesh_set_positions(mesh, positions.data(), positions.size()) == CYBER_OK);
+    CHECK(cyber_mesh_topology_generation(mesh) == fresh);
+
+    // Subdivision rebuilds the mesh from scratch and reassigns EVERY id, which
+    // the header says in capitals. The counter has to say it too.
+    size_t faces = 0;
+    REQUIRE(cyber_retopo_subdivide(mesh, nullptr, &faces) == CYBER_OK);
+    const uint64_t afterSubdivide = cyber_mesh_topology_generation(mesh);
+    CHECK(afterSubdivide != fresh);
+
+    // Monotone: a host comparing two samples needs "changed", never "changed
+    // back". A second structural edit must not return to an earlier value.
+    REQUIRE(cyber_retopo_subdivide(mesh, nullptr, &faces) == CYBER_OK);
+    CHECK(cyber_mesh_topology_generation(mesh) > afterSubdivide);
+
+    // A clone's ids ARE the source's, so an annotation valid for one is valid
+    // for the other and the counter must carry over.
+    CyberMesh* clone = nullptr;
+    REQUIRE(cyber_mesh_clone(mesh, &clone) == CYBER_OK);
+    CHECK(cyber_mesh_topology_generation(clone) == cyber_mesh_topology_generation(mesh));
+
+    cyber_mesh_free(clone);
+    cyber_mesh_free(mesh);
+    std::error_code ec;
+    std::filesystem::remove(objPath, ec);
+}
+
+TEST_CASE("a null mesh answers the generation query without crashing") {
+    CHECK(cyber_mesh_topology_generation(nullptr) == 0u);
+}
+
+TEST_CASE("the import ceiling refuses a legitimate file over the host's budget") {
+    // A RESOURCE bound, distinct from the structural hostility check: this file
+    // is well-formed and honest about its size, and is refused anyway because
+    // the host said it could not afford it.
+    const std::filesystem::path objPath = writeAbiPlaneObj();
+
+    REQUIRE(cyber_max_import_vertices() == 0u);  // off by default
+    REQUIRE(cyber_set_max_import_vertices(3) == CYBER_OK);
+    CHECK(cyber_max_import_vertices() == 3u);
+
+    CyberMesh* refused = nullptr;
+    CHECK(cyber_mesh_load(objPath.string().c_str(), &refused) != CYBER_OK);
+    CHECK(refused == nullptr);
+    const std::string message = cyber_last_error();
+    CHECK(message.find("ceiling") != std::string::npos);
+
+    // Raised above the file's size, the same file loads -- so the refusal was
+    // the ceiling and not something else about the file.
+    REQUIRE(cyber_set_max_import_vertices(1000) == CYBER_OK);
+    CyberMesh* loaded = nullptr;
+    REQUIRE(cyber_mesh_load(objPath.string().c_str(), &loaded) == CYBER_OK);
+    CHECK(loaded != nullptr);
+    cyber_mesh_free(loaded);
+
+    REQUIRE(cyber_set_max_import_vertices(0) == CYBER_OK);  // restore for other cases
+    std::error_code ec;
+    std::filesystem::remove(objPath, ec);
+}

@@ -1030,7 +1030,7 @@ There are **two** version numbers and they answer different questions.
 
 ```c
 #define CYBER_ABI_VERSION_MAJOR 1     /* the SHAPE of cyber_capi.h */
-#define CYBER_ABI_VERSION_MINOR 0
+#define CYBER_ABI_VERSION_MINOR 1
 
 void       cyber_abi_version(int* major, int* minor);
 CyberStatus cyber_abi_check(int compiled_major, int compiled_minor);
@@ -1063,6 +1063,33 @@ full increment rules, including why appending an enumerator is *not* additive.
 
 Python: `cyberremesh.abi_version()` / `check_abi()`. Swift:
 `CyberRuntime.abiVersionComponents` / `CyberRuntime.checkABI()`.
+
+#### Two things an embedder should wire up
+
+**Element ids move, and you can now detect it.** The ELEMENT-ID STABILITY block
+in `cyber_capi.h` is exact about which operations preserve ids — `snap_all`
+keeps every one, `subdivide*` reassigns all of them — but reading it is not the
+same as checking it. `cyber_mesh_topology_generation()` changes exactly when
+those rules say ids may have been reassigned, so record it beside any id-keyed
+state and compare before trusting that state:
+
+```c
+uint64_t gen = cyber_mesh_topology_generation(mesh);
+/* ... your pins/tags/scene mapping, keyed on vertex ids ... */
+if (cyber_mesh_topology_generation(mesh) != gen) {
+    /* drop or rebuild them; do NOT reuse the ids */
+}
+```
+
+Equal values prove your ids are good; differing values only mean don't assume —
+it errs safe, never the other way.
+
+**Set your own import ceiling.** `cyber_set_max_import_vertices()` is off by
+default because the engine cannot know your budget. This is a *resource* bound,
+not a security one: malformed input is already refused structurally, since a
+declared element count is checked against the bytes the file actually carries. A
+ceiling that is never reached is not a ceiling — pick a number your target
+device can actually afford.
 
 The shared library exports **only its `cyber_*` C ABI** — a linker version script
 on ELF, an exported-symbols list on Mach-O — so the ~4000 vendored

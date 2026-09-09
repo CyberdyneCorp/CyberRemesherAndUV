@@ -192,6 +192,9 @@ def check_field_bake(tmpdir: str) -> None:
         def gradient(self, p):
             return (0.0, 0.0, 1.0)
 
+        # Deliberately the OLD name: this is the regression case for the
+        # occlusion -> openness shim. If the shim is ever dropped, this fails
+        # with NotImplementedError rather than silently baking nothing.
         def occlusion(self, p, n, radius):
             return 0.25
 

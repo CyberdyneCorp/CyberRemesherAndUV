@@ -42,6 +42,13 @@ endif()
 # direction used for the project version below. The header is what a vendoring
 # consumer parses (and what bindgen turns into constants), so it has to be the
 # single source; a value defined in CMake would be invisible to them.
+# Re-run configure when the header changes: file(STRINGS) reads at CONFIGURE
+# time, so without this an ABI bump in the header leaves a stale SOVERSION and
+# a stale library VERSION in an existing build tree -- the numbers disagree and
+# nothing says so.
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+             "${CMAKE_CURRENT_SOURCE_DIR}/include/cyber_capi.h")
+
 foreach(_part MAJOR MINOR)
     file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/include/cyber_capi.h" _cyber_abi_line
          REGEX "^#define[ \t]+CYBER_ABI_VERSION_${_part}[ \t]+[0-9]+")

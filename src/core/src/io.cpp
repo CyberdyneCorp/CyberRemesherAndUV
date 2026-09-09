@@ -35,23 +35,46 @@ Result<ImportedMesh> importMesh(const std::filesystem::path& path, const ImportO
         return Error{ErrorCode::FileNotFound, "no such file: '" + path.string() + "'"};
     }
     const std::string ext = detail::lowercaseExtension(path);
-    if (ext == ".obj") {
-        return detail::importObj(path, options);
+    Result<ImportedMesh> imported = [&]() -> Result<ImportedMesh> {
+        if (ext == ".obj") {
+            return detail::importObj(path, options);
+        }
+        if (ext == ".stl") {
+            return detail::importStl(path, options);
+        }
+        if (ext == ".ply") {
+            return detail::importPly(path, options);
+        }
+        if (ext == ".gltf" || ext == ".glb") {
+            return detail::importGltf(path, options);
+        }
+        if (ext == ".fbx") {
+            return detail::importFbx(path, options);
+        }
+        return Error{ErrorCode::UnsupportedFormat,
+                     "unsupported import format '" + ext + "' for '" + path.string() + "'"};
+    }();
+
+    // The resource ceiling, applied once here rather than in five importers.
+    //
+    // It bounds the RESULT, not the peak: the file is fully parsed before this
+    // refuses it. That is deliberate and worth stating plainly rather than
+    // overclaiming, because loading is the cheap half -- what a host actually
+    // needs is to refuse a mesh before the REMESHING pipeline spends orders of
+    // magnitude more on it, and this is the boundary where that decision
+    // belongs. Peak-bounded parsing is a per-format concern, and the formats
+    // that declare their counts (PLY, binary STL, glTF accessors) already check
+    // those declarations against the bytes present, which is the HOSTILITY
+    // bound and a different quantity from this one.
+    if (options.maxVertices > 0 && imported.ok() &&
+        imported.value().mesh.vertexCount() > options.maxVertices) {
+        return Error{ErrorCode::ParseError,
+                     "'" + path.string() + "' carries " +
+                         std::to_string(imported.value().mesh.vertexCount()) +
+                         " vertices, over this host's ceiling of " +
+                         std::to_string(options.maxVertices)};
     }
-    if (ext == ".stl") {
-        return detail::importStl(path, options);
-    }
-    if (ext == ".ply") {
-        return detail::importPly(path, options);
-    }
-    if (ext == ".gltf" || ext == ".glb") {
-        return detail::importGltf(path, options);
-    }
-    if (ext == ".fbx") {
-        return detail::importFbx(path, options);
-    }
-    return Error{ErrorCode::UnsupportedFormat,
-                 "unsupported import format '" + ext + "' for '" + path.string() + "'"};
+    return imported;
 }
 
 Status exportMesh(const Mesh& mesh, const std::filesystem::path& path,

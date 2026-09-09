@@ -68,6 +68,7 @@ def main() -> int:
         print("PASS bake: normal map points up; curvature/cavity read neutral on a flat Target")
 
         _gate_a_raising_evaluator_raises(obj.name)
+        _gate_the_openness_rename_shim(obj.name)
     finally:
         os.unlink(obj.name)
     return 0
@@ -82,7 +83,7 @@ class _RaisingField(cyberremesh.FieldEvaluator):
     def gradient(self, p):
         return (0.0, 0.0, 1.0)
 
-    def occlusion(self, p, n, radius):
+    def openness(self, p, n, radius):
         return 1.0
 
 
@@ -111,6 +112,58 @@ def _gate_a_raising_evaluator_raises(obj_path):
     # by the previous failure.
     assert field._pending_error is None
     print("PASS bake_field: a raising evaluator raises instead of baking a fabricated map")
+
+
+class _OldNameField(cyberremesh.FieldEvaluator):
+    """Written against the pre-rename API: defines `occlusion`, means openness."""
+
+    def distance(self, p):
+        return p[2]
+
+    def gradient(self, p):
+        return (0.0, 0.0, 1.0)
+
+    def occlusion(self, p, n, radius):
+        return 0.25
+
+
+class _NewNameField(_OldNameField):
+    def openness(self, p, n, radius):
+        return 0.25
+
+
+def _gate_the_openness_rename_shim(obj_path):
+    """`occlusion` was renamed to `openness`, and the shim must FORWARD not invert.
+
+    The old name described the inverse of the value it returned, which is the
+    whole footgun: an implementer following the name computed occlusion and
+    baked a plausible inverted map. But a subclass that already said
+    `occlusion` was returning OPENNESS regardless -- the rename changed the
+    name, not the quantity -- so the shim forwards. Inverting here would flip a
+    map that was correct before, which is the same bug in the other direction.
+    """
+    import warnings as _w
+
+    params = cyberremesh.BakeParams(width=8, height=8)
+    with cyberremesh.Mesh.load(obj_path) as low:
+        with _w.catch_warnings(record=True) as caught:
+            _w.simplefilter("always")
+            with cyberremesh.bake_field(
+                low, cyberremesh.BakeMap.AO, _OldNameField(), params
+            ) as old_img:
+                old_value = float(old_img.to_numpy()[4, 4, 0])
+        assert any(issubclass(c.category, DeprecationWarning) for c in caught), [
+            str(c.message) for c in caught
+        ]
+        with cyberremesh.bake_field(
+            low, cyberremesh.BakeMap.AO, _NewNameField(), params
+        ) as new_img:
+            new_value = float(new_img.to_numpy()[4, 4, 0])
+
+    # Same value from both names: forwarded, not inverted.
+    assert abs(old_value - new_value) < 1e-6, (old_value, new_value)
+    assert abs(old_value - 0.25) < 0.02, old_value
+    print("PASS bake_field: the occlusion->openness shim forwards and warns")
 
 
 if __name__ == "__main__":

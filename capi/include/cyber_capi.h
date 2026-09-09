@@ -92,7 +92,7 @@ typedef enum CyberStatus {
  * Do not compare these numbers by hand: cyber_abi_check() applies the rule
  * above in one place, so every binding gets the same answer. */
 #define CYBER_ABI_VERSION_MAJOR 1
-#define CYBER_ABI_VERSION_MINOR 0
+#define CYBER_ABI_VERSION_MINOR 1
 
 /* The ABI this build implements. Cannot fail; either pointer may be NULL. */
 void cyber_abi_version(int* major, int* minor);
@@ -183,6 +183,30 @@ CyberStatus cyber_set_max_worker_threads(int max_threads);
 
 /* The current cap, or 0 when none is set. */
 int cyber_max_worker_threads(void);
+
+/* Ceiling on the vertex count this process will accept from a mesh FILE.
+ * 0 (the default) means no ceiling.
+ *
+ * A RESOURCE bound, not a hostility bound, and conflating the two gives you
+ * something fit for neither. Hostile input is refused structurally and needs no
+ * number: a declared element count is checked against the bytes the file
+ * actually carries, so a small file claiming 37 billion vertices is provably
+ * lying. What this bounds is a LEGITIMATE file too large for YOUR budget -- a
+ * 200M-vertex scan on a tablet.
+ *
+ * The default is off because the engine cannot know your budget, and a number
+ * chosen here would be too small for a workstation and useless on a phone. Set
+ * yours. A ceiling that is never reached is not a ceiling.
+ *
+ * It bounds the RESULT, not the peak: the file is parsed before the count is
+ * known. That is the useful boundary anyway -- loading is the cheap half, and
+ * this refuses the mesh before the remeshing pipeline spends orders of
+ * magnitude more on it. Global, like the worker cap, and safe to call from any
+ * thread; an import already in flight keeps the ceiling it started with. */
+CyberStatus cyber_set_max_import_vertices(uint64_t max_vertices);
+
+/* The current import ceiling, or 0 when none is set. */
+uint64_t cyber_max_import_vertices(void);
 
 /* ---- mesh I/O -------------------------------------------------------- */
 
@@ -1400,6 +1424,33 @@ typedef enum CyberSubdivisionMode {
     CYBER_SUBDIV_CATMULL_CLARK = 1
 } CyberSubdivisionMode;
 
+/* Counter that changes whenever this handle's element ids MAY have been
+ * reassigned. Starts at 0 and only ever increases.
+ *
+ * The ELEMENT-ID STABILITY rules above are exact, and until now they were only
+ * PROSE: a host holding a vertex id had no way to ask whether it was still the
+ * vertex it meant. Nothing announced the difference, so a stale annotation --
+ * a pin, a loop tag, a hidden face, a mapping back into the host's own scene --
+ * silently pointed at whatever now holds that index.
+ *
+ * The rule this follows is exactly the documented one, because both come from
+ * the same place in the implementation: an op that only MOVES vertices leaves
+ * the counter alone, and an op that can create, destroy or rewire elements
+ * bumps it. So:
+ *
+ *   generation unchanged  ->  every id you hold still means what it meant
+ *   generation changed    ->  assume all of them are orphaned
+ *
+ * The usual shape is to record it beside any id-keyed state and compare before
+ * trusting that state. A clone carries its source's counter, because a clone's
+ * ids match the mesh it was copied from.
+ *
+ * This is a HINT IN THE SAFE DIRECTION: it may change when ids in fact
+ * survived (a failed op invalidates conservatively), never the reverse. Equal
+ * counters therefore prove your ids are good; differing ones only mean you
+ * must not assume. */
+uint64_t cyber_mesh_topology_generation(const CyberMesh* mesh);
+
 /* Subdivision into quads, LINEAR (Catmull-Clark topology, NO smoothing), plus
  * optional REPROJECTION: when `snapper` is non-NULL every vertex of the
  * subdivided mesh is projected onto the Target surface, which is what
@@ -1864,7 +1915,13 @@ int cyber_stroke_interpretation_grid_size(const CyberStrokeInterpretation* inter
 /* Bakeable map types (surface-baking spec). */
 typedef enum CyberBakeMap {
     CYBER_BAKE_NORMAL = 0,   /* tangent-space normal map (RGB, encoded [0,1]) */
-    CYBER_BAKE_AO,           /* ambient occlusion / openness (1 channel) */
+    /* 1 channel of OPENNESS: 1.0 = fully open, 0.0 = fully occluded. Named
+     * "AO" for the map artists ask for, but the VALUE is the inverse of
+     * occlusion, and a host feeding its own occlusion straight through bakes a
+     * plausible-looking inverted map -- light where it should be dark. Invert
+     * on your side (1 - x) if your engine measures occlusion.
+     * CyberFieldEvaluator::occlusion returns this same openness convention. */
+    CYBER_BAKE_AO,
     CYBER_BAKE_DISPLACEMENT, /* signed height along the low-poly normal (1 ch) */
     CYBER_BAKE_POSITION,     /* Target hit position, world space (RGB) */
     CYBER_BAKE_COLOR,        /* Target vertex color at the hit (RGB) */

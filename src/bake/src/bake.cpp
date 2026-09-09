@@ -667,9 +667,9 @@ public:
     }
 
     [[nodiscard]] float openness(Vec3 p, Vec3 n, float radius) {
-        const float o = m_field.occlusion(p + n * 0.0f, n, radius);
+        const float o = m_field.openness(p, n, radius);
         if (!std::isfinite(o)) {
-            violate("occlusion", p, "returned a non-finite openness");
+            violate("openness", p, "returned a non-finite value");
             return 0.0f;
         }
         // Was a silent clamp. A value far outside [0,1] is not float slack, it
@@ -678,7 +678,7 @@ public:
         // failure is exactly the one to refuse. Slack still clamps.
         constexpr float kSlack = 1e-3f;
         if (o < -kSlack || o > 1.0f + kSlack) {
-            violate("occlusion", p, "returned an openness outside [0,1]");
+            violate("openness", p, "returned a value outside [0,1]");
             return 0.0f;
         }
         return std::clamp(o, 0.0f, 1.0f);

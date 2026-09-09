@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -131,6 +132,11 @@ struct CyberRenderCache {
 // swept of dead ids after an edit (see dropDeadHandleState).
 struct CyberMesh {
     cyber::Mesh mesh;
+    // Bumped by runEdit on any TOPOLOGY-scoped edit, which is the same
+    // distinction the ELEMENT-ID STABILITY rules in cyber_capi.h draw -- both
+    // read from EditScope, so the counter cannot drift from the documented
+    // contract without the scope itself being wrong.
+    std::uint64_t topologyGeneration = 0;
     std::optional<cyber::remesh::Statistics> stats;
     std::unordered_set<std::uint32_t> hiddenFaces;
     std::vector<std::uint32_t> taggedEdges;
@@ -292,6 +298,31 @@ CyberStatus cyber_abi_check(int compiled_major, int compiled_minor) {
              " and cannot serve a client compiled against ABI " +
              std::to_string(compiled_major) + "." + std::to_string(compiled_minor));
     return CYBER_ERR_INCOMPATIBLE_VERSION;
+}
+
+namespace {
+
+// Global, like the worker-thread cap it mirrors. An import already in flight
+// keeps the ceiling it started with, so this needs no ordering against one.
+std::atomic<std::uint64_t>& importVertexCeiling() {
+    static std::atomic<std::uint64_t> ceiling{0};
+    return ceiling;
+}
+
+}  // namespace
+
+CyberStatus cyber_set_max_import_vertices(uint64_t max_vertices) {
+    importVertexCeiling().store(max_vertices, std::memory_order_relaxed);
+    clearError();
+    return CYBER_OK;
+}
+
+uint64_t cyber_max_import_vertices(void) {
+    return importVertexCeiling().load(std::memory_order_relaxed);
+}
+
+uint64_t cyber_mesh_topology_generation(const CyberMesh* mesh) {
+    return mesh == nullptr ? 0u : mesh->topologyGeneration;
 }
 
 const char* cyber_status_string(CyberStatus status) {
@@ -456,7 +487,9 @@ CyberStatus cyber_mesh_load(const char* path, CyberMesh** out) {
     }
     *out = nullptr;
     try {
-        auto result = cyber::io::importMesh(std::filesystem::path(path));
+        cyber::io::ImportOptions options;
+        options.maxVertices = static_cast<std::size_t>(cyber_max_import_vertices());
+        auto result = cyber::io::importMesh(std::filesystem::path(path), options);
         if (!result.ok()) {
             return mapIoError(result.error());
         }
@@ -2184,6 +2217,9 @@ CyberStatus runEdit(CyberMesh* mesh, const char* name, EditScope scope, Body bod
         if (status == CYBER_OK) {
             dropDeadHandleState(mesh);
             invalidateCaches(mesh, scope);
+            if (scope == EditScope::Topology) {
+                ++mesh->topologyGeneration;
+            }
             clearError();
         }
         return status;
@@ -2193,11 +2229,16 @@ CyberStatus runEdit(CyberMesh* mesh, const char* name, EditScope scope, Body bod
         // over a mutated mesh.
         dropDeadHandleState(mesh);
         invalidateCaches(mesh, EditScope::Topology);
+        // A throw may have left the mesh partially mutated, so the ids are
+        // suspect even though the op reported failure. Bumped on purpose: the
+        // counter must err toward "assume orphaned", never away from it.
+        ++mesh->topologyGeneration;
         setError(std::string(name) + ": " + e.what());
         return CYBER_ERR_RUNTIME;
     } catch (...) {
         dropDeadHandleState(mesh);
         invalidateCaches(mesh, EditScope::Topology);
+        ++mesh->topologyGeneration;
         setError(std::string(name) + ": unknown error");
         return CYBER_ERR_RUNTIME;
     }
@@ -2238,6 +2279,10 @@ CyberStatus cyber_mesh_clone(const CyberMesh* mesh, CyberMesh** out) {
         // are deliberately left default so the copy builds its own on first use.
         auto copy = std::make_unique<CyberMesh>();
         copy->mesh = mesh->mesh;
+        // The clone's ids ARE the source's ids, so an annotation valid for one
+        // is valid for the other; carrying the counter is what lets a host know
+        // that rather than having to assume the worst.
+        copy->topologyGeneration = mesh->topologyGeneration;
         copy->stats = mesh->stats;
         copy->hiddenFaces = mesh->hiddenFaces;
         copy->taggedEdges = mesh->taggedEdges;
@@ -5024,7 +5069,7 @@ public:
         m_c.gradient(m_c.user, xyz, g);
         return cyber::Vec3{g[0], g[1], g[2]};
     }
-    [[nodiscard]] float occlusion(cyber::Vec3 p, cyber::Vec3 n, float radius) const override {
+    [[nodiscard]] float openness(cyber::Vec3 p, cyber::Vec3 n, float radius) const override {
         const float xyz[3] = {p.x, p.y, p.z};
         const float nrm[3] = {n.x, n.y, n.z};
         return m_c.occlusion(m_c.user, xyz, nrm, radius);
