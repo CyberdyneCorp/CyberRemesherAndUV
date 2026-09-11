@@ -4,6 +4,7 @@ the clamp-warning path, run against the real binary."""
 
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -30,6 +31,23 @@ def check(name: str, condition: bool, detail: str = "") -> None:
     else:
         FAILURES.append(name)
         print(f"FAIL: {name} {detail}")
+
+
+def header_abi() -> str:
+    """The ABI as DECLARED in cyber_capi.h, formatted "<major>.<minor>".
+
+    Parsed the way a vendoring consumer would — bindgen turns these same two
+    macros into constants — so the test reads the source of truth rather than
+    carrying a second copy of the number that could drift from it.
+    """
+    header = Path(__file__).resolve().parents[2] / "capi" / "include" / "cyber_capi.h"
+    text = header.read_text(encoding="utf-8")
+    parts = []
+    for part in ("MAJOR", "MINOR"):
+        m = re.search(r"^#define\s+CYBER_ABI_VERSION_%s\s+(\d+)" % part, text, re.M)
+        assert m, f"CYBER_ABI_VERSION_{part} missing from {header}"
+        parts.append(m.group(1))
+    return ".".join(parts)
 
 
 def write_sphere_obj(path: Path) -> None:
@@ -146,6 +164,16 @@ def main() -> int:
     check("version names the seamless-uv solver", len(solver) == 1, r.stdout)
     check("seamless-uv solver is a known build",
           bool(solver) and solver[0] in ("native", "native+geogram"), r.stdout)
+    # Third number: the C ABI, which decides whether a compiled caller can LINK
+    # and is deliberately independent of the engine version, so it cannot be
+    # read off the line above it. Pinned against the header (the single source
+    # of truth, which capi/CMakeLists.txt also parses for the soname) so a bump
+    # there that the CLI does not pick up is a test failure, not a silent lie.
+    abi = [line.split(" ", 1)[1].strip() for line in r.stdout.splitlines()
+           if line.startswith("c-abi ")]
+    check("version names the C ABI", len(abi) == 1, r.stdout)
+    check("C ABI matches the header",
+          bool(abi) and abi[0] == header_abi(), f"{abi} vs {header_abi()}")
 
     # Success path with report (exit 0).
     r = run("--input", str(sphere), "--output", str(out), "--target-quads", "300",

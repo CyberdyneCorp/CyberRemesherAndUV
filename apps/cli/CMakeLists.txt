@@ -13,6 +13,13 @@ if(TARGET cyber_exportbundle)
     target_link_libraries(cyberremesh PRIVATE cyber_exportbundle)
     target_compile_definitions(cyberremesh PRIVATE CYBER_CLI_HAVE_PRESETS=1)
 endif()
+# --version reports the C ABI version, which lives in capi/include/cyber_capi.h
+# (the single source of truth -- capi/CMakeLists.txt parses the same #defines for
+# the soname). Include path only, NOT a link to cyber_capi: the CLI drives the
+# C++ core directly, the two macros need no library behind them, and cyber_capi
+# is an optional target (CYBER_BUILD_CAPI) while the header is always in-tree.
+target_include_directories(cyberremesh PRIVATE ${PROJECT_SOURCE_DIR}/capi/include)
+
 # nlohmann json.hpp (vendored with tinygltf, MIT) for the JSON report.
 target_include_directories(cyberremesh SYSTEM PRIVATE
     ${PROJECT_SOURCE_DIR}/thirdparty/tinygltf)
