@@ -23,6 +23,67 @@ code: where a number here disagrees with this host's
 `tests/bench/baselines-<System>-<machine>-<compiler>.json` or the README, the
 baselines are authoritative.
 
+## Update — 2026-09-10: the "adaptive sizing collapses face count on open surfaces" report is NOT a bug — but chasing it found one
+
+**The report.** quad-cover, `--target-quads 3000 --pure-quads`, adaptivity 0 → 1:
+spot 2582→2620 (+1.5%), fandisk 2564→2642 (+3.0%), cheburashka 2650→2690 (+1.5%),
+rocker-arm 2576→2694 (+4.6%), cube 2400→2400 (0%), **stanford-bunny 3542→2676
+(−24.4%)**. The bunny is the one OPEN model in the set (223 boundary edges,
+5 loops), which read as an open-surface failure class.
+
+**It is neither open-surface nor a collapse.** Three findings, in order:
+
+1. **The adaptivity-1 result is the CORRECT count, and the better mesh.** At
+   matched conditions the −24% arm wins on every quality axis: median angle
+   79.8° vs 76.4°, edge-length CV 0.236 vs 0.342, surface deviation (RMS) 0.336%
+   vs 0.378%, Hausdorff (p99) 1.12% vs 1.60%, normal error 11.87° vs 12.67°,
+   irregular 4.3% vs 4.4%, 0 non-manifold / 0 boundary / 0 degenerate either way.
+   24% fewer quads that follow the surface more closely is the feature working.
+
+2. **The 3542 is the outlier, not the 2676.** Internal target for all six models
+   is 649.5 quads (the pure-quad base, ×4 by subdivision). Every model's first
+   calibration attempt overshoots and gets corrected to ~1.00× — except the bunny
+   at adaptivity 0, whose first attempt landed at **863/649.5 = 1.3287×**, inside
+   the loop's `ratio < 1.33` acceptance band **by one quad**, and was therefore
+   accepted uncorrected. One more quad and it would have re-solved to ~650 like
+   everything else. The count is a knife-edge on the acceptance band, not a
+   response to adaptivity.
+
+3. **Openness is not the variable.** Two derived inputs settle it. Punching holes
+   in spot (52 boundary edges, 3 loops) reproduces *nothing*: 2648 → 2640, −0.3%.
+   Fan-filling the bunny's 5 holes (closed, identical geometry elsewhere) does not
+   remove the pathology either — it made it worse in the other direction,
+   2508 → 5490, a +119% OVERSHOOT on a CLOSED model. A one-model finding was not
+   a class. (That 5490 is the pre-fix number; it is the bug below, and it is now
+   4120.)
+
+**What WAS a bug, found on the closed bunny.** The calibration loop kept its
+**last** attempt rather than its best. bunny-closed at adaptivity 1: attempt 0
+extracted 1003 quads (+54%), the correction raised scaling 0.500 → 0.621 and
+attempt 1 extracted **1335** (+106%) — the quads ~ 1/scaling² assumption is not
+monotone there — and the loop shipped attempt 1. Cost of shipping the worse
+attempt: **736 boundary edges on a CLOSED input**, median 75.7° → 60.8°, edge CV
+0.45 → 0.79, irregular 4.2% → 16.6%. Fixed: the loop now keeps the attempt whose
+count is closest to the target, ranked by |log(got/target)| so an overshoot and
+the reciprocal undershoot rank equally, and an attempt that extracted nothing
+never wins (so a failed re-solve cannot discard a good first attempt). Output is
+**byte-identical on all six corpus models at both adaptivity 0 and 1** — every
+one of their re-solves was already an improvement. Regression test:
+`tests/quadrangulate/test_quadcover_extractor.cpp`, a 20×20 plane-with-hole at
+edge length 0.13 (target 51.9, attempt 0 → 38, attempt 1 → 18); it fails with the
+selection reverted.
+
+**What an embedder should expect.** `targetQuadCount` is a request, not a
+contract: anything in 0.75–1.33× (0.88–1.14× for tiny targets) is accepted
+uncorrected, so the achieved count is bimodal and any parameter change can move
+it ~30% without anything being wrong. Hold it tightly by driving the request from
+the achieved count, as `examples/11_benchmark.py`'s `search_matched_count` does.
+Documented in README "How it works → Quad retopology", step 4.
+
+**Not changed, deliberately.** The acceptance band itself. Narrowing it moves
+every model's output and trades one arbitrary threshold for another; the defect
+was keeping a measured-worse answer, and that is what got fixed.
+
 ## Update — 2026-08-30 (later): three gates were not measuring what they claimed
 
 Working the remaining ZRemesher items produced more corrections than features.
@@ -2069,10 +2130,31 @@ quads where curvature is high → better fidelity per polygon.
 met — QuadriFlow leads on all 5)*; adaptivity beats our own uniform sizing on
 ≥ 4/5 *(**NOT met — 2/5**; the earlier "met" was the artifact above)*.
 
-**Recommendation: descope.** The shipped `quad-cover` default is uniform-only by
+**Recommendation: descope.** ~~The shipped `quad-cover` default is uniform-only by
 design (capi hardcodes adaptivity 0; the isotropic stage that consumes
 `params.adaptivity` is bypassed for it), so this phase measures a lever the
-default cannot use, and the lever does not win where it can be used.
+default cannot use~~, and the lever does not win where it can be used.
+
+> **Correction — 2026-09-10.** The struck sentence is half right and its
+> conclusion is wrong. The C ABI does hardcode 0, and the *pipeline's* isotropic
+> stage is indeed bypassed for quad-cover — but the quad-cover extractor runs its
+> **own** isotropic pre-remesh (`prepareNativeSolve`, `iso.adaptivity`) and passes
+> the same value to the vendored Geogram solve as `-a`, and the CLI forwards
+> `params.adaptivity` (default **1.0**) straight into
+> `makeQuadCoverQuadrangulator`. So the shipped CLI default is NOT uniform, and
+> adaptivity is not "a lever the default cannot use": on the scanned bunny at a
+> 3000-quad request it triples the pre-remesh triangle count (2480 → 7720) and
+> changes the output. What is true is narrower — *the C ABI* cannot use it, which
+> is the "No inert parameters" violation tracked against
+> `openspec/specs/remeshing-parameters/spec.md`, not a property of the extractor.
+>
+> Measured on the corpus at `--target-quads 3000 --pure-quads`, adaptivity 0 → 1:
+> counts move spot 2582→2620, fandisk 2564→2642, cheburashka 2650→2690,
+> rocker-arm 2576→2694, stanford-bunny 3542→2676, cube 2400→2400 (byte-identical;
+> it is piecewise flat, so the curvature field is below the adapt noise floor).
+> The bunny's −24% is **not** an open-surface effect and not a collapse: it is the
+> count-calibration acceptance band, and the smaller mesh is the better one. See
+> the 2026-09-10 entry below.
 
 ## Phase 3 — Win on features & robustness — 🟦 CLOSED 2026-07-24 (validity won outright; feature-following a known limitation)
 

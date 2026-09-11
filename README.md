@@ -744,7 +744,30 @@ Stage by stage:
    either way. The dependency-free native solver traces the same input to 160
    quads at median 89° and CV 0.35, where the cleanup changes little — it is the
    vendored field that makes the difference here.
-4. **Pure-quad path.** The extracted mesh is relaxed onto the original surface
+4. **Count calibration — what `--target-quads` actually promises.** The spacing
+   the solver needs to hit a requested count is not knowable in closed form, so
+   the extractor solves, counts, and re-solves once at a corrected spacing when
+   the count misses. **`--target-quads` is a request, not a contract:** the loop
+   accepts a first attempt that lands anywhere from 0.75× to 1.33× the request
+   (0.88–1.14× for the tiny `--pure-quads` bases, which cannot afford the slack),
+   and only re-solves outside that band — where it typically lands within a few
+   percent. So the achieved count is bimodal, and two runs that differ only in
+   some *other* parameter can differ ~30% in count purely because one of them
+   fell inside the band and the other did not. That, and not adaptive sizing, is
+   why `--adaptivity 0` and `--adaptivity 1` can return visibly different counts
+   on the same model: on the scanned Stanford bunny at a 3000-quad request,
+   adaptivity 0 lands 3542 and adaptivity 1 lands 2676, because the adaptivity-0
+   first attempt came in at 1.329× the internal target — inside the band by one
+   quad — and was accepted uncorrected, while the adaptivity-1 run corrected to
+   1.005×. **The 2676 is the accurate one, and it is also better per polygon**
+   (median angle 79.8° vs 76.4°, edge CV 0.236 vs 0.342, surface deviation 0.336%
+   vs 0.378%, Hausdorff 1.12% vs 1.60%, 0 defects either way) — 24% fewer quads
+   that reproduce the surface more faithfully. An embedder that needs a count
+   held tightly should drive the request itself, the way
+   `examples/11_benchmark.py`'s `search_matched_count` does: probe, measure the
+   achieved count, and correct the request. Whichever attempts the loop makes, it
+   ships the one whose count is *closest* to the target, never merely the last.
+5. **Pure-quad path.** The extracted mesh is relaxed onto the original surface
    (longer for the uniform quad-cover/integer bases, which tolerate it — see
    `CYBER_BASE_RELAX_ITERS`), subdivided 4× so any residual triangle or pentagon
    becomes quads, then projected and relaxed once more. Feature and boundary

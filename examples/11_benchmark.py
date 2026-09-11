@@ -8,8 +8,15 @@ It also runs the Phase-2 adaptivity comparison: ours with curvature-adaptive siz
 vs ours with uniform sizing, at matched *achieved* quad count (QuadriFlow shown for
 context). Adaptive sizing spends polygons where the surface bends, so it should
 reproduce the surface more accurately per polygon — something QuadriFlow's uniform
-grid cannot do. Phase 2 necessarily runs on the position-field extractor, the only
-one exposing the knob; the shipped quad-cover default is uniform-only by design.
+grid cannot do. Phase 2 runs on the position-field extractor.
+
+Correction (2026-09-10): the reason given here used to be "the only one exposing the
+knob; the shipped quad-cover default is uniform-only by design", and that is false.
+quad-cover consumes `adaptivity` too — the CLI forwards it (default 1.0) into
+`makeQuadCoverQuadrangulator`, and the extractor's own isotropic pre-remesh and the
+vendored Geogram solve both use it. Only the C ABI hardcodes 0, which is a separate
+"No inert parameters" violation. Phase 2 stayed on the position-field extractor for
+history, not because quad-cover cannot adapt. See docs/ROADMAP.md, 2026-09-10.
 
     examples/run.sh examples/11_benchmark.py
     examples/run.sh examples/11_benchmark.py --models spot fandisk --target-quads 3000
