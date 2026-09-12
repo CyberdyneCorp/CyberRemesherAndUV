@@ -3614,6 +3614,8 @@ public:
     Outcome quadrangulateBestOfTwo(Mesh& mesh, float targetEdgeLength, ProgressSink* progress,
                                    const CancelToken* cancel) {
         const bool closedInput = isClosed(mesh);
+        const CandidateSelectionContext selectionContext{.expectedBoundaryComponents =
+                                                             boundaryComponentCount(mesh)};
         struct Candidate {
             const char* name;
             CrossFieldSource field;
@@ -3641,14 +3643,16 @@ public:
                 continue;
             }
             const QualityScore score = scoreQuality(trial, nullptr, closedInput);
-            const bool take = bestName.empty() || candidateBeats(score, bestScore);
+            const bool take =
+                bestName.empty() || candidateBeats(score, bestScore, selectionContext);
             if (std::getenv("CYBER_QC_DEBUG") != nullptr) {
                 std::fprintf(stderr,
                              "[zr] candidate %-12s total=%7.3f angle=%.3f uniformity=%.3f "
                              "quads=%.3f irregular=%.1f%% defects=%zu -> %s\n",
                              candidate.name, score.total, score.angle, score.edgeUniformity,
                              score.quadPurity, 100.0 * score.irregularFraction,
-                             score.nonManifoldEdges + score.boundaryEdges, take ? "BEST" : "kept");
+                             score.nonManifoldEdges + score.boundaryComponents,
+                             take ? "BEST" : "kept");
             }
             if (take) {
                 best = std::move(trial);

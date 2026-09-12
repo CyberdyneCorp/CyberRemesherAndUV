@@ -364,7 +364,9 @@ TEST_CASE("scoring an empty layout is zero, not a division by zero") {
 // --- whole-result quality score (Phase G) -----------------------------------
 
 using cyber::EdgeId;
+using cyber::remesh::boundaryComponentCount;
 using cyber::remesh::candidateBeats;
+using cyber::remesh::CandidateSelectionContext;
 using cyber::remesh::QualityScore;
 using cyber::remesh::scoreQuality;
 
@@ -390,10 +392,58 @@ TEST_CASE("quality score: an open border is a defect only when the input was clo
     const QualityScore asOpen = scoreQuality(mesh, nullptr, /*closedInput=*/false);
     const QualityScore asClosed = scoreQuality(mesh, nullptr, /*closedInput=*/true);
     CHECK(asOpen.boundaryEdges > 0);
+    CHECK(asOpen.boundaryComponents == 1);
+    CHECK(boundaryComponentCount(mesh) == 1);
     CHECK(asOpen.boundaryEdges == asClosed.boundaryEdges);
     CHECK(asOpen.topologicalDefects == doctest::Approx(0.0));
     CHECK(asClosed.topologicalDefects > 0.0);
     CHECK(asClosed.total < asOpen.total);
+}
+
+TEST_CASE("candidate selection preserves open boundary components, not their tessellation") {
+    // Both candidates preserve one source rim. The adaptive candidate has a
+    // denser tessellation along it and a better score; raw boundary-edge count
+    // must not make it lose.
+    QualityScore coarse;
+    coarse.total = 1.0;
+    coarse.boundaryEdges = 4;
+    coarse.boundaryComponents = 1;
+
+    QualityScore fine;
+    fine.total = 2.0;
+    fine.boundaryEdges = 20;
+    fine.boundaryComponents = 1;
+
+    const CandidateSelectionContext openInput{.expectedBoundaryComponents = 1};
+    CHECK(candidateBeats(fine, coarse, openInput));
+    CHECK_FALSE(candidateBeats(coarse, fine, openInput));
+}
+
+TEST_CASE("candidate selection rejects new boundary components before aesthetics") {
+    QualityScore preserved;
+    preserved.total = 0.2;
+    preserved.boundaryComponents = 1;
+
+    QualityScore cracked;
+    cracked.total = 100.0;
+    cracked.boundaryComponents = 2;
+
+    const CandidateSelectionContext openInput{.expectedBoundaryComponents = 1};
+    CHECK(candidateBeats(preserved, cracked, openInput));
+    CHECK_FALSE(candidateBeats(cracked, preserved, openInput));
+}
+
+TEST_CASE("candidate selection rejects a closed-input crack before aesthetics") {
+    QualityScore closed;
+    closed.total = 0.1;
+
+    QualityScore cracked;
+    cracked.total = 100.0;
+    cracked.boundaryEdges = 4;
+    cracked.boundaryComponents = 1;
+
+    CHECK(candidateBeats(closed, cracked));
+    CHECK_FALSE(candidateBeats(cracked, closed));
 }
 
 TEST_CASE("quality score: topological defects dominate every aesthetic term") {
