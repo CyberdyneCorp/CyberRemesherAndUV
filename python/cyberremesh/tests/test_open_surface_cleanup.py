@@ -13,9 +13,11 @@ valence-2, so it merges cells into long uneven quads. The fix runs `fixHoles` bu
 skips `simplifyGraph` (and the collapse steps that re-trigger it) on open islands.
 
 This is the regression guard, exercised through the real remesh path on an open
-paraboloid: the output must be dense (not the sparse under-traced case) and uniform
-(edge-length CV well below the pre-fix blowup), while staying manifold. Closed
-inputs are byte-identical and are covered by the golden tests.
+paraboloid with explicit uniform sizing: the output must be dense (not the sparse
+under-traced case) and uniform (edge-length CV well below the pre-fix blowup), while
+staying manifold. It intentionally requests `adaptivity=0`: curvature-adaptive
+sizing is expected to vary edge lengths and is covered by its own parameter tests.
+Closed inputs are byte-identical and are covered by the golden tests.
 
 Runnable as a plain script; exits 77 (CTest SKIP) if the library is absent.
 """
@@ -99,8 +101,12 @@ def remesh_paraboloid(tmp: str, target: int):
     write_paraboloid(src)
     out_path = os.path.join(tmp, f"out_{target}.obj")
     with Mesh.load_obj(src) as mesh:
+        # This guard is about open-island cleanup preserving a UNIFORM isoline
+        # grid. Adaptivity intentionally varies target edge length, so state the
+        # uniform prerequisite instead of relying on the old C ABI bug that
+        # silently replaced the public default of 1.0 with 0.0.
         params = RemeshParams(target_quad_count=target, pure_quads=True,
-                              quad_method="quad-cover")
+                              quad_method="quad-cover", adaptivity=0.0)
         with remesh(mesh, params) as out:
             out.save_obj(out_path)
     return read_obj(out_path)

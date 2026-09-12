@@ -640,7 +640,12 @@ CyberStatus remeshShared(const CyberMesh* in, const CyberRemeshParams* params,
         // to be handed to the extractor as well as to the pipeline's edge tagging, or the
         // ABI runs at the factory default while the CLI honours the value.
         const float sharpEdgeDegrees = params->sharpEdgeDegrees;
-        const auto makeQuad = [holeFillMaxBoundary, sharpEdgeDegrees](
+        // Quad-cover owns its own isotropic sizing stage, so adaptivity must
+        // reach the extractor as well as the pipeline.  Without this capture,
+        // the C ABI silently ran the factory's uniform default while the CLI
+        // used the caller value (and its canonical default of 1.0).
+        const float adaptivity = cppParams.adaptivity;
+        const auto makeQuad = [holeFillMaxBoundary, sharpEdgeDegrees, adaptivity](
                                   int method) -> std::unique_ptr<cyber::remesh::IQuadrangulator> {
             if (method == CYBER_QUAD_INSTANT_MESHES) {
                 return cyber::remesh::makeInstantMeshesQuadrangulator();
@@ -649,33 +654,12 @@ CyberStatus remeshShared(const CyberMesh* in, const CyberRemeshParams* params,
                 return cyber::remesh::makeIntegerQuadrangulator();
             }
             if (method == CYBER_QUAD_QUADCOVER) {
-                // Uniform (adaptivity 0): quad-cover is a seamless global-grid method whose
-                // strength is uniform clean topology. Measured, curvature-adaptive sizing on
-                // it gives no surface-fidelity gain but injects singularities and edge-length
-                // variance (spot irr 2->6%, fandisk 3->15%), so — unlike the field/integer
-                // paths — it stays uniform-only here. The adaptivity knob remains available
-                // for experiments via makeQuadCoverQuadrangulator(iters, a) / CYBER_QC_ADAPT.
-                //
-                // CORRECTION (2026-09-10): those two measurements no longer reproduce on
-                // this build. Re-measured at --target-quads 3000, adaptivity 0 -> 1:
-                // WITHOUT --pure-quads spot irregular 5.4% -> 3.6% (adaptivity BETTER) and
-                // fandisk 2.9% -> 3.5%; WITH --pure-quads spot 2.2% -> 2.3%, fandisk
-                // 2.6% -> 2.5%, cheburashka 4.2% -> 3.6%, rocker-arm 5.8% -> 4.4%,
-                // stanford-bunny 4.4% -> 4.3%. Nothing like 2->6 or 3->15 anywhere, and
-                // median angle / edge CV move the same (small, mixed-sign) way. The
-                // hardcoded 0 is therefore resting on a stale justification — it is NOT
-                // re-justified here, and it still contradicts the "No inert parameters"
-                // requirement in openspec/specs/remeshing-parameters/spec.md, which is
-                // tracked separately. Left as-is only because changing it moves every
-                // embedder's default output and is not this change's subject.
-                return cyber::remesh::makeQuadCoverQuadrangulator(40, 0.0f, holeFillMaxBoundary,
+                return cyber::remesh::makeQuadCoverQuadrangulator(40, adaptivity, holeFillMaxBoundary,
                                                                   sharpEdgeDegrees);
             }
             if (method == CYBER_QUAD_ZREMESHER) {
-                // Uniform for the same reason quad-cover is (see above): the
-                // layout stage does not change what adaptivity costs a seamless
-                // global-grid method.
                 cyber::remesh::ZRemesherOptions zr;
+                zr.adaptivity = adaptivity;
                 zr.holeFillMaxBoundary = holeFillMaxBoundary;
                 zr.featureDegrees = sharpEdgeDegrees;
                 return cyber::remesh::makeZRemesherQuadrangulator(zr);
