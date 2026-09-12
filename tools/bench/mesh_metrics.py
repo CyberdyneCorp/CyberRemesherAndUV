@@ -99,6 +99,122 @@ def _edge_face_counts(mesh: MeshData) -> dict[tuple[int, int], int]:
     return counts
 
 
+def validity_stats(mesh: MeshData) -> dict:
+    """Structural mesh checks that must precede quality comparisons.
+
+    ``self_intersection_candidates`` is deliberately a broad-phase evidence
+    count, not a proof of intersection: exact triangle intersection needs a
+    robust predicate library. The remaining defects are exact for OBJ polygon
+    connectivity after fan triangulation.
+    """
+    vertex_count = len(mesh.vertices)
+    invalid_indices = 0
+    degenerate_faces = 0
+    duplicate_faces = 0
+    valid_faces: list[tuple[int, ...]] = []
+    canonical_faces: set[tuple[int, ...]] = set()
+    for face in mesh.faces:
+        if any(index < 0 or index >= vertex_count for index in face):
+            invalid_indices += 1
+            continue
+        if len(set(face)) < 3:
+            degenerate_faces += 1
+            continue
+        triangles = [(face[0], face[i], face[i + 1]) for i in range(1, len(face) - 1)]
+        area = sum(
+            0.5 * np.linalg.norm(np.cross(mesh.vertices[b] - mesh.vertices[a],
+                                           mesh.vertices[c] - mesh.vertices[a]))
+            for a, b, c in triangles
+        )
+        if area <= 1e-14:
+            degenerate_faces += 1
+            continue
+        canonical = tuple(sorted(face))
+        if canonical in canonical_faces:
+            duplicate_faces += 1
+            continue
+        canonical_faces.add(canonical)
+        valid_faces.append(face)
+
+    valid_mesh = MeshData(mesh.vertices, valid_faces)
+    edge_counts = _edge_face_counts(valid_mesh)
+    non_manifold_edges = sum(1 for count in edge_counts.values() if count > 2)
+    boundary_edges = [edge for edge, count in edge_counts.items() if count == 1]
+    boundary_adjacency: dict[int, set[int]] = {}
+    for a, b in boundary_edges:
+        boundary_adjacency.setdefault(a, set()).add(b)
+        boundary_adjacency.setdefault(b, set()).add(a)
+    boundary_branch_vertices = sum(len(neighbors) != 2 for neighbors in boundary_adjacency.values())
+    boundary_loops = 0
+    seen: set[int] = set()
+    for vertex in boundary_adjacency:
+        if vertex in seen:
+            continue
+        component: set[int] = set()
+        stack = [vertex]
+        while stack:
+            current = stack.pop()
+            if current in component:
+                continue
+            component.add(current)
+            stack.extend(boundary_adjacency[current] - component)
+        seen.update(component)
+        if all(len(boundary_adjacency[item]) == 2 for item in component):
+            boundary_loops += 1
+
+    incident: dict[int, list[tuple[int, ...]]] = {}
+    for face in valid_faces:
+        for vertex in face:
+            incident.setdefault(vertex, []).append(face)
+    non_manifold_vertices = 0
+    for vertex, faces in incident.items():
+        if len(faces) < 2:
+            continue
+        neighbors = {index: set() for index in range(len(faces))}
+        for left, face in enumerate(faces):
+            local = {item for item in face if item != vertex}
+            for right in range(left + 1, len(faces)):
+                if local & {item for item in faces[right] if item != vertex}:
+                    neighbors[left].add(right)
+                    neighbors[right].add(left)
+        reached = set()
+        pending = [0]
+        while pending:
+            item = pending.pop()
+            if item not in reached:
+                reached.add(item)
+                pending.extend(neighbors[item] - reached)
+        if len(reached) != len(faces):
+            non_manifold_vertices += 1
+
+    triangles = valid_mesh.triangles()
+    candidates = 0
+    if len(triangles):
+        points = mesh.vertices[triangles]
+        mins, maxs = points.min(axis=1), points.max(axis=1)
+        for left in range(len(triangles)):
+            for right in range(left + 1, len(triangles)):
+                if set(triangles[left]) & set(triangles[right]):
+                    continue
+                if np.all(maxs[left] >= mins[right]) and np.all(maxs[right] >= mins[left]):
+                    candidates += 1
+
+    hard_defects = (invalid_indices + degenerate_faces + duplicate_faces +
+                    non_manifold_edges + non_manifold_vertices)
+    return {
+        "valid": hard_defects == 0,
+        "invalid_index_faces": invalid_indices,
+        "degenerate_faces": degenerate_faces,
+        "duplicate_faces": duplicate_faces,
+        "non_manifold_edges": non_manifold_edges,
+        "non_manifold_vertices": non_manifold_vertices,
+        "boundary_edges": len(boundary_edges),
+        "boundary_loops": boundary_loops,
+        "boundary_branch_vertices": boundary_branch_vertices,
+        "self_intersection_candidates": candidates,
+    }
+
+
 def singularity_stats(mesh: MeshData) -> dict:
     """Irregular-vertex count: interior vertices with valence != 4.
 
@@ -364,6 +480,9 @@ def compute_all(input_path: str, output_path: str,
     reference = load_obj(input_path)
     result = load_obj(output_path)
     metrics: dict = {}
+    metrics.update(validity_stats(result))
+    if not metrics["valid"]:
+        return metrics
     metrics.update(face_counts(result))
     metrics.update(singularity_stats(result))
     metrics.update(distance_stats(reference, result, samples))
