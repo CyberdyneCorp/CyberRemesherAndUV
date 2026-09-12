@@ -3,12 +3,12 @@
   "comment": "Offline deterministic acceptance fixtures. Generator identity and parameters are part of the benchmark contract; downloaded corpus.json remains non-gating.",
   "fixtures": [
     {"name": "sphere", "category": "organic", "generator": "sphere", "target_quads": 800, "expected_input": "accepted", "sha256": "1dd2ca285db4bec8dd6a41d6a443b00ddf0d04ab8faed3605190b01d54c11cbd"},
-    {"name": "box_sharp", "category": "cad-feature", "generator": "box", "target_quads": 600, "expected_input": "accepted"},
-    {"name": "torus", "category": "thin-closed", "generator": "torus", "target_quads": 700, "expected_input": "accepted"},
-    {"name": "cylinder", "category": "mixed-feature", "generator": "cylinder", "target_quads": 600, "expected_input": "accepted"},
-    {"name": "open_patch", "category": "open-boundary", "generator": "open_patch", "target_quads": 300, "expected_input": "accepted"},
-    {"name": "multi_component", "category": "multiple-components", "generator": "multi_component", "target_quads": 700, "expected_input": "accepted"},
-    {"name": "large_coordinates", "category": "extreme-scale", "generator": "large_coordinates", "target_quads": 500, "expected_input": "accepted"},
-    {"name": "invalid_index", "category": "malformed-input", "generator": "invalid_index", "target_quads": 0, "expected_input": "rejected"}
+    {"name": "box_sharp", "category": "cad-feature", "generator": "box", "target_quads": 600, "expected_input": "accepted", "sha256": "fc67bb6666c5c41e43f5d293af5ea5f860b69f8036952b124be8dcab8b99ddc4"},
+    {"name": "torus", "category": "thin-closed", "generator": "torus", "target_quads": 700, "expected_input": "accepted", "sha256": "aadc5d0f1e68345d697e3b813bcb1c80d1270f38149d963e82244069a8faf542"},
+    {"name": "cylinder", "category": "mixed-feature", "generator": "cylinder", "target_quads": 600, "expected_input": "accepted", "sha256": "644b5873ed084ac84332eaf35ebb33ad499a88d8d78b7889cd0e6284e81ee8ac"},
+    {"name": "open_patch", "category": "open-boundary", "generator": "open_patch", "target_quads": 300, "expected_input": "accepted", "sha256": "b811ff1ce5e51829f714f0ac12548270599d1646d7e0cc6704ee45825c84f854"},
+    {"name": "multi_component", "category": "multiple-components", "generator": "multi_component", "target_quads": 700, "expected_input": "accepted", "sha256": "04fed2a2f2474ae1b9e3103ed0377426abee30a4313967cfb99d6de9af268378"},
+    {"name": "large_coordinates", "category": "extreme-scale", "generator": "large_coordinates", "target_quads": 500, "expected_input": "accepted", "sha256": "3d498c3e1cb0a646127fb744ea55790980912b57bcaaa2e65272354f21dedf0c"},
+    {"name": "invalid_index", "category": "malformed-input", "generator": "invalid_index", "target_quads": 0, "expected_input": "rejected", "sha256": "fccad1c0581497100d0cb72c8aec22f3efea0e088952512b199d0f7108dbb9b8"}
   ]
 }
