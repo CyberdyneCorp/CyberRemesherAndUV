@@ -295,7 +295,7 @@ def record_baselines(results: list[dict], solver: str) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=["run", "record", "check"])
-    parser.add_argument("--corpus", choices=["generated", "downloaded", "all"],
+    parser.add_argument("--corpus", choices=["generated", "acceptance", "downloaded", "all"],
                         default="generated")
     parser.add_argument("--solvers", default="all",
                         help="comma-separated solver names (default: all resolved)")
@@ -310,6 +310,9 @@ def main() -> int:
     meshes: list[dict] = []
     if args.corpus in ("generated", "all"):
         meshes += corpus.generated_meshes(args.cache_dir / "generated")
+    if args.corpus in ("acceptance", "all"):
+        meshes += [mesh for mesh in corpus.acceptance_meshes(args.cache_dir / "acceptance")
+                   if mesh["expected_input"] == "accepted"]
     if args.corpus in ("downloaded", "all"):
         meshes += corpus.downloaded_meshes(args.cache_dir / "downloaded")
 
