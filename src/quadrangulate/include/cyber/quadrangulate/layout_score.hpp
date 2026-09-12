@@ -130,12 +130,20 @@ struct QualityScore {
     std::size_t faces = 0;
     std::size_t nonQuadFaces = 0;
     std::size_t boundaryEdges = 0;
+    // Connected components of the boundary-edge graph. Unlike the raw edge
+    // count, this survives a different tessellation of the same source rim.
+    std::size_t boundaryComponents = 0;
     std::size_t nonManifoldEdges = 0;
     double medianAngleDegrees = 0.0;
     double edgeLengthCv = 0.0;
     std::size_t irregularVertices = 0;
     std::size_t interiorVertices = 0;
 };
+
+// Counts connected components in the boundary-edge graph. This is a topology
+// property: a finer remesh of a source rim can change boundaryEdges but not its
+// component count, while an ordinary crack adds one.
+[[nodiscard]] std::size_t boundaryComponentCount(const Mesh& mesh);
 
 // Score a finished mesh. `singularity` (optional) folds in the layout's cone
 // placement cost; without it the topology terms still work off the mesh alone.
@@ -144,11 +152,21 @@ struct QualityScore {
 [[nodiscard]] QualityScore scoreQuality(const Mesh& mesh, const SingularityMetrics* singularity,
                                         bool closedInput, const QualityWeights& weights = {});
 
-// Pick the better of two scored candidates, deterministically. Defects dominate;
-// ties fall through to the total, then the cone count, then candidate order — so
-// the same inputs always select the same candidate.
+// Context supplied by the solve that produced the candidates. The default is
+// appropriate for a closed input; open-input selection MUST provide the source
+// boundary-component count.
+struct CandidateSelectionContext {
+    std::size_t expectedBoundaryComponents = 0;
+};
+
+// Pick the better of two scored candidates, deterministically. Non-manifold
+// meshes and candidates that do not preserve the input's boundary components
+// are ineligible before aesthetics; ties fall through to the total, then the
+// cone count, then candidate order — so the same inputs always select the same
+// candidate.
 //
 // Returns true when `b` should replace `a`.
-[[nodiscard]] bool candidateBeats(const QualityScore& b, const QualityScore& a);
+[[nodiscard]] bool candidateBeats(const QualityScore& b, const QualityScore& a,
+                                  CandidateSelectionContext context = {});
 
 }  // namespace cyber::remesh

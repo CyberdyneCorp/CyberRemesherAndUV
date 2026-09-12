@@ -109,6 +109,47 @@ double median(std::vector<double>& v) {
 
 }  // namespace
 
+std::size_t boundaryComponentCount(const Mesh& mesh) {
+    std::vector<unsigned char> visited(mesh.vertexCapacity(), 0);
+    std::vector<VertexId> stack;
+    std::size_t components = 0;
+    for (Index i = 0; i < mesh.vertexCapacity(); ++i) {
+        const VertexId start{i};
+        if (!mesh.isAlive(start) || visited[i] != 0) {
+            continue;
+        }
+        bool touchesBoundary = false;
+        for (const EdgeId edge : mesh.vertexEdges(start)) {
+            if (mesh.isAlive(edge) && mesh.isBoundaryEdge(edge)) {
+                touchesBoundary = true;
+                break;
+            }
+        }
+        if (!touchesBoundary) {
+            continue;
+        }
+        ++components;
+        visited[i] = 1;
+        stack.push_back(start);
+        while (!stack.empty()) {
+            const VertexId vertex = stack.back();
+            stack.pop_back();
+            for (const EdgeId edge : mesh.vertexEdges(vertex)) {
+                if (!mesh.isAlive(edge) || !mesh.isBoundaryEdge(edge)) {
+                    continue;
+                }
+                const auto [a, b] = mesh.edgeVertices(edge);
+                const VertexId next = a == vertex ? b : a;
+                if (visited[next.value] == 0) {
+                    visited[next.value] = 1;
+                    stack.push_back(next);
+                }
+            }
+        }
+    }
+    return components;
+}
+
 QualityScore scoreQuality(const Mesh& mesh, const SingularityMetrics* singularity, bool closedInput,
                           const QualityWeights& weights) {
     QualityScore out;
@@ -144,6 +185,7 @@ QualityScore scoreQuality(const Mesh& mesh, const SingularityMetrics* singularit
         const auto [a, b] = mesh.edgeVertices(edge);
         lengths.push_back(static_cast<double>(length(mesh.position(b) - mesh.position(a))));
     }
+    out.boundaryComponents = boundaryComponentCount(mesh);
 
     // Angle quality: how close the median interior angle is to 90 degrees. A
     // quad mesh cannot do better than 90, and the distance from it is what
@@ -220,13 +262,33 @@ QualityScore scoreQuality(const Mesh& mesh, const SingularityMetrics* singularit
     return out;
 }
 
-bool candidateBeats(const QualityScore& b, const QualityScore& a) {
-    // Topological validity first and absolutely: a mesh with excellent angles
-    // and a crack is not a winner, whatever the aesthetic terms say.
-    const std::size_t defectsA = a.nonManifoldEdges + a.boundaryEdges;
-    const std::size_t defectsB = b.nonManifoldEdges + b.boundaryEdges;
-    if (defectsA != defectsB) {
-        return defectsB < defectsA;
+bool candidateBeats(const QualityScore& b, const QualityScore& a,
+                    CandidateSelectionContext context) {
+    const auto isEligible = [context](const QualityScore& score) {
+        return score.nonManifoldEdges == 0 &&
+               score.boundaryComponents == context.expectedBoundaryComponents;
+    };
+    const bool eligibleA = isEligible(a);
+    const bool eligibleB = isEligible(b);
+    if (eligibleA != eligibleB) {
+        return eligibleB;
+    }
+    if (!eligibleA) {
+        // Every candidate is invalid. Retain a deterministic least-bad choice
+        // for diagnostics, without letting aesthetics outrank a topology fault.
+        const std::size_t mismatchA =
+            a.boundaryComponents > context.expectedBoundaryComponents
+                ? a.boundaryComponents - context.expectedBoundaryComponents
+                : context.expectedBoundaryComponents - a.boundaryComponents;
+        const std::size_t mismatchB =
+            b.boundaryComponents > context.expectedBoundaryComponents
+                ? b.boundaryComponents - context.expectedBoundaryComponents
+                : context.expectedBoundaryComponents - b.boundaryComponents;
+        const std::size_t defectsA = a.nonManifoldEdges + mismatchA;
+        const std::size_t defectsB = b.nonManifoldEdges + mismatchB;
+        if (defectsA != defectsB) {
+            return defectsB < defectsA;
+        }
     }
     if (b.total != a.total) {
         return b.total > a.total;
