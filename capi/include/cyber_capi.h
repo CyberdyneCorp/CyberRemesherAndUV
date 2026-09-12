@@ -262,19 +262,9 @@ typedef struct CyberRemeshParams {
     float sharpEdgeDegrees;    /* dihedral threshold for feature edges: drives both
                                 * the isotropic stage and the parameterization */
     float smoothNormalDegrees; /* normal-smoothing angle */
-    /* 0 uniform .. 1 fully curvature-adaptive.
-     *
-     * KNOWN GAP (2026-09-11): this said "the quad-cover extractor stays uniform
-     * by design", and that is not what happens. The EXTRACTOR consumes
-     * adaptivity perfectly well -- it runs its own isotropic pre-remesh from
-     * it. What is uniform is this ABI: capi.cpp hardcodes 0.0f for
-     * quadMethod = quad-cover, so the value you pass never reaches the
-     * extractor FROM HERE, while the CLI forwards it and defaults it to 1.0.
-     * The two front ends therefore return different meshes for the same
-     * request, which violates this project's own "No inert parameters"
-     * requirement (openspec/specs/remeshing-parameters). Being fixed; the fix
-     * changes default output for this method, so it is sequenced and announced
-     * rather than slipped in. */
+    /* 0 uniform .. 1 fully curvature-adaptive. Forwarded to every selected
+     * extractor, including quad-cover and ZRemesher. The default is 1.0;
+     * callers that require the historical uniform quad-cover output can set 0. */
     float adaptivity;
     int pureQuads;             /* non-zero: forbid residual triangles */
     int holeFillMaxBoundary;   /* max boundary edges of holes to fill; 0 off */

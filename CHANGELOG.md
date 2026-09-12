@@ -479,6 +479,15 @@
 
 ### Fixed
 
+- **C ABI selector paths now honor `adaptivity`.** `cyber_remesh` forwarded
+  the value through the ordinary pipeline but replaced it with `0.0` while
+  constructing both the quad-cover default and `CYBER_QUAD_ZREMESHER`. The CLI
+  forwarded the requested value (default `1.0`), so the same request could
+  produce different meshes depending on the frontend. Explicit `0.0` retains
+  the historical uniform behavior; the C ABI default now matches the CLI.
+  Regression coverage uses a torus, whose varying curvature distinguishes
+  uniform from adaptive sizing, and exercises both selector methods.
+
 - **Guidance counts were bounded after the pointer arithmetic, not before.**
   `toGuidance` built its density range as `src + count` and relied on the
   allocator to refuse an impossible request — but a count a binding marshalled

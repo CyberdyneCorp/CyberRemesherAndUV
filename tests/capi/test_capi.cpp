@@ -41,6 +41,41 @@ std::filesystem::path writeCubeObj() {
     return path;
 }
 
+// A torus has strongly varying curvature (inner versus outer equator), which
+// makes it a discriminating adaptivity fixture. A sphere is not: its curvature
+// is constant, so 0 and 1 produce the same sizing field and a forwarding bug
+// would pass unnoticed.
+std::filesystem::path writeTorusObj() {
+    constexpr int kMajorSegments = 32;
+    constexpr int kMinorSegments = 16;
+    constexpr float kMajorRadius = 1.0f;
+    constexpr float kMinorRadius = 0.35f;
+    const std::filesystem::path path =
+        std::filesystem::temp_directory_path() / "cyber_capi_torus.obj";
+    std::ofstream out(path);
+    for (int i = 0; i < kMajorSegments; ++i) {
+        const float u = 2.0f * 3.14159265358979323846f * static_cast<float>(i) /
+                        static_cast<float>(kMajorSegments);
+        for (int j = 0; j < kMinorSegments; ++j) {
+            const float v = 2.0f * 3.14159265358979323846f * static_cast<float>(j) /
+                            static_cast<float>(kMinorSegments);
+            const float radius = kMajorRadius + kMinorRadius * std::cos(v);
+            out << "v " << radius * std::cos(u) << ' ' << kMinorRadius * std::sin(v) << ' '
+                << radius * std::sin(u) << '\n';
+        }
+    }
+    const auto index = [](int i, int j) {
+        return (i % kMajorSegments) * kMinorSegments + (j % kMinorSegments) + 1;
+    };
+    for (int i = 0; i < kMajorSegments; ++i) {
+        for (int j = 0; j < kMinorSegments; ++j) {
+            out << "f " << index(i, j) << ' ' << index(i + 1, j) << ' ' << index(i + 1, j + 1)
+                << ' ' << index(i, j + 1) << '\n';
+        }
+    }
+    return path;
+}
+
 void onProgress(float fraction, const char* stage, void* user) {
     REQUIRE(fraction >= 0.0f);
     REQUIRE(fraction <= 1.0001f);
@@ -231,6 +266,41 @@ TEST_CASE("capi remesh honours sharpEdgeDegrees on the default quad-cover path")
     CHECK(remeshAt(40.0f) != remeshAt(90.0f));
     // Same value twice is still deterministic (the knob, not run-to-run noise).
     CHECK(remeshAt(40.0f) == remeshAt(40.0f));
+
+    cyber_mesh_free(input);
+    std::error_code ec;
+    std::filesystem::remove(objPath, ec);
+}
+
+// Regression: remeshShared used the factory's 0.0 adaptivity default for both
+// selector paths, despite validating the caller value and despite the CLI
+// forwarding it. That made adaptivity inert through cyber_remesh for the
+// shipped quad-cover default and for CYBER_QUAD_ZREMESHER.
+TEST_CASE("capi remesh honours adaptivity for quad-cover selector paths") {
+    const std::filesystem::path objPath = writeTorusObj();
+    CyberMesh* input = nullptr;
+    REQUIRE(cyber_mesh_load_obj(objPath.string().c_str(), &input) == CYBER_OK);
+
+    const auto remeshAt = [input](int method, float adaptivity) {
+        CyberRemeshParams params{};
+        cyber_default_params(&params);
+        params.targetQuads = 300;
+        params.quadMethod = method;
+        params.adaptivity = adaptivity;
+        CyberMesh* output = nullptr;
+        REQUIRE(cyber_remesh(input, &params, nullptr, nullptr, nullptr, &output) == CYBER_OK);
+        REQUIRE(output != nullptr);
+        std::vector<float> positions(cyber_mesh_copy_positions(output, nullptr, 0));
+        cyber_mesh_copy_positions(output, positions.data(), positions.size());
+        cyber_mesh_free(output);
+        return positions;
+    };
+
+    for (const int method : {CYBER_QUAD_QUADCOVER, CYBER_QUAD_ZREMESHER}) {
+        CAPTURE(method);
+        CHECK(remeshAt(method, 0.0f) != remeshAt(method, 1.0f));
+        CHECK(remeshAt(method, 1.0f) == remeshAt(method, 1.0f));
+    }
 
     cyber_mesh_free(input);
     std::error_code ec;
