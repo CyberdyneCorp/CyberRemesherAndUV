@@ -43,11 +43,16 @@ With `--report <path.json>` the CLI SHALL write a JSON report containing: tool v
 - **THEN** the JSON report SHALL list that island's failure stage and reason and the run status "partial"
 
 ### Requirement: Version and quiet output
-`--version` SHALL print the real semantic version and build info. Default output SHALL be the summary only; `--verbose` gates diagnostic detail; `--quiet` suppresses everything but errors. Progress SHALL print as a single updating line only when stdout is a TTY.
+`--version` SHALL print the real semantic version and build info: the engine version, the seamless-UV solver the build carries, and the C ABI version the binary was built against. The C ABI version is the one that decides whether a compiled caller can link, and it is deliberately independent of the engine version (see the ABI block in `capi/include/cyber_capi.h`), so it SHALL NOT be inferred from the engine version. Default output SHALL be the summary only; `--verbose` gates diagnostic detail; `--quiet` suppresses everything but errors. Progress SHALL print as a single updating line only when stdout is a TTY.
 
 #### Scenario: Version prints
 - **WHEN** `--version` is invoked
 - **THEN** a non-empty semantic version SHALL print (AutoRemesher printed an empty string)
+
+#### Scenario: Version names all three numbers
+- **WHEN** `--version` is invoked
+- **THEN** the output SHALL carry the engine version, the seamless-UV solver build, and the C ABI version as `<major>.<minor>` matching `CYBER_ABI_VERSION_MAJOR`/`_MINOR` in `capi/include/cyber_capi.h`
+- **AND** the ABI reported SHALL be the one this binary was COMPILED against, which is not necessarily the ABI of a shared library a separate host loads at runtime — that library answers for itself through `cyber_abi_version()`
 
 ### Requirement: Preset-driven export from the CLI
 The CLI SHALL accept `--preset <name-or-path>` selecting a built-in or

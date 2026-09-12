@@ -34,6 +34,9 @@ quadrangulator. A build without it routes to the portable solver and produces
 genuinely different quads — different enough that bench baselines from one do
 not gate the other. `cyberremesh --version` prints which solver a binary
 carries (`native+geogram` vs `native`); check it before trusting any measurement.
+It prints three lines — engine version, solver, and `c-abi <major>.<minor>` (the
+ABI the binary was compiled against, which is what decides whether a compiled
+caller links and moves independently of the engine version).
 
 Run the Python binding tests through ctest, not directly — the bare scripts
 print `SKIP: cyber_capi shared library not loadable` because ctest is what

@@ -7,6 +7,19 @@
 
 ### Added
 
+- **`cyberremesh --version` now prints the C ABI version too.** Three numbers
+  decide what a user is actually running — engine, seamless-UV solver, C ABI —
+  and the CLI reported two. The ABI is the one that decides whether a compiled
+  caller can LINK, and it is deliberately independent of the engine version, so
+  it could not be inferred from the line above it. Added as a third line
+  (`c-abi 1.2`); the two existing lines are byte-identical, because
+  `tools/bench/bench.py` and the CLI test parse them by prefix.
+
+  It is the COMPILE-TIME answer, from the header macros: the ABI this binary was
+  built against. A host that dlopens some other `libcyber_capi.so.1` gets a
+  different answer from `cyber_abi_version()`, which is the call for that
+  question — the CLI links the C++ core, not the C ABI facade.
+
 - **ABI 1.2** — three entry points across two additive bumps, nothing removed
   or reshaped, soname unchanged throughout. The additive-only rule exercised on
   itself rather than asserted: a test pins that clients compiled against 1.0 and

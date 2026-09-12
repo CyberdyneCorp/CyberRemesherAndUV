@@ -28,6 +28,12 @@
 
 #include <json.hpp>
 
+// Included for CYBER_ABI_VERSION_* alone (printed by --version). The header is
+// the single source of truth for those macros -- capi/CMakeLists.txt parses the
+// same two #defines for the soname -- and it is self-contained, so the CLI takes
+// the include path without linking any part of the C ABI library.
+#include <cyber_capi.h>
+
 #include "cyber/accel/backend.hpp"
 #include "cyber/core/export_preset.hpp"
 #include "cyber/core/io.hpp"
@@ -172,7 +178,8 @@ void printUsage() {
                  "  --backend <name>         compute backend: cpu | metal | cuda |\n"
                  "                           opencl (default: best available)\n"
                  "  --list-backends          print compute backends and exit\n"
-                 "  --version                print version and exit\n");
+                 "  --version                print engine version, solver and C ABI,\n"
+                 "                           then exit\n");
 }
 
 using cyber::cli::parseNumber;
@@ -213,6 +220,31 @@ int parseArgs(int argc, char** argv, CliOptions& options, bool& exitEarly) {
             // the route most meshes take. Print which one this binary carries
             // so a quality report identifies its own solver.
             std::printf("seamless-uv-solver %s\n", remesh::quadCoverSolverBuild().c_str());
+            // Three numbers decide what a user is running and this printed two.
+            // The C ABI version is what decides whether a compiled caller can
+            // LINK, and it is deliberately independent of the engine version
+            // above (see the ABI block in cyber_capi.h) -- so it cannot be
+            // inferred from the line above it, which is exactly why it has to
+            // be printed.
+            //
+            // These are the HEADER CONSTANTS, i.e. the compile-time answer:
+            // the ABI this binary was built against. Not the same question as
+            // the loaded-library answer for a host that dlopens some other
+            // libcyber_capi.so.1 -- that library reports itself through
+            // cyber_abi_version(), and the two can differ. We cannot call that
+            // here: the CLI links the C++ core, not the C ABI facade (see
+            // apps/cli/CMakeLists.txt), and linking cyber_capi purely to read
+            // two integers would pull the whole facade into every CLI build.
+            // It would also answer no better -- statically linked,
+            // cyber_abi_version() just returns these same macros. The only
+            // caller for whom the distinction matters is a host doing its own
+            // dlopen, and that host has cyber_abi_version() already.
+            //
+            // Appended as a third line, never inserted: the two lines above are
+            // parsed by tools/bench/bench.py (solver_identity) and
+            // tests/cli/test_cli.py, both by line prefix, so their bytes stay
+            // untouched.
+            std::printf("c-abi %d.%d\n", CYBER_ABI_VERSION_MAJOR, CYBER_ABI_VERSION_MINOR);
             exitEarly = true;
             return kExitOk;
         }
