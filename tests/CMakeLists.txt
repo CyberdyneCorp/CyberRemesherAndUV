@@ -282,6 +282,10 @@ if(Python3_FOUND)
 endif()
 
 if(CYBER_BUILD_CLI AND Python3_FOUND)
+    add_test(NAME bench_metrics
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/bench/test_mesh_metrics.py)
+    set_tests_properties(bench_metrics PROPERTIES TIMEOUT 60)
+
     add_test(NAME cli
         COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/cli/test_cli.py
                 $<TARGET_FILE:cyberremesh>)
