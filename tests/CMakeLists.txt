@@ -77,6 +77,7 @@ if(TARGET cyber_imageio)
 endif()
 if(TARGET cyber_capi)
     target_sources(cyber_tests PRIVATE capi/test_capi.cpp capi/test_capi_abi.cpp
+                                        capi/abi_clients/v0_8_client.cpp
                                         capi/test_capi_cache.cpp
                                         capi/test_capi_isotropic.cpp)
     target_link_libraries(cyber_tests PRIVATE cyber_capi)
@@ -84,6 +85,29 @@ if(TARGET cyber_capi)
     # the capi cases read it and gate on what it says.
     target_compile_definitions(cyber_tests PRIVATE
         CYBER_CAPI_HEADER_PATH="${PROJECT_SOURCE_DIR}/capi/include/cyber_capi.h")
+endif()
+
+# A separate process, compiled from the retained v0.8 declarations and linked
+# to the current SHARED library. Unit tests link the in-tree static target for
+# speed; this is the executable compatibility check an embedder actually needs.
+if(TARGET cyber_capi_shared)
+    add_executable(cyber_v0_8_shared_client
+        capi/abi_clients/v0_8_client.cpp
+        capi/abi_clients/v0_8_client_runner.cpp)
+    target_link_libraries(cyber_v0_8_shared_client PRIVATE cyber_capi_shared)
+    cyber_set_warnings(cyber_v0_8_shared_client)
+    add_test(NAME capi_v0_8_shared_client_load COMMAND cyber_v0_8_shared_client --load-only)
+    add_test(NAME capi_v0_8_shared_client_version COMMAND cyber_v0_8_shared_client)
+    set_tests_properties(capi_v0_8_shared_client_load capi_v0_8_shared_client_version
+        PROPERTIES TIMEOUT 20)
+    # Unlike ELF/Mach-O, Windows does not record a build-tree rpath in the
+    # executable.  The DLL is emitted in capi/ while this client lives in
+    # tests/, so make the dynamic-loader search path explicit for CTest.
+    if(WIN32)
+        set_tests_properties(capi_v0_8_shared_client_load capi_v0_8_shared_client_version
+            PROPERTIES ENVIRONMENT_MODIFICATION
+                "PATH=path_list_prepend:$<TARGET_FILE_DIR:cyber_capi_shared>")
+    endif()
 endif()
 if(TARGET cyber_app)
     target_sources(cyber_tests PRIVATE app/test_app.cpp)
@@ -206,6 +230,20 @@ if(Python3_FOUND)
     add_test(NAME swift_abi_parity
         COMMAND ${Python3_EXECUTABLE}
                 ${CMAKE_CURRENT_SOURCE_DIR}/packaging/test_swift_abi_parity.py)
+
+    # The checked-in manifest combines source-level type identities with
+    # layouts measured by this exact compiler.  It must run on every supported
+    # architecture: a manifest generated on one host is evidence, not a
+    # substitute for validating the toolchain that packages the library.
+    add_test(NAME capi_abi_manifest
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/packaging/test_capi_abi_manifest.py)
+    set(_capi_abi_manifest_environment "CXX=${CMAKE_CXX_COMPILER}")
+    if(CYBER_TEST_LAUNCHER_ENV)
+        list(APPEND _capi_abi_manifest_environment "${CYBER_TEST_LAUNCHER_ENV}")
+    endif()
+    set_tests_properties(capi_abi_manifest PROPERTIES
+        ENVIRONMENT "${_capi_abi_manifest_environment}")
 
     # Objective-C++ syntax gate for the Metal compute backend. Same idea as the
     # Swift guard above: metal_backend.mm needs an Apple toolchain to build and

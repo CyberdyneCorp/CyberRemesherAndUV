@@ -1088,6 +1088,14 @@ full increment rules, including why appending an enumerator is *not* additive.
 `SOVERSION` carries the ABI major, so the soname changes when the surface breaks
 (`libcyber_capi.so.1`) rather than tracking the project's `0.x`.
 
+Every release and supported CTest toolchain compares
+[`capi/abi/cyber_capi-1.2.json`](capi/abi/cyber_capi-1.2.json) with a
+compiler-measured manifest of this header. It records signatures, enum values,
+field types and padding—not merely `sizeof`—and compiles a retained v0.8 client
+surface against the current library. Extend the ABI with a new sibling entry
+point and a new parameter/report struct; never append fields to an existing
+caller-owned struct in an ABI minor.
+
 Python: `cyberremesh.abi_version()` / `check_abi()`. Swift:
 `CyberRuntime.abiVersionComponents` / `CyberRuntime.checkABI()`.
 Rust: `cyberremesh::check_abi()` / `abi()` — see [`rust/README.md`](rust/README.md).

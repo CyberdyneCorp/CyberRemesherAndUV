@@ -49,3 +49,36 @@ on the client's side.
 - **WHEN** the engine's behaviour changes without altering any declaration
 - **THEN** the engine version SHALL move and the ABI version SHALL NOT, and a
   matching ABI SHALL NOT be taken as a promise of identical output
+
+### Requirement: ABI declarations are machine-checked beyond byte layout
+
+The release and CTest gates SHALL compare the public C header with a checked-in
+ABI manifest. The manifest SHALL record exported function and callback
+signatures, enum values and representation, and every concrete struct's field
+identity, source type, offset, field size, aggregate size and alignment.
+Compiler-measured layout SHALL be validated on each supported packaging
+toolchain. A source-level type change or a field added in existing padding SHALL
+be reported even when the aggregate `sizeof` is unchanged.
+
+The project SHALL compile and run a previous-release client surface against the
+current library. That client SHALL use its historical declarations rather than
+including the current header, and SHALL exercise both ordinary calls and
+guarded output buffers.
+
+#### Scenario: A same-sized type change is rejected
+
+- **WHEN** a pointer pointee type changes while its pointer-sized field and
+  aggregate layout remain the same
+- **THEN** manifest validation SHALL fail
+
+#### Scenario: A field consumes trailing padding
+
+- **WHEN** a field is introduced in previously unused trailing padding
+- **THEN** manifest validation SHALL fail even if `sizeof` is unchanged
+
+#### Scenario: An old client uses the new library
+
+- **WHEN** the client translation unit is compiled from the retained v0.8.0
+  declarations and linked with the current shared library
+- **THEN** it SHALL load a mesh, use array/out-param APIs without damaging
+  guard bytes, and complete successfully
