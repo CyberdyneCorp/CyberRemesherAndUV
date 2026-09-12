@@ -655,6 +655,19 @@ CyberStatus remeshShared(const CyberMesh* in, const CyberRemeshParams* params,
                 // variance (spot irr 2->6%, fandisk 3->15%), so — unlike the field/integer
                 // paths — it stays uniform-only here. The adaptivity knob remains available
                 // for experiments via makeQuadCoverQuadrangulator(iters, a) / CYBER_QC_ADAPT.
+                //
+                // CORRECTION (2026-09-10): those two measurements no longer reproduce on
+                // this build. Re-measured at --target-quads 3000, adaptivity 0 -> 1:
+                // WITHOUT --pure-quads spot irregular 5.4% -> 3.6% (adaptivity BETTER) and
+                // fandisk 2.9% -> 3.5%; WITH --pure-quads spot 2.2% -> 2.3%, fandisk
+                // 2.6% -> 2.5%, cheburashka 4.2% -> 3.6%, rocker-arm 5.8% -> 4.4%,
+                // stanford-bunny 4.4% -> 4.3%. Nothing like 2->6 or 3->15 anywhere, and
+                // median angle / edge CV move the same (small, mixed-sign) way. The
+                // hardcoded 0 is therefore resting on a stale justification — it is NOT
+                // re-justified here, and it still contradicts the "No inert parameters"
+                // requirement in openspec/specs/remeshing-parameters/spec.md, which is
+                // tracked separately. Left as-is only because changing it moves every
+                // embedder's default output and is not this change's subject.
                 return cyber::remesh::makeQuadCoverQuadrangulator(40, 0.0f, holeFillMaxBoundary,
                                                                   sharpEdgeDegrees);
             }

@@ -192,6 +192,23 @@ struct NativeSolveContext {
 // Const / non-mutating (unlike Mesh::tagFeatureEdges).
 [[nodiscard]] float creaseEdgeFraction(const Mesh& mesh, float dihedralDegrees);
 
+// Ranks two count-calibration attempts for the quad-cover re-solve loop (see
+// the quadrangulator's calibrate loop). `got` and `incumbent` are extracted
+// quad counts and `target` the count the requested edge length implies; returns
+// true when `got` is the closer match, i.e. when ITS mesh is the one to keep.
+//
+// Distance is |log(got / target)|, not |got - target|: the loop's own
+// acceptance band is a RATIO band (its 1.33x and 0.75x edges are a reciprocal
+// pair, near enough), so the ranking has to be a ratio too. A |got - target|
+// ranking would call 41-against-156 a better match than 400-against-156 — the
+// smaller absolute gap, but a 3.8x undershoot against a 2.6x overshoot, which
+// is the wrong way round for a density knob.
+//
+// An attempt that extracted nothing (`got` <= 0) never wins, so a re-solve that
+// produced no quads cannot discard a good earlier attempt. A non-positive
+// `target` means there is nothing to calibrate against, so nothing wins.
+[[nodiscard]] bool countAttemptIsCloser(double got, double incumbent, double target);
+
 // -----------------------------------------------------------------------------
 // Collaborator 2 (NOT IMPLEMENTED): the isoline tracer / mesh extractor.
 // -----------------------------------------------------------------------------

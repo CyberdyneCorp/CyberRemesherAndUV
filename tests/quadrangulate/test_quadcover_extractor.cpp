@@ -9,6 +9,7 @@
 #include <cstdlib>
 #include <exception>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <new>
 #include <sstream>
@@ -33,6 +34,7 @@
 #include "cyber/core/mesh.hpp"
 #include "cyber/core/remesh_params.hpp"
 #include "cyber/quadrangulate/quadcover_extractor.hpp"
+#include "support/scoped_env.hpp"
 
 using cyber::EdgeId;
 using cyber::FaceId;
@@ -111,6 +113,33 @@ Mesh makeCube() {
                                  {0, 0, 1}, {1, 0, 1}, {1, 1, 1}, {0, 1, 1}};
     const std::vector<std::vector<Index>> f = {{0, 3, 2, 1}, {4, 5, 6, 7}, {0, 1, 5, 4},
                                                {2, 3, 7, 6}, {1, 2, 6, 5}, {3, 0, 4, 7}};
+    return Mesh::fromIndexed(p, f);
+}
+
+// A flat n x n grid of triangulated cells with a square hole punched out of the
+// middle: an OPEN surface (two boundary loops) whose area is exactly
+// 1 - (hole cells) / n^2.
+Mesh makePlaneWithHole(int n) {
+    std::vector<Vec3> p;
+    std::vector<std::vector<Index>> f;
+    for (int j = 0; j <= n; ++j) {
+        for (int i = 0; i <= n; ++i) {
+            p.push_back({static_cast<float>(i) / static_cast<float>(n),
+                         static_cast<float>(j) / static_cast<float>(n), 0.0f});
+        }
+    }
+    const auto vid = [&](int i, int j) { return static_cast<Index>(j * (n + 1) + i); };
+    const int lo = n / 3;
+    const int hi = 2 * n / 3;
+    for (int j = 0; j < n; ++j) {
+        for (int i = 0; i < n; ++i) {
+            if (i >= lo && i < hi && j >= lo && j < hi) {
+                continue;  // the hole
+            }
+            f.push_back({vid(i, j), vid(i + 1, j), vid(i + 1, j + 1)});
+            f.push_back({vid(i, j), vid(i + 1, j + 1), vid(i, j + 1)});
+        }
+    }
     return Mesh::fromIndexed(p, f);
 }
 
@@ -595,6 +624,95 @@ TEST_CASE("creaseEdgeFraction routes sharp CAD to native, keeps smooth meshes ve
     REQUIRE(smooth < 0.02f);
     REQUIRE(sharp > 0.02f);
     REQUIRE(sharp > smooth);
+}
+
+TEST_CASE("countAttemptIsCloser ranks calibration attempts multiplicatively") {
+    // Distance is multiplicative, so an overshoot can beat an undershoot that has a
+    // SMALLER absolute gap: 200 is 2x the target where 40 is 2.5x under it, even
+    // though |200 - 100| > |40 - 100|. A |got - target| ranking gets this backwards,
+    // which on a density knob means preferring the sparser of two equally wrong
+    // meshes. The ranking is also antisymmetric — swapping the pair flips it.
+    CHECK(remesh::countAttemptIsCloser(200.0, 40.0, 100.0));
+    CHECK_FALSE(remesh::countAttemptIsCloser(40.0, 200.0, 100.0));
+    // The measured plane-with-hole case below: attempt 0's 38 against a 51.9 target
+    // beats attempt 1's 18, so attempt 0's mesh is the one to keep.
+    CHECK(remesh::countAttemptIsCloser(38.0, 18.0, 51.9));
+    CHECK_FALSE(remesh::countAttemptIsCloser(18.0, 38.0, 51.9));
+    // The plain cases, and the two that keep a failed re-solve from discarding a
+    // usable attempt: nothing extracted never wins, and with nothing to calibrate
+    // against nothing wins either.
+    CHECK(remesh::countAttemptIsCloser(95.0, 60.0, 100.0));
+    CHECK(remesh::countAttemptIsCloser(95.0, 0.0, 100.0));  // no incumbent yet
+    CHECK_FALSE(remesh::countAttemptIsCloser(0.0, 60.0, 100.0));
+    CHECK_FALSE(remesh::countAttemptIsCloser(95.0, 60.0, 0.0));
+}
+
+// REGRESSION: the count-calibration loop used to keep its LAST attempt rather than
+// its best one. The correction assumes quads ~ 1/scaling^2; where that is not
+// monotone the re-solve can land FARTHER from the target than the first attempt,
+// and the loop then shipped the worse mesh it had already measured.
+//
+// This 20x20 plane-with-hole at edge length 0.13 is the smallest reproducer found:
+// target 51.9 quads, attempt 0 extracts 38 (-32%), the correction drops scaling
+// 0.500 -> 0.428 and attempt 1 extracts 18 (-65%). Before the fix the shipped mesh
+// had 32 faces; after it has 47, the same mesh the pinned single-attempt run below
+// produces. The defect also shows on real inputs at the shipped 3000-quad default:
+// a hole-filled Stanford bunny at adaptivity 1 shipped attempt 1's 1335 quads over
+// attempt 0's 1003, costing 736 boundary edges on a CLOSED input, median angle
+// 75.7 -> 60.8 deg and irregular 4.2% -> 16.6%.
+TEST_CASE("quad-cover count calibration keeps its best attempt, not its last") {
+    const int n = 20;
+    const float edgeLength = 0.13f;
+    const Mesh plane = makePlaneWithHole(n);
+
+    // Every cell of the unit square is two triangles of area 1/(2n^2), so the
+    // target count the loop calibrates against is area / edgeLength^2.
+    const double area = static_cast<double>(aliveFaces(plane)) / (2.0 * static_cast<double>(n) * n);
+    const double targetQuads = area / (static_cast<double>(edgeLength) * edgeLength);
+    const auto countError = [targetQuads](std::size_t quads) {
+        return quads == 0 ? std::numeric_limits<double>::infinity()
+                          : std::fabs(std::log(static_cast<double>(quads) / targetQuads));
+    };
+    const auto solve = [&](Mesh& mesh) {
+        auto q = remesh::makeQuadCoverQuadrangulator(40, 0.0f, 64, 40.0f);
+        return q->quadrangulate(mesh, edgeLength, nullptr, nullptr);
+    };
+
+    // Both runs skip the initial-scaling probe so attempt 0 starts at the loop's
+    // 0.5 on every build, with or without the vendored Geogram solver — otherwise
+    // the pinned run below would not be the full run's own first attempt.
+    const cyber::test::ScopedEnv noProbe("CYBER_QC_NO_PROBE", "1");
+
+    std::size_t firstAttemptFaces = 0;
+    {
+        // CYBER_QC_SCALING pins the spacing scale and stops the loop after one
+        // attempt, so this IS attempt 0's mesh.
+        const cyber::test::ScopedEnv pin("CYBER_QC_SCALING", "0.5");
+        Mesh first = plane;
+        // A bare `return` here made this case pass having run ZERO assertions
+        // whenever the solve failed for ANY reason, not only the one it names --
+        // which is how it was found: a deliberately broken build reported
+        // "1 passed, 0 assertions" and read as green. The skip is real (a build
+        // without a seamless solver has nothing to compare) but it has to be
+        // LOUD, or a future breakage that stops the solve silently converts this
+        // regression test into a no-op that still reports success.
+        if (!solve(first).success) {
+            MESSAGE("skipped: no seamless solver in this build, nothing to compare");
+            return;
+        }
+        firstAttemptFaces = aliveFaces(first);
+    }
+    REQUIRE(firstAttemptFaces > 0);
+
+    Mesh shipped = plane;
+    REQUIRE(solve(shipped).success);
+    const std::size_t shippedFaces = aliveFaces(shipped);
+    REQUIRE(shippedFaces > 0);
+    CHECK(shipped.validate().empty());
+
+    // The loop may re-solve, but it may never ship a count FARTHER from the target
+    // than an attempt it already made and measured.
+    CHECK(countError(shippedFaces) <= countError(firstAttemptFaces));
 }
 
 TEST_CASE("quad-cover M2: flat integer-grid UV extracts a clean quad grid") {

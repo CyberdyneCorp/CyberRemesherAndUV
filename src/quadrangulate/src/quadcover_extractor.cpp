@@ -1338,6 +1338,18 @@ float creaseEdgeFraction(const Mesh& mesh, float dihedralDegrees) {
     return interior > 0 ? static_cast<float>(creases) / static_cast<float>(interior) : 0.0f;
 }
 
+// Which of two count-calibration attempts to keep (see the header for why the
+// distance is multiplicative).
+bool countAttemptIsCloser(double got, double incumbent, double target) {
+    if (!(got > 0.0) || !(target > 0.0)) {
+        return false;  // nothing extracted, or nothing to calibrate against
+    }
+    if (!(incumbent > 0.0)) {
+        return true;  // no usable incumbent yet
+    }
+    return std::fabs(std::log(got / target)) < std::fabs(std::log(incumbent / target));
+}
+
 SeamlessUv computeSeamlessUv(const Mesh& mesh, float targetEdgeLength, float harnessScaling,
                              float harnessAdaptivity, const CancelToken* cancel,
                              float featureDegrees, NativeSolveContext* ctx) {
@@ -3682,6 +3694,19 @@ public:
         // and re-solve once if we are off by more than 25%.
         const double targetQuads = meshTargetQuads(mesh, targetEdgeLength);
         IsolineQuadMesh out;
+        // The loop KEEPS THE BEST attempt, not merely the last one. The correction
+        // assumes quads ~ 1/scaling^2, and that relation is not monotone on every
+        // input: a hole-filled Stanford bunny at adaptivity 1 went 1003 quads (+54%
+        // over target) -> 1335 (+106%) when the scaling was raised, and shipping that
+        // second attempt cost 736 boundary edges on a CLOSED input, median angle
+        // 75.7 -> 60.8 deg, edge CV 0.45 -> 0.79 and irregular 4.2% -> 16.6%. The
+        // re-solve is still the right move (it is right on every corpus model); what
+        // was wrong was overwriting a measured-better answer with a measured-worse
+        // one. Rejected alternative: widening the acceptance band so such a first
+        // attempt is accepted outright — that trades one arbitrary threshold for
+        // another and still ships the worse answer whenever the band is missed.
+        IsolineQuadMesh best;
+        double bestQuads = 0.0;
         float scaling = 0.5f;
         // The native solve's isotropic remesh + cross field + cut setup depend only on the
         // mesh / edge length / adaptivity / feature threshold — never on `scaling` — so the
@@ -3798,6 +3823,12 @@ public:
                              "[qc] calibrate attempt=%d scaling=%.4f got=%.0f target=%.1f\n",
                              attempt, static_cast<double>(scaling), got, targetQuads);
             }
+            // Move (not copy) — `out` is reassigned at the top of every later
+            // iteration, and restored from `best` below before anything reads it.
+            if (countAttemptIsCloser(got, bestQuads, targetQuads)) {
+                best = std::move(out);
+                bestQuads = got;
+            }
             if (std::getenv("CYBER_QC_SCALING") != nullptr || targetQuads <= 0.0 || got <= 0.0) {
                 break;  // fixed scaling (experiment) or nothing to calibrate against
             }
@@ -3812,6 +3843,13 @@ public:
                 break;  // within band -> accept
             }
             scaling = std::clamp(scaling * static_cast<float>(std::sqrt(ratio)), 0.2f, 1.5f);
+        }
+        // Ship the best attempt. `bestQuads` is 0 only when no attempt extracted
+        // anything (or there was no target to calibrate against, the fixed-scaling
+        // experiment path), and then `out` was never moved from and still holds the
+        // single attempt — so both paths below are byte-identical to before.
+        if (bestQuads > 0.0) {
+            out = std::move(best);
         }
         reportUnhonoredGuidance();
         if (progress != nullptr) {

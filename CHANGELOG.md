@@ -137,6 +137,40 @@
 
 ### Fixed
 
+- **Quad-cover's count calibration shipped its LAST attempt, not its best one.**
+  The loop solves, measures the extracted quad count, and re-solves once at a
+  corrected spacing when the count misses the target. The correction assumes
+  quads ~ 1/scaling², and where that relation is not monotone the re-solve can
+  land FARTHER from the target than the first attempt — at which point the loop
+  overwrote a measured-better answer with a measured-worse one.
+
+  Not theoretical. A hole-filled Stanford bunny at `--adaptivity 1` extracted
+  1003 quads (+54% over target) on the first attempt, then 1335 (+106%) on the
+  second, and shipped the second: **736 boundary edges on a CLOSED input**,
+  median angle 75.7° → 60.8°, edge-length CV 0.45 → 0.79, irregular 4.2% →
+  16.6%. Keeping the first attempt instead gives a clean, defect-free mesh.
+
+  The loop still re-solves — that is right on every corpus model, where the
+  second attempt lands within a few percent of the target. What changed is only
+  which of the attempts it keeps: now the one whose count is closest to the
+  target, ranked by |log(got/target)| so an overshoot and the reciprocal
+  undershoot rank equally (the acceptance band is multiplicative, so the ranking
+  must be too). An attempt that extracted nothing never wins, so a failed
+  re-solve can no longer discard a usable first attempt.
+
+  Output is **byte-identical** on all six benchmark corpus models at both
+  adaptivity 0 and 1 — every one of those re-solves was an improvement, so
+  there was nothing for the new rule to change.
+
+  Note what this does NOT change: the acceptance band itself is still 0.75–1.33×
+  (0.88–1.14× for tiny targets), so a first attempt landing inside it is still
+  accepted as-is. That is why the same run can return 1.33× the requested count
+  on one model and within 1% on another, and why `--adaptivity 0` and
+  `--adaptivity 1` can differ ~24% in count on the scanned Stanford bunny with
+  no bug involved. README "How it works → Quad retopology" now documents what
+  `targetQuadCount` promises and what an embedder should do when it needs the
+  count held tightly.
+
 - **The field-evaluator boundary failed open in five places.**
   `CyberFieldEvaluator` is where HOST code returns values into ours, and only
   `occlusion` was defended — by a silent clamp. Each of the others handed back
