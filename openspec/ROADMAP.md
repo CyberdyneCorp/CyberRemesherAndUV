@@ -9,6 +9,10 @@ provide something for them.
 Living requirements are in `openspec/specs/`; this file is the plan, not the
 contract. A row becomes real when it becomes a change in `openspec/changes/`.
 
+> Historical snapshot: this document's status section is dated 2026-08-05.
+> For current supported contracts and platform evidence, see
+> [`docs/CURRENT_STATUS.md`](../docs/CURRENT_STATUS.md).
+
 ## Where the engine is (2026-08-05, v0.5.0)
 
 14 capabilities, 5 archived changes, one change complete and awaiting archive
