@@ -19,6 +19,7 @@ from pathlib import Path
 
 BENCH_DIR = Path(__file__).resolve().parent
 MANIFEST = BENCH_DIR / "corpus.json"
+ACCEPTANCE_MANIFEST = BENCH_DIR / "acceptance_corpus.json"
 
 
 def _write_obj(path: Path, verts: list, faces: list) -> None:
@@ -139,11 +140,43 @@ def _cylinder(segments: int = 48, height_divs: int = 12) -> tuple[list, list]:
     return verts, faces
 
 
+def _open_patch() -> tuple[list, list]:
+    return ([(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (1.0, 1.0, 0.0), (0.0, 1.0, 0.0)],
+            [(0, 1, 2), (0, 2, 3)])
+
+
+def _translated_sphere(offset: tuple[float, float, float]) -> tuple[list, list]:
+    vertices, faces = _sphere(rings=12, segments=18)
+    return ([tuple(value + offset[axis] for axis, value in enumerate(vertex))
+             for vertex in vertices], faces)
+
+
+def _multi_component() -> tuple[list, list]:
+    left, left_faces = _translated_sphere((-1.5, 0.0, 0.0))
+    right, right_faces = _translated_sphere((1.5, 0.0, 0.0))
+    return left + right, left_faces + [tuple(index + len(left) for index in face)
+                                       for face in right_faces]
+
+
+def _large_coordinates() -> tuple[list, list]:
+    return _translated_sphere((500_000.0, 500_000.0, 500_000.0))
+
+
 GENERATED = {
     "sphere": (_sphere, 800),        # name -> (builder, default target quads)
     "box_sharp": (_box, 600),
     "torus": (_torus, 700),
     "cylinder": (_cylinder, 600),
+}
+
+ACCEPTANCE_GENERATORS = {
+    "sphere": _sphere,
+    "box": _box,
+    "torus": _torus,
+    "cylinder": _cylinder,
+    "open_patch": _open_patch,
+    "multi_component": _multi_component,
+    "large_coordinates": _large_coordinates,
 }
 
 
@@ -156,6 +189,28 @@ def generated_meshes(cache_dir: Path) -> list[dict]:
             verts, faces = builder()
             _write_obj(path, verts, faces)
         entries.append({"name": name, "path": path, "target_quads": target_quads})
+    return entries
+
+
+def acceptance_meshes(cache_dir: Path) -> list[dict]:
+    """Materialize the versioned offline acceptance corpus without a network."""
+    manifest = json.loads(ACCEPTANCE_MANIFEST.read_text())
+    if manifest.get("schema_version") != 1:
+        raise RuntimeError("unsupported acceptance corpus schema")
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    entries = []
+    for item in manifest["fixtures"]:
+        path = cache_dir / f"{item['name']}.obj"
+        generator = item["generator"]
+        if generator == "invalid_index":
+            path.write_text("v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 4\n")
+        else:
+            builder = ACCEPTANCE_GENERATORS.get(generator)
+            if builder is None:
+                raise RuntimeError(f"unknown acceptance generator: {generator}")
+            vertices, faces = builder()
+            _write_obj(path, vertices, faces)
+        entries.append({**item, "path": path, "sha256": _sha256(path)})
     return entries
 
 
