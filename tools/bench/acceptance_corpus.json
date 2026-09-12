@@ -2,7 +2,7 @@
   "schema_version": 1,
   "comment": "Offline deterministic acceptance fixtures. Generator identity and parameters are part of the benchmark contract; downloaded corpus.json remains non-gating.",
   "fixtures": [
-    {"name": "sphere", "category": "organic", "generator": "sphere", "target_quads": 800, "expected_input": "accepted"},
+    {"name": "sphere", "category": "organic", "generator": "sphere", "target_quads": 800, "expected_input": "accepted", "sha256": "1dd2ca285db4bec8dd6a41d6a443b00ddf0d04ab8faed3605190b01d54c11cbd"},
     {"name": "box_sharp", "category": "cad-feature", "generator": "box", "target_quads": 600, "expected_input": "accepted"},
     {"name": "torus", "category": "thin-closed", "generator": "torus", "target_quads": 700, "expected_input": "accepted"},
     {"name": "cylinder", "category": "mixed-feature", "generator": "cylinder", "target_quads": 600, "expected_input": "accepted"},

@@ -210,7 +210,14 @@ def acceptance_meshes(cache_dir: Path) -> list[dict]:
                 raise RuntimeError(f"unknown acceptance generator: {generator}")
             vertices, faces = builder()
             _write_obj(path, vertices, faces)
-        entries.append({**item, "path": path, "sha256": _sha256(path)})
+        digest = _sha256(path)
+        expected = item.get("sha256")
+        if expected is not None and digest != expected:
+            raise RuntimeError(
+                f"{item['name']}: generated content hash changed "
+                f"(got {digest}, expected {expected})"
+            )
+        entries.append({**item, "path": path, "sha256": digest})
     return entries
 
 
