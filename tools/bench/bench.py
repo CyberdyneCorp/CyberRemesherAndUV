@@ -112,13 +112,25 @@ def benchmark(meshes: list[dict], solvers: dict, out_dir: Path, samples: int,
         for name, spec in solvers.items():
             output = out_dir / f"{mesh['name']}.{name}.obj"
             row = {"mesh": mesh["name"], "solver": name,
-                   "target_quads": mesh["target_quads"]}
+                   "target_quads": mesh["target_quads"], "input": str(mesh["path"]),
+                   "output": str(output)}
             outcome = run_solver(spec, mesh["path"], output, mesh["target_quads"],
                                  timeout)
             row.update(outcome)
             if outcome["ok"]:
-                row["metrics"] = mesh_metrics.compute_all(
-                    str(mesh["path"]), str(output), samples=samples)
+                try:
+                    row["metrics"] = mesh_metrics.compute_all(
+                        str(mesh["path"]), str(output), samples=samples)
+                except (OSError, ValueError, IndexError) as exc:
+                    row.update(ok=False, error=f"unmeasurable output: {exc}")
+                else:
+                    validity = row["metrics"]
+                    if not validity["valid"]:
+                        defects = ", ".join(
+                            f"{name}={value}" for name, value in validity.items()
+                            if name != "valid" and isinstance(value, int) and value > 0
+                        )
+                        row.update(ok=False, error=f"invalid output: {defects}")
             print(format_row(row))
             results.append(row)
     return results
@@ -126,7 +138,9 @@ def benchmark(meshes: list[dict], solvers: dict, out_dir: Path, samples: int,
 
 def format_row(row: dict) -> str:
     if not row.get("ok"):
-        return f"{row['mesh']:<12} {row['solver']:<14} FAILED: {row['error']}"
+        artifact = row.get("output", "")
+        suffix = f" (artifact: {artifact})" if artifact else ""
+        return f"{row['mesh']:<12} {row['solver']:<14} FAILED: {row['error']}{suffix}"
     m = row["metrics"]
     recall = m.get("feature_recall")
     recall_str = f"{recall:.2f}" if recall is not None else "  - "
