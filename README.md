@@ -10,6 +10,10 @@ see `openspec/changes/archive/2026-07-22-bootstrap-v1-platform/` for the foundin
 (proposal, design, capability specs, task plan). Completed changes are archived there and
 their requirements folded into `openspec/specs/`, which is the current contract.
 
+For supported integration paths, platform verification boundaries and a current
+capability matrix, read [Current capability and integration contract](docs/CURRENT_STATUS.md).
+The detailed [roadmap](docs/ROADMAP.md) is a dated research log.
+
 ### Auto-retopology
 
 Triangle→quad remeshing via `RemeshParams.quad_method`, clean-room and permissively
