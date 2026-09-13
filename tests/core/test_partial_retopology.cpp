@@ -55,7 +55,13 @@ TEST_CASE("partial retopology rejects disconnected or parity-incompatible region
 }
 
 TEST_CASE("partial retopology replaces only the selected region") {
-    const Mesh source = makePatch();
+    Mesh source = makePatch();
+    auto& weights = source.vertexAttributes().create<float>("weight");
+    auto& groups = source.vertexAttributes().create<std::int32_t>("group_id");
+    for (Index vertex = 0; vertex < source.vertexCapacity(); ++vertex) {
+        weights[vertex] = static_cast<float>(vertex);
+        groups[vertex] = static_cast<std::int32_t>(vertex);
+    }
     const std::vector<VertexId> exteriorFace = source.faceVertices(FaceId{0});
     const Vec3 borderPosition = source.position({6});
 
@@ -73,6 +79,12 @@ TEST_CASE("partial retopology replaces only the selected region") {
     CHECK(result.mesh.position({6}) == borderPosition);
     CHECK(result.mesh.validate().empty());
     REQUIRE(result.correspondences.size() == 4);
+    REQUIRE(result.sourceVertexToOutput.size() == source.vertexCapacity());
+    CHECK(result.sourceVertexToOutput[6] == cyber::VertexId{6});
+    const auto* transferredWeights = result.mesh.vertexAttributes().find<float>("weight");
+    const auto* transferredGroups = result.mesh.vertexAttributes().find<std::int32_t>("group_id");
+    REQUIRE(transferredWeights != nullptr);
+    REQUIRE(transferredGroups != nullptr);
     for (const remesh::SourceCorrespondence& correspondence : result.correspondences) {
         CHECK(correspondence.sourceFace == FaceId{5});
         CHECK(correspondence.distance == doctest::Approx(0.0f));
@@ -80,6 +92,17 @@ TEST_CASE("partial retopology replaces only the selected region") {
         CHECK(correspondence.barycentric.x + correspondence.barycentric.y +
                   correspondence.barycentric.z ==
               doctest::Approx(1.0f));
+        CHECK((*transferredWeights)[correspondence.outputVertex.value] ==
+              doctest::Approx(
+                  correspondence.barycentric.x * weights[correspondence.sourceTriangle[0].value] +
+                  correspondence.barycentric.y * weights[correspondence.sourceTriangle[1].value] +
+                  correspondence.barycentric.z * weights[correspondence.sourceTriangle[2].value]));
+        const std::int32_t transferred = (*transferredGroups)[correspondence.outputVertex.value];
+        const bool transferredFromTriangle =
+            transferred == groups[correspondence.sourceTriangle[0].value] ||
+            transferred == groups[correspondence.sourceTriangle[1].value] ||
+            transferred == groups[correspondence.sourceTriangle[2].value];
+        CHECK(transferredFromTriangle);
     }
     for (std::size_t face = 0; face < result.mesh.faceCapacity(); ++face) {
         if (result.mesh.isAlive(FaceId{static_cast<Index>(face)})) {

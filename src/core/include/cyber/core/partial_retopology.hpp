@@ -46,6 +46,9 @@ struct PartialRetopologyResult {
     PartialRetopologyStatus status = PartialRetopologyStatus::Rejected;
     Mesh mesh;
     PartialRetopologyAnalysis analysis;
+    // Indexed by source vertex id. A valid entry identifies the same vertex in
+    // `mesh`; exact-border mode preserves all source vertices by identity.
+    std::vector<VertexId> sourceVertexToOutput;
     std::vector<SourceCorrespondence> correspondences;
     std::string reason;
 };

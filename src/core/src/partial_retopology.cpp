@@ -4,6 +4,7 @@
 #include <limits>
 #include <map>
 #include <queue>
+#include <type_traits>
 
 #include "cyber/core/bvh.hpp"
 
@@ -62,6 +63,29 @@ SourceCorrespondence findSourceCorrespondence(const Mesh& source,
     result.distance = std::sqrt(bestDistanceSquared);
     result.confidence = bestDistanceSquared == 0.0f ? 1.0f : 0.0f;
     return result;
+}
+
+void transferVertexAttributes(const Mesh& source, Mesh& output,
+                              const SourceCorrespondence& correspondence) {
+    source.vertexAttributes().forEachColumnPaired(
+        output.vertexAttributes(), [&](const auto& input, auto& result) {
+            using T = typename std::decay_t<decltype(input)>::value_type;
+            const std::array<VertexId, 3>& triangle = correspondence.sourceTriangle;
+            const Vec3 weights = correspondence.barycentric;
+            if constexpr (std::is_same_v<T, std::int32_t>) {
+                std::size_t nearest = 0;
+                if (weights.y > weights.x && weights.y >= weights.z) {
+                    nearest = 1;
+                } else if (weights.z > weights.x && weights.z > weights.y) {
+                    nearest = 2;
+                }
+                result[correspondence.outputVertex.value] = input[triangle[nearest].value];
+            } else {
+                result[correspondence.outputVertex.value] = input[triangle[0].value] * weights.x +
+                                                            input[triangle[1].value] * weights.y +
+                                                            input[triangle[2].value] * weights.z;
+            }
+        });
 }
 
 }  // namespace
@@ -164,6 +188,12 @@ PartialRetopologyResult partialRetopologize(const Mesh& source,
                                             const PartialRetopologyRequest& request) {
     PartialRetopologyResult result;
     result.mesh = source;
+    result.sourceVertexToOutput.resize(source.vertexCapacity());
+    for (Index vertex = 0; vertex < source.vertexCapacity(); ++vertex) {
+        if (source.isAlive(VertexId{vertex})) {
+            result.sourceVertexToOutput[vertex] = VertexId{vertex};
+        }
+    }
     result.analysis = analyzePartialRetopology(source, request);
     if (result.analysis.status != PartialRetopologyStatus::Ready) {
         result.reason = result.analysis.reason;
@@ -188,6 +218,7 @@ PartialRetopologyResult partialRetopologize(const Mesh& source,
         result.correspondences.push_back(
             findSourceCorrespondence(source, result.analysis.selectedFaces, inner.back(),
                                      result.mesh.position(inner.back())));
+        transferVertexAttributes(source, result.mesh, result.correspondences.back());
     }
     for (std::size_t i = 0; i < boundary.size(); ++i) {
         const std::vector<VertexId> quad = {boundary[i], boundary[(i + 1) % boundary.size()],
