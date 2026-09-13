@@ -187,6 +187,26 @@ TEST_CASE("capi bulk indexed exchange preserves authored polygons transactionall
     cyber_mesh_free(mesh);
 }
 
+TEST_CASE("capi symmetry detection reports ambiguity without editing") {
+    const std::vector<float> positions = {
+        -1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f,
+        1.0f, 1.0f, 0.0f, -1.0f, 1.0f, 0.0f,
+    };
+    const std::vector<size_t> offsets = {0, 4};
+    const std::vector<uint32_t> indices = {0, 1, 2, 3};
+    const CyberIndexedMesh input{positions.data(), 4, offsets.data(), 1, indices.data(), 4, nullptr, 0};
+    CyberMesh* mesh = nullptr;
+    REQUIRE(cyber_mesh_from_indexed(&input, &mesh) == CYBER_OK);
+    CyberSymmetryDetectionReport report{};
+    REQUIRE(cyber_detect_symmetry(mesh, &report) == CYBER_OK);
+    CHECK(report.detected == 0);
+    CHECK(report.ambiguous == 1);
+    CHECK(report.axis == CYBER_ZR_SYMMETRY_NONE);
+    CHECK(report.matchedVertices == report.sampledVertices);
+    CHECK(cyber_detect_symmetry(nullptr, &report) == CYBER_ERR_INVALID_ARG);
+    cyber_mesh_free(mesh);
+}
+
 TEST_CASE("capi bulk indexed exchange retains vertex face and corner attributes") {
     const float positions[] = {0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0};
     const size_t offsets[] = {0, 4};
