@@ -15,14 +15,14 @@
       version symbol" comment deleted, because it is no longer true.
 - [x] A5. Tests, including the spec's own previously-unwritable scenario, and
       `static_assert`s pinning the sizeof of the array-strided structs.
-- [ ] A6. A layout manifest pinning type identity and struct-level padding.
-      DEFERRED, and the reason is recorded: two designs for this were refuted
-      during review. One recorded only `sizeof`/`offsetof`, so a `float*` ->
-      `double*` swap reproduced byte-for-byte; the other was blind to a field
-      dropped into existing trailing padding, which 4 of the 26 structs have.
-      A correct one needs type-kind tags from `<type_traits>` and
-      struct-granularity diffs. Until it exists, additive-only-minor is enforced
-      by review everywhere except the five pinned structs.
+- [x] A6. A checked-in, type-aware layout manifest generated from the public
+      header and compiler-measured on every CTest toolchain. It records function
+      and callback signatures, enum values/representation, every struct field's
+      declared type/name/offset/size and each aggregate's size/alignment, so it
+      detects both `float* -> double*` and a field added in existing trailing
+      padding. The test mutates both cases. A v0.8.0 header subset also compiles
+      as its own translation unit, links to the current library and checks
+      guarded out-param/array writes.
 
 ## Field-evaluator boundary
 

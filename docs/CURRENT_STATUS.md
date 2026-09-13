@@ -46,7 +46,9 @@ isolation is tracked in [#51](https://github.com/CyberdyneCorp/CyberRemesherAndU
 ## Release and contribution policy
 
 Additive ABI changes increment the ABI minor; incompatible layouts require a
-new ABI major. Every output-affecting claim needs a dated corpus/configuration,
+new ABI major. The checked-in ABI manifest and retained v0.8 client test protect
+declarations, compiler layouts and guarded output buffers; the source of truth
+remains `capi/include/cyber_capi.h`. Every output-affecting claim needs a dated corpus/configuration,
 and historical measurements stay in the research log. Report security issues
 privately through the repository's GitHub security-advisory channel; ordinary
 bugs and proposals belong in GitHub Issues. Contributions follow the repository

@@ -20,6 +20,8 @@
 
 namespace {
 
+extern "C" int cyber_v0_8_client_smoke(const char* path);
+
 // A 4-vertex quad, written to a temp file. Small on purpose: the import-ceiling
 // case needs a vertex count it can sit a ceiling either side of.
 std::filesystem::path writeAbiPlaneObj() {
@@ -55,6 +57,17 @@ TEST_CASE("the ABI version is reported and is independent of the engine version"
     int onlyMinor = -1;
     cyber_abi_version(nullptr, &onlyMinor);
     CHECK(onlyMinor == CYBER_ABI_VERSION_MINOR);
+}
+
+TEST_CASE("a v0.8-era client header links to this library without overwriting output guards") {
+    // This call is compiled from tests/capi/abi_clients/v0_8_legacy.h, an
+    // extracted v0.8.0 header subset.  It cannot see current declarations or
+    // layouts, so it catches the real failure mode: an old binary linked to a
+    // newer library that writes a changed out-param or array stride.
+    const std::filesystem::path objPath = writeAbiPlaneObj();
+    CHECK(cyber_v0_8_client_smoke(objPath.string().c_str()) == 0);
+    std::error_code ec;
+    std::filesystem::remove(objPath, ec);
 }
 
 TEST_CASE("a client compiled against an earlier ABI minor is served, a later one is refused") {
