@@ -377,6 +377,18 @@ TEST_CASE("pipeline refuses pure-quad subdivision before exceeding output budget
     CHECK(sphere.faceCount() > 0);
 }
 
+TEST_CASE("pipeline reports an intermediate ceiling before an isotropic split grows topology") {
+    const Mesh sphere = makeSphere(8, 12);
+    remesh::ResourceLimits limits;
+    limits.maxIntermediateFaces = sphere.faceCount();
+
+    const auto result = remesh::remesh(sphere, smallRun(2'000), nullptr, nullptr, {}, {}, nullptr,
+                                       &limits);
+    CHECK(result.status == remesh::RunStatus::Error);
+    CHECK(result.error.find("resource limit at isotropic") != std::string::npos);
+    CHECK(sphere.faceCount() == limits.maxIntermediateFaces);
+}
+
 TEST_CASE("cancel token poll is observed by isCancelled (mid-solve cancellation)") {
     // A long report-less stage (e.g. the native seamless-UV solve) polls the token but
     // never triggers the progress-report path that the C-API flips the flag on. The poll

@@ -723,10 +723,7 @@ IsotropicStatus isotropicRemesh(Mesh& mesh, const ReferenceSurface& reference,
         options.extraVertexScale);
     // Measured once on the input: remeshing preserves surface area, so the
     // ceiling holds for every iteration.
-    std::size_t maxFaces = faceBudget(mesh, options.targetEdgeLength);
-    if (options.maxFaces > 0) {
-        maxFaces = std::min(maxFaces, options.maxFaces);
-    }
+    const std::size_t maxFaces = faceBudget(mesh, options.targetEdgeLength);
     long long tScale = 0, tSplit = 0, tCollapse = 0, tFlip = 0, tSmooth = 0;
     const auto ms = [](Clk::time_point a, Clk::time_point b) {
         return std::chrono::duration_cast<std::chrono::milliseconds>(b - a).count();
