@@ -118,6 +118,13 @@ jobs:
       # is how the gate stayed dark.
       - name: Which solver this binary carries
         run: ./build/cpu-headless/apps/cli/cyberremesh --version
+      - name: Record acceptance baseline for this toolchain
+        if: ${{ inputs.record_bench_baselines }}
+        run: |
+          set -euo pipefail
+          python3 tools/bench/bench.py record --corpus acceptance \
+            --cyber-binary build/cpu-headless/apps/cli/cyberremesh \
+            --cache-dir build/cpu-headless/acceptance-baseline-cache
       - name: Benchmark regression check
         run: |
           # pipefail, or this gate LIES. `bench.py check | tee` takes tee's exit
