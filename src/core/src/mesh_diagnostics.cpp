@@ -203,11 +203,12 @@ void Mesh::tagFeatureEdges(float dihedralAngleDegrees) {
         const Vec3 n1 = faceNormal(faces[1]);
         const float cosAngle = std::clamp(dot(n0, n1), -1.0f, 1.0f);
         const float normalAngle = std::acos(cosAngle);
-        const bool groupBoundary = groupIds != nullptr &&
-                                   (*groupIds)[faces[0].value] != (*groupIds)[faces[1].value];
-        const bool materialBoundary = materialIds != nullptr &&
-                                      (*materialIds)[faces[0].value] != (*materialIds)[faces[1].value];
-        m_edges[i].feature = normalAngle >= normalAngleThreshold || groupBoundary || materialBoundary;
+        const bool groupBoundary =
+            groupIds != nullptr && (*groupIds)[faces[0].value] != (*groupIds)[faces[1].value];
+        const bool materialBoundary = materialIds != nullptr && (*materialIds)[faces[0].value] !=
+                                                                    (*materialIds)[faces[1].value];
+        m_edges[i].feature =
+            normalAngle >= normalAngleThreshold || groupBoundary || materialBoundary;
     }
 }
 
