@@ -92,7 +92,7 @@ typedef enum CyberStatus {
  * Do not compare these numbers by hand: cyber_abi_check() applies the rule
  * above in one place, so every binding gets the same answer. */
 #define CYBER_ABI_VERSION_MAJOR 1
-#define CYBER_ABI_VERSION_MINOR 12
+#define CYBER_ABI_VERSION_MINOR 13
 
 /* The ABI this build implements. Cannot fail; either pointer may be NULL. */
 void cyber_abi_version(int* major, int* minor);
@@ -554,6 +554,25 @@ typedef struct CyberZRemesherReport {
     float maxBorderDrift;
 } CyberZRemesherReport;
 
+/* Advisory-only automatic symmetry analysis.  `detected` never changes the
+ * mesh and never enables forced symmetry; applications must opt in to a later
+ * remesh request themselves.  Version 1 initially evaluates axis-aligned
+ * planes only (axis: 0 none, 1 X, 2 Y, 3 Z). */
+typedef struct CyberSymmetryDetectionReport {
+    int detected;
+    int axis;
+    float point[3];
+    float normal[3];
+    size_t sampledVertices;
+    size_t matchedVertices;
+    size_t unmatchedVertices;
+    float matchTolerance;
+    float meanMatchError;
+    float maxMatchError;
+    float confidence;
+    int ambiguous;
+} CyberSymmetryDetectionReport;
+
 /* Diagnostics for the symbolic layout-to-integer hand-off. This is a separate
  * POD rather than an extension of CyberZRemesherReport: callers compiled
  * against an older report allocate its historical size, so extending it would
@@ -682,6 +701,9 @@ CyberStatus cyber_remesh_zremesher(const CyberMesh* in, const CyberRemeshParams*
                                    CyberProgressCb progress, CyberCancelCb cancel,
                                    CyberWarningCb warning, void* user, CyberMesh** out,
                                    CyberZRemesherReport* report);
+
+/* Analyse symmetry without modifying `mesh`. */
+CyberStatus cyber_detect_symmetry(const CyberMesh* mesh, CyberSymmetryDetectionReport* report);
 
 /* Like cyber_remesh_zremesher, and additionally returns the per-run symbolic
  * injectability diagnostics through a separately versioned-safe POD. Either

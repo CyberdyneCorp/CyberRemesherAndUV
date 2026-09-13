@@ -1349,6 +1349,41 @@ CyberStatus cyber_remesh_zremesher(const CyberMesh* in, const CyberRemeshParams*
                                  warning, user, out, report, nullptr, nullptr);
 }
 
+CyberStatus cyber_detect_symmetry(const CyberMesh* mesh, CyberSymmetryDetectionReport* report) {
+    if (mesh == nullptr || report == nullptr) {
+        setError("cyber_detect_symmetry: null argument");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    try {
+        const cyber::remesh::SymmetryDetectionReport detected =
+            cyber::remesh::detectSymmetry(mesh->mesh);
+        *report = CyberSymmetryDetectionReport{};
+        report->detected = detected.detected ? 1 : 0;
+        report->axis = static_cast<int>(detected.axis);
+        report->point[0] = detected.plane.point.x;
+        report->point[1] = detected.plane.point.y;
+        report->point[2] = detected.plane.point.z;
+        report->normal[0] = detected.plane.normal.x;
+        report->normal[1] = detected.plane.normal.y;
+        report->normal[2] = detected.plane.normal.z;
+        report->sampledVertices = detected.sampledVertices;
+        report->matchedVertices = detected.matchedVertices;
+        report->unmatchedVertices = detected.unmatchedVertices;
+        report->matchTolerance = detected.matchTolerance;
+        report->meanMatchError = detected.meanMatchError;
+        report->maxMatchError = detected.maxMatchError;
+        report->confidence = detected.confidence;
+        report->ambiguous = detected.ambiguous ? 1 : 0;
+        return CYBER_OK;
+    } catch (const std::exception& e) {
+        setError(std::string("cyber_detect_symmetry: ") + e.what());
+        return CYBER_ERR_RUNTIME;
+    } catch (...) {
+        setError("cyber_detect_symmetry: unknown error");
+        return CYBER_ERR_RUNTIME;
+    }
+}
+
 CyberStatus cyber_remesh_zremesher_with_injectability_report(
     const CyberMesh* in, const CyberRemeshParams* params, const CyberZRemesherParams* zr,
     const CyberGuidanceEx* guidance, CyberProgressCb progress, CyberCancelCb cancel,

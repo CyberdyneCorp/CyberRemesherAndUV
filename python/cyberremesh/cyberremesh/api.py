@@ -921,6 +921,24 @@ class SeamPath(_Handle):
         _ffi.get_lib().cyber_seam_path_drop_resume_marker(self.handle)
 
 
+@dataclass(frozen=True)
+class SymmetryDetectionReport:
+    """Advisory axis-aligned symmetry analysis; it never edits the mesh."""
+
+    detected: bool
+    axis: str
+    point: Tuple[float, float, float]
+    normal: Tuple[float, float, float]
+    sampled_vertices: int
+    matched_vertices: int
+    unmatched_vertices: int
+    match_tolerance: float
+    mean_match_error: float
+    max_match_error: float
+    confidence: float
+    ambiguous: bool
+
+
 class Mesh:
     """A handle to an engine mesh.
 
@@ -1062,6 +1080,22 @@ class Mesh:
         copy.zremesher_report = self.zremesher_report
         copy.target_count_report = self.target_count_report
         return copy
+
+    def detect_symmetry(self) -> SymmetryDetectionReport:
+        """Return a report-only symmetry hypothesis without changing this mesh."""
+        out = _ffi.CyberSymmetryDetectionReport()
+        _check(_ffi.get_lib().cyber_detect_symmetry(self.handle, ctypes.byref(out)))
+        axis = {0: "none", 1: "x", 2: "y", 3: "z"}.get(int(out.axis), "none")
+        return SymmetryDetectionReport(
+            detected=bool(out.detected), axis=axis,
+            point=tuple(float(value) for value in out.point),
+            normal=tuple(float(value) for value in out.normal),
+            sampled_vertices=int(out.sampled_vertices), matched_vertices=int(out.matched_vertices),
+            unmatched_vertices=int(out.unmatched_vertices),
+            match_tolerance=float(out.match_tolerance), mean_match_error=float(out.mean_match_error),
+            max_match_error=float(out.max_match_error), confidence=float(out.confidence),
+            ambiguous=bool(out.ambiguous),
+        )
 
     def __copy__(self) -> "Mesh":
         return self.copy()
