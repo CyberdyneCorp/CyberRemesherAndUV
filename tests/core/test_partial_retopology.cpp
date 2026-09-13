@@ -60,7 +60,10 @@ TEST_CASE("partial retopology replaces only the selected region") {
     auto& groups = source.vertexAttributes().create<std::int32_t>("group_id");
     auto& materials = source.faceAttributes().create<std::int32_t>("material_id");
     materials[5] = 42;
-    source.cornerAttributes().create<cyber::Vec2>("uv");
+    auto& uvs = source.cornerAttributes().create<cyber::Vec2>("uv");
+    for (Index loop = 0; loop < source.loopCapacity(); ++loop) {
+        uvs[loop] = {static_cast<float>(loop), -static_cast<float>(loop)};
+    }
     for (Index vertex = 0; vertex < source.vertexCapacity(); ++vertex) {
         weights[vertex] = static_cast<float>(vertex);
         groups[vertex] = static_cast<std::int32_t>(vertex);
@@ -84,8 +87,7 @@ TEST_CASE("partial retopology replaces only the selected region") {
     REQUIRE(result.correspondences.size() == 4);
     REQUIRE(result.sourceVertexToOutput.size() == source.vertexCapacity());
     CHECK(result.sourceVertexToOutput[6] == cyber::VertexId{6});
-    REQUIRE(result.untransferredAttributes.size() == 1);
-    CHECK(result.untransferredAttributes[0] == "corner:uv");
+    CHECK(result.untransferredAttributes.empty());
     const auto* transferredWeights = result.mesh.vertexAttributes().find<float>("weight");
     const auto* transferredGroups = result.mesh.vertexAttributes().find<std::int32_t>("group_id");
     REQUIRE(transferredWeights != nullptr);
@@ -93,6 +95,14 @@ TEST_CASE("partial retopology replaces only the selected region") {
     const auto* transferredMaterials =
         result.mesh.faceAttributes().find<std::int32_t>("material_id");
     REQUIRE(transferredMaterials != nullptr);
+    const auto* transferredUvs = result.mesh.cornerAttributes().find<cyber::Vec2>("uv");
+    REQUIRE(transferredUvs != nullptr);
+    const std::vector<cyber::LoopId> sourceLoops = source.faceLoops(FaceId{5});
+    const std::vector<cyber::LoopId> replacementLoops = result.mesh.faceLoops(FaceId{5});
+    REQUIRE(replacementLoops.size() == 4);
+    for (std::size_t i = 0; i < replacementLoops.size(); ++i) {
+        CHECK((*transferredUvs)[replacementLoops[i].value] == uvs[sourceLoops[i].value]);
+    }
     for (const remesh::SourceCorrespondence& correspondence : result.correspondences) {
         CHECK(correspondence.sourceFace == FaceId{5});
         CHECK(correspondence.distance == doctest::Approx(0.0f));

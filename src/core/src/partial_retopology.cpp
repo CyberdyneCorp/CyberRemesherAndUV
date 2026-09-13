@@ -95,13 +95,26 @@ void listUntransferredAttributes(const Mesh& source, PartialRetopologyResult& re
         });
     };
     listDomain("edge", source.edgeAttributes());
-    listDomain("corner", source.cornerAttributes());
 }
 
 void transferFaceAttributes(const Mesh& source, Mesh& output, FaceId outputFace,
                             FaceId sourceFace) {
     output.faceAttributes().applyRow(outputFace.value,
                                      source.faceAttributes().extractRow(sourceFace.value));
+}
+
+void transferCornerAttributes(const Mesh& source, Mesh& output, FaceId outputFace,
+                              FaceId sourceFace) {
+    const std::vector<LoopId> sourceLoops = source.faceLoops(sourceFace);
+    const std::vector<LoopId> outputLoops = output.faceLoops(outputFace);
+    for (std::size_t i = 0; i < outputLoops.size(); ++i) {
+        // Corner rows remain independent. Cycling source-side rows preserves a
+        // discontinuous UV seam as separate output corners rather than merging
+        // it into the shared boundary vertex.
+        output.cornerAttributes().applyRow(
+            outputLoops[i].value,
+            source.cornerAttributes().extractRow(sourceLoops[i % sourceLoops.size()].value));
+    }
 }
 
 }  // namespace
@@ -248,6 +261,7 @@ PartialRetopologyResult partialRetopologize(const Mesh& source,
             return result;
         }
         transferFaceAttributes(source, result.mesh, newFace, attributeSource);
+        transferCornerAttributes(source, result.mesh, newFace, attributeSource);
     }
     const FaceId centerFace = result.mesh.addFace(inner);
     if (!centerFace.valid()) {
@@ -256,6 +270,7 @@ PartialRetopologyResult partialRetopologize(const Mesh& source,
         return result;
     }
     transferFaceAttributes(source, result.mesh, centerFace, attributeSource);
+    transferCornerAttributes(source, result.mesh, centerFace, attributeSource);
     if (!result.mesh.validate().empty()) {
         result.mesh = source;
         result.reason = "replacement violated mesh structural invariants";
