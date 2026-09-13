@@ -183,6 +183,16 @@ TEST_CASE("glTF round-trip preserves geometry, colors and UVs (.gltf and .glb)")
     }
 }
 
+TEST_CASE("glTF vertex ceiling rejects a declared position accessor before mesh allocation") {
+    const fs::path path = tempDir() / "over_vertex_budget.glb";
+    REQUIRE(io::exportMesh(makeCorpusCube(), path).ok());
+    io::ImportOptions options;
+    options.maxVertices = 1;
+    const auto result = io::importMesh(path, options);
+    REQUIRE(!result.ok());
+    CHECK(result.error().code == io::ErrorCode::ResourceLimit);
+}
+
 TEST_CASE("corrupt glTF is a typed ParseError (spec: mesh-io corrupt input)") {
     const fs::path path = tempDir() / "corrupt.gltf";
     std::ofstream f(path, std::ios::trunc);
