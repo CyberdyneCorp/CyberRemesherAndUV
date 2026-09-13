@@ -92,7 +92,7 @@ typedef enum CyberStatus {
  * Do not compare these numbers by hand: cyber_abi_check() applies the rule
  * above in one place, so every binding gets the same answer. */
 #define CYBER_ABI_VERSION_MAJOR 1
-#define CYBER_ABI_VERSION_MINOR 10
+#define CYBER_ABI_VERSION_MINOR 11
 
 /* The ABI this build implements. Cannot fail; either pointer may be NULL. */
 void cyber_abi_version(int* major, int* minor);
@@ -576,6 +576,38 @@ typedef struct CyberZRemesherInjectabilityReport {
     double realizedDeviationEnergy;
 } CyberZRemesherInjectabilityReport;
 
+/* Per-request final-mesh evidence for a semantic face boundary. `id` is the
+ * stable source attribute/component key (for example "group_id:42"). State is
+ * reported as an int rather than a C enum so a newer library can add a state
+ * without handing an older client an out-of-range enum value. */
+#define CYBER_SEMANTIC_REALIZED 0
+#define CYBER_SEMANTIC_PARTIAL 1
+#define CYBER_SEMANTIC_REJECTED 2
+typedef struct CyberSemanticBoundaryResult {
+    char id[64];
+    size_t sourceEdges;
+    int requestedClosed;
+    int outputClosed;
+    int state;
+    float edgeChainCoverage;
+    float meanDistance;
+    float maxDistance;
+    char reason[128];
+} CyberSemanticBoundaryResult;
+
+/* Caller-owned semantic-boundary report. Set `boundaries` to NULL and
+ * `boundaryCapacity` to zero to query the required count; a non-null buffer
+ * must hold every result, otherwise the call returns CYBER_ERR_INVALID_ARG and
+ * does not produce a mesh. */
+typedef struct CyberSemanticBoundaryReport {
+    size_t boundaryCount;
+    size_t realizedCount;
+    size_t partialCount;
+    size_t rejectedCount;
+    CyberSemanticBoundaryResult* boundaries;
+    size_t boundaryCapacity;
+} CyberSemanticBoundaryReport;
+
 /* What a flow guide is asking for. */
 #define CYBER_GUIDE_ORIENTATION 0
 /* "Put an actual edge loop HERE": the stroke becomes a curve in the layout,
@@ -659,6 +691,29 @@ CyberStatus cyber_remesh_zremesher_with_injectability_report(
     const CyberGuidanceEx* guidance, CyberProgressCb progress, CyberCancelCb cancel,
     CyberWarningCb warning, void* user, CyberMesh** out, CyberZRemesherReport* report,
     CyberZRemesherInjectabilityReport* injectability_report);
+
+/* Like cyber_remesh_zremesher, and additionally measures every `group_id` /
+ * `material_id` semantic boundary against the FINAL output mesh. This is a
+ * separate ABI-safe POD because extending CyberZRemesherReport would overwrite
+ * storage allocated by an older caller. */
+CyberStatus cyber_remesh_zremesher_with_semantic_boundary_report(
+    const CyberMesh* in, const CyberRemeshParams* params, const CyberZRemesherParams* zr,
+    const CyberGuidanceEx* guidance, CyberProgressCb progress, CyberCancelCb cancel,
+    CyberWarningCb warning, void* user, CyberMesh** out, CyberZRemesherReport* report,
+    CyberSemanticBoundaryReport* semantic_boundary_report);
+
+/* The complete diagnostic variant. `topology` and `execution` may each be
+ * NULL. `injectability_report` may be NULL. When `semantic_boundary_report`
+ * is non-NULL it follows CyberSemanticBoundaryReport's caller-buffer contract.
+ * This avoids a binding having to choose between resource limits and either
+ * kind of final-run evidence. */
+CyberStatus cyber_remesh_zremesher_with_reports(
+    const CyberMesh* in, const CyberRemeshParams* params, const CyberZRemesherParams* zr,
+    const CyberGuidanceEx* guidance, const CyberRemeshLimits* topology,
+    const CyberRemeshExecutionLimits* execution, CyberProgressCb progress, CyberCancelCb cancel,
+    CyberWarningCb warning, void* user, CyberMesh** out, CyberZRemesherReport* report,
+    CyberZRemesherInjectabilityReport* injectability_report,
+    CyberSemanticBoundaryReport* semantic_boundary_report);
 
 /* ZRemesher variant with the additive topology/execution resource limits. */
 CyberStatus cyber_remesh_zremesher_with_resource_limits(
@@ -940,6 +995,9 @@ typedef struct CyberIndexedMesh {
     size_t face_count;
     const uint32_t* indices;
     size_t index_count;
+    /* Optional typed columns. A face-domain CYBER_ATTRIBUTE_INT32 column
+     * named "group_id" or "material_id" is a semantic retopology boundary:
+     * unequal adjacent values are retained as a hard feature. */
     const CyberAttributeColumn* attributes;
     size_t attribute_count;
 } CyberIndexedMesh;

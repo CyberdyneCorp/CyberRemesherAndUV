@@ -101,6 +101,22 @@ final class ZRemesherParityTests: XCTestCase {
         XCTAssertEqual(uv, [0, 0, 1, 0, 1, 1, 0, 1])
     }
 
+    func testSemanticBoundaryEvidenceReachesSwift() async throws {
+        let mesh = try Mesh(
+            positions: [0, 0, 0, 1, 0, 0, 0.5, 0.866, 0, 0.5, 0.289, 0.816],
+            faceOffsets: [0, 3, 6, 9, 12],
+            indices: [0, 2, 1, 0, 1, 3, 1, 2, 3, 2, 0, 3],
+            attributes: [MeshAttribute(name: "group_id", domain: .face, values: .int32([1, 0, 0, 0]))])
+        let result = try await mesh.remesh(
+            params: zremesherParams(targetQuads: 100), zremesher: ZRemesherParameters()).value()
+        guard let semantic = result.report.semanticBoundaries else {
+            return XCTFail("semantic boundary evidence was dropped")
+        }
+        XCTAssertEqual(semantic.boundaries.count, 1)
+        XCTAssertTrue(semantic.boundaries[0].id.hasPrefix("group_id:"))
+        XCTAssertNotEqual(semantic.boundaries[0].state, .rejected)
+    }
+
     /// Defaults come from the engine, not from restated literals, so the Swift
     /// mirror cannot drift from `cyber_default_zremesher_params`.
     func testDefaultsComeFromTheEngine() {

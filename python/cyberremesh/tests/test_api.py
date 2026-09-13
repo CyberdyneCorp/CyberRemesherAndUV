@@ -29,7 +29,7 @@ _REPO = os.path.dirname(  # <repo>/python/cyberremesh/tests -> <repo>
 )
 
 import cyberremesh
-from cyberremesh import CyberError, Mesh, RemeshParams, remesh
+from cyberremesh import CyberError, Mesh, RemeshLimits, RemeshParams, remesh
 
 # A unit cube as an OBJ (8 verts, 6 quad faces).
 _CUBE_OBJ = """\
@@ -207,6 +207,28 @@ def _run_bulk_indexed_exchange():
     print("PASS: bulk indexed polygon and attribute exchange")
 
 
+def _run_semantic_boundary_report():
+    """A face-domain group id reaches the returned ZRemesher evidence."""
+    positions = [0, 0, 0, 1, 0, 0, 0.5, 0.866, 0, 0.5, 0.289, 0.816]
+    offsets = [0, 3, 6, 9, 12]
+    indices = [0, 2, 1, 0, 1, 3, 1, 2, 3, 2, 0, 3]
+    with Mesh.from_indexed(
+        positions, offsets, indices, {("face", "group_id"): [1, 0, 0, 0]}
+    ) as mesh:
+        result = remesh(
+            mesh, RemeshParams(target_quad_count=100, quad_method="zremesher"),
+            limits=RemeshLimits(),
+        )
+        with result:
+            report = result.zremesher_report
+            assert report is not None and report.semantic_boundaries is not None
+            semantic = report.semantic_boundaries
+            assert len(semantic.boundaries) == 1, semantic
+            assert semantic.boundaries[0].id.startswith("group_id:")
+            assert semantic.boundaries[0].state != "rejected"
+    print("PASS: semantic boundary evidence reaches Python")
+
+
 def main():
     _check_import_contract()
     _check_library_discovery()
@@ -221,6 +243,7 @@ def main():
     _run_quad_method()
     _run_guide_point_arity()
     _run_bulk_indexed_exchange()
+    _run_semantic_boundary_report()
     return 0
 
 

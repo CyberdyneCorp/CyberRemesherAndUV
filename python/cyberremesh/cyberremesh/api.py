@@ -109,7 +109,7 @@ def version() -> str:
 #: The C ABI this binding was written against. Mirrors CYBER_ABI_VERSION_* in
 #: cyber_capi.h; ``check_abi()`` compares it against the loaded library.
 ABI_VERSION_MAJOR = 1
-ABI_VERSION_MINOR = 10
+ABI_VERSION_MINOR = 11
 
 
 def abi_version() -> tuple:
@@ -2222,6 +2222,7 @@ class ZRemesherReport:
     membranes_removed: int = 0
     max_border_drift: float = 0.0
     injectability: Optional["InjectabilityReport"] = None
+    semantic_boundaries: Optional["SemanticBoundaryReport"] = None
 
     @classmethod
     def _from_c(cls, c: "_ffi.CyberZRemesherReport") -> "ZRemesherReport":
@@ -2271,6 +2272,39 @@ class InjectabilityReport:
     @classmethod
     def _from_c(cls, c: "_ffi.CyberZRemesherInjectabilityReport") -> "InjectabilityReport":
         return cls(**{name: getattr(c, name) for name, _type in c._fields_})
+
+
+@dataclass
+class SemanticBoundaryResult:
+    """Final-mesh evidence for one ``group_id`` or ``material_id`` component."""
+
+    id: str
+    source_edges: int
+    requested_closed: bool
+    output_closed: bool
+    state: str
+    edge_chain_coverage: float
+    mean_distance: float
+    max_distance: float
+    reason: str
+
+    @classmethod
+    def _from_c(cls, c: "_ffi.CyberSemanticBoundaryResult") -> "SemanticBoundaryResult":
+        state = {0: "realized", 1: "partial", 2: "rejected"}.get(int(c.state), "rejected")
+        return cls(c.id.decode("utf-8", "replace"), int(c.source_edges),
+                   bool(c.requested_closed), bool(c.output_closed), state,
+                   float(c.edge_chain_coverage), float(c.mean_distance),
+                   float(c.max_distance), c.reason.decode("utf-8", "replace"))
+
+
+@dataclass
+class SemanticBoundaryReport:
+    """Aggregated final-mesh evidence for all semantic face boundaries."""
+
+    realized_count: int = 0
+    partial_count: int = 0
+    rejected_count: int = 0
+    boundaries: tuple[SemanticBoundaryResult, ...] = ()
 
 
 def remesh(
@@ -2424,6 +2458,8 @@ def remesh(
 
     c_report = None
     c_injectability = None
+    c_semantic_boundaries = None
+    semantic_rows = None
     if count_policy is not None:
         c_policy = count_policy._to_c()
         c_islands = (_ffi.CyberCountIslandOutcome * max(1, mesh.face_count))()
@@ -2441,22 +2477,32 @@ def remesh(
         c_zr = (zremesher or ZRemesherParams())._to_c()
         c_report = _ffi.CyberZRemesherReport()
         c_injectability = _ffi.CyberZRemesherInjectabilityReport()
-        if limits is not None:
-            c_limits = limits._to_c()
-            c_execution = limits._execution_to_c()
-            status = lib.cyber_remesh_zremesher_with_resource_limits(
-                mesh.handle, ctypes.byref(c_params), ctypes.byref(c_zr),
-                ctypes.byref(c_guidance) if c_guidance is not None else None,
-                ctypes.byref(c_limits), ctypes.byref(c_execution), progress_cb, cancel_cb,
-                warning_cb, None, ctypes.byref(out_handle), ctypes.byref(c_report),
-            )
-        else:
-            status = lib.cyber_remesh_zremesher_with_injectability_report(
-                mesh.handle, ctypes.byref(c_params), ctypes.byref(c_zr),
-                ctypes.byref(c_guidance) if c_guidance is not None else None,
-                progress_cb, cancel_cb, warning_cb, None, ctypes.byref(out_handle),
-                ctypes.byref(c_report), ctypes.byref(c_injectability),
-            )
+        semantic_input = any(
+            key in mesh.authored_attributes()
+            for key in (("face", "group_id"), ("face", "material_id"))
+        )
+        c_limits = limits._to_c() if limits is not None else None
+        c_execution = limits._execution_to_c() if limits is not None else None
+        if semantic_input:
+            # Every semantic component contains an authored edge, so the total
+            # number of CSR polygon corners is a safe upper bound on its count.
+            # Keeping the report caller-owned mirrors the C ABI and avoids a
+            # hidden allocator/lifetime crossing the binding boundary.
+            semantic_capacity = max(1, len(mesh.authored_polygons()[1]))
+            semantic_rows = (_ffi.CyberSemanticBoundaryResult * semantic_capacity)()
+            c_semantic_boundaries = _ffi.CyberSemanticBoundaryReport()
+            c_semantic_boundaries.boundaries = ctypes.cast(
+                semantic_rows, ctypes.POINTER(_ffi.CyberSemanticBoundaryResult))
+            c_semantic_boundaries.boundary_capacity = len(semantic_rows)
+        status = lib.cyber_remesh_zremesher_with_reports(
+            mesh.handle, ctypes.byref(c_params), ctypes.byref(c_zr),
+            ctypes.byref(c_guidance) if c_guidance is not None else None,
+            ctypes.byref(c_limits) if c_limits is not None else None,
+            ctypes.byref(c_execution) if c_execution is not None else None,
+            progress_cb, cancel_cb, warning_cb, None, ctypes.byref(out_handle),
+            ctypes.byref(c_report), ctypes.byref(c_injectability),
+            ctypes.byref(c_semantic_boundaries) if c_semantic_boundaries is not None else None,
+        )
     elif c_guidance is not None:
         status = lib.cyber_remesh_guided_ex(
             mesh.handle,
@@ -2506,6 +2552,14 @@ def remesh(
         result.zremesher_report = ZRemesherReport._from_c(c_report)
         if c_injectability is not None:
             result.zremesher_report.injectability = InjectabilityReport._from_c(c_injectability)
+        if c_semantic_boundaries is not None:
+            result.zremesher_report.semantic_boundaries = SemanticBoundaryReport(
+                realized_count=int(c_semantic_boundaries.realized_count),
+                partial_count=int(c_semantic_boundaries.partial_count),
+                rejected_count=int(c_semantic_boundaries.rejected_count),
+                boundaries=tuple(SemanticBoundaryResult._from_c(row) for row in
+                                 semantic_rows[:c_semantic_boundaries.boundary_count]),
+            )
     for message in guidance_warnings:
         warnings.warn(f"cyberremesh guidance: {message}", stacklevel=2)
     # Statistics are fetched from the result mesh (the C ABI has no out-stats).

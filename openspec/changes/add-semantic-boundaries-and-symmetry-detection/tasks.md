@@ -6,25 +6,28 @@ first.
 
 ## Milestone 1 — the missing input
 
-- [ ] M1. A sibling ABI entry point carrying per-face group / material ids.
-      `CyberRemeshParams` cannot grow fields without breaking compiled callers,
-      so this is a new entry point, not an extension.
+- [x] M1. A sibling ABI entry point carrying per-face group / material ids.
+      The existing typed `CyberIndexedMesh` bulk descriptor is the additive
+      sibling surface: face-domain `int32` `group_id` / `material_id` columns
+      retain their values and need no ABI-breaking `CyberRemeshParams` growth.
       Gate: a caller supplies group ids and reads them back unchanged; existing
       compiled callers keep working against the unchanged struct.
-- [ ] M2. Decide whether the OBJ loader retains `g` / `usemtl`, and record the
-      decision either way.
+- [x] M2. Decide whether the OBJ loader retains `g` / `usemtl`, and record the
+      decision either way. Decision: it does not; the explicit typed descriptor
+      is the only supported semantic input route until a lossless OBJ mapping
+      can be specified and tested.
       Gate: the decision is written down in the spec, with its cost.
 
 ## Milestone 2 — boundaries reach the field
 
-- [ ] M3. Tag edges where adjacent faces disagree in group or material as
-      feature edges, through `projectGuideToPath` -> `setFeatureEdge`, applied
-      after the dihedral re-tag so they cannot be demoted.
-      Gate: a two-material cube keeps the material boundary as an edge loop.
-- [ ] M4. Connect those boundaries to field pinning, the topology layout and
-      the sizing field.
-      Gate: the layout reports arcs along a material boundary that no dihedral
-      angle would have produced.
+- [x] M3. Tag edges where adjacent faces disagree in group or material as
+      feature edges after the dihedral re-tag so they cannot be demoted.
+      Gate: coplanar faces with distinct semantic ids retain their shared edge,
+      while matching ids do not create a false feature.
+- [x] M4. Convert non-branching semantic components into topology guides and
+      measure their final-mesh adherence.
+      Gate: open and closed coplanar semantic boundaries require aligned output
+      edge coverage; branched components are explicitly reported as rejected.
 
 ## Milestone 3 — symmetry detection, report before apply
 

@@ -23,6 +23,17 @@ code: where a number here disagrees with this host's
 `tests/bench/baselines-<System>-<machine>-<compiler>.json` or the README, the
 baselines are authoritative.
 
+## Update — 2026-09-13: semantic face boundaries are now an input-to-output contract
+
+The typed indexed-mesh input accepts face-domain `int32` `group_id` and
+`material_id` columns. Unequal adjacent values become hard features even across
+coplanar faces, then non-branching components become topology constraints.
+The final ZRemesher result reports each component as realized, partial, or
+explicitly rejected, with aligned-edge coverage, closure and distance evidence.
+The same report is available through the C ABI, Python and Swift bindings,
+including resource-limited runs. OBJ `g` / `usemtl` remain intentionally
+unmapped until a lossless mapping contract exists.
+
 ## Update — 2026-09-10: the "adaptive sizing collapses face count on open surfaces" report is NOT a bug — but chasing it found one
 
 **The report.** quad-cover, `--target-quads 3000 --pure-quads`, adaptivity 0 → 1:

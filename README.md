@@ -332,9 +332,9 @@ of it and the CLI's own report and export are **done**.
 
 Still open, and each for a stated reason rather than for lack of attention:
 automatic symmetry detection is **unblocked but not started**; semantic
-(group / material) boundaries turn out to need only input plumbing, since Phase E
-already ships the project-a-curve-and-pin-it mechanism a group boundary would
-reuse; a `balanced` quality mode is **deliberately not built** — with five corpus
+group/material boundaries now travel through the typed indexed input, become
+hard features, and return per-component final-mesh evidence in C, Python and
+Swift; a `balanced` quality mode is **deliberately not built** — with five corpus
 models and margins of 0.001–0.02 between the two candidates, a predictor is
 overfitting rather than prediction; and the layout does not yet reach the output
 on organic meshes at all, which is scoped as its own change
@@ -1144,6 +1144,17 @@ corner domain (`float`, `int32`, `float2`, `float3`, `float4`); corner columns
 remain aligned to polygon indices, preserving UV seams. Swift uses
 `MeshAttribute`, Python uses `Mesh.from_indexed(..., attributes=...)` and
 `authored_attributes()`, while Rust intentionally exposes geometry only.
+
+For semantic retopology boundaries, attach a face-domain `int32` column named
+`group_id` or `material_id`. An edge between unequal values is treated as a
+hard feature even when the adjacent faces are coplanar; the normal feature
+retagging cannot demote it. OBJ `g` and `usemtl` tokens are intentionally not
+imported into these attributes yet: use the in-memory indexed route when that
+semantic identity is required, rather than assuming a file-format round-trip
+preserves it. ZRemesher returns per-component final-mesh evidence (`realized`,
+`partial`, or explicitly `rejected`), including aligned-edge coverage, closure
+and distance; Python exposes it as `result.zremesher_report.semantic_boundaries`
+and Swift as `result.report.semanticBoundaries`.
 
 #### Two things an embedder should wire up
 

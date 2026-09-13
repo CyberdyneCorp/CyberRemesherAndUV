@@ -12,6 +12,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <exception>
 #include <filesystem>
@@ -46,6 +47,7 @@
 #include "cyber/quadrangulate/position_field.hpp"
 #include "cyber/quadrangulate/quadcover_extractor.hpp"
 #include "cyber/quadrangulate/symmetry_layout.hpp"
+#include "cyber/quadrangulate/topology_guides.hpp"
 #include "cyber/retopo/actions.hpp"
 #include "cyber/retopo/adjacency.hpp"
 #include "cyber/retopo/boundary.hpp"
@@ -1001,6 +1003,46 @@ void fillInjectabilityReport(const cyber::remesh::ZRemesherRunReport& zr,
     out.realizedDeviationEnergy = in.realizedDeviationEnergy;
 }
 
+bool fillSemanticBoundaryReport(const cyber::Mesh& output,
+                                const std::vector<cyber::remesh::SemanticBoundaryRequest>& requests,
+                                float targetEdgeLength, CyberSemanticBoundaryReport& out) {
+    CyberSemanticBoundaryResult* const rows = out.boundaries;
+    const size_t capacity = out.boundaryCapacity;
+    out = CyberSemanticBoundaryReport{};
+    out.boundaries = rows;
+    out.boundaryCapacity = capacity;
+    out.boundaryCount = requests.size();
+    if ((rows == nullptr && capacity != 0) || (rows != nullptr && capacity < requests.size())) {
+        return false;
+    }
+    const float tolerance = std::max(1e-4f, 0.5f * targetEdgeLength);
+    for (size_t i = 0; i < requests.size(); ++i) {
+        const cyber::remesh::SemanticBoundaryAdherence measured =
+            cyber::remesh::measureSemanticBoundaryAdherence(output, requests[i], tolerance);
+        CyberSemanticBoundaryResult& row = rows[i];
+        row = CyberSemanticBoundaryResult{};
+        std::snprintf(row.id, sizeof(row.id), "%s", measured.id.c_str());
+        row.sourceEdges = measured.sourceEdges;
+        row.requestedClosed = measured.requestedClosed ? 1 : 0;
+        row.outputClosed = measured.outputClosed ? 1 : 0;
+        row.edgeChainCoverage = measured.adherence.edgeChainCoverage;
+        row.meanDistance = measured.adherence.meanDistance;
+        row.maxDistance = measured.adherence.maxDistance;
+        std::snprintf(row.reason, sizeof(row.reason), "%s", measured.reason.c_str());
+        if (measured.realized) {
+            row.state = CYBER_SEMANTIC_REALIZED;
+            ++out.realizedCount;
+        } else if (!requests[i].rejectionReason.empty()) {
+            row.state = CYBER_SEMANTIC_REJECTED;
+            ++out.rejectedCount;
+        } else {
+            row.state = CYBER_SEMANTIC_PARTIAL;
+            ++out.partialCount;
+        }
+    }
+    return true;
+}
+
 }  // namespace
 
 CyberStatus cyber_remesh(const CyberMesh* in, const CyberRemeshParams* params,
@@ -1118,12 +1160,15 @@ static CyberStatus remeshZremesherShared(
     const CyberGuidanceEx* guidance, const CyberRemeshLimits* topology,
     const CyberRemeshExecutionLimits* execution, CyberProgressCb progress, CyberCancelCb cancel,
     CyberWarningCb warning, void* user, CyberMesh** out, CyberZRemesherReport* report,
-    CyberZRemesherInjectabilityReport* injectabilityReport) {
+    CyberZRemesherInjectabilityReport* injectabilityReport,
+    CyberSemanticBoundaryReport* semanticBoundaryReport) {
     if (in == nullptr || params == nullptr || out == nullptr) {
         setError("cyber_remesh_zremesher: null argument");
         return CYBER_ERR_INVALID_ARG;
     }
     *out = nullptr;
+
+    std::vector<cyber::remesh::SemanticBoundaryRequest> semanticRequests;
 
     CyberZRemesherParams zrParams;
     cyber_default_zremesher_params(&zrParams);
@@ -1165,6 +1210,20 @@ static CyberStatus remeshZremesherShared(
     }
 
     try {
+        if (semanticBoundaryReport != nullptr) {
+            semanticRequests = cyber::remesh::collectSemanticBoundaryRequests(in->mesh);
+            semanticBoundaryReport->boundaryCount = semanticRequests.size();
+            if ((semanticBoundaryReport->boundaries == nullptr &&
+                 semanticBoundaryReport->boundaryCapacity != 0) ||
+                (semanticBoundaryReport->boundaries != nullptr &&
+                 semanticBoundaryReport->boundaryCapacity < semanticRequests.size()) ||
+                (semanticBoundaryReport->boundaries == nullptr && !semanticRequests.empty())) {
+                setError(
+                    "cyber_remesh_zremesher_with_semantic_boundary_report: "
+                    "semantic boundary buffer is too small");
+                return CYBER_ERR_INVALID_ARG;
+            }
+        }
         const cyber::remesh::Parameters cppParams = toParameters(*params);
         const cyber::CancelToken token;
         token.setPoll([cancel, user]() { return cancel != nullptr && cancel(user) != 0; });
@@ -1242,6 +1301,15 @@ static CyberStatus remeshZremesherShared(
                 if (injectabilityReport != nullptr) {
                     fillInjectabilityReport(zrReport, *injectabilityReport);
                 }
+                if (semanticBoundaryReport != nullptr &&
+                    !fillSemanticBoundaryReport(result.mesh, semanticRequests,
+                                                result.stats.targetEdgeLength,
+                                                *semanticBoundaryReport)) {
+                    setError(
+                        "cyber_remesh_zremesher_with_semantic_boundary_report: "
+                        "semantic boundary buffer is too small");
+                    return CYBER_ERR_INVALID_ARG;
+                }
                 clearError();
                 *out = handle.release();
                 return CYBER_OK;
@@ -1277,7 +1345,7 @@ CyberStatus cyber_remesh_zremesher(const CyberMesh* in, const CyberRemeshParams*
                                    CyberWarningCb warning, void* user, CyberMesh** out,
                                    CyberZRemesherReport* report) {
     return remeshZremesherShared(in, params, zr, guidance, nullptr, nullptr, progress, cancel,
-                                 warning, user, out, report, nullptr);
+                                 warning, user, out, report, nullptr, nullptr);
 }
 
 CyberStatus cyber_remesh_zremesher_with_injectability_report(
@@ -1286,7 +1354,35 @@ CyberStatus cyber_remesh_zremesher_with_injectability_report(
     CyberWarningCb warning, void* user, CyberMesh** out, CyberZRemesherReport* report,
     CyberZRemesherInjectabilityReport* injectabilityReport) {
     return remeshZremesherShared(in, params, zr, guidance, nullptr, nullptr, progress, cancel,
-                                 warning, user, out, report, injectabilityReport);
+                                 warning, user, out, report, injectabilityReport, nullptr);
+}
+
+CyberStatus cyber_remesh_zremesher_with_semantic_boundary_report(
+    const CyberMesh* in, const CyberRemeshParams* params, const CyberZRemesherParams* zr,
+    const CyberGuidanceEx* guidance, CyberProgressCb progress, CyberCancelCb cancel,
+    CyberWarningCb warning, void* user, CyberMesh** out, CyberZRemesherReport* report,
+    CyberSemanticBoundaryReport* semanticBoundaryReport) {
+    if (semanticBoundaryReport == nullptr) {
+        if (out != nullptr) {
+            *out = nullptr;
+        }
+        setError("cyber_remesh_zremesher_with_semantic_boundary_report: null report");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    return remeshZremesherShared(in, params, zr, guidance, nullptr, nullptr, progress, cancel,
+                                 warning, user, out, report, nullptr, semanticBoundaryReport);
+}
+
+CyberStatus cyber_remesh_zremesher_with_reports(
+    const CyberMesh* in, const CyberRemeshParams* params, const CyberZRemesherParams* zr,
+    const CyberGuidanceEx* guidance, const CyberRemeshLimits* topology,
+    const CyberRemeshExecutionLimits* execution, CyberProgressCb progress, CyberCancelCb cancel,
+    CyberWarningCb warning, void* user, CyberMesh** out, CyberZRemesherReport* report,
+    CyberZRemesherInjectabilityReport* injectabilityReport,
+    CyberSemanticBoundaryReport* semanticBoundaryReport) {
+    return remeshZremesherShared(in, params, zr, guidance, topology, execution, progress, cancel,
+                                 warning, user, out, report, injectabilityReport,
+                                 semanticBoundaryReport);
 }
 
 CyberStatus cyber_remesh_zremesher_with_resource_limits(
@@ -1295,7 +1391,7 @@ CyberStatus cyber_remesh_zremesher_with_resource_limits(
     const CyberRemeshExecutionLimits* execution, CyberProgressCb progress, CyberCancelCb cancel,
     CyberWarningCb warning, void* user, CyberMesh** out, CyberZRemesherReport* report) {
     return remeshZremesherShared(in, params, zr, guidance, topology, execution, progress, cancel,
-                                 warning, user, out, report, nullptr);
+                                 warning, user, out, report, nullptr, nullptr);
 }
 
 CyberStatus cyber_mesh_stats(const CyberMesh* mesh, CyberStats* out) {

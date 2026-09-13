@@ -164,7 +164,9 @@ public:
 
     // ---- feature edges (mesh-core spec, "Feature edge tagging") --------
     // Tags edges whose dihedral angle exceeds the threshold, plus boundary
-    // edges. Non-manifold (3+ face) edges are always tagged.
+    // edges. Non-manifold (3+ face) edges are always tagged. Face-domain int32
+    // attributes named `group_id` or `material_id` are semantic constraints:
+    // a coplanar shared edge is tagged when either attribute differs across it.
     void tagFeatureEdges(float dihedralAngleDegrees);
     [[nodiscard]] bool isFeatureEdge(EdgeId e) const { return m_edges[e.value].feature; }
     void setFeatureEdge(EdgeId e, bool feature) { m_edges[e.value].feature = feature; }

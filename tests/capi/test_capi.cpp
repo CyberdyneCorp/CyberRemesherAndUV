@@ -192,11 +192,14 @@ TEST_CASE("capi bulk indexed exchange retains vertex face and corner attributes"
     const size_t offsets[] = {0, 4};
     const uint32_t indices[] = {0, 1, 2, 3};
     const float weights[] = {1, 2, 3, 4};
-    const int32_t material[] = {7};
+    const int32_t materialIds[] = {7};
     const float uv[] = {0, 0, 1, 0, 1, 1, 0, 1};
     const CyberAttributeColumn attributes[] = {
         {"weight", CYBER_ATTRIBUTE_VERTEX, CYBER_ATTRIBUTE_FLOAT, weights, 4},
-        {"material", CYBER_ATTRIBUTE_FACE, CYBER_ATTRIBUTE_INT32, material, 1},
+        // `material_id` is the public semantic-boundary convention. It is
+        // still an ordinary face attribute, so hosts can read it back before
+        // remeshing and it does not require an ABI-breaking params extension.
+        {"material_id", CYBER_ATTRIBUTE_FACE, CYBER_ATTRIBUTE_INT32, materialIds, 1},
         {"uv", CYBER_ATTRIBUTE_CORNER, CYBER_ATTRIBUTE_FLOAT2, uv, 4},
     };
     const CyberIndexedMesh source{positions, 4, offsets, 1, indices, 4, attributes, 3};
@@ -205,6 +208,16 @@ TEST_CASE("capi bulk indexed exchange retains vertex face and corner attributes"
     REQUIRE(cyber_mesh_attribute_count(mesh) == 3u);
 
     CyberAttributeInfo info{};
+    REQUIRE(cyber_mesh_attribute_info(mesh, 1, &info) == CYBER_OK);
+    CHECK(std::string(info.name) == "material_id");
+    CHECK(info.domain == CYBER_ATTRIBUTE_FACE);
+    CHECK(info.type == CYBER_ATTRIBUTE_INT32);
+    std::vector<int32_t> copiedMaterial(cyber_mesh_copy_attribute(mesh, &info, nullptr, 0));
+    REQUIRE(copiedMaterial.size() == 1u);
+    CHECK(cyber_mesh_copy_attribute(mesh, &info, copiedMaterial.data(), copiedMaterial.size()) ==
+          copiedMaterial.size());
+    CHECK(copiedMaterial == std::vector<int32_t>(materialIds, materialIds + 1));
+
     REQUIRE(cyber_mesh_attribute_info(mesh, 2, &info) == CYBER_OK);
     CHECK(std::string(info.name) == "uv");
     CHECK(info.domain == CYBER_ATTRIBUTE_CORNER);
@@ -222,6 +235,45 @@ TEST_CASE("capi bulk indexed exchange retains vertex face and corner attributes"
     CHECK(cyber_mesh_from_indexed(&rejected, &untouched) == CYBER_ERR_INVALID_ARG);
     CHECK(untouched == mesh);
     cyber_mesh_free(mesh);
+}
+
+TEST_CASE("zremesher semantic-boundary report requires a complete caller buffer") {
+    const float positions[] = {0, 0, 0, 1, 0, 0, 0.5f, 0.866f, 0, 0.5f, 0.289f, 0.816f};
+    const size_t offsets[] = {0, 3, 6, 9, 12};
+    const uint32_t indices[] = {0, 2, 1, 0, 1, 3, 1, 2, 3, 2, 0, 3};
+    const int32_t groups[] = {1, 0, 0, 0};
+    const CyberAttributeColumn attributes[] = {
+        {"group_id", CYBER_ATTRIBUTE_FACE, CYBER_ATTRIBUTE_INT32, groups, 4},
+    };
+    const CyberIndexedMesh source{positions, 4, offsets, 4, indices, 12, attributes, 1};
+    CyberMesh* input = nullptr;
+    REQUIRE(cyber_mesh_from_indexed(&source, &input) == CYBER_OK);
+
+    CyberRemeshParams params{};
+    cyber_default_params(&params);
+    params.targetQuads = 16;
+    CyberSemanticBoundaryReport report{};
+    CyberMesh* output = reinterpret_cast<CyberMesh*>(0x1);
+    CHECK(cyber_remesh_zremesher_with_semantic_boundary_report(
+              input, &params, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, &output,
+              nullptr, &report) == CYBER_ERR_INVALID_ARG);
+    CHECK(output == nullptr);
+    CHECK(report.boundaryCount == 1u);
+
+    CyberSemanticBoundaryResult result{};
+    report.boundaries = &result;
+    report.boundaryCapacity = 1;
+    CyberZRemesherInjectabilityReport injectability{};
+    CHECK(cyber_remesh_zremesher_with_reports(input, &params, nullptr, nullptr, nullptr, nullptr,
+                                              nullptr, nullptr, nullptr, nullptr, &output, nullptr,
+                                              &injectability, &report) == CYBER_OK);
+    REQUIRE(output != nullptr);
+    CHECK(report.boundaryCount == 1u);
+    CHECK(std::string(result.id).find("group_id:") == 0);
+    CHECK(result.state != CYBER_SEMANTIC_REJECTED);
+    CHECK(injectability.arcs > 0u);
+    cyber_mesh_free(output);
+    cyber_mesh_free(input);
 }
 
 TEST_CASE("capi backend selection reports what it actually selected") {
