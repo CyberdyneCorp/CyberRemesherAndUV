@@ -971,6 +971,31 @@ int writeReport(const CliOptions& options, const remesh::PipelineResult& result,
         if (!zremesher.layout.invalidReason.empty()) {
             report["zremesher"]["invalidReason"] = zremesher.layout.invalidReason;
         }
+        report["zremesher"]["candidates"] = nlohmann::json::array();
+        for (const auto& candidate : zremesher.candidates) {
+            const auto& candidateStats = candidate.layout.stats;
+            const auto& candidateInjectability = candidate.layout.injectability;
+            report["zremesher"]["candidates"].push_back({
+                {"name", candidate.name},
+                {"selected", candidate.selected},
+                {"qualityScore", candidate.qualityScore},
+                {"layouts", candidate.layout.layouts},
+                {"layoutsValid", candidate.layout.layoutsValid},
+                {"arcs", candidateStats.arcs},
+                {"excludedArcs", candidateStats.excludedArcs},
+                {"injectability", {
+                    {"arcs", candidateInjectability.arcs},
+                    {"injectableArcs", candidateInjectability.injectableArcs},
+                    {"excludedArcs", candidateInjectability.excludedArcs},
+                    {"emptyRows", candidateInjectability.emptyRows},
+                    {"latticeFreeRows", candidateInjectability.latticeFreeRows},
+                    {"fractionalCoefficientRows",
+                     candidateInjectability.fractionalCoefficientRows},
+                    {"realizedDeviationEnergy",
+                     candidateInjectability.realizedDeviationEnergy},
+                }},
+            });
+        }
     }
     addPresetToReport(report, presetOutcome);
     addHandoffToReport(report, handoffOutcome);

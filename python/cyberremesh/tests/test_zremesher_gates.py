@@ -289,10 +289,24 @@ def gate_cli_reports_and_exports_the_layout(cli, work):
         "--quality best named {0!r} in the report".format(zr.get("selectedCandidate")))
     assert report["parameters"]["quality"] == "best"
     assert report["parameters"]["quadMethod"] == "zremesher"
+    candidates = zr.get("candidates")
+    assert isinstance(candidates, list) and len(candidates) == 2, candidates
+    assert sum(bool(candidate["selected"]) for candidate in candidates) == 1, candidates
+    assert next(candidate for candidate in candidates if candidate["selected"])["name"] == zr[
+        "selectedCandidate"]
+    assert sum(candidate["arcs"] for candidate in candidates) == zr["arcs"]
 
-    for path in (layout_json, layout_obj):
+    # Best evaluates two candidates. Their exported layouts are named by
+    # candidate and serial instead of overwriting `layout.json` with whichever
+    # one happened to run last.
+    exports = []
+    for candidate in candidates:
+        base = os.path.join(work, "layout.{0}.{1}".format(
+            candidate["name"], candidates.index(candidate)))
+        exports.extend((base + ".json", base + ".obj"))
+    for path in exports:
         assert os.path.getsize(path) > 0, "layout export wrote nothing to " + path
-    with open(layout_json) as fh:
+    with open(exports[0]) as fh:
         exported = json.load(fh)
     assert exported.get("nodes"), "the exported layout has no nodes"
 
