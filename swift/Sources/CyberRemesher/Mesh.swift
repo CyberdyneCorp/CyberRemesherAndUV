@@ -52,6 +52,18 @@ public struct PartialRetopologyReport: Equatable {
     public let untransferredAttributeCount: Int
 }
 
+/// Advisory symmetry analysis. Calling it never edits the mesh or enables a
+/// forced-symmetry remesh.
+public struct SymmetryDetectionReport: Equatable {
+    public let detected: Bool
+    public let axis: String
+    public let confidence: Float
+    public let ambiguous: Bool
+    public let sampledVertices: Int
+    public let matchedVertices: Int
+    public let unmatchedVertices: Int
+}
+
 /// A triangle or quad-dominant mesh owned by the engine.
 ///
 /// Construct from indexed geometry with ``init(positions:indices:)``, or read a
@@ -179,6 +191,22 @@ public final class Mesh {
             generatedVertexCount: Int(report.generated_vertex_count),
             untransferredAttributeCount: Int(report.untransferred_attribute_count)
         )
+    }
+
+    /// Analyses the axis-aligned symmetry hypotheses without modifying this mesh.
+    public func detectSymmetry() throws -> SymmetryDetectionReport {
+        var report = CyberSymmetryDetectionReport()
+        try CyberError.check(cyber_detect_symmetry(handle, &report))
+        let axis = ["none", "x", "y", "z"]
+        let rawAxis = Int(report.axis)
+        return SymmetryDetectionReport(
+            detected: report.detected != 0,
+            axis: rawAxis >= 0 && rawAxis < axis.count ? axis[rawAxis] : "none",
+            confidence: report.confidence,
+            ambiguous: report.ambiguous != 0,
+            sampledVertices: Int(report.sampledVertices),
+            matchedVertices: Int(report.matchedVertices),
+            unmatchedVertices: Int(report.unmatchedVertices))
     }
 
     /// Copies vertex positions out as a flat `x,y,z` buffer, in the engine's

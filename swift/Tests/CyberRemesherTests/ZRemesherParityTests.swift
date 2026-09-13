@@ -67,6 +67,16 @@ private func zremesherParams(targetQuads: Int = 800) -> RemeshParameters {
 }
 
 final class ZRemesherParityTests: XCTestCase {
+    func testSymmetryDetectionIsAdvisoryAndReportsAmbiguity() throws {
+        let mesh = try Mesh(positions: [-1, 0, 0, 1, 0, 0, 1, 1, 0, -1, 1, 0],
+                            faceOffsets: [0, 4], indices: [0, 1, 2, 3])
+        let report = try mesh.detectSymmetry()
+        XCTAssertFalse(report.detected)
+        XCTAssertTrue(report.ambiguous)
+        XCTAssertEqual(report.axis, "none")
+        XCTAssertEqual(report.matchedVertices, report.sampledVertices)
+    }
+
     func testPartialRetopologyReachesSwiftAndIsAtomic() throws {
         var positions: [Float] = []
         var indices: [UInt32] = []
