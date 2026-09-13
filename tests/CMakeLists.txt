@@ -289,7 +289,7 @@ if(CYBER_BUILD_CLI AND Python3_FOUND)
     if(NOT CMAKE_CROSSCOMPILING)
         add_test(NAME acceptance_corpus
             COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tools/bench/bench.py
-                    run --corpus acceptance --solvers cyber
+                    check --corpus acceptance
                     --cyber-binary $<TARGET_FILE:cyberremesh>
                     --cache-dir ${PROJECT_BINARY_DIR}/acceptance-cache
                     --results ${PROJECT_BINARY_DIR}/acceptance-results.json)

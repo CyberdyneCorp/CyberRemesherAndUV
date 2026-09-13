@@ -237,7 +237,7 @@ def toolchain_identity() -> str:
     return f"{system}/{machine}/{family}"
 
 
-def baselines_path(identity: str) -> Path:
+def baselines_path(identity: str, corpus_name: str = "generated") -> Path:
     """The baseline file for one toolchain.
 
     ONE FILE PER TOOLCHAIN, because the solve is not reproducible across them
@@ -249,7 +249,8 @@ def baselines_path(identity: str) -> Path:
     (correctly) treating a skip as a failure. Giving each toolchain its own file
     lets both gate for real.
     """
-    return BASELINES_DIR / f"baselines-{identity.replace('/', '-')}.json"
+    prefix = "baselines" if corpus_name == "generated" else f"baselines-{corpus_name}"
+    return BASELINES_DIR / f"{prefix}-{identity.replace('/', '-')}.json"
 
 
 def solver_identity(cyber_binary: Path) -> str:
@@ -288,9 +289,12 @@ def check_against_baselines(results: list[dict], path: Path) -> int:
             print(f"CHECK FAIL {key}: solver failed: {row['error']}")
             failures += 1
             continue
+        if row.get("expected_rejection"):
+            continue
         base = baselines.get(key)
         if base is None:
-            print(f"CHECK WARN {key}: no recorded baseline (run `bench.py record`)")
+            print(f"CHECK FAIL {key}: no recorded baseline (run `bench.py record`)")
+            failures += 1
             continue
         for metric, (kind, tol, direction) in CHECKED_METRICS.items():
             baseline_value = base.get(metric)
@@ -304,20 +308,21 @@ def check_against_baselines(results: list[dict], path: Path) -> int:
     return failures
 
 
-def record_baselines(results: list[dict], solver: str) -> None:
+def record_baselines(results: list[dict], solver: str, corpus_name: str) -> None:
     payload = {
-        "comment": "Recorded by tools/bench/bench.py record on the generated "
-                   "corpus. Regenerate deliberately after intentional solver "
+        "comment": "Recorded by tools/bench/bench.py record. Regenerate deliberately after intentional solver "
                    "changes; the diff is the review artifact.",
+        "corpus": corpus_name,
         "solver": solver,
         # The toolchain these numbers came from. Without it a baseline recorded
         # on Clang silently gates a GCC run against incomparable cone counts.
         "toolchain": toolchain_identity(),
         "results": {
-            row["mesh"]: row["metrics"] for row in results if row.get("ok")
+            row["mesh"]: row.get("metrics", {"expected_rejection": True})
+            for row in results if row.get("ok")
         },
     }
-    path = baselines_path(payload["toolchain"])
+    path = baselines_path(payload["toolchain"], corpus_name)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
     print(f"wrote {path} ({len(payload['results'])} meshes, "
@@ -350,9 +355,9 @@ def main() -> int:
     solvers = load_solvers(args.cyber_binary)
     if args.command in ("record", "check"):
         solvers = {k: v for k, v in solvers.items() if k == "cyber"}
-        if args.corpus != "generated":
-            print("record/check always use the generated corpus", file=sys.stderr)
-            meshes = corpus.generated_meshes(args.cache_dir / "generated")
+        if args.corpus not in ("generated", "acceptance"):
+            print("record/check require generated or acceptance corpus", file=sys.stderr)
+            return 2
     elif args.solvers != "all":
         wanted = set(args.solvers.split(","))
         missing = wanted - set(solvers)
@@ -378,7 +383,7 @@ def main() -> int:
         # comparing a field inside one, so a host either has baselines or does
         # not. Nothing to re-record on an unrelated machine to make CI green.
         current_host = toolchain_identity()
-        path = baselines_path(current_host)
+        path = baselines_path(current_host, args.corpus)
         if not path.exists():
             print(f"bench check SKIPPED: no baselines recorded for "
                   f"'{current_host}' ({path.name}). The solve reads "
@@ -387,6 +392,10 @@ def main() -> int:
                   f"record` on this one to gate it.")
             return SKIP_EXIT
         baselines = json.loads(path.read_text())
+        if baselines.get("corpus", "generated") != args.corpus:
+            print(f"bench check SKIPPED: {path.name} records '{baselines.get('corpus')}' "
+                  f"rather than requested '{args.corpus}'")
+            return SKIP_EXIT
         recorded = baselines.get("solver", "")
         current = solver_identity(args.cyber_binary)
         if recorded and current and recorded != current:
@@ -402,10 +411,10 @@ def main() -> int:
         args.results.write_text(json.dumps(results, indent=2) + "\n")
 
     if args.command == "record":
-        record_baselines(results, solver_identity(args.cyber_binary))
+        record_baselines(results, solver_identity(args.cyber_binary), args.corpus)
         return 0
     if args.command == "check":
-        failures = check_against_baselines(results, baselines_path(toolchain_identity()))
+        failures = check_against_baselines(results, baselines_path(toolchain_identity(), args.corpus))
         print("bench check:", "OK" if failures == 0 else f"{failures} failure(s)")
         return 1 if failures else 0
     return 0 if all(r.get("ok") for r in results) else 1

@@ -139,7 +139,7 @@ jobs:
       - name: Offline acceptance corpus
         run: |
           set -euo pipefail
-          python3 tools/bench/bench.py run --corpus acceptance --solvers cyber \
+          python3 tools/bench/bench.py check --corpus acceptance \
             --cyber-binary build/cpu-headless/apps/cli/cyberremesh \
             --cache-dir build/cpu-headless/acceptance-cache \
             --results acceptance-results.json
