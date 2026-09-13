@@ -1057,7 +1057,7 @@ There are **two** version numbers and they answer different questions.
 
 ```c
 #define CYBER_ABI_VERSION_MAJOR 1     /* the SHAPE of cyber_capi.h */
-#define CYBER_ABI_VERSION_MINOR 2
+#define CYBER_ABI_VERSION_MINOR 3
 
 void       cyber_abi_version(int* major, int* minor);
 CyberStatus cyber_abi_check(int compiled_major, int compiled_minor);
@@ -1089,7 +1089,7 @@ full increment rules, including why appending an enumerator is *not* additive.
 (`libcyber_capi.so.1`) rather than tracking the project's `0.x`.
 
 Every release and supported CTest toolchain compares
-[`capi/abi/cyber_capi-1.2.json`](capi/abi/cyber_capi-1.2.json) with a
+[`capi/abi/cyber_capi-1.3.json`](capi/abi/cyber_capi-1.3.json) with a
 compiler-measured manifest of this header. It records signatures, enum values,
 field types and padding—not merely `sizeof`—and compiles a retained v0.8 client
 surface against the current library. Extend the ABI with a new sibling entry
@@ -1099,6 +1099,18 @@ caller-owned struct in an ABI minor.
 Python: `cyberremesh.abi_version()` / `check_abi()`. Swift:
 `CyberRuntime.abiVersionComponents` / `CyberRuntime.checkABI()`.
 Rust: `cyberremesh::check_abi()` / `abi()` — see [`rust/README.md`](rust/README.md).
+
+#### In-memory authored polygon and attribute exchange
+
+`cyber_mesh_from_indexed` copies packed XYZ positions, CSR face offsets, and
+polygon indices in one transaction; it preserves triangles, quads, n-gons, and
+unused vertices. `cyber_mesh_copy_face_offsets` and
+`cyber_mesh_copy_polygon_indices` recover that authored topology without render
+triangulation. Named typed columns can be attached in the vertex, face, or
+corner domain (`float`, `int32`, `float2`, `float3`, `float4`); corner columns
+remain aligned to polygon indices, preserving UV seams. Swift uses
+`MeshAttribute`, Python uses `Mesh.from_indexed(..., attributes=...)` and
+`authored_attributes()`, while Rust intentionally exposes geometry only.
 
 #### Two things an embedder should wire up
 

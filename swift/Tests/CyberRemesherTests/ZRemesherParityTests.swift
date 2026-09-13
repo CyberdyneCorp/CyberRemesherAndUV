@@ -67,6 +67,40 @@ private func zremesherParams(targetQuads: Int = 800) -> RemeshParameters {
 }
 
 final class ZRemesherParityTests: XCTestCase {
+    func testBulkPolygonExchangePreservesAuthoredArity() throws {
+        var positions: [Float] = [
+            0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0,
+            9, 9, 9,  // retained unused vertex
+        ]
+        let offsets = [0, 3, 7]
+        let indices: [UInt32] = [0, 1, 2, 0, 2, 3, 1]
+        let mesh = try Mesh(positions: positions, faceOffsets: offsets, indices: indices)
+        positions[0] = 42
+
+        XCTAssertEqual(mesh.vertexCount, 5)
+        XCTAssertEqual(mesh.authoredPolygons().faceOffsets, offsets)
+        XCTAssertEqual(mesh.authoredPolygons().indices, indices)
+        XCTAssertEqual(mesh.positions()[0], 0)
+        XCTAssertThrowsError(
+            try Mesh(positions: positions, faceOffsets: [0, 2, 7], indices: indices))
+    }
+
+    func testBulkExchangePreservesTypedAttributes() throws {
+        let attributes: [MeshAttribute] = [
+            MeshAttribute(name: "weight", domain: .vertex, values: .float([1, 2, 3, 4])),
+            MeshAttribute(name: "material", domain: .face, values: .int32([7])),
+            MeshAttribute(name: "uv", domain: .corner, values: .float2([0, 0, 1, 0, 1, 1, 0, 1])),
+        ]
+        let mesh = try Mesh(positions: [0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0],
+                            faceOffsets: [0, 4], indices: [0, 1, 2, 3], attributes: attributes)
+        let returned = try mesh.authoredAttributes()
+        XCTAssertEqual(returned.count, 3)
+        guard case let .float2(uv)? = returned.first(where: { $0.name == "uv" })?.values else {
+            return XCTFail("missing corner UV attribute")
+        }
+        XCTAssertEqual(uv, [0, 0, 1, 0, 1, 1, 0, 1])
+    }
+
     /// Defaults come from the engine, not from restated literals, so the Swift
     /// mirror cannot drift from `cyber_default_zremesher_params`.
     func testDefaultsComeFromTheEngine() {

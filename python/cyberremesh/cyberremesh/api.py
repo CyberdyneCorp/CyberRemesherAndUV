@@ -108,7 +108,7 @@ def version() -> str:
 #: The C ABI this binding was written against. Mirrors CYBER_ABI_VERSION_* in
 #: cyber_capi.h; ``check_abi()`` compares it against the loaded library.
 ABI_VERSION_MAJOR = 1
-ABI_VERSION_MINOR = 2
+ABI_VERSION_MINOR = 3
 
 
 def abi_version() -> tuple:
@@ -830,6 +830,74 @@ class Mesh:
         # not come from that path. Always present so callers can test it
         # without hasattr.
         self.zremesher_report: Optional["ZRemesherReport"] = None
+
+    @classmethod
+    def from_indexed(cls, positions, face_offsets: Sequence[int], indices: Sequence[int],
+                     attributes=None) -> "Mesh":
+        """Copy packed positions and CSR-authored polygons into a new mesh.
+
+        ``face_offsets`` starts at zero, has one trailing entry, and each range
+        names at least three entries in ``indices``. The C ABI copies all data,
+        so callers retain ownership of every supplied buffer.
+        """
+        position_buffer = _float_buffer(positions)
+        if len(position_buffer) % 3:
+            raise ValueError("positions must contain x,y,z triples")
+        offsets = [int(value) for value in face_offsets]
+        if not offsets or offsets[0] != 0 or offsets[-1] != len(indices):
+            raise ValueError("face_offsets must span exactly the indices")
+        if any(start < 0 or end < start or end - start < 3
+               for start, end in zip(offsets, offsets[1:])):
+            raise ValueError("each authored face must contain at least three indices")
+        offset_buffer = (ctypes.c_size_t * len(offsets))(*offsets)
+        index_buffer = (ctypes.c_uint32 * len(indices))(*[int(value) for value in indices])
+        columns, retained = cls._attribute_columns(attributes)
+        column_pointer = ctypes.cast(columns, ctypes.c_void_p) if columns is not None else None
+        input_view = _ffi.CyberIndexedMesh(
+            position_buffer, len(position_buffer) // 3, offset_buffer, len(offsets) - 1,
+            index_buffer, len(indices), column_pointer, 0 if columns is None else len(columns),
+        )
+        output = ctypes.c_void_p()
+        _check(_ffi.get_lib().cyber_mesh_from_indexed(ctypes.byref(input_view), ctypes.byref(output)))
+        return cls(handle=output.value)
+
+    @staticmethod
+    def _attribute_columns(attributes):
+        if not attributes:
+            return None, []
+        domains = {"vertex": _ffi.ATTRIBUTE_VERTEX, "face": _ffi.ATTRIBUTE_FACE,
+                   "corner": _ffi.ATTRIBUTE_CORNER}
+        columns, retained = [], []
+        for (domain_name, name), rows in attributes.items():
+            if domain_name not in domains or not isinstance(name, str):
+                raise ValueError("attributes keys must be ('vertex'|'face'|'corner', name)")
+            rows = list(rows)
+            first = rows[0] if rows else 0.0
+            if isinstance(first, int) and not isinstance(first, bool):
+                type_code, array_type = _ffi.ATTRIBUTE_INT32, ctypes.c_int32
+                flat = [int(value) for value in rows]
+            else:
+                first_row = list(first) if isinstance(first, (tuple, list)) else [first]
+                width = len(first_row)
+                if width < 1 or width > 4:
+                    raise ValueError("attribute values must be scalar or 2-4 component rows")
+                type_code = (_ffi.ATTRIBUTE_FLOAT, _ffi.ATTRIBUTE_FLOAT2, _ffi.ATTRIBUTE_FLOAT3,
+                             _ffi.ATTRIBUTE_FLOAT4)[width - 1]
+                flat = [float(component) for row in rows
+                        for component in (list(row) if isinstance(row, (tuple, list)) else [row])]
+                if len(flat) != len(rows) * width:
+                    raise ValueError("attribute rows must have a consistent component count")
+                array_type = ctypes.c_float
+            data = (array_type * len(flat))(*flat)
+            encoded = name.encode("utf-8")
+            if not encoded or b"\0" in encoded or len(encoded) > 63:
+                raise ValueError("attribute names must contain 1-63 UTF-8 bytes")
+            retained.extend((data, encoded))
+            columns.append(_ffi.CyberAttributeColumn(encoded, domains[domain_name], type_code,
+                                                       ctypes.cast(data, ctypes.c_void_p), len(rows)))
+        array = (_ffi.CyberAttributeColumn * len(columns))(*columns)
+        retained.append(array)
+        return array, retained
 
     # -- lifetime -----------------------------------------------------------
     @property
@@ -1693,6 +1761,41 @@ class Mesh:
         if needed:
             lib.cyber_mesh_copy_positions(self.handle, buf, needed)
         return buf
+
+    def authored_polygons(self) -> Tuple[List[int], List[int]]:
+        """Copy CSR offsets and indices without render triangulation."""
+        lib = _ffi.get_lib()
+        offset_count = int(lib.cyber_mesh_copy_face_offsets(self.handle, None, 0))
+        index_count = int(lib.cyber_mesh_copy_polygon_indices(self.handle, None, 0))
+        offsets = (ctypes.c_size_t * offset_count)()
+        indices = (ctypes.c_uint32 * index_count)()
+        lib.cyber_mesh_copy_face_offsets(self.handle, offsets, offset_count)
+        lib.cyber_mesh_copy_polygon_indices(self.handle, indices, index_count)
+        return list(offsets), list(indices)
+
+    def authored_attributes(self):
+        """Return copied typed attributes keyed by ``(domain, name)``.
+
+        Domains are ``vertex``, ``face`` and ``corner``; corner values remain
+        aligned to :meth:`authored_polygons` indices, preserving UV seams.
+        """
+        lib = _ffi.get_lib()
+        names = {0: "vertex", 1: "face", 2: "corner"}
+        widths = {0: 1, 1: 1, 2: 2, 3: 3, 4: 4}
+        result = {}
+        for index in range(int(lib.cyber_mesh_attribute_count(self.handle))):
+            info = _ffi.CyberAttributeInfo()
+            _check(lib.cyber_mesh_attribute_info(self.handle, index, ctypes.byref(info)))
+            width = widths[info.type]
+            scalar_count = int(lib.cyber_mesh_copy_attribute(self.handle, ctypes.byref(info), None, 0))
+            scalar_type = ctypes.c_int32 if info.type == _ffi.ATTRIBUTE_INT32 else ctypes.c_float
+            values = (scalar_type * scalar_count)()
+            lib.cyber_mesh_copy_attribute(self.handle, ctypes.byref(info), values, scalar_count)
+            rows = list(values) if width == 1 else [tuple(values[i:i + width])
+                                                     for i in range(0, scalar_count, width)]
+            name = bytes(info.name).split(b"\0", 1)[0].decode("utf-8")
+            result[(names[info.domain], name)] = rows
+        return result
 
     def set_positions(self, values) -> None:
         """Write vertex positions back — the exact inverse of :attr:`positions`.

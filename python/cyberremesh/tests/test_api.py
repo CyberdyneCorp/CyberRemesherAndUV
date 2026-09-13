@@ -182,6 +182,21 @@ def _quads_in(path):
     return quads
 
 
+def _run_bulk_indexed_exchange():
+    """CSR topology and all three attribute domains cross one copied ABI call."""
+    with Mesh.from_indexed(
+        [0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0], [0, 4], [0, 1, 2, 3],
+        {("vertex", "weight"): [1.0, 2.0, 3.0, 4.0],
+         ("face", "material"): [7],
+         ("corner", "uv"): [(0, 0), (1, 0), (1, 1), (0, 1)]},
+    ) as mesh:
+        assert mesh.authored_polygons() == ([0, 4], [0, 1, 2, 3])
+        attributes = mesh.authored_attributes()
+        assert attributes[("face", "material")] == [7]
+        assert attributes[("corner", "uv")] == [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)]
+    print("PASS: bulk indexed polygon and attribute exchange")
+
+
 def main():
     _check_import_contract()
     _check_library_discovery()
@@ -195,6 +210,7 @@ def main():
     _run_remesh()
     _run_quad_method()
     _run_guide_point_arity()
+    _run_bulk_indexed_exchange()
     return 0
 
 

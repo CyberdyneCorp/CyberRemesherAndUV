@@ -92,7 +92,7 @@ typedef enum CyberStatus {
  * Do not compare these numbers by hand: cyber_abi_check() applies the rule
  * above in one place, so every binding gets the same answer. */
 #define CYBER_ABI_VERSION_MAJOR 1
-#define CYBER_ABI_VERSION_MINOR 2
+#define CYBER_ABI_VERSION_MINOR 3
 
 /* The ABI this build implements. Cannot fail; either pointer may be NULL. */
 void cyber_abi_version(int* major, int* minor);
@@ -743,6 +743,88 @@ size_t cyber_mesh_copy_positions(const CyberMesh* mesh, float* out, size_t max_f
 CyberStatus cyber_mesh_set_positions(CyberMesh* mesh, const float* positions, size_t float_count);
 /* Alias of cyber_default_params. */
 void cyber_remesh_params_default(CyberRemeshParams* params);
+
+/* --- Bulk authored-polygon exchange --------------------------------------
+ *
+ * A copying CSR mesh view for hosts which already own indexed geometry. The
+ * call copies every accepted value before returning: none of these pointers is
+ * retained, so their storage may be mutated or released immediately afterward.
+ *
+ * `positions` is tightly packed x,y,z triples with `vertex_count` entries.
+ * `face_offsets` has `face_count + 1` entries and describes the CSR ranges in
+ * `indices`: it starts at zero, is monotonic, and ends at `index_count`. Every
+ * face range has at least three indices. `indices` address `positions`.
+ *
+ * Attributes use a separate, typed column descriptor. A vertex column has
+ * one value per position, a face column one per authored face, and a corner
+ * column one per CSR index (this is the representation needed for UV seams).
+ * The ABI deliberately has no edge domain: edge identity is rebuilt from
+ * topology and is not stable across remeshing. Names are UTF-8 NUL-terminated
+ * identifiers of at most 63 bytes; duplicate (domain, name) pairs are
+ * rejected. Values are copied and may be released after the call.
+ *
+ * `cyber_mesh_from_indexed` validates all pointers/counts, finite positions,
+ * overflow-safe CSR relations, face arity, index range, and kernel face
+ * construction before publishing a new handle through `out`. On failure,
+ * `*out` is untouched and no partial mesh is exposed. Unreferenced positions
+ * are retained to preserve host vertex indexing. */
+#define CYBER_ATTRIBUTE_VERTEX 0
+#define CYBER_ATTRIBUTE_FACE 1
+#define CYBER_ATTRIBUTE_CORNER 2
+
+#define CYBER_ATTRIBUTE_FLOAT 0
+#define CYBER_ATTRIBUTE_INT32 1
+#define CYBER_ATTRIBUTE_FLOAT2 2
+#define CYBER_ATTRIBUTE_FLOAT3 3
+#define CYBER_ATTRIBUTE_FLOAT4 4
+
+typedef struct CyberAttributeColumn {
+    const char* name;
+    int domain;
+    int type;
+    const void* values;
+    size_t value_count;
+} CyberAttributeColumn;
+
+typedef struct CyberAttributeInfo {
+    char name[64];
+    int domain;
+    int type;
+    size_t value_count;
+} CyberAttributeInfo;
+
+typedef struct CyberIndexedMesh {
+    const float* positions;
+    size_t vertex_count;
+    const size_t* face_offsets;
+    size_t face_count;
+    const uint32_t* indices;
+    size_t index_count;
+    const CyberAttributeColumn* attributes;
+    size_t attribute_count;
+} CyberIndexedMesh;
+
+CyberStatus cyber_mesh_from_indexed(const CyberIndexedMesh* input, CyberMesh** out);
+
+/* Authored polygon export in the same compacted vertex order as
+ * cyber_mesh_copy_positions. Query each required count by passing NULL/zero,
+ * then pass a buffer at least that large. A too-small non-null output buffer
+ * is left untouched and the required count is returned. Face offsets contains
+ * `face_count + 1` entries; polygon indices contains `face_offsets[face_count]`
+ * entries. Neither function triangulates quads or n-gons. */
+size_t cyber_mesh_copy_face_offsets(const CyberMesh* mesh, size_t* out, size_t capacity);
+size_t cyber_mesh_copy_polygon_indices(const CyberMesh* mesh, uint32_t* out, size_t capacity);
+
+/* Attribute schema and values in the same compacted authored order as the
+ * polygon export. Query the schema count, then fill `CyberAttributeInfo`
+ * records. `cyber_mesh_copy_attribute` matches by its name/domain/type fields;
+ * pass out=NULL to query its scalar count (not row count). A too-small output
+ * buffer is left untouched and the required scalar count is returned. */
+size_t cyber_mesh_attribute_count(const CyberMesh* mesh);
+CyberStatus cyber_mesh_attribute_info(const CyberMesh* mesh, size_t index,
+                                      CyberAttributeInfo* out);
+size_t cyber_mesh_copy_attribute(const CyberMesh* mesh, const CyberAttributeInfo* attribute,
+                                 void* out, size_t capacity);
 
 /* --- Render-data accessors (viewport renderers) --------------------------
  *

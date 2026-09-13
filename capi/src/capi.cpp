@@ -1655,6 +1655,101 @@ const T* bufferView(const std::vector<T>* src, size_t* out_count) {
     return count == 0 ? nullptr : src->data();
 }
 
+bool attributeName(const char* name, std::string& out) {
+    if (name == nullptr) {
+        return false;
+    }
+    const void* end = std::memchr(name, '\0', 64);
+    if (end == nullptr || end == name) {
+        return false;
+    }
+    out.assign(name, static_cast<const char*>(end));
+    return true;
+}
+
+bool validAttributeShape(const CyberAttributeColumn& column, size_t vertices, size_t faces,
+                         size_t corners, std::string& name) {
+    if (!attributeName(column.name, name) || column.values == nullptr ||
+        column.domain < CYBER_ATTRIBUTE_VERTEX || column.domain > CYBER_ATTRIBUTE_CORNER ||
+        column.type < CYBER_ATTRIBUTE_FLOAT || column.type > CYBER_ATTRIBUTE_FLOAT4) {
+        return false;
+    }
+    const size_t expected = column.domain == CYBER_ATTRIBUTE_VERTEX
+                                ? vertices
+                                : (column.domain == CYBER_ATTRIBUTE_FACE ? faces : corners);
+    return column.value_count == expected;
+}
+
+template <typename T>
+bool copyAttributeColumn(cyber::AttributeSet& set, const CyberAttributeColumn& column,
+                         const std::string& name) {
+    const T* values = static_cast<const T*>(column.values);
+    std::vector<T>& destination = set.create<T>(name);
+    for (size_t i = 0; i < column.value_count; ++i) {
+        if constexpr (std::is_same_v<T, float>) {
+            if (!std::isfinite(values[i])) {
+                return false;
+            }
+        } else if constexpr (std::is_same_v<T, cyber::Vec2>) {
+            if (!std::isfinite(values[i].x) || !std::isfinite(values[i].y)) {
+                return false;
+            }
+        } else if constexpr (std::is_same_v<T, cyber::Vec3>) {
+            if (!std::isfinite(values[i].x) || !std::isfinite(values[i].y) ||
+                !std::isfinite(values[i].z)) {
+                return false;
+            }
+        } else if constexpr (std::is_same_v<T, cyber::Vec4>) {
+            if (!std::isfinite(values[i].x) || !std::isfinite(values[i].y) ||
+                !std::isfinite(values[i].z) || !std::isfinite(values[i].w)) {
+                return false;
+            }
+        }
+        destination[i] = values[i];
+    }
+    return true;
+}
+
+bool importAttributeColumn(cyber::Mesh& mesh, const CyberAttributeColumn& column,
+                           const std::string& name) {
+    cyber::AttributeSet* set = column.domain == CYBER_ATTRIBUTE_VERTEX
+                                   ? &mesh.vertexAttributes()
+                                   : (column.domain == CYBER_ATTRIBUTE_FACE ? &mesh.faceAttributes()
+                                                                            : &mesh.cornerAttributes());
+    switch (column.type) {
+        case CYBER_ATTRIBUTE_FLOAT:
+            return copyAttributeColumn<float>(*set, column, name);
+        case CYBER_ATTRIBUTE_INT32:
+            return copyAttributeColumn<std::int32_t>(*set, column, name);
+        case CYBER_ATTRIBUTE_FLOAT2:
+            return copyAttributeColumn<cyber::Vec2>(*set, column, name);
+        case CYBER_ATTRIBUTE_FLOAT3:
+            return copyAttributeColumn<cyber::Vec3>(*set, column, name);
+        case CYBER_ATTRIBUTE_FLOAT4:
+            return copyAttributeColumn<cyber::Vec4>(*set, column, name);
+        default:
+            return false;
+    }
+}
+
+template <typename Fn>
+void forEachAttribute(const cyber::Mesh& mesh, const Fn& fn) {
+    const auto visit = [&](const cyber::AttributeSet& set, int domain) {
+        set.forEachColumn([&](const std::string& name, const auto& values) {
+            using T = typename std::decay_t<decltype(values)>::value_type;
+            constexpr int type = std::is_same_v<T, float>       ? CYBER_ATTRIBUTE_FLOAT
+                                 : std::is_same_v<T, std::int32_t> ? CYBER_ATTRIBUTE_INT32
+                                 : std::is_same_v<T, cyber::Vec2>  ? CYBER_ATTRIBUTE_FLOAT2
+                                 : std::is_same_v<T, cyber::Vec3>  ? CYBER_ATTRIBUTE_FLOAT3
+                                                                   : CYBER_ATTRIBUTE_FLOAT4;
+            fn(name, domain, type, values);
+        });
+    };
+    visit(mesh.vertexAttributes(), CYBER_ATTRIBUTE_VERTEX);
+    visit(mesh.faceAttributes(), CYBER_ATTRIBUTE_FACE);
+    visit(mesh.cornerAttributes(), CYBER_ATTRIBUTE_CORNER);
+}
+
 }  // namespace
 
 size_t cyber_mesh_copy_render_positions(const CyberMesh* mesh, float* out, size_t max_floats) {
@@ -2304,6 +2399,255 @@ CyberStatus cyber_mesh_clone(const CyberMesh* mesh, CyberMesh** out) {
         setError("cyber_mesh_clone: unknown error");
         return CYBER_ERR_RUNTIME;
     }
+}
+
+CyberStatus cyber_mesh_from_indexed(const CyberIndexedMesh* input, CyberMesh** out) {
+    return guarded("cyber_mesh_from_indexed", CYBER_ERR_RUNTIME, [&] {
+        if (input == nullptr || out == nullptr || input->face_offsets == nullptr ||
+            (input->vertex_count != 0 && input->positions == nullptr) ||
+            (input->index_count != 0 && input->indices == nullptr) ||
+            (input->attribute_count != 0 && input->attributes == nullptr)) {
+            setError("cyber_mesh_from_indexed: null input buffer or output");
+            return CYBER_ERR_INVALID_ARG;
+        }
+        if (input->face_count == std::numeric_limits<size_t>::max() ||
+            input->vertex_count > std::numeric_limits<cyber::Index>::max()) {
+            setError("cyber_mesh_from_indexed: count exceeds representable range");
+            return CYBER_ERR_INVALID_ARG;
+        }
+        if (input->face_offsets[0] != 0 || input->face_offsets[input->face_count] != input->index_count) {
+            setError("cyber_mesh_from_indexed: offsets must span exactly the index buffer");
+            return CYBER_ERR_INVALID_ARG;
+        }
+        std::vector<std::string> attributeNames;
+        attributeNames.reserve(input->attribute_count);
+        for (size_t i = 0; i < input->attribute_count; ++i) {
+            std::string name;
+            if (!validAttributeShape(input->attributes[i], input->vertex_count, input->face_count,
+                                     input->index_count, name)) {
+                setError("cyber_mesh_from_indexed: invalid attribute descriptor");
+                return CYBER_ERR_INVALID_ARG;
+            }
+            const std::string key = std::to_string(input->attributes[i].domain) + ":" + name;
+            if (std::find(attributeNames.begin(), attributeNames.end(), key) != attributeNames.end()) {
+                setError("cyber_mesh_from_indexed: duplicate attribute domain and name");
+                return CYBER_ERR_INVALID_ARG;
+            }
+            attributeNames.push_back(key);
+        }
+
+        cyber::Mesh temporary;
+        std::vector<cyber::VertexId> vertices;
+        vertices.reserve(input->vertex_count);
+        for (size_t i = 0; i < input->vertex_count; ++i) {
+            const float x = input->positions[i * 3];
+            const float y = input->positions[i * 3 + 1];
+            const float z = input->positions[i * 3 + 2];
+            if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z)) {
+                setError("cyber_mesh_from_indexed: positions must be finite");
+                return CYBER_ERR_INVALID_ARG;
+            }
+            vertices.push_back(temporary.addVertex({x, y, z}));
+        }
+        std::vector<cyber::VertexId> polygon;
+        for (size_t face = 0; face < input->face_count; ++face) {
+            const size_t begin = input->face_offsets[face];
+            const size_t end = input->face_offsets[face + 1];
+            if (end < begin || end > input->index_count || end - begin < 3) {
+                setError("cyber_mesh_from_indexed: offsets must describe faces with at least three corners");
+                return CYBER_ERR_INVALID_ARG;
+            }
+            polygon.clear();
+            polygon.reserve(end - begin);
+            for (size_t corner = begin; corner < end; ++corner) {
+                const uint32_t source = input->indices[corner];
+                if (source >= input->vertex_count) {
+                    setError("cyber_mesh_from_indexed: index is outside the position buffer");
+                    return CYBER_ERR_INVALID_ARG;
+                }
+                polygon.push_back(vertices[source]);
+            }
+            const cyber::FaceId added = temporary.addFace(polygon);
+            if (!temporary.isAlive(added)) {
+                setError("cyber_mesh_from_indexed: face is topologically degenerate");
+                return CYBER_ERR_INVALID_ARG;
+            }
+        }
+        for (size_t i = 0; i < input->attribute_count; ++i) {
+            std::string name;
+            const CyberAttributeColumn& attribute = input->attributes[i];
+            attributeName(attribute.name, name);
+            if (!importAttributeColumn(temporary, attribute, name)) {
+                setError("cyber_mesh_from_indexed: attribute values must be finite");
+                return CYBER_ERR_INVALID_ARG;
+            }
+        }
+
+        auto imported = std::make_unique<CyberMesh>();
+        imported->mesh = std::move(temporary);
+        *out = imported.release();
+        clearError();
+        return CYBER_OK;
+    });
+}
+
+size_t cyber_mesh_copy_face_offsets(const CyberMesh* mesh, size_t* out, size_t capacity) {
+    return guarded("cyber_mesh_copy_face_offsets", size_t{0}, [&] {
+        if (mesh == nullptr) {
+            return size_t{0};
+        }
+        std::vector<cyber::Vec3> positions;
+        std::vector<std::vector<cyber::Index>> faces;
+        mesh->mesh.toIndexed(positions, faces);
+        const size_t required = faces.size() + 1;
+        if (out == nullptr) {
+            return required;
+        }
+        if (capacity < required) {
+            return required;
+        }
+        size_t offset = 0;
+        out[0] = 0;
+        for (size_t face = 0; face < faces.size(); ++face) {
+            offset += faces[face].size();
+            out[face + 1] = offset;
+        }
+        return required;
+    });
+}
+
+size_t cyber_mesh_copy_polygon_indices(const CyberMesh* mesh, uint32_t* out, size_t capacity) {
+    return guarded("cyber_mesh_copy_polygon_indices", size_t{0}, [&] {
+        if (mesh == nullptr) {
+            return size_t{0};
+        }
+        std::vector<cyber::Vec3> positions;
+        std::vector<std::vector<cyber::Index>> faces;
+        mesh->mesh.toIndexed(positions, faces);
+        size_t required = 0;
+        for (const auto& face : faces) {
+            if (face.size() > std::numeric_limits<size_t>::max() - required) {
+                setError("cyber_mesh_copy_polygon_indices: index count overflow");
+                return size_t{0};
+            }
+            required += face.size();
+        }
+        if (out == nullptr) {
+            return required;
+        }
+        if (capacity < required) {
+            return required;
+        }
+        size_t next = 0;
+        for (const auto& face : faces) {
+            for (const cyber::Index index : face) {
+                out[next++] = index;
+            }
+        }
+        return required;
+    });
+}
+
+size_t cyber_mesh_attribute_count(const CyberMesh* mesh) {
+    if (mesh == nullptr) {
+        return 0;
+    }
+    size_t count = 0;
+    forEachAttribute(mesh->mesh, [&](const auto&, int, int, const auto&) { ++count; });
+    return count;
+}
+
+CyberStatus cyber_mesh_attribute_info(const CyberMesh* mesh, size_t index, CyberAttributeInfo* out) {
+    return guarded("cyber_mesh_attribute_info", CYBER_ERR_RUNTIME, [&] {
+        if (mesh == nullptr || out == nullptr) {
+            setError("cyber_mesh_attribute_info: null mesh or output");
+            return CYBER_ERR_INVALID_ARG;
+        }
+        size_t current = 0;
+        bool found = false;
+        forEachAttribute(mesh->mesh, [&](const std::string& name, int domain, int type,
+                                         const auto& values) {
+            if (current++ != index) {
+                return;
+            }
+            std::memset(out, 0, sizeof(*out));
+            std::memcpy(out->name, name.data(), std::min(name.size(), sizeof(out->name) - 1));
+            out->domain = domain;
+            out->type = type;
+            out->value_count = values.size();
+            found = true;
+        });
+        if (!found) {
+            setError("cyber_mesh_attribute_info: index is outside the schema");
+            return CYBER_ERR_INVALID_ARG;
+        }
+        clearError();
+        return CYBER_OK;
+    });
+}
+
+template <typename T>
+size_t copyAuthoredAttribute(const cyber::Mesh& mesh, const std::vector<T>& values, int domain,
+                             void* out, size_t capacity) {
+    std::vector<size_t> order;
+    if (domain == CYBER_ATTRIBUTE_VERTEX) {
+        for (cyber::Index i = 0; i < mesh.vertexCapacity(); ++i) {
+            if (mesh.isAlive(cyber::VertexId{i})) order.push_back(i);
+        }
+    } else if (domain == CYBER_ATTRIBUTE_FACE) {
+        for (cyber::Index i = 0; i < mesh.faceCapacity(); ++i) {
+            if (mesh.isAlive(cyber::FaceId{i})) order.push_back(i);
+        }
+    } else {
+        for (cyber::Index i = 0; i < mesh.faceCapacity(); ++i) {
+            const cyber::FaceId face{i};
+            if (!mesh.isAlive(face)) continue;
+            for (const cyber::LoopId loop : mesh.faceLoops(face)) order.push_back(loop.value);
+        }
+    }
+    constexpr size_t components = std::is_same_v<T, float> || std::is_same_v<T, std::int32_t>
+                                      ? 1
+                                      : (std::is_same_v<T, cyber::Vec2> ? 2
+                                                                         : (std::is_same_v<T, cyber::Vec3> ? 3 : 4));
+    const size_t required = order.size() * components;
+    if (out == nullptr || capacity < required) return required;
+    auto* destination = static_cast<float*>(out);
+    if constexpr (std::is_same_v<T, std::int32_t>) {
+        auto* integers = static_cast<std::int32_t*>(out);
+        for (size_t i = 0; i < order.size(); ++i) integers[i] = values[order[i]];
+    } else if constexpr (std::is_same_v<T, float>) {
+        for (size_t i = 0; i < order.size(); ++i) destination[i] = values[order[i]];
+    } else {
+        for (size_t i = 0; i < order.size(); ++i) {
+            const T& value = values[order[i]];
+            destination[i * components] = value.x;
+            destination[i * components + 1] = value.y;
+            if constexpr (components >= 3) destination[i * components + 2] = value.z;
+            if constexpr (components == 4) destination[i * components + 3] = value.w;
+        }
+    }
+    return required;
+}
+
+size_t cyber_mesh_copy_attribute(const CyberMesh* mesh, const CyberAttributeInfo* attribute,
+                                 void* out, size_t capacity) {
+    return guarded("cyber_mesh_copy_attribute", size_t{0}, [&] {
+        if (mesh == nullptr || attribute == nullptr) {
+            return size_t{0};
+        }
+        std::string name;
+        if (!attributeName(attribute->name, name)) return size_t{0};
+        size_t result = 0;
+        bool found = false;
+        forEachAttribute(mesh->mesh, [&](const std::string& candidate, int domain, int type,
+                                         const auto& values) {
+            if (candidate == name && domain == attribute->domain && type == attribute->type) {
+                result = copyAuthoredAttribute(mesh->mesh, values, domain, out, capacity);
+                found = true;
+            }
+        });
+        return found ? result : size_t{0};
+    });
 }
 
 CyberStatus cyber_mesh_set_positions(CyberMesh* mesh, const float* positions, size_t float_count) {

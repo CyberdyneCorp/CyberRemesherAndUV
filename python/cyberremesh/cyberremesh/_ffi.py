@@ -74,6 +74,9 @@ POLICY_MIN_FACES = 2
 # CYBER_INVALID_ID — the sentinel every element-id accessor returns for "none".
 INVALID_ID = 0xFFFFFFFF
 
+ATTRIBUTE_VERTEX, ATTRIBUTE_FACE, ATTRIBUTE_CORNER = range(3)
+ATTRIBUTE_FLOAT, ATTRIBUTE_INT32, ATTRIBUTE_FLOAT2, ATTRIBUTE_FLOAT3, ATTRIBUTE_FLOAT4 = range(5)
+
 # CyberLoopSubdivideMode enum — mirrors cyber::retopo::LoopSubdivideMode.
 # Persisted by callers, so these values are append-only.
 LOOP_SUBDIVIDE_SMOOTH = 0
@@ -118,6 +121,31 @@ class CyberRemeshParams(Structure):
         # 4 = zremesher
         ("quad_method", c_int32),
     ]
+
+
+class CyberIndexedMesh(Structure):
+    """Copying CSR authored-polygon input view (``CyberIndexedMesh``)."""
+
+    _fields_ = [
+        ("positions", POINTER(c_float)),
+        ("vertex_count", c_size_t),
+        ("face_offsets", POINTER(c_size_t)),
+        ("face_count", c_size_t),
+        ("indices", POINTER(c_uint32)),
+        ("index_count", c_size_t),
+        ("attributes", c_void_p),
+        ("attribute_count", c_size_t),
+    ]
+
+
+class CyberAttributeColumn(Structure):
+    _fields_ = [("name", c_char_p), ("domain", c_int32), ("type", c_int32),
+                ("values", c_void_p), ("value_count", c_size_t)]
+
+
+class CyberAttributeInfo(Structure):
+    _fields_ = [("name", c_char * 64), ("domain", c_int32), ("type", c_int32),
+                ("value_count", c_size_t)]
 
 
 class CyberFlowGuide(Structure):
@@ -889,6 +917,19 @@ def _declare(lib: ctypes.CDLL) -> None:
     # CyberStatus cyber_mesh_clone(const CyberMesh*, CyberMesh** out)
     lib.cyber_mesh_clone.argtypes = [c_void_p, POINTER(c_void_p)]
     lib.cyber_mesh_clone.restype = c_int32
+
+    lib.cyber_mesh_from_indexed.argtypes = [POINTER(CyberIndexedMesh), POINTER(c_void_p)]
+    lib.cyber_mesh_from_indexed.restype = c_int32
+    lib.cyber_mesh_copy_face_offsets.argtypes = [c_void_p, POINTER(c_size_t), c_size_t]
+    lib.cyber_mesh_copy_face_offsets.restype = c_size_t
+    lib.cyber_mesh_copy_polygon_indices.argtypes = [c_void_p, POINTER(c_uint32), c_size_t]
+    lib.cyber_mesh_copy_polygon_indices.restype = c_size_t
+    lib.cyber_mesh_attribute_count.argtypes = [c_void_p]
+    lib.cyber_mesh_attribute_count.restype = c_size_t
+    lib.cyber_mesh_attribute_info.argtypes = [c_void_p, c_size_t, POINTER(CyberAttributeInfo)]
+    lib.cyber_mesh_attribute_info.restype = c_int32
+    lib.cyber_mesh_copy_attribute.argtypes = [c_void_p, POINTER(CyberAttributeInfo), c_void_p, c_size_t]
+    lib.cyber_mesh_copy_attribute.restype = c_size_t
 
     # -- mesh I/O ------------------------------------------------------------
     # Both dispatch on the file extension (.obj/.ply/.stl/.gltf/.glb, plus .fbx
