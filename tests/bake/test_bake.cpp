@@ -76,6 +76,20 @@ TEST_CASE("UV layout is rasterized to covered texels") {
     REQUIRE(r.texelsCovered > 900);  // ~full 32x32 square
 }
 
+TEST_CASE("bake texel ceiling rejects before UV rasterization and image allocation") {
+    const Mesh low = makePlane(0, 0, 1, 0, 1, true, false);
+    const Mesh high = makePlane(0, 0, 1, 0, 1, false, false);
+    bake::BakeParams p = params32();
+    p.maxPixels = 1023;
+    const bake::BakeResult refused = bake::bake(low, high, bake::BakeMap::Position, p);
+    CHECK(refused.image.pixels.empty());
+    CHECK(refused.texelsCovered == 0);
+
+    p.maxPixels = 0;
+    const bake::BakeResult accepted = bake::bake(low, high, bake::BakeMap::Position, p);
+    CHECK_FALSE(accepted.image.pixels.empty());
+}
+
 TEST_CASE("normal bake of coincident flat surfaces is tangent-space up") {
     const Mesh low = makePlane(0, 0, 1, 0, 1, true, false);
     const Mesh high = makePlane(0, 0, 1, 0, 1, false, false);
