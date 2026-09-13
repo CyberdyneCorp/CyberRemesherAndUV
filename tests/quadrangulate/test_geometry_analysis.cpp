@@ -2,6 +2,7 @@
 
 #include <cmath>
 #include <cstddef>
+#include <limits>
 #include <vector>
 
 #include "cyber/core/bvh.hpp"
@@ -377,11 +378,47 @@ TEST_CASE("quality score: a perfect quad grid scores near the top") {
     CHECK(s.nonQuadFaces == 0);
     CHECK(s.quadPurity == doctest::Approx(1.0));
     CHECK(s.medianAngleDegrees == doctest::Approx(90.0));
+    CHECK(s.p95AngleDeviationDegrees == doctest::Approx(0.0));
     CHECK(s.angle == doctest::Approx(1.0));
     CHECK(s.edgeUniformity == doctest::Approx(1.0));
     // Every interior vertex of a regular grid has valence 4.
     CHECK(s.irregularVertices == 0);
     CHECK(s.topologicalDefects == doctest::Approx(0.0));
+}
+
+TEST_CASE("quality score: invalid geometry cannot beat an eligible candidate") {
+    const QualityScore eligible = scoreQuality(flatGrid(4), nullptr, /*closedInput=*/false);
+
+    const QualityScore empty = scoreQuality(Mesh{}, nullptr, /*closedInput=*/false);
+    CHECK_FALSE(empty.geometryValid);
+    CHECK_FALSE(candidateBeats(empty, eligible, CandidateSelectionContext{1}));
+
+    Mesh nonFinite = flatGrid(4);
+    nonFinite.setPosition(VertexId{0}, {std::numeric_limits<float>::quiet_NaN(), 0.0f, 0.0f});
+    const QualityScore nonFiniteScore = scoreQuality(nonFinite, nullptr, /*closedInput=*/false);
+    CHECK_FALSE(nonFiniteScore.geometryValid);
+    CHECK_FALSE(candidateBeats(nonFiniteScore, eligible, CandidateSelectionContext{1}));
+
+    Mesh degenerate = flatGrid(4);
+    degenerate.setPosition(VertexId{1}, degenerate.position(VertexId{0}));
+    const QualityScore degenerateScore = scoreQuality(degenerate, nullptr, /*closedInput=*/false);
+    CHECK_FALSE(degenerateScore.geometryValid);
+    CHECK(degenerateScore.degenerateEdges > 0);
+    CHECK_FALSE(candidateBeats(degenerateScore, eligible, CandidateSelectionContext{1}));
+}
+
+TEST_CASE("quality score: p95 angle tail sees a distorted corner that the median hides") {
+    const QualityScore regular = scoreQuality(flatGrid(4), nullptr, /*closedInput=*/false);
+    Mesh distorted = flatGrid(4);
+    // This interior point retains nonzero incident edges but makes one local
+    // quad corner nearly flat. Most corners remain square, so its median alone
+    // would hide the fault.
+    distorted.setPosition(VertexId{12}, {1.99f, 1.01f, 0.0f});
+    const QualityScore skewed = scoreQuality(distorted, nullptr, /*closedInput=*/false);
+    CHECK(skewed.geometryValid);
+    CHECK(skewed.medianAngleDegrees == doctest::Approx(90.0));
+    CHECK(skewed.p95AngleDeviationDegrees > regular.p95AngleDeviationDegrees);
+    CHECK(skewed.angle < regular.angle);
 }
 
 TEST_CASE("quality score: an open border is a defect only when the input was closed") {

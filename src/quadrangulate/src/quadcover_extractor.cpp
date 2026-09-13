@@ -3660,13 +3660,14 @@ public:
             const bool take =
                 bestName.empty() || candidateBeats(score, bestScore, selectionContext);
             if (std::getenv("CYBER_QC_DEBUG") != nullptr) {
-                std::fprintf(stderr,
-                             "[zr] candidate %-12s total=%7.3f angle=%.3f uniformity=%.3f "
-                             "quads=%.3f irregular=%.1f%% defects=%zu -> %s\n",
-                             candidate.name, score.total, score.angle, score.edgeUniformity,
-                             score.quadPurity, 100.0 * score.irregularFraction,
-                             score.nonManifoldEdges + score.boundaryComponents,
-                             take ? "BEST" : "kept");
+                std::fprintf(
+                    stderr,
+                    "[zr] candidate %-12s total=%7.3f angle=%.3f angle_p95=%.1f "
+                    "uniformity=%.3f quads=%.3f irregular=%.1f%% valid=%d defects=%zu -> %s\n",
+                    candidate.name, score.total, score.angle, score.p95AngleDeviationDegrees,
+                    score.edgeUniformity, score.quadPurity, 100.0 * score.irregularFraction,
+                    score.geometryValid ? 1 : 0, score.nonManifoldEdges + score.boundaryComponents,
+                    take ? "BEST" : "kept");
             }
             if (take) {
                 best = std::move(trial);
