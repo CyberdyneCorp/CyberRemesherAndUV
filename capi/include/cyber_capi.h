@@ -702,6 +702,19 @@ CyberStatus cyber_remesh_zremesher_with_semantic_boundary_report(
     CyberWarningCb warning, void* user, CyberMesh** out, CyberZRemesherReport* report,
     CyberSemanticBoundaryReport* semantic_boundary_report);
 
+/* The complete diagnostic variant. `topology` and `execution` may each be
+ * NULL. `injectability_report` may be NULL. When `semantic_boundary_report`
+ * is non-NULL it follows CyberSemanticBoundaryReport's caller-buffer contract.
+ * This avoids a binding having to choose between resource limits and either
+ * kind of final-run evidence. */
+CyberStatus cyber_remesh_zremesher_with_reports(
+    const CyberMesh* in, const CyberRemeshParams* params, const CyberZRemesherParams* zr,
+    const CyberGuidanceEx* guidance, const CyberRemeshLimits* topology,
+    const CyberRemeshExecutionLimits* execution, CyberProgressCb progress, CyberCancelCb cancel,
+    CyberWarningCb warning, void* user, CyberMesh** out, CyberZRemesherReport* report,
+    CyberZRemesherInjectabilityReport* injectability_report,
+    CyberSemanticBoundaryReport* semantic_boundary_report);
+
 /* ZRemesher variant with the additive topology/execution resource limits. */
 CyberStatus cyber_remesh_zremesher_with_resource_limits(
     const CyberMesh* in, const CyberRemeshParams* params, const CyberZRemesherParams* zr,

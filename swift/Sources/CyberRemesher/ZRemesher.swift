@@ -221,6 +221,9 @@ public struct ZRemesherReport: Sendable, Equatable {
     public var borderSnapped: Int
     public var membranesRemoved: Int
     public var maxBorderDrift: Float
+    /// Final-mesh evidence for authored `group_id` / `material_id` face
+    /// boundaries. Nil means the input supplied no semantic face attributes.
+    public var semanticBoundaries: SemanticBoundaryReport?
 
     init(_ c: CyberZRemesherReport) {
         layouts = Int(c.layouts)
@@ -250,6 +253,58 @@ public struct ZRemesherReport: Sendable, Equatable {
         borderSnapped = Int(c.borderSnapped)
         membranesRemoved = Int(c.membranesRemoved)
         maxBorderDrift = c.maxBorderDrift
+        semanticBoundaries = nil
+    }
+}
+
+/// The final-mesh outcome of one authored semantic face-boundary component.
+public struct SemanticBoundaryResult: Sendable, Equatable {
+    public enum State: Sendable, Equatable { case realized, partial, rejected }
+
+    public let id: String
+    public let sourceEdges: Int
+    public let requestedClosed: Bool
+    public let outputClosed: Bool
+    public let state: State
+    public let edgeChainCoverage: Float
+    public let meanDistance: Float
+    public let maxDistance: Float
+    public let reason: String
+
+    init(_ c: CyberSemanticBoundaryResult) {
+        func string<T>(_ value: inout T) -> String {
+            withUnsafeBytes(of: &value) { String(decoding: $0.prefix(while: { $0 != 0 }), as: UTF8.self) }
+        }
+        var id = c.id
+        var reason = c.reason
+        self.id = string(&id)
+        sourceEdges = Int(c.sourceEdges)
+        requestedClosed = c.requestedClosed != 0
+        outputClosed = c.outputClosed != 0
+        switch c.state {
+        case CYBER_SEMANTIC_REALIZED: state = .realized
+        case CYBER_SEMANTIC_PARTIAL: state = .partial
+        default: state = .rejected
+        }
+        edgeChainCoverage = c.edgeChainCoverage
+        meanDistance = c.meanDistance
+        maxDistance = c.maxDistance
+        self.reason = string(&reason)
+    }
+}
+
+/// Aggregated final-mesh evidence for authored semantic face boundaries.
+public struct SemanticBoundaryReport: Sendable, Equatable {
+    public let realizedCount: Int
+    public let partialCount: Int
+    public let rejectedCount: Int
+    public let boundaries: [SemanticBoundaryResult]
+
+    init(_ c: CyberSemanticBoundaryReport, rows: [CyberSemanticBoundaryResult]) {
+        realizedCount = Int(c.realizedCount)
+        partialCount = Int(c.partialCount)
+        rejectedCount = Int(c.rejectedCount)
+        boundaries = rows.prefix(Int(c.boundaryCount)).map(SemanticBoundaryResult.init)
     }
 }
 
@@ -418,25 +473,61 @@ public final class ZRemesherOperation {
         var czr = zremesher.cValue
         var creport = CyberZRemesherReport()
         var out: OpaquePointer?
+        let semanticInput: Bool
+        do {
+            semanticInput = try input.authoredAttributes().contains { attribute in
+                guard attribute.domain == .face,
+                      attribute.name == "group_id" || attribute.name == "material_id" else {
+                    return false
+                }
+                if case .int32 = attribute.values { return true }
+                return false
+            }
+        } catch {
+            return .failure(error)
+        }
+        let semanticCapacity = semanticInput ? max(1, input.authoredPolygons().indices.count) : 0
+        var semanticRows = [CyberSemanticBoundaryResult](repeating: CyberSemanticBoundaryResult(), count: semanticCapacity)
+        var semanticReport = CyberSemanticBoundaryReport()
 
         // Every point buffer has to stay alive across the call, so the guides
         // are built inside nested `withUnsafeBufferPointer` scopes rather than
         // from temporaries that would be gone by the time the engine reads them.
-        let status = withGuidance(guidance) { guidancePtr in
-            guard let limits else {
-                return cyber_remesh_zremesher(
-                    input.handle, &cparams, &czr, guidancePtr,
+        let status = semanticRows.withUnsafeMutableBufferPointer { rows in
+            if semanticInput {
+                semanticReport.boundaries = rows.baseAddress
+                semanticReport.boundaryCapacity = rows.count
+            }
+            return withGuidance(guidance) { guidancePtr in
+                if let limits {
+                    var topology = limits.cValue
+                    var execution = limits.executionCValue
+                    if semanticInput {
+                        return cyber_remesh_zremesher_with_reports(
+                            input.handle, &cparams, &czr, guidancePtr, &topology, &execution,
+                            zremesherProgressCb, zremesherCancelCb, zremesherWarningCb, user,
+                            &out, &creport, nil, &semanticReport
+                        )
+                    }
+                    return cyber_remesh_zremesher_with_reports(
+                        input.handle, &cparams, &czr, guidancePtr, &topology, &execution,
+                        zremesherProgressCb, zremesherCancelCb, zremesherWarningCb, user,
+                        &out, &creport, nil, nil
+                    )
+                }
+                if semanticInput {
+                    return cyber_remesh_zremesher_with_reports(
+                        input.handle, &cparams, &czr, guidancePtr, nil, nil,
+                        zremesherProgressCb, zremesherCancelCb, zremesherWarningCb, user,
+                        &out, &creport, nil, &semanticReport
+                    )
+                }
+                return cyber_remesh_zremesher_with_reports(
+                    input.handle, &cparams, &czr, guidancePtr, nil, nil,
                     zremesherProgressCb, zremesherCancelCb, zremesherWarningCb, user,
-                    &out, &creport
+                    &out, &creport, nil, nil
                 )
             }
-            var topology = limits.cValue
-            var execution = limits.executionCValue
-            return cyber_remesh_zremesher_with_resource_limits(
-                input.handle, &cparams, &czr, guidancePtr,
-                &topology, &execution, zremesherProgressCb, zremesherCancelCb,
-                zremesherWarningCb, user, &out, &creport
-            )
         }
         withExtendedLifetime(input) {}
         withExtendedLifetime(box) {}
@@ -447,7 +538,11 @@ public final class ZRemesherOperation {
         return .success(
             ZRemesherResult(
                 mesh: Mesh(owning: handle),
-                report: ZRemesherReport(creport),
+                report: {
+                    var report = ZRemesherReport(creport)
+                    if semanticInput { report.semanticBoundaries = SemanticBoundaryReport(semanticReport, rows: semanticRows) }
+                    return report
+                }(),
                 guidanceWarnings: warnings.collected
             )
         )

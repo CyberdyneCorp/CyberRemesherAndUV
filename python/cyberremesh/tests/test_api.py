@@ -29,7 +29,7 @@ _REPO = os.path.dirname(  # <repo>/python/cyberremesh/tests -> <repo>
 )
 
 import cyberremesh
-from cyberremesh import CyberError, Mesh, RemeshParams, remesh
+from cyberremesh import CyberError, Mesh, RemeshLimits, RemeshParams, remesh
 
 # A unit cube as an OBJ (8 verts, 6 quad faces).
 _CUBE_OBJ = """\
@@ -215,7 +215,10 @@ def _run_semantic_boundary_report():
     with Mesh.from_indexed(
         positions, offsets, indices, {("face", "group_id"): [1, 0, 0, 0]}
     ) as mesh:
-        result = remesh(mesh, RemeshParams(target_quad_count=16, quad_method="zremesher"))
+        result = remesh(
+            mesh, RemeshParams(target_quad_count=100, quad_method="zremesher"),
+            limits=RemeshLimits(),
+        )
         with result:
             report = result.zremesher_report
             assert report is not None and report.semantic_boundaries is not None

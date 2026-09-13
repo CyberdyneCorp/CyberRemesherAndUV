@@ -1373,6 +1373,18 @@ CyberStatus cyber_remesh_zremesher_with_semantic_boundary_report(
                                  warning, user, out, report, nullptr, semanticBoundaryReport);
 }
 
+CyberStatus cyber_remesh_zremesher_with_reports(
+    const CyberMesh* in, const CyberRemeshParams* params, const CyberZRemesherParams* zr,
+    const CyberGuidanceEx* guidance, const CyberRemeshLimits* topology,
+    const CyberRemeshExecutionLimits* execution, CyberProgressCb progress, CyberCancelCb cancel,
+    CyberWarningCb warning, void* user, CyberMesh** out, CyberZRemesherReport* report,
+    CyberZRemesherInjectabilityReport* injectabilityReport,
+    CyberSemanticBoundaryReport* semanticBoundaryReport) {
+    return remeshZremesherShared(in, params, zr, guidance, topology, execution, progress, cancel,
+                                 warning, user, out, report, injectabilityReport,
+                                 semanticBoundaryReport);
+}
+
 CyberStatus cyber_remesh_zremesher_with_resource_limits(
     const CyberMesh* in, const CyberRemeshParams* params, const CyberZRemesherParams* zr,
     const CyberGuidanceEx* guidance, const CyberRemeshLimits* topology,

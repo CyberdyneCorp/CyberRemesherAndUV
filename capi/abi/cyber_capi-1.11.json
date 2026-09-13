@@ -1290,6 +1290,25 @@
       ],
       "return": "CyberStatus"
     },
+    "cyber_remesh_zremesher_with_reports": {
+      "parameters": [
+        "const CyberMesh*",
+        "const CyberRemeshParams*",
+        "const CyberZRemesherParams*",
+        "const CyberGuidanceEx*",
+        "const CyberRemeshLimits*",
+        "const CyberRemeshExecutionLimits*",
+        "CyberProgressCb",
+        "CyberCancelCb",
+        "CyberWarningCb",
+        "void*",
+        "CyberMesh**",
+        "CyberZRemesherReport*",
+        "CyberZRemesherInjectabilityReport*",
+        "CyberSemanticBoundaryReport*"
+      ],
+      "return": "CyberStatus"
+    },
     "cyber_remesh_zremesher_with_resource_limits": {
       "parameters": [
         "const CyberMesh*",

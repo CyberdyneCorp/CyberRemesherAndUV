@@ -263,13 +263,15 @@ TEST_CASE("zremesher semantic-boundary report requires a complete caller buffer"
     CyberSemanticBoundaryResult result{};
     report.boundaries = &result;
     report.boundaryCapacity = 1;
-    CHECK(cyber_remesh_zremesher_with_semantic_boundary_report(
-              input, &params, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, &output,
-              nullptr, &report) == CYBER_OK);
+    CyberZRemesherInjectabilityReport injectability{};
+    CHECK(cyber_remesh_zremesher_with_reports(input, &params, nullptr, nullptr, nullptr, nullptr,
+                                              nullptr, nullptr, nullptr, nullptr, &output, nullptr,
+                                              &injectability, &report) == CYBER_OK);
     REQUIRE(output != nullptr);
     CHECK(report.boundaryCount == 1u);
     CHECK(std::string(result.id).find("group_id:") == 0);
     CHECK(result.state != CYBER_SEMANTIC_REJECTED);
+    CHECK(injectability.arcs > 0u);
     cyber_mesh_free(output);
     cyber_mesh_free(input);
 }

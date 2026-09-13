@@ -109,7 +109,7 @@ def version() -> str:
 #: The C ABI this binding was written against. Mirrors CYBER_ABI_VERSION_* in
 #: cyber_capi.h; ``check_abi()`` compares it against the loaded library.
 ABI_VERSION_MAJOR = 1
-ABI_VERSION_MINOR = 10
+ABI_VERSION_MINOR = 11
 
 
 def abi_version() -> tuple:
@@ -2481,38 +2481,28 @@ def remesh(
             key in mesh.authored_attributes()
             for key in (("face", "group_id"), ("face", "material_id"))
         )
-        if limits is not None:
-            c_limits = limits._to_c()
-            c_execution = limits._execution_to_c()
-            status = lib.cyber_remesh_zremesher_with_resource_limits(
-                mesh.handle, ctypes.byref(c_params), ctypes.byref(c_zr),
-                ctypes.byref(c_guidance) if c_guidance is not None else None,
-                ctypes.byref(c_limits), ctypes.byref(c_execution), progress_cb, cancel_cb,
-                warning_cb, None, ctypes.byref(out_handle), ctypes.byref(c_report),
-            )
-        elif semantic_input:
-            # A semantic component needs at least two source faces, so the
-            # face count is a safe upper bound on its component count. Keeping
-            # the report caller-owned mirrors the C ABI and avoids a hidden
-            # allocator/lifetime crossing the binding boundary.
-            semantic_rows = (_ffi.CyberSemanticBoundaryResult * max(1, mesh.face_count))()
+        c_limits = limits._to_c() if limits is not None else None
+        c_execution = limits._execution_to_c() if limits is not None else None
+        if semantic_input:
+            # Every semantic component contains an authored edge, so the total
+            # number of CSR polygon corners is a safe upper bound on its count.
+            # Keeping the report caller-owned mirrors the C ABI and avoids a
+            # hidden allocator/lifetime crossing the binding boundary.
+            semantic_capacity = max(1, len(mesh.authored_polygons()[1]))
+            semantic_rows = (_ffi.CyberSemanticBoundaryResult * semantic_capacity)()
             c_semantic_boundaries = _ffi.CyberSemanticBoundaryReport()
             c_semantic_boundaries.boundaries = ctypes.cast(
                 semantic_rows, ctypes.POINTER(_ffi.CyberSemanticBoundaryResult))
             c_semantic_boundaries.boundary_capacity = len(semantic_rows)
-            status = lib.cyber_remesh_zremesher_with_semantic_boundary_report(
-                mesh.handle, ctypes.byref(c_params), ctypes.byref(c_zr),
-                ctypes.byref(c_guidance) if c_guidance is not None else None,
-                progress_cb, cancel_cb, warning_cb, None, ctypes.byref(out_handle),
-                ctypes.byref(c_report), ctypes.byref(c_semantic_boundaries),
-            )
-        else:
-            status = lib.cyber_remesh_zremesher_with_injectability_report(
-                mesh.handle, ctypes.byref(c_params), ctypes.byref(c_zr),
-                ctypes.byref(c_guidance) if c_guidance is not None else None,
-                progress_cb, cancel_cb, warning_cb, None, ctypes.byref(out_handle),
-                ctypes.byref(c_report), ctypes.byref(c_injectability),
-            )
+        status = lib.cyber_remesh_zremesher_with_reports(
+            mesh.handle, ctypes.byref(c_params), ctypes.byref(c_zr),
+            ctypes.byref(c_guidance) if c_guidance is not None else None,
+            ctypes.byref(c_limits) if c_limits is not None else None,
+            ctypes.byref(c_execution) if c_execution is not None else None,
+            progress_cb, cancel_cb, warning_cb, None, ctypes.byref(out_handle),
+            ctypes.byref(c_report), ctypes.byref(c_injectability),
+            ctypes.byref(c_semantic_boundaries) if c_semantic_boundaries is not None else None,
+        )
     elif c_guidance is not None:
         status = lib.cyber_remesh_guided_ex(
             mesh.handle,

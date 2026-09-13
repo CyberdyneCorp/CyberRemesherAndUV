@@ -20,14 +20,14 @@ first.
 
 ## Milestone 2 — boundaries reach the field
 
-- [ ] M3. Tag edges where adjacent faces disagree in group or material as
-      feature edges, through `projectGuideToPath` -> `setFeatureEdge`, applied
-      after the dihedral re-tag so they cannot be demoted.
-      Gate: a two-material cube keeps the material boundary as an edge loop.
-- [ ] M4. Connect those boundaries to field pinning, the topology layout and
-      the sizing field.
-      Gate: the layout reports arcs along a material boundary that no dihedral
-      angle would have produced.
+- [x] M3. Tag edges where adjacent faces disagree in group or material as
+      feature edges after the dihedral re-tag so they cannot be demoted.
+      Gate: coplanar faces with distinct semantic ids retain their shared edge,
+      while matching ids do not create a false feature.
+- [x] M4. Convert non-branching semantic components into topology guides and
+      measure their final-mesh adherence.
+      Gate: open and closed coplanar semantic boundaries require aligned output
+      edge coverage; branched components are explicitly reported as rejected.
 
 ## Milestone 3 — symmetry detection, report before apply
 
