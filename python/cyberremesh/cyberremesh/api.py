@@ -108,7 +108,7 @@ def version() -> str:
 #: The C ABI this binding was written against. Mirrors CYBER_ABI_VERSION_* in
 #: cyber_capi.h; ``check_abi()`` compares it against the loaded library.
 ABI_VERSION_MAJOR = 1
-ABI_VERSION_MINOR = 3
+ABI_VERSION_MINOR = 4
 
 
 def abi_version() -> tuple:

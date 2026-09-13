@@ -92,7 +92,7 @@ typedef enum CyberStatus {
  * Do not compare these numbers by hand: cyber_abi_check() applies the rule
  * above in one place, so every binding gets the same answer. */
 #define CYBER_ABI_VERSION_MAJOR 1
-#define CYBER_ABI_VERSION_MINOR 3
+#define CYBER_ABI_VERSION_MINOR 4
 
 /* The ABI this build implements. Cannot fail; either pointer may be NULL. */
 void cyber_abi_version(int* major, int* minor);
