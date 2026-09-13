@@ -1,0 +1,18 @@
+// swift-tools-version:5.9
+import PackageDescription
+
+let package = Package(
+    name: "CyberRemesher",
+    platforms: [.iOS(.v15)],
+    products: [.library(name: "CyberRemesher", targets: ["CyberRemesher"])],
+    targets: [
+        .binaryTarget(name: "CyberRemesherBinary", path: "CyberRemesherC.xcframework"),
+        .systemLibrary(name: "CCyberRemesher", path: "Sources/CCyberRemesher"),
+        .target(
+            name: "CyberRemesher",
+            dependencies: ["CCyberRemesher", "CyberRemesherBinary"],
+            path: "Sources/CyberRemesher",
+            linkerSettings: [.linkedFramework("CyberRemesherC")]
+        ),
+    ]
+)

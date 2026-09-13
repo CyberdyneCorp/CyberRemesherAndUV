@@ -4,6 +4,22 @@ Idiomatic Swift bindings for the CyberRemesher engine, for **iPadOS 15+** and
 **macOS 12+**. This package wraps the versioned **C ABI facade**
 (`capi/include/cyber_capi.h`) — no C++ types cross the boundary.
 
+## iOS binary distribution
+
+For an embedded iOS host, build the distributable CPU/native-solver artifact:
+
+```sh
+packaging/ios/validate_xcframework.sh
+```
+
+It stages `build/ios-sdk/CyberRemesher/`: a SwiftPM package containing an
+arm64 device + arm64 simulator `CyberRemesherC.xcframework`, the public Swift
+wrapper sources, and no source-tree header or native-library path. The initial
+artifact deliberately uses the dependency-free CPU/native solver; it does not
+claim desktop `native+geogram` quality parity. Physical-device latency, memory
+and thermal profiles require a named hardware run and are not inferred from the
+simulator build gate.
+
 The package binds the **real header**, symbol for symbol. Two checks keep it
 that way:
 
