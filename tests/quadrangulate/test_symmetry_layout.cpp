@@ -62,6 +62,32 @@ Mesh offsetGrid(int n) {
     return Mesh::fromIndexed(p, f);
 }
 
+Mesh unequallyTessellatedSymmetricStrip() {
+    std::vector<Vec3> positions;
+    for (int y = 0; y <= 3; ++y) {
+        const float width = 1.0f + 0.2f * static_cast<float>(y);
+        for (int x = -1; x <= 1; ++x) {
+            positions.push_back(Vec3{static_cast<float>(x) * width, static_cast<float>(y),
+                                     0.2f * static_cast<float>(y * y)});
+        }
+    }
+    const auto at = [](int x, int y) { return static_cast<Index>(y * 3 + x + 1); };
+    std::vector<std::vector<Index>> faces;
+    for (int y = 0; y < 3; ++y) {
+        const float lowerWidth = 1.0f + 0.2f * static_cast<float>(y);
+        const float upperWidth = 1.0f + 0.2f * static_cast<float>(y + 1);
+        faces.push_back({at(-1, y), at(0, y), at(0, y + 1), at(-1, y + 1)});
+        const Index center = static_cast<Index>(positions.size());
+        positions.push_back(Vec3{0.25f * (lowerWidth + upperWidth), static_cast<float>(y) + 0.5f,
+                                 0.2f * (static_cast<float>(y * y) + static_cast<float>(y) + 0.5f)});
+        faces.push_back({at(0, y), at(1, y), center});
+        faces.push_back({at(1, y), at(1, y + 1), center});
+        faces.push_back({at(1, y + 1), at(0, y + 1), center});
+        faces.push_back({at(0, y + 1), at(0, y), center});
+    }
+    return Mesh::fromIndexed(positions, faces);
+}
+
 std::size_t aliveFaces(const Mesh& mesh) {
     std::size_t n = 0;
     for (Index f = 0; f < mesh.faceCapacity(); ++f) {
@@ -283,6 +309,24 @@ TEST_CASE("symmetry detection reports a rotated plane without projecting it to a
     CHECK(report.axis == SymmetryAxis::None);
     CHECK(std::abs(cyber::dot(report.plane.normal, expectedNormal)) > 0.999f);
     CHECK(report.unmatchedSurfacePoints == 0);
+}
+
+TEST_CASE("symmetry detection accepts unequal tessellation by scoring the surface") {
+    const Mesh mesh = unequallyTessellatedSymmetricStrip();
+    const auto report = detectSymmetry(mesh);
+    CHECK(report.detected);
+    CHECK(report.axis == SymmetryAxis::X);
+    CHECK(report.unmatchedVertices > 0);
+    CHECK(report.unmatchedSurfacePoints == 0);
+}
+
+TEST_CASE("symmetry detection rejects a partial scan") {
+    const Mesh full = unequallyTessellatedSymmetricStrip();
+    const auto partial = splitAtPlane(full, planeX(), true);
+    REQUIRE(partial.valid);
+    const auto report = detectSymmetry(partial.half);
+    CHECK_FALSE(report.detected);
+    CHECK(report.unmatchedSurfacePoints > 0);
 }
 
 TEST_CASE("mirroring is deterministic") {
