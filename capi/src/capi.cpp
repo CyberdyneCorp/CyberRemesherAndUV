@@ -36,6 +36,7 @@
 #include "cyber/core/io.hpp"
 #include "cyber/core/isotropic.hpp"
 #include "cyber/core/mesh.hpp"
+#include "cyber/core/partial_retopology.hpp"
 #include "cyber/core/pipeline.hpp"
 #include "cyber/core/progress.hpp"
 #include "cyber/core/reference_surface.hpp"
@@ -3133,6 +3134,34 @@ CyberStatus cyber_retopo_delete_faces(CyberMesh* mesh, const uint32_t* faces, si
         }
         if (out_removed != nullptr) {
             *out_removed = doomed.size();
+        }
+        return CYBER_OK;
+    });
+}
+
+CyberStatus cyber_retopo_partial_remesh(CyberMesh* mesh, const uint32_t* faces, size_t face_count,
+                                        CyberPartialRetopologyReport* out_report) {
+    return runMeshEdit(mesh, "cyber_retopo_partial_remesh", [&] {
+        if (faces == nullptr && face_count != 0) {
+            setError("cyber_retopo_partial_remesh: null face list");
+            return CYBER_ERR_INVALID_ARG;
+        }
+        cyber::remesh::PartialRetopologyRequest request;
+        request.faces.reserve(face_count);
+        for (size_t i = 0; i < face_count; ++i) {
+            request.faces.push_back(cyber::FaceId{faces[i]});
+        }
+        const cyber::remesh::PartialRetopologyResult result =
+            cyber::remesh::partialRetopologize(mesh->mesh, request);
+        if (result.status != cyber::remesh::PartialRetopologyStatus::Applied) {
+            setError("cyber_retopo_partial_remesh: " + result.reason);
+            return CYBER_ERR_UNSUPPORTED_TOPOLOGY;
+        }
+        mesh->mesh = result.mesh;
+        if (out_report != nullptr) {
+            out_report->boundary_vertex_count = result.analysis.boundary.size();
+            out_report->generated_vertex_count = result.correspondences.size();
+            out_report->untransferred_attribute_count = result.untransferredAttributes.size();
         }
         return CYBER_OK;
     });
