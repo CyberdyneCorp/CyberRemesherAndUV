@@ -74,6 +74,9 @@ let quadMesh = try await op.value()          // throws .cancelled if the Task ca
 progressTask.cancel()
 try quadMesh.saveOBJ(to: "model_quads.obj")
 
+// To cancel from a UI action, request it on the operation itself:
+// op.cancel()
+
 // ZRemesher-class retopology: quality mode, symmetry, guide modes, run report.
 // `params.quadMethod` is ignored on this path — the call IS the method.
 let result = try await mesh.remesh(
@@ -107,6 +110,15 @@ if interpretation.action(0) == .insertLoop {
     // apply it with the cyber_retopo_* ops
 }
 ```
+
+`RemeshOperation` is a single-execution job. `value()` is safe to await from
+multiple tasks: they join the same native solve and receive the same terminal
+result or error. Call `op.cancel()` to request cooperative cancellation
+explicitly; cancelling a task awaiting `value()` makes the same request.
+Stopping the progress-reading task only stops UI observation — it does not
+cancel remeshing. The operation retains its input and callback state until the
+native call has returned; do not mutate that input mesh while the job is active.
+A successful `Mesh` result is owned independently by the caller.
 
 ## ZRemesher parity
 

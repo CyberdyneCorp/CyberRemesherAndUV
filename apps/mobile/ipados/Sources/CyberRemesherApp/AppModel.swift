@@ -123,7 +123,8 @@ public final class AppModel: ObservableObject {
     public func cancelOperation() {
         guard case .running = operation else { return }
         operation = .cancelling
-        progressPump?.cancel() // bridges to the engine's CyberCancelCb
+        runningOp?.cancel()
+        progressPump?.cancel()
         log.info("cancel requested")
     }
 
