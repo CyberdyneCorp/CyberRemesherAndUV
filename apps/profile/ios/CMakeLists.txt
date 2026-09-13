@@ -3,7 +3,7 @@ enable_language(OBJCXX)
 add_executable(cyber_ios_memory_profile MACOSX_BUNDLE MemoryProfile.mm)
 target_link_libraries(cyber_ios_memory_profile PRIVATE cyber_capi)
 target_link_libraries(cyber_ios_memory_profile PRIVATE "-framework UIKit")
-target_include_directories(cyber_ios_memory_profile PRIVATE ${CMAKE_SOURCE_DIR}/capi/include)
+target_include_directories(cyber_ios_memory_profile PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../../../capi/include)
 set_target_properties(cyber_ios_memory_profile PROPERTIES
     MACOSX_BUNDLE_GUI_IDENTIFIER "com.cyberdynecorp.CyberRemesherMemoryProfile"
     MACOSX_BUNDLE_BUNDLE_NAME "CyberRemesher Memory Profile"
