@@ -128,6 +128,16 @@ TEST_CASE("PLY round-trip preserves quads and vertex colors") {
     REQUIRE((*colors)[2].x == doctest::Approx(0.25f).epsilon(0.01));
 }
 
+TEST_CASE("PLY vertex ceiling rejects the header declaration before decoding") {
+    const fs::path path = tempDir() / "over_vertex_budget.ply";
+    REQUIRE(io::exportMesh(makeCorpusCube(), path).ok());
+    io::ImportOptions options;
+    options.maxVertices = 1;
+    const auto result = io::importMesh(path, options);
+    REQUIRE(!result.ok());
+    CHECK(result.error().code == io::ErrorCode::ResourceLimit);
+}
+
 TEST_CASE("STL round-trip welds shared vertices back together") {
     const Mesh cube = makeCorpusCube();
     const fs::path path = tempDir() / "cube.stl";
