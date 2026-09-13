@@ -163,6 +163,21 @@ TEST_CASE("ASCII STL imports") {
     auto result = io::importMesh(path);
     REQUIRE(result.ok());
     REQUIRE(result.value().mesh.faceCount() == 1);
+
+}
+
+TEST_CASE("ASCII STL face ceiling stops the streaming importer before the next facet") {
+    const fs::path path = tempDir() / "two_triangles.stl";
+    std::ofstream f(path, std::ios::trunc);
+    f << "solid tris\n"
+         "facet normal 0 0 1\nouter loop\nvertex 0 0 0\nvertex 1 0 0\nvertex 0 1 0\nendloop\nendfacet\n"
+         "facet normal 0 0 1\nouter loop\nvertex 1 0 0\nvertex 1 1 0\nvertex 0 1 0\nendloop\nendfacet\nendsolid tris\n";
+    f.close();
+    io::ImportOptions options;
+    options.maxFaces = 1;
+    const auto result = io::importMesh(path, options);
+    REQUIRE(!result.ok());
+    CHECK(result.error().code == io::ErrorCode::ResourceLimit);
 }
 
 TEST_CASE("corrupt STL is a typed ParseError") {
