@@ -42,6 +42,9 @@ public struct SymmetryAxis: RawRepresentable, Equatable, Sendable {
     public static let x = SymmetryAxis(rawValue: Int32(CYBER_ZR_SYMMETRY_X))
     public static let y = SymmetryAxis(rawValue: Int32(CYBER_ZR_SYMMETRY_Y))
     public static let z = SymmetryAxis(rawValue: Int32(CYBER_ZR_SYMMETRY_Z))
+    /// Opt in to a confident, unambiguous detected X/Y/Z axis. The engine
+    /// rejects ambiguous or arbitrary-plane reports rather than falling back.
+    public static let auto = SymmetryAxis(rawValue: Int32(CYBER_ZR_SYMMETRY_AUTO))
 }
 
 /// What a flow guide is asking for, mirroring `CYBER_GUIDE_*`.

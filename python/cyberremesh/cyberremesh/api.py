@@ -110,7 +110,7 @@ def version() -> str:
 #: The C ABI this binding was written against. Mirrors CYBER_ABI_VERSION_* in
 #: cyber_capi.h; ``check_abi()`` compares it against the loaded library.
 ABI_VERSION_MAJOR = 1
-ABI_VERSION_MINOR = 15
+ABI_VERSION_MINOR = 16
 
 
 def abi_version() -> tuple:
@@ -2235,7 +2235,7 @@ class ZRemesherParams:
     #: "organic vs CAD" threshold picks the right field for every model, so the
     #: answer is to measure both. It costs a second full solve.
     quality: str = "fast"
-    #: ``"none"``, ``"x"``, ``"y"`` or ``"z"``. Solves one half and mirrors its
+    #: ``"none"``, ``"x"``, ``"y"``, ``"z"`` or opt-in ``"auto"``. Solves one half and mirrors its
     #: CONNECTIVITY, so the halves are exact reflections rather than merely
     #: similar shapes. ``target_quad_count`` names the WHOLE model.
     symmetry: str = "none"
@@ -2252,7 +2252,7 @@ class ZRemesherParams:
     fold_repair: bool = True
 
     _QUALITY = {"fast": 0, "best": 1}
-    _SYMMETRY = {"none": 0, "x": 1, "y": 2, "z": 3}
+    _SYMMETRY = {"none": 0, "x": 1, "y": 2, "z": 3, "auto": 4}
 
     def _to_c(self) -> "_ffi.CyberZRemesherParams":
         try:

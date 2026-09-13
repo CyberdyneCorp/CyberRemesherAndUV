@@ -216,6 +216,15 @@ TEST_CASE("capi symmetry detection reports ambiguity without editing") {
     CHECK(cyber_detect_symmetry(nullptr, &report) == CYBER_ERR_INVALID_ARG);
     CHECK(cyber_detect_symmetry_evidence(nullptr, &evidence) == CYBER_ERR_INVALID_ARG);
     CHECK(cyber_detect_symmetry_correspondence(nullptr, &correspondence) == CYBER_ERR_INVALID_ARG);
+    CyberRemeshParams params{};
+    cyber_default_params(&params);
+    CyberZRemesherParams autoParams{};
+    cyber_default_zremesher_params(&autoParams);
+    autoParams.symmetry = CYBER_ZR_SYMMETRY_AUTO;
+    CyberMesh* output = nullptr;
+    CHECK(cyber_remesh_zremesher(mesh, &params, &autoParams, nullptr, nullptr, nullptr, nullptr,
+                                 nullptr, &output, nullptr) == CYBER_ERR_INVALID_PARAM);
+    CHECK(output == nullptr);
     cyber_mesh_free(mesh);
 }
 

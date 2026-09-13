@@ -92,7 +92,7 @@ typedef enum CyberStatus {
  * Do not compare these numbers by hand: cyber_abi_check() applies the rule
  * above in one place, so every binding gets the same answer. */
 #define CYBER_ABI_VERSION_MAJOR 1
-#define CYBER_ABI_VERSION_MINOR 15
+#define CYBER_ABI_VERSION_MINOR 16
 
 /* The ABI this build implements. Cannot fail; either pointer may be NULL. */
 void cyber_abi_version(int* major, int* minor);
@@ -473,7 +473,7 @@ CyberStatus cyber_remesh_guided(const CyberMesh* in, const CyberRemeshParams* pa
 typedef struct CyberZRemesherParams {
     /* CYBER_ZR_QUALITY_FAST / CYBER_ZR_QUALITY_BEST. */
     int quality;
-    /* CYBER_ZR_SYMMETRY_NONE / _X / _Y / _Z. Solves one half and mirrors its
+    /* CYBER_ZR_SYMMETRY_NONE / _X / _Y / _Z / _AUTO. Solves one half and mirrors its
      * CONNECTIVITY, so the two halves are exact reflections rather than
      * merely similar shapes. targetQuads names the WHOLE model. */
     int symmetry;
@@ -503,6 +503,9 @@ typedef struct CyberZRemesherParams {
 #define CYBER_ZR_SYMMETRY_X 1
 #define CYBER_ZR_SYMMETRY_Y 2
 #define CYBER_ZR_SYMMETRY_Z 3
+/* Opt in to an unambiguous, calibrated detected X/Y/Z axis. A report with no
+ * eligible axis is rejected; this value never falls back to no symmetry. */
+#define CYBER_ZR_SYMMETRY_AUTO 4
 
 /* Fills params with the engine defaults. No-op on NULL. */
 void cyber_default_zremesher_params(CyberZRemesherParams* params);

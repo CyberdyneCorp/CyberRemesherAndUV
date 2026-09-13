@@ -31,7 +31,7 @@ first.
 
 ## Milestone 3 — symmetry detection, report before apply
 
-- [ ] M5. Detect a symmetry plane and REPORT it, without applying it.
+- [x] M5. Detect a symmetry plane and REPORT it, without applying it.
       Matching is nearest-within-tolerance — never a quantized tolerance grid,
       which both collides distinct vertices and misses partners across a cell
       boundary. The in-progress detector also measures reflected triangle
@@ -41,6 +41,6 @@ first.
       `docs/symmetry-detection-calibration.md`.
       Gate: the corpus's symmetric models report their plane; the asymmetric
       ones report none, and nothing about the output changes.
-- [ ] M6. Only once M5's threshold is calibrated on the corpus, allow detection
+- [x] M6. Only once M5's threshold is calibrated on the corpus, allow detection
       to select the axis that forced symmetry then applies.
       Gate: no model whose detection is uncertain is silently mirrored.

@@ -333,9 +333,10 @@ of it and the CLI's own report and export are **done**.
 Still open, and each for a stated reason rather than for lack of attention:
 automatic symmetry detection currently provides a **detect-only C++ advisory**
 with explicit-axis and unambiguous PCA plane hypotheses, vertex diagnostics,
-and reflected surface/normal measurements; it neither mutates a mesh nor
-selects forced symmetry. Arbitrary detected planes report no forced axis, and
-corpus calibration remains open; semantic
+and reflected surface/normal measurements; it never mutates a mesh. An
+explicit `auto` ZRemesher symmetry request applies only a calibrated,
+unambiguous X/Y/Z report with matching components and semantics. Arbitrary
+detected planes report no forced axis; semantic
 group/material boundaries now travel through the typed indexed input, become
 hard features, and return per-component final-mesh evidence in C, Python and
 Swift; a `balanced` quality mode is **deliberately not built** — with five corpus

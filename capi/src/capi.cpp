@@ -1184,7 +1184,7 @@ static CyberStatus remeshZremesherShared(
                  std::to_string(zrParams.quality));
         return CYBER_ERR_INVALID_PARAM;
     }
-    if (zrParams.symmetry < CYBER_ZR_SYMMETRY_NONE || zrParams.symmetry > CYBER_ZR_SYMMETRY_Z) {
+    if (zrParams.symmetry < CYBER_ZR_SYMMETRY_NONE || zrParams.symmetry > CYBER_ZR_SYMMETRY_AUTO) {
         setError("cyber_remesh_zremesher: unknown symmetry axis " +
                  std::to_string(zrParams.symmetry));
         return CYBER_ERR_INVALID_PARAM;
@@ -1247,11 +1247,28 @@ static CyberStatus remeshZremesherShared(
         options.foldRepair = zrParams.foldRepair != 0;
         options.report = &zrReport;
 
-        const cyber::remesh::SymmetryAxis axis =
+        cyber::remesh::SymmetryAxis axis =
             zrParams.symmetry == CYBER_ZR_SYMMETRY_X   ? cyber::remesh::SymmetryAxis::X
             : zrParams.symmetry == CYBER_ZR_SYMMETRY_Y ? cyber::remesh::SymmetryAxis::Y
             : zrParams.symmetry == CYBER_ZR_SYMMETRY_Z ? cyber::remesh::SymmetryAxis::Z
                                                        : cyber::remesh::SymmetryAxis::None;
+        if (zrParams.symmetry == CYBER_ZR_SYMMETRY_AUTO) {
+            const cyber::remesh::SymmetryDetectionReport detected =
+                cyber::remesh::detectSymmetry(in->mesh);
+            const bool componentsAgree =
+                detected.componentConsistentSurfacePoints == detected.matchedSurfacePoints;
+            const bool semanticsAgree = detected.sampledSemanticSurfacePoints == 0 ||
+                                        detected.semanticConsistentSurfacePoints ==
+                                            detected.sampledSemanticSurfacePoints;
+            if (!detected.detected || detected.ambiguous ||
+                detected.axis == cyber::remesh::SymmetryAxis::None || !componentsAgree ||
+                !semanticsAgree) {
+                setError("cyber_remesh_zremesher: automatic symmetry requires a confident, "
+                         "unambiguous axis-aligned detection with matching components and semantics");
+                return CYBER_ERR_INVALID_PARAM;
+            }
+            axis = detected.axis;
+        }
 
         cyber::remesh::SymmetryRunReport symReport;
         const cyber::remesh::Guidance* guidancePtr = converted.empty() ? nullptr : &converted;
