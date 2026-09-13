@@ -1,18 +1,18 @@
 ## 1. Region contract and feasibility
 
-- [ ] 1.1 Add typed core request/result, boundary mode and explicit rejection
+- [x] 1.1 Add typed core request/result, boundary mode and explicit rejection
   reasons without changing existing remesh parameters.
-- [ ] 1.2 Extract selected face components and oriented simple interior loops;
+- [x] 1.2 Extract selected face components and oriented simple interior loops;
   reject empty, dead, disconnected, open, holed, branching and non-manifold
   selections before solving.
-- [ ] 1.3 Implement exact all-quad boundary parity feasibility and core
+- [x] 1.3 Implement exact all-quad boundary parity feasibility and core
   regressions proving failure leaves the input unchanged.
 
 ## 2. Region solve and atomic stitch
 
 - [ ] 2.1 Lower extracted boundaries to hard topology constraints and solve the
   isolated region against its original source surface.
-- [ ] 2.2 Validate ordered output-loop correspondence and stitch by original
+- [x] 2.2 Validate ordered output-loop correspondence and stitch by original
   boundary IDs while copying exterior faces unchanged.
 - [ ] 2.3 Validate output manifoldness, orientation and seam uniqueness before
   returning; add selected-patch and invalid-loop regression fixtures.
