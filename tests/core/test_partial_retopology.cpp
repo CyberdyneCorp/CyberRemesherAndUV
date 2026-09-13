@@ -9,6 +9,7 @@ using cyber::FaceId;
 using cyber::Index;
 using cyber::Mesh;
 using cyber::Vec3;
+using cyber::VertexId;
 namespace remesh = cyber::remesh;
 
 namespace {
@@ -51,4 +52,39 @@ TEST_CASE("partial retopology rejects disconnected or parity-incompatible region
     const auto larger = remesh::analyzePartialRetopology(mesh, {{FaceId{5}, FaceId{6}}, true});
     CHECK(larger.status == remesh::PartialRetopologyStatus::Rejected);
     CHECK(larger.reason.find("four-edge boundary") != std::string::npos);
+}
+
+TEST_CASE("partial retopology replaces only the selected region") {
+    const Mesh source = makePatch();
+    const std::vector<VertexId> exteriorFace = source.faceVertices(FaceId{0});
+    const Vec3 borderPosition = source.position({6});
+
+    const remesh::PartialRetopologyResult result =
+        remesh::partialRetopologize(source, {{FaceId{5}}, true});
+
+    REQUIRE(result.status == remesh::PartialRetopologyStatus::Applied);
+    CHECK(source.faceCount() == 16);
+    CHECK(result.mesh.faceCount() == 20);
+    const std::vector<VertexId> resultExteriorFace = result.mesh.faceVertices(FaceId{0});
+    REQUIRE(resultExteriorFace.size() == exteriorFace.size());
+    for (std::size_t i = 0; i < exteriorFace.size(); ++i) {
+        CHECK(resultExteriorFace[i] == exteriorFace[i]);
+    }
+    CHECK(result.mesh.position({6}) == borderPosition);
+    CHECK(result.mesh.validate().empty());
+    for (std::size_t face = 0; face < result.mesh.faceCapacity(); ++face) {
+        if (result.mesh.isAlive(FaceId{static_cast<Index>(face)})) {
+            CHECK(result.mesh.faceSize(FaceId{static_cast<Index>(face)}) == 4);
+        }
+    }
+}
+
+TEST_CASE("rejected partial retopology returns an unchanged mesh") {
+    const Mesh source = makePatch();
+    const remesh::PartialRetopologyResult result =
+        remesh::partialRetopologize(source, {{FaceId{5}, FaceId{6}}, true});
+
+    CHECK(result.status == remesh::PartialRetopologyStatus::Rejected);
+    CHECK(result.mesh.faceCount() == source.faceCount());
+    CHECK(result.mesh.validate().empty());
 }

@@ -109,4 +109,54 @@ PartialRetopologyAnalysis analyzePartialRetopology(const Mesh& source,
     return result;
 }
 
+PartialRetopologyResult partialRetopologize(const Mesh& source,
+                                            const PartialRetopologyRequest& request) {
+    PartialRetopologyResult result;
+    result.mesh = source;
+    result.analysis = analyzePartialRetopology(source, request);
+    if (result.analysis.status != PartialRetopologyStatus::Ready) {
+        result.reason = result.analysis.reason;
+        return result;
+    }
+
+    const std::vector<VertexId>& boundary = result.analysis.boundary;
+    Vec3 center;
+    for (const VertexId vertex : boundary) {
+        center += source.position(vertex);
+    }
+    center = center / static_cast<float>(boundary.size());
+
+    for (const FaceId face : result.analysis.selectedFaces) {
+        result.mesh.removeFace(face);
+    }
+
+    std::vector<VertexId> inner;
+    inner.reserve(boundary.size());
+    for (const VertexId vertex : boundary) {
+        inner.push_back(result.mesh.addVertex(lerp(source.position(vertex), center, 0.5f)));
+    }
+    for (std::size_t i = 0; i < boundary.size(); ++i) {
+        const std::vector<VertexId> quad = {boundary[i], boundary[(i + 1) % boundary.size()],
+                                            inner[(i + 1) % inner.size()], inner[i]};
+        if (!result.mesh.addFace(quad).valid()) {
+            result.mesh = source;
+            result.reason = "failed to stitch the replacement boundary";
+            return result;
+        }
+    }
+    if (!result.mesh.addFace(inner).valid()) {
+        result.mesh = source;
+        result.reason = "failed to create the replacement center quad";
+        return result;
+    }
+    if (!result.mesh.validate().empty()) {
+        result.mesh = source;
+        result.reason = "replacement violated mesh structural invariants";
+        return result;
+    }
+
+    result.status = PartialRetopologyStatus::Applied;
+    return result;
+}
+
 }  // namespace cyber::remesh
