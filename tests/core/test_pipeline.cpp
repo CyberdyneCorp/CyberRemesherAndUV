@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "cyber/core/pipeline.hpp"
+#include "cyber/quadrangulate/quadcover_extractor.hpp"
 
 using cyber::CancelToken;
 using cyber::FaceId;
@@ -387,6 +388,21 @@ TEST_CASE("pipeline reports an intermediate ceiling before an isotropic split gr
     CHECK(result.status == remesh::RunStatus::Error);
     CHECK(result.error.find("resource limit at isotropic") != std::string::npos);
     CHECK(sphere.faceCount() == limits.maxIntermediateFaces);
+}
+
+TEST_CASE("zremesher candidate selection rejects its storage ceiling before copying") {
+    const Mesh sphere = makeSphere(8, 12);
+    remesh::ResourceLimits limits;
+    limits.maxCandidateBytes = 1;
+    remesh::ZRemesherOptions options;
+    options.quality = remesh::RemeshQualityMode::Best;
+
+    const auto result = remesh::remesh(
+        sphere, smallRun(400), nullptr, nullptr,
+        [&options]() { return remesh::makeZRemesherQuadrangulator(options); }, {}, nullptr, &limits);
+    CHECK(result.status == remesh::RunStatus::Error);
+    CHECK(result.error.find("candidate mesh storage ceiling") != std::string::npos);
+    CHECK(sphere.faceCount() > 0);
 }
 
 TEST_CASE("cancel token poll is observed by isCancelled (mid-solve cancellation)") {
