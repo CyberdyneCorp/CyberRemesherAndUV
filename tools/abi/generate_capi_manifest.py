@@ -73,7 +73,8 @@ def parse_header(header: Path) -> dict:
 
     callbacks = {}
     for ret, name, params in re.findall(
-        r"typedef\s+(.+?)\s*\(\s*\*\s*(Cyber\w+)\s*\)\s*\((.*?)\)\s*;", text, re.DOTALL
+        r"(?:^|\n)[ \t]*typedef[ \t]+([A-Za-z_][\w \t\*]*?)[ \t]*"
+        r"\(\s*\*\s*(Cyber\w+)\s*\)\s*\((.*?)\)\s*;", text, re.DOTALL
     ):
         callbacks[name] = {
             "return": normalized(ret),

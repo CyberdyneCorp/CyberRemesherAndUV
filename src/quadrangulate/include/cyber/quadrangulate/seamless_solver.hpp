@@ -133,10 +133,36 @@ struct SeamlessSolveLimits {
 // `stats` SUMS the per-layout statistics rather than keeping the last one: a
 // multi-island run has no single layout to report, and a caller asking "how
 // many singularities did this remesh produce" means all of them.
+//
+// Unlike `LayoutStats`, `injectability` describes the quantization hand-off.
+// It is deliberately separate: tracing a valid layout says nothing about
+// whether its symbolic arc lengths can be represented by the integer solve.
+struct InjectabilityStats {
+    std::size_t arcs = 0;
+    std::size_t injectableArcs = 0;
+    // Each non-injectable arc has exactly one first cause in this order:
+    // contained/excluded, empty expression, an ordinal outside the integer
+    // lattice, or a fractional coefficient. The counters therefore reconcile
+    // with `arcs - injectableArcs`.
+    std::size_t excludedArcs = 0;
+    std::size_t emptyRows = 0;
+    std::size_t latticeFreeRows = 0;
+    std::size_t fractionalCoefficientRows = 0;
+    // Equation-level damage is kept distinct from an arc's symbolic cause.
+    std::size_t fractionalPivotRows = 0;
+    std::size_t droppedRows = 0;
+    std::size_t pivots = 0;
+    std::size_t cleanPivots = 0;
+    std::size_t injectedPivots = 0;
+    double optimumDeviationEnergy = 0.0;
+    double realizedDeviationEnergy = 0.0;
+};
+
 struct LayoutRunReport {
-    std::size_t layouts = 0;       // layouts traced
-    std::size_t layoutsValid = 0;  // of those, how many passed validation
-    LayoutStats stats;             // summed over every traced layout
+    std::size_t layouts = 0;           // layouts traced
+    std::size_t layoutsValid = 0;      // of those, how many passed validation
+    LayoutStats stats;                 // summed over every traced layout
+    InjectabilityStats injectability;  // summed over every quantized layout
     // The first hard violation seen, empty when every layout validated. First
     // rather than last because it is the one that explains the rest.
     std::string invalidReason;

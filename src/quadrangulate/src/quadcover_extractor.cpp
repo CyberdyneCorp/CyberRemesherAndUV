@@ -3588,7 +3588,8 @@ public:
           m_layout(layout),
           m_name(std::move(name)),
           m_bestOfTwo(bestOfTwo),
-          m_report(report) {}
+          m_report(report),
+          m_layoutArtifactSerial(report != nullptr ? report->candidates.size() : 0) {}
 
     Outcome quadrangulate(Mesh& mesh, float targetEdgeLength, ProgressSink* progress,
                           const CancelToken* cancel) override {
@@ -3637,6 +3638,10 @@ public:
         QualityScore bestScore;
         std::string bestName;
         Outcome bestOutcome{.success = false, .cancelled = false, .failureReason = {}};
+        LayoutRunReport* const aggregateReport = m_layout.report;
+        const std::string reportPath = m_layout.reportPath;
+        const std::string meshPath = m_layout.meshPath;
+        std::size_t selectedReport = std::numeric_limits<std::size_t>::max();
         for (const Candidate& candidate : kCandidates) {
             if (cancel != nullptr && cancel->isCancelled()) {
                 return {.success = false, .cancelled = true, .failureReason = {}};
@@ -3652,11 +3657,32 @@ public:
             }
             Mesh trial = mesh;
             m_fieldSource = candidate.field;
+            ZRemesherCandidateReport candidateReport;
+            candidateReport.name = candidate.name;
+            // Candidate layout counters must never be accumulated straight
+            // into the run aggregate: doing so made the selected layout
+            // indistinguishable from the discarded one. The aggregate is
+            // merged after this candidate has a stable identity.
+            m_layout.report = &candidateReport.layout;
+            const std::string suffix =
+                "." + candidateReport.name + "." + std::to_string(m_layoutArtifactSerial++);
+            m_layout.reportPath = taggedArtifactPath(reportPath, suffix);
+            m_layout.meshPath = taggedArtifactPath(meshPath, suffix);
             const Outcome outcome = quadrangulateOnce(trial, targetEdgeLength, progress, cancel);
+            m_layout.report = aggregateReport;
+            m_layout.reportPath = reportPath;
+            m_layout.meshPath = meshPath;
+            if (aggregateReport != nullptr) {
+                mergeLayoutReport(*aggregateReport, candidateReport.layout);
+            }
             if (!outcome.success) {
+                if (m_report != nullptr) {
+                    m_report->candidates.push_back(std::move(candidateReport));
+                }
                 continue;
             }
             const QualityScore score = scoreQuality(trial, nullptr, closedInput);
+            candidateReport.qualityScore = score.total;
             const bool take =
                 bestName.empty() || candidateBeats(score, bestScore, selectionContext);
             if (std::getenv("CYBER_QC_DEBUG") != nullptr) {
@@ -3674,6 +3700,11 @@ public:
                 bestScore = score;
                 bestName = candidate.name;
                 bestOutcome = outcome;
+                selectedReport = m_report != nullptr ? m_report->candidates.size()
+                                                     : std::numeric_limits<std::size_t>::max();
+            }
+            if (m_report != nullptr) {
+                m_report->candidates.push_back(std::move(candidateReport));
             }
         }
         m_fieldSource = CrossFieldSource::Auto;
@@ -3692,6 +3723,9 @@ public:
         if (m_report != nullptr) {
             m_report->selectedCandidate = bestName;
             m_report->qualityScore = bestScore.total;
+            if (selectedReport < m_report->candidates.size()) {
+                m_report->candidates[selectedReport].selected = true;
+            }
         }
         mesh = std::move(best);
         return bestOutcome;
@@ -4062,6 +4096,53 @@ public:
     [[nodiscard]] std::string name() const override { return m_name; }
 
 private:
+    static std::string taggedArtifactPath(const std::string& path, const std::string& suffix) {
+        if (path.empty()) {
+            return {};
+        }
+        const std::size_t slash = path.find_last_of("/\\");
+        const std::size_t dot = path.find_last_of('.');
+        if (dot == std::string::npos || (slash != std::string::npos && dot < slash)) {
+            return path + suffix;
+        }
+        return path.substr(0, dot) + suffix + path.substr(dot);
+    }
+
+    static void mergeLayoutReport(LayoutRunReport& target, const LayoutRunReport& source) {
+        target.layouts += source.layouts;
+        target.layoutsValid += source.layoutsValid;
+        auto& out = target.stats;
+        const auto& in = source.stats;
+        out.nodes += in.nodes;
+        out.arcs += in.arcs;
+        out.patches += in.patches;
+        out.singularities += in.singularities;
+        out.tJunctions += in.tJunctions;
+        out.boundaryArcs += in.boundaryArcs;
+        out.featureArcs += in.featureArcs;
+        out.excludedArcs += in.excludedArcs;
+        out.nonQuadPatches += in.nonQuadPatches;
+        out.nonClosingPatches += in.nonClosingPatches;
+        out.totalIndex += in.totalIndex;
+        const auto& inject = source.injectability;
+        auto& aggregate = target.injectability;
+        aggregate.arcs += inject.arcs;
+        aggregate.injectableArcs += inject.injectableArcs;
+        aggregate.excludedArcs += inject.excludedArcs;
+        aggregate.emptyRows += inject.emptyRows;
+        aggregate.latticeFreeRows += inject.latticeFreeRows;
+        aggregate.fractionalCoefficientRows += inject.fractionalCoefficientRows;
+        aggregate.fractionalPivotRows += inject.fractionalPivotRows;
+        aggregate.droppedRows += inject.droppedRows;
+        aggregate.pivots += inject.pivots;
+        aggregate.cleanPivots += inject.cleanPivots;
+        aggregate.injectedPivots += inject.injectedPivots;
+        aggregate.optimumDeviationEnergy += inject.optimumDeviationEnergy;
+        aggregate.realizedDeviationEnergy += inject.realizedDeviationEnergy;
+        if (target.invalidReason.empty()) {
+            target.invalidReason = source.invalidReason;
+        }
+    }
     std::size_t m_maxDirectFactorBytes = 0;
     std::size_t m_maxCandidateBytes = 0;
     static bool isClosed(const Mesh& mesh) {
@@ -4082,6 +4163,7 @@ private:
     std::string m_name;
     bool m_bestOfTwo = false;
     ZRemesherRunReport* m_report = nullptr;
+    std::size_t m_layoutArtifactSerial = 0;
     CrossFieldSource m_fieldSource = CrossFieldSource::Auto;
     CountCalibration m_count;
     std::optional<CountPolicy> m_countPolicy;

@@ -21,6 +21,12 @@ python3 tools/bench/bench.py record
 # What ctest runs (test name: bench) — compares against this host's
 # tests/bench/baselines-<System>-<machine>-<compiler>.json
 python3 tools/bench/bench.py check
+
+# Record the ZRemesher layout-to-integer injectability diagnostics. This is a
+# separate gate from mesh quality: it proves whether a traced layout can reach
+# the quantizer at all.
+python3 tools/bench/injectability.py \
+  --binary build/geogram/apps/cli/cyberremesh
 ```
 
 ## Metrics

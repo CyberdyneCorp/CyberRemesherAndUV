@@ -325,6 +325,27 @@ Bi-MDF path affect organic output while 74–100% of arcs are non-injectable. Th
 half-integer lattice is the blocker, and everything downstream of it is
 diagnostic until it moves.
 
+### Reproduced diagnostic baseline (2026-09-13)
+
+The historical table above was an stderr observation. The current native
+solver now writes exclusive symbolic causes and realized deviation energy into
+the run report. Reproduced with
+`tools/bench/injectability.py --corpus downloaded --target-quads 2000`:
+
+| model | arcs | injectable | excluded | empty | lattice-free | fractional |
+|---|---:|---:|---:|---:|---:|---:|
+| spot | 876 | 0 | 0 | 0 | **876** | 0 |
+| nefertiti | 5204 | 274 | 468 | 58 | **4404** | 0 |
+| armadillo | 5232 | 90 | 160 | 30 | **4952** | 0 |
+| box_sharp (generated control) | 24 | **24** | 0 | 0 | 0 | 0 |
+
+The causes reconcile exactly to each row's arc count. The new evidence makes
+the architecture decision sharper: on the current organic corpus the primary
+blocker is an expression that reaches a non-integer free variable, not merely
+the earlier aggregate `badArcs` counter or containment. The report also carries
+the Bi-MDF optimum and realized energy; changing only the first number is not
+evidence that the layout reaches the output.
+
 ### Where the measurements say the next lever is
 
 The classifier is largely producing the RIGHT answer; the layout is genuinely

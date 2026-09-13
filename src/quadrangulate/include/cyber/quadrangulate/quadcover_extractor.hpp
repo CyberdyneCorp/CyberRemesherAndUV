@@ -306,8 +306,19 @@ enum class RemeshQualityMode : std::uint8_t {
 // are required to surface both (engine-bindings spec, "ZRemesher is reachable
 // from every binding"). The release gate had to scrape stderr for the same
 // reason; with this it can ask.
+struct ZRemesherCandidateReport {
+    std::string name;
+    LayoutRunReport layout;
+    double qualityScore = 0.0;
+    bool selected = false;
+};
+
 struct ZRemesherRunReport {
     LayoutRunReport layout;
+    // One entry per candidate evaluated under `Best`. The aggregate above is
+    // retained for callers asking for totals; consumers comparing candidates
+    // must use this vector rather than treating an aggregate as one layout.
+    std::vector<ZRemesherCandidateReport> candidates;
     // The cross field `Best` kept ("multires" / "single-level"), and its score.
     // Empty and 0 under `Fast`, which solves one predicted path and therefore
     // never selects anything — an empty name means "no selection ran", never

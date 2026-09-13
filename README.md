@@ -164,6 +164,12 @@ layout stage on forces the native seamless route, so honouring them elsewhere
 would silently change *that* method's mesh — a flag altering the result it was
 only meant to describe.
 
+With `--quality best`, both candidates are preserved rather than overwriting
+the last one: the paths above become `layout.multires.0.json` /
+`layout.single-level.1.json` (and matching `.obj` files). `run.json` names the
+selected candidate and contains per-candidate diagnostics, so an aggregate is
+never mistaken for the selected layout.
+
 `run.json` carries the same numbers as a value, so a pipeline reads them instead
 of scraping stderr:
 

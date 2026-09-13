@@ -933,6 +933,7 @@ int writeReport(const CliOptions& options, const remesh::PipelineResult& result,
     // an all-zero layout would read as "traced nothing" rather than "not traced".
     if (zremesher.layout.layouts != 0) {
         const auto& st = zremesher.layout.stats;
+        const auto& injectability = zremesher.layout.injectability;
         report["zremesher"] = {
             {"layouts", zremesher.layout.layouts},
             {"layoutsValid", zremesher.layout.layoutsValid},
@@ -951,9 +952,50 @@ int writeReport(const CliOptions& options, const remesh::PipelineResult& result,
             // therefore selects nothing.
             {"selectedCandidate", zremesher.selectedCandidate},
             {"qualityScore", zremesher.qualityScore},
+            {"injectability",
+             {
+                 {"arcs", injectability.arcs},
+                 {"injectableArcs", injectability.injectableArcs},
+                 {"excludedArcs", injectability.excludedArcs},
+                 {"emptyRows", injectability.emptyRows},
+                 {"latticeFreeRows", injectability.latticeFreeRows},
+                 {"fractionalCoefficientRows", injectability.fractionalCoefficientRows},
+                 {"fractionalPivotRows", injectability.fractionalPivotRows},
+                 {"droppedRows", injectability.droppedRows},
+                 {"pivots", injectability.pivots},
+                 {"cleanPivots", injectability.cleanPivots},
+                 {"injectedPivots", injectability.injectedPivots},
+                 {"optimumDeviationEnergy", injectability.optimumDeviationEnergy},
+                 {"realizedDeviationEnergy", injectability.realizedDeviationEnergy},
+             }},
         };
         if (!zremesher.layout.invalidReason.empty()) {
             report["zremesher"]["invalidReason"] = zremesher.layout.invalidReason;
+        }
+        report["zremesher"]["candidates"] = nlohmann::json::array();
+        for (const auto& candidate : zremesher.candidates) {
+            const auto& candidateStats = candidate.layout.stats;
+            const auto& candidateInjectability = candidate.layout.injectability;
+            report["zremesher"]["candidates"].push_back({
+                {"name", candidate.name},
+                {"selected", candidate.selected},
+                {"qualityScore", candidate.qualityScore},
+                {"layouts", candidate.layout.layouts},
+                {"layoutsValid", candidate.layout.layoutsValid},
+                {"arcs", candidateStats.arcs},
+                {"excludedArcs", candidateStats.excludedArcs},
+                {"injectability",
+                 {
+                     {"arcs", candidateInjectability.arcs},
+                     {"injectableArcs", candidateInjectability.injectableArcs},
+                     {"excludedArcs", candidateInjectability.excludedArcs},
+                     {"emptyRows", candidateInjectability.emptyRows},
+                     {"latticeFreeRows", candidateInjectability.latticeFreeRows},
+                     {"fractionalCoefficientRows",
+                      candidateInjectability.fractionalCoefficientRows},
+                     {"realizedDeviationEnergy", candidateInjectability.realizedDeviationEnergy},
+                 }},
+            });
         }
     }
     addPresetToReport(report, presetOutcome);

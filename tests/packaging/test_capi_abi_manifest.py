@@ -15,7 +15,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[2]
 GENERATOR = REPO / "tools/abi/generate_capi_manifest.py"
 HEADER = REPO / "capi/include/cyber_capi.h"
-PINNED = REPO / "capi/abi/cyber_capi-1.9.json"
+PINNED = REPO / "capi/abi/cyber_capi-1.10.json"
 COMPILER = os.environ.get("CXX") or shutil.which("clang++") or shutil.which("g++")
 RUNNER = os.environ.get("CYBER_TEST_LAUNCHER", "")
 
@@ -33,20 +33,36 @@ def require(condition: bool, message: str) -> None:
         raise AssertionError(message)
 
 
+def manifest_diff(generated: dict, pinned: dict) -> list[str]:
+    """Name changed ABI entries; a raw JSON comparison is not actionable in CI."""
+    changed = []
+    for section in ("macros", "structs", "enums", "callbacks", "functions"):
+        left, right = generated.get(section, {}), pinned.get(section, {})
+        for name in sorted(set(left) | set(right)):
+            if left.get(name) != right.get(name):
+                changed.append(section + "." + name)
+    return changed
+
+
 def main() -> int:
     with tempfile.TemporaryDirectory(prefix="cyber-abi-manifest-") as temporary:
         root = Path(temporary)
         generated = root / "generated.json"
         result = generate(HEADER, generated)
         require(result.returncode == 0, result.stderr)
-        require(json.loads(generated.read_text()) == json.loads(PINNED.read_text()),
-                "the checked-in ABI manifest is stale; regenerate it deliberately")
         manifest = json.loads(generated.read_text())
+        pinned = json.loads(PINNED.read_text())
+        require(manifest == pinned,
+                "the checked-in ABI manifest is stale; changed entries: " +
+                ", ".join(manifest_diff(manifest, pinned)))
         require(len(manifest["functions"]) > 200,
                 "the manifest must retain the complete exported function surface")
         require(all(";" not in entry["return"] and "#" not in entry["return"]
                     for entry in manifest["functions"].values()),
                 "a function declaration parser consumed unrelated header declarations")
+        require(all(";" not in entry["return"] and "#" not in entry["return"]
+                    for entry in manifest["callbacks"].values()),
+                "a callback declaration parser consumed unrelated header declarations")
 
         # Same-sized pointer swap: sizeof/offsetof-only schemes missed this.
         mutated = root / "cyber_capi.h"
