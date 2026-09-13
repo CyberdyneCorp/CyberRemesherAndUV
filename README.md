@@ -771,6 +771,12 @@ Stage by stage:
    `examples/11_benchmark.py`'s `search_matched_count` does: probe, measure the
    achieved count, and correct the request. Whichever attempts the loop makes, it
    ships the one whose count is *closest* to the target, never merely the last.
+   When using `cyberremesh --report run.json`, read the `targetCount` block rather
+   than inferring this from the output mesh: it records the requested whole-model
+   count, effective base count, final output faces, and one row per island with
+   its area-weighted allocation, retained calibrated count, attempt, and
+   termination reason. In `--pure-quads` mode the effective base and final count
+   are intentionally different.
 5. **Pure-quad path.** The extracted mesh is relaxed onto the original surface
    (longer for the uniform quad-cover/integer bases, which tolerate it — see
    `CYBER_BASE_RELAX_ITERS`), subdivided 4× so any residual triangle or pentagon
