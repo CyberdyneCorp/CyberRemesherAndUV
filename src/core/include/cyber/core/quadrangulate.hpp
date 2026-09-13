@@ -21,6 +21,7 @@ enum class CountTermination {
     NoExtractedFaces,
     AttemptBudgetExhausted,
     ToleranceNotMet,
+    InfeasibleConstraints,
 };
 
 // Supplying no policy preserves the historical two-attempt acceptance bands.

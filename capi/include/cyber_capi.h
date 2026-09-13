@@ -329,6 +329,7 @@ typedef struct CyberCountPolicy {
 #define CYBER_COUNT_NO_EXTRACTED_FACES 4
 #define CYBER_COUNT_ATTEMPT_BUDGET_EXHAUSTED 5
 #define CYBER_COUNT_TOLERANCE_NOT_MET 6
+#define CYBER_COUNT_INFEASIBLE_CONSTRAINTS 7
 
 typedef struct CyberCountIslandOutcome {
     size_t islandIndex;

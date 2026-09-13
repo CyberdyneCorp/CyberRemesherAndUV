@@ -3717,6 +3717,7 @@ public:
         CountTermination countTermination = targetQuads > 0.0
                                                 ? CountTermination::AttemptBudgetExhausted
                                                 : CountTermination::NoTarget;
+        bool rejectedForValidity = false;
         float scaling = 0.5f;
         // The native solve's isotropic remesh + cross field + cut setup depend only on the
         // mesh / edge length / adaptivity / feature threshold — never on `scaling` — so the
@@ -3726,6 +3727,43 @@ public:
         nativeCtx.guidance = m_guidance;  // non-null forces the native route (see the header)
         nativeCtx.layout = m_layout;      // capture likewise forces native
         nativeCtx.fieldSource = m_fieldSource;
+        std::size_t inputBoundary = 0;
+        std::size_t inputEdges = 0;
+        for (Index ei = 0; ei < mesh.edgeCapacity(); ++ei) {
+            const EdgeId e{ei};
+            if (!mesh.isAlive(e)) {
+                continue;
+            }
+            ++inputEdges;
+            inputBoundary += mesh.edgeFaceCount(e) == 1 ? 1 : 0;
+        }
+        const bool closedInput = inputEdges > 0 && static_cast<double>(inputBoundary) <
+                                                       0.01 * static_cast<double>(inputEdges);
+        const double inputArea = meshSurfaceArea(mesh);
+        const auto validCountCandidate = [&](const IsolineQuadMesh& candidate) {
+            if (candidate.quads.empty()) {
+                return false;
+            }
+            std::vector<std::vector<Index>> candidateFaces;
+            candidateFaces.reserve(candidate.quads.size());
+            for (const auto& polygon : candidate.quads) {
+                if (polygon.size() < 3) {
+                    return false;
+                }
+                std::vector<Index> face;
+                face.reserve(polygon.size());
+                for (const std::size_t vertex : polygon) {
+                    face.push_back(static_cast<Index>(vertex));
+                }
+                candidateFaces.push_back(std::move(face));
+            }
+            const Mesh candidateMesh = Mesh::fromIndexed(candidate.vertices, candidateFaces);
+            if (!candidateMesh.validate().empty()) {
+                return false;
+            }
+            return !closedInput || inputArea <= 0.0 ||
+                   meshSurfaceArea(candidateMesh) >= 0.85 * inputArea;
+        };
         // Everything the run could NOT do with the guidance, on the route it
         // actually took. Called on EVERY exit below (including the early one),
         // because an island that never reached a solver honored nothing either.
@@ -3838,7 +3876,9 @@ public:
             }
             // Move (not copy) — `out` is reassigned at the top of every later
             // iteration, and restored from `best` below before anything reads it.
-            if (countAttemptIsCloser(got, bestQuads, targetQuads)) {
+            const bool eligible = validCountCandidate(out);
+            rejectedForValidity = rejectedForValidity || (got > 0.0 && !eligible);
+            if (eligible && countAttemptIsCloser(got, bestQuads, targetQuads)) {
                 best = std::move(out);
                 bestQuads = got;
                 selectedAttempt = attempt;
@@ -3868,6 +3908,10 @@ public:
         }
         if (m_countPolicy && countTermination == CountTermination::AttemptBudgetExhausted) {
             countTermination = CountTermination::ToleranceNotMet;
+        }
+        if (bestQuads <= 0.0 && rejectedForValidity) {
+            countTermination = CountTermination::InfeasibleConstraints;
+            out = {};
         }
         // Ship the best attempt. `bestQuads` is 0 only when no attempt extracted
         // anything (or there was no target to calibrate against, the fixed-scaling
@@ -3957,21 +4001,6 @@ public:
         // wrong answer. OPEN islands are exempt: their traces legitimately stop short of
         // the boundary rim (the accepted open-surface undershoot contract — see the
         // open-surface cleanup suite).
-        std::size_t nBoundary = 0;
-        std::size_t nAliveEdges = 0;
-        for (Index ei = 0; ei < mesh.edgeCapacity(); ++ei) {
-            const EdgeId e{ei};
-            if (!mesh.isAlive(e)) {
-                continue;
-            }
-            ++nAliveEdges;
-            if (mesh.edgeFaceCount(e) == 1) {
-                ++nBoundary;
-            }
-        }
-        const bool closedInput = nAliveEdges > 0 && static_cast<double>(nBoundary) <
-                                                        0.01 * static_cast<double>(nAliveEdges);
-        const double inputArea = meshSurfaceArea(mesh);
         const double outputArea = meshSurfaceArea(quads);
         if (closedInput && inputArea > 0.0 && outputArea < 0.85 * inputArea) {
             char reason[128];

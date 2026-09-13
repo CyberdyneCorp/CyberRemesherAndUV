@@ -646,6 +646,8 @@ const char* countTerminationName(remesh::CountTermination termination) {
             return "attempt-budget-exhausted";
         case remesh::CountTermination::ToleranceNotMet:
             return "tolerance-not-met";
+        case remesh::CountTermination::InfeasibleConstraints:
+            return "infeasible-constraints";
     }
     return "unknown";
 }
