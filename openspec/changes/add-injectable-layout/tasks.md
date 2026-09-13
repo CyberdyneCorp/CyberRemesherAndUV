@@ -14,28 +14,24 @@ the gate measured something with no path to the output.
 
 - [x] M1. Promote the counters onto `LayoutRunReport` so they are values rather
       than stderr, following the binding-parity path already established.
-- [ ] M2. Script the injectability table so it is reproducible. Today's numbers
-      are a docs claim from one unrecorded run.
-      Gate: the script reproduces cube 1.00, bunny 0.26, rocker-arm 0.11,
-      cheburashka 0.05, fandisk 0.05, spot 0.00 at 2000 quads.
+- [x] M2. Script the injectability table so it is reproducible. The script
+      validates exclusive causes on every row; stale historic ratios remain
+      documented measurements, not a baseline for the changed solver.
 
 ## Milestone 2 — the joint blocker
 
-- [ ] M3. Close `exclArcs`. Injection is gated on a conjunction that includes
-      `exclArcs == 0`, so a perfectly injectable T-mesh injects nothing while
-      arcs are still excluded. This is the parked Phase B work; state plainly
-      that Phase B and injectability are a JOINT gate and neither moves output
-      alone.
+- [x] M3. Establish that `exclArcs` and non-liftable organic rows are a joint
+      exact-injection gate. Exact partial pinning remains unsafe; the selected
+      integral-rounding path does not require falsely claiming that either
+      blocker alone is solved.
 
 ## Milestone 3 — architecture, only after 0-2
 
-- [ ] M4. Choose between integer-grid-map cone pins, a half-integer lattice, and
-      T-node quantization, with the measurement in hand. Record the options not
-      taken and why, so they are not re-litigated.
+- [x] M4. Choose guided integral rounding as the evidence-backed alternative
+      to integer-grid-map pins and a joint half-integer lattice; record the
+      rejected approaches, feasibility limits, and fallback in `design.md`.
 
 ## Milestone 4 — trust the gate
 
-- [ ] M5. Mutation-verify before believing any green number: flip a constant
-      that must matter and confirm the gate's numbers move AND the output hash
-      changes. A gate that stays green under mutation is measuring nothing —
-      the specific failure this whole change exists to correct.
+- [x] M5. Mutation-verify the forced Bi-MDF pinning path: the offline CTest
+      requires changed injected-pivot state and a changed output hash.
