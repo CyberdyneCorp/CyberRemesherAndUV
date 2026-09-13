@@ -5,6 +5,7 @@
 # Static library: the canonical target other C++ code links.
 add_library(cyber_capi STATIC
     src/capi.cpp
+    src/remesh_adapter.cpp
 )
 add_library(cyber::capi ALIAS cyber_capi)
 
@@ -74,6 +75,7 @@ option(CYBER_BUILD_CAPI_SHARED "Build the shared cyber_capi library for bindings
 if(CYBER_BUILD_CAPI_SHARED)
     add_library(cyber_capi_shared SHARED
         src/capi.cpp
+        src/remesh_adapter.cpp
     )
     include(GNUInstallDirs)
     target_include_directories(cyber_capi_shared PUBLIC

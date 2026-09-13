@@ -71,6 +71,7 @@
 #include "cyber/retopo/symmetry.hpp"
 #include "cyber/retopo/tweak.hpp"
 #include "cyber_capi.h"
+#include "remesh_adapter.hpp"
 #ifdef CYBER_CAPI_WITH_APP
 #include "cyber/app/document.hpp"
 #endif
@@ -226,33 +227,6 @@ CyberStatus mapIoError(const cyber::io::Error& error) {
             break;
     }
     return CYBER_ERR_IO;
-}
-
-cyber::remesh::Parameters toParameters(const CyberRemeshParams& in) {
-    cyber::remesh::Parameters params;
-    params.targetQuadCount = in.targetQuads;
-    params.edgeScale = in.edgeScale;
-    params.sharpEdgeDegrees = in.sharpEdgeDegrees;
-    params.smoothNormalDegrees = in.smoothNormalDegrees;
-    params.adaptivity = in.adaptivity;
-    params.pureQuads = in.pureQuads != 0;
-    params.holeFillMaxBoundary = in.holeFillMaxBoundary;
-    return params;
-}
-
-cyber::remesh::ResourceLimits toResourceLimits(const CyberRemeshLimits& in) {
-    return {static_cast<std::size_t>(in.maxInputVertices),
-            static_cast<std::size_t>(in.maxInputFaces),
-            static_cast<std::size_t>(in.maxIntermediateVertices),
-            static_cast<std::size_t>(in.maxIntermediateFaces),
-            static_cast<std::size_t>(in.maxOutputVertices),
-            static_cast<std::size_t>(in.maxOutputFaces)};
-}
-
-void applyExecutionLimits(const CyberRemeshExecutionLimits& in,
-                          cyber::remesh::ResourceLimits& out) {
-    out.maxDirectFactorBytes = static_cast<std::size_t>(in.maxDirectFactorBytes);
-    out.maxCandidateBytes = static_cast<std::size_t>(in.maxCandidateBytes);
 }
 
 // Adapts the C progress/cancel callbacks into a ProgressSink. Cancellation is
@@ -678,7 +652,9 @@ CyberStatus remeshShared(const CyberMesh* in, const CyberRemeshParams* params,
         countReport->islandCapacity = islandCapacity;
     }
     try {
-        const cyber::remesh::Parameters cppParams = toParameters(*params);
+        const cyber::capi::remesh_adapter::LoweredRequest lowered =
+            cyber::capi::remesh_adapter::lowerRequest(*params, limits, execution);
+        const cyber::remesh::Parameters& cppParams = lowered.parameters;
         cyber::remesh::CountPolicy cppCountPolicy;
         const cyber::remesh::CountPolicy* policy = nullptr;
         if (countPolicy != nullptr) {
@@ -753,18 +729,10 @@ CyberStatus remeshShared(const CyberMesh* in, const CyberRemeshParams* params,
         if (quadMethod == CYBER_QUAD_QUADCOVER || quadMethod == CYBER_QUAD_ZREMESHER) {
             fallback = []() { return cyber::remesh::makeFieldAlignedQuadrangulator(); };
         }
-        std::optional<cyber::remesh::ResourceLimits> cppLimits;
-        if (limits != nullptr || execution != nullptr) {
-            cppLimits =
-                limits != nullptr ? toResourceLimits(*limits) : cyber::remesh::ResourceLimits{};
-            if (execution != nullptr) {
-                applyExecutionLimits(*execution, *cppLimits);
-            }
-        }
         cyber::remesh::PipelineResult result = cyber::remesh::remesh(
             in->mesh, cppParams, &sink, &token,
             [quadMethod, makeQuad]() { return makeQuad(quadMethod); }, fallback, guidance, policy,
-            cppLimits ? &*cppLimits : nullptr);
+            lowered.limits ? &*lowered.limits : nullptr);
 
         // The loud channel: every clamp, every rejection and every island whose
         // backend could not honor the guidance reaches the caller.
@@ -851,199 +819,6 @@ CyberStatus remeshShared(const CyberMesh* in, const CyberRemeshParams* params,
     }
 }
 
-// Copy `count` floats from `src` into `dst`, refusing a count no allocation
-// could satisfy.
-//
-// The bound check has to happen BEFORE the pointer arithmetic, not after. A
-// count a binding marshalled from a signed -1 arrives here as SIZE_MAX, and
-// `src + SIZE_MAX` is undefined behavior in its own right — UBSan reports
-// "addition of unsigned offset ... overflowed" — so the allocator never gets
-// the chance to refuse it. The observable ABI behavior is unchanged: the caller
-// still gets an argument error rather than an abort.
-bool assignFloats(const float* src, std::size_t count, std::vector<float>& dst) {
-    if (count > dst.max_size()) {
-        return false;
-    }
-    dst.assign(src, src + count);
-    return true;
-}
-
-// CyberGuidance -> cyber::remesh::Guidance. Rejects arrays whose pointer is
-// null while the count is not (and vice versa) rather than reading garbage;
-// value-level validation is validateGuidance's job inside the pipeline.
-bool toGuidance(const CyberGuidance& in, cyber::remesh::Guidance& out) {
-    if ((in.guides == nullptr) != (in.guide_count == 0)) {
-        return false;
-    }
-    for (size_t i = 0; i < in.guide_count; ++i) {
-        const CyberFlowGuide& g = in.guides[i];
-        if (g.points == nullptr && g.point_count != 0) {
-            return false;
-        }
-        cyber::remesh::FlowGuide guide;
-        guide.strength = g.strength;
-        guide.radius = g.radius;
-        guide.points.reserve(g.point_count);
-        for (size_t k = 0; k < g.point_count; ++k) {
-            guide.points.push_back(
-                cyber::Vec3{g.points[3 * k], g.points[3 * k + 1], g.points[3 * k + 2]});
-        }
-        out.guides.push_back(std::move(guide));
-    }
-    if ((in.vertex_density == nullptr) != (in.vertex_density_count == 0)) {
-        return false;
-    }
-    if ((in.face_density == nullptr) != (in.face_density_count == 0)) {
-        return false;
-    }
-    return assignFloats(in.vertex_density, in.vertex_density_count, out.density.vertexValues) &&
-           assignFloats(in.face_density, in.face_density_count, out.density.faceValues);
-}
-
-// CyberGuidanceEx -> cyber::remesh::Guidance. Same pointer/count discipline as
-// toGuidance, plus the guide MODE, which is validated here rather than clamped:
-// a typo'd mode that silently biased the field instead of cutting a loop is the
-// exact failure topology guides exist to remove. `reason` names what was wrong.
-bool toGuidanceEx(const CyberGuidanceEx& in, cyber::remesh::Guidance& out, std::string& reason) {
-    if ((in.guides == nullptr) != (in.guide_count == 0)) {
-        reason = "guide array pointer/count mismatch";
-        return false;
-    }
-    for (size_t i = 0; i < in.guide_count; ++i) {
-        const CyberFlowGuideEx& g = in.guides[i];
-        if (g.points == nullptr && g.point_count != 0) {
-            reason = "guide " + std::to_string(i) + ": point array pointer/count mismatch";
-            return false;
-        }
-        if (g.mode != CYBER_GUIDE_ORIENTATION && g.mode != CYBER_GUIDE_TOPOLOGY) {
-            reason = "guide " + std::to_string(i) + ": unknown mode " + std::to_string(g.mode);
-            return false;
-        }
-        cyber::remesh::FlowGuide guide;
-        guide.strength = g.strength;
-        guide.radius = g.radius;
-        guide.mode = g.mode == CYBER_GUIDE_TOPOLOGY ? cyber::remesh::GuideMode::Topology
-                                                    : cyber::remesh::GuideMode::Orientation;
-        guide.closed = g.closed != 0;
-        guide.points.reserve(g.point_count);
-        for (size_t k = 0; k < g.point_count; ++k) {
-            guide.points.push_back(
-                cyber::Vec3{g.points[3 * k], g.points[3 * k + 1], g.points[3 * k + 2]});
-        }
-        out.guides.push_back(std::move(guide));
-    }
-    if ((in.vertex_density == nullptr) != (in.vertex_density_count == 0)) {
-        reason = "vertex density array pointer/count mismatch";
-        return false;
-    }
-    if ((in.face_density == nullptr) != (in.face_density_count == 0)) {
-        reason = "face density array pointer/count mismatch";
-        return false;
-    }
-    if (!assignFloats(in.vertex_density, in.vertex_density_count, out.density.vertexValues)) {
-        reason = "vertex density count is larger than any allocation could hold";
-        return false;
-    }
-    if (!assignFloats(in.face_density, in.face_density_count, out.density.faceValues)) {
-        reason = "face density count is larger than any allocation could hold";
-        return false;
-    }
-    return true;
-}
-
-// Flatten the two C++ run reports into the flat POD the ABI hands back.
-void fillZRemesherReport(const cyber::remesh::ZRemesherRunReport& zr,
-                         const cyber::remesh::SymmetryRunReport& sym, CyberZRemesherReport& out) {
-    out = CyberZRemesherReport{};
-    out.layouts = zr.layout.layouts;
-    out.layoutsValid = zr.layout.layoutsValid;
-    out.layoutNodes = zr.layout.stats.nodes;
-    out.layoutArcs = zr.layout.stats.arcs;
-    out.layoutPatches = zr.layout.stats.patches;
-    out.singularities = zr.layout.stats.singularities;
-    out.tJunctions = zr.layout.stats.tJunctions;
-    out.featureArcs = zr.layout.stats.featureArcs;
-    out.boundaryArcs = zr.layout.stats.boundaryArcs;
-    out.excludedArcs = zr.layout.stats.excludedArcs;
-    out.nonClosingPatches = zr.layout.stats.nonClosingPatches;
-    out.totalIndex = zr.layout.stats.totalIndex;
-    // Truncating copy into the fixed buffer: the ABI hands back a value, not a
-    // pointer into engine memory whose lifetime the caller would have to track.
-    // The candidate names are short and fixed by the engine, so this never
-    // truncates in practice — it is bounded so that it cannot overrun if one
-    // day they are not.
-    const std::size_t n = std::min(zr.selectedCandidate.size(), sizeof(out.selectedCandidate) - 1);
-    std::memcpy(out.selectedCandidate, zr.selectedCandidate.data(), n);
-    out.selectedCandidate[n] = '\0';
-    out.qualityScore = zr.qualityScore;
-    out.symmetryApplied = sym.applied ? 1 : 0;
-    out.topologicallySymmetric = sym.topologicallySymmetric ? 1 : 0;
-    out.mirroredVertices = sym.mirroredVertices;
-    out.mirroredFaces = sym.mirroredFaces;
-    out.borderSnapped = sym.borderSnapped;
-    out.membranesRemoved = sym.membranesRemoved;
-    out.maxBorderDrift = sym.maxBorderDrift;
-}
-
-void fillInjectabilityReport(const cyber::remesh::ZRemesherRunReport& zr,
-                             CyberZRemesherInjectabilityReport& out) {
-    out = CyberZRemesherInjectabilityReport{};
-    const cyber::remesh::InjectabilityStats& in = zr.layout.injectability;
-    out.arcs = in.arcs;
-    out.injectableArcs = in.injectableArcs;
-    out.excludedArcs = in.excludedArcs;
-    out.emptyRows = in.emptyRows;
-    out.latticeFreeRows = in.latticeFreeRows;
-    out.fractionalCoefficientRows = in.fractionalCoefficientRows;
-    out.fractionalPivotRows = in.fractionalPivotRows;
-    out.droppedRows = in.droppedRows;
-    out.pivots = in.pivots;
-    out.cleanPivots = in.cleanPivots;
-    out.injectedPivots = in.injectedPivots;
-    out.optimumDeviationEnergy = in.optimumDeviationEnergy;
-    out.realizedDeviationEnergy = in.realizedDeviationEnergy;
-}
-
-bool fillSemanticBoundaryReport(const cyber::Mesh& output,
-                                const std::vector<cyber::remesh::SemanticBoundaryRequest>& requests,
-                                float targetEdgeLength, CyberSemanticBoundaryReport& out) {
-    CyberSemanticBoundaryResult* const rows = out.boundaries;
-    const size_t capacity = out.boundaryCapacity;
-    out = CyberSemanticBoundaryReport{};
-    out.boundaries = rows;
-    out.boundaryCapacity = capacity;
-    out.boundaryCount = requests.size();
-    if ((rows == nullptr && capacity != 0) || (rows != nullptr && capacity < requests.size())) {
-        return false;
-    }
-    const float tolerance = std::max(1e-4f, 0.5f * targetEdgeLength);
-    for (size_t i = 0; i < requests.size(); ++i) {
-        const cyber::remesh::SemanticBoundaryAdherence measured =
-            cyber::remesh::measureSemanticBoundaryAdherence(output, requests[i], tolerance);
-        CyberSemanticBoundaryResult& row = rows[i];
-        row = CyberSemanticBoundaryResult{};
-        std::snprintf(row.id, sizeof(row.id), "%s", measured.id.c_str());
-        row.sourceEdges = measured.sourceEdges;
-        row.requestedClosed = measured.requestedClosed ? 1 : 0;
-        row.outputClosed = measured.outputClosed ? 1 : 0;
-        row.edgeChainCoverage = measured.adherence.edgeChainCoverage;
-        row.meanDistance = measured.adherence.meanDistance;
-        row.maxDistance = measured.adherence.maxDistance;
-        std::snprintf(row.reason, sizeof(row.reason), "%s", measured.reason.c_str());
-        if (measured.realized) {
-            row.state = CYBER_SEMANTIC_REALIZED;
-            ++out.realizedCount;
-        } else if (!requests[i].rejectionReason.empty()) {
-            row.state = CYBER_SEMANTIC_REJECTED;
-            ++out.rejectedCount;
-        } else {
-            row.state = CYBER_SEMANTIC_PARTIAL;
-            ++out.partialCount;
-        }
-    }
-    return true;
-}
-
 }  // namespace
 
 CyberStatus cyber_remesh(const CyberMesh* in, const CyberRemeshParams* params,
@@ -1097,7 +872,7 @@ CyberStatus cyber_remesh_guided(const CyberMesh* in, const CyberRemeshParams* pa
     // count the allocator refuses is an argument error, never an abort.
     const CyberStatus conversion =
         guarded("cyber_remesh_guided", CYBER_ERR_INVALID_ARG, [&]() -> CyberStatus {
-            if (!toGuidance(*guidance, converted)) {
+            if (!cyber::capi::remesh_adapter::lowerGuidance(*guidance, converted)) {
                 setError("cyber_remesh_guided: guidance array pointer/count mismatch");
                 return CYBER_ERR_INVALID_ARG;
             }
@@ -1124,7 +899,7 @@ CyberStatus cyber_remesh_guided_ex(const CyberMesh* in, const CyberRemeshParams*
     std::string reason;
     const CyberStatus conversion =
         guarded("cyber_remesh_guided_ex", CYBER_ERR_INVALID_PARAM, [&]() -> CyberStatus {
-            if (!toGuidanceEx(*guidance, converted, reason)) {
+            if (!cyber::capi::remesh_adapter::lowerGuidanceEx(*guidance, converted, reason)) {
                 setError("cyber_remesh_guided_ex: " + reason);
                 return CYBER_ERR_INVALID_PARAM;
             }
@@ -1199,7 +974,7 @@ static CyberStatus remeshZremesherShared(
         // abort.
         const CyberStatus conversion =
             guarded("cyber_remesh_zremesher", CYBER_ERR_INVALID_PARAM, [&]() -> CyberStatus {
-                if (!toGuidanceEx(*guidance, converted, reason)) {
+                if (!cyber::capi::remesh_adapter::lowerGuidanceEx(*guidance, converted, reason)) {
                     setError("cyber_remesh_zremesher: " + reason);
                     return CYBER_ERR_INVALID_PARAM;
                 }
@@ -1225,7 +1000,9 @@ static CyberStatus remeshZremesherShared(
                 return CYBER_ERR_INVALID_ARG;
             }
         }
-        const cyber::remesh::Parameters cppParams = toParameters(*params);
+        const cyber::capi::remesh_adapter::LoweredRequest lowered =
+            cyber::capi::remesh_adapter::lowerRequest(*params, topology, execution);
+        const cyber::remesh::Parameters& cppParams = lowered.parameters;
         const cyber::CancelToken token;
         token.setPoll([cancel, user]() { return cancel != nullptr && cancel(user) != 0; });
         cyber::ProgressSink sink = makeSink(progress, cancel, user, token);
@@ -1273,17 +1050,11 @@ static CyberStatus remeshZremesherShared(
 
         cyber::remesh::SymmetryRunReport symReport;
         const cyber::remesh::Guidance* guidancePtr = converted.empty() ? nullptr : &converted;
-        std::optional<cyber::remesh::ResourceLimits> limits;
-        if (topology != nullptr || execution != nullptr) {
-            limits =
-                topology != nullptr ? toResourceLimits(*topology) : cyber::remesh::ResourceLimits{};
-            if (execution != nullptr) applyExecutionLimits(*execution, *limits);
-        }
         cyber::remesh::PipelineResult result = cyber::remesh::remeshSymmetric(
             in->mesh, cppParams, axis, &symReport, &sink, &token,
             [&options]() { return cyber::remesh::makeZRemesherQuadrangulator(options); },
             []() { return cyber::remesh::makeFieldAlignedQuadrangulator(); }, guidancePtr,
-            limits ? &*limits : nullptr);
+            lowered.limits ? &*lowered.limits : nullptr);
 
         if (warning != nullptr) {
             for (const auto& issue : result.parameterIssues) {
@@ -1315,15 +1086,16 @@ static CyberStatus remeshZremesherShared(
                 handle->mesh = std::move(result.mesh);
                 handle->stats = result.stats;
                 if (report != nullptr) {
-                    fillZRemesherReport(zrReport, symReport, *report);
+                    cyber::capi::remesh_adapter::writeZRemesherReport(zrReport, symReport, *report);
                 }
                 if (injectabilityReport != nullptr) {
-                    fillInjectabilityReport(zrReport, *injectabilityReport);
+                    cyber::capi::remesh_adapter::writeInjectabilityReport(zrReport,
+                                                                          *injectabilityReport);
                 }
                 if (semanticBoundaryReport != nullptr &&
-                    !fillSemanticBoundaryReport(result.mesh, semanticRequests,
-                                                result.stats.targetEdgeLength,
-                                                *semanticBoundaryReport)) {
+                    !cyber::capi::remesh_adapter::writeSemanticBoundaryReport(
+                        result.mesh, semanticRequests, result.stats.targetEdgeLength,
+                        *semanticBoundaryReport)) {
                     setError(
                         "cyber_remesh_zremesher_with_semantic_boundary_report: "
                         "semantic boundary buffer is too small");
