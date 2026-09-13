@@ -107,6 +107,72 @@ double median(std::vector<double>& v) {
     return v[mid];
 }
 
+double percentile(std::vector<double>& values, double fraction) {
+    if (values.empty()) {
+        return 0.0;
+    }
+    const double scaled = fraction * static_cast<double>(values.size() - 1);
+    const std::size_t index = static_cast<std::size_t>(std::ceil(scaled));
+    std::nth_element(values.begin(), values.begin() + static_cast<std::ptrdiff_t>(index),
+                     values.end());
+    return values[index];
+}
+
+bool isFinite(Vec3 point) {
+    return std::isfinite(point.x) && std::isfinite(point.y) && std::isfinite(point.z);
+}
+
+void checkFiniteVertices(const Mesh& mesh, QualityScore& score) {
+    for (Index v = 0; v < mesh.vertexCapacity(); ++v) {
+        const VertexId vertex{v};
+        if (mesh.isAlive(vertex) && !isFinite(mesh.position(vertex))) {
+            score.geometryValid = false;
+        }
+    }
+}
+
+void collectEdgeStatistics(const Mesh& mesh, QualityScore& score, std::vector<double>& lengths) {
+    for (Index e = 0; e < mesh.edgeCapacity(); ++e) {
+        const EdgeId edge{e};
+        if (!mesh.isAlive(edge)) {
+            continue;
+        }
+        const std::size_t incident = mesh.edgeFaceCount(edge);
+        if (incident == 1) {
+            ++score.boundaryEdges;
+        } else if (incident > 2) {
+            ++score.nonManifoldEdges;
+        }
+        const auto [a, b] = mesh.edgeVertices(edge);
+        const double edgeLength = static_cast<double>(length(mesh.position(b) - mesh.position(a)));
+        if (!std::isfinite(edgeLength) || edgeLength <= 1e-20) {
+            ++score.degenerateEdges;
+            score.geometryValid = false;
+            continue;
+        }
+        lengths.push_back(edgeLength);
+    }
+}
+
+void scoreAngleTail(std::vector<double> angles, QualityScore& score) {
+    score.medianAngleDegrees = median(angles);
+    std::vector<double> deviations;
+    deviations.reserve(angles.size());
+    for (const double cornerAngle : angles) {
+        if (!std::isfinite(cornerAngle)) {
+            score.geometryValid = false;
+            continue;
+        }
+        deviations.push_back(std::abs(cornerAngle - 90.0));
+    }
+    if (deviations.empty()) {
+        score.geometryValid = false;
+        return;
+    }
+    score.p95AngleDeviationDegrees = percentile(deviations, 0.95);
+    score.angle = std::clamp(1.0 - score.p95AngleDeviationDegrees / 90.0, 0.0, 1.0);
+}
+
 }  // namespace
 
 std::size_t boundaryComponentCount(const Mesh& mesh) {
@@ -154,6 +220,7 @@ QualityScore scoreQuality(const Mesh& mesh, const SingularityMetrics* singularit
                           const QualityWeights& weights) {
     QualityScore out;
     std::vector<double> angles;
+    checkFiniteVertices(mesh, out);
     for (Index f = 0; f < mesh.faceCapacity(); ++f) {
         const FaceId face{f};
         if (!mesh.isAlive(face)) {
@@ -163,35 +230,23 @@ QualityScore scoreQuality(const Mesh& mesh, const SingularityMetrics* singularit
         if (mesh.faceSize(face) != 4) {
             ++out.nonQuadFaces;
         }
-        faceAngles(mesh, face, angles);
+        if (out.geometryValid) {
+            faceAngles(mesh, face, angles);
+        }
     }
     if (out.faces == 0) {
+        out.geometryValid = false;
         return out;
     }
 
     // Edge statistics: lengths for uniformity, incidence for defects.
     std::vector<double> lengths;
-    for (Index e = 0; e < mesh.edgeCapacity(); ++e) {
-        const EdgeId edge{e};
-        if (!mesh.isAlive(edge)) {
-            continue;
-        }
-        const std::size_t incident = mesh.edgeFaceCount(edge);
-        if (incident == 1) {
-            ++out.boundaryEdges;
-        } else if (incident > 2) {
-            ++out.nonManifoldEdges;
-        }
-        const auto [a, b] = mesh.edgeVertices(edge);
-        lengths.push_back(static_cast<double>(length(mesh.position(b) - mesh.position(a))));
-    }
+    collectEdgeStatistics(mesh, out, lengths);
     out.boundaryComponents = boundaryComponentCount(mesh);
 
-    // Angle quality: how close the median interior angle is to 90 degrees. A
-    // quad mesh cannot do better than 90, and the distance from it is what
-    // "squareness" means.
-    out.medianAngleDegrees = median(angles);
-    out.angle = std::clamp(1.0 - std::abs(out.medianAngleDegrees - 90.0) / 90.0, 0.0, 1.0);
+    // Angle quality uses the 95th-percentile deviation from 90 degrees so a
+    // small tail of visibly distorted corners cannot hide behind the median.
+    scoreAngleTail(std::move(angles), out);
 
     // Edge uniformity as 1 - coefficient of variation, so a perfectly uniform
     // mesh scores 1 and a wildly varying one approaches 0.
@@ -265,7 +320,7 @@ QualityScore scoreQuality(const Mesh& mesh, const SingularityMetrics* singularit
 bool candidateBeats(const QualityScore& b, const QualityScore& a,
                     CandidateSelectionContext context) {
     const auto isEligible = [context](const QualityScore& score) {
-        return score.nonManifoldEdges == 0 &&
+        return score.geometryValid && score.nonManifoldEdges == 0 &&
                score.boundaryComponents == context.expectedBoundaryComponents;
     };
     const bool eligibleA = isEligible(a);

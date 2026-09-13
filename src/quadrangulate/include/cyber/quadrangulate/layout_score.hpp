@@ -134,7 +134,10 @@ struct QualityScore {
     // count, this survives a different tessellation of the same source rim.
     std::size_t boundaryComponents = 0;
     std::size_t nonManifoldEdges = 0;
+    bool geometryValid = true;
+    std::size_t degenerateEdges = 0;
     double medianAngleDegrees = 0.0;
+    double p95AngleDeviationDegrees = 0.0;
     double edgeLengthCv = 0.0;
     std::size_t irregularVertices = 0;
     std::size_t interiorVertices = 0;
@@ -160,10 +163,10 @@ struct CandidateSelectionContext {
 };
 
 // Pick the better of two scored candidates, deterministically. Non-manifold
-// meshes and candidates that do not preserve the input's boundary components
-// are ineligible before aesthetics; ties fall through to the total, then the
-// cone count, then candidate order — so the same inputs always select the same
-// candidate.
+// meshes, invalid geometry, and candidates that do not preserve the input's
+// boundary components are ineligible before aesthetics; ties fall through to
+// the total, then the cone count, then candidate order — so the same inputs
+// always select the same candidate.
 //
 // Returns true when `b` should replace `a`.
 [[nodiscard]] bool candidateBeats(const QualityScore& b, const QualityScore& a,
