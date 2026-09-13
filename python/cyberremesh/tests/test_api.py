@@ -135,6 +135,16 @@ def _run_quad_method():
             result = remesh(mesh, RemeshParams(target_quad_count=200, quad_method=method))
             with result:
                 assert result.stats.quads > 0, (method, result.stats)
+                if method == "zremesher":
+                    report = result.zremesher_report
+                    assert report is not None
+                    injectability = report.injectability
+                    assert injectability is not None, "additive injectability ABI was not mapped"
+                    attributed = (injectability.injectable_arcs + injectability.excluded_arcs +
+                                  injectability.empty_rows + injectability.lattice_free_rows +
+                                  injectability.fractional_coefficient_rows)
+                    assert attributed == injectability.arcs, (
+                        injectability, attributed, injectability.arcs)
         print("PASS: quad_method={0} produced {1} quads".format(method, result.stats.quads))
 
     try:

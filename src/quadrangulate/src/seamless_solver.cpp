@@ -3009,6 +3009,7 @@ int solveSeamlessReduced(
     std::unique_ptr<bimdf::TMesh> bimdfTm;
     std::vector<std::vector<std::pair<std::size_t, double>>> bimdfArcRows;
     std::vector<std::pair<std::size_t, double>> bimdfPins;  // (intFree ordinal, value)
+    InjectabilityStats injectability;
     if (bimdfCharts != nullptr) {
         bimdfCharts->u = relaxedUv.data();
         bimdfCharts->v = relaxedUv.data() + nCut;
@@ -3455,6 +3456,45 @@ int solveSeamlessReduced(
                     const bool force = mode != nullptr && std::string(mode) == "force";
                     const bool exact = nPivots > 0 && cleanPivots == nPivots && maxFrac < 0.25 &&
                                        exclArcs == 0 && injDropped == 0;
+
+                    // Attribute every arc once, using the same containment
+                    // and reduced-basis facts the injection gate uses. A row
+                    // with more than one defect takes the first cause, making
+                    // the counters reconcilable instead of an overlapping
+                    // list of symptoms.
+                    injectability = {};
+                    injectability.arcs = tmesh.arcs.size();
+                    injectability.fractionalPivotRows = fracRows.size();
+                    injectability.droppedRows = injDropped;
+                    injectability.pivots = nPivots;
+                    injectability.cleanPivots = cleanPivots;
+                    injectability.optimumDeviationEnergy = sol.deviationEnergy;
+                    for (std::size_t a = 0; a < tmesh.arcs.size(); ++a) {
+                        if ((a < tmesh.arcExcluded.size() && tmesh.arcExcluded[a] != 0) ||
+                            (a < sol.arcOutside.size() && sol.arcOutside[a] != 0) ||
+                            injDrop[a] != 0) {
+                            ++injectability.excludedArcs;
+                            continue;
+                        }
+                        const auto& row = bimdfArcRows[a];
+                        if (row.empty()) {
+                            ++injectability.emptyRows;
+                            continue;
+                        }
+                        bool latticeFree = false;
+                        bool fractional = false;
+                        for (const auto& [ri, cf] : row) {
+                            latticeFree = latticeFree || ordinalOf[ri] == kInvalidIndex;
+                            fractional = fractional || std::abs(cf - std::round(cf)) > 1e-7;
+                        }
+                        if (latticeFree) {
+                            ++injectability.latticeFreeRows;
+                        } else if (fractional) {
+                            ++injectability.fractionalCoefficientRows;
+                        } else {
+                            ++injectability.injectableArcs;
+                        }
+                    }
                     std::fprintf(stderr,
                                  "[qc] bimdf inject: arcs=%zu badArcs=%zu exclArcs=%zu "
                                  "injDropped=%zu rows=%zu cols=%zu pivots=%zu cleanPivots=%zu "
@@ -3475,6 +3515,7 @@ int solveSeamlessReduced(
                             }
                         }
                     }
+                    injectability.injectedPivots = bimdfPins.size();
                     break;
                 }
             }
@@ -3659,8 +3700,30 @@ int solveSeamlessReduced(
             }
             finalLen[a] = lenA;
         }
-        std::fprintf(stderr, "[qc] bimdf realized: arcDeviationEnergy=%.3f injected=%zu\n",
-                     bimdf::deviationEnergy(*bimdfTm, finalLen), bimdfPins.size());
+        injectability.realizedDeviationEnergy = bimdf::deviationEnergy(*bimdfTm, finalLen);
+        if (layoutOptions != nullptr && layoutOptions->report != nullptr) {
+            InjectabilityStats& aggregate = layoutOptions->report->injectability;
+            aggregate.arcs += injectability.arcs;
+            aggregate.injectableArcs += injectability.injectableArcs;
+            aggregate.excludedArcs += injectability.excludedArcs;
+            aggregate.emptyRows += injectability.emptyRows;
+            aggregate.latticeFreeRows += injectability.latticeFreeRows;
+            aggregate.fractionalCoefficientRows += injectability.fractionalCoefficientRows;
+            aggregate.fractionalPivotRows += injectability.fractionalPivotRows;
+            aggregate.droppedRows += injectability.droppedRows;
+            aggregate.pivots += injectability.pivots;
+            aggregate.cleanPivots += injectability.cleanPivots;
+            aggregate.injectedPivots += injectability.injectedPivots;
+            aggregate.optimumDeviationEnergy += injectability.optimumDeviationEnergy;
+            aggregate.realizedDeviationEnergy += injectability.realizedDeviationEnergy;
+        }
+        std::fprintf(stderr,
+                     "[qc] bimdf realized: arcDeviationEnergy=%.3f injected=%zu injectable=%zu "
+                     "excluded=%zu empty=%zu latticeFree=%zu fractional=%zu\n",
+                     injectability.realizedDeviationEnergy, bimdfPins.size(),
+                     injectability.injectableArcs, injectability.excludedArcs,
+                     injectability.emptyRows, injectability.latticeFreeRows,
+                     injectability.fractionalCoefficientRows);
     }
     return totalCg;
 }

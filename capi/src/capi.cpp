@@ -982,6 +982,25 @@ void fillZRemesherReport(const cyber::remesh::ZRemesherRunReport& zr,
     out.maxBorderDrift = sym.maxBorderDrift;
 }
 
+void fillInjectabilityReport(const cyber::remesh::ZRemesherRunReport& zr,
+                             CyberZRemesherInjectabilityReport& out) {
+    out = CyberZRemesherInjectabilityReport{};
+    const cyber::remesh::InjectabilityStats& in = zr.layout.injectability;
+    out.arcs = in.arcs;
+    out.injectableArcs = in.injectableArcs;
+    out.excludedArcs = in.excludedArcs;
+    out.emptyRows = in.emptyRows;
+    out.latticeFreeRows = in.latticeFreeRows;
+    out.fractionalCoefficientRows = in.fractionalCoefficientRows;
+    out.fractionalPivotRows = in.fractionalPivotRows;
+    out.droppedRows = in.droppedRows;
+    out.pivots = in.pivots;
+    out.cleanPivots = in.cleanPivots;
+    out.injectedPivots = in.injectedPivots;
+    out.optimumDeviationEnergy = in.optimumDeviationEnergy;
+    out.realizedDeviationEnergy = in.realizedDeviationEnergy;
+}
+
 }  // namespace
 
 CyberStatus cyber_remesh(const CyberMesh* in, const CyberRemeshParams* params,
@@ -1098,7 +1117,8 @@ static CyberStatus remeshZremesherShared(
     const CyberMesh* in, const CyberRemeshParams* params, const CyberZRemesherParams* zr,
     const CyberGuidanceEx* guidance, const CyberRemeshLimits* topology,
     const CyberRemeshExecutionLimits* execution, CyberProgressCb progress, CyberCancelCb cancel,
-    CyberWarningCb warning, void* user, CyberMesh** out, CyberZRemesherReport* report) {
+    CyberWarningCb warning, void* user, CyberMesh** out, CyberZRemesherReport* report,
+    CyberZRemesherInjectabilityReport* injectabilityReport) {
     if (in == nullptr || params == nullptr || out == nullptr) {
         setError("cyber_remesh_zremesher: null argument");
         return CYBER_ERR_INVALID_ARG;
@@ -1219,6 +1239,9 @@ static CyberStatus remeshZremesherShared(
                 if (report != nullptr) {
                     fillZRemesherReport(zrReport, symReport, *report);
                 }
+                if (injectabilityReport != nullptr) {
+                    fillInjectabilityReport(zrReport, *injectabilityReport);
+                }
                 clearError();
                 *out = handle.release();
                 return CYBER_OK;
@@ -1254,7 +1277,16 @@ CyberStatus cyber_remesh_zremesher(const CyberMesh* in, const CyberRemeshParams*
                                    CyberWarningCb warning, void* user, CyberMesh** out,
                                    CyberZRemesherReport* report) {
     return remeshZremesherShared(in, params, zr, guidance, nullptr, nullptr, progress, cancel,
-                                 warning, user, out, report);
+                                 warning, user, out, report, nullptr);
+}
+
+CyberStatus cyber_remesh_zremesher_with_injectability_report(
+    const CyberMesh* in, const CyberRemeshParams* params, const CyberZRemesherParams* zr,
+    const CyberGuidanceEx* guidance, CyberProgressCb progress, CyberCancelCb cancel,
+    CyberWarningCb warning, void* user, CyberMesh** out, CyberZRemesherReport* report,
+    CyberZRemesherInjectabilityReport* injectabilityReport) {
+    return remeshZremesherShared(in, params, zr, guidance, nullptr, nullptr, progress, cancel,
+                                 warning, user, out, report, injectabilityReport);
 }
 
 CyberStatus cyber_remesh_zremesher_with_resource_limits(
@@ -1263,7 +1295,7 @@ CyberStatus cyber_remesh_zremesher_with_resource_limits(
     const CyberRemeshExecutionLimits* execution, CyberProgressCb progress, CyberCancelCb cancel,
     CyberWarningCb warning, void* user, CyberMesh** out, CyberZRemesherReport* report) {
     return remeshZremesherShared(in, params, zr, guidance, topology, execution, progress, cancel,
-                                 warning, user, out, report);
+                                 warning, user, out, report, nullptr);
 }
 
 CyberStatus cyber_mesh_stats(const CyberMesh* mesh, CyberStats* out) {

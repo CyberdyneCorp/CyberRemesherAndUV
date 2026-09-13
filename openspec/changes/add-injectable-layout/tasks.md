@@ -6,13 +6,13 @@ the gate measured something with no path to the output.
 
 ## Milestone 0 — attribute the failure
 
-- [ ] M0. Split `badArcs` into named causes (empty row, lattice-free ordinal,
+- [x] M0. Split `badArcs` into named causes (empty row, lattice-free ordinal,
       fractional coefficient, excluded arc) and report them.
       Gate: the four counters sum to today's `badArcs` on every corpus model.
 
 ## Milestone 1 — make it a gate
 
-- [ ] M1. Promote the counters onto `LayoutRunReport` so they are values rather
+- [x] M1. Promote the counters onto `LayoutRunReport` so they are values rather
       than stderr, following the binding-parity path already established.
 - [ ] M2. Script the injectability table so it is reproducible. Today's numbers
       are a docs claim from one unrecorded run.

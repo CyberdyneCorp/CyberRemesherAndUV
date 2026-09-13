@@ -92,7 +92,7 @@ typedef enum CyberStatus {
  * Do not compare these numbers by hand: cyber_abi_check() applies the rule
  * above in one place, so every binding gets the same answer. */
 #define CYBER_ABI_VERSION_MAJOR 1
-#define CYBER_ABI_VERSION_MINOR 9
+#define CYBER_ABI_VERSION_MINOR 10
 
 /* The ABI this build implements. Cannot fail; either pointer may be NULL. */
 void cyber_abi_version(int* major, int* minor);
@@ -554,6 +554,28 @@ typedef struct CyberZRemesherReport {
     float maxBorderDrift;
 } CyberZRemesherReport;
 
+/* Diagnostics for the symbolic layout-to-integer hand-off. This is a separate
+ * POD rather than an extension of CyberZRemesherReport: callers compiled
+ * against an older report allocate its historical size, so extending it would
+ * make the existing entry points write past their allocation. The four arc
+ * causes are mutually exclusive and reconcile with
+ * arcs - injectableArcs. */
+typedef struct CyberZRemesherInjectabilityReport {
+    size_t arcs;
+    size_t injectableArcs;
+    size_t excludedArcs;
+    size_t emptyRows;
+    size_t latticeFreeRows;
+    size_t fractionalCoefficientRows;
+    size_t fractionalPivotRows;
+    size_t droppedRows;
+    size_t pivots;
+    size_t cleanPivots;
+    size_t injectedPivots;
+    double optimumDeviationEnergy;
+    double realizedDeviationEnergy;
+} CyberZRemesherInjectabilityReport;
+
 /* What a flow guide is asking for. */
 #define CYBER_GUIDE_ORIENTATION 0
 /* "Put an actual edge loop HERE": the stroke becomes a curve in the layout,
@@ -628,6 +650,15 @@ CyberStatus cyber_remesh_zremesher(const CyberMesh* in, const CyberRemeshParams*
                                    CyberProgressCb progress, CyberCancelCb cancel,
                                    CyberWarningCb warning, void* user, CyberMesh** out,
                                    CyberZRemesherReport* report);
+
+/* Like cyber_remesh_zremesher, and additionally returns the per-run symbolic
+ * injectability diagnostics through a separately versioned-safe POD. Either
+ * report output pointer may be NULL. */
+CyberStatus cyber_remesh_zremesher_with_injectability_report(
+    const CyberMesh* in, const CyberRemeshParams* params, const CyberZRemesherParams* zr,
+    const CyberGuidanceEx* guidance, CyberProgressCb progress, CyberCancelCb cancel,
+    CyberWarningCb warning, void* user, CyberMesh** out, CyberZRemesherReport* report,
+    CyberZRemesherInjectabilityReport* injectability_report);
 
 /* ZRemesher variant with the additive topology/execution resource limits. */
 CyberStatus cyber_remesh_zremesher_with_resource_limits(

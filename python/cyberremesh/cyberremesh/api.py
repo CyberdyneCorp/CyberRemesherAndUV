@@ -109,7 +109,7 @@ def version() -> str:
 #: The C ABI this binding was written against. Mirrors CYBER_ABI_VERSION_* in
 #: cyber_capi.h; ``check_abi()`` compares it against the loaded library.
 ABI_VERSION_MAJOR = 1
-ABI_VERSION_MINOR = 9
+ABI_VERSION_MINOR = 10
 
 
 def abi_version() -> tuple:
@@ -2221,6 +2221,7 @@ class ZRemesherReport:
     border_snapped: int = 0
     membranes_removed: int = 0
     max_border_drift: float = 0.0
+    injectability: Optional["InjectabilityReport"] = None
 
     @classmethod
     def _from_c(cls, c: "_ffi.CyberZRemesherReport") -> "ZRemesherReport":
@@ -2247,6 +2248,29 @@ class ZRemesherReport:
             membranes_removed=int(c.membranes_removed),
             max_border_drift=float(c.max_border_drift),
         )
+
+
+@dataclass
+class InjectabilityReport:
+    """Measured symbolic-layout reach into the integer quantizer."""
+
+    arcs: int = 0
+    injectable_arcs: int = 0
+    excluded_arcs: int = 0
+    empty_rows: int = 0
+    lattice_free_rows: int = 0
+    fractional_coefficient_rows: int = 0
+    fractional_pivot_rows: int = 0
+    dropped_rows: int = 0
+    pivots: int = 0
+    clean_pivots: int = 0
+    injected_pivots: int = 0
+    optimum_deviation_energy: float = 0.0
+    realized_deviation_energy: float = 0.0
+
+    @classmethod
+    def _from_c(cls, c: "_ffi.CyberZRemesherInjectabilityReport") -> "InjectabilityReport":
+        return cls(**{name: getattr(c, name) for name, _type in c._fields_})
 
 
 def remesh(
@@ -2399,6 +2423,7 @@ def remesh(
             c_guidance.vertex_density_count = count
 
     c_report = None
+    c_injectability = None
     if count_policy is not None:
         c_policy = count_policy._to_c()
         c_islands = (_ffi.CyberCountIslandOutcome * max(1, mesh.face_count))()
@@ -2415,6 +2440,7 @@ def remesh(
         # differed from the CLI for the same request.
         c_zr = (zremesher or ZRemesherParams())._to_c()
         c_report = _ffi.CyberZRemesherReport()
+        c_injectability = _ffi.CyberZRemesherInjectabilityReport()
         if limits is not None:
             c_limits = limits._to_c()
             c_execution = limits._execution_to_c()
@@ -2425,11 +2451,11 @@ def remesh(
                 warning_cb, None, ctypes.byref(out_handle), ctypes.byref(c_report),
             )
         else:
-            status = lib.cyber_remesh_zremesher(
+            status = lib.cyber_remesh_zremesher_with_injectability_report(
                 mesh.handle, ctypes.byref(c_params), ctypes.byref(c_zr),
                 ctypes.byref(c_guidance) if c_guidance is not None else None,
                 progress_cb, cancel_cb, warning_cb, None, ctypes.byref(out_handle),
-                ctypes.byref(c_report),
+                ctypes.byref(c_report), ctypes.byref(c_injectability),
             )
     elif c_guidance is not None:
         status = lib.cyber_remesh_guided_ex(
@@ -2478,6 +2504,8 @@ def remesh(
     result.guidance_warnings = list(guidance_warnings)
     if c_report is not None:
         result.zremesher_report = ZRemesherReport._from_c(c_report)
+        if c_injectability is not None:
+            result.zremesher_report.injectability = InjectabilityReport._from_c(c_injectability)
     for message in guidance_warnings:
         warnings.warn(f"cyberremesh guidance: {message}", stacklevel=2)
     # Statistics are fetched from the result mesh (the C ABI has no out-stats).

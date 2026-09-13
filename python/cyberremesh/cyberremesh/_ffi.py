@@ -260,6 +260,26 @@ class CyberZRemesherReport(Structure):
     ]
 
 
+class CyberZRemesherInjectabilityReport(Structure):
+    """Mirror of the additive symbolic injectability report."""
+
+    _fields_ = [
+        ("arcs", c_size_t),
+        ("injectable_arcs", c_size_t),
+        ("excluded_arcs", c_size_t),
+        ("empty_rows", c_size_t),
+        ("lattice_free_rows", c_size_t),
+        ("fractional_coefficient_rows", c_size_t),
+        ("fractional_pivot_rows", c_size_t),
+        ("dropped_rows", c_size_t),
+        ("pivots", c_size_t),
+        ("clean_pivots", c_size_t),
+        ("injected_pivots", c_size_t),
+        ("optimum_deviation_energy", c_double),
+        ("realized_deviation_energy", c_double),
+    ]
+
+
 class CyberFlowGuideEx(Structure):
     """Mirror of ``CyberFlowGuideEx`` — a flow guide that names its mode."""
 
@@ -1179,6 +1199,13 @@ def _declare(lib: ctypes.CDLL) -> None:
         POINTER(CyberZRemesherReport),
     ]
     lib.cyber_remesh_zremesher.restype = c_int32
+    lib.cyber_remesh_zremesher_with_injectability_report.argtypes = [
+        c_void_p, POINTER(CyberRemeshParams), POINTER(CyberZRemesherParams),
+        POINTER(CyberGuidanceEx), PROGRESS_CB, CANCEL_CB, WARNING_CB, c_void_p,
+        POINTER(c_void_p), POINTER(CyberZRemesherReport),
+        POINTER(CyberZRemesherInjectabilityReport),
+    ]
+    lib.cyber_remesh_zremesher_with_injectability_report.restype = c_int32
     lib.cyber_remesh_zremesher_with_resource_limits.argtypes = [
         c_void_p, POINTER(CyberRemeshParams), POINTER(CyberZRemesherParams),
         POINTER(CyberGuidanceEx), POINTER(CyberRemeshLimits), POINTER(CyberRemeshExecutionLimits),
