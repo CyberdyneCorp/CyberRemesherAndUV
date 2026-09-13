@@ -771,6 +771,12 @@ Stage by stage:
    `examples/11_benchmark.py`'s `search_matched_count` does: probe, measure the
    achieved count, and correct the request. Whichever attempts the loop makes, it
    ships the one whose count is *closest* to the target, never merely the last.
+   When using `cyberremesh --report run.json`, read the `targetCount` block rather
+   than inferring this from the output mesh: it records the requested whole-model
+   count, effective base count, final output faces, and one row per island with
+   its area-weighted allocation, retained calibrated count, attempt, and
+   termination reason. In `--pure-quads` mode the effective base and final count
+   are intentionally different.
 5. **Pure-quad path.** The extracted mesh is relaxed onto the original surface
    (longer for the uniform quad-cover/integer bases, which tolerate it — see
    `CYBER_BASE_RELAX_ITERS`), subdivided 4× so any residual triangle or pentagon
@@ -1057,7 +1063,7 @@ There are **two** version numbers and they answer different questions.
 
 ```c
 #define CYBER_ABI_VERSION_MAJOR 1     /* the SHAPE of cyber_capi.h */
-#define CYBER_ABI_VERSION_MINOR 3
+#define CYBER_ABI_VERSION_MINOR 4
 
 void       cyber_abi_version(int* major, int* minor);
 CyberStatus cyber_abi_check(int compiled_major, int compiled_minor);
@@ -1089,7 +1095,7 @@ full increment rules, including why appending an enumerator is *not* additive.
 (`libcyber_capi.so.1`) rather than tracking the project's `0.x`.
 
 Every release and supported CTest toolchain compares
-[`capi/abi/cyber_capi-1.3.json`](capi/abi/cyber_capi-1.3.json) with a
+[`capi/abi/cyber_capi-1.4.json`](capi/abi/cyber_capi-1.4.json) with a
 compiler-measured manifest of this header. It records signatures, enum values,
 field types and padding—not merely `sizeof`—and compiles a retained v0.8 client
 surface against the current library. Extend the ABI with a new sibling entry

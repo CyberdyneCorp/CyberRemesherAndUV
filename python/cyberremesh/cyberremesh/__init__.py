@@ -64,6 +64,8 @@ from .api import (
     check_abi,
     ABI_VERSION_MAJOR,
     ABI_VERSION_MINOR,
+    CountPolicy,
+    TargetCountReport,
     write_bundle,
 )
 
@@ -86,6 +88,8 @@ __all__ = [
     "check_abi",
     "ABI_VERSION_MAJOR",
     "ABI_VERSION_MINOR",
+    "CountPolicy",
+    "TargetCountReport",
     "HAVE_NUMPY",
     "BakeMap",
     "BakeParams",

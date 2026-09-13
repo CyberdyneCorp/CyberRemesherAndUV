@@ -287,16 +287,15 @@ CyberStatus cyber_abi_check(int compiled_major, int compiled_minor) {
     // compiled against a LOWER minor is served -- minors are additive, so
     // everything it knows about is still here. A HIGHER minor is refused
     // because the entry points it was compiled against genuinely are absent.
-    if (compiled_major == CYBER_ABI_VERSION_MAJOR &&
-        compiled_minor <= CYBER_ABI_VERSION_MINOR) {
+    if (compiled_major == CYBER_ABI_VERSION_MAJOR && compiled_minor <= CYBER_ABI_VERSION_MINOR) {
         clearError();
         return CYBER_OK;
     }
     setError("cyber_abi_check: this library implements ABI " +
              std::to_string(CYBER_ABI_VERSION_MAJOR) + "." +
              std::to_string(CYBER_ABI_VERSION_MINOR) +
-             " and cannot serve a client compiled against ABI " +
-             std::to_string(compiled_major) + "." + std::to_string(compiled_minor));
+             " and cannot serve a client compiled against ABI " + std::to_string(compiled_major) +
+             "." + std::to_string(compiled_minor));
     return CYBER_ERR_INCOMPATIBLE_VERSION;
 }
 
@@ -594,15 +593,30 @@ namespace {
 // it always did.
 CyberStatus remeshShared(const CyberMesh* in, const CyberRemeshParams* params,
                          const cyber::remesh::Guidance* guidance, CyberProgressCb progress,
-                         CyberCancelCb cancel, CyberWarningCb warning, void* user,
-                         CyberMesh** out) {
+                         CyberCancelCb cancel, CyberWarningCb warning, void* user, CyberMesh** out,
+                         const CyberCountPolicy* countPolicy = nullptr,
+                         CyberTargetCountReport* countReport = nullptr) {
     if (in == nullptr || params == nullptr || out == nullptr) {
         setError("cyber_remesh: null argument");
         return CYBER_ERR_INVALID_ARG;
     }
     *out = nullptr;
+    if (countReport != nullptr) {
+        CyberCountIslandOutcome* const islands = countReport->islands;
+        const std::size_t islandCapacity = countReport->islandCapacity;
+        *countReport = CyberTargetCountReport{};
+        countReport->islands = islands;
+        countReport->islandCapacity = islandCapacity;
+    }
     try {
         const cyber::remesh::Parameters cppParams = toParameters(*params);
+        cyber::remesh::CountPolicy cppCountPolicy;
+        const cyber::remesh::CountPolicy* policy = nullptr;
+        if (countPolicy != nullptr) {
+            cppCountPolicy.relativeTolerance = countPolicy->relativeTolerance;
+            cppCountPolicy.maxAttempts = countPolicy->maxAttempts;
+            policy = &cppCountPolicy;
+        }
         const cyber::CancelToken token;
         // Poll the C cancel callback directly from isCancelled(), so a long report-less
         // stage (e.g. the native seamless-UV solve) is cancellable mid-flight, not only at
@@ -654,8 +668,8 @@ CyberStatus remeshShared(const CyberMesh* in, const CyberRemeshParams* params,
                 return cyber::remesh::makeIntegerQuadrangulator();
             }
             if (method == CYBER_QUAD_QUADCOVER) {
-                return cyber::remesh::makeQuadCoverQuadrangulator(40, adaptivity, holeFillMaxBoundary,
-                                                                  sharpEdgeDegrees);
+                return cyber::remesh::makeQuadCoverQuadrangulator(
+                    40, adaptivity, holeFillMaxBoundary, sharpEdgeDegrees);
             }
             if (method == CYBER_QUAD_ZREMESHER) {
                 cyber::remesh::ZRemesherOptions zr;
@@ -672,7 +686,7 @@ CyberStatus remeshShared(const CyberMesh* in, const CyberRemeshParams* params,
         }
         cyber::remesh::PipelineResult result = cyber::remesh::remesh(
             in->mesh, cppParams, &sink, &token,
-            [quadMethod, makeQuad]() { return makeQuad(quadMethod); }, fallback, guidance);
+            [quadMethod, makeQuad]() { return makeQuad(quadMethod); }, fallback, guidance, policy);
 
         // The loud channel: every clamp, every rejection and every island whose
         // backend could not honor the guidance reaches the caller.
@@ -702,6 +716,30 @@ CyberStatus remeshShared(const CyberMesh* in, const CyberRemeshParams* params,
         switch (result.status) {
             case cyber::remesh::RunStatus::Success:
             case cyber::remesh::RunStatus::Partial: {
+                if (countReport != nullptr) {
+                    const auto& source = result.targetCount;
+                    if (countReport->islands != nullptr &&
+                        countReport->islandCapacity < source.islands.size()) {
+                        setError("cyber_remesh_with_count_report: island buffer is too small");
+                        return CYBER_ERR_INVALID_ARG;
+                    }
+                    countReport->requestedQuads = source.requestedQuads;
+                    countReport->effectiveBaseQuads = source.effectiveBaseQuads;
+                    countReport->finalFaces = source.finalFaces;
+                    countReport->pureQuads = source.pureQuads ? 1 : 0;
+                    countReport->islandCount = source.islands.size();
+                    for (std::size_t i = 0; i < source.islands.size(); ++i) {
+                        if (countReport->islands == nullptr) {
+                            break;
+                        }
+                        const auto& row = source.islands[i];
+                        countReport->islands[i] = {
+                            row.islandIndex,        row.requestedQuads,
+                            row.effectiveBaseQuads, row.calibratedQuads,
+                            row.finalFaces,         row.attempts,
+                            row.selectedAttempt,    static_cast<int>(row.termination)};
+                    }
+                }
                 auto handle = std::make_unique<CyberMesh>();
                 handle->mesh = std::move(result.mesh);
                 handle->stats = result.stats;
@@ -875,6 +913,22 @@ CyberStatus cyber_remesh(const CyberMesh* in, const CyberRemeshParams* params,
                          CyberProgressCb progress, CyberCancelCb cancel, void* user,
                          CyberMesh** out) {
     return remeshShared(in, params, nullptr, progress, cancel, nullptr, user, out);
+}
+
+CyberStatus cyber_remesh_with_count_report(const CyberMesh* in, const CyberRemeshParams* params,
+                                           const CyberCountPolicy* countPolicy,
+                                           CyberProgressCb progress, CyberCancelCb cancel,
+                                           void* user, CyberMesh** out,
+                                           CyberTargetCountReport* report) {
+    if (report == nullptr) {
+        setError("cyber_remesh_with_count_report: null report");
+        if (out != nullptr) {
+            *out = nullptr;
+        }
+        return CYBER_ERR_INVALID_ARG;
+    }
+    return remeshShared(in, params, nullptr, progress, cancel, nullptr, user, out, countPolicy,
+                        report);
 }
 
 CyberStatus cyber_remesh_guided(const CyberMesh* in, const CyberRemeshParams* params,

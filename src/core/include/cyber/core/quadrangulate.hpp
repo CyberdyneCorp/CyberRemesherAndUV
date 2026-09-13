@@ -10,6 +10,38 @@
 
 namespace cyber::remesh {
 
+// Why a count-calibration pass stopped. This is outcome data, not a status:
+// a bounded search may return a valid best candidate without meeting a caller's
+// requested tolerance, whereas cancellation and solver failure remain errors.
+enum class CountTermination {
+    NotCalibrated,
+    WithinAcceptanceBand,
+    FixedScaling,
+    NoTarget,
+    NoExtractedFaces,
+    AttemptBudgetExhausted,
+    ToleranceNotMet,
+    InfeasibleConstraints,
+};
+
+// Supplying no policy preserves the historical two-attempt acceptance bands.
+// An explicit policy replaces only the attempt budget and acceptance tolerance.
+struct CountPolicy {
+    double relativeTolerance = 0.0;
+    std::size_t maxAttempts = 0;
+};
+
+// The extractor-level facts behind a target-count request. `targetQuads` is
+// the target implied by this island's edge length; `selectedQuads` is the best
+// measured eligible attempt before pipeline cleanup changes topology.
+struct CountCalibration {
+    double targetQuads = 0.0;
+    double selectedQuads = 0.0;
+    std::size_t attempts = 0;
+    std::size_t selectedAttempt = 0;
+    CountTermination termination = CountTermination::NotCalibrated;
+};
+
 // Stage seam for turning an isotropically remeshed triangle island into a
 // quad-dominant mesh (design D2: the parameterization solver is swappable).
 //
@@ -51,6 +83,14 @@ public:
     // no guide hook). Queried by the pipeline after every run and surfaced in
     // the per-island report — never swallowed. Empty by default.
     [[nodiscard]] virtual std::vector<std::string> unhonoredGuidance() const { return {}; }
+
+    // Count data is read separately so existing Outcome aggregate initializers
+    // stay source-compatible for every quadrangulator implementation.
+    [[nodiscard]] virtual CountCalibration countCalibration() const { return {}; }
+
+    virtual void setCountPolicy(const CountPolicy*) {}
+
+    [[nodiscard]] virtual bool supportsCountPolicy() const { return false; }
 
     [[nodiscard]] virtual std::string name() const = 0;
 };

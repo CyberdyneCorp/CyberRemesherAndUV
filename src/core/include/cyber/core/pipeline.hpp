@@ -48,6 +48,28 @@ struct IslandGuidance {
     std::string reason;             // why not, when either is false
 };
 
+// Target-count accounting is deliberately separate from mesh statistics. The
+// requested count may be converted to a lower-density base for pure-quads, and
+// cleanup can subsequently change the delivered count.
+struct IslandTargetCount {
+    std::size_t islandIndex = 0;
+    double requestedQuads = 0.0;      // area-weighted allocation of the user request
+    double effectiveBaseQuads = 0.0;  // area-weighted allocation after pure-quad policy
+    double calibratedQuads = 0.0;     // selected extractor output before pipeline cleanup
+    std::size_t finalFaces = 0;       // faces remaining after per-island cleanup
+    std::size_t attempts = 0;
+    std::size_t selectedAttempt = 0;
+    CountTermination termination = CountTermination::NotCalibrated;
+};
+
+struct TargetCountReport {
+    int requestedQuads = 0;
+    int effectiveBaseQuads = 0;
+    std::size_t finalFaces = 0;
+    bool pureQuads = false;
+    std::vector<IslandTargetCount> islands;
+};
+
 struct PipelineResult {
     RunStatus status = RunStatus::Error;
     Mesh mesh;
@@ -55,7 +77,8 @@ struct PipelineResult {
     std::vector<IslandDiagnostic> failedIslands;  // reported, never swallowed (spec)
     std::vector<ParameterIssue> parameterIssues;  // clamp warnings from validation
     std::vector<IslandGuidance> islandGuidance;   // empty when no guidance was supplied
-    std::string error;                            // set when status == Error
+    TargetCountReport targetCount;
+    std::string error;  // set when status == Error
 };
 
 // Progress mapping across stages: isotropic 0.0-0.3, quadrangulation
@@ -86,7 +109,8 @@ using QuadrangulatorFactory = std::function<std::unique_ptr<IQuadrangulator>()>;
                                     const CancelToken* cancel = nullptr,
                                     const QuadrangulatorFactory& quadrangulator = {},
                                     const QuadrangulatorFactory& fallbackQuadrangulator = {},
-                                    const Guidance* guidance = nullptr);
+                                    const Guidance* guidance = nullptr,
+                                    const CountPolicy* countPolicy = nullptr);
 
 // Cleanup policy from the canonical parameters, applied per island result:
 // KeepLargest keeps only the biggest connected patch, KeepAll keeps

@@ -92,6 +92,37 @@ public struct RemeshParameters: Sendable {
     }
 }
 
+/// Optional bounds for target-count calibration. Omitting this policy keeps
+/// the engine's historical default calibration behavior.
+public struct CountPolicy: Sendable {
+    public var relativeTolerance: Double
+    public var maxAttempts: Int
+
+    public init(relativeTolerance: Double, maxAttempts: Int) {
+        self.relativeTolerance = relativeTolerance
+        self.maxAttempts = maxAttempts
+    }
+}
+
+public struct CountIslandOutcome: Sendable {
+    public let islandIndex: Int
+    public let requestedQuads: Double
+    public let effectiveBaseQuads: Double
+    public let calibratedQuads: Double
+    public let finalFaces: Int
+    public let attempts: Int
+    public let selectedAttempt: Int
+    public let termination: Int32
+}
+
+public struct TargetCountReport: Sendable {
+    public let requestedQuads: Int
+    public let effectiveBaseQuads: Int
+    public let finalFaces: Int
+    public let pureQuads: Bool
+    public let islands: [CountIslandOutcome]
+}
+
 /// Shared control block handed to the C callbacks via the opaque `user` pointer.
 ///
 /// Held strongly by the running thread closure for the whole blocking call, so
@@ -213,6 +244,43 @@ public final class RemeshOperation {
 }
 
 public extension Mesh {
+    /// Runs remeshing with an explicit target-count policy and returns the
+    /// caller-visible calibration outcome alongside the result mesh.
+    func remeshWithCountReport(
+        params: RemeshParameters,
+        countPolicy: CountPolicy
+    ) throws -> (mesh: Mesh, report: TargetCountReport) {
+        var cparams = params.cValue
+        var cpolicy = CyberCountPolicy(
+            relativeTolerance: countPolicy.relativeTolerance,
+            maxAttempts: numericCast(countPolicy.maxAttempts)
+        )
+        var output: OpaquePointer?
+        let capacity = max(1, Int(cyber_mesh_face_count(handle)))
+        var islands = Array(repeating: CyberCountIslandOutcome(), count: capacity)
+        var report = CyberTargetCountReport()
+        let status = islands.withUnsafeMutableBufferPointer { buffer in
+            report.islands = buffer.baseAddress
+            report.islandCapacity = buffer.count
+            return cyber_remesh_with_count_report(
+                handle, &cparams, &cpolicy, nil, nil, nil, &output, &report
+            )
+        }
+        guard status == CYBER_OK, let output else { throw CyberError.map(status) }
+        let outcomes = islands.prefix(Int(report.islandCount)).map { row in
+            CountIslandOutcome(
+                islandIndex: Int(row.islandIndex), requestedQuads: row.requestedQuads,
+                effectiveBaseQuads: row.effectiveBaseQuads, calibratedQuads: row.calibratedQuads,
+                finalFaces: Int(row.finalFaces), attempts: Int(row.attempts),
+                selectedAttempt: Int(row.selectedAttempt), termination: row.termination
+            )
+        }
+        return (Mesh(owning: output), TargetCountReport(
+            requestedQuads: Int(report.requestedQuads), effectiveBaseQuads: Int(report.effectiveBaseQuads),
+            finalFaces: Int(report.finalFaces), pureQuads: report.pureQuads != 0, islands: outcomes
+        ))
+    }
+
     /// Starts a remesh and returns the observable operation.
     func remesh(params: RemeshParameters) -> RemeshOperation {
         RemeshOperation(input: self, params: params)

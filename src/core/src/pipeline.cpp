@@ -586,9 +586,17 @@ void applySmallPatchPolicy(Mesh& mesh, SmallPatchPolicy policy, int minFaces) {
 
 PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSink* progress,
                       const CancelToken* cancel, const QuadrangulatorFactory& quadrangulator,
-                      const QuadrangulatorFactory& fallbackQuadrangulator,
-                      const Guidance* guidance) {
+                      const QuadrangulatorFactory& fallbackQuadrangulator, const Guidance* guidance,
+                      const CountPolicy* countPolicy) {
     PipelineResult result;
+
+    if (countPolicy != nullptr &&
+        (!(countPolicy->relativeTolerance >= 0.0) ||
+         !std::isfinite(countPolicy->relativeTolerance) || countPolicy->maxAttempts == 0)) {
+        result.status = RunStatus::Error;
+        result.error = "invalid target-count policy";
+        return result;
+    }
 
     // Stage 0: parameters (validated at every entry point — spec).
     ValidatedParameters validated = validate(rawParams);
@@ -633,6 +641,8 @@ PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSi
     // density become 3 quads).
     int effectiveQuads =
         params.pureQuads ? std::max(25, params.targetQuadCount / 4) : params.targetQuadCount;
+    result.targetCount.requestedQuads = params.targetQuadCount;
+    result.targetCount.pureQuads = params.pureQuads;
 
     // Stage 1: guarded target edge length.
     Mesh work = input;
@@ -725,6 +735,7 @@ PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSi
         result.error = lengthResult.error;
         return result;
     }
+    result.targetCount.effectiveBaseQuads = effectiveQuads;
     // Every later stage reads `effectiveEdgeLength`, so the reported statistic
     // is the density that actually ran, not the one that was asked for.
     const ResolvedEdgeLength resolved = resolveAgainstCoordinates(work, lengthResult.edgeLength);
@@ -744,6 +755,7 @@ PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSi
         std::string stage;
         std::string reason;
         std::size_t inputFaces = 0;
+        IslandTargetCount targetCount;
     };
     std::vector<IslandOutcome> outcomes(islandFaces.size());
 
@@ -802,6 +814,12 @@ PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSi
         }
 
         outcome.mesh = extractIsland(work, islandFaces[i]);
+        outcome.targetCount.islandIndex = i;
+        const double islandArea = totalSurfaceArea(outcome.mesh);
+        const double areaWeight = area > 0.0 ? islandArea / area : 0.0;
+        outcome.targetCount.requestedQuads =
+            static_cast<double>(params.targetQuadCount) * areaWeight;
+        outcome.targetCount.effectiveBaseQuads = static_cast<double>(effectiveQuads) * areaWeight;
         outcome.mesh.tagFeatureEdges(params.sharpEdgeDegrees);
         // Per-island guidance audit: one row per island whenever guidance was
         // supplied, filled in as the island routes and pushed on every exit.
@@ -849,6 +867,12 @@ PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSi
         // injected quadrangulator (field-aligned) when provided, else greedy.
         std::unique_ptr<IQuadrangulator> quad =
             quadrangulator ? quadrangulator() : makeGreedyPairingQuadrangulator();
+        if (countPolicy != nullptr && !quad->supportsCountPolicy()) {
+            result.status = RunStatus::Error;
+            result.error = "target-count policy is only supported by quad-cover";
+            return result;
+        }
+        quad->setCountPolicy(countPolicy);
         // instant-meshes and quad-cover both extract from a smooth field, so the
         // uniform-square shape-match relax lowers their edge-CV ~20% corpus-wide with
         // no change to irregular % and improved surface deviation (measured); only the
@@ -879,6 +903,11 @@ PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSi
                      : ProgressSink{};
         const auto quadOutcome = quad->quadrangulate(outcome.mesh, effectiveEdgeLength,
                                                      progress ? &quadSink : nullptr, cancel);
+        const CountCalibration calibration = quad->countCalibration();
+        outcome.targetCount.calibratedQuads = calibration.selectedQuads;
+        outcome.targetCount.attempts = calibration.attempts;
+        outcome.targetCount.selectedAttempt = calibration.selectedAttempt;
+        outcome.targetCount.termination = calibration.termination;
         if (quadOutcome.cancelled) {
             result.status = RunStatus::Cancelled;
             return result;
@@ -906,6 +935,7 @@ PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSi
             }
             if (isoStatus == IsotropicStatus::Success && outcome.mesh.faceCount() > 0) {
                 std::unique_ptr<IQuadrangulator> fb = fallbackQuadrangulator();
+                fb->setCountPolicy(countPolicy);
                 fieldExtractor = fb->name() == "instant-meshes" || fb->name() == "quad-cover";
                 integerExtractor = fb->name() == "integer";
                 if (guidanceField) {
@@ -921,6 +951,11 @@ PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSi
                 }
                 const auto fbOutcome = fb->quadrangulate(outcome.mesh, effectiveEdgeLength,
                                                          progress ? &quadSink : nullptr, cancel);
+                const CountCalibration fallbackCalibration = fb->countCalibration();
+                outcome.targetCount.calibratedQuads = fallbackCalibration.selectedQuads;
+                outcome.targetCount.attempts = fallbackCalibration.attempts;
+                outcome.targetCount.selectedAttempt = fallbackCalibration.selectedAttempt;
+                outcome.targetCount.termination = fallbackCalibration.termination;
                 if (fbOutcome.cancelled) {
                     result.status = RunStatus::Cancelled;
                     return result;
@@ -946,12 +981,18 @@ PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSi
         recordAudit(audit);
 
         applySmallPatchPolicy(outcome.mesh, params.smallPatchPolicy, params.smallPatchMinFaces);
+        outcome.targetCount.finalFaces = outcome.mesh.faceCount();
         outcome.ok = outcome.mesh.faceCount() > 0;
         if (!outcome.ok) {
             outcome.stage = "cleanup";
             outcome.reason = "patch policy removed all faces";
         }
         progressBase += weight;
+    }
+
+    result.targetCount.islands.reserve(outcomes.size());
+    for (const IslandOutcome& outcome : outcomes) {
+        result.targetCount.islands.push_back(outcome.targetCount);
     }
 
     // Stage 3: deterministic merge (island order), 0.9-1.0.
@@ -1161,6 +1202,7 @@ PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSi
         }
     }
     countFaces(result.mesh, result.stats);
+    result.targetCount.finalFaces = result.mesh.faceCount();
 
     if (result.mesh.faceCount() == 0) {
         result.status = RunStatus::Error;

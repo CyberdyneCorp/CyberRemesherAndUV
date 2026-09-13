@@ -97,6 +97,31 @@ TEST_CASE("capi version and status strings are well-formed") {
     REQUIRE(std::string(cyber_status_string(CYBER_ERR_INVALID_PARAM)).size() > 0);
 }
 
+TEST_CASE("capi count report is additive and caller-owned") {
+    const auto path = writeCubeObj();
+    CyberMesh* input = nullptr;
+    REQUIRE(cyber_mesh_load(path.string().c_str(), &input) == CYBER_OK);
+
+    CyberRemeshParams params{};
+    cyber_default_params(&params);
+    params.targetQuads = 400;
+    params.quadMethod = CYBER_QUAD_QUADCOVER;
+    CyberCountPolicy policy{.relativeTolerance = 0.05, .maxAttempts = 1};
+    CyberTargetCountReport report{};
+    CyberMesh* output = nullptr;
+    REQUIRE(cyber_remesh_with_count_report(input, &params, &policy, nullptr, nullptr, nullptr,
+                                           &output, &report) == CYBER_OK);
+    REQUIRE(output != nullptr);
+    CHECK(report.requestedQuads == 400);
+    CHECK(report.effectiveBaseQuads == 400);
+    CHECK(report.finalFaces > 0);
+    CHECK(report.islandCount == 1);
+    CHECK(report.islands == nullptr);
+    cyber_mesh_free(output);
+    cyber_mesh_free(input);
+    std::filesystem::remove(path);
+}
+
 TEST_CASE("capi bulk indexed exchange preserves authored polygons transactionally") {
     std::vector<float> positions = {
         0.0f, 0.0f, 0.0f,  // 0

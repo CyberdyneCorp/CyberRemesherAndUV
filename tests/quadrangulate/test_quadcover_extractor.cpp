@@ -705,7 +705,8 @@ TEST_CASE("quad-cover count calibration keeps its best attempt, not its last") {
     REQUIRE(firstAttemptFaces > 0);
 
     Mesh shipped = plane;
-    REQUIRE(solve(shipped).success);
+    auto shippedQuadrangulator = remesh::makeQuadCoverQuadrangulator(40, 0.0f, 64, 40.0f);
+    REQUIRE(shippedQuadrangulator->quadrangulate(shipped, edgeLength, nullptr, nullptr).success);
     const std::size_t shippedFaces = aliveFaces(shipped);
     REQUIRE(shippedFaces > 0);
     CHECK(shipped.validate().empty());
@@ -713,6 +714,15 @@ TEST_CASE("quad-cover count calibration keeps its best attempt, not its last") {
     // The loop may re-solve, but it may never ship a count FARTHER from the target
     // than an attempt it already made and measured.
     CHECK(countError(shippedFaces) <= countError(firstAttemptFaces));
+
+    // The public outcome identifies the retained incumbent rather than making
+    // hosts reverse-engineer it from debug output or the final mesh.
+    const auto calibration = shippedQuadrangulator->countCalibration();
+    CHECK(calibration.targetQuads == doctest::Approx(targetQuads));
+    CHECK(calibration.selectedQuads > 0.0);
+    CHECK(calibration.attempts >= 1);
+    CHECK(calibration.attempts <= 2);
+    CHECK(calibration.selectedAttempt < calibration.attempts);
 }
 
 TEST_CASE("quad-cover M2: flat integer-grid UV extracts a clean quad grid") {
