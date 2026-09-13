@@ -867,6 +867,11 @@ PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSi
         // injected quadrangulator (field-aligned) when provided, else greedy.
         std::unique_ptr<IQuadrangulator> quad =
             quadrangulator ? quadrangulator() : makeGreedyPairingQuadrangulator();
+        if (countPolicy != nullptr && !quad->supportsCountPolicy()) {
+            result.status = RunStatus::Error;
+            result.error = "target-count policy is only supported by quad-cover";
+            return result;
+        }
         quad->setCountPolicy(countPolicy);
         // instant-meshes and quad-cover both extract from a smooth field, so the
         // uniform-square shape-match relax lowers their edge-CV ~20% corpus-wide with

@@ -90,6 +90,8 @@ public:
 
     virtual void setCountPolicy(const CountPolicy*) {}
 
+    [[nodiscard]] virtual bool supportsCountPolicy() const { return false; }
+
     [[nodiscard]] virtual std::string name() const = 0;
 };
 

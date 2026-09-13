@@ -4036,6 +4036,8 @@ public:
         m_countPolicy = policy == nullptr ? std::nullopt : std::optional<CountPolicy>(*policy);
     }
 
+    [[nodiscard]] bool supportsCountPolicy() const override { return true; }
+
     [[nodiscard]] std::string name() const override { return m_name; }
 
 private:

@@ -171,6 +171,14 @@ TEST_CASE("pipeline rejects an invalid opt-in target-count policy before remeshi
     CHECK(result.error == "invalid target-count policy");
 }
 
+TEST_CASE("pipeline rejects a count policy on a non-calibrating backend") {
+    remesh::CountPolicy policy{.relativeTolerance = 0.1, .maxAttempts = 1};
+    const auto result = remesh::remesh(makeSphere(8, 12), smallRun(400), nullptr, nullptr, {}, {},
+                                       nullptr, &policy);
+    REQUIRE(result.status == remesh::RunStatus::Error);
+    CHECK(result.error == "target-count policy is only supported by quad-cover");
+}
+
 TEST_CASE("adaptive refinement does not compound across iterations (runaway regression)") {
     // Regression: scales were once recomputed from the current mesh every
     // iteration; with curvature variance (pole fans) and a large target this
