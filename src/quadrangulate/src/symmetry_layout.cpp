@@ -9,6 +9,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include "cyber/core/bvh.hpp"
+
 namespace cyber::remesh {
 namespace {
 
@@ -83,7 +85,311 @@ private:
     std::map<std::array<long long, 3>, std::vector<Index>> m_cells;
 };
 
+struct Bounds {
+    Vec3 low{kInf, kInf, kInf};
+    Vec3 high{-kInf, -kInf, -kInf};
+    std::size_t vertices = 0;
+};
+
+Bounds boundsOf(const Mesh& mesh) {
+    Bounds bounds;
+    for (Index v = 0; v < mesh.vertexCapacity(); ++v) {
+        const VertexId id{v};
+        if (!mesh.isAlive(id)) {
+            continue;
+        }
+        const Vec3 p = mesh.position(id);
+        bounds.low = Vec3{std::min(bounds.low.x, p.x), std::min(bounds.low.y, p.y),
+                          std::min(bounds.low.z, p.z)};
+        bounds.high = Vec3{std::max(bounds.high.x, p.x), std::max(bounds.high.y, p.y),
+                           std::max(bounds.high.z, p.z)};
+        ++bounds.vertices;
+    }
+    return bounds;
+}
+
+float detectionTolerance(const Mesh& mesh, const Bounds& bounds) {
+    const float diagonal = length(bounds.high - bounds.low);
+    float edgeTotal = 0.0f;
+    std::size_t edges = 0;
+    for (Index e = 0; e < mesh.edgeCapacity(); ++e) {
+        const EdgeId id{e};
+        if (!mesh.isAlive(id)) {
+            continue;
+        }
+        const auto [a, b] = mesh.edgeVertices(id);
+        edgeTotal += length(mesh.position(a) - mesh.position(b));
+        ++edges;
+    }
+    const float scaleTolerance = std::max(diagonal, 1.0f) * 1e-4f;
+    const float samplingTolerance =
+        edges == 0 ? scaleTolerance : edgeTotal / static_cast<float>(edges) * 1e-3f;
+    return std::max(1e-6f, std::min(scaleTolerance, samplingTolerance));
+}
+
+Vec3 reflectedNormal(const Plane& plane, Vec3 normal) {
+    const Vec3 unitNormal = normalized(plane.normal);
+    return normalized(normal - unitNormal * (2.0f * dot(normal, unitNormal)));
+}
+
+void scoreSurface(const Mesh& mesh, const Plane& plane, float tolerance,
+                  SymmetryDetectionReport& report) {
+    const Bvh surface(mesh);
+    if (surface.empty()) {
+        return;
+    }
+
+    float totalError = 0.0f;
+    float totalNormalAgreement = 0.0f;
+    std::vector<std::size_t> componentByFace(mesh.faceCapacity(), kInvalidIndex);
+    const std::vector<std::vector<FaceId>> components = mesh.islands();
+    for (std::size_t component = 0; component < components.size(); ++component) {
+        for (const FaceId face : components[component]) {
+            componentByFace[face.value] = component;
+        }
+    }
+    const auto* groups = mesh.faceAttributes().find<std::int32_t>("group_id");
+    const auto* materials = mesh.faceAttributes().find<std::int32_t>("material_id");
+    std::map<std::size_t, std::size_t> reflectedComponents;
+    std::set<std::size_t> claimedComponents;
+    for (Index f = 0; f < mesh.faceCapacity(); ++f) {
+        const FaceId face{f};
+        if (!mesh.isAlive(face)) {
+            continue;
+        }
+        const std::vector<VertexId> vertices = mesh.faceVertices(face);
+        if (vertices.size() < 3) {
+            continue;
+        }
+        const Vec3 a = mesh.position(vertices.front());
+        for (std::size_t i = 1; i + 1 < vertices.size(); ++i) {
+            const Vec3 b = mesh.position(vertices[i]);
+            const Vec3 c = mesh.position(vertices[i + 1]);
+            ++report.sampledSurfacePoints;
+            const Vec3 sample = (a + b + c) / 3.0f;
+            const Bvh::ClosestHit hit = surface.closestPoint(mirrorAcrossPlane(plane, sample));
+            const float error = std::sqrt(std::max(0.0f, hit.distanceSquared));
+            if (error > tolerance) {
+                ++report.unmatchedSurfacePoints;
+                continue;
+            }
+            ++report.matchedSurfacePoints;
+            totalError += error;
+            report.maxSurfaceError = std::max(report.maxSurfaceError, error);
+            const Vec3 sourceNormal = normalized(cross(b - a, c - a));
+            const float agreement = std::clamp(
+                dot(reflectedNormal(plane, sourceNormal), mesh.faceNormal(hit.face)), -1.0f, 1.0f);
+            totalNormalAgreement += agreement;
+            if (agreement >= 0.9f) {
+                ++report.normalConsistentSurfacePoints;
+            }
+            const std::size_t sourceComponent = componentByFace[face.value];
+            const std::size_t targetComponent = componentByFace[hit.face.value];
+            const auto [mapping, inserted] =
+                reflectedComponents.emplace(sourceComponent, targetComponent);
+            if (inserted) {
+                if (!claimedComponents.insert(targetComponent).second) {
+                    mapping->second = kInvalidIndex;
+                }
+            }
+            if (mapping->second == targetComponent) {
+                ++report.componentConsistentSurfacePoints;
+            }
+            if (groups != nullptr || materials != nullptr) {
+                ++report.sampledSemanticSurfacePoints;
+                const bool groupMatches =
+                    groups == nullptr || (*groups)[face.value] == (*groups)[hit.face.value];
+                const bool materialMatches =
+                    materials == nullptr ||
+                    (*materials)[face.value] == (*materials)[hit.face.value];
+                if (groupMatches && materialMatches) {
+                    ++report.semanticConsistentSurfacePoints;
+                }
+            }
+        }
+    }
+    if (report.matchedSurfacePoints != 0) {
+        report.meanSurfaceError = totalError / static_cast<float>(report.matchedSurfacePoints);
+        report.meanNormalAgreement =
+            totalNormalAgreement / static_cast<float>(report.matchedSurfacePoints);
+    }
+}
+
+SymmetryDetectionReport scorePlane(const Mesh& mesh, const Plane& plane, SymmetryAxis axis,
+                                   float tolerance) {
+    SymmetryDetectionReport report;
+    report.axis = axis;
+    report.plane = plane;
+    report.sampledVertices = mesh.vertexCount();
+    report.matchTolerance = tolerance;
+    const VertexGrid grid(mesh, tolerance);
+    float totalError = 0.0f;
+    for (Index v = 0; v < mesh.vertexCapacity(); ++v) {
+        const VertexId id{v};
+        if (!mesh.isAlive(id)) {
+            continue;
+        }
+        const Vec3 reflected = mirrorAcrossPlane(report.plane, mesh.position(id));
+        const Index partner = grid.nearest(mesh, reflected, tolerance);
+        if (partner == kInvalidIndex) {
+            ++report.unmatchedVertices;
+            continue;
+        }
+        const float error = length(mesh.position(VertexId{partner}) - reflected);
+        ++report.matchedVertices;
+        totalError += error;
+        report.maxMatchError = std::max(report.maxMatchError, error);
+    }
+    if (report.matchedVertices != 0) {
+        report.meanMatchError = totalError / static_cast<float>(report.matchedVertices);
+    }
+    scoreSurface(mesh, report.plane, tolerance, report);
+    const float surfaceCoverage = report.sampledSurfacePoints == 0
+                                      ? 0.0f
+                                      : static_cast<float>(report.matchedSurfacePoints) /
+                                            static_cast<float>(report.sampledSurfacePoints);
+    const float surfaceAccuracy =
+        tolerance == 0.0f ? 0.0f : 1.0f - report.meanSurfaceError / tolerance;
+    // Surface agreement decides the advisory result. Vertex correspondence is
+    // retained as diagnostics, but making it a gate would reject the common
+    // case where two geometric halves use different tessellation densities.
+    report.confidence = std::clamp(surfaceCoverage * std::max(0.0f, surfaceAccuracy), 0.0f, 1.0f);
+    // Detection stays deliberately strict until corpus calibration establishes
+    // an application threshold.  A caller can inspect weaker hypotheses, but
+    // no hypothesis changes the mesh.
+    report.detected = report.unmatchedSurfacePoints == 0 && report.confidence >= 0.995f;
+    return report;
+}
+
+Vec3 centroidOf(const Mesh& mesh, const Bounds& bounds) {
+    Vec3 centroid{};
+    for (Index v = 0; v < mesh.vertexCapacity(); ++v) {
+        const VertexId id{v};
+        if (mesh.isAlive(id)) {
+            centroid += mesh.position(id);
+        }
+    }
+    return centroid / static_cast<float>(bounds.vertices);
+}
+
+struct PrincipalAxes {
+    std::array<Vec3, 3> vectors{};
+    std::array<float, 3> values{};
+};
+
+PrincipalAxes principalAxes(const Mesh& mesh, const Bounds& bounds) {
+    const Vec3 centroid = centroidOf(mesh, bounds);
+    float covariance[3][3]{};
+    for (Index v = 0; v < mesh.vertexCapacity(); ++v) {
+        const VertexId id{v};
+        if (!mesh.isAlive(id)) {
+            continue;
+        }
+        const Vec3 p = mesh.position(id) - centroid;
+        const float values[3] = {p.x, p.y, p.z};
+        for (int row = 0; row < 3; ++row) {
+            for (int column = 0; column < 3; ++column) {
+                covariance[row][column] += values[row] * values[column];
+            }
+        }
+    }
+    float vectors[3][3] = {{1.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f}};
+    for (int iteration = 0; iteration < 12; ++iteration) {
+        int row = 0;
+        int column = 1;
+        for (int candidateRow = 0; candidateRow < 3; ++candidateRow) {
+            for (int candidateColumn = candidateRow + 1; candidateColumn < 3; ++candidateColumn) {
+                if (std::abs(covariance[candidateRow][candidateColumn]) >
+                    std::abs(covariance[row][column])) {
+                    row = candidateRow;
+                    column = candidateColumn;
+                }
+            }
+        }
+        if (std::abs(covariance[row][column]) <= 1e-7f) {
+            break;
+        }
+        const float angle = 0.5f * std::atan2(2.0f * covariance[row][column],
+                                              covariance[column][column] - covariance[row][row]);
+        const float cosine = std::cos(angle);
+        const float sine = std::sin(angle);
+        for (int i = 0; i < 3; ++i) {
+            const float left = covariance[i][row];
+            const float right = covariance[i][column];
+            covariance[i][row] = cosine * left - sine * right;
+            covariance[i][column] = sine * left + cosine * right;
+        }
+        for (int i = 0; i < 3; ++i) {
+            const float left = covariance[row][i];
+            const float right = covariance[column][i];
+            covariance[row][i] = cosine * left - sine * right;
+            covariance[column][i] = sine * left + cosine * right;
+            const float vectorLeft = vectors[i][row];
+            const float vectorRight = vectors[i][column];
+            vectors[i][row] = cosine * vectorLeft - sine * vectorRight;
+            vectors[i][column] = sine * vectorLeft + cosine * vectorRight;
+        }
+    }
+    PrincipalAxes result;
+    for (std::size_t i = 0; i < 3; ++i) {
+        result.values[i] = covariance[i][i];
+        result.vectors[i] = normalized(Vec3{vectors[0][i], vectors[1][i], vectors[2][i]});
+    }
+    return result;
+}
+
+bool duplicatesPlane(const std::vector<Plane>& candidates, const Plane& candidate) {
+    for (const Plane& existing : candidates) {
+        if (std::abs(dot(normalized(existing.normal), normalized(candidate.normal))) > 0.9999f) {
+            return true;
+        }
+    }
+    return false;
+}
+
 }  // namespace
+
+SymmetryDetectionReport detectSymmetry(const Mesh& mesh) {
+    const Bounds bounds = boundsOf(mesh);
+    if (bounds.vertices < 3) {
+        return {};
+    }
+    const float tolerance = detectionTolerance(mesh, bounds);
+    std::vector<Plane> planes{symmetryPlane(mesh, SymmetryAxis::X),
+                              symmetryPlane(mesh, SymmetryAxis::Y),
+                              symmetryPlane(mesh, SymmetryAxis::Z)};
+    std::vector<SymmetryAxis> axes{SymmetryAxis::X, SymmetryAxis::Y, SymmetryAxis::Z};
+    const PrincipalAxes pca = principalAxes(mesh, bounds);
+    const float magnitude = std::max(
+        {std::abs(pca.values[0]), std::abs(pca.values[1]), std::abs(pca.values[2]), 1e-8f});
+    for (std::size_t i = 0; i < 3; ++i) {
+        bool unique = true;
+        for (std::size_t j = 0; j < 3; ++j) {
+            unique =
+                unique && (i == j || std::abs(pca.values[i] - pca.values[j]) > magnitude * 1e-4f);
+        }
+        const Plane candidate{centroidOf(mesh, bounds), pca.vectors[i]};
+        if (unique && !duplicatesPlane(planes, candidate)) {
+            planes.push_back(candidate);
+            axes.push_back(SymmetryAxis::None);
+        }
+    }
+    std::vector<SymmetryDetectionReport> candidates;
+    candidates.reserve(planes.size());
+    for (std::size_t i = 0; i < planes.size(); ++i) {
+        candidates.push_back(scorePlane(mesh, planes[i], axes[i], tolerance));
+    }
+    std::sort(candidates.begin(), candidates.end(),
+              [](const auto& a, const auto& b) { return a.confidence > b.confidence; });
+    SymmetryDetectionReport result = candidates.front();
+    result.ambiguous =
+        candidates[1].detected && std::abs(candidates[1].confidence - result.confidence) < 1e-4f;
+    if (result.ambiguous) {
+        result.detected = false;
+        result.axis = SymmetryAxis::None;
+    }
+    return result;
+}
 
 Plane symmetryPlane(const Mesh& mesh, SymmetryAxis axis) {
     Plane plane;

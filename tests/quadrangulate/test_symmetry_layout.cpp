@@ -1,6 +1,7 @@
 #include <doctest.h>
 
 #include <cmath>
+#include <cstdint>
 #include <vector>
 
 #include "cyber/core/mesh.hpp"
@@ -13,6 +14,7 @@ using cyber::Mesh;
 using cyber::Plane;
 using cyber::Vec3;
 using cyber::VertexId;
+using cyber::remesh::detectSymmetry;
 using cyber::remesh::isTopologicallySymmetric;
 using cyber::remesh::mirrorAcross;
 using cyber::remesh::splitAtPlane;
@@ -59,6 +61,33 @@ Mesh offsetGrid(int n) {
         }
     }
     return Mesh::fromIndexed(p, f);
+}
+
+Mesh unequallyTessellatedSymmetricStrip() {
+    std::vector<Vec3> positions;
+    for (int y = 0; y <= 3; ++y) {
+        const float width = 1.0f + 0.2f * static_cast<float>(y);
+        for (int x = -1; x <= 1; ++x) {
+            positions.push_back(Vec3{static_cast<float>(x) * width, static_cast<float>(y),
+                                     0.2f * static_cast<float>(y * y)});
+        }
+    }
+    const auto at = [](int x, int y) { return static_cast<Index>(y * 3 + x + 1); };
+    std::vector<std::vector<Index>> faces;
+    for (int y = 0; y < 3; ++y) {
+        const float lowerWidth = 1.0f + 0.2f * static_cast<float>(y);
+        const float upperWidth = 1.0f + 0.2f * static_cast<float>(y + 1);
+        faces.push_back({at(-1, y), at(0, y), at(0, y + 1), at(-1, y + 1)});
+        const Index center = static_cast<Index>(positions.size());
+        positions.push_back(
+            Vec3{0.25f * (lowerWidth + upperWidth), static_cast<float>(y) + 0.5f,
+                 0.2f * (static_cast<float>(y * y) + static_cast<float>(y) + 0.5f)});
+        faces.push_back({at(0, y), at(1, y), center});
+        faces.push_back({at(1, y), at(1, y + 1), center});
+        faces.push_back({at(1, y + 1), at(0, y + 1), center});
+        faces.push_back({at(0, y + 1), at(0, y), center});
+    }
+    return Mesh::fromIndexed(positions, faces);
 }
 
 std::size_t aliveFaces(const Mesh& mesh) {
@@ -212,6 +241,110 @@ TEST_CASE("a mesh that is already symmetric is recognised as such") {
     // the negative cases above meaningless.
     const Mesh mesh = centredGrid(3);
     CHECK(isTopologicallySymmetric(mesh, planeX()));
+}
+
+TEST_CASE("symmetry detection is advisory, conservative, and translation invariant") {
+    Mesh mesh = centredGrid(3);
+    // Break the horizontal midplane while retaining every X reflection pair.
+    // Each row remains planar, so the triangulated surface representation is
+    // also symmetric rather than merely its four quad corners.
+    for (Index v = 0; v < mesh.vertexCapacity(); ++v) {
+        const VertexId id{v};
+        if (mesh.isAlive(id)) {
+            Vec3 position = mesh.position(id);
+            position.z += 0.2f * position.y * position.y;
+            mesh.setPosition(id, position * 7.0f + Vec3{13.0f, -4.0f, 2.0f});
+        }
+    }
+    const auto report = detectSymmetry(mesh);
+    CAPTURE(static_cast<int>(report.axis));
+    CAPTURE(report.confidence);
+    CAPTURE(report.unmatchedVertices);
+    CAPTURE(report.ambiguous);
+    CHECK(report.detected);
+    CHECK(report.axis == SymmetryAxis::X);
+    CHECK(report.confidence == doctest::Approx(1.0f).epsilon(0.001f));
+    CHECK(report.unmatchedVertices == 0);
+    CHECK(report.unmatchedSurfacePoints == 0);
+    CHECK(report.matchedSurfacePoints == report.sampledSurfacePoints);
+    CHECK(report.meanNormalAgreement > 0.8f);
+    CHECK(report.plane.point.x == doctest::Approx(13.0f));
+
+    // Detection must not mutate the source: it is only advice for a caller
+    // that may later opt into forced symmetry.
+    CHECK(mesh.position(VertexId{0}).x == doctest::Approx(-8.0f));
+}
+
+TEST_CASE("symmetry detection rejects a deliberate asymmetric accessory") {
+    Mesh mesh = centredGrid(3);
+    // A one-sided, off-plane accessory defeats X/Y/Z hypotheses. A flat mesh
+    // alone would always (correctly) be symmetric through its own plane.
+    mesh.setPosition(VertexId{0}, mesh.position(VertexId{0}) + Vec3{0.2f, 0.0f, 0.3f});
+    const auto report = detectSymmetry(mesh);
+    CAPTURE(static_cast<int>(report.axis));
+    CAPTURE(report.confidence);
+    CAPTURE(report.unmatchedVertices);
+    CAPTURE(report.ambiguous);
+    CHECK_FALSE(report.detected);
+    CHECK(report.unmatchedVertices > 0);
+}
+
+TEST_CASE("symmetry detection reports a rotated plane without projecting it to an axis") {
+    Mesh mesh = centredGrid(3);
+    constexpr float angle = 0.61f;
+    const float cosine = std::cos(angle);
+    const float sine = std::sin(angle);
+    for (Index v = 0; v < mesh.vertexCapacity(); ++v) {
+        const VertexId id{v};
+        if (!mesh.isAlive(id)) {
+            continue;
+        }
+        Vec3 position = mesh.position(id);
+        position.z += 0.2f * position.y * position.y;
+        mesh.setPosition(id, Vec3{cosine * position.x - sine * position.y,
+                                  sine * position.x + cosine * position.y, position.z});
+    }
+
+    const auto report = detectSymmetry(mesh);
+    const Vec3 expectedNormal{cosine, sine, 0.0f};
+    CHECK(report.detected);
+    CHECK(report.axis == SymmetryAxis::None);
+    CHECK(std::abs(cyber::dot(report.plane.normal, expectedNormal)) > 0.999f);
+    CHECK(report.unmatchedSurfacePoints == 0);
+}
+
+TEST_CASE("symmetry detection accepts unequal tessellation by scoring the surface") {
+    const Mesh mesh = unequallyTessellatedSymmetricStrip();
+    const auto report = detectSymmetry(mesh);
+    CHECK(report.detected);
+    CHECK(report.axis == SymmetryAxis::X);
+    CHECK(report.unmatchedVertices > 0);
+    CHECK(report.unmatchedSurfacePoints == 0);
+}
+
+TEST_CASE("symmetry detection rejects a partial scan") {
+    const Mesh full = unequallyTessellatedSymmetricStrip();
+    const auto partial = splitAtPlane(full, planeX(), true);
+    REQUIRE(partial.valid);
+    const auto report = detectSymmetry(partial.half);
+    CHECK_FALSE(report.detected);
+    CHECK(report.unmatchedSurfacePoints > 0);
+}
+
+TEST_CASE("symmetry detection reports semantic correspondence separately from geometry") {
+    Mesh mesh = unequallyTessellatedSymmetricStrip();
+    auto& groups = mesh.faceAttributes().create<std::int32_t>("group_id");
+    for (Index f = 0; f < mesh.faceCapacity(); ++f) {
+        const FaceId face{f};
+        if (mesh.isAlive(face)) {
+            groups[f] = mesh.faceCentroid(face).x < 0.0f ? 1 : 2;
+        }
+    }
+    const auto report = detectSymmetry(mesh);
+    CHECK(report.detected);
+    CHECK(report.sampledSemanticSurfacePoints == report.sampledSurfacePoints);
+    CHECK(report.semanticConsistentSurfacePoints < report.sampledSemanticSurfacePoints);
+    CHECK(report.componentConsistentSurfacePoints == report.matchedSurfacePoints);
 }
 
 TEST_CASE("mirroring is deterministic") {

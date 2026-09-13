@@ -92,7 +92,7 @@ typedef enum CyberStatus {
  * Do not compare these numbers by hand: cyber_abi_check() applies the rule
  * above in one place, so every binding gets the same answer. */
 #define CYBER_ABI_VERSION_MAJOR 1
-#define CYBER_ABI_VERSION_MINOR 12
+#define CYBER_ABI_VERSION_MINOR 16
 
 /* The ABI this build implements. Cannot fail; either pointer may be NULL. */
 void cyber_abi_version(int* major, int* minor);
@@ -473,7 +473,7 @@ CyberStatus cyber_remesh_guided(const CyberMesh* in, const CyberRemeshParams* pa
 typedef struct CyberZRemesherParams {
     /* CYBER_ZR_QUALITY_FAST / CYBER_ZR_QUALITY_BEST. */
     int quality;
-    /* CYBER_ZR_SYMMETRY_NONE / _X / _Y / _Z. Solves one half and mirrors its
+    /* CYBER_ZR_SYMMETRY_NONE / _X / _Y / _Z / _AUTO. Solves one half and mirrors its
      * CONNECTIVITY, so the two halves are exact reflections rather than
      * merely similar shapes. targetQuads names the WHOLE model. */
     int symmetry;
@@ -503,6 +503,9 @@ typedef struct CyberZRemesherParams {
 #define CYBER_ZR_SYMMETRY_X 1
 #define CYBER_ZR_SYMMETRY_Y 2
 #define CYBER_ZR_SYMMETRY_Z 3
+/* Opt in to an unambiguous, calibrated detected X/Y/Z axis. A report with no
+ * eligible axis is rejected; this value never falls back to no symmetry. */
+#define CYBER_ZR_SYMMETRY_AUTO 4
 
 /* Fills params with the engine defaults. No-op on NULL. */
 void cyber_default_zremesher_params(CyberZRemesherParams* params);
@@ -553,6 +556,48 @@ typedef struct CyberZRemesherReport {
     size_t membranesRemoved;
     float maxBorderDrift;
 } CyberZRemesherReport;
+
+/* Advisory-only automatic symmetry analysis.  `detected` never changes the
+ * mesh and never enables forced symmetry; applications must opt in to a later
+ * remesh request themselves.  Version 1 initially evaluates axis-aligned
+ * planes plus unambiguous PCA-derived planes. `axis` is 0 for an arbitrary
+ * detected plane (or for no detection), and 1 X, 2 Y, 3 Z otherwise. */
+typedef struct CyberSymmetryDetectionReport {
+    int detected;
+    int axis;
+    float point[3];
+    float normal[3];
+    size_t sampledVertices;
+    size_t matchedVertices;
+    size_t unmatchedVertices;
+    float matchTolerance;
+    float meanMatchError;
+    float maxMatchError;
+    float confidence;
+    int ambiguous;
+} CyberSymmetryDetectionReport;
+
+/* Extended advisory evidence. Kept separate from CyberSymmetryDetectionReport
+ * so existing callers retain their historical output-buffer layout. */
+typedef struct CyberSymmetryDetectionEvidence {
+    CyberSymmetryDetectionReport hypothesis;
+    size_t sampledSurfacePoints;
+    size_t matchedSurfacePoints;
+    size_t unmatchedSurfacePoints;
+    size_t normalConsistentSurfacePoints;
+    float meanSurfaceError;
+    float maxSurfaceError;
+    float meanNormalAgreement;
+} CyberSymmetryDetectionEvidence;
+
+/* Component and face-semantic correspondence for the same advisory analysis.
+ * Separate output storage preserves the ABI 1.14 evidence record's layout. */
+typedef struct CyberSymmetryCorrespondenceEvidence {
+    size_t matchedSurfacePoints;
+    size_t componentConsistentSurfacePoints;
+    size_t sampledSemanticSurfacePoints;
+    size_t semanticConsistentSurfacePoints;
+} CyberSymmetryCorrespondenceEvidence;
 
 /* Diagnostics for the symbolic layout-to-integer hand-off. This is a separate
  * POD rather than an extension of CyberZRemesherReport: callers compiled
@@ -682,6 +727,13 @@ CyberStatus cyber_remesh_zremesher(const CyberMesh* in, const CyberRemeshParams*
                                    CyberProgressCb progress, CyberCancelCb cancel,
                                    CyberWarningCb warning, void* user, CyberMesh** out,
                                    CyberZRemesherReport* report);
+
+/* Analyse symmetry without modifying `mesh`. */
+CyberStatus cyber_detect_symmetry(const CyberMesh* mesh, CyberSymmetryDetectionReport* report);
+CyberStatus cyber_detect_symmetry_evidence(const CyberMesh* mesh,
+                                           CyberSymmetryDetectionEvidence* report);
+CyberStatus cyber_detect_symmetry_correspondence(
+    const CyberMesh* mesh, CyberSymmetryCorrespondenceEvidence* report);
 
 /* Like cyber_remesh_zremesher, and additionally returns the per-run symbolic
  * injectability diagnostics through a separately versioned-safe POD. Either

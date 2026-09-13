@@ -110,7 +110,7 @@ def version() -> str:
 #: The C ABI this binding was written against. Mirrors CYBER_ABI_VERSION_* in
 #: cyber_capi.h; ``check_abi()`` compares it against the loaded library.
 ABI_VERSION_MAJOR = 1
-ABI_VERSION_MINOR = 12
+ABI_VERSION_MINOR = 16
 
 
 def abi_version() -> tuple:
@@ -921,6 +921,34 @@ class SeamPath(_Handle):
         _ffi.get_lib().cyber_seam_path_drop_resume_marker(self.handle)
 
 
+@dataclass(frozen=True)
+class SymmetryDetectionReport:
+    """Advisory axis-aligned symmetry analysis; it never edits the mesh."""
+
+    detected: bool
+    axis: str
+    point: Tuple[float, float, float]
+    normal: Tuple[float, float, float]
+    sampled_vertices: int
+    matched_vertices: int
+    unmatched_vertices: int
+    match_tolerance: float
+    mean_match_error: float
+    max_match_error: float
+    sampled_surface_points: int
+    matched_surface_points: int
+    unmatched_surface_points: int
+    normal_consistent_surface_points: int
+    mean_surface_error: float
+    max_surface_error: float
+    mean_normal_agreement: float
+    component_consistent_surface_points: int
+    sampled_semantic_surface_points: int
+    semantic_consistent_surface_points: int
+    confidence: float
+    ambiguous: bool
+
+
 class Mesh:
     """A handle to an engine mesh.
 
@@ -1062,6 +1090,37 @@ class Mesh:
         copy.zremesher_report = self.zremesher_report
         copy.target_count_report = self.target_count_report
         return copy
+
+    def detect_symmetry(self) -> SymmetryDetectionReport:
+        """Return a report-only symmetry hypothesis without changing this mesh."""
+        evidence = _ffi.CyberSymmetryDetectionEvidence()
+        _check(_ffi.get_lib().cyber_detect_symmetry_evidence(self.handle, ctypes.byref(evidence)))
+        correspondence = _ffi.CyberSymmetryCorrespondenceEvidence()
+        _check(_ffi.get_lib().cyber_detect_symmetry_correspondence(
+            self.handle, ctypes.byref(correspondence)))
+        out = evidence.hypothesis
+        axis = {0: "none", 1: "x", 2: "y", 3: "z"}.get(int(out.axis), "none")
+        return SymmetryDetectionReport(
+            detected=bool(out.detected), axis=axis,
+            point=tuple(float(value) for value in out.point),
+            normal=tuple(float(value) for value in out.normal),
+            sampled_vertices=int(out.sampled_vertices), matched_vertices=int(out.matched_vertices),
+            unmatched_vertices=int(out.unmatched_vertices),
+            match_tolerance=float(out.match_tolerance), mean_match_error=float(out.mean_match_error),
+            max_match_error=float(out.max_match_error),
+            sampled_surface_points=int(evidence.sampled_surface_points),
+            matched_surface_points=int(evidence.matched_surface_points),
+            unmatched_surface_points=int(evidence.unmatched_surface_points),
+            normal_consistent_surface_points=int(evidence.normal_consistent_surface_points),
+            mean_surface_error=float(evidence.mean_surface_error),
+            max_surface_error=float(evidence.max_surface_error),
+            mean_normal_agreement=float(evidence.mean_normal_agreement),
+            component_consistent_surface_points=int(correspondence.component_consistent_surface_points),
+            sampled_semantic_surface_points=int(correspondence.sampled_semantic_surface_points),
+            semantic_consistent_surface_points=int(correspondence.semantic_consistent_surface_points),
+            confidence=float(out.confidence),
+            ambiguous=bool(out.ambiguous),
+        )
 
     def __copy__(self) -> "Mesh":
         return self.copy()
@@ -2176,7 +2235,7 @@ class ZRemesherParams:
     #: "organic vs CAD" threshold picks the right field for every model, so the
     #: answer is to measure both. It costs a second full solve.
     quality: str = "fast"
-    #: ``"none"``, ``"x"``, ``"y"`` or ``"z"``. Solves one half and mirrors its
+    #: ``"none"``, ``"x"``, ``"y"``, ``"z"`` or opt-in ``"auto"``. Solves one half and mirrors its
     #: CONNECTIVITY, so the halves are exact reflections rather than merely
     #: similar shapes. ``target_quad_count`` names the WHOLE model.
     symmetry: str = "none"
@@ -2193,7 +2252,7 @@ class ZRemesherParams:
     fold_repair: bool = True
 
     _QUALITY = {"fast": 0, "best": 1}
-    _SYMMETRY = {"none": 0, "x": 1, "y": 2, "z": 3}
+    _SYMMETRY = {"none": 0, "x": 1, "y": 2, "z": 3, "auto": 4}
 
     def _to_c(self) -> "_ffi.CyberZRemesherParams":
         try:

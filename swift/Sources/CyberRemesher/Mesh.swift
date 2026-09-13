@@ -52,6 +52,28 @@ public struct PartialRetopologyReport: Equatable {
     public let untransferredAttributeCount: Int
 }
 
+/// Advisory symmetry analysis. Calling it never edits the mesh or enables a
+/// forced-symmetry remesh.
+public struct SymmetryDetectionReport: Equatable {
+    public let detected: Bool
+    public let axis: String
+    public let confidence: Float
+    public let ambiguous: Bool
+    public let sampledVertices: Int
+    public let matchedVertices: Int
+    public let unmatchedVertices: Int
+    public let sampledSurfacePoints: Int
+    public let matchedSurfacePoints: Int
+    public let unmatchedSurfacePoints: Int
+    public let normalConsistentSurfacePoints: Int
+    public let meanSurfaceError: Float
+    public let maxSurfaceError: Float
+    public let meanNormalAgreement: Float
+    public let componentConsistentSurfacePoints: Int
+    public let sampledSemanticSurfacePoints: Int
+    public let semanticConsistentSurfacePoints: Int
+}
+
 /// A triangle or quad-dominant mesh owned by the engine.
 ///
 /// Construct from indexed geometry with ``init(positions:indices:)``, or read a
@@ -179,6 +201,35 @@ public final class Mesh {
             generatedVertexCount: Int(report.generated_vertex_count),
             untransferredAttributeCount: Int(report.untransferred_attribute_count)
         )
+    }
+
+    /// Analyses the axis-aligned symmetry hypotheses without modifying this mesh.
+    public func detectSymmetry() throws -> SymmetryDetectionReport {
+        var evidence = CyberSymmetryDetectionEvidence()
+        try CyberError.check(cyber_detect_symmetry_evidence(handle, &evidence))
+        var correspondence = CyberSymmetryCorrespondenceEvidence()
+        try CyberError.check(cyber_detect_symmetry_correspondence(handle, &correspondence))
+        let report = evidence.hypothesis
+        let axis = ["none", "x", "y", "z"]
+        let rawAxis = Int(report.axis)
+        return SymmetryDetectionReport(
+            detected: report.detected != 0,
+            axis: rawAxis >= 0 && rawAxis < axis.count ? axis[rawAxis] : "none",
+            confidence: report.confidence,
+            ambiguous: report.ambiguous != 0,
+            sampledVertices: Int(report.sampledVertices),
+            matchedVertices: Int(report.matchedVertices),
+            unmatchedVertices: Int(report.unmatchedVertices),
+            sampledSurfacePoints: Int(evidence.sampledSurfacePoints),
+            matchedSurfacePoints: Int(evidence.matchedSurfacePoints),
+            unmatchedSurfacePoints: Int(evidence.unmatchedSurfacePoints),
+            normalConsistentSurfacePoints: Int(evidence.normalConsistentSurfacePoints),
+            meanSurfaceError: evidence.meanSurfaceError,
+            maxSurfaceError: evidence.maxSurfaceError,
+            meanNormalAgreement: evidence.meanNormalAgreement,
+            componentConsistentSurfacePoints: Int(correspondence.componentConsistentSurfacePoints),
+            sampledSemanticSurfacePoints: Int(correspondence.sampledSemanticSurfacePoints),
+            semanticConsistentSurfacePoints: Int(correspondence.semanticConsistentSurfacePoints))
     }
 
     /// Copies vertex positions out as a flat `x,y,z` buffer, in the engine's
