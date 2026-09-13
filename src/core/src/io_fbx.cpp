@@ -204,8 +204,7 @@ void createAttributeColumns(ImportedMesh& out, const ufbx_scene& scene) {
     }
 }
 
-std::optional<Error> preflightSceneTopology(const ufbx_scene& scene,
-                                            const ImportOptions& options,
+std::optional<Error> preflightSceneTopology(const ufbx_scene& scene, const ImportOptions& options,
                                             const std::filesystem::path& path) {
     if (options.maxVertices == 0 && options.maxFaces == 0) {
         return std::nullopt;
@@ -224,9 +223,10 @@ std::optional<Error> preflightSceneTopology(const ufbx_scene& scene,
         const std::size_t instances = std::max<std::size_t>(1, mesh.instances.count);
         for (std::size_t instance = 0; instance < instances; ++instance) {
             if (add(vertices, mesh.num_vertices, options.maxVertices)) {
-                return Error{ErrorCode::ResourceLimit,
-                             "FBX scene '" + path.string() + "' exceeds this host's vertex "
-                             "ceiling of " + std::to_string(options.maxVertices)};
+                return Error{ErrorCode::ResourceLimit, "FBX scene '" + path.string() +
+                                                           "' exceeds this host's vertex "
+                                                           "ceiling of " +
+                                                           std::to_string(options.maxVertices)};
             }
             for (std::size_t fi = 0; fi < mesh.num_faces; ++fi) {
                 const ufbx_face face = mesh.faces.data[fi];
@@ -235,9 +235,10 @@ std::optional<Error> preflightSceneTopology(const ufbx_scene& scene,
                         ? static_cast<std::size_t>(face.num_indices - 2)
                         : (face.num_indices >= 3 ? 1 : 0);
                 if (add(faces, emitted, options.maxFaces)) {
-                    return Error{ErrorCode::ResourceLimit,
-                                 "FBX scene '" + path.string() + "' exceeds this host's face "
-                                 "ceiling of " + std::to_string(options.maxFaces)};
+                    return Error{ErrorCode::ResourceLimit, "FBX scene '" + path.string() +
+                                                               "' exceeds this host's face "
+                                                               "ceiling of " +
+                                                               std::to_string(options.maxFaces)};
                 }
             }
         }

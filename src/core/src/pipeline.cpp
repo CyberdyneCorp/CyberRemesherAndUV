@@ -27,9 +27,8 @@ bool exceeds(std::size_t value, std::size_t limit) { return limit > 0 && value >
 
 std::string resourceLimitError(std::string_view stage, std::string_view element,
                                std::size_t requested, std::size_t allowed) {
-    return "resource limit at " + std::string(stage) + ": " + std::string(element) +
-           " requested " + std::to_string(requested) + ", allowed " +
-           std::to_string(allowed);
+    return "resource limit at " + std::string(stage) + ": " + std::string(element) + " requested " +
+           std::to_string(requested) + ", allowed " + std::to_string(allowed);
 }
 
 bool exceedsTopology(const Mesh& mesh, std::size_t maxVertices, std::size_t maxFaces,
@@ -830,9 +829,8 @@ PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSi
         if (st != IsotropicStatus::Cancelled &&
             (st != IsotropicStatus::Success || m.faceCount() == 0)) {
             oc.stage = "isotropic";
-            oc.reason = st == IsotropicStatus::ResourceLimit
-                            ? "intermediate topology limit reached"
-                            : st == IsotropicStatus::InvalidInput
+            oc.reason = st == IsotropicStatus::ResourceLimit ? "intermediate topology limit reached"
+                        : st == IsotropicStatus::InvalidInput
                             ? "invalid island input"
                             : "island vanished during isotropic remeshing";
         }
@@ -1024,9 +1022,9 @@ PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSi
                 }
                 mergeUnhonored(fb->unhonoredGuidance());
                 quadOk = fbOutcome.success && outcome.mesh.faceCount() > 0;
-                if (quadOk && exceedsTopology(outcome.mesh, budget.maxIntermediateVertices,
-                                              budget.maxIntermediateFaces, "quadrangulate",
-                                              result.error)) {
+                if (quadOk &&
+                    exceedsTopology(outcome.mesh, budget.maxIntermediateVertices,
+                                    budget.maxIntermediateFaces, "quadrangulate", result.error)) {
                     result.status = RunStatus::Error;
                     return result;
                 }
@@ -1084,25 +1082,24 @@ PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSi
     if (exceeds(mergedVertices, budget.maxIntermediateVertices) ||
         exceeds(mergedFaces, budget.maxIntermediateFaces)) {
         result.status = RunStatus::Error;
-        result.error = exceeds(mergedVertices, budget.maxIntermediateVertices)
-                           ? resourceLimitError("merge", "vertices", mergedVertices,
-                                                budget.maxIntermediateVertices)
-                           : resourceLimitError("merge", "faces", mergedFaces,
-                                                budget.maxIntermediateFaces);
+        result.error =
+            exceeds(mergedVertices, budget.maxIntermediateVertices)
+                ? resourceLimitError("merge", "vertices", mergedVertices,
+                                     budget.maxIntermediateVertices)
+                : resourceLimitError("merge", "faces", mergedFaces, budget.maxIntermediateFaces);
         return result;
     }
     // Without pure-quad subdivision the merge is the final topology build, so
     // reject its result before reserving the output arrays rather than only
     // discovering an output ceiling after Mesh::fromIndexed has allocated it.
-    if (!params.pureQuads &&
-        (exceeds(mergedVertices, budget.maxOutputVertices) ||
-         exceeds(mergedFaces, budget.maxOutputFaces))) {
+    if (!params.pureQuads && (exceeds(mergedVertices, budget.maxOutputVertices) ||
+                              exceeds(mergedFaces, budget.maxOutputFaces))) {
         result.status = RunStatus::Error;
-        result.error = exceeds(mergedVertices, budget.maxOutputVertices)
-                           ? resourceLimitError("merge", "output vertices", mergedVertices,
-                                                budget.maxOutputVertices)
-                           : resourceLimitError("merge", "output faces", mergedFaces,
-                                                budget.maxOutputFaces);
+        result.error =
+            exceeds(mergedVertices, budget.maxOutputVertices)
+                ? resourceLimitError("merge", "output vertices", mergedVertices,
+                                     budget.maxOutputVertices)
+                : resourceLimitError("merge", "output faces", mergedFaces, budget.maxOutputFaces);
         return result;
     }
     positions.reserve(mergedVertices);
@@ -1142,14 +1139,14 @@ PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSi
         const std::size_t inputFaces = result.mesh.faceCount();
         const std::size_t inputVertices = result.mesh.vertexCount();
         const std::size_t inputEdges = result.mesh.edgeCount();
-        if ((budget.maxOutputFaces > 0 &&
-             inputFaces > budget.maxOutputFaces / 4) ||
+        if ((budget.maxOutputFaces > 0 && inputFaces > budget.maxOutputFaces / 4) ||
             (budget.maxOutputVertices > 0 &&
              (inputVertices > budget.maxOutputVertices ||
               inputEdges > budget.maxOutputVertices - inputVertices ||
               inputFaces > budget.maxOutputVertices - inputVertices - inputEdges))) {
             result.status = RunStatus::Error;
-            result.error = "resource limit at subdivision: output topology ceiling would be exceeded";
+            result.error =
+                "resource limit at subdivision: output topology ceiling would be exceeded";
             return result;
         }
         // The position-field extractor produces an already-uniform base, so we

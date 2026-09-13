@@ -376,8 +376,8 @@ TEST_CASE("capi remesh limits reject input before the pipeline allocates output"
     limits.maxInputFaces = 5;  // the cube has 6
 
     CyberMesh* output = reinterpret_cast<CyberMesh*>(1);
-    const CyberStatus status = cyber_remesh_with_limits(input, &params, &limits, nullptr, nullptr,
-                                                         nullptr, &output);
+    const CyberStatus status =
+        cyber_remesh_with_limits(input, &params, &limits, nullptr, nullptr, nullptr, &output);
     CHECK(status == CYBER_ERR_RUNTIME);
     CHECK(output == nullptr);
     CHECK(std::string(cyber_last_error()).find("resource limit at input: faces requested") !=

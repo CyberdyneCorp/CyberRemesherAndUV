@@ -205,7 +205,7 @@ std::optional<std::string> plyHeaderExceedsFile(const std::filesystem::path& pat
 }
 
 std::optional<std::uintmax_t> declaredPlyElementCount(const std::filesystem::path& path,
-                                                       std::string_view wanted) {
+                                                      std::string_view wanted) {
     std::ifstream file(path, std::ios::binary);
     if (!file) {
         return std::nullopt;
@@ -251,10 +251,10 @@ Result<ImportedMesh> importPly(const std::filesystem::path& path, const ImportOp
     if (options.maxFaces > 0) {
         const std::optional<std::uintmax_t> declared = declaredPlyElementCount(path, "face");
         if (declared && *declared > options.maxFaces) {
-            return Error{ErrorCode::ResourceLimit,
-                         "'" + path.string() + "' declares " + std::to_string(*declared) +
-                             " faces, over this host's face ceiling of " +
-                             std::to_string(options.maxFaces)};
+            return Error{ErrorCode::ResourceLimit, "'" + path.string() + "' declares " +
+                                                       std::to_string(*declared) +
+                                                       " faces, over this host's face ceiling of " +
+                                                       std::to_string(options.maxFaces)};
         }
     }
     try {

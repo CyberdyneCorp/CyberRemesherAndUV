@@ -118,14 +118,11 @@ struct PipelineResult {
 // into `PipelineResult::islandGuidance`. A null pointer, or a Guidance whose
 // guides and density are both empty, takes exactly the same code path as today.
 using QuadrangulatorFactory = std::function<std::unique_ptr<IQuadrangulator>()>;
-[[nodiscard]] PipelineResult remesh(const Mesh& input, const Parameters& rawParams,
-                                    ProgressSink* progress = nullptr,
-                                    const CancelToken* cancel = nullptr,
-                                    const QuadrangulatorFactory& quadrangulator = {},
-                                    const QuadrangulatorFactory& fallbackQuadrangulator = {},
-                                    const Guidance* guidance = nullptr,
-                                    const CountPolicy* countPolicy = nullptr,
-                                    const ResourceLimits* limits = nullptr);
+[[nodiscard]] PipelineResult remesh(
+    const Mesh& input, const Parameters& rawParams, ProgressSink* progress = nullptr,
+    const CancelToken* cancel = nullptr, const QuadrangulatorFactory& quadrangulator = {},
+    const QuadrangulatorFactory& fallbackQuadrangulator = {}, const Guidance* guidance = nullptr,
+    const CountPolicy* countPolicy = nullptr, const ResourceLimits* limits = nullptr);
 
 // Cleanup policy from the canonical parameters, applied per island result:
 // KeepLargest keeps only the biggest connected patch, KeepAll keeps

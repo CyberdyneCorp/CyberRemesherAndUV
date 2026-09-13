@@ -22,10 +22,12 @@ std::size_t Mesh::ownedBufferBytes() const {
     addBytes(total, m_edges.capacity(), sizeof(Edge));
     addBytes(total, m_loops.capacity(), sizeof(Loop));
     addBytes(total, m_faces.capacity(), sizeof(Face));
-    for (const Vertex& vertex : m_vertices) addBytes(total, vertex.edges.capacity(), sizeof(EdgeId));
+    for (const Vertex& vertex : m_vertices)
+        addBytes(total, vertex.edges.capacity(), sizeof(EdgeId));
     for (const auto* attrs : {&m_vertexAttrs, &m_edgeAttrs, &m_faceAttrs, &m_cornerAttrs}) {
         attrs->forEachColumn([&total](const std::string&, const auto& column) {
-            addBytes(total, column.capacity(), sizeof(typename std::decay_t<decltype(column)>::value_type));
+            addBytes(total, column.capacity(),
+                     sizeof(typename std::decay_t<decltype(column)>::value_type));
         });
     }
     for (const auto* freeList : {&m_freeVertices, &m_freeEdges, &m_freeLoops, &m_freeFaces}) {

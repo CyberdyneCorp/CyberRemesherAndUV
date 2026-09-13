@@ -41,10 +41,10 @@ Result<ImportedMesh> importMesh(const std::filesystem::path& path, const ImportO
                          "cannot determine size of '" + path.string() + "': " + ec.message()};
         }
         if (bytes > options.maxInputBytes) {
-            return Error{ErrorCode::ResourceLimit,
-                         "input '" + path.string() + "' is " + std::to_string(bytes) +
-                             " bytes, over this host's input budget of " +
-                             std::to_string(options.maxInputBytes)};
+            return Error{ErrorCode::ResourceLimit, "input '" + path.string() + "' is " +
+                                                       std::to_string(bytes) +
+                                                       " bytes, over this host's input budget of " +
+                                                       std::to_string(options.maxInputBytes)};
         }
     }
     const std::string ext = detail::lowercaseExtension(path);
@@ -92,8 +92,7 @@ Result<ImportedMesh> importMesh(const std::filesystem::path& path, const ImportO
         return Error{ErrorCode::ResourceLimit,
                      "'" + path.string() + "' carries " +
                          std::to_string(imported.value().mesh.faceCount()) +
-                         " faces, over this host's ceiling of " +
-                         std::to_string(options.maxFaces)};
+                         " faces, over this host's ceiling of " + std::to_string(options.maxFaces)};
     }
     return imported;
 }

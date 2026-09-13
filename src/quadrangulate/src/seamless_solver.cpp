@@ -2027,19 +2027,16 @@ void reportTopologyLayout(const bimdf::Charts& charts, const bimdf::TMesh& tmesh
     write(objPath, layoutToObj(layout));
 }
 
-int solveSeamlessReduced(accel::IBackend& backend, std::size_t nCut,
-                         const std::vector<std::unordered_map<std::size_t, float>>& rows,
-                         const std::vector<float>& bu, const std::vector<float>& bv,
-                         const std::vector<SeamRef>& seams, const std::vector<std::size_t>& gauges,
-                         std::vector<float>& u, std::vector<float>& v,
-                         const CancelToken* cancel = nullptr,
-                         SeamlessSolveCacheImpl* cache = nullptr,
-                         bimdf::Charts* bimdfCharts = nullptr,
-                         const FoldRepairContext* foldCtx = nullptr,
-                         const GeometryAnalysis* layoutGeometry = nullptr,
-                         const SeamlessLayoutOptions* layoutOptions = nullptr,
-                         const SeamlessSolveLimits* limits = nullptr,
-                         bool* resourceLimitExceeded = nullptr) {
+int solveSeamlessReduced(
+    accel::IBackend& backend, std::size_t nCut,
+    const std::vector<std::unordered_map<std::size_t, float>>& rows, const std::vector<float>& bu,
+    const std::vector<float>& bv, const std::vector<SeamRef>& seams,
+    const std::vector<std::size_t>& gauges, std::vector<float>& u, std::vector<float>& v,
+    const CancelToken* cancel = nullptr, SeamlessSolveCacheImpl* cache = nullptr,
+    bimdf::Charts* bimdfCharts = nullptr, const FoldRepairContext* foldCtx = nullptr,
+    const GeometryAnalysis* layoutGeometry = nullptr,
+    const SeamlessLayoutOptions* layoutOptions = nullptr,
+    const SeamlessSolveLimits* limits = nullptr, bool* resourceLimitExceeded = nullptr) {
     const std::size_t nSeam = seams.size();
     const std::size_t nUv = 2 * nCut;
     // Feature-seam integer pinning (docs/ROADMAP.md 2026-08-01 priority 1;

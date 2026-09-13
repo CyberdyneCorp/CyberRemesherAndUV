@@ -161,8 +161,7 @@ int findAttribute(const tinygltf::Primitive& prim, const char* name) {
 
 }  // namespace
 
-Result<ImportedMesh> importGltf(const std::filesystem::path& path,
-                                const ImportOptions& options) {
+Result<ImportedMesh> importGltf(const std::filesystem::path& path, const ImportOptions& options) {
     tinygltf::TinyGLTF loader;
     tinygltf::Model model;
     std::string err, warn;
@@ -210,20 +209,21 @@ Result<ImportedMesh> importGltf(const std::filesystem::path& path,
                 triangleCount = indexReader->count() / 3;
             }
             const std::size_t existingFaces = out.mesh.faceCount();
-            if (options.maxFaces > 0 &&
-                (existingFaces > options.maxFaces ||
-                 triangleCount > options.maxFaces - existingFaces)) {
-                return Error{ErrorCode::ResourceLimit,
-                             "triangle accessor in '" + path.string() + "' exceeds this host's "
-                             "face ceiling of " + std::to_string(options.maxFaces)};
+            if (options.maxFaces > 0 && (existingFaces > options.maxFaces ||
+                                         triangleCount > options.maxFaces - existingFaces)) {
+                return Error{ErrorCode::ResourceLimit, "triangle accessor in '" + path.string() +
+                                                           "' exceeds this host's "
+                                                           "face ceiling of " +
+                                                           std::to_string(options.maxFaces)};
             }
             const std::size_t existingVertices = out.mesh.vertexCount();
             if (options.maxVertices > 0 &&
-                (positions->count() > options.maxVertices -
-                 std::min(options.maxVertices, existingVertices))) {
-                return Error{ErrorCode::ResourceLimit,
-                             "POSITION accessor in '" + path.string() + "' exceeds this host's "
-                             "vertex ceiling of " + std::to_string(options.maxVertices)};
+                (positions->count() >
+                 options.maxVertices - std::min(options.maxVertices, existingVertices))) {
+                return Error{ErrorCode::ResourceLimit, "POSITION accessor in '" + path.string() +
+                                                           "' exceeds this host's "
+                                                           "vertex ceiling of " +
+                                                           std::to_string(options.maxVertices)};
             }
             std::vector<VertexId> ids;
             ids.reserve(positions->count());

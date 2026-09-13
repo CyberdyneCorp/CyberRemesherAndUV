@@ -149,7 +149,7 @@ struct NativeSolveContext {
 [[nodiscard]] SeamlessUv computeSeamlessUv(const Mesh& mesh, float targetEdgeLength,
                                            float harnessScaling = 0.5f,
                                            float harnessAdaptivity = 0.0f,
-    const CancelToken* cancel = nullptr,
+                                           const CancelToken* cancel = nullptr,
                                            float featureDegrees = 40.0f,
                                            NativeSolveContext* ctx = nullptr);
 

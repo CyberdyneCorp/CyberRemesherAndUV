@@ -126,10 +126,10 @@ Result<ImportedMesh> importBinaryStl(const std::filesystem::path& path, std::uin
         return Error{ErrorCode::ParseError, "binary STL size mismatch in '" + path.string() + "'"};
     }
     if (options.maxFaces > 0 && count > options.maxFaces) {
-        return Error{ErrorCode::ResourceLimit,
-                     "'" + path.string() + "' declares " + std::to_string(count) +
-                         " facets, over this host's face ceiling of " +
-                         std::to_string(options.maxFaces)};
+        return Error{ErrorCode::ResourceLimit, "'" + path.string() + "' declares " +
+                                                   std::to_string(count) +
+                                                   " facets, over this host's face ceiling of " +
+                                                   std::to_string(options.maxFaces)};
     }
 
     ImportedMesh out;
@@ -161,8 +161,7 @@ Result<ImportedMesh> importBinaryStl(const std::filesystem::path& path, std::uin
 
 }  // namespace
 
-Result<ImportedMesh> importStl(const std::filesystem::path& path,
-                               const ImportOptions& options) {
+Result<ImportedMesh> importStl(const std::filesystem::path& path, const ImportOptions& options) {
     std::error_code ec;
     const std::uintmax_t size = std::filesystem::file_size(path, ec);
     if (ec || size < 15) {

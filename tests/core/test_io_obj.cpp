@@ -64,8 +64,7 @@ TEST_CASE("triangulate policy fans n-gons on import") {
 }
 
 TEST_CASE("OBJ vertex budget rejects before constructing the mesh") {
-    const auto path = writeFile("over_vertex_budget.obj",
-                                "v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n");
+    const auto path = writeFile("over_vertex_budget.obj", "v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n");
     io::ImportOptions options;
     options.maxVertices = 2;
     const auto result = io::importMesh(path, options);

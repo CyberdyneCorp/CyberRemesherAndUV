@@ -22,12 +22,13 @@ bool factorStorageExceeds(std::size_t n, std::size_t lowerNnz, std::size_t limit
     // order, rank, column starts and row indices are size_t; numeric values
     // and the diagonal are doubles. This deliberately charges only durable
     // factor storage, not temporary ordering/factorization work buffers.
-    if (n > (std::numeric_limits<std::size_t>::max() - 1) / (3 * sizeof(std::size_t) + sizeof(double))) {
+    if (n > (std::numeric_limits<std::size_t>::max() - 1) /
+                (3 * sizeof(std::size_t) + sizeof(double))) {
         return true;
     }
     const std::size_t base = n * (3 * sizeof(std::size_t) + sizeof(double)) + sizeof(std::size_t);
-    if (lowerNnz > (std::numeric_limits<std::size_t>::max() - base) /
-                       (sizeof(std::size_t) + sizeof(double))) {
+    if (lowerNnz >
+        (std::numeric_limits<std::size_t>::max() - base) / (sizeof(std::size_t) + sizeof(double))) {
         return true;
     }
     return base + lowerNnz * (sizeof(std::size_t) + sizeof(double)) > limit;

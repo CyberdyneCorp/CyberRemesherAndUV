@@ -28,36 +28,37 @@ Result<ObjPreflight> preflightObjTopology(const std::filesystem::path& path,
     ObjPreflight counts;
     std::string line;
     while (std::getline(input, line)) {
-        if (line.size() >= 2 && line[0] == 'v' &&
-            (line[1] == ' ' || line[1] == '\t')) {
+        if (line.size() >= 2 && line[0] == 'v' && (line[1] == ' ' || line[1] == '\t')) {
             ++counts.vertices;
             if (options.maxVertices > 0 && counts.vertices > options.maxVertices) {
                 return Error{ErrorCode::ResourceLimit,
-                             "'" + path.string() + "' declares more than this host's vertex "
-                             "ceiling of " + std::to_string(options.maxVertices)};
+                             "'" + path.string() +
+                                 "' declares more than this host's vertex "
+                                 "ceiling of " +
+                                 std::to_string(options.maxVertices)};
             }
-        } else if (line.size() >= 2 && line[0] == 'f' &&
-                   (line[1] == ' ' || line[1] == '\t')) {
+        } else if (line.size() >= 2 && line[0] == 'f' && (line[1] == ' ' || line[1] == '\t')) {
             std::istringstream face(line.substr(1));
             std::string token;
             std::size_t corners = 0;
             while (face >> token && token[0] != '#') {
                 ++corners;
             }
-            const std::size_t emitted = corners < 3
-                                            ? 0
-                                            : (options.polygons == PolygonPolicy::Triangulate &&
-                                                       corners > 3
-                                                   ? corners - 2
-                                                   : 1);
+            const std::size_t emitted =
+                corners < 3
+                    ? 0
+                    : (options.polygons == PolygonPolicy::Triangulate && corners > 3 ? corners - 2
+                                                                                     : 1);
             if (counts.faces > std::numeric_limits<std::size_t>::max() - emitted) {
-                return Error{ErrorCode::ParseError, "face count overflow in '" + path.string() + "'"};
+                return Error{ErrorCode::ParseError,
+                             "face count overflow in '" + path.string() + "'"};
             }
             counts.faces += emitted;
             if (options.maxFaces > 0 && counts.faces > options.maxFaces) {
-                return Error{ErrorCode::ResourceLimit,
-                             "'" + path.string() + "' declares more than this host's face "
-                             "ceiling of " + std::to_string(options.maxFaces)};
+                return Error{ErrorCode::ResourceLimit, "'" + path.string() +
+                                                           "' declares more than this host's face "
+                                                           "ceiling of " +
+                                                           std::to_string(options.maxFaces)};
             }
         }
     }

@@ -389,8 +389,7 @@ public:
                 continue;
             }
             if ((m_options.maxFaces > 0 && m_mesh.faceCount() >= m_options.maxFaces) ||
-                (m_options.maxVertices > 0 &&
-                 m_mesh.vertexCount() >= m_options.maxVertices)) {
+                (m_options.maxVertices > 0 && m_mesh.vertexCount() >= m_options.maxVertices)) {
                 m_resourceLimit = true;
                 return;
             }
