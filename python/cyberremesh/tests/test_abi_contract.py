@@ -120,10 +120,10 @@ def gate_the_minor_bump_serves_the_previous_minor():
     nothing it knew about was taken away.
     """
     major, minor = _header_abi()
-    assert (major, minor) == (1, 4), (major, minor)
-    for older in (0, 1, 2, 3, 4):
+    assert (major, minor) == (1, 5), (major, minor)
+    for older in (0, 1, 2, 3, 4, 5):
         cyberremesh.check_abi(1, older)  # every earlier minor, still served
-    print("PASS: ABI 1.4 still serves clients compiled against every earlier 1.x minor")
+    print("PASS: ABI 1.5 still serves clients compiled against every earlier 1.x minor")
 
 
 def gate_the_new_entry_points_are_reachable():
@@ -133,6 +133,14 @@ def gate_the_new_entry_points_are_reachable():
     cyberremesh.set_max_import_vertices(1_000_000)
     assert cyberremesh.max_import_vertices() == 1_000_000
     cyberremesh.set_max_import_vertices(0)
+    assert cyberremesh.max_import_input_bytes() == 0
+    cyberremesh.set_max_import_input_bytes(1_000_000)
+    assert cyberremesh.max_import_input_bytes() == 1_000_000
+    cyberremesh.set_max_import_input_bytes(0)
+    assert cyberremesh.max_import_faces() == 0
+    cyberremesh.set_max_import_faces(1_000_000)
+    assert cyberremesh.max_import_faces() == 1_000_000
+    cyberremesh.set_max_import_faces(0)
     assert cyberremesh.seamless_solver() in ("native", "native+geogram"), \
         cyberremesh.seamless_solver()
     assert hasattr(cyberremesh, "CountPolicy")

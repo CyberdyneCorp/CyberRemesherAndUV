@@ -108,7 +108,7 @@ def version() -> str:
 #: The C ABI this binding was written against. Mirrors CYBER_ABI_VERSION_* in
 #: cyber_capi.h; ``check_abi()`` compares it against the loaded library.
 ABI_VERSION_MAJOR = 1
-ABI_VERSION_MINOR = 4
+ABI_VERSION_MINOR = 5
 
 
 def abi_version() -> tuple:
@@ -149,6 +149,26 @@ def set_max_import_vertices(max_vertices: int) -> None:
     budget; a ceiling that is never reached is not a ceiling.
     """
     _check(_ffi.get_lib().cyber_set_max_import_vertices(int(max_vertices)))
+
+
+def max_import_input_bytes() -> int:
+    """The current pre-parser input-byte ceiling, or 0 when disabled."""
+    return int(_ffi.get_lib().cyber_max_import_input_bytes())
+
+
+def set_max_import_input_bytes(max_bytes: int) -> None:
+    """Refuse a mesh file before parsing when it exceeds ``max_bytes``."""
+    _check(_ffi.get_lib().cyber_set_max_import_input_bytes(int(max_bytes)))
+
+
+def max_import_faces() -> int:
+    """The current output face ceiling, or 0 when disabled."""
+    return int(_ffi.get_lib().cyber_max_import_faces())
+
+
+def set_max_import_faces(max_faces: int) -> None:
+    """Refuse an import whose declared or realized face count exceeds this limit."""
+    _check(_ffi.get_lib().cyber_set_max_import_faces(int(max_faces)))
 
 
 def check_abi(major: int = ABI_VERSION_MAJOR, minor: int = ABI_VERSION_MINOR) -> None:

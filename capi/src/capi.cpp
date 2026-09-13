@@ -308,6 +308,14 @@ std::atomic<std::uint64_t>& importVertexCeiling() {
     static std::atomic<std::uint64_t> ceiling{0};
     return ceiling;
 }
+std::atomic<std::uint64_t>& importInputByteCeiling() {
+    static std::atomic<std::uint64_t> ceiling{0};
+    return ceiling;
+}
+std::atomic<std::uint64_t>& importFaceCeiling() {
+    static std::atomic<std::uint64_t> ceiling{0};
+    return ceiling;
+}
 
 }  // namespace
 
@@ -319,6 +327,20 @@ CyberStatus cyber_set_max_import_vertices(uint64_t max_vertices) {
 
 uint64_t cyber_max_import_vertices(void) {
     return importVertexCeiling().load(std::memory_order_relaxed);
+}
+CyberStatus cyber_set_max_import_input_bytes(uint64_t max_bytes) {
+    importInputByteCeiling().store(max_bytes, std::memory_order_relaxed);
+    clearError(); return CYBER_OK;
+}
+uint64_t cyber_max_import_input_bytes(void) {
+    return importInputByteCeiling().load(std::memory_order_relaxed);
+}
+CyberStatus cyber_set_max_import_faces(uint64_t max_faces) {
+    importFaceCeiling().store(max_faces, std::memory_order_relaxed);
+    clearError(); return CYBER_OK;
+}
+uint64_t cyber_max_import_faces(void) {
+    return importFaceCeiling().load(std::memory_order_relaxed);
 }
 
 const char* cyber_seamless_solver(void) {
@@ -498,6 +520,8 @@ CyberStatus cyber_mesh_load(const char* path, CyberMesh** out) {
     try {
         cyber::io::ImportOptions options;
         options.maxVertices = static_cast<std::size_t>(cyber_max_import_vertices());
+        options.maxInputBytes = static_cast<std::size_t>(cyber_max_import_input_bytes());
+        options.maxFaces = static_cast<std::size_t>(cyber_max_import_faces());
         auto result = cyber::io::importMesh(std::filesystem::path(path), options);
         if (!result.ok()) {
             return mapIoError(result.error());

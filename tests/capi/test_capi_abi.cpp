@@ -225,6 +225,17 @@ TEST_CASE("the import ceiling refuses a legitimate file over the host's budget")
     std::filesystem::remove(objPath, ec);
 }
 
+TEST_CASE("C ABI exposes independent input-byte and face import ceilings") {
+    REQUIRE(cyber_max_import_input_bytes() == 0u);
+    REQUIRE(cyber_max_import_faces() == 0u);
+    REQUIRE(cyber_set_max_import_input_bytes(4096) == CYBER_OK);
+    REQUIRE(cyber_set_max_import_faces(128) == CYBER_OK);
+    CHECK(cyber_max_import_input_bytes() == 4096u);
+    CHECK(cyber_max_import_faces() == 128u);
+    REQUIRE(cyber_set_max_import_input_bytes(0) == CYBER_OK);
+    REQUIRE(cyber_set_max_import_faces(0) == CYBER_OK);
+}
+
 TEST_CASE("the solver a build carries is reachable from the ABI") {
     // The difference is invisible and consequential: a build without the
     // vendored Geogram solver does not fail, it routes to the portable

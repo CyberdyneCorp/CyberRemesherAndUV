@@ -92,7 +92,7 @@ typedef enum CyberStatus {
  * Do not compare these numbers by hand: cyber_abi_check() applies the rule
  * above in one place, so every binding gets the same answer. */
 #define CYBER_ABI_VERSION_MAJOR 1
-#define CYBER_ABI_VERSION_MINOR 4
+#define CYBER_ABI_VERSION_MINOR 5
 
 /* The ABI this build implements. Cannot fail; either pointer may be NULL. */
 void cyber_abi_version(int* major, int* minor);
@@ -227,6 +227,13 @@ CyberStatus cyber_set_max_import_vertices(uint64_t max_vertices);
 
 /* The current import ceiling, or 0 when none is set. */
 uint64_t cyber_max_import_vertices(void);
+
+/* Independent hard budgets for the input file bytes and output faces. 0
+ * disables each ceiling; these are process-global like the vertex ceiling. */
+CyberStatus cyber_set_max_import_input_bytes(uint64_t max_bytes);
+uint64_t cyber_max_import_input_bytes(void);
+CyberStatus cyber_set_max_import_faces(uint64_t max_faces);
+uint64_t cyber_max_import_faces(void);
 
 /* ---- mesh I/O -------------------------------------------------------- */
 
