@@ -68,7 +68,7 @@ EOF
 
 plutil -extract Entitlements xml1 -o "${ENTITLEMENTS}" "${PROFILE_PLIST}"
 plutil -replace application-identifier -string "${EXPECTED_APP_ID}" "${ENTITLEMENTS}"
-plutil -replace com.apple.developer.team-identifier -string "${TEAM_ID}" "${ENTITLEMENTS}"
+/usr/libexec/PlistBuddy -c "Set :com.apple.developer.team-identifier ${TEAM_ID}" "${ENTITLEMENTS}"
 if plutil -extract 'keychain-access-groups.0' raw -o /dev/null "${ENTITLEMENTS}" 2>/dev/null; then
     plutil -replace 'keychain-access-groups.0' -string "${EXPECTED_APP_ID}" "${ENTITLEMENTS}"
 fi
@@ -82,5 +82,6 @@ launch_output="$(xcrun devicectl device process launch --console --terminate-exi
     --device "${IOS_DEVICE_ID}" "${IOS_BUNDLE_ID}" 2>&1)"
 elapsed="$(( $(date +%s) - start ))"
 printf '%s\n' "${launch_output}"
+grep -q "CYBER_IOS_METRICS" <<<"${launch_output}"
 grep -q "CYBER_IOS_CONSUMER_OK" <<<"${launch_output}"
 printf 'physical device validation: device=%s elapsed=%ss\n' "${IOS_DEVICE_ID}" "${elapsed}"

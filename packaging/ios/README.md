@@ -42,6 +42,19 @@ packaging/ios/validate_device_xcframework.sh
 ```
 
 It installs the same staged consumer, verifies ABI/remesh/progress/cancellation
-on hardware, and prints the elapsed wall time. Repeat and thermal behaviour,
-peak memory, and cancellation latency remain named release measurements; they
-must not be inferred from a simulator run.
+on hardware, and prints the elapsed wall time. The consumer also emits one
+`CYBER_IOS_METRICS` line: remesh duration, sampled resident-memory peak,
+pre-start cancellation latency, and thermal state before and after the run.
+Resident memory is sampled every 5 ms, so it is a sampled peak rather than an
+allocator-instrumented maximum. Repeat and thermal behaviour must be measured
+on named hardware; they must not be inferred from a simulator run.
+
+## Recorded hardware smoke evidence
+
+On 2026-09-13, the staged CPU-only XCFramework consumer ran on iPad Air
+13-inch (M3, `iPad15,5`), iPadOS 26.5.2. The four runs used the in-memory
+two-triangle, target-four-quad fixture and each completed ABI/remesh/authored
+polygon/progress/pre-start-cancellation checks. Remesh time was 16.05–17.82
+ms; sampled resident peak was 7.24–7.29 MB; pre-start cancellation was
+0.042–0.045 ms; thermal state was `nominal` before and after every run.
+These are smoke-fixture measurements, not a general workload limit.
