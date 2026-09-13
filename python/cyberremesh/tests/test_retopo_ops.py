@@ -303,6 +303,24 @@ def test_snap_all(path):
         check("snap_all needs a snapper", raises(mesh.snap_all, None))
 
 
+def test_partial_retopology():
+    positions = [coordinate for y in range(5) for x in range(5)
+                 for coordinate in (float(x), float(y), 0.0)]
+    indices = []
+    for y in range(4):
+        for x in range(4):
+            base = y * 5 + x
+            indices.extend((base, base + 1, base + 6, base + 5))
+    offsets = list(range(0, len(indices) + 1, 4))
+    with cyberremesh.Mesh.from_indexed(positions, offsets, indices) as mesh:
+        report = mesh.partial_retopologize([5])
+        check("partial retopology reports the exact border", report.boundary_vertex_count == 4)
+        check("partial retopology reports generated vertices", report.generated_vertex_count == 4)
+        check("partial retopology replaces one quad with five", mesh.face_count == 20)
+        check("partial retopology rejects unsupported topology atomically",
+              raises(mesh.partial_retopologize, [5, 6]) and mesh.face_count == 20)
+
+
 def main() -> int:
     if not cyberremesh.is_available():
         print("SKIP: cyber_capi shared library not loadable")
@@ -318,6 +336,7 @@ def main() -> int:
         test_merge_vertices(path)
         test_relax(path)
         test_snap_all(path)
+        test_partial_retopology()
     finally:
         for p in _TEMP_FILES:
             try:

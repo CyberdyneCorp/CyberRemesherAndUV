@@ -123,6 +123,14 @@ class CyberRemeshParams(Structure):
     ]
 
 
+class CyberPartialRetopologyReport(Structure):
+    _fields_ = [
+        ("boundary_vertex_count", c_size_t),
+        ("generated_vertex_count", c_size_t),
+        ("untransferred_attribute_count", c_size_t),
+    ]
+
+
 class CyberCountPolicy(Structure):
     _fields_ = [("relative_tolerance", c_double), ("max_attempts", c_size_t)]
 
@@ -869,6 +877,11 @@ def _declare_retopo_ops(lib: ctypes.CDLL) -> None:
         c_void_p, POINTER(c_uint32), c_size_t, POINTER(c_size_t),
     ]
     lib.cyber_retopo_delete_faces.restype = c_int32
+
+    lib.cyber_retopo_partial_remesh.argtypes = [
+        c_void_p, POINTER(c_uint32), c_size_t, POINTER(CyberPartialRetopologyReport)
+    ]
+    lib.cyber_retopo_partial_remesh.restype = c_int32
 
     # CyberStatus cyber_retopo_dissolve_edges(CyberMesh*, const uint32_t*,
     #                                         size_t, size_t*)
