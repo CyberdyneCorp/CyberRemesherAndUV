@@ -364,6 +364,30 @@ TEST_CASE("capi loads, remeshes and reports stats for a cube") {
     std::filesystem::remove(savePath, ec);
 }
 
+TEST_CASE("capi remesh limits reject input before the pipeline allocates output") {
+    const std::filesystem::path objPath = writeCubeObj();
+    CyberMesh* input = nullptr;
+    REQUIRE(cyber_mesh_load(objPath.string().c_str(), &input) == CYBER_OK);
+    CyberRemeshParams params{};
+    cyber_default_params(&params);
+    params.targetQuads = 100;
+    CyberRemeshLimits limits{};
+    cyber_default_remesh_limits(&limits);
+    limits.maxInputFaces = 5;  // the cube has 6
+
+    CyberMesh* output = reinterpret_cast<CyberMesh*>(1);
+    const CyberStatus status = cyber_remesh_with_limits(input, &params, &limits, nullptr, nullptr,
+                                                         nullptr, &output);
+    CHECK(status == CYBER_ERR_RUNTIME);
+    CHECK(output == nullptr);
+    CHECK(std::string(cyber_last_error()).find("resource limit at input: faces requested") !=
+          std::string::npos);
+    CHECK(cyber_mesh_face_count(input) == 6);
+    cyber_mesh_free(input);
+    std::error_code ec;
+    std::filesystem::remove(objPath, ec);
+}
+
 // Regression: the C ABI built the default quad-cover extractor without the
 // feature angle, so params.sharpEdgeDegrees never reached the parameterization
 // and every binding ran at the factory's 40 degrees — the ABI's own documented

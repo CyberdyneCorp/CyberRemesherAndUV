@@ -92,7 +92,7 @@ typedef enum CyberStatus {
  * Do not compare these numbers by hand: cyber_abi_check() applies the rule
  * above in one place, so every binding gets the same answer. */
 #define CYBER_ABI_VERSION_MAJOR 1
-#define CYBER_ABI_VERSION_MINOR 5
+#define CYBER_ABI_VERSION_MINOR 6
 
 /* The ABI this build implements. Cannot fail; either pointer may be NULL. */
 void cyber_abi_version(int* major, int* minor);
@@ -284,6 +284,18 @@ typedef struct CyberRemeshParams {
                               *     explicit topology-layout stage) */
 } CyberRemeshParams;
 
+/* Optional exact topology ceilings for one remesh call. Zero disables the
+ * individual ceiling. These bound mesh element counts, not process RSS: the
+ * engine and third-party solvers do not share a portable allocator hook. */
+typedef struct CyberRemeshLimits {
+    uint64_t maxInputVertices;
+    uint64_t maxInputFaces;
+    uint64_t maxIntermediateVertices;
+    uint64_t maxIntermediateFaces;
+    uint64_t maxOutputVertices;
+    uint64_t maxOutputFaces;
+} CyberRemeshLimits;
+
 /* Quadrangulator selection values for CyberRemeshParams.quadMethod. */
 #define CYBER_QUAD_FIELD_ALIGNED 0
 #define CYBER_QUAD_INSTANT_MESHES 1
@@ -303,6 +315,7 @@ typedef struct CyberRemeshParams {
 
 /* Fills params with the engine defaults. No-op on NULL. */
 void cyber_default_params(CyberRemeshParams* params);
+void cyber_default_remesh_limits(CyberRemeshLimits* limits);
 
 /* Cancellation callback: return non-zero to request cooperative cancel. */
 typedef int (*CyberCancelCb)(void* user);
@@ -370,6 +383,14 @@ CyberStatus cyber_remesh_with_count_report(const CyberMesh* in, const CyberRemes
                                            CyberProgressCb progress, CyberCancelCb cancel,
                                            void* user, CyberMesh** out,
                                            CyberTargetCountReport* report);
+
+/* Same operation as cyber_remesh, with an optional per-call topology budget.
+ * A limit failure returns CYBER_ERR_RUNTIME with the stage, requested count and
+ * allowed count in cyber_last_error(); `in` is never modified. */
+CyberStatus cyber_remesh_with_limits(const CyberMesh* in, const CyberRemeshParams* params,
+                                     const CyberRemeshLimits* limits,
+                                     CyberProgressCb progress, CyberCancelCb cancel, void* user,
+                                     CyberMesh** out);
 
 /* ---- guided remeshing (flow guides + painted density) ---------------- */
 

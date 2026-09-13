@@ -18,6 +18,7 @@ release.
 Skips with 77 (CTest SKIP) when the shared library is not loadable.
 """
 
+import ctypes
 import os
 import re
 import sys
@@ -27,6 +28,7 @@ if _PKG_PARENT not in sys.path:
     sys.path.insert(0, _PKG_PARENT)
 
 import cyberremesh  # noqa: E402
+from cyberremesh import _ffi  # noqa: E402
 
 _REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 _HEADER = os.path.join(_REPO, "capi", "include", "cyber_capi.h")
@@ -120,10 +122,15 @@ def gate_the_minor_bump_serves_the_previous_minor():
     nothing it knew about was taken away.
     """
     major, minor = _header_abi()
-    assert (major, minor) == (1, 5), (major, minor)
-    for older in (0, 1, 2, 3, 4, 5):
+    assert (major, minor) == (1, 6), (major, minor)
+    for older in (0, 1, 2, 3, 4, 5, 6):
         cyberremesh.check_abi(1, older)  # every earlier minor, still served
-    print("PASS: ABI 1.5 still serves clients compiled against every earlier 1.x minor")
+    print("PASS: ABI 1.6 still serves clients compiled against every earlier 1.x minor")
+
+    limits = _ffi.CyberRemeshLimits()
+    _ffi.get_lib().cyber_default_remesh_limits(ctypes.byref(limits))
+    assert all(getattr(limits, field) == 0 for field, _ in limits._fields_)
+    print("PASS: the per-call remesh limits ABI is reachable from Python")
 
 
 def gate_the_new_entry_points_are_reachable():

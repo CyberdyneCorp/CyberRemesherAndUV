@@ -15,7 +15,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[2]
 GENERATOR = REPO / "tools/abi/generate_capi_manifest.py"
 HEADER = REPO / "capi/include/cyber_capi.h"
-PINNED = REPO / "capi/abi/cyber_capi-1.5.json"
+PINNED = REPO / "capi/abi/cyber_capi-1.6.json"
 COMPILER = os.environ.get("CXX") or shutil.which("clang++") or shutil.which("g++")
 RUNNER = os.environ.get("CYBER_TEST_LAUNCHER", "")
 

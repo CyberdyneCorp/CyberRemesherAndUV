@@ -37,6 +37,18 @@ struct Statistics {
     float targetEdgeLength = 0.0f;
 };
 
+// Opt-in topology ceilings for one pipeline call. They bound exact mesh
+// element counts, not process RSS: dependencies and STL allocations do not
+// share a portable allocator/accounting hook. Zero disables a dimension.
+struct ResourceLimits {
+    std::size_t maxInputVertices = 0;
+    std::size_t maxInputFaces = 0;
+    std::size_t maxIntermediateVertices = 0;
+    std::size_t maxIntermediateFaces = 0;
+    std::size_t maxOutputVertices = 0;
+    std::size_t maxOutputFaces = 0;
+};
+
 // Per-island guidance audit (remeshing-pipeline spec, "Guidance is honored
 // loudly or rejected loudly"). One row per island whenever guidance was
 // supplied, whether or not the island's backend could use it.
@@ -110,7 +122,8 @@ using QuadrangulatorFactory = std::function<std::unique_ptr<IQuadrangulator>()>;
                                     const QuadrangulatorFactory& quadrangulator = {},
                                     const QuadrangulatorFactory& fallbackQuadrangulator = {},
                                     const Guidance* guidance = nullptr,
-                                    const CountPolicy* countPolicy = nullptr);
+                                    const CountPolicy* countPolicy = nullptr,
+                                    const ResourceLimits* limits = nullptr);
 
 // Cleanup policy from the canonical parameters, applied per island result:
 // KeepLargest keeps only the biggest connected patch, KeepAll keeps

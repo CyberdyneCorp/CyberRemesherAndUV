@@ -35,6 +35,7 @@ __all__ = [
     "Mesh",
     "Document",
     "RemeshParams",
+    "RemeshLimits",
     "Statistics",
     "remesh",
     "version",
@@ -108,7 +109,7 @@ def version() -> str:
 #: The C ABI this binding was written against. Mirrors CYBER_ABI_VERSION_* in
 #: cyber_capi.h; ``check_abi()`` compares it against the loaded library.
 ABI_VERSION_MAJOR = 1
-ABI_VERSION_MINOR = 5
+ABI_VERSION_MINOR = 6
 
 
 def abi_version() -> tuple:
@@ -302,6 +303,32 @@ class TargetCountReport:
     final_faces: int
     pure_quads: bool
     islands: tuple[CountIslandOutcome, ...]
+
+
+@dataclass
+class RemeshLimits:
+    """Exact opt-in topology ceilings for a single plain remesh call.
+
+    Zero disables a dimension. These are mesh-count ceilings, not a process-RSS
+    promise; use them to stop topology expansion before the relevant stage.
+    """
+
+    max_input_vertices: int = 0
+    max_input_faces: int = 0
+    max_intermediate_vertices: int = 0
+    max_intermediate_faces: int = 0
+    max_output_vertices: int = 0
+    max_output_faces: int = 0
+
+    def _to_c(self) -> "_ffi.CyberRemeshLimits":
+        values = [
+            self.max_input_vertices, self.max_input_faces,
+            self.max_intermediate_vertices, self.max_intermediate_faces,
+            self.max_output_vertices, self.max_output_faces,
+        ]
+        if any(value < 0 for value in values):
+            raise ValueError("remesh limits must be >= 0")
+        return _ffi.CyberRemeshLimits(*values)
 
 
 @dataclass
@@ -2216,6 +2243,7 @@ def remesh(
     density_per_face: bool = False,
     zremesher: Optional[ZRemesherParams] = None,
     count_policy: Optional[CountPolicy] = None,
+    limits: Optional[RemeshLimits] = None,
 ) -> Mesh:
     """Run the automatic quad-remeshing pipeline on ``mesh``.
 
@@ -2257,6 +2285,8 @@ def remesh(
         )
     if count_policy is not None and (is_zremesher or guides is not None or density is not None):
         raise ValueError("count_policy currently requires an unguided non-ZRemesher remesh")
+    if limits is not None and (is_zremesher or guides is not None or density is not None):
+        raise ValueError("limits currently require the plain unguided remesh entry point")
 
     lib = _ffi.get_lib()
 
@@ -2391,6 +2421,12 @@ def remesh(
             warning_cb,
             None,
             ctypes.byref(out_handle),
+        )
+    elif limits is not None:
+        c_limits = limits._to_c()
+        status = lib.cyber_remesh_with_limits(
+            mesh.handle, ctypes.byref(c_params), ctypes.byref(c_limits), progress_cb,
+            cancel_cb, None, ctypes.byref(out_handle),
         )
     else:
         status = lib.cyber_remesh(

@@ -351,6 +351,32 @@ TEST_CASE("cancellation returns Cancelled and an empty result (spec: atomic)") {
     REQUIRE(result.mesh.faceCount() == 0);  // nothing committed
 }
 
+TEST_CASE("pipeline rejects an input topology budget before copying the mesh") {
+    const Mesh sphere = makeSphere(12, 18);
+    remesh::ResourceLimits limits;
+    limits.maxInputFaces = sphere.faceCount() - 1;
+
+    const auto result = remesh::remesh(sphere, smallRun(400), nullptr, nullptr, {}, {}, nullptr,
+                                       &limits);
+    CHECK(result.status == remesh::RunStatus::Error);
+    CHECK(result.error.find("resource limit at input: faces requested") != std::string::npos);
+    CHECK(result.mesh.faceCount() == 0);
+    CHECK(sphere.faceCount() > limits.maxInputFaces);  // the caller input was not edited
+}
+
+TEST_CASE("pipeline refuses pure-quad subdivision before exceeding output budget") {
+    const Mesh sphere = makeSphere(10, 14);
+    remesh::Parameters params = smallRun(300);
+    params.pureQuads = true;
+    remesh::ResourceLimits limits;
+    limits.maxOutputFaces = 20;
+
+    const auto result = remesh::remesh(sphere, params, nullptr, nullptr, {}, {}, nullptr, &limits);
+    CHECK(result.status == remesh::RunStatus::Error);
+    CHECK(result.error.find("resource limit at subdivision") != std::string::npos);
+    CHECK(sphere.faceCount() > 0);
+}
+
 TEST_CASE("cancel token poll is observed by isCancelled (mid-solve cancellation)") {
     // A long report-less stage (e.g. the native seamless-UV solve) polls the token but
     // never triggers the progress-report path that the C-API flips the flag on. The poll

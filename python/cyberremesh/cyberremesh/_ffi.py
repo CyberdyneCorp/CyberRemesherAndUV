@@ -170,6 +170,19 @@ class CyberAttributeInfo(Structure):
                 ("value_count", c_size_t)]
 
 
+class CyberRemeshLimits(Structure):
+    """Mirror of the additive per-call ``CyberRemeshLimits`` ABI struct."""
+
+    _fields_ = [
+        ("max_input_vertices", c_uint64),
+        ("max_input_faces", c_uint64),
+        ("max_intermediate_vertices", c_uint64),
+        ("max_intermediate_faces", c_uint64),
+        ("max_output_vertices", c_uint64),
+        ("max_output_faces", c_uint64),
+    ]
+
+
 class CyberFlowGuide(Structure):
     """Mirror of ``CyberFlowGuide`` — one polyline flow guide."""
 
@@ -1091,6 +1104,13 @@ def _declare(lib: ctypes.CDLL) -> None:
         CANCEL_CB, c_void_p, POINTER(c_void_p), POINTER(CyberTargetCountReport),
     ]
     lib.cyber_remesh_with_count_report.restype = c_int32
+    lib.cyber_default_remesh_limits.argtypes = [POINTER(CyberRemeshLimits)]
+    lib.cyber_default_remesh_limits.restype = None
+    lib.cyber_remesh_with_limits.argtypes = [
+        c_void_p, POINTER(CyberRemeshParams), POINTER(CyberRemeshLimits),
+        PROGRESS_CB, CANCEL_CB, c_void_p, POINTER(c_void_p),
+    ]
+    lib.cyber_remesh_with_limits.restype = c_int32
 
     # CyberStatus cyber_remesh_guided(const CyberMesh* in, const CyberRemeshParams*,
     #                                 const CyberGuidance*, CyberProgressCb,
