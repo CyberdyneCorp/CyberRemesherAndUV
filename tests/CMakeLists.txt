@@ -282,6 +282,16 @@ if(Python3_FOUND)
 endif()
 
 if(CYBER_BUILD_CLI AND Python3_FOUND)
+    # The metric unit test and the acceptance corpus import numpy/scipy. Keep
+    # them visible and mandatory in the hardening bench lane, which installs
+    # those dependencies, but do not make unrelated platform lanes red merely
+    # because their minimal Python image intentionally omits the harness.
+    execute_process(
+        COMMAND ${Python3_EXECUTABLE} -c "import numpy; import scipy"
+        RESULT_VARIABLE _cyber_bench_dependencies_result
+        OUTPUT_QUIET
+        ERROR_QUIET)
+    if(_cyber_bench_dependencies_result EQUAL 0)
     add_test(NAME bench_metrics
         COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/bench/test_mesh_metrics.py)
     set_tests_properties(bench_metrics PROPERTIES TIMEOUT 60)
@@ -294,6 +304,9 @@ if(CYBER_BUILD_CLI AND Python3_FOUND)
                     --cache-dir ${PROJECT_BINARY_DIR}/acceptance-cache
                     --results ${PROJECT_BINARY_DIR}/acceptance-results.json)
         set_tests_properties(acceptance_corpus PROPERTIES TIMEOUT 900)
+    endif()
+    else()
+        message(STATUS "bench metric and acceptance tests skipped: numpy/scipy unavailable")
     endif()
 
     add_test(NAME cli
