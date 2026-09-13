@@ -37,7 +37,8 @@ first.
       boundary. The in-progress detector also measures reflected triangle
       samples against the source BVH and reports reflected-normal, component,
       and declared `group_id` / `material_id` correspondence; those
-      measurements are not yet corpus-calibrated.
+      measurements are calibrated and recorded in
+      `docs/symmetry-detection-calibration.md`.
       Gate: the corpus's symmetric models report their plane; the asymmetric
       ones report none, and nothing about the output changes.
 - [ ] M6. Only once M5's threshold is calibrated on the corpus, allow detection
