@@ -72,6 +72,15 @@ TEST_CASE("partial retopology replaces only the selected region") {
     }
     CHECK(result.mesh.position({6}) == borderPosition);
     CHECK(result.mesh.validate().empty());
+    REQUIRE(result.correspondences.size() == 4);
+    for (const remesh::SourceCorrespondence& correspondence : result.correspondences) {
+        CHECK(correspondence.sourceFace == FaceId{5});
+        CHECK(correspondence.distance == doctest::Approx(0.0f));
+        CHECK(correspondence.confidence == doctest::Approx(1.0f));
+        CHECK(correspondence.barycentric.x + correspondence.barycentric.y +
+                  correspondence.barycentric.z ==
+              doctest::Approx(1.0f));
+    }
     for (std::size_t face = 0; face < result.mesh.faceCapacity(); ++face) {
         if (result.mesh.isAlive(FaceId{static_cast<Index>(face)})) {
             CHECK(result.mesh.faceSize(FaceId{static_cast<Index>(face)}) == 4);

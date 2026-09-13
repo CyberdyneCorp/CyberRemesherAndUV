@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <string>
 #include <vector>
 
@@ -26,6 +27,18 @@ struct PartialRetopologyAnalysis {
     std::string reason;
 };
 
+// Maps a generated vertex to one source triangle. The source triangle is
+// explicit because source faces may be n-gons and therefore do not have one
+// unambiguous face-wide barycentric coordinate system.
+struct SourceCorrespondence {
+    VertexId outputVertex;
+    FaceId sourceFace;
+    std::array<VertexId, 3> sourceTriangle;
+    Vec3 barycentric;
+    float distance = 0.0f;
+    float confidence = 0.0f;
+};
+
 // A region replacement is transactional: on rejection `mesh` is an unchanged
 // copy of `source`; on success it shares every exterior element id and
 // position with `source`.
@@ -33,6 +46,7 @@ struct PartialRetopologyResult {
     PartialRetopologyStatus status = PartialRetopologyStatus::Rejected;
     Mesh mesh;
     PartialRetopologyAnalysis analysis;
+    std::vector<SourceCorrespondence> correspondences;
     std::string reason;
 };
 
