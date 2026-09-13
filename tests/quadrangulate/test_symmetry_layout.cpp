@@ -227,6 +227,10 @@ TEST_CASE("symmetry detection is advisory, conservative, and translation invaria
         }
     }
     const auto report = detectSymmetry(mesh);
+    CAPTURE(static_cast<int>(report.axis));
+    CAPTURE(report.confidence);
+    CAPTURE(report.unmatchedVertices);
+    CAPTURE(report.ambiguous);
     CHECK(report.detected);
     CHECK(report.axis == SymmetryAxis::X);
     CHECK(report.confidence == doctest::Approx(1.0f));
@@ -240,8 +244,14 @@ TEST_CASE("symmetry detection is advisory, conservative, and translation invaria
 
 TEST_CASE("symmetry detection rejects a deliberate asymmetric accessory") {
     Mesh mesh = centredGrid(3);
-    mesh.setPosition(VertexId{0}, mesh.position(VertexId{0}) + Vec3{0.2f, 0.0f, 0.0f});
+    // A one-sided, off-plane accessory defeats X/Y/Z hypotheses. A flat mesh
+    // alone would always (correctly) be symmetric through its own plane.
+    mesh.setPosition(VertexId{0}, mesh.position(VertexId{0}) + Vec3{0.2f, 0.0f, 0.3f});
     const auto report = detectSymmetry(mesh);
+    CAPTURE(static_cast<int>(report.axis));
+    CAPTURE(report.confidence);
+    CAPTURE(report.unmatchedVertices);
+    CAPTURE(report.ambiguous);
     CHECK_FALSE(report.detected);
     CHECK(report.unmatchedVertices > 0);
 }
