@@ -45,6 +45,13 @@ public struct MeshAttribute {
     }
 }
 
+/// Observable result of exact-border partial retopology.
+public struct PartialRetopologyReport: Equatable {
+    public let boundaryVertexCount: Int
+    public let generatedVertexCount: Int
+    public let untransferredAttributeCount: Int
+}
+
 /// A triangle or quad-dominant mesh owned by the engine.
 ///
 /// Construct from indexed geometry with ``init(positions:indices:)``, or read a
@@ -153,6 +160,25 @@ public final class Mesh {
     /// `n - 2`, so a pure-quad mesh reports `2 * faceCount`).
     public var triangleCount: Int {
         Int(cyber_mesh_triangle_count(handle))
+    }
+
+    /// Replaces one supported interior region while preserving the exterior.
+    ///
+    /// The current exact solver accepts a simple, manifold four-edge interior
+    /// boundary. Unsupported selections throw `CyberError` and leave the mesh
+    /// untouched. Non-vertex attribute domains are counted in the report so a
+    /// host can apply its own UV/material transfer policy explicitly.
+    public func partialRetopologize(faces: [UInt32]) throws -> PartialRetopologyReport {
+        var report = CyberPartialRetopologyReport()
+        let status = faces.withUnsafeBufferPointer {
+            cyber_retopo_partial_remesh(handle, $0.baseAddress, $0.count, &report)
+        }
+        try CyberError.check(status)
+        return PartialRetopologyReport(
+            boundaryVertexCount: Int(report.boundary_vertex_count),
+            generatedVertexCount: Int(report.generated_vertex_count),
+            untransferredAttributeCount: Int(report.untransferred_attribute_count)
+        )
     }
 
     /// Copies vertex positions out as a flat `x,y,z` buffer, in the engine's
