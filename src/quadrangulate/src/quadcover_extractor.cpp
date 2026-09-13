@@ -3591,6 +3591,7 @@ public:
 
     Outcome quadrangulate(Mesh& mesh, float targetEdgeLength, ProgressSink* progress,
                           const CancelToken* cancel) override {
+        m_count = {};
         if (m_bestOfTwo) {
             return quadrangulateBestOfTwo(mesh, targetEdgeLength, progress, cancel);
         }
@@ -3711,6 +3712,11 @@ public:
         // another and still ships the worse answer whenever the band is missed.
         IsolineQuadMesh best;
         double bestQuads = 0.0;
+        std::size_t selectedAttempt = 0;
+        std::size_t attempts = 0;
+        CountTermination countTermination = targetQuads > 0.0
+                                                ? CountTermination::AttemptBudgetExhausted
+                                                : CountTermination::NoTarget;
         float scaling = 0.5f;
         // The native solve's isotropic remesh + cross field + cut setup depend only on the
         // mesh / edge length / adaptivity / feature threshold — never on `scaling` — so the
@@ -3781,7 +3787,10 @@ public:
                 }
             }
         }
-        for (int attempt = 0; attempt < 2; ++attempt) {
+        const std::size_t maxAttempts =
+            m_countPolicy ? m_countPolicy->maxAttempts : static_cast<std::size_t>(2);
+        for (std::size_t attempt = 0; attempt < maxAttempts; ++attempt) {
+            ++attempts;
             const SeamlessUv uv = computeSeamlessUv(mesh, targetEdgeLength, scaling, m_adaptivity,
                                                     cancel, m_featureDegrees, &nativeCtx);
             if (!uv.valid) {
@@ -3823,17 +3832,22 @@ public:
             out = extractIsolineQuads(mesh, uv, m_holeFillMaxBoundary);
             const double got = static_cast<double>(out.quads.size());
             if (std::getenv("CYBER_QC_DEBUG") != nullptr) {
-                std::fprintf(stderr,
-                             "[qc] calibrate attempt=%d scaling=%.4f got=%.0f target=%.1f\n",
-                             attempt, static_cast<double>(scaling), got, targetQuads);
+                std::fprintf(
+                    stderr, "[qc] calibrate attempt=%d scaling=%.4f got=%.0f target=%.1f\n",
+                    static_cast<int>(attempt), static_cast<double>(scaling), got, targetQuads);
             }
             // Move (not copy) — `out` is reassigned at the top of every later
             // iteration, and restored from `best` below before anything reads it.
             if (countAttemptIsCloser(got, bestQuads, targetQuads)) {
                 best = std::move(out);
                 bestQuads = got;
+                selectedAttempt = attempt;
             }
             if (std::getenv("CYBER_QC_SCALING") != nullptr || targetQuads <= 0.0 || got <= 0.0) {
+                countTermination = std::getenv("CYBER_QC_SCALING") != nullptr
+                                       ? CountTermination::FixedScaling
+                                       : (targetQuads <= 0.0 ? CountTermination::NoTarget
+                                                             : CountTermination::NoExtractedFaces);
                 break;  // fixed scaling (experiment) or nothing to calibrate against
             }
             const double ratio = got / targetQuads;
@@ -3843,10 +3857,17 @@ public:
             // cylinder base leaves its rims 8 segments wide — recall-fatal), so accept
             // only within 12% there. Larger solves keep the historical band unchanged.
             const bool small = targetQuads < 200.0;
-            if (ratio > (small ? 0.88 : 0.75) && ratio < (small ? 1.14 : 1.33)) {
+            const bool accepted =
+                m_countPolicy ? std::abs(ratio - 1.0) <= m_countPolicy->relativeTolerance
+                              : ratio > (small ? 0.88 : 0.75) && ratio < (small ? 1.14 : 1.33);
+            if (accepted) {
+                countTermination = CountTermination::WithinAcceptanceBand;
                 break;  // within band -> accept
             }
             scaling = std::clamp(scaling * static_cast<float>(std::sqrt(ratio)), 0.2f, 1.5f);
+        }
+        if (m_countPolicy && countTermination == CountTermination::AttemptBudgetExhausted) {
+            countTermination = CountTermination::ToleranceNotMet;
         }
         // Ship the best attempt. `bestQuads` is 0 only when no attempt extracted
         // anything (or there was no target to calibrate against, the fixed-scaling
@@ -3855,6 +3876,15 @@ public:
         if (bestQuads > 0.0) {
             out = std::move(best);
         }
+        // Publish calibration before the post-extraction validity gates. A
+        // declined island still needs to explain how far the bounded search
+        // got; callers must not infer "not calibrated" from a valid candidate
+        // that was later rejected for coverage or topology.
+        m_count = {.targetQuads = targetQuads,
+                   .selectedQuads = bestQuads,
+                   .attempts = attempts,
+                   .selectedAttempt = selectedAttempt,
+                   .termination = countTermination};
         reportUnhonoredGuidance();
         if (progress != nullptr) {
             progress->report(0.5f, "quadrangulate (quad-cover: isoline extract)");
@@ -3971,6 +4001,12 @@ public:
         return m_unhonored;
     }
 
+    [[nodiscard]] CountCalibration countCalibration() const override { return m_count; }
+
+    void setCountPolicy(const CountPolicy* policy) override {
+        m_countPolicy = policy == nullptr ? std::nullopt : std::optional<CountPolicy>(*policy);
+    }
+
     [[nodiscard]] std::string name() const override { return m_name; }
 
 private:
@@ -3993,6 +4029,8 @@ private:
     bool m_bestOfTwo = false;
     ZRemesherRunReport* m_report = nullptr;
     CrossFieldSource m_fieldSource = CrossFieldSource::Auto;
+    CountCalibration m_count;
+    std::optional<CountPolicy> m_countPolicy;
     const GuidanceField* m_guidance = nullptr;
     std::vector<std::string> m_unhonored;
 };

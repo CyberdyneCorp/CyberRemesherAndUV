@@ -61,6 +61,23 @@ remesh::Parameters smallRun(int quads) {
     return params;
 }
 
+class CalibrationQuadrangulator final : public remesh::IQuadrangulator {
+public:
+    Outcome quadrangulate(Mesh&, float, ProgressSink*, const CancelToken*) override {
+        return {.success = true, .cancelled = false, .failureReason = {}};
+    }
+
+    [[nodiscard]] remesh::CountCalibration countCalibration() const override {
+        return {.targetQuads = 123.0,
+                .selectedQuads = 117.0,
+                .attempts = 2,
+                .selectedAttempt = 1,
+                .termination = remesh::CountTermination::AttemptBudgetExhausted};
+    }
+
+    [[nodiscard]] std::string name() const override { return "calibration-test"; }
+};
+
 // Capped cylinder with triangle-fan caps: sharp 90-degree rims (exactly on
 // the default feature threshold) plus a high-valence fan center whose
 // neighbors all sit on the rim — the geometry that exposed the adaptivity
@@ -112,6 +129,46 @@ TEST_CASE("pipeline remeshes a sphere into a quad-dominant mesh") {
     const std::size_t total = result.stats.quadCount + result.stats.triangleCount;
     REQUIRE(total > 200);
     REQUIRE(total < 800);
+
+    // Every run exposes the request, its effective base, and one accounting
+    // row per input island even when a non-calibrating backend is selected.
+    REQUIRE(result.targetCount.requestedQuads == 400);
+    REQUIRE(result.targetCount.effectiveBaseQuads == 400);
+    REQUIRE_FALSE(result.targetCount.pureQuads);
+    REQUIRE(result.targetCount.finalFaces == result.mesh.faceCount());
+    REQUIRE(result.targetCount.islands.size() == 1);
+    const auto& count = result.targetCount.islands.front();
+    REQUIRE(count.islandIndex == 0);
+    REQUIRE(count.requestedQuads == doctest::Approx(400.0));
+    REQUIRE(count.effectiveBaseQuads == doctest::Approx(400.0));
+    REQUIRE(count.finalFaces > 0);
+    REQUIRE(count.termination == remesh::CountTermination::NotCalibrated);
+}
+
+TEST_CASE("pipeline preserves quadrangulator target-count calibration per island") {
+    const Mesh sphere = makeSphere(8, 12);
+    const auto result = remesh::remesh(sphere, smallRun(400), nullptr, nullptr, []() {
+        return std::make_unique<CalibrationQuadrangulator>();
+    });
+
+    REQUIRE(result.status == remesh::RunStatus::Success);
+    REQUIRE(result.targetCount.islands.size() == 1);
+    const auto& count = result.targetCount.islands.front();
+    CHECK(count.calibratedQuads == doctest::Approx(117.0));
+    CHECK(count.attempts == 2);
+    CHECK(count.selectedAttempt == 1);
+    CHECK(count.termination == remesh::CountTermination::AttemptBudgetExhausted);
+}
+
+TEST_CASE("pipeline rejects an invalid opt-in target-count policy before remeshing") {
+    remesh::CountPolicy policy;
+    policy.relativeTolerance = -0.1;
+    policy.maxAttempts = 2;
+
+    const auto result = remesh::remesh(makeSphere(8, 12), smallRun(400), nullptr, nullptr, {}, {},
+                                       nullptr, &policy);
+    REQUIRE(result.status == remesh::RunStatus::Error);
+    CHECK(result.error == "invalid target-count policy");
 }
 
 TEST_CASE("adaptive refinement does not compound across iterations (runaway regression)") {
@@ -224,6 +281,10 @@ TEST_CASE("pure quads option yields zero non-quads (spec: pure-quad post-pass)")
     REQUIRE(result.stats.otherPolygonCount == 0);
     REQUIRE(result.stats.quadCount > 0);
     REQUIRE(result.mesh.validate().empty());
+    REQUIRE(result.targetCount.pureQuads);
+    REQUIRE(result.targetCount.requestedQuads == 400);
+    REQUIRE(result.targetCount.effectiveBaseQuads >= 100);
+    REQUIRE(result.targetCount.finalFaces == result.mesh.faceCount());
 }
 
 TEST_CASE("parameter clamp warnings surface in the result (spec)") {

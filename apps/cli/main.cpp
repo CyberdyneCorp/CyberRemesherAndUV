@@ -630,6 +630,26 @@ const char* statusName(remesh::RunStatus status) {
     return "unknown";
 }
 
+const char* countTerminationName(remesh::CountTermination termination) {
+    switch (termination) {
+        case remesh::CountTermination::NotCalibrated:
+            return "not-calibrated";
+        case remesh::CountTermination::WithinAcceptanceBand:
+            return "within-acceptance-band";
+        case remesh::CountTermination::FixedScaling:
+            return "fixed-scaling";
+        case remesh::CountTermination::NoTarget:
+            return "no-target";
+        case remesh::CountTermination::NoExtractedFaces:
+            return "no-extracted-faces";
+        case remesh::CountTermination::AttemptBudgetExhausted:
+            return "attempt-budget-exhausted";
+        case remesh::CountTermination::ToleranceNotMet:
+            return "tolerance-not-met";
+    }
+    return "unknown";
+}
+
 // ---- guidance sidecar (--guides) ---------------------------------------
 //
 // {"version": 1,
@@ -871,6 +891,24 @@ int writeReport(const CliOptions& options, const remesh::PipelineResult& result,
         {"islandsFailed", result.stats.islandsFailed},
         {"targetEdgeLength", result.stats.targetEdgeLength},
     };
+    report["targetCount"] = {
+        {"requestedQuads", result.targetCount.requestedQuads},
+        {"effectiveBaseQuads", result.targetCount.effectiveBaseQuads},
+        {"finalFaces", result.targetCount.finalFaces},
+        {"pureQuads", result.targetCount.pureQuads},
+        {"islands", nlohmann::json::array()},
+    };
+    for (const auto& island : result.targetCount.islands) {
+        report["targetCount"]["islands"].push_back(
+            {{"island", island.islandIndex},
+             {"requestedQuads", island.requestedQuads},
+             {"effectiveBaseQuads", island.effectiveBaseQuads},
+             {"calibratedQuads", island.calibratedQuads},
+             {"finalFaces", island.finalFaces},
+             {"attempts", island.attempts},
+             {"selectedAttempt", island.selectedAttempt},
+             {"termination", countTerminationName(island.termination)}});
+    }
     report["warnings"] = nlohmann::json::array();
     for (const auto& issue : result.parameterIssues) {
         report["warnings"].push_back(issue.message);
