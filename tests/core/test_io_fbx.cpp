@@ -81,6 +81,21 @@ TEST_CASE("FBX import triangulates when the caller asks for it") {
     CHECK(countFacesWithArity(mesh, 4) == 0);
 }
 
+TEST_CASE("FBX scene topology is checked before output mesh construction") {
+    io::ImportOptions options;
+    options.maxVertices = 7;
+    const auto vertices = io::importMesh(fixture("cube_quads.fbx"), options);
+    REQUIRE(!vertices.ok());
+    CHECK(vertices.error().code == io::ErrorCode::ResourceLimit);
+
+    options = {};
+    options.polygons = io::PolygonPolicy::Triangulate;
+    options.maxFaces = 11;
+    const auto faces = io::importMesh(fixture("cube_quads.fbx"), options);
+    REQUIRE(!faces.ok());
+    CHECK(faces.error().code == io::ErrorCode::ResourceLimit);
+}
+
 TEST_CASE("FBX import normalizes axis and unit conventions") {
     // The same physical 2 m cube described three ways: Y-up, Z-up, and authored
     // in a centimetre scene (200 units across). All three must land on the same

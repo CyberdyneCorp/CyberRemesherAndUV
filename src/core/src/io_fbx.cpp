@@ -4,6 +4,8 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -202,6 +204,47 @@ void createAttributeColumns(ImportedMesh& out, const ufbx_scene& scene) {
     }
 }
 
+std::optional<Error> preflightSceneTopology(const ufbx_scene& scene,
+                                            const ImportOptions& options,
+                                            const std::filesystem::path& path) {
+    if (options.maxVertices == 0 && options.maxFaces == 0) {
+        return std::nullopt;
+    }
+    std::size_t vertices = 0;
+    std::size_t faces = 0;
+    const auto add = [](std::size_t& total, std::size_t value, std::size_t limit) {
+        if (value > std::numeric_limits<std::size_t>::max() - total) {
+            return true;
+        }
+        total += value;
+        return limit > 0 && total > limit;
+    };
+    for (std::size_t i = 0; i < scene.meshes.count; ++i) {
+        const ufbx_mesh& mesh = *scene.meshes.data[i];
+        const std::size_t instances = std::max<std::size_t>(1, mesh.instances.count);
+        for (std::size_t instance = 0; instance < instances; ++instance) {
+            if (add(vertices, mesh.num_vertices, options.maxVertices)) {
+                return Error{ErrorCode::ResourceLimit,
+                             "FBX scene '" + path.string() + "' exceeds this host's vertex "
+                             "ceiling of " + std::to_string(options.maxVertices)};
+            }
+            for (std::size_t fi = 0; fi < mesh.num_faces; ++fi) {
+                const ufbx_face face = mesh.faces.data[fi];
+                const std::size_t emitted =
+                    options.polygons == PolygonPolicy::Triangulate && face.num_indices > 3
+                        ? static_cast<std::size_t>(face.num_indices - 2)
+                        : (face.num_indices >= 3 ? 1 : 0);
+                if (add(faces, emitted, options.maxFaces)) {
+                    return Error{ErrorCode::ResourceLimit,
+                                 "FBX scene '" + path.string() + "' exceeds this host's face "
+                                 "ceiling of " + std::to_string(options.maxFaces)};
+                }
+            }
+        }
+    }
+    return std::nullopt;
+}
+
 }  // namespace
 
 Result<ImportedMesh> importFbx(const std::filesystem::path& path, const ImportOptions& options) {
@@ -213,6 +256,9 @@ Result<ImportedMesh> importFbx(const std::filesystem::path& path, const ImportOp
                      "failed to parse '" + path.string() + "': " + formatError(error)};
     }
     const ufbx_scene& scene = *handle.get();
+    if (const std::optional<Error> limit = preflightSceneTopology(scene, options, path)) {
+        return *limit;
+    }
 
     ImportedMesh out;
     createAttributeColumns(out, scene);
