@@ -65,12 +65,11 @@ struct SymmetryDetectionReport {
 };
 
 // Analyse X/Y/Z midplanes plus unambiguous PCA hypotheses and return the
-// strongest geometric symmetry hypothesis. Vertex partners are found by nearest-within-tolerance lookup,
-// never exact or quantized-key equality. Face-centroid samples are reflected
-// and queried against the input surface, and their reflected normals are
-// compared with the hit face normals. The tolerance scales with the model's
-// bounding-box diagonal and is capped by the mean edge length, which keeps a
-// sparse model from accepting a visibly asymmetric displacement.
+// strongest geometric symmetry hypothesis. Vertex partners are found by nearest-within-tolerance
+// lookup, never exact or quantized-key equality. Face-centroid samples are reflected and queried
+// against the input surface, and their reflected normals are compared with the hit face normals.
+// The tolerance scales with the model's bounding-box diagonal and is capped by the mean edge
+// length, which keeps a sparse model from accepting a visibly asymmetric displacement.
 [[nodiscard]] SymmetryDetectionReport detectSymmetry(const Mesh& mesh);
 
 // The plane for an axis through the mesh's bounding-box centre. Returns a plane

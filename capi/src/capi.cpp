@@ -1257,14 +1257,15 @@ static CyberStatus remeshZremesherShared(
                 cyber::remesh::detectSymmetry(in->mesh);
             const bool componentsAgree =
                 detected.componentConsistentSurfacePoints == detected.matchedSurfacePoints;
-            const bool semanticsAgree = detected.sampledSemanticSurfacePoints == 0 ||
-                                        detected.semanticConsistentSurfacePoints ==
-                                            detected.sampledSemanticSurfacePoints;
+            const bool semanticsAgree =
+                detected.sampledSemanticSurfacePoints == 0 ||
+                detected.semanticConsistentSurfacePoints == detected.sampledSemanticSurfacePoints;
             if (!detected.detected || detected.ambiguous ||
                 detected.axis == cyber::remesh::SymmetryAxis::None || !componentsAgree ||
                 !semanticsAgree) {
-                setError("cyber_remesh_zremesher: automatic symmetry requires a confident, "
-                         "unambiguous axis-aligned detection with matching components and semantics");
+                setError(
+                    "cyber_remesh_zremesher: automatic symmetry requires a confident, "
+                    "unambiguous axis-aligned detection with matching components and semantics");
                 return CYBER_ERR_INVALID_PARAM;
             }
             axis = detected.axis;
@@ -1445,8 +1446,8 @@ CyberStatus cyber_detect_symmetry_evidence(const CyberMesh* mesh,
     }
 }
 
-CyberStatus cyber_detect_symmetry_correspondence(
-    const CyberMesh* mesh, CyberSymmetryCorrespondenceEvidence* report) {
+CyberStatus cyber_detect_symmetry_correspondence(const CyberMesh* mesh,
+                                                 CyberSymmetryCorrespondenceEvidence* report) {
     if (mesh == nullptr || report == nullptr) {
         setError("cyber_detect_symmetry_correspondence: null argument");
         return CYBER_ERR_INVALID_ARG;

@@ -1,7 +1,5 @@
 #include "cyber/quadrangulate/symmetry_layout.hpp"
 
-#include "cyber/core/bvh.hpp"
-
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -10,6 +8,8 @@
 #include <set>
 #include <unordered_map>
 #include <vector>
+
+#include "cyber/core/bvh.hpp"
 
 namespace cyber::remesh {
 namespace {
@@ -184,7 +184,8 @@ void scoreSurface(const Mesh& mesh, const Plane& plane, float tolerance,
             }
             const std::size_t sourceComponent = componentByFace[face.value];
             const std::size_t targetComponent = componentByFace[hit.face.value];
-            const auto [mapping, inserted] = reflectedComponents.emplace(sourceComponent, targetComponent);
+            const auto [mapping, inserted] =
+                reflectedComponents.emplace(sourceComponent, targetComponent);
             if (inserted) {
                 if (!claimedComponents.insert(targetComponent).second) {
                     mapping->second = kInvalidIndex;
@@ -195,9 +196,11 @@ void scoreSurface(const Mesh& mesh, const Plane& plane, float tolerance,
             }
             if (groups != nullptr || materials != nullptr) {
                 ++report.sampledSemanticSurfacePoints;
-                const bool groupMatches = groups == nullptr || (*groups)[face.value] == (*groups)[hit.face.value];
+                const bool groupMatches =
+                    groups == nullptr || (*groups)[face.value] == (*groups)[hit.face.value];
                 const bool materialMatches =
-                    materials == nullptr || (*materials)[face.value] == (*materials)[hit.face.value];
+                    materials == nullptr ||
+                    (*materials)[face.value] == (*materials)[hit.face.value];
                 if (groupMatches && materialMatches) {
                     ++report.semanticConsistentSurfacePoints;
                 }
@@ -244,9 +247,8 @@ SymmetryDetectionReport scorePlane(const Mesh& mesh, const Plane& plane, Symmetr
                                       ? 0.0f
                                       : static_cast<float>(report.matchedSurfacePoints) /
                                             static_cast<float>(report.sampledSurfacePoints);
-    const float surfaceAccuracy = tolerance == 0.0f
-                                      ? 0.0f
-                                      : 1.0f - report.meanSurfaceError / tolerance;
+    const float surfaceAccuracy =
+        tolerance == 0.0f ? 0.0f : 1.0f - report.meanSurfaceError / tolerance;
     // Surface agreement decides the advisory result. Vertex correspondence is
     // retained as diagnostics, but making it a gate would reject the common
     // case where two geometric halves use different tessellation densities.
@@ -357,12 +359,13 @@ SymmetryDetectionReport detectSymmetry(const Mesh& mesh) {
                               symmetryPlane(mesh, SymmetryAxis::Z)};
     std::vector<SymmetryAxis> axes{SymmetryAxis::X, SymmetryAxis::Y, SymmetryAxis::Z};
     const PrincipalAxes pca = principalAxes(mesh, bounds);
-    const float magnitude = std::max({std::abs(pca.values[0]), std::abs(pca.values[1]),
-                                      std::abs(pca.values[2]), 1e-8f});
+    const float magnitude = std::max(
+        {std::abs(pca.values[0]), std::abs(pca.values[1]), std::abs(pca.values[2]), 1e-8f});
     for (std::size_t i = 0; i < 3; ++i) {
         bool unique = true;
         for (std::size_t j = 0; j < 3; ++j) {
-            unique = unique && (i == j || std::abs(pca.values[i] - pca.values[j]) > magnitude * 1e-4f);
+            unique =
+                unique && (i == j || std::abs(pca.values[i] - pca.values[j]) > magnitude * 1e-4f);
         }
         const Plane candidate{centroidOf(mesh, bounds), pca.vectors[i]};
         if (unique && !duplicatesPlane(planes, candidate)) {
