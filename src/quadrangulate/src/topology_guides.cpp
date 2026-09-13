@@ -164,15 +164,17 @@ std::vector<SemanticBoundaryRequest> collectAttributeBoundaries(
         SemanticBoundaryRequest request;
         request.id = name + ":" + std::to_string(component.front().value);
         request.sourceEdges = component.size();
-        const auto endpoint = std::find_if(incident.begin(), incident.end(),
-                                           [](const auto& item) { return item.second.size() == 1; });
+        const auto endpoint = std::find_if(incident.begin(), incident.end(), [](const auto& item) {
+            return item.second.size() == 1;
+        });
         const bool open = endpoint != incident.end();
-        const bool degreesValid = std::all_of(
-            incident.begin(), incident.end(), [open](const auto& item) {
+        const bool degreesValid =
+            std::all_of(incident.begin(), incident.end(), [open](const auto& item) {
                 return item.second.size() == 2 || (open && item.second.size() == 1);
             });
-        const std::size_t endpoints = static_cast<std::size_t>(std::count_if(
-            incident.begin(), incident.end(), [](const auto& item) { return item.second.size() == 1; }));
+        const std::size_t endpoints = static_cast<std::size_t>(
+            std::count_if(incident.begin(), incident.end(),
+                          [](const auto& item) { return item.second.size() == 1; }));
         if (!degreesValid || (open && endpoints != 2)) {
             request.rejectionReason = "semantic boundary component branches";
             out.push_back(std::move(request));
@@ -232,8 +234,8 @@ bool edgeAlignedToGuide(const Mesh& mesh, EdgeId edge, const FlowGuide& guide, f
         const Vec3 second = guide.points[(i + 1) % guide.points.size()];
         const Vec3 segment = second - first;
         const float len2 = dot(segment, segment);
-        const float t = len2 > 1e-20f ? std::clamp(dot(midpoint - first, segment) / len2, 0.0f, 1.0f)
-                                      : 0.0f;
+        const float t =
+            len2 > 1e-20f ? std::clamp(dot(midpoint - first, segment) / len2, 0.0f, 1.0f) : 0.0f;
         if (length(midpoint - (first + segment * t)) <= tolerance &&
             std::abs(dot(direction, normalized(segment))) >= cosLimit) {
             return true;
@@ -451,8 +453,7 @@ std::vector<SemanticBoundaryRequest> collectSemanticBoundaryRequests(const Mesh&
 
 SemanticBoundaryAdherence measureSemanticBoundaryAdherence(const Mesh& output,
                                                            const SemanticBoundaryRequest& request,
-                                                           float tolerance,
-                                                           float maxAngleDegrees) {
+                                                           float tolerance, float maxAngleDegrees) {
     SemanticBoundaryAdherence out;
     out.id = request.id;
     out.sourceEdges = request.sourceEdges;

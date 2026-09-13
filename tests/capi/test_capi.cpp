@@ -237,6 +237,43 @@ TEST_CASE("capi bulk indexed exchange retains vertex face and corner attributes"
     cyber_mesh_free(mesh);
 }
 
+TEST_CASE("zremesher semantic-boundary report requires a complete caller buffer") {
+    const float positions[] = {0, 0, 0, 1, 0, 0, 0.5f, 0.866f, 0, 0.5f, 0.289f, 0.816f};
+    const size_t offsets[] = {0, 3, 6, 9, 12};
+    const uint32_t indices[] = {0, 2, 1, 0, 1, 3, 1, 2, 3, 2, 0, 3};
+    const int32_t groups[] = {1, 0, 0, 0};
+    const CyberAttributeColumn attributes[] = {
+        {"group_id", CYBER_ATTRIBUTE_FACE, CYBER_ATTRIBUTE_INT32, groups, 4},
+    };
+    const CyberIndexedMesh source{positions, 4, offsets, 4, indices, 12, attributes, 1};
+    CyberMesh* input = nullptr;
+    REQUIRE(cyber_mesh_from_indexed(&source, &input) == CYBER_OK);
+
+    CyberRemeshParams params{};
+    cyber_default_params(&params);
+    params.targetQuads = 16;
+    CyberSemanticBoundaryReport report{};
+    CyberMesh* output = reinterpret_cast<CyberMesh*>(0x1);
+    CHECK(cyber_remesh_zremesher_with_semantic_boundary_report(
+              input, &params, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, &output,
+              nullptr, &report) == CYBER_ERR_INVALID_ARG);
+    CHECK(output == nullptr);
+    CHECK(report.boundaryCount == 1u);
+
+    CyberSemanticBoundaryResult result{};
+    report.boundaries = &result;
+    report.boundaryCapacity = 1;
+    CHECK(cyber_remesh_zremesher_with_semantic_boundary_report(
+              input, &params, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, &output,
+              nullptr, &report) == CYBER_OK);
+    REQUIRE(output != nullptr);
+    CHECK(report.boundaryCount == 1u);
+    CHECK(std::string(result.id).find("group_id:") == 0);
+    CHECK(result.state != CYBER_SEMANTIC_REJECTED);
+    cyber_mesh_free(output);
+    cyber_mesh_free(input);
+}
+
 TEST_CASE("capi backend selection reports what it actually selected") {
     // The C ABI used to expose no backend selection at all: a host embedding
     // libcyber_capi could only steer the engine with the CYBER_BACKEND
