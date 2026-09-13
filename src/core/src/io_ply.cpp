@@ -9,6 +9,7 @@
 #include <optional>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "io_internal.hpp"
@@ -203,7 +204,8 @@ std::optional<std::string> plyHeaderExceedsFile(const std::filesystem::path& pat
     return std::nullopt;
 }
 
-std::optional<std::uintmax_t> declaredPlyVertexCount(const std::filesystem::path& path) {
+std::optional<std::uintmax_t> declaredPlyElementCount(const std::filesystem::path& path,
+                                                       std::string_view wanted) {
     std::ifstream file(path, std::ios::binary);
     if (!file) {
         return std::nullopt;
@@ -218,7 +220,7 @@ std::optional<std::uintmax_t> declaredPlyVertexCount(const std::filesystem::path
             std::string name;
             std::string count;
             words >> keyword >> name >> count;
-            if (name == "vertex") {
+            if (name == wanted) {
                 std::uintmax_t value = 0;
                 parseElementCount(count, value);
                 return value;
@@ -238,12 +240,21 @@ Result<ImportedMesh> importPly(const std::filesystem::path& path, const ImportOp
         return Error{ErrorCode::ParseError, "'" + path.string() + "' " + *refusal};
     }
     if (options.maxVertices > 0) {
-        const std::optional<std::uintmax_t> declared = declaredPlyVertexCount(path);
+        const std::optional<std::uintmax_t> declared = declaredPlyElementCount(path, "vertex");
         if (declared && *declared > options.maxVertices) {
             return Error{ErrorCode::ResourceLimit,
                          "'" + path.string() + "' declares " + std::to_string(*declared) +
                              " vertices, over this host's vertex ceiling of " +
                              std::to_string(options.maxVertices)};
+        }
+    }
+    if (options.maxFaces > 0) {
+        const std::optional<std::uintmax_t> declared = declaredPlyElementCount(path, "face");
+        if (declared && *declared > options.maxFaces) {
+            return Error{ErrorCode::ResourceLimit,
+                         "'" + path.string() + "' declares " + std::to_string(*declared) +
+                             " faces, over this host's face ceiling of " +
+                             std::to_string(options.maxFaces)};
         }
     }
     try {

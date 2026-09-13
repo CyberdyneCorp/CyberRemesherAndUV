@@ -138,6 +138,16 @@ TEST_CASE("PLY vertex ceiling rejects the header declaration before decoding") {
     CHECK(result.error().code == io::ErrorCode::ResourceLimit);
 }
 
+TEST_CASE("PLY face ceiling rejects the header declaration before decoding") {
+    const fs::path path = tempDir() / "over_face_budget.ply";
+    REQUIRE(io::exportMesh(makeCorpusCube(), path).ok());
+    io::ImportOptions options;
+    options.maxFaces = 1;
+    const auto result = io::importMesh(path, options);
+    REQUIRE(!result.ok());
+    CHECK(result.error().code == io::ErrorCode::ResourceLimit);
+}
+
 TEST_CASE("STL round-trip welds shared vertices back together") {
     const Mesh cube = makeCorpusCube();
     const fs::path path = tempDir() / "cube.stl";
