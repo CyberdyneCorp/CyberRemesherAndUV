@@ -3735,7 +3735,7 @@ public:
                 continue;
             }
             ++inputEdges;
-            inputBoundary += mesh.edgeFaceCount(e) == 1 ? 1 : 0;
+            inputBoundary += mesh.edgeFaceCount(e) == 1 ? std::size_t{1} : std::size_t{0};
         }
         const bool closedInput = inputEdges > 0 && static_cast<double>(inputBoundary) <
                                                        0.01 * static_cast<double>(inputEdges);
