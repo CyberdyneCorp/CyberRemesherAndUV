@@ -10,7 +10,8 @@ phone application's working topology budget.
 ## What changes
 
 - Add an opt-in `ResourceLimits` value to the C++ pipeline with independent
-  input, intermediate and output vertex/face ceilings.
+  input, intermediate and output vertex/face ceilings, plus scoped ceilings
+  for the native direct sparse factor and retained candidate meshes.
 - Check input limits before the pipeline's first full-mesh copy; thread the
   intermediate topology ceiling into the isotropic split pass; validate each
   island result and the final pure-quad subdivision before it becomes a
@@ -22,5 +23,6 @@ phone application's working topology budget.
 
 This change does not claim a process RSS limit or a general allocator hook:
 third-party sparse solvers and STL containers do not expose a single portable
-allocation-accounting interface. The limits here are hard topology ceilings;
-dependency allocation limits remain separately documented and audited.
+allocation-accounting interface. The limits here are hard topology ceilings
+and named, exact owned-storage ceilings; dependency allocation limits remain
+separately documented and audited.

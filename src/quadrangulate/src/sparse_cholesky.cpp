@@ -15,6 +15,24 @@ namespace {
 
 constexpr std::size_t kNone = std::numeric_limits<std::size_t>::max();
 
+bool factorStorageExceeds(std::size_t n, std::size_t lowerNnz, std::size_t limit) {
+    if (limit == 0) {
+        return false;
+    }
+    // order, rank, column starts and row indices are size_t; numeric values
+    // and the diagonal are doubles. This deliberately charges only durable
+    // factor storage, not temporary ordering/factorization work buffers.
+    if (n > (std::numeric_limits<std::size_t>::max() - 1) / (3 * sizeof(std::size_t) + sizeof(double))) {
+        return true;
+    }
+    const std::size_t base = n * (3 * sizeof(std::size_t) + sizeof(double)) + sizeof(std::size_t);
+    if (lowerNnz > (std::numeric_limits<std::size_t>::max() - base) /
+                       (sizeof(std::size_t) + sizeof(double))) {
+        return true;
+    }
+    return base + lowerNnz * (sizeof(std::size_t) + sizeof(double)) > limit;
+}
+
 // Reverse Cuthill-McKee ordering of the symmetric pattern (diagonal ignored).
 // Per connected component: pick a pseudo-peripheral start (repeated BFS toward
 // the farthest, lowest-degree node), then breadth-first visit with neighbors in
@@ -453,10 +471,19 @@ std::size_t symbolicFill(std::size_t n, const std::vector<std::size_t>& adjStart
 
 bool SparseCholesky::factor(std::size_t n, const std::vector<std::size_t>& rowStart,
                             const std::vector<std::size_t>& colIndex,
-                            const std::vector<double>& value, double ridge) {
+                            const std::vector<double>& value, double ridge,
+                            std::size_t maxFactorBytes) {
     m_ready = false;
     m_n = n;
+    m_status = FactorStatus::None;
     if (n == 0 || rowStart.size() != n + 1) {
+        m_status = FactorStatus::InvalidInput;
+        return false;
+    }
+    // The permanent factor has at least its diagonal/order bookkeeping even
+    // before symbolic fill is known. Reject before those owned allocations.
+    if (factorStorageExceeds(n, 0, maxFactorBytes)) {
+        m_status = FactorStatus::ResourceLimit;
         return false;
     }
 
@@ -597,6 +624,10 @@ bool SparseCholesky::factor(std::size_t n, const std::vector<std::size_t>& rowSt
     for (std::size_t k = 0; k < n; ++k) {
         m_colStart[k + 1] = m_colStart[k] + colCount[k];
     }
+    if (factorStorageExceeds(n, m_colStart[n], maxFactorBytes)) {
+        m_status = FactorStatus::ResourceLimit;
+        return false;
+    }
     m_rowIdx.assign(m_colStart[n], 0);
     m_val.assign(m_colStart[n], 0.0);
     m_diag.assign(n, 0.0);
@@ -628,11 +659,13 @@ bool SparseCholesky::factor(std::size_t n, const std::vector<std::size_t>& rowSt
             ++colNext[j];
         }
         if (!(d > 0.0)) {
+            m_status = FactorStatus::NotPositiveDefinite;
             return false;  // lost positivity — caller falls back to CG
         }
         m_diag[k] = std::sqrt(d);
     }
     m_ready = true;
+    m_status = FactorStatus::Success;
     return true;
 }
 

@@ -1032,8 +1032,9 @@ SeamlessUv computeSeamlessUvNative(const Mesh& mesh, float targetEdgeLength, flo
     const auto tSolve0 = tick();
     const Parameterization param =
         solveParameterization(work, setup, targetEdgeLength * spacingMul, *backend, cancel,
-                              &prep.solveCache, prep.guidance, &prep.layout);
+                              &prep.solveCache, prep.guidance, &prep.layout, &prep.solveLimits);
     if (!param.valid) {
+        prep.resourceLimitExceeded = param.resourceLimitExceeded;
         logNative(false, "parameterization invalid (or cancelled)");
         return uv;
     }
@@ -3598,6 +3599,9 @@ public:
         return quadrangulateOnce(mesh, targetEdgeLength, progress, cancel);
     }
 
+    void setMaxDirectFactorBytes(std::size_t bytes) override { m_maxDirectFactorBytes = bytes; }
+    void setMaxCandidateBytes(std::size_t bytes) override { m_maxCandidateBytes = bytes; }
+
     // Candidate selection (ZRemesher Phase G). The repo's own roadmap records
     // the open question this answers: no static "organic vs CAD" threshold can
     // pick the better field for every model — rocker-arm prefers one, spot and
@@ -3636,6 +3640,15 @@ public:
         for (const Candidate& candidate : kCandidates) {
             if (cancel != nullptr && cancel->isCancelled()) {
                 return {.success = false, .cancelled = true, .failureReason = {}};
+            }
+            const std::size_t trialBytes = mesh.ownedBufferBytes();
+            const std::size_t retainedBytes = best.ownedBufferBytes();
+            if (m_maxCandidateBytes != 0 &&
+                (trialBytes > m_maxCandidateBytes - std::min(retainedBytes, m_maxCandidateBytes))) {
+                return {.success = false,
+                        .cancelled = false,
+                        .resourceLimit = true,
+                        .failureReason = "candidate mesh storage ceiling reached"};
             }
             Mesh trial = mesh;
             m_fieldSource = candidate.field;
@@ -3724,6 +3737,7 @@ public:
         // context computes them once and each attempt re-runs only the (spacing-dependent)
         // parameterization + extraction.
         NativeSolveContext nativeCtx;
+        nativeCtx.solveLimits.maxDirectFactorBytes = m_maxDirectFactorBytes;
         nativeCtx.guidance = m_guidance;  // non-null forces the native route (see the header)
         nativeCtx.layout = m_layout;      // capture likewise forces native
         nativeCtx.fieldSource = m_fieldSource;
@@ -3833,6 +3847,12 @@ public:
                                                     cancel, m_featureDegrees, &nativeCtx);
             if (!uv.valid) {
                 reportUnhonoredGuidance();
+                if (nativeCtx.resourceLimitExceeded) {
+                    return {.success = false,
+                            .cancelled = false,
+                            .resourceLimit = true,
+                            .failureReason = "native direct sparse-factor ceiling reached"};
+                }
                 return {.success = false,
                         .cancelled = false,
                         .failureReason =
@@ -4041,6 +4061,8 @@ public:
     [[nodiscard]] std::string name() const override { return m_name; }
 
 private:
+    std::size_t m_maxDirectFactorBytes = 0;
+    std::size_t m_maxCandidateBytes = 0;
     static bool isClosed(const Mesh& mesh) {
         for (Index e = 0; e < mesh.edgeCapacity(); ++e) {
             const EdgeId edge{e};

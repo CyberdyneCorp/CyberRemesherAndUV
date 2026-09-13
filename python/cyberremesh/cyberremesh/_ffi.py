@@ -183,6 +183,10 @@ class CyberRemeshLimits(Structure):
     ]
 
 
+class CyberRemeshExecutionLimits(Structure):
+    _fields_ = [("max_direct_factor_bytes", c_uint64), ("max_candidate_bytes", c_uint64)]
+
+
 class CyberFlowGuide(Structure):
     """Mirror of ``CyberFlowGuide`` — one polyline flow guide."""
 
@@ -1115,6 +1119,13 @@ def _declare(lib: ctypes.CDLL) -> None:
         PROGRESS_CB, CANCEL_CB, c_void_p, POINTER(c_void_p),
     ]
     lib.cyber_remesh_with_limits.restype = c_int32
+    lib.cyber_default_remesh_execution_limits.argtypes = [POINTER(CyberRemeshExecutionLimits)]
+    lib.cyber_default_remesh_execution_limits.restype = None
+    lib.cyber_remesh_with_resource_limits.argtypes = [
+        c_void_p, POINTER(CyberRemeshParams), POINTER(CyberRemeshLimits),
+        POINTER(CyberRemeshExecutionLimits), PROGRESS_CB, CANCEL_CB, c_void_p, POINTER(c_void_p),
+    ]
+    lib.cyber_remesh_with_resource_limits.restype = c_int32
 
     # CyberStatus cyber_remesh_guided(const CyberMesh* in, const CyberRemeshParams*,
     #                                 const CyberGuidance*, CyberProgressCb,

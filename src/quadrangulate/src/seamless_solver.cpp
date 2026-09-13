@@ -1272,7 +1272,8 @@ public:
               const std::vector<std::vector<std::pair<std::size_t, double>>>& tuvRows,
               const std::vector<std::vector<std::pair<std::size_t, double>>>& ttRows,
               const std::vector<float>& gReduced, const std::vector<std::size_t>& intFree,
-              std::size_t W, SeamlessSolveCacheImpl* cache, const CancelToken* cancel) {
+              std::size_t W, SeamlessSolveCacheImpl* cache, const CancelToken* cancel,
+              std::size_t maxFactorBytes, bool& resourceLimitExceeded) {
         m_W = W;
         m_intFree = &intFree;
         const std::size_t nInt = intFree.size();
@@ -1281,7 +1282,7 @@ public:
             m_D = &cache->mD;
         } else {
             if (!factorAndInvertIntBlock(backend, nCut, rows, tuvRows, ttRows, intFree, cache,
-                                         cancel)) {
+                                         cancel, maxFactorBytes, resourceLimitExceeded)) {
                 return false;
             }
         }
@@ -1380,7 +1381,7 @@ private:
         const std::vector<std::vector<std::pair<std::size_t, double>>>& tuvRows,
         const std::vector<std::vector<std::pair<std::size_t, double>>>& ttRows,
         const std::vector<std::size_t>& intFree, SeamlessSolveCacheImpl* cache,
-        const CancelToken* cancel) {
+        const CancelToken* cancel, std::size_t maxFactorBytes, bool& resourceLimitExceeded) {
         const std::size_t nInt = intFree.size();
         SparseCholesky* chol = cache != nullptr ? &cache->cholM : &m_ownChol;
         std::vector<double>* D = cache != nullptr ? &cache->mD : &m_ownD;
@@ -1396,7 +1397,9 @@ private:
             return false;
         }
         const auto t1 = std::chrono::steady_clock::now();
-        if (!chol->factor(m_W, mStart, mCol, mVal, kReducedRidge)) {
+        if (!chol->factor(m_W, mStart, mCol, mVal, kReducedRidge, maxFactorBytes)) {
+            resourceLimitExceeded =
+                chol->factorStatus() == SparseCholesky::FactorStatus::ResourceLimit;
             return false;
         }
         const long msFactor = msSince(t1);
@@ -2034,7 +2037,9 @@ int solveSeamlessReduced(accel::IBackend& backend, std::size_t nCut,
                          bimdf::Charts* bimdfCharts = nullptr,
                          const FoldRepairContext* foldCtx = nullptr,
                          const GeometryAnalysis* layoutGeometry = nullptr,
-                         const SeamlessLayoutOptions* layoutOptions = nullptr) {
+                         const SeamlessLayoutOptions* layoutOptions = nullptr,
+                         const SeamlessSolveLimits* limits = nullptr,
+                         bool* resourceLimitExceeded = nullptr) {
     const std::size_t nSeam = seams.size();
     const std::size_t nUv = 2 * nCut;
     // Feature-seam integer pinning (docs/ROADMAP.md 2026-08-01 priority 1;
@@ -2663,9 +2668,17 @@ int solveSeamlessReduced(accel::IBackend& backend, std::size_t nCut,
     // factorization; the schedule below is shared verbatim by both solvers.
     std::vector<char> mask(W, 1);
     DirectRounding direct;
+    bool directResourceLimit = false;
     bool useDirect =
         !noDirect && !haveFused &&
-        direct.init(backend, nCut, rows, tuvRows, ttRows, gReduced, intFree, W, cache, cancel);
+        direct.init(backend, nCut, rows, tuvRows, ttRows, gReduced, intFree, W, cache, cancel,
+                    limits != nullptr ? limits->maxDirectFactorBytes : 0, directResourceLimit);
+    if (directResourceLimit) {
+        if (resourceLimitExceeded != nullptr) {
+            *resourceLimitExceeded = true;
+        }
+        return 0;
+    }
     if (useDirect) {
         ++maskedSolveCalls;
         direct.seed(w);
@@ -3668,7 +3681,8 @@ Parameterization solveParameterizationImpl(const Mesh& mesh, const SeamlessSetup
                                            float spacing, accel::IBackend& backend,
                                            const CancelToken* cancel, double* probeCellArea,
                                            SeamlessSolveCache* cache, const GuidanceField* density,
-                                           const SeamlessLayoutOptions* layoutOpts) {
+                                           const SeamlessLayoutOptions* layoutOpts,
+                                           const SeamlessSolveLimits* limits) {
     Parameterization out;
     if (!setup.valid || spacing <= 0.0f || mesh.faceCapacity() == 0) {
         return out;
@@ -4038,6 +4052,7 @@ Parameterization solveParameterizationImpl(const Mesh& mesh, const SeamlessSetup
     }
     SparseCholesky ownCholA;
     const SparseCholesky* cholA = nullptr;
+    bool poissonResourceLimit = false;
     if (std::getenv("CYBER_QC_NO_DIRECT") == nullptr) {
         SparseCholesky* target = cacheImpl != nullptr ? &cacheImpl->cholA : &ownCholA;
         if (cacheImpl != nullptr && cacheImpl->aReady && cacheImpl->cholA.dim() == nCut) {
@@ -4048,7 +4063,8 @@ Parameterization solveParameterizationImpl(const Mesh& mesh, const SeamlessSetup
             }
             const auto tA = std::chrono::steady_clock::now();
             const std::vector<double> aVal(A.value.begin(), A.value.end());
-            if (target->factor(nCut, A.rowStart, A.colIndex, aVal)) {
+            if (target->factor(nCut, A.rowStart, A.colIndex, aVal, 0.0,
+                               limits != nullptr ? limits->maxDirectFactorBytes : 0)) {
                 cholA = target;
                 if (cacheImpl != nullptr) {
                     cacheImpl->aReady = true;
@@ -4057,11 +4073,17 @@ Parameterization solveParameterizationImpl(const Mesh& mesh, const SeamlessSetup
                     std::fprintf(stderr, "[qc-time] direct poisson: factorA=%ldms cholNnz=%zu\n",
                                  msSince(tA), target->factorNnz());
                 }
+            } else if (target->factorStatus() == SparseCholesky::FactorStatus::ResourceLimit) {
+                poissonResourceLimit = true;
             }
             // factor failure (non-SPD assembly) falls through to CG below
         }
     }
 
+    if (poissonResourceLimit) {
+        out.resourceLimitExceeded = true;
+        return out;
+    }
     std::vector<float> u(nCut, 0.0f), v(nCut, 0.0f);
 
     // CYBER_QC_FIELD_STATS diagnostics on the +z flat region (|n.z| > 0.99): combed-target
@@ -4429,8 +4451,14 @@ Parameterization solveParameterizationImpl(const Mesh& mesh, const SeamlessSetup
     // independent DOF and greedily rounds the integer translations. No dense dual, no seam cap —
     // it scales to hundreds of cones (spot: ~350 seam edges), reconciling branch-point holonomy.
     if (!seams.empty()) {
+        bool reducedResourceLimit = false;
         solveSeamlessReduced(backend, nCut, rows, bu0, bv0, seams, gauges, u, v, cancel, cacheImpl,
-                             bimdfCharts.get(), foldCtx.get(), layoutGeometry.get(), layoutOpts);
+                             bimdfCharts.get(), foldCtx.get(), layoutGeometry.get(), layoutOpts,
+                             limits, &reducedResourceLimit);
+        if (reducedResourceLimit) {
+            out.resourceLimitExceeded = true;
+            return out;
+        }
     }
     foldCensusPhase("final");
     statsGradHist("reduced");
@@ -4465,9 +4493,10 @@ Parameterization solveParameterizationImpl(const Mesh& mesh, const SeamlessSetup
 Parameterization solveParameterization(const Mesh& mesh, const SeamlessSetup& setup, float spacing,
                                        accel::IBackend& backend, const CancelToken* cancel,
                                        SeamlessSolveCache* cache, const GuidanceField* density,
-                                       const SeamlessLayoutOptions* layout) {
+                                       const SeamlessLayoutOptions* layout,
+                                       const SeamlessSolveLimits* limits) {
     return solveParameterizationImpl(mesh, setup, spacing, backend, cancel, nullptr, cache, density,
-                                     layout);
+                                     layout, limits);
 }
 
 double relaxedCellArea(const Mesh& mesh, const SeamlessSetup& setup, float spacing,
@@ -4476,7 +4505,7 @@ double relaxedCellArea(const Mesh& mesh, const SeamlessSetup& setup, float spaci
     double cells = -1.0;
     // The calibration probe never traces a T-mesh, so it needs no layout options.
     (void)solveParameterizationImpl(mesh, setup, spacing, backend, cancel, &cells, cache, density,
-                                    nullptr);
+                                    nullptr, nullptr);
     return cells;
 }
 

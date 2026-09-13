@@ -58,6 +58,7 @@ public:
     struct Outcome {
         bool success = false;
         bool cancelled = false;
+        bool resourceLimit = false;
         std::string failureReason;
     };
 
@@ -65,6 +66,12 @@ public:
     // implementations respect them as hard constraints.
     virtual Outcome quadrangulate(Mesh& mesh, float targetEdgeLength, ProgressSink* progress,
                                   const CancelToken* cancel) = 0;
+
+    // Exact owned-storage ceiling for the native direct sparse factor. Zero
+    // keeps the historical unbounded direct path; backends without that path
+    // deliberately ignore it.
+    virtual void setMaxDirectFactorBytes(std::size_t bytes) { (void)bytes; }
+    virtual void setMaxCandidateBytes(std::size_t bytes) { (void)bytes; }
 
     // Offer user-drawn guidance to this backend. The DEFAULT implementation
     // DECLINES and sets `reason`, so a backend with no guide support reports

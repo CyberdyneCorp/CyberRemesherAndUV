@@ -59,6 +59,12 @@ TEST_CASE("the ABI version is reported and is independent of the engine version"
     CHECK(onlyMinor == CYBER_ABI_VERSION_MINOR);
 }
 
+TEST_CASE("remesh execution limits default to disabled") {
+    CyberRemeshExecutionLimits limits{123, 456};
+    cyber_default_remesh_execution_limits(&limits);
+    CHECK(limits.maxDirectFactorBytes == 0);
+}
+
 TEST_CASE("a v0.8-era client header links to this library without overwriting output guards") {
     // This call is compiled from tests/capi/abi_clients/v0_8_legacy.h, an
     // extracted v0.8.0 header subset.  It cannot see current declarations or

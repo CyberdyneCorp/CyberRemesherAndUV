@@ -109,7 +109,7 @@ def version() -> str:
 #: The C ABI this binding was written against. Mirrors CYBER_ABI_VERSION_* in
 #: cyber_capi.h; ``check_abi()`` compares it against the loaded library.
 ABI_VERSION_MAJOR = 1
-ABI_VERSION_MINOR = 7
+ABI_VERSION_MINOR = 8
 
 
 def abi_version() -> tuple:
@@ -329,16 +329,22 @@ class RemeshLimits:
     max_intermediate_faces: int = 0
     max_output_vertices: int = 0
     max_output_faces: int = 0
+    max_direct_factor_bytes: int = 0
+    max_candidate_bytes: int = 0
 
     def _to_c(self) -> "_ffi.CyberRemeshLimits":
         values = [
             self.max_input_vertices, self.max_input_faces,
             self.max_intermediate_vertices, self.max_intermediate_faces,
-            self.max_output_vertices, self.max_output_faces,
+            self.max_output_vertices, self.max_output_faces, self.max_direct_factor_bytes,
+            self.max_candidate_bytes,
         ]
         if any(value < 0 for value in values):
             raise ValueError("remesh limits must be >= 0")
-        return _ffi.CyberRemeshLimits(*values)
+        return _ffi.CyberRemeshLimits(*values[:6])
+
+    def _execution_to_c(self) -> "_ffi.CyberRemeshExecutionLimits":
+        return _ffi.CyberRemeshExecutionLimits(self.max_direct_factor_bytes, self.max_candidate_bytes)
 
 
 @dataclass
@@ -2434,9 +2440,10 @@ def remesh(
         )
     elif limits is not None:
         c_limits = limits._to_c()
-        status = lib.cyber_remesh_with_limits(
-            mesh.handle, ctypes.byref(c_params), ctypes.byref(c_limits), progress_cb,
-            cancel_cb, None, ctypes.byref(out_handle),
+        c_execution = limits._execution_to_c()
+        status = lib.cyber_remesh_with_resource_limits(
+            mesh.handle, ctypes.byref(c_params), ctypes.byref(c_limits), ctypes.byref(c_execution),
+            progress_cb, cancel_cb, None, ctypes.byref(out_handle),
         )
     else:
         status = lib.cyber_remesh(

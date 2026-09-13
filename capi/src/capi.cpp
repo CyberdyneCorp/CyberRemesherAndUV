@@ -246,6 +246,12 @@ cyber::remesh::ResourceLimits toResourceLimits(const CyberRemeshLimits& in) {
             static_cast<std::size_t>(in.maxOutputFaces)};
 }
 
+void applyExecutionLimits(const CyberRemeshExecutionLimits& in,
+                          cyber::remesh::ResourceLimits& out) {
+    out.maxDirectFactorBytes = static_cast<std::size_t>(in.maxDirectFactorBytes);
+    out.maxCandidateBytes = static_cast<std::size_t>(in.maxCandidateBytes);
+}
+
 // Adapts the C progress/cancel callbacks into a ProgressSink. Cancellation is
 // cooperative and polled on every progress report: the pipeline reports at
 // each stage boundary, so a returned non-zero cancel flag flips the shared
@@ -619,6 +625,12 @@ void cyber_default_remesh_limits(CyberRemeshLimits* limits) {
     }
 }
 
+void cyber_default_remesh_execution_limits(CyberRemeshExecutionLimits* limits) {
+    if (limits != nullptr) {
+        *limits = CyberRemeshExecutionLimits{};
+    }
+}
+
 void cyber_default_isotropic_params(CyberIsotropicParams* params) {
     if (params == nullptr) {
         return;
@@ -648,7 +660,8 @@ CyberStatus remeshShared(const CyberMesh* in, const CyberRemeshParams* params,
                          CyberCancelCb cancel, CyberWarningCb warning, void* user, CyberMesh** out,
                          const CyberCountPolicy* countPolicy = nullptr,
                          CyberTargetCountReport* countReport = nullptr,
-                         const CyberRemeshLimits* limits = nullptr) {
+                         const CyberRemeshLimits* limits = nullptr,
+                         const CyberRemeshExecutionLimits* execution = nullptr) {
     if (in == nullptr || params == nullptr || out == nullptr) {
         setError("cyber_remesh: null argument");
         return CYBER_ERR_INVALID_ARG;
@@ -737,8 +750,13 @@ CyberStatus remeshShared(const CyberMesh* in, const CyberRemeshParams* params,
         if (quadMethod == CYBER_QUAD_QUADCOVER || quadMethod == CYBER_QUAD_ZREMESHER) {
             fallback = []() { return cyber::remesh::makeFieldAlignedQuadrangulator(); };
         }
-        const std::optional<cyber::remesh::ResourceLimits> cppLimits =
-            limits != nullptr ? std::optional{toResourceLimits(*limits)} : std::nullopt;
+        std::optional<cyber::remesh::ResourceLimits> cppLimits;
+        if (limits != nullptr || execution != nullptr) {
+            cppLimits = limits != nullptr ? toResourceLimits(*limits) : cyber::remesh::ResourceLimits{};
+            if (execution != nullptr) {
+                applyExecutionLimits(*execution, *cppLimits);
+            }
+        }
         cyber::remesh::PipelineResult result = cyber::remesh::remesh(
             in->mesh, cppParams, &sink, &token,
             [quadMethod, makeQuad]() { return makeQuad(quadMethod); }, fallback, guidance, policy,
@@ -992,6 +1010,14 @@ CyberStatus cyber_remesh_with_limits(const CyberMesh* in, const CyberRemeshParam
                                      CyberCancelCb cancel, void* user, CyberMesh** out) {
     return remeshShared(in, params, nullptr, progress, cancel, nullptr, user, out, nullptr, nullptr,
                         limits);
+}
+
+CyberStatus cyber_remesh_with_resource_limits(
+    const CyberMesh* in, const CyberRemeshParams* params, const CyberRemeshLimits* topology,
+    const CyberRemeshExecutionLimits* execution, CyberProgressCb progress, CyberCancelCb cancel,
+    void* user, CyberMesh** out) {
+    return remeshShared(in, params, nullptr, progress, cancel, nullptr, user, out, topology,
+                        execution);
 }
 
 CyberStatus cyber_remesh_guided(const CyberMesh* in, const CyberRemeshParams* params,

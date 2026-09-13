@@ -22,11 +22,13 @@ namespace cyber::remesh {
 // positivity — callers keep their iterative path as the fallback.
 class SparseCholesky {
 public:
+    enum class FactorStatus { None, InvalidInput, NotPositiveDefinite, ResourceLimit, Success };
+
     // `ridge` is added to every diagonal entry before factorization (the
     // reduced operator's well-conditioning ridge; pass 0 for none).
     bool factor(std::size_t n, const std::vector<std::size_t>& rowStart,
                 const std::vector<std::size_t>& colIndex, const std::vector<double>& value,
-                double ridge = 0.0);
+                double ridge = 0.0, std::size_t maxFactorBytes = 0);
 
     // Solve A x = b. `b` and `x` have size n (x is overwritten). Thread-safe
     // across concurrent callers (uses only local scratch).
@@ -38,6 +40,7 @@ public:
     void solveUnitGather(std::size_t k, const std::vector<std::size_t>& targets, double* out) const;
 
     [[nodiscard]] bool ready() const { return m_ready; }
+    [[nodiscard]] FactorStatus factorStatus() const { return m_status; }
     [[nodiscard]] std::size_t dim() const { return m_n; }
     [[nodiscard]] std::size_t factorNnz() const { return m_rowIdx.size() + m_diag.size(); }
 
@@ -54,6 +57,7 @@ private:
     std::vector<std::size_t> m_rowIdx;
     std::vector<double> m_val;
     std::vector<double> m_diag;  // size n
+    FactorStatus m_status = FactorStatus::None;
 };
 
 // Dense SPD Cholesky that grows one row/column at a time — the bordered

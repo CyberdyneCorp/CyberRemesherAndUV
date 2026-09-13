@@ -916,6 +916,8 @@ PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSi
             return result;
         }
         quad->setCountPolicy(countPolicy);
+        quad->setMaxDirectFactorBytes(budget.maxDirectFactorBytes);
+        quad->setMaxCandidateBytes(budget.maxCandidateBytes);
         // instant-meshes and quad-cover both extract from a smooth field, so the
         // uniform-square shape-match relax lowers their edge-CV ~20% corpus-wide with
         // no change to irregular % and improved surface deviation (measured); only the
@@ -955,6 +957,11 @@ PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSi
             result.status = RunStatus::Cancelled;
             return result;
         }
+        if (quadOutcome.resourceLimit) {
+            result.status = RunStatus::Error;
+            result.error = "resource limit at quadrangulate: " + quadOutcome.failureReason;
+            return result;
+        }
         bool quadOk = quadOutcome.success && outcome.mesh.faceCount() > 0;
         if (quadOk && exceedsTopology(outcome.mesh, budget.maxIntermediateVertices,
                                       budget.maxIntermediateFaces, "quadrangulate", result.error)) {
@@ -989,6 +996,8 @@ PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSi
             if (isoStatus == IsotropicStatus::Success && outcome.mesh.faceCount() > 0) {
                 std::unique_ptr<IQuadrangulator> fb = fallbackQuadrangulator();
                 fb->setCountPolicy(countPolicy);
+                fb->setMaxDirectFactorBytes(budget.maxDirectFactorBytes);
+                fb->setMaxCandidateBytes(budget.maxCandidateBytes);
                 fieldExtractor = fb->name() == "instant-meshes" || fb->name() == "quad-cover";
                 integerExtractor = fb->name() == "integer";
                 if (guidanceField) {

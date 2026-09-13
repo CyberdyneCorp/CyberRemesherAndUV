@@ -47,6 +47,8 @@ struct ResourceLimits {
     std::size_t maxIntermediateFaces = 0;
     std::size_t maxOutputVertices = 0;
     std::size_t maxOutputFaces = 0;
+    std::size_t maxDirectFactorBytes = 0;
+    std::size_t maxCandidateBytes = 0;
 };
 
 // Per-island guidance audit (remeshing-pipeline spec, "Guidance is honored

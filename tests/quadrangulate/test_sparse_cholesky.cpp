@@ -108,6 +108,14 @@ TEST_CASE("sparse cholesky: AMD ordering solves exactly and fills less than RCM 
     CHECK(nnzAuto == std::min(nnzRcm, nnzAmd));
 }
 
+TEST_CASE("sparse cholesky: rejects a factor storage budget before factor buffers allocate") {
+    const Csr a = gridLaplacian(8);
+    SparseCholesky chol;
+    CHECK_FALSE(chol.factor(a.n, a.rowStart, a.colIndex, a.value, 0.0, 1));
+    CHECK(chol.factorStatus() == SparseCholesky::FactorStatus::ResourceLimit);
+    CHECK_FALSE(chol.ready());
+}
+
 TEST_CASE("sparse cholesky: AMD handles disconnected components and isolated vertices") {
     // Two disjoint grids plus one isolated vertex, assembled into one matrix.
     const Csr g = gridLaplacian(7);

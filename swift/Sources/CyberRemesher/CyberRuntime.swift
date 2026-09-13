@@ -52,7 +52,7 @@ public enum CyberRuntime {
     }
 
     /// The ABI this Swift package was written against.
-    public static let abiVersionCompiledAgainst = (major: 1, minor: 5)
+    public static let abiVersionCompiledAgainst = (major: 1, minor: 6)
 
     /// Throw if the loaded library cannot serve this package's compiled ABI.
     public static func checkABI() throws {

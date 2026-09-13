@@ -116,6 +116,8 @@ struct NativeSolveContext {
     // choice; the candidate-selection path names one explicitly so it can solve
     // both and compare without a process-global switch.
     CrossFieldSource fieldSource = CrossFieldSource::Auto;
+    SeamlessSolveLimits solveLimits;
+    bool resourceLimitExceeded = false;
     // Topology-guide accounting, read back for the run report. A requested
     // guide that was not honoured is named, never dropped.
     std::size_t topologyGuidesRequested = 0;
@@ -147,7 +149,7 @@ struct NativeSolveContext {
 [[nodiscard]] SeamlessUv computeSeamlessUv(const Mesh& mesh, float targetEdgeLength,
                                            float harnessScaling = 0.5f,
                                            float harnessAdaptivity = 0.0f,
-                                           const CancelToken* cancel = nullptr,
+    const CancelToken* cancel = nullptr,
                                            float featureDegrees = 40.0f,
                                            NativeSolveContext* ctx = nullptr);
 
