@@ -123,6 +123,28 @@ class CyberRemeshParams(Structure):
     ]
 
 
+class CyberCountPolicy(Structure):
+    _fields_ = [("relative_tolerance", c_double), ("max_attempts", c_size_t)]
+
+
+class CyberCountIslandOutcome(Structure):
+    _fields_ = [
+        ("island_index", c_size_t), ("requested_quads", c_double),
+        ("effective_base_quads", c_double), ("calibrated_quads", c_double),
+        ("final_faces", c_size_t), ("attempts", c_size_t),
+        ("selected_attempt", c_size_t), ("termination", c_int32),
+    ]
+
+
+class CyberTargetCountReport(Structure):
+    _fields_ = [
+        ("requested_quads", c_int32), ("effective_base_quads", c_int32),
+        ("final_faces", c_size_t), ("pure_quads", c_int32),
+        ("island_count", c_size_t), ("islands", POINTER(CyberCountIslandOutcome)),
+        ("island_capacity", c_size_t),
+    ]
+
+
 class CyberIndexedMesh(Structure):
     """Copying CSR authored-polygon input view (``CyberIndexedMesh``)."""
 
@@ -1055,6 +1077,12 @@ def _declare(lib: ctypes.CDLL) -> None:
         POINTER(c_void_p),
     ]
     lib.cyber_remesh.restype = c_int32
+
+    lib.cyber_remesh_with_count_report.argtypes = [
+        c_void_p, POINTER(CyberRemeshParams), POINTER(CyberCountPolicy), PROGRESS_CB,
+        CANCEL_CB, c_void_p, POINTER(c_void_p), POINTER(CyberTargetCountReport),
+    ]
+    lib.cyber_remesh_with_count_report.restype = c_int32
 
     # CyberStatus cyber_remesh_guided(const CyberMesh* in, const CyberRemeshParams*,
     #                                 const CyberGuidance*, CyberProgressCb,

@@ -252,6 +252,38 @@ class RemeshParams:
         )
 
 
+@dataclass(frozen=True)
+class CountPolicy:
+    """Optional bounded target-count calibration policy."""
+
+    relative_tolerance: float
+    max_attempts: int
+
+    def _to_c(self) -> "_ffi.CyberCountPolicy":
+        return _ffi.CyberCountPolicy(float(self.relative_tolerance), int(self.max_attempts))
+
+
+@dataclass(frozen=True)
+class CountIslandOutcome:
+    island_index: int
+    requested_quads: float
+    effective_base_quads: float
+    calibrated_quads: float
+    final_faces: int
+    attempts: int
+    selected_attempt: int
+    termination: int
+
+
+@dataclass(frozen=True)
+class TargetCountReport:
+    requested_quads: int
+    effective_base_quads: int
+    final_faces: int
+    pure_quads: bool
+    islands: tuple[CountIslandOutcome, ...]
+
+
 @dataclass
 class IsotropicParams:
     """Adaptive isotropic (triangle) remeshing parameters.
@@ -2158,6 +2190,7 @@ def remesh(
     density: Optional[Sequence[float]] = None,
     density_per_face: bool = False,
     zremesher: Optional[ZRemesherParams] = None,
+    count_policy: Optional[CountPolicy] = None,
 ) -> Mesh:
     """Run the automatic quad-remeshing pipeline on ``mesh``.
 
@@ -2197,6 +2230,8 @@ def remesh(
         raise ValueError(
             'zremesher=... requires quad_method="zremesher", got {0!r}'.format(params.quad_method)
         )
+    if count_policy is not None and (is_zremesher or guides is not None or density is not None):
+        raise ValueError("count_policy currently requires an unguided non-ZRemesher remesh")
 
     lib = _ffi.get_lib()
 
@@ -2293,7 +2328,16 @@ def remesh(
             c_guidance.vertex_density_count = count
 
     c_report = None
-    if is_zremesher:
+    if count_policy is not None:
+        c_policy = count_policy._to_c()
+        c_islands = (_ffi.CyberCountIslandOutcome * max(1, mesh.face_count))()
+        c_count_report = _ffi.CyberTargetCountReport()
+        c_count_report.islands = ctypes.cast(c_islands, ctypes.POINTER(_ffi.CyberCountIslandOutcome))
+        c_count_report.island_capacity = len(c_islands)
+        status = lib.cyber_remesh_with_count_report(
+            mesh.handle, ctypes.byref(c_params), ctypes.byref(c_policy), progress_cb, cancel_cb,
+            None, ctypes.byref(out_handle), ctypes.byref(c_count_report))
+    elif is_zremesher:
         # The ZRemesher entry point, not cyber_remesh with quadMethod=4: it is
         # the only one that carries quality, symmetry and the run report — and
         # the only one that forwards adaptivity, which is where the plain call
@@ -2338,6 +2382,17 @@ def remesh(
         raise CyberError(_ffi.STATUS_ERROR, _last_error() or "remesh produced no mesh")
 
     result = Mesh(handle=out_handle.value)
+    if count_policy is not None:
+        result.target_count_report = TargetCountReport(
+            requested_quads=int(c_count_report.requested_quads),
+            effective_base_quads=int(c_count_report.effective_base_quads),
+            final_faces=int(c_count_report.final_faces), pure_quads=bool(c_count_report.pure_quads),
+            islands=tuple(CountIslandOutcome(
+                int(row.island_index), float(row.requested_quads), float(row.effective_base_quads),
+                float(row.calibrated_quads), int(row.final_faces), int(row.attempts),
+                int(row.selected_attempt), int(row.termination))
+                for row in c_islands[:c_count_report.island_count]),
+        )
     result.guidance_warnings = list(guidance_warnings)
     if c_report is not None:
         result.zremesher_report = ZRemesherReport._from_c(c_report)

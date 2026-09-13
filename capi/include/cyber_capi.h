@@ -266,15 +266,15 @@ typedef struct CyberRemeshParams {
      * extractor, including quad-cover and ZRemesher. The default is 1.0;
      * callers that require the historical uniform quad-cover output can set 0. */
     float adaptivity;
-    int pureQuads;             /* non-zero: forbid residual triangles */
-    int holeFillMaxBoundary;   /* max boundary edges of holes to fill; 0 off */
-    int quadMethod;            /* 0 = field-aligned matching,
-                                * 1 = Instant-Meshes position-field extractor,
-                                * 2 = integer-parametrization extractor,
-                                * 3 = QuadCover seamless-UV isoline extractor (default;
-                                *     falls back to field-aligned where no solver is present),
-                                * 4 = ZRemesher-class retopology (quad-cover plus the
-                                *     explicit topology-layout stage) */
+    int pureQuads;           /* non-zero: forbid residual triangles */
+    int holeFillMaxBoundary; /* max boundary edges of holes to fill; 0 off */
+    int quadMethod;          /* 0 = field-aligned matching,
+                              * 1 = Instant-Meshes position-field extractor,
+                              * 2 = integer-parametrization extractor,
+                              * 3 = QuadCover seamless-UV isoline extractor (default;
+                              *     falls back to field-aligned where no solver is present),
+                              * 4 = ZRemesher-class retopology (quad-cover plus the
+                              *     explicit topology-layout stage) */
 } CyberRemeshParams;
 
 /* Quadrangulator selection values for CyberRemeshParams.quadMethod. */
@@ -310,6 +310,58 @@ typedef void (*CyberProgressCb)(float fraction, const char* stage, void* user);
 CyberStatus cyber_remesh(const CyberMesh* in, const CyberRemeshParams* params,
                          CyberProgressCb progress, CyberCancelCb cancel, void* user,
                          CyberMesh** out);
+
+/* Optional bounded calibration policy. The existing remesh entry points retain
+ * their historical two-attempt behavior; this struct is used only by the
+ * additive reporting entry point below. */
+typedef struct CyberCountPolicy {
+    double relativeTolerance; /* >= 0, e.g. 0.05 means within 5% */
+    size_t maxAttempts;       /* >= 1 */
+} CyberCountPolicy;
+
+/* Stable integer values, rather than a C enum, so newer termination states do
+ * not create an out-of-range enum value for a caller compiled against an older
+ * header. */
+#define CYBER_COUNT_NOT_CALIBRATED 0
+#define CYBER_COUNT_WITHIN_TOLERANCE 1
+#define CYBER_COUNT_FIXED_SCALING 2
+#define CYBER_COUNT_NO_TARGET 3
+#define CYBER_COUNT_NO_EXTRACTED_FACES 4
+#define CYBER_COUNT_ATTEMPT_BUDGET_EXHAUSTED 5
+#define CYBER_COUNT_TOLERANCE_NOT_MET 6
+
+typedef struct CyberCountIslandOutcome {
+    size_t islandIndex;
+    double requestedQuads;
+    double effectiveBaseQuads;
+    double calibratedQuads;
+    size_t finalFaces;
+    size_t attempts;
+    size_t selectedAttempt;
+    int termination;
+} CyberCountIslandOutcome;
+
+/* Caller-owned count report. Set islands to NULL / islandCapacity to zero to
+ * query islandCount. A non-null buffer must have room for every island; the
+ * call otherwise fails without returning a mesh. */
+typedef struct CyberTargetCountReport {
+    int requestedQuads;
+    int effectiveBaseQuads;
+    size_t finalFaces;
+    int pureQuads;
+    size_t islandCount;
+    CyberCountIslandOutcome* islands;
+    size_t islandCapacity;
+} CyberTargetCountReport;
+
+/* Runs automatic remeshing with optional bounded target-count calibration and
+ * fills the caller-owned count report. Existing cyber_remesh callers are ABI
+ * and behavior compatible. */
+CyberStatus cyber_remesh_with_count_report(const CyberMesh* in, const CyberRemeshParams* params,
+                                           const CyberCountPolicy* count_policy,
+                                           CyberProgressCb progress, CyberCancelCb cancel,
+                                           void* user, CyberMesh** out,
+                                           CyberTargetCountReport* report);
 
 /* ---- guided remeshing (flow guides + painted density) ---------------- */
 
@@ -2018,7 +2070,7 @@ int cyber_stroke_interpretation_grid_size(const CyberStrokeInterpretation* inter
 
 /* Bakeable map types (surface-baking spec). */
 typedef enum CyberBakeMap {
-    CYBER_BAKE_NORMAL = 0,   /* tangent-space normal map (RGB, encoded [0,1]) */
+    CYBER_BAKE_NORMAL = 0, /* tangent-space normal map (RGB, encoded [0,1]) */
     /* 1 channel of OPENNESS: 1.0 = fully open, 0.0 = fully occluded. Named
      * "AO" for the map artists ask for, but the VALUE is the inverse of
      * occlusion, and a host feeding its own occlusion straight through bakes a
