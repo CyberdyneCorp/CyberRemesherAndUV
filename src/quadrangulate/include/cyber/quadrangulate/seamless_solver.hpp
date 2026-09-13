@@ -159,9 +159,9 @@ struct InjectabilityStats {
 };
 
 struct LayoutRunReport {
-    std::size_t layouts = 0;       // layouts traced
-    std::size_t layoutsValid = 0;  // of those, how many passed validation
-    LayoutStats stats;             // summed over every traced layout
+    std::size_t layouts = 0;           // layouts traced
+    std::size_t layoutsValid = 0;      // of those, how many passed validation
+    LayoutStats stats;                 // summed over every traced layout
     InjectabilityStats injectability;  // summed over every quantized layout
     // The first hard violation seen, empty when every layout validated. First
     // rather than last because it is the one that explains the rest.

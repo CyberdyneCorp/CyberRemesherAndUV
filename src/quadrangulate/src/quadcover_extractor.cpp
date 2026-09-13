@@ -3664,8 +3664,8 @@ public:
             // indistinguishable from the discarded one. The aggregate is
             // merged after this candidate has a stable identity.
             m_layout.report = &candidateReport.layout;
-            const std::string suffix = "." + candidateReport.name + "." +
-                                       std::to_string(m_layoutArtifactSerial++);
+            const std::string suffix =
+                "." + candidateReport.name + "." + std::to_string(m_layoutArtifactSerial++);
             m_layout.reportPath = taggedArtifactPath(reportPath, suffix);
             m_layout.meshPath = taggedArtifactPath(meshPath, suffix);
             const Outcome outcome = quadrangulateOnce(trial, targetEdgeLength, progress, cancel);

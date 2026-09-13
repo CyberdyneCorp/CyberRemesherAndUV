@@ -402,16 +402,16 @@ CyberStatus cyber_remesh_with_count_report(const CyberMesh* in, const CyberRemes
  * A limit failure returns CYBER_ERR_RUNTIME with the stage, requested count and
  * allowed count in cyber_last_error(); `in` is never modified. */
 CyberStatus cyber_remesh_with_limits(const CyberMesh* in, const CyberRemeshParams* params,
-                                     const CyberRemeshLimits* limits,
-                                     CyberProgressCb progress, CyberCancelCb cancel, void* user,
-                                     CyberMesh** out);
+                                     const CyberRemeshLimits* limits, CyberProgressCb progress,
+                                     CyberCancelCb cancel, void* user, CyberMesh** out);
 
 /* Additive resource-limited entry point. `topology` and `execution` may each
  * be NULL. The input mesh is never modified on success or limit failure. */
-CyberStatus cyber_remesh_with_resource_limits(
-    const CyberMesh* in, const CyberRemeshParams* params, const CyberRemeshLimits* topology,
-    const CyberRemeshExecutionLimits* execution, CyberProgressCb progress, CyberCancelCb cancel,
-    void* user, CyberMesh** out);
+CyberStatus cyber_remesh_with_resource_limits(const CyberMesh* in, const CyberRemeshParams* params,
+                                              const CyberRemeshLimits* topology,
+                                              const CyberRemeshExecutionLimits* execution,
+                                              CyberProgressCb progress, CyberCancelCb cancel,
+                                              void* user, CyberMesh** out);
 
 /* ---- guided remeshing (flow guides + painted density) ---------------- */
 
@@ -961,8 +961,7 @@ size_t cyber_mesh_copy_polygon_indices(const CyberMesh* mesh, uint32_t* out, siz
  * pass out=NULL to query its scalar count (not row count). A too-small output
  * buffer is left untouched and the required scalar count is returned. */
 size_t cyber_mesh_attribute_count(const CyberMesh* mesh);
-CyberStatus cyber_mesh_attribute_info(const CyberMesh* mesh, size_t index,
-                                      CyberAttributeInfo* out);
+CyberStatus cyber_mesh_attribute_info(const CyberMesh* mesh, size_t index, CyberAttributeInfo* out);
 size_t cyber_mesh_copy_attribute(const CyberMesh* mesh, const CyberAttributeInfo* attribute,
                                  void* out, size_t capacity);
 
