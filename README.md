@@ -332,9 +332,9 @@ of it and the CLI's own report and export are **done**.
 
 Still open, and each for a stated reason rather than for lack of attention:
 automatic symmetry detection currently provides a **detect-only, axis-aligned
-C++ advisory** with coverage and error confidence; it neither mutates a mesh
-nor selects forced symmetry, and arbitrary-plane detection and corpus
-calibration remain open; semantic
+C++ advisory** with vertex diagnostics plus reflected surface and normal
+measurements; it neither mutates a mesh nor selects forced symmetry, and
+arbitrary-plane detection and corpus calibration remain open; semantic
 group/material boundaries now travel through the typed indexed input, become
 hard features, and return per-component final-mesh evidence in C, Python and
 Swift; a `balanced` quality mode is **deliberately not built** — with five corpus

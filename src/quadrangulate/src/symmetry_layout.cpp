@@ -1,5 +1,7 @@
 #include "cyber/quadrangulate/symmetry_layout.hpp"
 
+#include "cyber/core/bvh.hpp"
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -124,12 +126,65 @@ float detectionTolerance(const Mesh& mesh, const Bounds& bounds) {
     return std::max(1e-6f, std::min(scaleTolerance, samplingTolerance));
 }
 
-SymmetryDetectionReport scoreAxis(const Mesh& mesh, SymmetryAxis axis, float tolerance,
-                                  std::size_t vertices) {
+Vec3 reflectedNormal(const Plane& plane, Vec3 normal) {
+    const Vec3 unitNormal = normalized(plane.normal);
+    return normalized(normal - unitNormal * (2.0f * dot(normal, unitNormal)));
+}
+
+void scoreSurface(const Mesh& mesh, const Plane& plane, float tolerance,
+                  SymmetryDetectionReport& report) {
+    const Bvh surface(mesh);
+    if (surface.empty()) {
+        return;
+    }
+
+    float totalError = 0.0f;
+    float totalNormalAgreement = 0.0f;
+    for (Index f = 0; f < mesh.faceCapacity(); ++f) {
+        const FaceId face{f};
+        if (!mesh.isAlive(face)) {
+            continue;
+        }
+        const std::vector<VertexId> vertices = mesh.faceVertices(face);
+        if (vertices.size() < 3) {
+            continue;
+        }
+        const Vec3 a = mesh.position(vertices.front());
+        for (std::size_t i = 1; i + 1 < vertices.size(); ++i) {
+            const Vec3 b = mesh.position(vertices[i]);
+            const Vec3 c = mesh.position(vertices[i + 1]);
+            ++report.sampledSurfacePoints;
+            const Vec3 sample = (a + b + c) / 3.0f;
+            const Bvh::ClosestHit hit = surface.closestPoint(mirrorAcrossPlane(plane, sample));
+            const float error = std::sqrt(std::max(0.0f, hit.distanceSquared));
+            if (error > tolerance) {
+                ++report.unmatchedSurfacePoints;
+                continue;
+            }
+            ++report.matchedSurfacePoints;
+            totalError += error;
+            report.maxSurfaceError = std::max(report.maxSurfaceError, error);
+            const Vec3 sourceNormal = normalized(cross(b - a, c - a));
+            const float agreement = std::clamp(
+                dot(reflectedNormal(plane, sourceNormal), mesh.faceNormal(hit.face)), -1.0f, 1.0f);
+            totalNormalAgreement += agreement;
+            if (agreement >= 0.9f) {
+                ++report.normalConsistentSurfacePoints;
+            }
+        }
+    }
+    if (report.matchedSurfacePoints != 0) {
+        report.meanSurfaceError = totalError / static_cast<float>(report.matchedSurfacePoints);
+        report.meanNormalAgreement =
+            totalNormalAgreement / static_cast<float>(report.matchedSurfacePoints);
+    }
+}
+
+SymmetryDetectionReport scoreAxis(const Mesh& mesh, SymmetryAxis axis, float tolerance) {
     SymmetryDetectionReport report;
     report.axis = axis;
     report.plane = symmetryPlane(mesh, axis);
-    report.sampledVertices = vertices;
+    report.sampledVertices = mesh.vertexCount();
     report.matchTolerance = tolerance;
     const VertexGrid grid(mesh, tolerance);
     float totalError = 0.0f;
@@ -152,14 +207,22 @@ SymmetryDetectionReport scoreAxis(const Mesh& mesh, SymmetryAxis axis, float tol
     if (report.matchedVertices != 0) {
         report.meanMatchError = totalError / static_cast<float>(report.matchedVertices);
     }
-    const float coverage =
-        vertices == 0 ? 0.0f : static_cast<float>(report.matchedVertices) / vertices;
-    const float accuracy = tolerance == 0.0f ? 0.0f : 1.0f - report.meanMatchError / tolerance;
-    report.confidence = std::clamp(coverage * std::max(0.0f, accuracy), 0.0f, 1.0f);
+    scoreSurface(mesh, report.plane, tolerance, report);
+    const float surfaceCoverage = report.sampledSurfacePoints == 0
+                                      ? 0.0f
+                                      : static_cast<float>(report.matchedSurfacePoints) /
+                                            static_cast<float>(report.sampledSurfacePoints);
+    const float surfaceAccuracy = tolerance == 0.0f
+                                      ? 0.0f
+                                      : 1.0f - report.meanSurfaceError / tolerance;
+    // Surface agreement decides the advisory result. Vertex correspondence is
+    // retained as diagnostics, but making it a gate would reject the common
+    // case where two geometric halves use different tessellation densities.
+    report.confidence = std::clamp(surfaceCoverage * std::max(0.0f, surfaceAccuracy), 0.0f, 1.0f);
     // Detection stays deliberately strict until corpus calibration establishes
     // an application threshold.  A caller can inspect weaker hypotheses, but
     // no hypothesis changes the mesh.
-    report.detected = report.unmatchedVertices == 0 && report.confidence >= 0.995f;
+    report.detected = report.unmatchedSurfacePoints == 0 && report.confidence >= 0.995f;
     return report;
 }
 
@@ -172,9 +235,8 @@ SymmetryDetectionReport detectSymmetry(const Mesh& mesh) {
     }
     const float tolerance = detectionTolerance(mesh, bounds);
     std::array<SymmetryDetectionReport, 3> candidates{
-        scoreAxis(mesh, SymmetryAxis::X, tolerance, bounds.vertices),
-        scoreAxis(mesh, SymmetryAxis::Y, tolerance, bounds.vertices),
-        scoreAxis(mesh, SymmetryAxis::Z, tolerance, bounds.vertices)};
+        scoreAxis(mesh, SymmetryAxis::X, tolerance), scoreAxis(mesh, SymmetryAxis::Y, tolerance),
+        scoreAxis(mesh, SymmetryAxis::Z, tolerance)};
     std::sort(candidates.begin(), candidates.end(),
               [](const auto& a, const auto& b) { return a.confidence > b.confidence; });
     SymmetryDetectionReport result = candidates.front();

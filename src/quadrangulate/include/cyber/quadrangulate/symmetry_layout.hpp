@@ -33,10 +33,12 @@ enum class SymmetryAxis : std::uint8_t {
     Z,
 };
 
-// An advisory result from symmetry analysis.  Detection is deliberately
+// An advisory result from symmetry analysis. Detection is deliberately
 // axis-aligned in this first release: callers must not mistake a PCA guess for
-// support for arbitrary rotated planes.  It never changes the mesh and never
-// selects forced symmetry for a remesh.
+// support for arbitrary rotated planes. It never changes the mesh and never
+// selects forced symmetry for a remesh. Vertex measurements are useful for
+// diagnosing exact correspondence, while surface samples permit differently
+// tessellated but geometrically matching halves to be assessed fairly.
 struct SymmetryDetectionReport {
     bool detected = false;
     SymmetryAxis axis = SymmetryAxis::None;
@@ -47,13 +49,22 @@ struct SymmetryDetectionReport {
     float matchTolerance = 0.0f;
     float meanMatchError = 0.0f;
     float maxMatchError = 0.0f;
+    std::size_t sampledSurfacePoints = 0;
+    std::size_t matchedSurfacePoints = 0;
+    std::size_t unmatchedSurfacePoints = 0;
+    std::size_t normalConsistentSurfacePoints = 0;
+    float meanSurfaceError = 0.0f;
+    float maxSurfaceError = 0.0f;
+    float meanNormalAgreement = 0.0f;
     float confidence = 0.0f;
     bool ambiguous = false;
 };
 
 // Analyse X/Y/Z midplanes and return the strongest geometric symmetry
-// hypothesis.  Partners are found by nearest-within-tolerance lookup, never
-// exact or quantized-key equality.  The tolerance scales with the model's
+// hypothesis. Vertex partners are found by nearest-within-tolerance lookup,
+// never exact or quantized-key equality. Face-centroid samples are reflected
+// and queried against the input surface, and their reflected normals are
+// compared with the hit face normals. The tolerance scales with the model's
 // bounding-box diagonal and is capped by the mean edge length, which keeps a
 // sparse model from accepting a visibly asymmetric displacement.
 [[nodiscard]] SymmetryDetectionReport detectSymmetry(const Mesh& mesh);

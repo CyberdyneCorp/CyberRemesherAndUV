@@ -218,12 +218,14 @@ TEST_CASE("a mesh that is already symmetric is recognised as such") {
 TEST_CASE("symmetry detection is advisory, conservative, and translation invariant") {
     Mesh mesh = centredGrid(3);
     // Break the horizontal midplane while retaining every X reflection pair.
-    mesh.setPosition(VertexId{0}, mesh.position(VertexId{0}) + Vec3{0.0f, 0.2f, 0.3f});
-    mesh.setPosition(VertexId{6}, mesh.position(VertexId{6}) + Vec3{0.0f, 0.2f, 0.3f});
+    // Each row remains planar, so the triangulated surface representation is
+    // also symmetric rather than merely its four quad corners.
     for (Index v = 0; v < mesh.vertexCapacity(); ++v) {
         const VertexId id{v};
         if (mesh.isAlive(id)) {
-            mesh.setPosition(id, mesh.position(id) * 7.0f + Vec3{13.0f, -4.0f, 2.0f});
+            Vec3 position = mesh.position(id);
+            position.z += 0.2f * position.y * position.y;
+            mesh.setPosition(id, position * 7.0f + Vec3{13.0f, -4.0f, 2.0f});
         }
     }
     const auto report = detectSymmetry(mesh);
@@ -233,8 +235,11 @@ TEST_CASE("symmetry detection is advisory, conservative, and translation invaria
     CAPTURE(report.ambiguous);
     CHECK(report.detected);
     CHECK(report.axis == SymmetryAxis::X);
-    CHECK(report.confidence == doctest::Approx(1.0f));
+    CHECK(report.confidence == doctest::Approx(1.0f).epsilon(0.001f));
     CHECK(report.unmatchedVertices == 0);
+    CHECK(report.unmatchedSurfacePoints == 0);
+    CHECK(report.matchedSurfacePoints == report.sampledSurfacePoints);
+    CHECK(report.meanNormalAgreement > 0.8f);
     CHECK(report.plane.point.x == doctest::Approx(13.0f));
 
     // Detection must not mutate the source: it is only advice for a caller
