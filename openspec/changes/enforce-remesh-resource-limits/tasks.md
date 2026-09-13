@@ -6,7 +6,10 @@
 - [x] Expose the limits through Python and Swift without changing existing calls.
 - [x] Add below/above-limit C++, C ABI, Python and Swift regression coverage.
 - [x] Validate OpenSpec and project test gates.
-- [ ] Add exact sparse-factor and retained-candidate storage ceilings to the
+- [x] Add exact sparse-factor and retained-candidate storage ceilings to the
       native QuadCover path, with typed pipeline diagnostics.
-- [ ] Extend the additive bindings limits API and cover below/above-limit
+- [x] Extend the additive bindings limits API and cover below/above-limit
       native-solver and candidate-selection regressions.
+- [x] Add an iOS device-profile harness for sampled peak RSS at approximately
+      100k and 1M input faces; collect physical-device evidence before closing
+      the tracking issue.
