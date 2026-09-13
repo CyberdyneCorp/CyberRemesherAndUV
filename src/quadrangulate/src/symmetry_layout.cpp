@@ -548,7 +548,7 @@ PipelineResult remeshSymmetric(const Mesh& input, const Parameters& rawParams, S
                                const Guidance* guidance, const ResourceLimits* limits) {
     if (axis == SymmetryAxis::None) {
         return remesh(input, rawParams, progress, cancel, quadrangulator, fallbackQuadrangulator,
-                      guidance, limits);
+                      guidance, nullptr, limits);
     }
 
     const Plane plane = symmetryPlane(input, axis);
@@ -572,7 +572,7 @@ PipelineResult remeshSymmetric(const Mesh& input, const Parameters& rawParams, S
     }
 
     PipelineResult result = remesh(split.half, halfParams, progress, cancel, quadrangulator,
-                                   fallbackQuadrangulator, guidance, limits);
+                                   fallbackQuadrangulator, guidance, nullptr, limits);
     if (result.mesh.faceCount() == 0) {
         return result;
     }

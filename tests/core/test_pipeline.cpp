@@ -357,8 +357,8 @@ TEST_CASE("pipeline rejects an input topology budget before copying the mesh") {
     remesh::ResourceLimits limits;
     limits.maxInputFaces = sphere.faceCount() - 1;
 
-    const auto result = remesh::remesh(sphere, smallRun(400), nullptr, nullptr, {}, {}, nullptr,
-                                       &limits);
+    const auto result =
+        remesh::remesh(sphere, smallRun(400), nullptr, nullptr, {}, {}, nullptr, nullptr, &limits);
     CHECK(result.status == remesh::RunStatus::Error);
     CHECK(result.error.find("resource limit at input: faces requested") != std::string::npos);
     CHECK(result.mesh.faceCount() == 0);
@@ -372,7 +372,8 @@ TEST_CASE("pipeline refuses pure-quad subdivision before exceeding output budget
     remesh::ResourceLimits limits;
     limits.maxOutputFaces = 20;
 
-    const auto result = remesh::remesh(sphere, params, nullptr, nullptr, {}, {}, nullptr, &limits);
+    const auto result =
+        remesh::remesh(sphere, params, nullptr, nullptr, {}, {}, nullptr, nullptr, &limits);
     CHECK(result.status == remesh::RunStatus::Error);
     CHECK(result.error.find("resource limit at subdivision") != std::string::npos);
     CHECK(sphere.faceCount() > 0);
@@ -384,7 +385,7 @@ TEST_CASE("pipeline reports an intermediate ceiling before an isotropic split gr
     limits.maxIntermediateFaces = sphere.faceCount();
 
     const auto result = remesh::remesh(sphere, smallRun(2'000), nullptr, nullptr, {}, {}, nullptr,
-                                       &limits);
+                                       nullptr, &limits);
     CHECK(result.status == remesh::RunStatus::Error);
     CHECK(result.error.find("resource limit at isotropic") != std::string::npos);
     CHECK(sphere.faceCount() == limits.maxIntermediateFaces);
@@ -399,7 +400,8 @@ TEST_CASE("zremesher candidate selection rejects its storage ceiling before copy
 
     const auto result = remesh::remesh(
         sphere, smallRun(400), nullptr, nullptr,
-        [&options]() { return remesh::makeZRemesherQuadrangulator(options); }, {}, nullptr, &limits);
+        [&options]() { return remesh::makeZRemesherQuadrangulator(options); }, {}, nullptr, nullptr,
+        &limits);
     CHECK(result.status == remesh::RunStatus::Error);
     CHECK(result.error.find("candidate mesh storage ceiling") != std::string::npos);
     CHECK(sphere.faceCount() > 0);

@@ -349,14 +349,16 @@ uint64_t cyber_max_import_vertices(void) {
 }
 CyberStatus cyber_set_max_import_input_bytes(uint64_t max_bytes) {
     importInputByteCeiling().store(max_bytes, std::memory_order_relaxed);
-    clearError(); return CYBER_OK;
+    clearError();
+    return CYBER_OK;
 }
 uint64_t cyber_max_import_input_bytes(void) {
     return importInputByteCeiling().load(std::memory_order_relaxed);
 }
 CyberStatus cyber_set_max_import_faces(uint64_t max_faces) {
     importFaceCeiling().store(max_faces, std::memory_order_relaxed);
-    clearError(); return CYBER_OK;
+    clearError();
+    return CYBER_OK;
 }
 uint64_t cyber_max_import_faces(void) {
     return importFaceCeiling().load(std::memory_order_relaxed);
@@ -366,9 +368,7 @@ CyberStatus cyber_set_max_bake_pixels(uint64_t max_pixels) {
     clearError();
     return CYBER_OK;
 }
-uint64_t cyber_max_bake_pixels(void) {
-    return bakePixelCeiling().load(std::memory_order_relaxed);
-}
+uint64_t cyber_max_bake_pixels(void) { return bakePixelCeiling().load(std::memory_order_relaxed); }
 
 const char* cyber_seamless_solver(void) {
     // The string is owned by a function-local static so the pointer outlives
@@ -752,7 +752,8 @@ CyberStatus remeshShared(const CyberMesh* in, const CyberRemeshParams* params,
         }
         std::optional<cyber::remesh::ResourceLimits> cppLimits;
         if (limits != nullptr || execution != nullptr) {
-            cppLimits = limits != nullptr ? toResourceLimits(*limits) : cyber::remesh::ResourceLimits{};
+            cppLimits =
+                limits != nullptr ? toResourceLimits(*limits) : cyber::remesh::ResourceLimits{};
             if (execution != nullptr) {
                 applyExecutionLimits(*execution, *cppLimits);
             }
@@ -1012,12 +1013,13 @@ CyberStatus cyber_remesh_with_limits(const CyberMesh* in, const CyberRemeshParam
                         limits);
 }
 
-CyberStatus cyber_remesh_with_resource_limits(
-    const CyberMesh* in, const CyberRemeshParams* params, const CyberRemeshLimits* topology,
-    const CyberRemeshExecutionLimits* execution, CyberProgressCb progress, CyberCancelCb cancel,
-    void* user, CyberMesh** out) {
-    return remeshShared(in, params, nullptr, progress, cancel, nullptr, user, out, topology,
-                        execution);
+CyberStatus cyber_remesh_with_resource_limits(const CyberMesh* in, const CyberRemeshParams* params,
+                                              const CyberRemeshLimits* topology,
+                                              const CyberRemeshExecutionLimits* execution,
+                                              CyberProgressCb progress, CyberCancelCb cancel,
+                                              void* user, CyberMesh** out) {
+    return remeshShared(in, params, nullptr, progress, cancel, nullptr, user, out, nullptr, nullptr,
+                        topology, execution);
 }
 
 CyberStatus cyber_remesh_guided(const CyberMesh* in, const CyberRemeshParams* params,
@@ -1175,7 +1177,8 @@ static CyberStatus remeshZremesherShared(
         const cyber::remesh::Guidance* guidancePtr = converted.empty() ? nullptr : &converted;
         std::optional<cyber::remesh::ResourceLimits> limits;
         if (topology != nullptr || execution != nullptr) {
-            limits = topology != nullptr ? toResourceLimits(*topology) : cyber::remesh::ResourceLimits{};
+            limits =
+                topology != nullptr ? toResourceLimits(*topology) : cyber::remesh::ResourceLimits{};
             if (execution != nullptr) applyExecutionLimits(*execution, *limits);
         }
         cyber::remesh::PipelineResult result = cyber::remesh::remeshSymmetric(
@@ -1879,10 +1882,11 @@ bool copyAttributeColumn(cyber::AttributeSet& set, const CyberAttributeColumn& c
 
 bool importAttributeColumn(cyber::Mesh& mesh, const CyberAttributeColumn& column,
                            const std::string& name) {
-    cyber::AttributeSet* set = column.domain == CYBER_ATTRIBUTE_VERTEX
-                                   ? &mesh.vertexAttributes()
-                                   : (column.domain == CYBER_ATTRIBUTE_FACE ? &mesh.faceAttributes()
-                                                                            : &mesh.cornerAttributes());
+    cyber::AttributeSet* set =
+        column.domain == CYBER_ATTRIBUTE_VERTEX
+            ? &mesh.vertexAttributes()
+            : (column.domain == CYBER_ATTRIBUTE_FACE ? &mesh.faceAttributes()
+                                                     : &mesh.cornerAttributes());
     switch (column.type) {
         case CYBER_ATTRIBUTE_FLOAT:
             return copyAttributeColumn<float>(*set, column, name);
@@ -1904,7 +1908,7 @@ void forEachAttribute(const cyber::Mesh& mesh, const Fn& fn) {
     const auto visit = [&](const cyber::AttributeSet& set, int domain) {
         set.forEachColumn([&](const std::string& name, const auto& values) {
             using T = typename std::decay_t<decltype(values)>::value_type;
-            constexpr int type = std::is_same_v<T, float>       ? CYBER_ATTRIBUTE_FLOAT
+            constexpr int type = std::is_same_v<T, float>          ? CYBER_ATTRIBUTE_FLOAT
                                  : std::is_same_v<T, std::int32_t> ? CYBER_ATTRIBUTE_INT32
                                  : std::is_same_v<T, cyber::Vec2>  ? CYBER_ATTRIBUTE_FLOAT2
                                  : std::is_same_v<T, cyber::Vec3>  ? CYBER_ATTRIBUTE_FLOAT3
@@ -2582,7 +2586,8 @@ CyberStatus cyber_mesh_from_indexed(const CyberIndexedMesh* input, CyberMesh** o
             setError("cyber_mesh_from_indexed: count exceeds representable range");
             return CYBER_ERR_INVALID_ARG;
         }
-        if (input->face_offsets[0] != 0 || input->face_offsets[input->face_count] != input->index_count) {
+        if (input->face_offsets[0] != 0 ||
+            input->face_offsets[input->face_count] != input->index_count) {
             setError("cyber_mesh_from_indexed: offsets must span exactly the index buffer");
             return CYBER_ERR_INVALID_ARG;
         }
@@ -2596,7 +2601,8 @@ CyberStatus cyber_mesh_from_indexed(const CyberIndexedMesh* input, CyberMesh** o
                 return CYBER_ERR_INVALID_ARG;
             }
             const std::string key = std::to_string(input->attributes[i].domain) + ":" + name;
-            if (std::find(attributeNames.begin(), attributeNames.end(), key) != attributeNames.end()) {
+            if (std::find(attributeNames.begin(), attributeNames.end(), key) !=
+                attributeNames.end()) {
                 setError("cyber_mesh_from_indexed: duplicate attribute domain and name");
                 return CYBER_ERR_INVALID_ARG;
             }
@@ -2621,7 +2627,9 @@ CyberStatus cyber_mesh_from_indexed(const CyberIndexedMesh* input, CyberMesh** o
             const size_t begin = input->face_offsets[face];
             const size_t end = input->face_offsets[face + 1];
             if (end < begin || end > input->index_count || end - begin < 3) {
-                setError("cyber_mesh_from_indexed: offsets must describe faces with at least three corners");
+                setError(
+                    "cyber_mesh_from_indexed: offsets must describe faces with at least three "
+                    "corners");
                 return CYBER_ERR_INVALID_ARG;
             }
             polygon.clear();
@@ -2724,7 +2732,8 @@ size_t cyber_mesh_attribute_count(const CyberMesh* mesh) {
     return count;
 }
 
-CyberStatus cyber_mesh_attribute_info(const CyberMesh* mesh, size_t index, CyberAttributeInfo* out) {
+CyberStatus cyber_mesh_attribute_info(const CyberMesh* mesh, size_t index,
+                                      CyberAttributeInfo* out) {
     return guarded("cyber_mesh_attribute_info", CYBER_ERR_RUNTIME, [&] {
         if (mesh == nullptr || out == nullptr) {
             setError("cyber_mesh_attribute_info: null mesh or output");
@@ -2732,18 +2741,18 @@ CyberStatus cyber_mesh_attribute_info(const CyberMesh* mesh, size_t index, Cyber
         }
         size_t current = 0;
         bool found = false;
-        forEachAttribute(mesh->mesh, [&](const std::string& name, int domain, int type,
-                                         const auto& values) {
-            if (current++ != index) {
-                return;
-            }
-            std::memset(out, 0, sizeof(*out));
-            std::memcpy(out->name, name.data(), std::min(name.size(), sizeof(out->name) - 1));
-            out->domain = domain;
-            out->type = type;
-            out->value_count = values.size();
-            found = true;
-        });
+        forEachAttribute(
+            mesh->mesh, [&](const std::string& name, int domain, int type, const auto& values) {
+                if (current++ != index) {
+                    return;
+                }
+                std::memset(out, 0, sizeof(*out));
+                std::memcpy(out->name, name.data(), std::min(name.size(), sizeof(out->name) - 1));
+                out->domain = domain;
+                out->type = type;
+                out->value_count = values.size();
+                found = true;
+            });
         if (!found) {
             setError("cyber_mesh_attribute_info: index is outside the schema");
             return CYBER_ERR_INVALID_ARG;
@@ -2772,10 +2781,10 @@ size_t copyAuthoredAttribute(const cyber::Mesh& mesh, const std::vector<T>& valu
             for (const cyber::LoopId loop : mesh.faceLoops(face)) order.push_back(loop.value);
         }
     }
-    constexpr size_t components = std::is_same_v<T, float> || std::is_same_v<T, std::int32_t>
-                                      ? 1
-                                      : (std::is_same_v<T, cyber::Vec2> ? 2
-                                                                         : (std::is_same_v<T, cyber::Vec3> ? 3 : 4));
+    constexpr size_t components =
+        std::is_same_v<T, float> || std::is_same_v<T, std::int32_t>
+            ? 1
+            : (std::is_same_v<T, cyber::Vec2> ? 2 : (std::is_same_v<T, cyber::Vec3> ? 3 : 4));
     const size_t required = order.size() * components;
     if (out == nullptr || capacity < required) return required;
     auto* destination = static_cast<float*>(out);
