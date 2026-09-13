@@ -114,6 +114,8 @@ TEST_CASE("capi bulk indexed exchange preserves authored polygons transactionall
         .face_count = offsets.size() - 1,
         .indices = indices.data(),
         .index_count = indices.size(),
+        .attributes = nullptr,
+        .attribute_count = 0,
     };
 
     CyberMesh* mesh = nullptr;
@@ -152,6 +154,8 @@ TEST_CASE("capi bulk indexed exchange preserves authored polygons transactionall
         .face_count = 2,
         .indices = indices.data(),
         .index_count = indices.size(),
+        .attributes = nullptr,
+        .attribute_count = 0,
     };
     CHECK(cyber_mesh_from_indexed(&malformed, &mesh) == CYBER_ERR_INVALID_ARG);
     CHECK(mesh == preserved);
