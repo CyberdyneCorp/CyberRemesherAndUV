@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -11,6 +12,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools" / "bench"))
 import mesh_metrics  # noqa: E402
+import corpus  # noqa: E402
 
 
 class ValidityStatsTest(unittest.TestCase):
@@ -44,6 +46,11 @@ class ValidityStatsTest(unittest.TestCase):
         )
         self.assertFalse(stats["valid"])
         self.assertEqual(stats["non_manifold_edges"], 1)
+
+    def test_acceptance_fixture_hashes_are_platform_independent(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            fixtures = corpus.acceptance_meshes(Path(directory))
+        self.assertEqual(len(fixtures), 8)
 
 
 if __name__ == "__main__":

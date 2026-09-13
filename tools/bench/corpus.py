@@ -27,7 +27,10 @@ REQUIRED_ACCEPTANCE_CATEGORIES = {
 
 
 def _write_obj(path: Path, verts: list, faces: list) -> None:
-    with path.open("w") as f:
+    # Hashes in acceptance_corpus.json describe bytes, not platform text-mode
+    # newline conversion. Force LF so the generated corpus is identical on
+    # Windows, macOS and Linux.
+    with path.open("w", newline="\n") as f:
         for v in verts:
             f.write(f"v {v[0]:.9g} {v[1]:.9g} {v[2]:.9g}\n")
         for face in faces:
@@ -233,7 +236,7 @@ def acceptance_meshes(cache_dir: Path) -> list[dict]:
         path = cache_dir / f"{item['name']}.obj"
         generator = item["generator"]
         if generator == "invalid_index":
-            path.write_text("v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 4\n")
+            path.write_text("v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 4\n", newline="\n")
         else:
             builder = ACCEPTANCE_GENERATORS.get(generator)
             if builder is None:
