@@ -13,3 +13,7 @@
 - [x] 3.1 Add an Apple CI gate that builds both slices and the simulator fixture.
 - [x] 3.2 Document installation, solver profile, supported architectures and the physical-device evidence boundary.
 - [x] 3.3 Validate the artifact, fixture and OpenSpec change.
+- [ ] 3.4 Run `validate_device_xcframework.sh` with a team-provided development
+      profile and record physical-device elapsed time, memory, cancellation,
+      and repeated-run thermal evidence. The script is reproducible, but the
+      account-owned profile is intentionally not stored in this repository.

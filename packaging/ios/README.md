@@ -31,6 +31,17 @@ The minimum deployment target is iOS 15.
 This script stages a local release artifact; release automation must publish its
 zip and checksum before an application can declare a remote SwiftPM binary
 target. Simulator verification is an executable CI gate. Physical-device
-performance, memory, cancellation latency, and thermal measurements remain a
-separate release-evidence requirement and must not be inferred from simulator
-results.
+validation uses a caller-supplied development profile and identity, so team
+credentials never enter the repository:
+
+```sh
+IOS_DEVICE_ID=<devicectl-identifier> \
+IOS_PROVISIONING_PROFILE=/path/to/development.mobileprovision \
+IOS_SIGNING_IDENTITY='Apple Development: Name (TEAMID)' \
+packaging/ios/validate_device_xcframework.sh
+```
+
+It installs the same staged consumer, verifies ABI/remesh/progress/cancellation
+on hardware, and prints the elapsed wall time. Repeat and thermal behaviour,
+peak memory, and cancellation latency remain named release measurements; they
+must not be inferred from a simulator run.
