@@ -35,17 +35,22 @@ SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
 BUILD_ARGS=(
     --configuration release
     --sdk "${SDK}"
-    -Xswiftc -target -Xswiftc arm64-apple-ios15.0
+    --triple arm64-apple-ios15.0
     -Xlinker "-F${FRAMEWORK_DIR}"
     -Xlinker -syslibroot -Xlinker "${SDK}"
     --package-path "${CONSUMER_DIR}"
 )
 swift build "${BUILD_ARGS[@]}"
 BIN_DIR="$(swift build "${BUILD_ARGS[@]}" --show-bin-path)"
+CONSUMER_BIN="${BIN_DIR}/CyberRemesherConsumer"
+otool -l "${CONSUMER_BIN}" | awk '
+    $1 == "platform" && $2 == "2" { found = 1 }
+    END { exit(found ? 0 : 1) }
+'
 
 rm -rf "${APP_DIR}"
 mkdir -p "${APP_DIR}"
-cp "${BIN_DIR}/CyberRemesherConsumer" "${APP_DIR}/"
+cp "${CONSUMER_BIN}" "${APP_DIR}/"
 cp "${IOS_PROVISIONING_PROFILE}" "${APP_DIR}/embedded.mobileprovision"
 cat > "${APP_DIR}/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>

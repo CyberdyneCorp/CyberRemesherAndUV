@@ -35,6 +35,9 @@ consumer integration. See proposal.md for motivation and the associated specs.
   headers before compiling the consumer.
 - Make simulator compilation and the fixture test a required Apple CI gate.
   Hardware profiling is tracked as evidence, not fabricated from CI.
+- Select the iOS SwiftPM destination with `--triple`, then inspect the
+  consumer Mach-O `LC_BUILD_VERSION` platform before packaging. Compiler-only
+  target flags can otherwise leave SwiftPM's build destination on the host.
 
 ## Risks / Trade-offs
 

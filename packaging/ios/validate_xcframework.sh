@@ -14,17 +14,22 @@ FRAMEWORK_DIR="${OUTPUT_DIR}/CyberRemesher/CyberRemesherC.xcframework/ios-arm64-
 CONSUMER_DIR="${OUTPUT_DIR}/CyberRemesherConsumer"
 BUILD_ARGS=(
     --sdk "${SDK}" \
-    -Xswiftc -target -Xswiftc arm64-apple-ios15.0-simulator \
+    --triple arm64-apple-ios15.0-simulator \
     -Xlinker "-F${FRAMEWORK_DIR}" \
     -Xlinker -syslibroot -Xlinker "${SDK}" \
     --package-path "${CONSUMER_DIR}"
 )
 swift build "${BUILD_ARGS[@]}"
 BIN_DIR="$(swift build "${BUILD_ARGS[@]}" --show-bin-path)"
+CONSUMER_BIN="${BIN_DIR}/CyberRemesherConsumer"
+otool -l "${CONSUMER_BIN}" | awk '
+    $1 == "platform" && $2 == "7" { found = 1 }
+    END { exit(found ? 0 : 1) }
+'
 APP_DIR="${OUTPUT_DIR}/CyberRemesherConsumer.app"
 rm -rf "${APP_DIR}"
 mkdir -p "${APP_DIR}"
-cp "${BIN_DIR}/CyberRemesherConsumer" "${APP_DIR}/"
+cp "${CONSUMER_BIN}" "${APP_DIR}/"
 cat > "${APP_DIR}/Info.plist" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
