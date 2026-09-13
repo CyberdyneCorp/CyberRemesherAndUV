@@ -128,6 +128,26 @@ TEST_CASE("PLY round-trip preserves quads and vertex colors") {
     REQUIRE((*colors)[2].x == doctest::Approx(0.25f).epsilon(0.01));
 }
 
+TEST_CASE("PLY vertex ceiling rejects the header declaration before decoding") {
+    const fs::path path = tempDir() / "over_vertex_budget.ply";
+    REQUIRE(io::exportMesh(makeCorpusCube(), path).ok());
+    io::ImportOptions options;
+    options.maxVertices = 1;
+    const auto result = io::importMesh(path, options);
+    REQUIRE(!result.ok());
+    CHECK(result.error().code == io::ErrorCode::ResourceLimit);
+}
+
+TEST_CASE("PLY face ceiling rejects the header declaration before decoding") {
+    const fs::path path = tempDir() / "over_face_budget.ply";
+    REQUIRE(io::exportMesh(makeCorpusCube(), path).ok());
+    io::ImportOptions options;
+    options.maxFaces = 1;
+    const auto result = io::importMesh(path, options);
+    REQUIRE(!result.ok());
+    CHECK(result.error().code == io::ErrorCode::ResourceLimit);
+}
+
 TEST_CASE("STL round-trip welds shared vertices back together") {
     const Mesh cube = makeCorpusCube();
     const fs::path path = tempDir() / "cube.stl";
@@ -155,6 +175,22 @@ TEST_CASE("ASCII STL imports") {
     REQUIRE(result.value().mesh.faceCount() == 1);
 }
 
+TEST_CASE("ASCII STL face ceiling stops the streaming importer before the next facet") {
+    const fs::path path = tempDir() / "two_triangles.stl";
+    std::ofstream f(path, std::ios::trunc);
+    f << "solid tris\n"
+         "facet normal 0 0 1\nouter loop\nvertex 0 0 0\nvertex 1 0 0\nvertex 0 1 "
+         "0\nendloop\nendfacet\n"
+         "facet normal 0 0 1\nouter loop\nvertex 1 0 0\nvertex 1 1 0\nvertex 0 1 "
+         "0\nendloop\nendfacet\nendsolid tris\n";
+    f.close();
+    io::ImportOptions options;
+    options.maxFaces = 1;
+    const auto result = io::importMesh(path, options);
+    REQUIRE(!result.ok());
+    CHECK(result.error().code == io::ErrorCode::ResourceLimit);
+}
+
 TEST_CASE("corrupt STL is a typed ParseError") {
     const fs::path path = tempDir() / "corrupt.stl";
     std::ofstream f(path, std::ios::binary | std::ios::trunc);
@@ -163,6 +199,16 @@ TEST_CASE("corrupt STL is a typed ParseError") {
     auto result = io::importMesh(path);
     REQUIRE(!result.ok());
     REQUIRE(result.error().code == io::ErrorCode::ParseError);
+}
+
+TEST_CASE("binary STL face ceiling rejects the header declaration before import") {
+    const fs::path path = tempDir() / "over_face_budget.stl";
+    REQUIRE(io::exportMesh(makeCorpusCube(), path).ok());
+    io::ImportOptions options;
+    options.maxFaces = 1;
+    const auto result = io::importMesh(path, options);
+    REQUIRE(!result.ok());
+    CHECK(result.error().code == io::ErrorCode::ResourceLimit);
 }
 
 TEST_CASE("glTF round-trip preserves geometry, colors and UVs (.gltf and .glb)") {
@@ -181,6 +227,26 @@ TEST_CASE("glTF round-trip preserves geometry, colors and UVs (.gltf and .glb)")
         REQUIRE(back.vertexAttributes().find<Vec3>(io::kColorAttribute) != nullptr);
         REQUIRE(back.cornerAttributes().find<Vec2>(io::kUvAttribute) != nullptr);
     }
+}
+
+TEST_CASE("glTF vertex ceiling rejects a declared position accessor before mesh allocation") {
+    const fs::path path = tempDir() / "over_vertex_budget.glb";
+    REQUIRE(io::exportMesh(makeCorpusCube(), path).ok());
+    io::ImportOptions options;
+    options.maxVertices = 1;
+    const auto result = io::importMesh(path, options);
+    REQUIRE(!result.ok());
+    CHECK(result.error().code == io::ErrorCode::ResourceLimit);
+}
+
+TEST_CASE("glTF face ceiling rejects its index accessor before mesh allocation") {
+    const fs::path path = tempDir() / "over_face_budget.glb";
+    REQUIRE(io::exportMesh(makeCorpusCube(), path).ok());
+    io::ImportOptions options;
+    options.maxFaces = 1;
+    const auto result = io::importMesh(path, options);
+    REQUIRE(!result.ok());
+    CHECK(result.error().code == io::ErrorCode::ResourceLimit);
 }
 
 TEST_CASE("corrupt glTF is a typed ParseError (spec: mesh-io corrupt input)") {

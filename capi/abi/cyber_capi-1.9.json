@@ -1,0 +1,3643 @@
+{
+  "callbacks": {
+    "CyberCancelCb": {
+      "parameters": [
+        "void*"
+      ],
+      "return": "struct CyberMesh CyberMesh; typedef enum CyberStatus { CYBER_OK = 0, CYBER_ERR_IO, CYBER_ERR_INVALID_ARG, CYBER_ERR_INVALID_PARAM, CYBER_ERR_EMPTY, CYBER_ERR_RUNTIME, CYBER_ERR_CANCELLED, CYBER_ERR_INCOMPATIBLE_VERSION, CYBER_ERR_UNSUPPORTED_TOPOLOGY } CyberStatus; #define CYBER_ABI_VERSION_MAJOR 1 #define CYBER_ABI_VERSION_MINOR 9 void cyber_abi_version(int* major, int* minor); CyberStatus cyber_abi_check(int compiled_major, int compiled_minor); void cyber_version(int* major, int* minor, int* patch); const char* cyber_seamless_solver(void); const char* cyber_status_string(CyberStatus status); const char* cyber_last_error(void); typedef enum CyberBackend { CYBER_BACKEND_AUTO = 0, CYBER_BACKEND_CPU = 1, CYBER_BACKEND_METAL = 2, CYBER_BACKEND_CUDA = 3, CYBER_BACKEND_OPENCL = 4 } CyberBackend; size_t cyber_available_backends(CyberBackend* out, size_t max_backends); CyberStatus cyber_set_backend(CyberBackend backend); CyberBackend cyber_active_backend(void); const char* cyber_active_backend_name(void); CyberStatus cyber_set_max_worker_threads(int max_threads); int cyber_max_worker_threads(void); CyberStatus cyber_set_max_import_vertices(uint64_t max_vertices); uint64_t cyber_max_import_vertices(void); CyberStatus cyber_set_max_import_input_bytes(uint64_t max_bytes); uint64_t cyber_max_import_input_bytes(void); CyberStatus cyber_set_max_import_faces(uint64_t max_faces); uint64_t cyber_max_import_faces(void); CyberStatus cyber_set_max_bake_pixels(uint64_t max_pixels); uint64_t cyber_max_bake_pixels(void); CyberStatus cyber_mesh_load(const char* path, CyberMesh** out); CyberStatus cyber_mesh_save(const CyberMesh* mesh, const char* path); CyberStatus cyber_mesh_load_obj(const char* path, CyberMesh** out); CyberStatus cyber_mesh_save_obj(const CyberMesh* mesh, const char* path); void cyber_mesh_free(CyberMesh* mesh); typedef struct CyberRemeshParams { int targetQuads; float edgeScale; float sharpEdgeDegrees; float smoothNormalDegrees; float adaptivity; int pureQuads; int holeFillMaxBoundary; int quadMethod; } CyberRemeshParams; typedef struct CyberRemeshLimits { uint64_t maxInputVertices; uint64_t maxInputFaces; uint64_t maxIntermediateVertices; uint64_t maxIntermediateFaces; uint64_t maxOutputVertices; uint64_t maxOutputFaces; } CyberRemeshLimits; typedef struct CyberRemeshExecutionLimits { uint64_t maxDirectFactorBytes; uint64_t maxCandidateBytes; } CyberRemeshExecutionLimits; #define CYBER_QUAD_FIELD_ALIGNED 0 #define CYBER_QUAD_INSTANT_MESHES 1 #define CYBER_QUAD_INTEGER 2 #define CYBER_QUAD_QUADCOVER 3 #define CYBER_QUAD_ZREMESHER 4 void cyber_default_params(CyberRemeshParams* params); void cyber_default_remesh_limits(CyberRemeshLimits* limits); void cyber_default_remesh_execution_limits(CyberRemeshExecutionLimits* limits); typedef int"
+    },
+    "CyberFieldDistanceFn": {
+      "parameters": [
+        "void*",
+        "const float[3]"
+      ],
+      "return": "struct CyberZRemesherParams { int quality; int symmetry; int unifiedSizing; int boundaryChains; int foldRepair; } CyberZRemesherParams; #define CYBER_ZR_QUALITY_FAST 0 #define CYBER_ZR_QUALITY_BEST 1 #define CYBER_ZR_SYMMETRY_NONE 0 #define CYBER_ZR_SYMMETRY_X 1 #define CYBER_ZR_SYMMETRY_Y 2 #define CYBER_ZR_SYMMETRY_Z 3 void cyber_default_zremesher_params(CyberZRemesherParams* params); typedef struct CyberZRemesherReport { size_t layouts; size_t layoutsValid; size_t layoutNodes; size_t layoutArcs; size_t layoutPatches; size_t singularities; size_t tJunctions; size_t featureArcs; size_t boundaryArcs; size_t excludedArcs; size_t nonClosingPatches; int totalIndex; char selectedCandidate[32]; double qualityScore; int symmetryApplied; int topologicallySymmetric; size_t mirroredVertices; size_t mirroredFaces; size_t borderSnapped; size_t membranesRemoved; float maxBorderDrift; } CyberZRemesherReport; #define CYBER_GUIDE_ORIENTATION 0 #define CYBER_GUIDE_TOPOLOGY 1 typedef struct CyberFlowGuideEx { const float* points; size_t point_count; float strength; float radius; int mode; int closed; } CyberFlowGuideEx; typedef struct CyberGuidanceEx { const CyberFlowGuideEx* guides; size_t guide_count; const float* vertex_density; size_t vertex_density_count; const float* face_density; size_t face_density_count; } CyberGuidanceEx; CyberStatus cyber_remesh_guided_ex(const CyberMesh* in, const CyberRemeshParams* params, const CyberGuidanceEx* guidance, CyberProgressCb progress, CyberCancelCb cancel, CyberWarningCb warning, void* user, CyberMesh** out); CyberStatus cyber_remesh_zremesher(const CyberMesh* in, const CyberRemeshParams* params, const CyberZRemesherParams* zr, const CyberGuidanceEx* guidance, CyberProgressCb progress, CyberCancelCb cancel, CyberWarningCb warning, void* user, CyberMesh** out, CyberZRemesherReport* report); CyberStatus cyber_remesh_zremesher_with_resource_limits( const CyberMesh* in, const CyberRemeshParams* params, const CyberZRemesherParams* zr, const CyberGuidanceEx* guidance, const CyberRemeshLimits* topology, const CyberRemeshExecutionLimits* execution, CyberProgressCb progress, CyberCancelCb cancel, CyberWarningCb warning, void* user, CyberMesh** out, CyberZRemesherReport* report); typedef struct CyberIsotropicParams { float targetEdgeLength; int iterations; float adaptivity; float smoothNormalDegrees; float sharpEdgeDegrees; } CyberIsotropicParams; void cyber_default_isotropic_params(CyberIsotropicParams* params); CyberStatus cyber_mesh_isotropic_remesh(CyberMesh* mesh, const CyberIsotropicParams* params, size_t* out_faces); typedef struct CyberStats { size_t vertices; size_t quads; size_t triangles; size_t other; size_t islands; size_t islandsFailed; } CyberStats; CyberStatus cyber_mesh_stats(const CyberMesh* mesh, CyberStats* out); typedef struct CyberAtlasParams { float maxChartAngleDegrees; float packMargin; int textureSize; int reorientCharts; int mergeCharts; float maxChartDistortion; } CyberAtlasParams; typedef struct CyberAtlasResult { int chartCount; size_t seamEdges; float maxAngleDistortion; float rmsAngleDistortion; int flippedCharts; int fallbackCharts; float packedArea; float texelDensity; int droppedCharts; float packedBoxArea; } CyberAtlasResult; void cyber_default_atlas_params(CyberAtlasParams* params); CyberStatus cyber_uv_atlas(CyberMesh* mesh, const CyberAtlasParams* params, CyberAtlasResult* out); CyberStatus cyber_uv_atlas_cancellable(CyberMesh* mesh, const CyberAtlasParams* params, CyberProgressCb progress, CyberCancelCb cancel, void* user, CyberAtlasResult* out); CyberMesh* cyber_mesh_create(void); void cyber_mesh_destroy(CyberMesh* mesh); CyberStatus cyber_mesh_clone(const CyberMesh* mesh, CyberMesh** out); size_t cyber_mesh_vertex_count(const CyberMesh* mesh); size_t cyber_mesh_face_count(const CyberMesh* mesh); size_t cyber_mesh_copy_positions(const CyberMesh* mesh, float* out, size_t max_floats); CyberStatus cyber_mesh_set_positions(CyberMesh* mesh, const float* positions, size_t float_count); void cyber_remesh_params_default(CyberRemeshParams* params); #define CYBER_ATTRIBUTE_VERTEX 0 #define CYBER_ATTRIBUTE_FACE 1 #define CYBER_ATTRIBUTE_CORNER 2 #define CYBER_ATTRIBUTE_FLOAT 0 #define CYBER_ATTRIBUTE_INT32 1 #define CYBER_ATTRIBUTE_FLOAT2 2 #define CYBER_ATTRIBUTE_FLOAT3 3 #define CYBER_ATTRIBUTE_FLOAT4 4 typedef struct CyberAttributeColumn { const char* name; int domain; int type; const void* values; size_t value_count; } CyberAttributeColumn; typedef struct CyberAttributeInfo { char name[64]; int domain; int type; size_t value_count; } CyberAttributeInfo; typedef struct CyberIndexedMesh { const float* positions; size_t vertex_count; const size_t* face_offsets; size_t face_count; const uint32_t* indices; size_t index_count; const CyberAttributeColumn* attributes; size_t attribute_count; } CyberIndexedMesh; CyberStatus cyber_mesh_from_indexed(const CyberIndexedMesh* input, CyberMesh** out); size_t cyber_mesh_copy_face_offsets(const CyberMesh* mesh, size_t* out, size_t capacity); size_t cyber_mesh_copy_polygon_indices(const CyberMesh* mesh, uint32_t* out, size_t capacity); size_t cyber_mesh_attribute_count(const CyberMesh* mesh); CyberStatus cyber_mesh_attribute_info(const CyberMesh* mesh, size_t index, CyberAttributeInfo* out); size_t cyber_mesh_copy_attribute(const CyberMesh* mesh, const CyberAttributeInfo* attribute, void* out, size_t capacity); size_t cyber_mesh_copy_render_positions(const CyberMesh* mesh, float* out, size_t max_floats); size_t cyber_mesh_triangle_count(const CyberMesh* mesh); size_t cyber_mesh_copy_triangle_indices(const CyberMesh* mesh, uint32_t* out, size_t max_indices); size_t cyber_mesh_copy_normals(const CyberMesh* mesh, float* out, size_t max_floats); int cyber_mesh_has_colors(const CyberMesh* mesh); size_t cyber_mesh_copy_colors(const CyberMesh* mesh, float* out, size_t max_floats); size_t cyber_mesh_edge_count(const CyberMesh* mesh); size_t cyber_mesh_copy_edge_indices(const CyberMesh* mesh, uint32_t* out, size_t max_indices); const float* cyber_mesh_positions_ptr(const CyberMesh* mesh, size_t* out_count); const uint32_t* cyber_mesh_triangle_indices_ptr(const CyberMesh* mesh, size_t* out_count); const uint32_t* cyber_mesh_edge_indices_ptr(const CyberMesh* mesh, size_t* out_count); const float* cyber_mesh_normals_ptr(const CyberMesh* mesh, size_t* out_count); const float* cyber_mesh_colors_ptr(const CyberMesh* mesh, size_t* out_count); size_t cyber_mesh_live_faces(const CyberMesh* mesh, uint32_t* out_faces, size_t max_faces); CyberStatus cyber_mesh_set_hidden_faces(CyberMesh* mesh, const uint32_t* faces, size_t face_count); size_t cyber_mesh_hidden_face_count(const CyberMesh* mesh); CyberStatus cyber_mesh_set_tagged_edges(CyberMesh* mesh, const uint32_t* edges, size_t edge_count); const uint32_t* cyber_mesh_tagged_edge_indices_ptr(const CyberMesh* mesh, size_t* out_count); #define CYBER_INVALID_ID 0xFFFFFFFFu typedef struct CyberSnapper CyberSnapper; CyberStatus cyber_snapper_create(const CyberMesh* target, CyberSnapper** out); void cyber_snapper_free(CyberSnapper* snapper); int cyber_snapper_snap_to_surface(const CyberSnapper* snapper, const float query[3], float out_point[3], uint32_t* out_face); int cyber_snapper_snap_to_vertex(const CyberSnapper* snapper, const float query[3], float radius, float out_point[3], uint32_t* out_vertex); int cyber_snapper_raycast(const CyberSnapper* snapper, const float origin[3], const float direction[3], float max_distance, float out_point[3], float* out_t, uint32_t* out_face); int cyber_mesh_nearest_vertex(const CyberMesh* mesh, const float query[3], float max_distance, uint32_t* out_vertex, float out_position[3]); int cyber_mesh_nearest_vertex_excluding(const CyberMesh* mesh, const float query[3], float max_distance, uint32_t exclude_vertex, uint32_t* out_vertex, float out_position[3]); int cyber_mesh_nearest_edge(const CyberMesh* mesh, const float query[3], float max_distance, uint32_t* out_edge, float out_point[3]); int cyber_mesh_edge_endpoints(const CyberMesh* mesh, uint32_t edge, uint32_t out_vertices[2]); int cyber_mesh_is_boundary_edge(const CyberMesh* mesh, uint32_t edge); int cyber_mesh_vertex_position(const CyberMesh* mesh, uint32_t vertex, float out_position[3]); int cyber_mesh_edge_faces(const CyberMesh* mesh, uint32_t edge, uint32_t out_faces[2], size_t out_sizes[2]); int cyber_mesh_edge_face_count(const CyberMesh* mesh, uint32_t edge); size_t cyber_mesh_shortest_vertex_path(const CyberMesh* mesh, uint32_t from, uint32_t to, uint32_t* out_vertices, size_t max_vertices); size_t cyber_mesh_boundary_loop(const CyberMesh* mesh, uint32_t edge, uint32_t* out_vertices, size_t max_vertices, int* out_closed); size_t cyber_mesh_edge_loop(const CyberMesh* mesh, uint32_t edge, uint32_t* out_edges, size_t max_edges); typedef struct CyberLoopMetrics { uint32_t edge_count; uint32_t vertex_count; int closed; float length; int has_endpoints; uint32_t endpoint_a; uint32_t endpoint_b; uint32_t boundary_edge_count; int snap_measured; uint32_t snapped_vertex_count; float max_snap_distance; } CyberLoopMetrics; CyberStatus cyber_mesh_loop_metrics(const CyberMesh* mesh, uint32_t edge, const CyberSnapper* snapper, CyberLoopMetrics* out_metrics); size_t cyber_mesh_quad_ring(const CyberMesh* mesh, uint32_t edge, uint32_t* out_edges, size_t max_edges, int* out_closed); CyberStatus cyber_retopo_create_face(CyberMesh* mesh, const float* points_xyz, size_t point_count, const CyberSnapper* snapper, uint32_t* out_face); CyberStatus cyber_retopo_tweak_vertex(CyberMesh* mesh, uint32_t vertex, const float target[3], const CyberSnapper* snapper); CyberStatus cyber_retopo_move(CyberMesh* mesh, uint32_t seed_vertex, const float displacement[3], float radius, const uint32_t* pinned, size_t pinned_count, const CyberSnapper* snapper); CyberStatus cyber_retopo_relax(CyberMesh* mesh, const float center[3], float radius, float strength, int iterations, int auto_pin_corners, const uint32_t* pinned, size_t pinned_count, const CyberSnapper* snapper); CyberStatus cyber_retopo_erase(CyberMesh* mesh, const float center[3], float base_radius, float pressure, size_t* out_removed); CyberStatus cyber_retopo_delete_faces(CyberMesh* mesh, const uint32_t* faces, size_t face_count, size_t* out_removed); CyberStatus cyber_retopo_insert_loop(CyberMesh* mesh, uint32_t edge, float t, size_t* out_new_faces); CyberStatus cyber_retopo_create_grid(CyberMesh* mesh, const float* points_xyz, size_t rows, size_t cols, const CyberSnapper* snapper, size_t* out_faces); CyberStatus cyber_retopo_dissolve_edges(CyberMesh* mesh, const uint32_t* edges, size_t edge_count, size_t* out_dissolved); CyberStatus cyber_retopo_merge_vertices(CyberMesh* mesh, uint32_t keep, uint32_t remove, int at_midpoint); CyberStatus cyber_retopo_rotate_edge(CyberMesh* mesh, uint32_t edge); #define CYBER_BUILD_NEW_VERTEX 0xFFFFFFFFu CyberStatus cyber_retopo_build_face(CyberMesh* mesh, size_t count, const uint32_t* vertex_ids, const float* points_xyz, const CyberSnapper* snapper, uint32_t* out_face, uint32_t* out_ring_vertices); CyberStatus cyber_retopo_grow_boundary_edge(CyberMesh* mesh, uint32_t edge, const float point_xyz[3], const CyberSnapper* snapper, uint32_t* out_vertex); CyberStatus cyber_retopo_distribute_path(CyberMesh* mesh, const uint32_t* vertices, size_t count, const CyberSnapper* snapper); CyberStatus cyber_retopo_surface_cut(CyberMesh* mesh, const float a[3], const float b[3], const float view_dir[3], int triangulate_ngons, const CyberSnapper* snapper, size_t* out_split_edges, size_t* out_split_faces); CyberStatus cyber_retopo_patch_clone(CyberMesh* mesh, const uint32_t* faces, size_t face_count, const float xf[12], int flip, const CyberSnapper* snapper, uint32_t* out_new_faces, size_t* out_new_face_count); CyberStatus cyber_retopo_extend_boundary_grid(CyberMesh* mesh, const uint32_t* chain, size_t count, int closed, const float offset[3], int rings, const CyberSnapper* snapper, uint32_t* out_outer_chain, size_t* out_new_faces); CyberStatus cyber_retopo_extend_boundary_fan(CyberMesh* mesh, const uint32_t* chain, size_t count, int closed, const float apex_offset[3], const CyberSnapper* snapper, uint32_t* out_apex, size_t* out_new_faces); CyberStatus cyber_retopo_draw_strip(CyberMesh* mesh, const float* path_xyz, size_t point_count, float width, const float view_dir[3], uint32_t start_a, uint32_t start_b, const CyberSnapper* snapper, size_t* out_new_faces); CyberStatus cyber_retopo_transform_vertices(CyberMesh* mesh, const uint32_t* vertices, size_t count, const float xf[12], const CyberSnapper* snapper, float resnap_epsilon, size_t* out_resnapped, float* out_max_distance); typedef struct CyberSymmetry { float origin[3]; float normal[3]; float weld_tolerance; int working_side_positive; } CyberSymmetry; CyberStatus cyber_retopo_snap_symmetry_plane(CyberMesh* mesh, const CyberSymmetry* symmetry, size_t* out_snapped); CyberStatus cyber_retopo_apply_symmetry(CyberMesh* mesh, const CyberSymmetry* symmetry, const CyberSnapper* snapper, size_t* out_added_faces); typedef struct CyberResymmetrizeReport { uint32_t snapped; uint32_t matched; uint32_t unmatched; float max_correction; } CyberResymmetrizeReport; CyberStatus cyber_retopo_resymmetrize(CyberMesh* mesh, const CyberSymmetry* symmetry, float match_tolerance, CyberResymmetrizeReport* out_report); CyberStatus cyber_retopo_snap_all(CyberMesh* mesh, const CyberSnapper* snapper, const uint32_t* pinned, size_t pinned_count, size_t* out_moved, float* out_max_distance); typedef enum CyberSubdivisionMode { CYBER_SUBDIV_LINEAR = 0, CYBER_SUBDIV_CATMULL_CLARK = 1 } CyberSubdivisionMode; uint64_t cyber_mesh_topology_generation(const CyberMesh* mesh); CyberStatus cyber_retopo_subdivide(CyberMesh* mesh, const CyberSnapper* snapper, size_t* out_faces); CyberStatus cyber_retopo_subdivide_ex(CyberMesh* mesh, const CyberSnapper* snapper, CyberSubdivisionMode mode, size_t* out_faces); typedef enum CyberLoopSubdivideMode { CYBER_LOOP_SUBDIVIDE_SMOOTH = 0, CYBER_LOOP_SUBDIVIDE_LINEAR = 1 } CyberLoopSubdivideMode; CyberStatus cyber_retopo_loop_subdivide(CyberMesh* mesh, CyberLoopSubdivideMode mode, const CyberSnapper* snapper, size_t* out_faces); CyberStatus cyber_retopo_triangulate(CyberMesh* mesh, size_t* out_faces); typedef enum CyberFalloff { CYBER_FALLOFF_LINEAR = 0, CYBER_FALLOFF_SMOOTH = 1, CYBER_FALLOFF_SHARP = 2, CYBER_FALLOFF_ROUND = 3 } CyberFalloff; typedef struct CyberSoftTransformReport { size_t moved; size_t resnapped; float max_snap_distance; } CyberSoftTransformReport; CyberStatus cyber_retopo_selection_line(CyberMesh* mesh, const float anchor[3], const float end[3], const float view_dir[3], int snap_angle, float snap_degrees, CyberFalloff falloff); CyberStatus cyber_retopo_selection_sphere(CyberMesh* mesh, const float center[3], float radius, CyberFalloff falloff); CyberStatus cyber_retopo_selection_paint(CyberMesh* mesh, const float center[3], float radius, float pressure, int subtract, CyberFalloff falloff); CyberStatus cyber_retopo_selection_paint_stroke(CyberMesh* mesh, const float* samples_xyzp, size_t sample_count, float radius, int subtract, CyberFalloff falloff); CyberStatus cyber_retopo_selection_clear(CyberMesh* mesh); CyberStatus cyber_retopo_selection_invert(CyberMesh* mesh); CyberStatus cyber_retopo_selection_expand(CyberMesh* mesh, int steps); CyberStatus cyber_retopo_selection_contract(CyberMesh* mesh, int steps); CyberStatus cyber_retopo_selection_smooth(CyberMesh* mesh, int steps); size_t cyber_retopo_selection_copy_weights(const CyberMesh* mesh, float* out, size_t capacity); CyberStatus cyber_retopo_selection_set_weights(CyberMesh* mesh, const float* weights, size_t count); CyberStatus cyber_retopo_selection_save(CyberMesh* mesh, const char* name); CyberStatus cyber_retopo_selection_load(CyberMesh* mesh, const char* name); size_t cyber_retopo_selection_slot_count(const CyberMesh* mesh); const char* cyber_retopo_selection_slot_name(const CyberMesh* mesh, size_t index); CyberStatus cyber_retopo_selection_transform(CyberMesh* mesh, const float xf[12], const CyberSnapper* snapper, float resnap_epsilon, CyberSoftTransformReport* out_report); CyberStatus cyber_retopo_selection_transform_pinned(CyberMesh* mesh, const float xf[12], const uint32_t* pinned, size_t pinned_count, const CyberSnapper* snapper, float resnap_epsilon, CyberSoftTransformReport* out_report); CyberStatus cyber_retopo_selection_relax(CyberMesh* mesh, float strength, int iterations, const uint32_t* pinned, size_t pinned_count, const CyberSnapper* snapper, float resnap_epsilon, CyberSoftTransformReport* out_report); typedef struct CyberDocument CyberDocument; CyberDocument* cyber_document_create(void); void cyber_document_free(CyberDocument* doc); CyberStatus cyber_document_set_target(CyberDocument* doc, const CyberMesh* mesh); CyberStatus cyber_document_set_edit_mesh(CyberDocument* doc, const CyberMesh* mesh); CyberMesh* cyber_document_target(const CyberDocument* doc); CyberMesh* cyber_document_edit_mesh(const CyberDocument* doc); size_t cyber_document_slot_count(const CyberDocument* doc); const char* cyber_document_slot_name(const CyberDocument* doc, size_t index); size_t cyber_document_slot_weights(const CyberDocument* doc, const char* name, float* out, size_t capacity); size_t cyber_document_save(const CyberDocument* doc, uint8_t* out, size_t capacity); CyberDocument* cyber_document_load(const uint8_t* bytes, size_t count); CyberStatus cyber_document_save_file(const CyberDocument* doc, const char* path); CyberDocument* cyber_document_load_file(const char* path); typedef enum CyberStrokeShape { CYBER_SHAPE_UNKNOWN = 0, CYBER_SHAPE_HOLD_POINT, CYBER_SHAPE_LINE, CYBER_SHAPE_CLOSED_LOOP, CYBER_SHAPE_CIRCLE, CYBER_SHAPE_SCRIBBLE, CYBER_SHAPE_CROSS, CYBER_SHAPE_LASSO, CYBER_SHAPE_GRID } CyberStrokeShape; typedef enum CyberStrokeContext { CYBER_CONTEXT_EMPTY_SURFACE = 0, CYBER_CONTEXT_FACE, CYBER_CONTEXT_EDGE, CYBER_CONTEXT_BOUNDARY_EDGE, CYBER_CONTEXT_VERTEX } CyberStrokeContext; typedef enum CyberStrokeAction { CYBER_ACTION_NONE = 0, CYBER_ACTION_CREATE_QUAD, CYBER_ACTION_INSERT_LOOP, CYBER_ACTION_TAG_LOOP, CYBER_ACTION_DISSOLVE_EDGE, CYBER_ACTION_DELETE_FACES, CYBER_ACTION_MERGE_VERTICES, CYBER_ACTION_ROTATE_EDGE, CYBER_ACTION_TWEAK_VERTEX, CYBER_ACTION_HIDE_REGION, CYBER_ACTION_TOGGLE_VISIBILITY, CYBER_ACTION_CREATE_GRID } CyberStrokeAction; typedef enum CyberElementKind { CYBER_ELEMENT_VERTEX = 0, CYBER_ELEMENT_EDGE, CYBER_ELEMENT_FACE } CyberElementKind; typedef struct CyberStrokeInterpretation CyberStrokeInterpretation; CyberStatus cyber_stroke_interpret(const CyberMesh* edit_mesh, const float* view_proj, const float* samples_xyt, size_t sample_count, float aspect, CyberStrokeInterpretation** out); void cyber_stroke_interpretation_free(CyberStrokeInterpretation* interpretation); CyberStrokeShape cyber_stroke_interpretation_shape(const CyberStrokeInterpretation* interpretation); float cyber_stroke_interpretation_shape_confidence(const CyberStrokeInterpretation* interpretation); CyberStrokeContext cyber_stroke_interpretation_context( const CyberStrokeInterpretation* interpretation); size_t cyber_stroke_interpretation_candidate_count(const CyberStrokeInterpretation* interpretation); CyberStrokeAction cyber_stroke_interpretation_action( const CyberStrokeInterpretation* interpretation, size_t candidate); float cyber_stroke_interpretation_confidence(const CyberStrokeInterpretation* interpretation, size_t candidate); size_t cyber_stroke_interpretation_element_count(const CyberStrokeInterpretation* interpretation, size_t candidate); int cyber_stroke_interpretation_element(const CyberStrokeInterpretation* interpretation, size_t candidate, size_t element, CyberElementKind* out_kind, uint32_t* out_id); size_t cyber_stroke_interpretation_corner_count(const CyberStrokeInterpretation* interpretation); int cyber_stroke_interpretation_corner(const CyberStrokeInterpretation* interpretation, size_t corner, float out_xy[2]); int cyber_stroke_interpretation_grid_size(const CyberStrokeInterpretation* interpretation, size_t* out_rows, size_t* out_cols); typedef enum CyberBakeMap { CYBER_BAKE_NORMAL = 0, CYBER_BAKE_AO, CYBER_BAKE_DISPLACEMENT, CYBER_BAKE_POSITION, CYBER_BAKE_COLOR, CYBER_BAKE_CURVATURE, CYBER_BAKE_CAVITY } CyberBakeMap; typedef struct CyberBakeParams { int width; int height; float cageDistance; int aoSamples; float aoRadius; float curvatureRange; } CyberBakeParams; void cyber_default_bake_params(CyberBakeParams* params); typedef struct CyberImage CyberImage; CyberStatus cyber_bake(const CyberMesh* low, const CyberMesh* high, CyberBakeMap map, const CyberBakeParams* params, CyberImage** out); void cyber_image_free(CyberImage* image); int cyber_image_width(const CyberImage* image); int cyber_image_height(const CyberImage* image); int cyber_image_channels(const CyberImage* image); size_t cyber_image_copy_pixels(const CyberImage* image, float* out, size_t max_floats); CyberStatus cyber_image_save_png(const CyberImage* image, const char* path); typedef struct CyberSeamSet CyberSeamSet; typedef struct CyberSeamPath CyberSeamPath; typedef struct CyberSeamPathOptions { float flatWeight; float featureWeight; float concaveWeight; float convexWeight; float creaseDegrees; float minWeight; } CyberSeamPathOptions; void cyber_default_seam_path_options(CyberSeamPathOptions* options); float cyber_mesh_edge_signed_dihedral(const CyberMesh* mesh, uint32_t edge); CyberStatus cyber_seam_set_create(CyberSeamSet** out); void cyber_seam_set_free(CyberSeamSet* seams); size_t cyber_seam_set_count(const CyberSeamSet* seams); int cyber_seam_set_is_seam(const CyberSeamSet* seams, uint32_t edge); size_t cyber_seam_set_edges(const CyberSeamSet* seams, uint32_t* out_edges, size_t max_edges); CyberStatus cyber_seam_set_mark(CyberSeamSet* seams, uint32_t edge); CyberStatus cyber_seam_set_erase(CyberSeamSet* seams, uint32_t edge); CyberStatus cyber_seam_path_create(const CyberMesh* mesh, const CyberSeamPathOptions* options, CyberSeamPath** out); void cyber_seam_path_free(CyberSeamPath* path); int cyber_seam_path_add_waypoint(CyberSeamPath* path, uint32_t vertex); int cyber_seam_path_move_waypoint(CyberSeamPath* path, size_t index, uint32_t vertex); int cyber_seam_path_move_waypoint_to(CyberSeamPath* path, size_t index, const float position[3], float radius); int cyber_seam_path_remove_waypoint(CyberSeamPath* path, size_t index); void cyber_seam_path_clear(CyberSeamPath* path); size_t cyber_seam_path_waypoint_count(const CyberSeamPath* path); size_t cyber_seam_path_waypoints(const CyberSeamPath* path, uint32_t* out_vertices, size_t max_vertices); size_t cyber_seam_path_segment_count(const CyberSeamPath* path); size_t cyber_seam_path_segment(const CyberSeamPath* path, size_t index, uint32_t* out_vertices, size_t max_vertices); uint64_t cyber_seam_path_segment_revision(const CyberSeamPath* path, size_t index); int cyber_seam_path_is_routed(const CyberSeamPath* path); size_t cyber_seam_path_vertices(const CyberSeamPath* path, uint32_t* out_vertices, size_t max_vertices); size_t cyber_seam_path_edges(const CyberSeamPath* path, uint32_t* out_edges, size_t max_edges); size_t cyber_seam_path_commit(CyberSeamPath* path, CyberSeamSet* seams, uint32_t* out_edges, size_t max_edges); uint32_t cyber_seam_path_resume_marker(const CyberSeamPath* path); void cyber_seam_path_drop_resume_marker(CyberSeamPath* path); typedef struct CyberUnwrapSeamsParams { float packMargin; int textureSize; int reorientCharts; } CyberUnwrapSeamsParams; void cyber_default_unwrap_seams_params(CyberUnwrapSeamsParams* params); CyberStatus cyber_uv_unwrap_seams(CyberMesh* mesh, const CyberSeamSet* seams, const CyberUnwrapSeamsParams* params, CyberAtlasResult* out); CyberStatus cyber_uv_unwrap_seams_cancellable(CyberMesh* mesh, const CyberSeamSet* seams, const CyberUnwrapSeamsParams* params, CyberProgressCb progress, CyberCancelCb cancel, void* user, CyberAtlasResult* out); CyberStatus cyber_uv_stitch_seams(CyberMesh* mesh, CyberSeamSet* seams, const uint32_t* edges, size_t edge_count); #define CYBER_HANDOFF_VERSION_MAJOR 1 #define CYBER_HANDOFF_VERSION_MINOR 0 typedef struct CyberHandoffInfo { int versionMajor; int versionMinor; const char* producer; size_t vertexCount; size_t faceCount; int hasVertexColors; int hasVertexNormals; int hasMaterialMix; size_t droppedFaces; } CyberHandoffInfo; CyberStatus cyber_handoff_open(const char* path, CyberMesh** out, CyberHandoffInfo* info); typedef struct CyberHandoffBuffers { const float* positions; const float* normals; const float* colors; const float* material_mix; size_t vertex_count; const uint32_t* indices; size_t index_count; int version_major; int version_minor; const char* producer; } CyberHandoffBuffers; CyberStatus cyber_handoff_open_buffers(const CyberHandoffBuffers* buffers, CyberMesh** out, CyberHandoffInfo* info); typedef float"
+    },
+    "CyberFieldGradientFn": {
+      "parameters": [
+        "void*",
+        "const float[3]",
+        "float[3]"
+      ],
+      "return": "void"
+    },
+    "CyberFieldOcclusionFn": {
+      "parameters": [
+        "void*",
+        "const float[3]",
+        "const float[3]",
+        "float"
+      ],
+      "return": "float"
+    },
+    "CyberProgressCb": {
+      "parameters": [
+        "float",
+        "const char*",
+        "void*"
+      ],
+      "return": "void"
+    },
+    "CyberWarningCb": {
+      "parameters": [
+        "const char*",
+        "void*"
+      ],
+      "return": "struct CyberCountPolicy { double relativeTolerance; size_t maxAttempts; } CyberCountPolicy; #define CYBER_COUNT_NOT_CALIBRATED 0 #define CYBER_COUNT_WITHIN_TOLERANCE 1 #define CYBER_COUNT_FIXED_SCALING 2 #define CYBER_COUNT_NO_TARGET 3 #define CYBER_COUNT_NO_EXTRACTED_FACES 4 #define CYBER_COUNT_ATTEMPT_BUDGET_EXHAUSTED 5 #define CYBER_COUNT_TOLERANCE_NOT_MET 6 #define CYBER_COUNT_INFEASIBLE_CONSTRAINTS 7 typedef struct CyberCountIslandOutcome { size_t islandIndex; double requestedQuads; double effectiveBaseQuads; double calibratedQuads; size_t finalFaces; size_t attempts; size_t selectedAttempt; int termination; } CyberCountIslandOutcome; typedef struct CyberTargetCountReport { int requestedQuads; int effectiveBaseQuads; size_t finalFaces; int pureQuads; size_t islandCount; CyberCountIslandOutcome* islands; size_t islandCapacity; } CyberTargetCountReport; CyberStatus cyber_remesh_with_count_report(const CyberMesh* in, const CyberRemeshParams* params, const CyberCountPolicy* count_policy, CyberProgressCb progress, CyberCancelCb cancel, void* user, CyberMesh** out, CyberTargetCountReport* report); CyberStatus cyber_remesh_with_limits(const CyberMesh* in, const CyberRemeshParams* params, const CyberRemeshLimits* limits, CyberProgressCb progress, CyberCancelCb cancel, void* user, CyberMesh** out); CyberStatus cyber_remesh_with_resource_limits( const CyberMesh* in, const CyberRemeshParams* params, const CyberRemeshLimits* topology, const CyberRemeshExecutionLimits* execution, CyberProgressCb progress, CyberCancelCb cancel, void* user, CyberMesh** out); typedef struct CyberFlowGuide { const float* points; size_t point_count; float strength; float radius; } CyberFlowGuide; typedef struct CyberGuidance { const CyberFlowGuide* guides; size_t guide_count; const float* vertex_density; size_t vertex_density_count; const float* face_density; size_t face_density_count; } CyberGuidance; typedef void"
+    }
+  },
+  "compiler": "toolchain-measured (compiler identity intentionally not pinned)",
+  "enums": {
+    "CyberBackend": {
+      "alignment": 4,
+      "signed": true,
+      "size": 4,
+      "values": [
+        {
+          "name": "CYBER_BACKEND_AUTO",
+          "value": "0"
+        },
+        {
+          "name": "CYBER_BACKEND_CPU",
+          "value": "1"
+        },
+        {
+          "name": "CYBER_BACKEND_METAL",
+          "value": "2"
+        },
+        {
+          "name": "CYBER_BACKEND_CUDA",
+          "value": "3"
+        },
+        {
+          "name": "CYBER_BACKEND_OPENCL",
+          "value": "4"
+        }
+      ]
+    },
+    "CyberBakeMap": {
+      "alignment": 4,
+      "signed": true,
+      "size": 4,
+      "values": [
+        {
+          "name": "CYBER_BAKE_NORMAL",
+          "value": "0"
+        },
+        {
+          "name": "CYBER_BAKE_AO",
+          "value": null
+        },
+        {
+          "name": "CYBER_BAKE_DISPLACEMENT",
+          "value": null
+        },
+        {
+          "name": "CYBER_BAKE_POSITION",
+          "value": null
+        },
+        {
+          "name": "CYBER_BAKE_COLOR",
+          "value": null
+        },
+        {
+          "name": "CYBER_BAKE_CURVATURE",
+          "value": null
+        },
+        {
+          "name": "CYBER_BAKE_CAVITY",
+          "value": null
+        }
+      ]
+    },
+    "CyberElementKind": {
+      "alignment": 4,
+      "signed": true,
+      "size": 4,
+      "values": [
+        {
+          "name": "CYBER_ELEMENT_VERTEX",
+          "value": "0"
+        },
+        {
+          "name": "CYBER_ELEMENT_EDGE",
+          "value": null
+        },
+        {
+          "name": "CYBER_ELEMENT_FACE",
+          "value": null
+        }
+      ]
+    },
+    "CyberFalloff": {
+      "alignment": 4,
+      "signed": true,
+      "size": 4,
+      "values": [
+        {
+          "name": "CYBER_FALLOFF_LINEAR",
+          "value": "0"
+        },
+        {
+          "name": "CYBER_FALLOFF_SMOOTH",
+          "value": "1"
+        },
+        {
+          "name": "CYBER_FALLOFF_SHARP",
+          "value": "2"
+        },
+        {
+          "name": "CYBER_FALLOFF_ROUND",
+          "value": "3"
+        }
+      ]
+    },
+    "CyberLoopSubdivideMode": {
+      "alignment": 4,
+      "signed": true,
+      "size": 4,
+      "values": [
+        {
+          "name": "CYBER_LOOP_SUBDIVIDE_SMOOTH",
+          "value": "0"
+        },
+        {
+          "name": "CYBER_LOOP_SUBDIVIDE_LINEAR",
+          "value": "1"
+        }
+      ]
+    },
+    "CyberStatus": {
+      "alignment": 4,
+      "signed": true,
+      "size": 4,
+      "values": [
+        {
+          "name": "CYBER_OK",
+          "value": "0"
+        },
+        {
+          "name": "CYBER_ERR_IO",
+          "value": null
+        },
+        {
+          "name": "CYBER_ERR_INVALID_ARG",
+          "value": null
+        },
+        {
+          "name": "CYBER_ERR_INVALID_PARAM",
+          "value": null
+        },
+        {
+          "name": "CYBER_ERR_EMPTY",
+          "value": null
+        },
+        {
+          "name": "CYBER_ERR_RUNTIME",
+          "value": null
+        },
+        {
+          "name": "CYBER_ERR_CANCELLED",
+          "value": null
+        },
+        {
+          "name": "CYBER_ERR_INCOMPATIBLE_VERSION",
+          "value": null
+        },
+        {
+          "name": "CYBER_ERR_UNSUPPORTED_TOPOLOGY",
+          "value": null
+        }
+      ]
+    },
+    "CyberStrokeAction": {
+      "alignment": 4,
+      "signed": true,
+      "size": 4,
+      "values": [
+        {
+          "name": "CYBER_ACTION_NONE",
+          "value": "0"
+        },
+        {
+          "name": "CYBER_ACTION_CREATE_QUAD",
+          "value": null
+        },
+        {
+          "name": "CYBER_ACTION_INSERT_LOOP",
+          "value": null
+        },
+        {
+          "name": "CYBER_ACTION_TAG_LOOP",
+          "value": null
+        },
+        {
+          "name": "CYBER_ACTION_DISSOLVE_EDGE",
+          "value": null
+        },
+        {
+          "name": "CYBER_ACTION_DELETE_FACES",
+          "value": null
+        },
+        {
+          "name": "CYBER_ACTION_MERGE_VERTICES",
+          "value": null
+        },
+        {
+          "name": "CYBER_ACTION_ROTATE_EDGE",
+          "value": null
+        },
+        {
+          "name": "CYBER_ACTION_TWEAK_VERTEX",
+          "value": null
+        },
+        {
+          "name": "CYBER_ACTION_HIDE_REGION",
+          "value": null
+        },
+        {
+          "name": "CYBER_ACTION_TOGGLE_VISIBILITY",
+          "value": null
+        },
+        {
+          "name": "CYBER_ACTION_CREATE_GRID",
+          "value": null
+        }
+      ]
+    },
+    "CyberStrokeContext": {
+      "alignment": 4,
+      "signed": true,
+      "size": 4,
+      "values": [
+        {
+          "name": "CYBER_CONTEXT_EMPTY_SURFACE",
+          "value": "0"
+        },
+        {
+          "name": "CYBER_CONTEXT_FACE",
+          "value": null
+        },
+        {
+          "name": "CYBER_CONTEXT_EDGE",
+          "value": null
+        },
+        {
+          "name": "CYBER_CONTEXT_BOUNDARY_EDGE",
+          "value": null
+        },
+        {
+          "name": "CYBER_CONTEXT_VERTEX",
+          "value": null
+        }
+      ]
+    },
+    "CyberStrokeShape": {
+      "alignment": 4,
+      "signed": true,
+      "size": 4,
+      "values": [
+        {
+          "name": "CYBER_SHAPE_UNKNOWN",
+          "value": "0"
+        },
+        {
+          "name": "CYBER_SHAPE_HOLD_POINT",
+          "value": null
+        },
+        {
+          "name": "CYBER_SHAPE_LINE",
+          "value": null
+        },
+        {
+          "name": "CYBER_SHAPE_CLOSED_LOOP",
+          "value": null
+        },
+        {
+          "name": "CYBER_SHAPE_CIRCLE",
+          "value": null
+        },
+        {
+          "name": "CYBER_SHAPE_SCRIBBLE",
+          "value": null
+        },
+        {
+          "name": "CYBER_SHAPE_CROSS",
+          "value": null
+        },
+        {
+          "name": "CYBER_SHAPE_LASSO",
+          "value": null
+        },
+        {
+          "name": "CYBER_SHAPE_GRID",
+          "value": null
+        }
+      ]
+    },
+    "CyberSubdivisionMode": {
+      "alignment": 4,
+      "signed": true,
+      "size": 4,
+      "values": [
+        {
+          "name": "CYBER_SUBDIV_LINEAR",
+          "value": "0"
+        },
+        {
+          "name": "CYBER_SUBDIV_CATMULL_CLARK",
+          "value": "1"
+        }
+      ]
+    }
+  },
+  "functions": {
+    "cyber_abi_check": {
+      "parameters": [
+        "int",
+        "int"
+      ],
+      "return": "CyberStatus"
+    },
+    "cyber_abi_version": {
+      "parameters": [
+        "int*",
+        "int*"
+      ],
+      "return": "void"
+    },
+    "cyber_active_backend": {
+      "parameters": [
+        "void"
+      ],
+      "return": "CyberBackend"
+    },
+    "cyber_active_backend_name": {
+      "parameters": [
+        "void"
+      ],
+      "return": "const char*"
+    },
+    "cyber_available_backends": {
+      "parameters": [
+        "CyberBackend*",
+        "size_t"
+      ],
+      "return": "size_t"
+    },
+    "cyber_bake": {
+      "parameters": [
+        "const CyberMesh*",
+        "const CyberMesh*",
+        "CyberBakeMap",
+        "const CyberBakeParams*",
+        "CyberImage**"
+      ],
+      "return": "CyberStatus"
+    },
+    "cyber_bake_field": {
+      "parameters": [
+        "const CyberMesh*",
+        "const CyberMesh*",
+        "CyberBakeMap",
+        "const CyberBakeParams*",
+        "const CyberFieldEvaluator*",
+        "CyberImage**"
+      ],
+      "return": "CyberStatus"
+    },
+    "cyber_bundle_result_chart_count": {
+      "parameters": [
+        "const CyberBundleResult*"
+      ],
+      "return": "int"
+    },
+    "cyber_bundle_result_file": {
+      "parameters": [
+        "const CyberBundleResult*",
+        "size_t",
+        "CyberBundleFile*"
+      ],
+      "return": "CyberStatus"
+    },
+    "cyber_bundle_result_file_count": {
+      "parameters": [
+        "const CyberBundleResult*"
+      ],
+      "return": "size_t"
+    },
+    "cyber_bundle_result_free": {
+      "parameters": [
+        "CyberBundleResult*"
+      ],
+      "return": "void"
+    },
+    "cyber_bundle_result_max_angle_distortion": {
+      "parameters": [
+        "const CyberBundleResult*"
+      ],
+      "return": "float"
+    },
+    "cyber_bundle_result_unwrapped": {
+      "parameters": [
+        "const CyberBundleResult*"
+      ],
+      "return": "int"
+    },
+    "cyber_bundle_result_warning": {
+      "parameters": [
+        "const CyberBundleResult*",
+        "size_t"
+      ],
+      "return": "const char*"
+    },
+    "cyber_bundle_result_warning_count": {
+      "parameters": [
+        "const CyberBundleResult*"
+      ],
+      "return": "size_t"
+    },
+    "cyber_conform": {
+      "parameters": [
+        "CyberMesh*",
+        "const CyberMesh*",
+        "float",
+        "CyberConformReport*",
+        "uint32_t*",
+        "size_t"
+      ],
+      "return": "CyberStatus"
+    },
+    "cyber_default_atlas_params": {
+      "parameters": [
+        "CyberAtlasParams*"
+      ],
+      "return": "void"
+    },
+    "cyber_default_bake_params": {
+      "parameters": [
+        "CyberBakeParams*"
+      ],
+      "return": "void"
+    },
+    "cyber_default_bundle_params": {
+      "parameters": [
+        "CyberBundleParams*"
+      ],
+      "return": "void"
+    },
+    "cyber_default_isotropic_params": {
+      "parameters": [
+        "CyberIsotropicParams*"
+      ],
+      "return": "void"
+    },
+    "cyber_default_params": {
+      "parameters": [
+        "CyberRemeshParams*"
+      ],
+      "return": "void"
+    },
+    "cyber_default_remesh_execution_limits": {
+      "parameters": [
+        "CyberRemeshExecutionLimits*"
+      ],
+      "return": "void"
+    },
+    "cyber_default_remesh_limits": {
+      "parameters": [
+        "CyberRemeshLimits*"
+      ],
+      "return": "void"
+    },
+    "cyber_default_seam_path_options": {
+      "parameters": [
+        "CyberSeamPathOptions*"
+      ],
+      "return": "void"
+    },
+    "cyber_default_unwrap_seams_params": {
+      "parameters": [
+        "CyberUnwrapSeamsParams*"
+      ],
+      "return": "void"
+    },
+    "cyber_default_zremesher_params": {
+      "parameters": [
+        "CyberZRemesherParams*"
+      ],
+      "return": "void"
+    },
+    "cyber_document_create": {
+      "parameters": [
+        "void"
+      ],
+      "return": "CyberDocument*"
+    },
+    "cyber_document_edit_mesh": {
+      "parameters": [
+        "const CyberDocument*"
+      ],
+      "return": "CyberMesh*"
+    },
+    "cyber_document_free": {
+      "parameters": [
+        "CyberDocument*"
+      ],
+      "return": "void"
+    },
+    "cyber_document_load": {
+      "parameters": [
+        "const uint8_t*",
+        "size_t"
+      ],
+      "return": "CyberDocument*"
+    },
+    "cyber_document_load_file": {
+      "parameters": [
+        "const char*"
+      ],
+      "return": "CyberDocument*"
+    },
+    "cyber_document_save": {
+      "parameters": [
+        "const CyberDocument*",
+        "uint8_t*",
+        "size_t"
+      ],
+      "return": "size_t"
+    },
+    "cyber_document_save_file": {
+      "parameters": [
+        "const CyberDocument*",
+        "const char*"
+      ],
+      "return": "CyberStatus"
+    },
+    "cyber_document_set_edit_mesh": {
+      "parameters": [
+        "CyberDocument*",
+        "const CyberMesh*"
+      ],
+      "return": "CyberStatus"
+    },
+    "cyber_document_set_target": {
+      "parameters": [
+        "CyberDocument*",
+        "const CyberMesh*"
+      ],
+      "return": "CyberStatus"
+    },
+    "cyber_document_slot_count": {
+      "parameters": [
+        "const CyberDocument*"
+      ],
+      "return": "size_t"
+    },
+    "cyber_document_slot_name": {
+      "parameters": [
+        "const CyberDocument*",
+        "size_t"
+      ],
+      "return": "const char*"
+    },
+    "cyber_document_slot_weights": {
+      "parameters": [
+        "const CyberDocument*",
+        "const char*",
+        "float*",
+        "size_t"
+      ],
+      "return": "size_t"
+    },
+    "cyber_document_target": {
+      "parameters": [
+        "const CyberDocument*"
+      ],
+      "return": "CyberMesh*"
+    },
+    "cyber_export_bundle_write": {
+      "parameters": [
+        "CyberMesh*",
+        "const CyberMesh*",
+        "const CyberExportPreset*",
+        "const CyberBundleParams*",
+        "CyberProgressCb",
+        "CyberCancelCb",
+        "void*",
+        "CyberBundleResult**"
+      ],
+      "return": "CyberStatus"
+    },
+    "cyber_export_preset_builtin_count": {
+      "parameters": [
+        "void"
+      ],
+      "return": "size_t"
+    },
+    "cyber_export_preset_builtin_name": {
+      "parameters": [
+        "size_t"
+      ],
+      "return": "const char*"
+    },
+    "cyber_export_preset_free": {
+      "parameters": [
+        "CyberExportPreset*"
+      ],
+      "return": "void"
+    },
+    "cyber_export_preset_info": {
+      "parameters": [
+        "const CyberExportPreset*",
+        "CyberExportPresetInfo*"
+      ],
+      "return": "CyberStatus"
+    },
+    "cyber_export_preset_map": {
+      "parameters": [
+        "const CyberExportPreset*",
+        "size_t",
+        "CyberExportPresetMap*"
+      ],
+      "return": "CyberStatus"
+    },
+    "cyber_export_preset_map_file_name": {
+      "parameters": [
+        "const CyberExportPreset*",
+        "size_t",
+        "const char*"
+      ],
+      "return": "const char*"
+    },
+    "cyber_export_preset_resolve": {
+      "parameters": [
+        "const char*",
+        "CyberExportPreset**"
+      ],
+      "return": "CyberStatus"
+    },
+    "cyber_export_preset_set_resolution": {
+      "parameters": [
+        "CyberExportPreset*",
+        "int"
+      ],
+      "return": "CyberStatus"
+    },
+    "cyber_handoff_open": {
+      "parameters": [
+        "const char*",
+        "CyberMesh**",
+        "CyberHandoffInfo*"
+      ],
+      "return": "CyberStatus"
+    },
+    "cyber_handoff_open_buffers": {
+      "parameters": [
+        "const CyberHandoffBuffers*",
+        "CyberMesh**",
+        "CyberHandoffInfo*"
+      ],
+      "return": "CyberStatus"
+    },
+    "cyber_image_channels": {
+      "parameters": [
+        "const CyberImage*"
+      ],
+      "return": "int"
+    },
+    "cyber_image_copy_pixels": {
+      "parameters": [
+        "const CyberImage*",
+        "float*",
+        "size_t"
+      ],
+      "return": "size_t"
+    },
+    "cyber_image_free": {
+      "parameters": [
+        "CyberImage*"
+      ],
+      "return": "void"
+    },
+    "cyber_image_height": {
+      "parameters": [
+        "const CyberImage*"
+      ],
+      "return": "int"
+    },
+    "cyber_image_save_png": {
+      "parameters": [
+        "const CyberImage*",
+        "const char*"
+      ],
+      "return": "CyberStatus"
+    },
+    "cyber_image_width": {
+      "parameters": [
+        "const CyberImage*"
+      ],
+      "return": "int"
+    },
+    "cyber_last_error": {
+      "parameters": [
+        "void"
+      ],
+      "return": "const char*"
+    },
+    "cyber_max_bake_pixels": {
+      "parameters": [
+        "void"
+      ],
+      "return": "uint64_t"
+    },
+    "cyber_max_import_faces": {
+      "parameters": [
+        "void"
+      ],
+      "return": "uint64_t"
+    },
+    "cyber_max_import_input_bytes": {
+      "parameters": [
+        "void"
+      ],
+      "return": "uint64_t"
+    },
+    "cyber_max_import_vertices": {
+      "parameters": [
+        "void"
+      ],
+      "return": "uint64_t"
+    },
+    "cyber_max_worker_threads": {
+      "parameters": [
+        "void"
+      ],
+      "return": "int"
+    },
+    "cyber_mesh_attribute_count": {
+      "parameters": [
+        "const CyberMesh*"
+      ],
+      "return": "size_t"
+    },
+    "cyber_mesh_attribute_info": {
+      "parameters": [
+        "const CyberMesh*",
+        "size_t",
+        "CyberAttributeInfo*"
+      ],
+      "return": "CyberStatus"
+    },
+    "cyber_mesh_boundary_loop": {
+      "parameters": [
+        "const CyberMesh*",
+        "uint32_t",
+        "uint32_t*",
+        "size_t",
+        "int*"
+      ],
+      "return": "size_t"
+    },
+    "cyber_mesh_clone": {
+      "parameters": [
+        "const CyberMesh*",
+        "CyberMesh**"
+      ],
+      "return": "CyberStatus"
+    },
+    "cyber_mesh_colors_ptr": {
+      "parameters": [
+        "const CyberMesh*",
+        "size_t*"
+      ],
+      "return": "const float*"
+    },
+    "cyber_mesh_copy_attribute": {
+      "parameters": [
+        "const CyberMesh*",
+        "const CyberAttributeInfo*",
+        "void*",
+        "size_t"
+      ],
+      "return": "size_t"
+    },
+    "cyber_mesh_copy_colors": {
+      "parameters": [
+        "const CyberMesh*",
+        "float*",
+        "size_t"
+      ],
+      "return": "size_t"
+    },
+    "cyber_mesh_copy_edge_indices": {
+      "parameters": [
+        "const CyberMesh*",
+        "uint32_t*",
+        "size_t"
+      ],
+      "return": "size_t"
+    },
+    "cyber_mesh_copy_face_offsets": {
+      "parameters": [
+        "const CyberMesh*",
+        "size_t*",
+        "size_t"
+      ],
+      "return": "size_t"
+    },
+    "cyber_mesh_copy_normals": {
+      "parameters": [
+        "const CyberMesh*",
+        "float*",
+        "size_t"
+      ],
+      "return": "size_t"
+    },
+    "cyber_mesh_copy_polygon_indices": {
+      "parameters": [
+        "const CyberMesh*",
+        "uint32_t*",
+        "size_t"
+      ],
+      "return": "size_t"
+    },
+    "cyber_mesh_copy_positions": {
+      "parameters": [
+        "const CyberMesh*",
+        "float*",
+        "size_t"
+      ],
+      "return": "size_t"
+    },
+    "cyber_mesh_copy_render_positions": {
+      "parameters": [
+        "const CyberMesh*",
+        "float*",
+        "size_t"
+      ],
+      "return": "size_t"
+    },
+    "cyber_mesh_copy_triangle_indices": {
+      "parameters": [
+        "const CyberMesh*",
+        "uint32_t*",
+        "size_t"
+      ],
+      "return": "size_t"
+    },
+    "cyber_mesh_create": {
+      "parameters": [
+        "void"
+      ],
+      "return": "CyberMesh*"
+    },
+    "cyber_mesh_destroy": {
+      "parameters": [
+        "CyberMesh*"
+      ],
+      "return": "void"
+    },
+    "cyber_mesh_edge_count": {
+      "parameters": [
+        "const CyberMesh*"
+      ],
+      "return": "size_t"
+    },
+    "cyber_mesh_edge_endpoints": {
+      "parameters": [
+        "const CyberMesh*",
+        "uint32_t",
+        "uint32_t[2]"
+      ],
+      "return": "int"
+    },
+    "cyber_mesh_edge_face_count": {
+      "parameters": [
+        "const CyberMesh*",
+        "uint32_t"
+      ],
+      "return": "int"
+    },
+    "cyber_mesh_edge_faces": {
+      "parameters": [
+        "const CyberMesh*",
+        "uint32_t",
+        "uint32_t[2]",
+        "size_t[2]"
+      ],
+      "return": "int"
+    },
+    "cyber_mesh_edge_indices_ptr": {
+      "parameters": [
+        "const CyberMesh*",
+        "size_t*"
+      ],
+      "return": "const uint32_t*"
+    },
+    "cyber_mesh_edge_loop": {
+      "parameters": [
+        "const CyberMesh*",
+        "uint32_t",
+        "uint32_t*",
+        "size_t"
+      ],
+      "return": "size_t"
+    },
+    "cyber_mesh_edge_signed_dihedral": {
+      "parameters": [
+        "const CyberMesh*",
+        "uint32_t"
+      ],
+      "return": "float"
+    },
+    "cyber_mesh_face_count": {
+      "parameters": [
+        "const CyberMesh*"
+      ],
+      "return": "size_t"
+    },
+    "cyber_mesh_free": {
+      "parameters": [
+        "CyberMesh*"
+      ],
+      "return": "void"
+    },
+    "cyber_mesh_from_indexed": {
+      "parameters": [
+        "const CyberIndexedMesh*",
+        "CyberMesh**"
+      ],
+      "return": "CyberStatus"
+    },
+    "cyber_mesh_has_colors": {
+      "parameters": [
+        "const CyberMesh*"
+      ],
+      "return": "int"
+    },
+    "cyber_mesh_hidden_face_count": {
+      "parameters": [
+        "const CyberMesh*"
+      ],
+      "return": "size_t"
+    },
+    "cyber_mesh_is_boundary_edge": {
+      "parameters": [
+        "const CyberMesh*",
+        "uint32_t"
+      ],
+      "return": "int"
+    },
+    "cyber_mesh_isotropic_remesh": {
+      "parameters": [
+        "CyberMesh*",
+        "const CyberIsotropicParams*",
+        "size_t*"
+      ],
+      "return": "CyberStatus"
+    },
+    "cyber_mesh_live_faces": {
+      "parameters": [
+        "const CyberMesh*",
+        "uint32_t*",
+        "size_t"
+      ],
+      "return": "size_t"
+    },
+    "cyber_mesh_load": {
+      "parameters": [
+        "const char*",
+        "CyberMesh**"
+      ],
+      "return": "CyberStatus"
+    },
+    "cyber_mesh_load_obj": {
+      "parameters": [
+        "const char*",
+        "CyberMesh**"
+      ],
+      "return": "CyberStatus"
+    },
+    "cyber_mesh_loop_metrics": {
+      "parameters": [
+        "const CyberMesh*",
+        "uint32_t",
+        "const CyberSnapper*",
+        "CyberLoopMetrics*"
+      ],
+      "return": "CyberStatus"
+    },
+    "cyber_mesh_nearest_edge": {
+      "parameters": [
+        "const CyberMesh*",
+        "const float[3]",
+        "float",
+        "uint32_t*",
+        "float[3]"
+      ],
+      "return": "int"
+    },
+    "cyber_mesh_nearest_vertex": {
+      "parameters": [
+        "const CyberMesh*",
+        "const float[3]",
+        "float",
+        "uint32_t*",
+        "float[3]"
+      ],
+      "return": "int"
+    },
+    "cyber_mesh_nearest_vertex_excluding": {
+      "parameters": [
+        "const CyberMesh*",
+        "const float[3]",
+        "float",
+        "uint32_t",
+        "uint32_t*",
+        "float[3]"
+      ],
+      "return": "int"
+    },
+    "cyber_mesh_normals_ptr": {
+      "parameters": [
+        "const CyberMesh*",
+        "size_t*"
+      ],
+      "return": "const float*"
+    },
+    "cyber_mesh_positions_ptr": {
+      "parameters": [
+        "const CyberMesh*",
+        "size_t*"
+      ],
+      "return": "const float*"
+    },
+    "cyber_mesh_quad_ring": {
+      "parameters": [
+        "const CyberMesh*",
+        "uint32_t",
+        "uint32_t*",
+        "size_t",
+        "int*"
+      ],
+      "return": "size_t"
+    },
+    "cyber_mesh_save": {
+      "parameters": [
+        "const CyberMesh*",
+        "const char*"
+      ],
+      "return": "CyberStatus"
+    },
+    "cyber_mesh_save_obj": {
+      "parameters": [
+        "const CyberMesh*",
+        "const char*"
+      ],
+      "return": "CyberStatus"
+    },
+    "cyber_mesh_set_hidden_faces": {
+      "parameters": [
+        "CyberMesh*",
+        "const uint32_t*",
+        "size_t"
+      ],
+      "return": "CyberStatus"
+    },
+    "cyber_mesh_set_positions": {
+      "parameters": [
+        "CyberMesh*",
+        "const float*",
+        "size_t"
+      ],
+      "return": "CyberStatus"
+    },
+    "cyber_mesh_set_tagged_edges": {
+      "parameters": [
+        "CyberMesh*",
+        "const uint32_t*",
+        "size_t"
+      ],
+      "return": "CyberStatus"
+    },
+    "cyber_mesh_shortest_vertex_path": {
+      "parameters": [
+        "const CyberMesh*",
+        "uint32_t",
+        "uint32_t",
+        "uint32_t*",
+        "size_t"
+      ],
+      "return": "size_t"
+    },
+    "cyber_mesh_stats": {
+      "parameters": [
+        "const CyberMesh*",
+        "CyberStats*"
+      ],
+      "return": "CyberStatus"
+    },
+    "cyber_mesh_tagged_edge_indices_ptr": {
+      "parameters": [
+        "const CyberMesh*",
+        "size_t*"
+      ],
+      "return": "const uint32_t*"
+    },
+    "cyber_mesh_topology_generation": {
+      "parameters": [
+        "const CyberMesh*"
+      ],
+      "return": "uint64_t"
+    },
+    "cyber_mesh_triangle_count": {
+      "parameters": [
+        "const CyberMesh*"
+      ],
+      "return": "size_t"
+    },
+    "cyber_mesh_triangle_indices_ptr": {
+      "parameters": [
+        "const CyberMesh*",
+        "size_t*"
+      ],
+      "return": "const uint32_t*"
+    },
+    "cyber_mesh_vertex_count": {
+      "parameters": [
+        "const CyberMesh*"
+      ],
+      "return": "size_t"
+    },
+    "cyber_mesh_vertex_position": {
+      "parameters": [
+        "const CyberMesh*",
+        "uint32_t",
+        "float[3]"
+      ],
+      "return": "int"
+    },
+    "cyber_remesh": {
+      "parameters": [
+        "const CyberMesh*",
+        "const CyberRemeshParams*",
+        "CyberProgressCb",
+        "CyberCancelCb",
+        "void*",
+        "CyberMesh**"
+      ],
+      "return": "CyberStatus"
+    },
+    "cyber_remesh_guided": {
+      "parameters": [
+        "const CyberMesh*",
+        "const CyberRemeshParams*",
+        "const CyberGuidance*",
+        "CyberProgressCb",
+        "CyberCancelCb",
+        "CyberWarningCb",
+        "void*",
+        "CyberMesh**"
+      ],
+      "return": "CyberStatus"
+    },
+    "cyber_remesh_guided_ex": {
+      "parameters": [
+        "const CyberMesh*",
+        "const CyberRemeshParams*",
+        "const CyberGuidanceEx*",
+        "CyberProgressCb",
+        "CyberCancelCb",
+        "CyberWarningCb",
+        "void*",
+        "CyberMesh**"
+      ],
+      "return": "CyberStatus"
+    },
+    "cyber_remesh_params_default": {
+      "parameters": [
+        "CyberRemeshParams*"
+      ],
+      "return": "void"
+    },
+    "cyber_remesh_with_count_report": {
+      "parameters": [
+        "const CyberMesh*",
+        "const CyberRemeshParams*",
+        "const CyberCountPolicy*",
+        "CyberProgressCb",
+        "CyberCancelCb",
+        "void*",
+        "CyberMesh**",
+        "CyberTargetCountReport*"
+      ],
+      "return": "CyberStatus"
+    },
+    "cyber_remesh_with_limits": {
+      "parameters": [
+        "const CyberMesh*",
+        "const CyberRemeshParams*",
+        "const CyberRemeshLimits*",
+        "CyberProgressCb",
+        "CyberCancelCb",
+        "void*",
+        "CyberMesh**"
+      ],
+      "return": "CyberStatus"
+    },
+    "cyber_remesh_with_resource_limits": {
+      "parameters": [
+        "const CyberMesh*",
+        "const CyberRemeshParams*",
+        "const CyberRemeshLimits*",
+        "const CyberRemeshExecutionLimits*",
+        "CyberProgressCb",
+        "CyberCancelCb",
+        "void*",
+        "CyberMesh**"
+      ],
+      "return": "CyberStatus"
+    },
+    "cyber_remesh_zremesher": {
+      "parameters": [
+        "const CyberMesh*",
+        "const CyberRemeshParams*",
+        "const CyberZRemesherParams*",
+        "const CyberGuidanceEx*",
+        "CyberProgressCb",
+        "CyberCancelCb",
+        "CyberWarningCb",
+        "void*",
+        "CyberMesh**",
+        "CyberZRemesherReport*"
+      ],
+      "return": "CyberStatus"
+    },
+    "cyber_remesh_zremesher_with_resource_limits": {
+      "parameters": [
+        "const CyberMesh*",
+        "const CyberRemeshParams*",
+        "const CyberZRemesherParams*",
+        "const CyberGuidanceEx*",
+        "const CyberRemeshLimits*",
+        "const CyberRemeshExecutionLimits*",
+        "CyberProgressCb",
+        "CyberCancelCb",
+        "CyberWarningCb",
+        "void*",
+        "CyberMesh**",
+        "CyberZRemesherReport*"
+      ],
+      "return": "CyberStatus"
+    },
+    "cyber_retopo_apply_symmetry": {
+      "parameters": [
+        "CyberMesh*",
+        "const CyberSymmetry*",
+        "const CyberSnapper*",
+        "size_t*"
+      ],
+      "return": "CyberStatus"
+    },
+    "cyber_retopo_build_face": {
+      "parameters": [
+        "CyberMesh*",
+        "size_t",
+        "const uint32_t*",
+        "const float*",
+        "const CyberSnapper*",
+        "uint32_t*",
+        "uint32_t*"
+      ],
+      "return": "CyberStatus"
+    },
+    "cyber_retopo_create_face": {
+      "parameters": [
+        "CyberMesh*",
+        "const float*",
+        "size_t",
+        "const CyberSnapper*",
+        "uint32_t*"
+      ],
+      "return": "CyberStatus"
+    },
+    "cyber_retopo_create_grid": {
+      "parameters": [
+        "CyberMesh*",
+        "const float*",
+        "size_t",
+        "size_t",
+        "const CyberSnapper*",
+        "size_t*"
+      ],
+      "return": "CyberStatus"
+    },
+    "cyber_retopo_delete_faces": {
+      "parameters": [
+        "CyberMesh*",
+        "const uint32_t*",
+        "size_t",
+        "size_t*"
+      ],
+      "return": "CyberStatus"
+    },
+    "cyber_retopo_dissolve_edges": {
+      "parameters": [
+        "CyberMesh*",
+        "const uint32_t*",
+        "size_t",
+        "size_t*"
+      ],
+      "return": "CyberStatus"
+    },
+    "cyber_retopo_distribute_path": {
+      "parameters": [
+        "CyberMesh*",
+        "const uint32_t*",
+        "size_t",
+        "const CyberSnapper*"
+      ],
+      "return": "CyberStatus"
+    },
+    "cyber_retopo_draw_strip": {
+      "parameters": [
+        "CyberMesh*",
+        "const float*",
+        "size_t",
+        "float",
+        "const float[3]",
+        "uint32_t",
+        "uint32_t",
+        "const CyberSnapper*",
+        "size_t*"
+      ],
+      "return": "CyberStatus"
+    },
+    "cyber_retopo_erase": {
+      "parameters": [
+        "CyberMesh*",
+        "const float[3]",
+        "float",
+        "float",
+        "size_t*"
+      ],
+      "return": "CyberStatus"
+    },
+    "cyber_retopo_extend_boundary_fan": {
+      "parameters": [
+        "CyberMesh*",
+        "const uint32_t*",
+        "size_t",
+        "int",
+        "const float[3]",
+        "const CyberSnapper*",
+        "uint32_t*",
+        "size_t*"
+      ],
+      "return": "CyberStatus"
+    },
+    "cyber_retopo_extend_boundary_grid": {
+      "parameters": [
+        "CyberMesh*",
+        "const uint32_t*",
+        "size_t",
+        "int",
+        "const float[3]",
+        "int",
+        "const CyberSnapper*",
+        "uint32_t*",
+        "size_t*"
+      ],
+      "return": "CyberStatus"
+    },
+    "cyber_retopo_grow_boundary_edge": {
+      "parameters": [
+        "CyberMesh*",
+        "uint32_t",
+        "const float[3]",
+        "const CyberSnapper*",
+        "uint32_t*"
+      ],
+      "return": "CyberStatus"
+    },
+    "cyber_retopo_insert_loop": {
+      "parameters": [
+        "CyberMesh*",
+        "uint32_t",
+        "float",
+        "size_t*"
+      ],
+      "return": "CyberStatus"
+    },
+    "cyber_retopo_loop_subdivide": {
+      "parameters": [
+        "CyberMesh*",
+        "CyberLoopSubdivideMode",
+        "const CyberSnapper*",
+        "size_t*"
+      ],
+      "return": "CyberStatus"
+    },
+    "cyber_retopo_merge_vertices": {
+      "parameters": [
+        "CyberMesh*",
+        "uint32_t",
+        "uint32_t",
+        "int"
+      ],
+      "return": "CyberStatus"
+    },
+    "cyber_retopo_move": {
+      "parameters": [
+        "CyberMesh*",
+        "uint32_t",
+        "const float[3]",
+        "float",
+        "const uint32_t*",
+        "size_t",
+        "const CyberSnapper*"
+      ],
+      "return": "CyberStatus"
+    },
+    "cyber_retopo_patch_clone": {
+      "parameters": [
+        "CyberMesh*",
+        "const uint32_t*",
+        "size_t",
+        "const float[12]",
+        "int",
+        "const CyberSnapper*",
+        "uint32_t*",
+        "size_t*"
+      ],
+      "return": "CyberStatus"
+    },
+    "cyber_retopo_relax": {
+      "parameters": [
+        "CyberMesh*",
+        "const float[3]",
+        "float",
+        "float",
+        "int",
+        "int",
+        "const uint32_t*",
+        "size_t",
+        "const CyberSnapper*"
+      ],
+      "return": "CyberStatus"
+    },
+    "cyber_retopo_resymmetrize": {
+      "parameters": [
+        "CyberMesh*",
+        "const CyberSymmetry*",
+        "float",
+        "CyberResymmetrizeReport*"
+      ],
+      "return": "CyberStatus"
+    },
+    "cyber_retopo_rotate_edge": {
+      "parameters": [
+        "CyberMesh*",
+        "uint32_t"
+      ],
+      "return": "CyberStatus"
+    },
+    "cyber_retopo_selection_clear": {
+      "parameters": [
+        "CyberMesh*"
+      ],
+      "return": "CyberStatus"
+    },
+    "cyber_retopo_selection_contract": {
+      "parameters": [
+        "CyberMesh*",
+        "int"
+      ],
+      "return": "CyberStatus"
+    },
+    "cyber_retopo_selection_copy_weights": {
+      "parameters": [
+        "const CyberMesh*",
+        "float*",
+        "size_t"
+      ],
+      "return": "size_t"
+    },
+    "cyber_retopo_selection_expand": {
+      "parameters": [
+        "CyberMesh*",
+        "int"
+      ],
+      "return": "CyberStatus"
+    },
+    "cyber_retopo_selection_invert": {
+      "parameters": [
+        "CyberMesh*"
+      ],
+      "return": "CyberStatus"
+    },
+    "cyber_retopo_selection_line": {
+      "parameters": [
+        "CyberMesh*",
+        "const float[3]",
+        "const float[3]",
+        "const float[3]",
+        "int",
+        "float",
+        "CyberFalloff"
+      ],
+      "return": "CyberStatus"
+    },
+    "cyber_retopo_selection_load": {
+      "parameters": [
+        "CyberMesh*",
+        "const char*"
+      ],
+      "return": "CyberStatus"
+    },
+    "cyber_retopo_selection_paint": {
+      "parameters": [
+        "CyberMesh*",
+        "const float[3]",
+        "float",
+        "float",
+        "int",
+        "CyberFalloff"
+      ],
+      "return": "CyberStatus"
+    },
+    "cyber_retopo_selection_paint_stroke": {
+      "parameters": [
+        "CyberMesh*",
+        "const float*",
+        "size_t",
+        "float",
+        "int",
+        "CyberFalloff"
+      ],
+      "return": "CyberStatus"
+    },
+    "cyber_retopo_selection_relax": {
+      "parameters": [
+        "CyberMesh*",
+        "float",
+        "int",
+        "const uint32_t*",
+        "size_t",
+        "const CyberSnapper*",
+        "float",
+        "CyberSoftTransformReport*"
+      ],
+      "return": "CyberStatus"
+    },
+    "cyber_retopo_selection_save": {
+      "parameters": [
+        "CyberMesh*",
+        "const char*"
+      ],
+      "return": "CyberStatus"
+    },
+    "cyber_retopo_selection_set_weights": {
+      "parameters": [
+        "CyberMesh*",
+        "const float*",
+        "size_t"
+      ],
+      "return": "CyberStatus"
+    },
+    "cyber_retopo_selection_slot_count": {
+      "parameters": [
+        "const CyberMesh*"
+      ],
+      "return": "size_t"
+    },
+    "cyber_retopo_selection_slot_name": {
+      "parameters": [
+        "const CyberMesh*",
+        "size_t"
+      ],
+      "return": "const char*"
+    },
+    "cyber_retopo_selection_smooth": {
+      "parameters": [
+        "CyberMesh*",
+        "int"
+      ],
+      "return": "CyberStatus"
+    },
+    "cyber_retopo_selection_sphere": {
+      "parameters": [
+        "CyberMesh*",
+        "const float[3]",
+        "float",
+        "CyberFalloff"
+      ],
+      "return": "CyberStatus"
+    },
+    "cyber_retopo_selection_transform": {
+      "parameters": [
+        "CyberMesh*",
+        "const float[12]",
+        "const CyberSnapper*",
+        "float",
+        "CyberSoftTransformReport*"
+      ],
+      "return": "CyberStatus"
+    },
+    "cyber_retopo_selection_transform_pinned": {
+      "parameters": [
+        "CyberMesh*",
+        "const float[12]",
+        "const uint32_t*",
+        "size_t",
+        "const CyberSnapper*",
+        "float",
+        "CyberSoftTransformReport*"
+      ],
+      "return": "CyberStatus"
+    },
+    "cyber_retopo_snap_all": {
+      "parameters": [
+        "CyberMesh*",
+        "const CyberSnapper*",
+        "const uint32_t*",
+        "size_t",
+        "size_t*",
+        "float*"
+      ],
+      "return": "CyberStatus"
+    },
+    "cyber_retopo_snap_symmetry_plane": {
+      "parameters": [
+        "CyberMesh*",
+        "const CyberSymmetry*",
+        "size_t*"
+      ],
+      "return": "CyberStatus"
+    },
+    "cyber_retopo_subdivide": {
+      "parameters": [
+        "CyberMesh*",
+        "const CyberSnapper*",
+        "size_t*"
+      ],
+      "return": "CyberStatus"
+    },
+    "cyber_retopo_subdivide_ex": {
+      "parameters": [
+        "CyberMesh*",
+        "const CyberSnapper*",
+        "CyberSubdivisionMode",
+        "size_t*"
+      ],
+      "return": "CyberStatus"
+    },
+    "cyber_retopo_surface_cut": {
+      "parameters": [
+        "CyberMesh*",
+        "const float[3]",
+        "const float[3]",
+        "const float[3]",
+        "int",
+        "const CyberSnapper*",
+        "size_t*",
+        "size_t*"
+      ],
+      "return": "CyberStatus"
+    },
+    "cyber_retopo_transform_vertices": {
+      "parameters": [
+        "CyberMesh*",
+        "const uint32_t*",
+        "size_t",
+        "const float[12]",
+        "const CyberSnapper*",
+        "float",
+        "size_t*",
+        "float*"
+      ],
+      "return": "CyberStatus"
+    },
+    "cyber_retopo_triangulate": {
+      "parameters": [
+        "CyberMesh*",
+        "size_t*"
+      ],
+      "return": "CyberStatus"
+    },
+    "cyber_retopo_tweak_vertex": {
+      "parameters": [
+        "CyberMesh*",
+        "uint32_t",
+        "const float[3]",
+        "const CyberSnapper*"
+      ],
+      "return": "CyberStatus"
+    },
+    "cyber_seam_path_add_waypoint": {
+      "parameters": [
+        "CyberSeamPath*",
+        "uint32_t"
+      ],
+      "return": "int"
+    },
+    "cyber_seam_path_clear": {
+      "parameters": [
+        "CyberSeamPath*"
+      ],
+      "return": "void"
+    },
+    "cyber_seam_path_commit": {
+      "parameters": [
+        "CyberSeamPath*",
+        "CyberSeamSet*",
+        "uint32_t*",
+        "size_t"
+      ],
+      "return": "size_t"
+    },
+    "cyber_seam_path_create": {
+      "parameters": [
+        "const CyberMesh*",
+        "const CyberSeamPathOptions*",
+        "CyberSeamPath**"
+      ],
+      "return": "CyberStatus"
+    },
+    "cyber_seam_path_drop_resume_marker": {
+      "parameters": [
+        "CyberSeamPath*"
+      ],
+      "return": "void"
+    },
+    "cyber_seam_path_edges": {
+      "parameters": [
+        "const CyberSeamPath*",
+        "uint32_t*",
+        "size_t"
+      ],
+      "return": "size_t"
+    },
+    "cyber_seam_path_free": {
+      "parameters": [
+        "CyberSeamPath*"
+      ],
+      "return": "void"
+    },
+    "cyber_seam_path_is_routed": {
+      "parameters": [
+        "const CyberSeamPath*"
+      ],
+      "return": "int"
+    },
+    "cyber_seam_path_move_waypoint": {
+      "parameters": [
+        "CyberSeamPath*",
+        "size_t",
+        "uint32_t"
+      ],
+      "return": "int"
+    },
+    "cyber_seam_path_move_waypoint_to": {
+      "parameters": [
+        "CyberSeamPath*",
+        "size_t",
+        "const float[3]",
+        "float"
+      ],
+      "return": "int"
+    },
+    "cyber_seam_path_remove_waypoint": {
+      "parameters": [
+        "CyberSeamPath*",
+        "size_t"
+      ],
+      "return": "int"
+    },
+    "cyber_seam_path_resume_marker": {
+      "parameters": [
+        "const CyberSeamPath*"
+      ],
+      "return": "uint32_t"
+    },
+    "cyber_seam_path_segment": {
+      "parameters": [
+        "const CyberSeamPath*",
+        "size_t",
+        "uint32_t*",
+        "size_t"
+      ],
+      "return": "size_t"
+    },
+    "cyber_seam_path_segment_count": {
+      "parameters": [
+        "const CyberSeamPath*"
+      ],
+      "return": "size_t"
+    },
+    "cyber_seam_path_segment_revision": {
+      "parameters": [
+        "const CyberSeamPath*",
+        "size_t"
+      ],
+      "return": "uint64_t"
+    },
+    "cyber_seam_path_vertices": {
+      "parameters": [
+        "const CyberSeamPath*",
+        "uint32_t*",
+        "size_t"
+      ],
+      "return": "size_t"
+    },
+    "cyber_seam_path_waypoint_count": {
+      "parameters": [
+        "const CyberSeamPath*"
+      ],
+      "return": "size_t"
+    },
+    "cyber_seam_path_waypoints": {
+      "parameters": [
+        "const CyberSeamPath*",
+        "uint32_t*",
+        "size_t"
+      ],
+      "return": "size_t"
+    },
+    "cyber_seam_set_count": {
+      "parameters": [
+        "const CyberSeamSet*"
+      ],
+      "return": "size_t"
+    },
+    "cyber_seam_set_create": {
+      "parameters": [
+        "CyberSeamSet**"
+      ],
+      "return": "CyberStatus"
+    },
+    "cyber_seam_set_edges": {
+      "parameters": [
+        "const CyberSeamSet*",
+        "uint32_t*",
+        "size_t"
+      ],
+      "return": "size_t"
+    },
+    "cyber_seam_set_erase": {
+      "parameters": [
+        "CyberSeamSet*",
+        "uint32_t"
+      ],
+      "return": "CyberStatus"
+    },
+    "cyber_seam_set_free": {
+      "parameters": [
+        "CyberSeamSet*"
+      ],
+      "return": "void"
+    },
+    "cyber_seam_set_is_seam": {
+      "parameters": [
+        "const CyberSeamSet*",
+        "uint32_t"
+      ],
+      "return": "int"
+    },
+    "cyber_seam_set_mark": {
+      "parameters": [
+        "CyberSeamSet*",
+        "uint32_t"
+      ],
+      "return": "CyberStatus"
+    },
+    "cyber_seamless_solver": {
+      "parameters": [
+        "void"
+      ],
+      "return": "const char*"
+    },
+    "cyber_set_backend": {
+      "parameters": [
+        "CyberBackend"
+      ],
+      "return": "CyberStatus"
+    },
+    "cyber_set_max_bake_pixels": {
+      "parameters": [
+        "uint64_t"
+      ],
+      "return": "CyberStatus"
+    },
+    "cyber_set_max_import_faces": {
+      "parameters": [
+        "uint64_t"
+      ],
+      "return": "CyberStatus"
+    },
+    "cyber_set_max_import_input_bytes": {
+      "parameters": [
+        "uint64_t"
+      ],
+      "return": "CyberStatus"
+    },
+    "cyber_set_max_import_vertices": {
+      "parameters": [
+        "uint64_t"
+      ],
+      "return": "CyberStatus"
+    },
+    "cyber_set_max_worker_threads": {
+      "parameters": [
+        "int"
+      ],
+      "return": "CyberStatus"
+    },
+    "cyber_snapper_create": {
+      "parameters": [
+        "const CyberMesh*",
+        "CyberSnapper**"
+      ],
+      "return": "CyberStatus"
+    },
+    "cyber_snapper_free": {
+      "parameters": [
+        "CyberSnapper*"
+      ],
+      "return": "void"
+    },
+    "cyber_snapper_raycast": {
+      "parameters": [
+        "const CyberSnapper*",
+        "const float[3]",
+        "const float[3]",
+        "float",
+        "float[3]",
+        "float*",
+        "uint32_t*"
+      ],
+      "return": "int"
+    },
+    "cyber_snapper_snap_to_surface": {
+      "parameters": [
+        "const CyberSnapper*",
+        "const float[3]",
+        "float[3]",
+        "uint32_t*"
+      ],
+      "return": "int"
+    },
+    "cyber_snapper_snap_to_vertex": {
+      "parameters": [
+        "const CyberSnapper*",
+        "const float[3]",
+        "float",
+        "float[3]",
+        "uint32_t*"
+      ],
+      "return": "int"
+    },
+    "cyber_status_string": {
+      "parameters": [
+        "CyberStatus"
+      ],
+      "return": "const char*"
+    },
+    "cyber_stroke_interpret": {
+      "parameters": [
+        "const CyberMesh*",
+        "const float*",
+        "const float*",
+        "size_t",
+        "float",
+        "CyberStrokeInterpretation**"
+      ],
+      "return": "CyberStatus"
+    },
+    "cyber_stroke_interpretation_action": {
+      "parameters": [
+        "const CyberStrokeInterpretation*",
+        "size_t"
+      ],
+      "return": "CyberStrokeAction"
+    },
+    "cyber_stroke_interpretation_candidate_count": {
+      "parameters": [
+        "const CyberStrokeInterpretation*"
+      ],
+      "return": "size_t"
+    },
+    "cyber_stroke_interpretation_confidence": {
+      "parameters": [
+        "const CyberStrokeInterpretation*",
+        "size_t"
+      ],
+      "return": "float"
+    },
+    "cyber_stroke_interpretation_context": {
+      "parameters": [
+        "const CyberStrokeInterpretation*"
+      ],
+      "return": "CyberStrokeContext"
+    },
+    "cyber_stroke_interpretation_corner": {
+      "parameters": [
+        "const CyberStrokeInterpretation*",
+        "size_t",
+        "float[2]"
+      ],
+      "return": "int"
+    },
+    "cyber_stroke_interpretation_corner_count": {
+      "parameters": [
+        "const CyberStrokeInterpretation*"
+      ],
+      "return": "size_t"
+    },
+    "cyber_stroke_interpretation_element": {
+      "parameters": [
+        "const CyberStrokeInterpretation*",
+        "size_t",
+        "size_t",
+        "CyberElementKind*",
+        "uint32_t*"
+      ],
+      "return": "int"
+    },
+    "cyber_stroke_interpretation_element_count": {
+      "parameters": [
+        "const CyberStrokeInterpretation*",
+        "size_t"
+      ],
+      "return": "size_t"
+    },
+    "cyber_stroke_interpretation_free": {
+      "parameters": [
+        "CyberStrokeInterpretation*"
+      ],
+      "return": "void"
+    },
+    "cyber_stroke_interpretation_grid_size": {
+      "parameters": [
+        "const CyberStrokeInterpretation*",
+        "size_t*",
+        "size_t*"
+      ],
+      "return": "int"
+    },
+    "cyber_stroke_interpretation_shape": {
+      "parameters": [
+        "const CyberStrokeInterpretation*"
+      ],
+      "return": "CyberStrokeShape"
+    },
+    "cyber_stroke_interpretation_shape_confidence": {
+      "parameters": [
+        "const CyberStrokeInterpretation*"
+      ],
+      "return": "float"
+    },
+    "cyber_uv_atlas": {
+      "parameters": [
+        "CyberMesh*",
+        "const CyberAtlasParams*",
+        "CyberAtlasResult*"
+      ],
+      "return": "CyberStatus"
+    },
+    "cyber_uv_atlas_cancellable": {
+      "parameters": [
+        "CyberMesh*",
+        "const CyberAtlasParams*",
+        "CyberProgressCb",
+        "CyberCancelCb",
+        "void*",
+        "CyberAtlasResult*"
+      ],
+      "return": "CyberStatus"
+    },
+    "cyber_uv_stitch_seams": {
+      "parameters": [
+        "CyberMesh*",
+        "CyberSeamSet*",
+        "const uint32_t*",
+        "size_t"
+      ],
+      "return": "CyberStatus"
+    },
+    "cyber_uv_unwrap_seams": {
+      "parameters": [
+        "CyberMesh*",
+        "const CyberSeamSet*",
+        "const CyberUnwrapSeamsParams*",
+        "CyberAtlasResult*"
+      ],
+      "return": "CyberStatus"
+    },
+    "cyber_uv_unwrap_seams_cancellable": {
+      "parameters": [
+        "CyberMesh*",
+        "const CyberSeamSet*",
+        "const CyberUnwrapSeamsParams*",
+        "CyberProgressCb",
+        "CyberCancelCb",
+        "void*",
+        "CyberAtlasResult*"
+      ],
+      "return": "CyberStatus"
+    },
+    "cyber_version": {
+      "parameters": [
+        "int*",
+        "int*",
+        "int*"
+      ],
+      "return": "void"
+    }
+  },
+  "header": "cyber_capi.h",
+  "macros": {
+    "CYBER_ABI_VERSION_MAJOR": "1",
+    "CYBER_ABI_VERSION_MINOR": "9"
+  },
+  "schema": 1,
+  "structs": {
+    "CyberAtlasParams": {
+      "alignment": 4,
+      "fields": [
+        {
+          "name": "maxChartAngleDegrees",
+          "offset": 0,
+          "size": 4,
+          "type": "float maxChartAngleDegrees"
+        },
+        {
+          "name": "packMargin",
+          "offset": 4,
+          "size": 4,
+          "type": "float packMargin"
+        },
+        {
+          "name": "textureSize",
+          "offset": 8,
+          "size": 4,
+          "type": "int textureSize"
+        },
+        {
+          "name": "reorientCharts",
+          "offset": 12,
+          "size": 4,
+          "type": "int reorientCharts"
+        },
+        {
+          "name": "mergeCharts",
+          "offset": 16,
+          "size": 4,
+          "type": "int mergeCharts"
+        },
+        {
+          "name": "maxChartDistortion",
+          "offset": 20,
+          "size": 4,
+          "type": "float maxChartDistortion"
+        }
+      ],
+      "size": 24
+    },
+    "CyberAtlasResult": {
+      "alignment": 8,
+      "fields": [
+        {
+          "name": "chartCount",
+          "offset": 0,
+          "size": 4,
+          "type": "int chartCount"
+        },
+        {
+          "name": "seamEdges",
+          "offset": 8,
+          "size": 8,
+          "type": "size_t seamEdges"
+        },
+        {
+          "name": "maxAngleDistortion",
+          "offset": 16,
+          "size": 4,
+          "type": "float maxAngleDistortion"
+        },
+        {
+          "name": "rmsAngleDistortion",
+          "offset": 20,
+          "size": 4,
+          "type": "float rmsAngleDistortion"
+        },
+        {
+          "name": "flippedCharts",
+          "offset": 24,
+          "size": 4,
+          "type": "int flippedCharts"
+        },
+        {
+          "name": "fallbackCharts",
+          "offset": 28,
+          "size": 4,
+          "type": "int fallbackCharts"
+        },
+        {
+          "name": "packedArea",
+          "offset": 32,
+          "size": 4,
+          "type": "float packedArea"
+        },
+        {
+          "name": "texelDensity",
+          "offset": 36,
+          "size": 4,
+          "type": "float texelDensity"
+        },
+        {
+          "name": "droppedCharts",
+          "offset": 40,
+          "size": 4,
+          "type": "int droppedCharts"
+        },
+        {
+          "name": "packedBoxArea",
+          "offset": 44,
+          "size": 4,
+          "type": "float packedBoxArea"
+        }
+      ],
+      "size": 48
+    },
+    "CyberAttributeColumn": {
+      "alignment": 8,
+      "fields": [
+        {
+          "name": "name",
+          "offset": 0,
+          "size": 8,
+          "type": "const char* name"
+        },
+        {
+          "name": "domain",
+          "offset": 8,
+          "size": 4,
+          "type": "int domain"
+        },
+        {
+          "name": "type",
+          "offset": 12,
+          "size": 4,
+          "type": "int type"
+        },
+        {
+          "name": "values",
+          "offset": 16,
+          "size": 8,
+          "type": "const void* values"
+        },
+        {
+          "name": "value_count",
+          "offset": 24,
+          "size": 8,
+          "type": "size_t value_count"
+        }
+      ],
+      "size": 32
+    },
+    "CyberAttributeInfo": {
+      "alignment": 8,
+      "fields": [
+        {
+          "name": "name",
+          "offset": 0,
+          "size": 64,
+          "type": "char name[64]"
+        },
+        {
+          "name": "domain",
+          "offset": 64,
+          "size": 4,
+          "type": "int domain"
+        },
+        {
+          "name": "type",
+          "offset": 68,
+          "size": 4,
+          "type": "int type"
+        },
+        {
+          "name": "value_count",
+          "offset": 72,
+          "size": 8,
+          "type": "size_t value_count"
+        }
+      ],
+      "size": 80
+    },
+    "CyberBakeParams": {
+      "alignment": 4,
+      "fields": [
+        {
+          "name": "width",
+          "offset": 0,
+          "size": 4,
+          "type": "int width"
+        },
+        {
+          "name": "height",
+          "offset": 4,
+          "size": 4,
+          "type": "int height"
+        },
+        {
+          "name": "cageDistance",
+          "offset": 8,
+          "size": 4,
+          "type": "float cageDistance"
+        },
+        {
+          "name": "aoSamples",
+          "offset": 12,
+          "size": 4,
+          "type": "int aoSamples"
+        },
+        {
+          "name": "aoRadius",
+          "offset": 16,
+          "size": 4,
+          "type": "float aoRadius"
+        },
+        {
+          "name": "curvatureRange",
+          "offset": 20,
+          "size": 4,
+          "type": "float curvatureRange"
+        }
+      ],
+      "size": 24
+    },
+    "CyberBundleFile": {
+      "alignment": 8,
+      "fields": [
+        {
+          "name": "path",
+          "offset": 0,
+          "size": 8,
+          "type": "const char* path"
+        },
+        {
+          "name": "kind",
+          "offset": 8,
+          "size": 8,
+          "type": "const char* kind"
+        },
+        {
+          "name": "colorSpace",
+          "offset": 16,
+          "size": 8,
+          "type": "const char* colorSpace"
+        },
+        {
+          "name": "width",
+          "offset": 24,
+          "size": 4,
+          "type": "int width"
+        },
+        {
+          "name": "height",
+          "offset": 28,
+          "size": 4,
+          "type": "int height"
+        }
+      ],
+      "size": 32
+    },
+    "CyberBundleParams": {
+      "alignment": 8,
+      "fields": [
+        {
+          "name": "meshPath",
+          "offset": 0,
+          "size": 8,
+          "type": "const char* meshPath"
+        },
+        {
+          "name": "basename",
+          "offset": 8,
+          "size": 8,
+          "type": "const char* basename"
+        },
+        {
+          "name": "cageDistance",
+          "offset": 16,
+          "size": 4,
+          "type": "float cageDistance"
+        },
+        {
+          "name": "aoSamples",
+          "offset": 20,
+          "size": 4,
+          "type": "int aoSamples"
+        },
+        {
+          "name": "aoRadius",
+          "offset": 24,
+          "size": 4,
+          "type": "float aoRadius"
+        }
+      ],
+      "size": 32
+    },
+    "CyberConformReport": {
+      "alignment": 8,
+      "fields": [
+        {
+          "name": "movedVertices",
+          "offset": 0,
+          "size": 8,
+          "type": "size_t movedVertices"
+        },
+        {
+          "name": "maxDeviation",
+          "offset": 8,
+          "size": 4,
+          "type": "float maxDeviation"
+        },
+        {
+          "name": "rmsDeviation",
+          "offset": 12,
+          "size": 4,
+          "type": "float rmsDeviation"
+        },
+        {
+          "name": "flaggedCount",
+          "offset": 16,
+          "size": 8,
+          "type": "size_t flaggedCount"
+        }
+      ],
+      "size": 24
+    },
+    "CyberCountIslandOutcome": {
+      "alignment": 8,
+      "fields": [
+        {
+          "name": "islandIndex",
+          "offset": 0,
+          "size": 8,
+          "type": "size_t islandIndex"
+        },
+        {
+          "name": "requestedQuads",
+          "offset": 8,
+          "size": 8,
+          "type": "double requestedQuads"
+        },
+        {
+          "name": "effectiveBaseQuads",
+          "offset": 16,
+          "size": 8,
+          "type": "double effectiveBaseQuads"
+        },
+        {
+          "name": "calibratedQuads",
+          "offset": 24,
+          "size": 8,
+          "type": "double calibratedQuads"
+        },
+        {
+          "name": "finalFaces",
+          "offset": 32,
+          "size": 8,
+          "type": "size_t finalFaces"
+        },
+        {
+          "name": "attempts",
+          "offset": 40,
+          "size": 8,
+          "type": "size_t attempts"
+        },
+        {
+          "name": "selectedAttempt",
+          "offset": 48,
+          "size": 8,
+          "type": "size_t selectedAttempt"
+        },
+        {
+          "name": "termination",
+          "offset": 56,
+          "size": 4,
+          "type": "int termination"
+        }
+      ],
+      "size": 64
+    },
+    "CyberCountPolicy": {
+      "alignment": 8,
+      "fields": [
+        {
+          "name": "relativeTolerance",
+          "offset": 0,
+          "size": 8,
+          "type": "double relativeTolerance"
+        },
+        {
+          "name": "maxAttempts",
+          "offset": 8,
+          "size": 8,
+          "type": "size_t maxAttempts"
+        }
+      ],
+      "size": 16
+    },
+    "CyberExportPresetInfo": {
+      "alignment": 8,
+      "fields": [
+        {
+          "name": "name",
+          "offset": 0,
+          "size": 8,
+          "type": "const char* name"
+        },
+        {
+          "name": "schemaVersion",
+          "offset": 8,
+          "size": 4,
+          "type": "int schemaVersion"
+        },
+        {
+          "name": "meshFormat",
+          "offset": 16,
+          "size": 8,
+          "type": "const char* meshFormat"
+        },
+        {
+          "name": "textureFormat",
+          "offset": 24,
+          "size": 8,
+          "type": "const char* textureFormat"
+        },
+        {
+          "name": "namingPattern",
+          "offset": 32,
+          "size": 8,
+          "type": "const char* namingPattern"
+        },
+        {
+          "name": "units",
+          "offset": 40,
+          "size": 8,
+          "type": "const char* units"
+        },
+        {
+          "name": "upAxis",
+          "offset": 48,
+          "size": 8,
+          "type": "const char* upAxis"
+        },
+        {
+          "name": "resolution",
+          "offset": 56,
+          "size": 4,
+          "type": "int resolution"
+        },
+        {
+          "name": "normalGreenPlusY",
+          "offset": 60,
+          "size": 4,
+          "type": "int normalGreenPlusY"
+        },
+        {
+          "name": "mapCount",
+          "offset": 64,
+          "size": 8,
+          "type": "size_t mapCount"
+        }
+      ],
+      "size": 72
+    },
+    "CyberExportPresetMap": {
+      "alignment": 8,
+      "fields": [
+        {
+          "name": "map",
+          "offset": 0,
+          "size": 8,
+          "type": "const char* map"
+        },
+        {
+          "name": "colorSpace",
+          "offset": 8,
+          "size": 8,
+          "type": "const char* colorSpace"
+        },
+        {
+          "name": "suffix",
+          "offset": 16,
+          "size": 8,
+          "type": "const char* suffix"
+        }
+      ],
+      "size": 24
+    },
+    "CyberFieldEvaluator": {
+      "alignment": 8,
+      "fields": [
+        {
+          "name": "distance",
+          "offset": 0,
+          "size": 8,
+          "type": "CyberFieldDistanceFn distance"
+        },
+        {
+          "name": "gradient",
+          "offset": 8,
+          "size": 8,
+          "type": "CyberFieldGradientFn gradient"
+        },
+        {
+          "name": "occlusion",
+          "offset": 16,
+          "size": 8,
+          "type": "CyberFieldOcclusionFn occlusion"
+        },
+        {
+          "name": "user",
+          "offset": 24,
+          "size": 8,
+          "type": "void* user"
+        }
+      ],
+      "size": 32
+    },
+    "CyberFlowGuide": {
+      "alignment": 8,
+      "fields": [
+        {
+          "name": "points",
+          "offset": 0,
+          "size": 8,
+          "type": "const float* points"
+        },
+        {
+          "name": "point_count",
+          "offset": 8,
+          "size": 8,
+          "type": "size_t point_count"
+        },
+        {
+          "name": "strength",
+          "offset": 16,
+          "size": 4,
+          "type": "float strength"
+        },
+        {
+          "name": "radius",
+          "offset": 20,
+          "size": 4,
+          "type": "float radius"
+        }
+      ],
+      "size": 24
+    },
+    "CyberFlowGuideEx": {
+      "alignment": 8,
+      "fields": [
+        {
+          "name": "points",
+          "offset": 0,
+          "size": 8,
+          "type": "const float* points"
+        },
+        {
+          "name": "point_count",
+          "offset": 8,
+          "size": 8,
+          "type": "size_t point_count"
+        },
+        {
+          "name": "strength",
+          "offset": 16,
+          "size": 4,
+          "type": "float strength"
+        },
+        {
+          "name": "radius",
+          "offset": 20,
+          "size": 4,
+          "type": "float radius"
+        },
+        {
+          "name": "mode",
+          "offset": 24,
+          "size": 4,
+          "type": "int mode"
+        },
+        {
+          "name": "closed",
+          "offset": 28,
+          "size": 4,
+          "type": "int closed"
+        }
+      ],
+      "size": 32
+    },
+    "CyberGuidance": {
+      "alignment": 8,
+      "fields": [
+        {
+          "name": "guides",
+          "offset": 0,
+          "size": 8,
+          "type": "const CyberFlowGuide* guides"
+        },
+        {
+          "name": "guide_count",
+          "offset": 8,
+          "size": 8,
+          "type": "size_t guide_count"
+        },
+        {
+          "name": "vertex_density",
+          "offset": 16,
+          "size": 8,
+          "type": "const float* vertex_density"
+        },
+        {
+          "name": "vertex_density_count",
+          "offset": 24,
+          "size": 8,
+          "type": "size_t vertex_density_count"
+        },
+        {
+          "name": "face_density",
+          "offset": 32,
+          "size": 8,
+          "type": "const float* face_density"
+        },
+        {
+          "name": "face_density_count",
+          "offset": 40,
+          "size": 8,
+          "type": "size_t face_density_count"
+        }
+      ],
+      "size": 48
+    },
+    "CyberGuidanceEx": {
+      "alignment": 8,
+      "fields": [
+        {
+          "name": "guides",
+          "offset": 0,
+          "size": 8,
+          "type": "const CyberFlowGuideEx* guides"
+        },
+        {
+          "name": "guide_count",
+          "offset": 8,
+          "size": 8,
+          "type": "size_t guide_count"
+        },
+        {
+          "name": "vertex_density",
+          "offset": 16,
+          "size": 8,
+          "type": "const float* vertex_density"
+        },
+        {
+          "name": "vertex_density_count",
+          "offset": 24,
+          "size": 8,
+          "type": "size_t vertex_density_count"
+        },
+        {
+          "name": "face_density",
+          "offset": 32,
+          "size": 8,
+          "type": "const float* face_density"
+        },
+        {
+          "name": "face_density_count",
+          "offset": 40,
+          "size": 8,
+          "type": "size_t face_density_count"
+        }
+      ],
+      "size": 48
+    },
+    "CyberHandoffBuffers": {
+      "alignment": 8,
+      "fields": [
+        {
+          "name": "positions",
+          "offset": 0,
+          "size": 8,
+          "type": "const float* positions"
+        },
+        {
+          "name": "normals",
+          "offset": 8,
+          "size": 8,
+          "type": "const float* normals"
+        },
+        {
+          "name": "colors",
+          "offset": 16,
+          "size": 8,
+          "type": "const float* colors"
+        },
+        {
+          "name": "material_mix",
+          "offset": 24,
+          "size": 8,
+          "type": "const float* material_mix"
+        },
+        {
+          "name": "vertex_count",
+          "offset": 32,
+          "size": 8,
+          "type": "size_t vertex_count"
+        },
+        {
+          "name": "indices",
+          "offset": 40,
+          "size": 8,
+          "type": "const uint32_t* indices"
+        },
+        {
+          "name": "index_count",
+          "offset": 48,
+          "size": 8,
+          "type": "size_t index_count"
+        },
+        {
+          "name": "version_major",
+          "offset": 56,
+          "size": 4,
+          "type": "int version_major"
+        },
+        {
+          "name": "version_minor",
+          "offset": 60,
+          "size": 4,
+          "type": "int version_minor"
+        },
+        {
+          "name": "producer",
+          "offset": 64,
+          "size": 8,
+          "type": "const char* producer"
+        }
+      ],
+      "size": 72
+    },
+    "CyberHandoffInfo": {
+      "alignment": 8,
+      "fields": [
+        {
+          "name": "versionMajor",
+          "offset": 0,
+          "size": 4,
+          "type": "int versionMajor"
+        },
+        {
+          "name": "versionMinor",
+          "offset": 4,
+          "size": 4,
+          "type": "int versionMinor"
+        },
+        {
+          "name": "producer",
+          "offset": 8,
+          "size": 8,
+          "type": "const char* producer"
+        },
+        {
+          "name": "vertexCount",
+          "offset": 16,
+          "size": 8,
+          "type": "size_t vertexCount"
+        },
+        {
+          "name": "faceCount",
+          "offset": 24,
+          "size": 8,
+          "type": "size_t faceCount"
+        },
+        {
+          "name": "hasVertexColors",
+          "offset": 32,
+          "size": 4,
+          "type": "int hasVertexColors"
+        },
+        {
+          "name": "hasVertexNormals",
+          "offset": 36,
+          "size": 4,
+          "type": "int hasVertexNormals"
+        },
+        {
+          "name": "hasMaterialMix",
+          "offset": 40,
+          "size": 4,
+          "type": "int hasMaterialMix"
+        },
+        {
+          "name": "droppedFaces",
+          "offset": 48,
+          "size": 8,
+          "type": "size_t droppedFaces"
+        }
+      ],
+      "size": 56
+    },
+    "CyberIndexedMesh": {
+      "alignment": 8,
+      "fields": [
+        {
+          "name": "positions",
+          "offset": 0,
+          "size": 8,
+          "type": "const float* positions"
+        },
+        {
+          "name": "vertex_count",
+          "offset": 8,
+          "size": 8,
+          "type": "size_t vertex_count"
+        },
+        {
+          "name": "face_offsets",
+          "offset": 16,
+          "size": 8,
+          "type": "const size_t* face_offsets"
+        },
+        {
+          "name": "face_count",
+          "offset": 24,
+          "size": 8,
+          "type": "size_t face_count"
+        },
+        {
+          "name": "indices",
+          "offset": 32,
+          "size": 8,
+          "type": "const uint32_t* indices"
+        },
+        {
+          "name": "index_count",
+          "offset": 40,
+          "size": 8,
+          "type": "size_t index_count"
+        },
+        {
+          "name": "attributes",
+          "offset": 48,
+          "size": 8,
+          "type": "const CyberAttributeColumn* attributes"
+        },
+        {
+          "name": "attribute_count",
+          "offset": 56,
+          "size": 8,
+          "type": "size_t attribute_count"
+        }
+      ],
+      "size": 64
+    },
+    "CyberIsotropicParams": {
+      "alignment": 4,
+      "fields": [
+        {
+          "name": "targetEdgeLength",
+          "offset": 0,
+          "size": 4,
+          "type": "float targetEdgeLength"
+        },
+        {
+          "name": "iterations",
+          "offset": 4,
+          "size": 4,
+          "type": "int iterations"
+        },
+        {
+          "name": "adaptivity",
+          "offset": 8,
+          "size": 4,
+          "type": "float adaptivity"
+        },
+        {
+          "name": "smoothNormalDegrees",
+          "offset": 12,
+          "size": 4,
+          "type": "float smoothNormalDegrees"
+        },
+        {
+          "name": "sharpEdgeDegrees",
+          "offset": 16,
+          "size": 4,
+          "type": "float sharpEdgeDegrees"
+        }
+      ],
+      "size": 20
+    },
+    "CyberLoopMetrics": {
+      "alignment": 4,
+      "fields": [
+        {
+          "name": "edge_count",
+          "offset": 0,
+          "size": 4,
+          "type": "uint32_t edge_count"
+        },
+        {
+          "name": "vertex_count",
+          "offset": 4,
+          "size": 4,
+          "type": "uint32_t vertex_count"
+        },
+        {
+          "name": "closed",
+          "offset": 8,
+          "size": 4,
+          "type": "int closed"
+        },
+        {
+          "name": "length",
+          "offset": 12,
+          "size": 4,
+          "type": "float length"
+        },
+        {
+          "name": "has_endpoints",
+          "offset": 16,
+          "size": 4,
+          "type": "int has_endpoints"
+        },
+        {
+          "name": "endpoint_a",
+          "offset": 20,
+          "size": 4,
+          "type": "uint32_t endpoint_a"
+        },
+        {
+          "name": "endpoint_b",
+          "offset": 24,
+          "size": 4,
+          "type": "uint32_t endpoint_b"
+        },
+        {
+          "name": "boundary_edge_count",
+          "offset": 28,
+          "size": 4,
+          "type": "uint32_t boundary_edge_count"
+        },
+        {
+          "name": "snap_measured",
+          "offset": 32,
+          "size": 4,
+          "type": "int snap_measured"
+        },
+        {
+          "name": "snapped_vertex_count",
+          "offset": 36,
+          "size": 4,
+          "type": "uint32_t snapped_vertex_count"
+        },
+        {
+          "name": "max_snap_distance",
+          "offset": 40,
+          "size": 4,
+          "type": "float max_snap_distance"
+        }
+      ],
+      "size": 44
+    },
+    "CyberRemeshExecutionLimits": {
+      "alignment": 8,
+      "fields": [
+        {
+          "name": "maxDirectFactorBytes",
+          "offset": 0,
+          "size": 8,
+          "type": "uint64_t maxDirectFactorBytes"
+        },
+        {
+          "name": "maxCandidateBytes",
+          "offset": 8,
+          "size": 8,
+          "type": "uint64_t maxCandidateBytes"
+        }
+      ],
+      "size": 16
+    },
+    "CyberRemeshLimits": {
+      "alignment": 8,
+      "fields": [
+        {
+          "name": "maxInputVertices",
+          "offset": 0,
+          "size": 8,
+          "type": "uint64_t maxInputVertices"
+        },
+        {
+          "name": "maxInputFaces",
+          "offset": 8,
+          "size": 8,
+          "type": "uint64_t maxInputFaces"
+        },
+        {
+          "name": "maxIntermediateVertices",
+          "offset": 16,
+          "size": 8,
+          "type": "uint64_t maxIntermediateVertices"
+        },
+        {
+          "name": "maxIntermediateFaces",
+          "offset": 24,
+          "size": 8,
+          "type": "uint64_t maxIntermediateFaces"
+        },
+        {
+          "name": "maxOutputVertices",
+          "offset": 32,
+          "size": 8,
+          "type": "uint64_t maxOutputVertices"
+        },
+        {
+          "name": "maxOutputFaces",
+          "offset": 40,
+          "size": 8,
+          "type": "uint64_t maxOutputFaces"
+        }
+      ],
+      "size": 48
+    },
+    "CyberRemeshParams": {
+      "alignment": 4,
+      "fields": [
+        {
+          "name": "targetQuads",
+          "offset": 0,
+          "size": 4,
+          "type": "int targetQuads"
+        },
+        {
+          "name": "edgeScale",
+          "offset": 4,
+          "size": 4,
+          "type": "float edgeScale"
+        },
+        {
+          "name": "sharpEdgeDegrees",
+          "offset": 8,
+          "size": 4,
+          "type": "float sharpEdgeDegrees"
+        },
+        {
+          "name": "smoothNormalDegrees",
+          "offset": 12,
+          "size": 4,
+          "type": "float smoothNormalDegrees"
+        },
+        {
+          "name": "adaptivity",
+          "offset": 16,
+          "size": 4,
+          "type": "float adaptivity"
+        },
+        {
+          "name": "pureQuads",
+          "offset": 20,
+          "size": 4,
+          "type": "int pureQuads"
+        },
+        {
+          "name": "holeFillMaxBoundary",
+          "offset": 24,
+          "size": 4,
+          "type": "int holeFillMaxBoundary"
+        },
+        {
+          "name": "quadMethod",
+          "offset": 28,
+          "size": 4,
+          "type": "int quadMethod"
+        }
+      ],
+      "size": 32
+    },
+    "CyberResymmetrizeReport": {
+      "alignment": 4,
+      "fields": [
+        {
+          "name": "snapped",
+          "offset": 0,
+          "size": 4,
+          "type": "uint32_t snapped"
+        },
+        {
+          "name": "matched",
+          "offset": 4,
+          "size": 4,
+          "type": "uint32_t matched"
+        },
+        {
+          "name": "unmatched",
+          "offset": 8,
+          "size": 4,
+          "type": "uint32_t unmatched"
+        },
+        {
+          "name": "max_correction",
+          "offset": 12,
+          "size": 4,
+          "type": "float max_correction"
+        }
+      ],
+      "size": 16
+    },
+    "CyberSeamPathOptions": {
+      "alignment": 4,
+      "fields": [
+        {
+          "name": "flatWeight",
+          "offset": 0,
+          "size": 4,
+          "type": "float flatWeight"
+        },
+        {
+          "name": "featureWeight",
+          "offset": 4,
+          "size": 4,
+          "type": "float featureWeight"
+        },
+        {
+          "name": "concaveWeight",
+          "offset": 8,
+          "size": 4,
+          "type": "float concaveWeight"
+        },
+        {
+          "name": "convexWeight",
+          "offset": 12,
+          "size": 4,
+          "type": "float convexWeight"
+        },
+        {
+          "name": "creaseDegrees",
+          "offset": 16,
+          "size": 4,
+          "type": "float creaseDegrees"
+        },
+        {
+          "name": "minWeight",
+          "offset": 20,
+          "size": 4,
+          "type": "float minWeight"
+        }
+      ],
+      "size": 24
+    },
+    "CyberSoftTransformReport": {
+      "alignment": 8,
+      "fields": [
+        {
+          "name": "moved",
+          "offset": 0,
+          "size": 8,
+          "type": "size_t moved"
+        },
+        {
+          "name": "resnapped",
+          "offset": 8,
+          "size": 8,
+          "type": "size_t resnapped"
+        },
+        {
+          "name": "max_snap_distance",
+          "offset": 16,
+          "size": 4,
+          "type": "float max_snap_distance"
+        }
+      ],
+      "size": 24
+    },
+    "CyberStats": {
+      "alignment": 8,
+      "fields": [
+        {
+          "name": "vertices",
+          "offset": 0,
+          "size": 8,
+          "type": "size_t vertices"
+        },
+        {
+          "name": "quads",
+          "offset": 8,
+          "size": 8,
+          "type": "size_t quads"
+        },
+        {
+          "name": "triangles",
+          "offset": 16,
+          "size": 8,
+          "type": "size_t triangles"
+        },
+        {
+          "name": "other",
+          "offset": 24,
+          "size": 8,
+          "type": "size_t other"
+        },
+        {
+          "name": "islands",
+          "offset": 32,
+          "size": 8,
+          "type": "size_t islands"
+        },
+        {
+          "name": "islandsFailed",
+          "offset": 40,
+          "size": 8,
+          "type": "size_t islandsFailed"
+        }
+      ],
+      "size": 48
+    },
+    "CyberSymmetry": {
+      "alignment": 4,
+      "fields": [
+        {
+          "name": "origin",
+          "offset": 0,
+          "size": 12,
+          "type": "float origin[3]"
+        },
+        {
+          "name": "normal",
+          "offset": 12,
+          "size": 12,
+          "type": "float normal[3]"
+        },
+        {
+          "name": "weld_tolerance",
+          "offset": 24,
+          "size": 4,
+          "type": "float weld_tolerance"
+        },
+        {
+          "name": "working_side_positive",
+          "offset": 28,
+          "size": 4,
+          "type": "int working_side_positive"
+        }
+      ],
+      "size": 32
+    },
+    "CyberTargetCountReport": {
+      "alignment": 8,
+      "fields": [
+        {
+          "name": "requestedQuads",
+          "offset": 0,
+          "size": 4,
+          "type": "int requestedQuads"
+        },
+        {
+          "name": "effectiveBaseQuads",
+          "offset": 4,
+          "size": 4,
+          "type": "int effectiveBaseQuads"
+        },
+        {
+          "name": "finalFaces",
+          "offset": 8,
+          "size": 8,
+          "type": "size_t finalFaces"
+        },
+        {
+          "name": "pureQuads",
+          "offset": 16,
+          "size": 4,
+          "type": "int pureQuads"
+        },
+        {
+          "name": "islandCount",
+          "offset": 24,
+          "size": 8,
+          "type": "size_t islandCount"
+        },
+        {
+          "name": "islands",
+          "offset": 32,
+          "size": 8,
+          "type": "CyberCountIslandOutcome* islands"
+        },
+        {
+          "name": "islandCapacity",
+          "offset": 40,
+          "size": 8,
+          "type": "size_t islandCapacity"
+        }
+      ],
+      "size": 48
+    },
+    "CyberUnwrapSeamsParams": {
+      "alignment": 4,
+      "fields": [
+        {
+          "name": "packMargin",
+          "offset": 0,
+          "size": 4,
+          "type": "float packMargin"
+        },
+        {
+          "name": "textureSize",
+          "offset": 4,
+          "size": 4,
+          "type": "int textureSize"
+        },
+        {
+          "name": "reorientCharts",
+          "offset": 8,
+          "size": 4,
+          "type": "int reorientCharts"
+        }
+      ],
+      "size": 12
+    },
+    "CyberZRemesherParams": {
+      "alignment": 4,
+      "fields": [
+        {
+          "name": "quality",
+          "offset": 0,
+          "size": 4,
+          "type": "int quality"
+        },
+        {
+          "name": "symmetry",
+          "offset": 4,
+          "size": 4,
+          "type": "int symmetry"
+        },
+        {
+          "name": "unifiedSizing",
+          "offset": 8,
+          "size": 4,
+          "type": "int unifiedSizing"
+        },
+        {
+          "name": "boundaryChains",
+          "offset": 12,
+          "size": 4,
+          "type": "int boundaryChains"
+        },
+        {
+          "name": "foldRepair",
+          "offset": 16,
+          "size": 4,
+          "type": "int foldRepair"
+        }
+      ],
+      "size": 20
+    },
+    "CyberZRemesherReport": {
+      "alignment": 8,
+      "fields": [
+        {
+          "name": "layouts",
+          "offset": 0,
+          "size": 8,
+          "type": "size_t layouts"
+        },
+        {
+          "name": "layoutsValid",
+          "offset": 8,
+          "size": 8,
+          "type": "size_t layoutsValid"
+        },
+        {
+          "name": "layoutNodes",
+          "offset": 16,
+          "size": 8,
+          "type": "size_t layoutNodes"
+        },
+        {
+          "name": "layoutArcs",
+          "offset": 24,
+          "size": 8,
+          "type": "size_t layoutArcs"
+        },
+        {
+          "name": "layoutPatches",
+          "offset": 32,
+          "size": 8,
+          "type": "size_t layoutPatches"
+        },
+        {
+          "name": "singularities",
+          "offset": 40,
+          "size": 8,
+          "type": "size_t singularities"
+        },
+        {
+          "name": "tJunctions",
+          "offset": 48,
+          "size": 8,
+          "type": "size_t tJunctions"
+        },
+        {
+          "name": "featureArcs",
+          "offset": 56,
+          "size": 8,
+          "type": "size_t featureArcs"
+        },
+        {
+          "name": "boundaryArcs",
+          "offset": 64,
+          "size": 8,
+          "type": "size_t boundaryArcs"
+        },
+        {
+          "name": "excludedArcs",
+          "offset": 72,
+          "size": 8,
+          "type": "size_t excludedArcs"
+        },
+        {
+          "name": "nonClosingPatches",
+          "offset": 80,
+          "size": 8,
+          "type": "size_t nonClosingPatches"
+        },
+        {
+          "name": "totalIndex",
+          "offset": 88,
+          "size": 4,
+          "type": "int totalIndex"
+        },
+        {
+          "name": "selectedCandidate",
+          "offset": 92,
+          "size": 32,
+          "type": "char selectedCandidate[32]"
+        },
+        {
+          "name": "qualityScore",
+          "offset": 128,
+          "size": 8,
+          "type": "double qualityScore"
+        },
+        {
+          "name": "symmetryApplied",
+          "offset": 136,
+          "size": 4,
+          "type": "int symmetryApplied"
+        },
+        {
+          "name": "topologicallySymmetric",
+          "offset": 140,
+          "size": 4,
+          "type": "int topologicallySymmetric"
+        },
+        {
+          "name": "mirroredVertices",
+          "offset": 144,
+          "size": 8,
+          "type": "size_t mirroredVertices"
+        },
+        {
+          "name": "mirroredFaces",
+          "offset": 152,
+          "size": 8,
+          "type": "size_t mirroredFaces"
+        },
+        {
+          "name": "borderSnapped",
+          "offset": 160,
+          "size": 8,
+          "type": "size_t borderSnapped"
+        },
+        {
+          "name": "membranesRemoved",
+          "offset": 168,
+          "size": 8,
+          "type": "size_t membranesRemoved"
+        },
+        {
+          "name": "maxBorderDrift",
+          "offset": 176,
+          "size": 4,
+          "type": "float maxBorderDrift"
+        }
+      ],
+      "size": 184
+    }
+  }
+}

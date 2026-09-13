@@ -63,6 +63,47 @@ TEST_CASE("triangulate policy fans n-gons on import") {
     REQUIRE(result.value().mesh.faceCount() == 3);
 }
 
+TEST_CASE("OBJ vertex budget rejects before constructing the mesh") {
+    const auto path = writeFile("over_vertex_budget.obj", "v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n");
+    io::ImportOptions options;
+    options.maxVertices = 2;
+    const auto result = io::importMesh(path, options);
+    REQUIRE(!result.ok());
+    CHECK(result.error().code == io::ErrorCode::ResourceLimit);
+}
+
+TEST_CASE("OBJ face budget rejects during the streaming preflight") {
+    const auto path = writeFile("over_face_budget.obj",
+                                "v 0 0 0\nv 1 0 0\nv 1 1 0\nv 0 1 0\n"
+                                "f 1 2 3\nf 1 3 4\n");
+    io::ImportOptions options;
+    options.maxFaces = 1;
+    const auto result = io::importMesh(path, options);
+    REQUIRE(!result.ok());
+    CHECK(result.error().code == io::ErrorCode::ResourceLimit);
+}
+
+TEST_CASE("OBJ triangulating preflight counts the faces an n-gon will emit") {
+    const auto path = writeFile("over_triangulated_face_budget.obj",
+                                "v 0 0 0\nv 1 0 0\nv 1 1 0\nv 0 1 0\n"
+                                "f 1 2 3 4\n");
+    io::ImportOptions options;
+    options.polygons = io::PolygonPolicy::Triangulate;
+    options.maxFaces = 1;
+    const auto result = io::importMesh(path, options);
+    REQUIRE(!result.ok());
+    CHECK(result.error().code == io::ErrorCode::ResourceLimit);
+}
+
+TEST_CASE("input byte budget rejects before format parsing") {
+    const auto path = writeFile("over_byte_budget.obj", "v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n");
+    io::ImportOptions options;
+    options.maxInputBytes = 1;
+    const auto result = io::importMesh(path, options);
+    REQUIRE(!result.ok());
+    CHECK(result.error().code == io::ErrorCode::ResourceLimit);
+}
+
 TEST_CASE("vertex colors import from xyzrgb OBJ (spec: mesh-io polypaint)") {
     const auto path = writeFile("colored.obj",
                                 "v 0 0 0 1 0 0\nv 1 0 0 0 1 0\nv 0 1 0 0 0 1\n"

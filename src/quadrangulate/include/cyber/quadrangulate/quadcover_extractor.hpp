@@ -116,6 +116,8 @@ struct NativeSolveContext {
     // choice; the candidate-selection path names one explicitly so it can solve
     // both and compare without a process-global switch.
     CrossFieldSource fieldSource = CrossFieldSource::Auto;
+    SeamlessSolveLimits solveLimits;
+    bool resourceLimitExceeded = false;
     // Topology-guide accounting, read back for the run report. A requested
     // guide that was not honoured is named, never dropped.
     std::size_t topologyGuidesRequested = 0;

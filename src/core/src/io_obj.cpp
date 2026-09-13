@@ -1,4 +1,6 @@
 #include <fstream>
+#include <limits>
+#include <sstream>
 
 #include "io_internal.hpp"
 
@@ -8,6 +10,60 @@
 namespace cyber::io::detail {
 
 namespace {
+
+struct ObjPreflight {
+    std::size_t vertices = 0;
+    std::size_t faces = 0;
+};
+
+Result<ObjPreflight> preflightObjTopology(const std::filesystem::path& path,
+                                          const ImportOptions& options) {
+    if (options.maxVertices == 0 && options.maxFaces == 0) {
+        return ObjPreflight{};
+    }
+    std::ifstream input(path);
+    if (!input) {
+        return Error{ErrorCode::ParseError, "cannot open '" + path.string() + "'"};
+    }
+    ObjPreflight counts;
+    std::string line;
+    while (std::getline(input, line)) {
+        if (line.size() >= 2 && line[0] == 'v' && (line[1] == ' ' || line[1] == '\t')) {
+            ++counts.vertices;
+            if (options.maxVertices > 0 && counts.vertices > options.maxVertices) {
+                return Error{ErrorCode::ResourceLimit,
+                             "'" + path.string() +
+                                 "' declares more than this host's vertex "
+                                 "ceiling of " +
+                                 std::to_string(options.maxVertices)};
+            }
+        } else if (line.size() >= 2 && line[0] == 'f' && (line[1] == ' ' || line[1] == '\t')) {
+            std::istringstream face(line.substr(1));
+            std::string token;
+            std::size_t corners = 0;
+            while (face >> token && token[0] != '#') {
+                ++corners;
+            }
+            const std::size_t emitted =
+                corners < 3
+                    ? 0
+                    : (options.polygons == PolygonPolicy::Triangulate && corners > 3 ? corners - 2
+                                                                                     : 1);
+            if (counts.faces > std::numeric_limits<std::size_t>::max() - emitted) {
+                return Error{ErrorCode::ParseError,
+                             "face count overflow in '" + path.string() + "'"};
+            }
+            counts.faces += emitted;
+            if (options.maxFaces > 0 && counts.faces > options.maxFaces) {
+                return Error{ErrorCode::ResourceLimit, "'" + path.string() +
+                                                           "' declares more than this host's face "
+                                                           "ceiling of " +
+                                                           std::to_string(options.maxFaces)};
+            }
+        }
+    }
+    return counts;
+}
 
 // tinyobjloader hands out-of-range vt/vn indices through unchanged — it only appends a
 // warning string and still reports success — so every attribute index has to be range
@@ -23,6 +79,10 @@ bool attributeIndexInRange(int index, std::size_t componentCount, std::size_t st
 }  // namespace
 
 Result<ImportedMesh> importObj(const std::filesystem::path& path, const ImportOptions& options) {
+    const Result<ObjPreflight> preflight = preflightObjTopology(path, options);
+    if (!preflight.ok()) {
+        return preflight.error();
+    }
     tinyobj::ObjReaderConfig config;
     config.triangulate = false;  // arity preserved; policy applied afterwards
     config.vertex_color = true;

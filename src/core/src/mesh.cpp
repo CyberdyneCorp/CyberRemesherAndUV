@@ -2,8 +2,39 @@
 
 #include <algorithm>
 #include <cassert>
+#include <limits>
 
 namespace cyber {
+
+namespace {
+void addBytes(std::size_t& total, std::size_t count, std::size_t width) {
+    if (count > (std::numeric_limits<std::size_t>::max() - total) / width) {
+        total = std::numeric_limits<std::size_t>::max();
+        return;
+    }
+    total += count * width;
+}
+}  // namespace
+
+std::size_t Mesh::ownedBufferBytes() const {
+    std::size_t total = 0;
+    addBytes(total, m_vertices.capacity(), sizeof(Vertex));
+    addBytes(total, m_edges.capacity(), sizeof(Edge));
+    addBytes(total, m_loops.capacity(), sizeof(Loop));
+    addBytes(total, m_faces.capacity(), sizeof(Face));
+    for (const Vertex& vertex : m_vertices)
+        addBytes(total, vertex.edges.capacity(), sizeof(EdgeId));
+    for (const auto* attrs : {&m_vertexAttrs, &m_edgeAttrs, &m_faceAttrs, &m_cornerAttrs}) {
+        attrs->forEachColumn([&total](const std::string&, const auto& column) {
+            addBytes(total, column.capacity(),
+                     sizeof(typename std::decay_t<decltype(column)>::value_type));
+        });
+    }
+    for (const auto* freeList : {&m_freeVertices, &m_freeEdges, &m_freeLoops, &m_freeFaces}) {
+        addBytes(total, freeList->capacity(), sizeof(Index));
+    }
+    return total;
+}
 
 // ---- element allocation -------------------------------------------------
 

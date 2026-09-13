@@ -123,6 +123,33 @@ public struct TargetCountReport: Sendable {
     public let islands: [CountIslandOutcome]
 }
 
+/// Exact opt-in topology ceilings for one plain remesh call. Zero disables a
+/// dimension. They constrain mesh element counts, not process RSS.
+public struct RemeshLimits: Sendable {
+    public var maxInputVertices: UInt64 = 0
+    public var maxInputFaces: UInt64 = 0
+    public var maxIntermediateVertices: UInt64 = 0
+    public var maxIntermediateFaces: UInt64 = 0
+    public var maxOutputVertices: UInt64 = 0
+    public var maxOutputFaces: UInt64 = 0
+    public var maxDirectFactorBytes: UInt64 = 0
+    public var maxCandidateBytes: UInt64 = 0
+
+    public init() {}
+
+    var cValue: CyberRemeshLimits {
+        CyberRemeshLimits(maxInputVertices: maxInputVertices, maxInputFaces: maxInputFaces,
+                           maxIntermediateVertices: maxIntermediateVertices,
+                           maxIntermediateFaces: maxIntermediateFaces,
+                           maxOutputVertices: maxOutputVertices, maxOutputFaces: maxOutputFaces)
+    }
+
+    var executionCValue: CyberRemeshExecutionLimits {
+        CyberRemeshExecutionLimits(maxDirectFactorBytes: maxDirectFactorBytes,
+                                   maxCandidateBytes: maxCandidateBytes)
+    }
+}
+
 /// Shared control block handed to the C callbacks via the opaque `user` pointer.
 ///
 /// Held strongly by the running thread closure for the whole blocking call, so
@@ -187,9 +214,10 @@ public final class RemeshOperation {
 
     private let input: Mesh
     private let params: RemeshParameters
+    private let limits: RemeshLimits?
     private let box: RemeshControlBox
 
-    init(input: Mesh, params: RemeshParameters) {
+    init(input: Mesh, params: RemeshParameters, limits: RemeshLimits?) {
         let (stream, continuation) = AsyncStream<Double>.makeStream(
             of: Double.self,
             bufferingPolicy: .bufferingNewest(1)
@@ -197,6 +225,7 @@ public final class RemeshOperation {
         self.progress = stream
         self.input = input
         self.params = params
+        self.limits = limits
         self.box = RemeshControlBox(progressContinuation: continuation)
     }
 
@@ -209,9 +238,10 @@ public final class RemeshOperation {
                 (continuation: CheckedContinuation<Mesh, Error>) in
                 let input = self.input
                 let params = self.params
+                let limits = self.limits
                 let box = self.box
                 Thread.detachNewThread {
-                    let result = RemeshOperation.run(input: input, params: params, box: box)
+                    let result = RemeshOperation.run(input: input, params: params, limits: limits, box: box)
                     box.finishProgress()
                     continuation.resume(with: result)
                 }
@@ -225,16 +255,21 @@ public final class RemeshOperation {
     private static func run(
         input: Mesh,
         params: RemeshParameters,
+        limits: RemeshLimits?,
         box: RemeshControlBox
     ) -> Result<Mesh, Error> {
         var cparams = params.cValue
         var out: OpaquePointer?
         let user = Unmanaged.passUnretained(box).toOpaque()
-        let status = cyber_remesh(
-            input.handle, &cparams,
-            remeshProgressCb, remeshCancelCb, user,
-            &out
-        )
+        let status: CyberStatus
+        if let limits {
+            var cLimits = limits.cValue
+            status = cyber_remesh_with_limits(input.handle, &cparams, &cLimits,
+                                              remeshProgressCb, remeshCancelCb, user, &out)
+        } else {
+            status = cyber_remesh(input.handle, &cparams,
+                                  remeshProgressCb, remeshCancelCb, user, &out)
+        }
         withExtendedLifetime(input) {}
         guard status == CYBER_OK, let handle = out else {
             return .failure(CyberError.map(status))
@@ -282,8 +317,8 @@ public extension Mesh {
     }
 
     /// Starts a remesh and returns the observable operation.
-    func remesh(params: RemeshParameters) -> RemeshOperation {
-        RemeshOperation(input: self, params: params)
+    func remesh(params: RemeshParameters, limits: RemeshLimits? = nil) -> RemeshOperation {
+        RemeshOperation(input: self, params: params, limits: limits)
     }
 
     /// Convenience: awaits the result while forwarding progress to a closure.
@@ -291,9 +326,10 @@ public extension Mesh {
     /// - Throws: ``CyberError`` (`.cancelled` if the surrounding `Task` cancels).
     func remesh(
         params: RemeshParameters,
+        limits: RemeshLimits? = nil,
         onProgress: @escaping @Sendable (Double) -> Void
     ) async throws -> Mesh {
-        let operation = remesh(params: params)
+        let operation = remesh(params: params, limits: limits)
         let pump = Task {
             for await value in operation.progress {
                 onProgress(value)

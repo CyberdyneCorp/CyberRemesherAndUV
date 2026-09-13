@@ -170,6 +170,23 @@ class CyberAttributeInfo(Structure):
                 ("value_count", c_size_t)]
 
 
+class CyberRemeshLimits(Structure):
+    """Mirror of the additive per-call ``CyberRemeshLimits`` ABI struct."""
+
+    _fields_ = [
+        ("max_input_vertices", c_uint64),
+        ("max_input_faces", c_uint64),
+        ("max_intermediate_vertices", c_uint64),
+        ("max_intermediate_faces", c_uint64),
+        ("max_output_vertices", c_uint64),
+        ("max_output_faces", c_uint64),
+    ]
+
+
+class CyberRemeshExecutionLimits(Structure):
+    _fields_ = [("max_direct_factor_bytes", c_uint64), ("max_candidate_bytes", c_uint64)]
+
+
 class CyberFlowGuide(Structure):
     """Mirror of ``CyberFlowGuide`` — one polyline flow guide."""
 
@@ -919,6 +936,18 @@ def _declare(lib: ctypes.CDLL) -> None:
     lib.cyber_set_max_import_vertices.restype = c_int32
     lib.cyber_max_import_vertices.argtypes = []
     lib.cyber_max_import_vertices.restype = c_uint64
+    lib.cyber_set_max_import_input_bytes.argtypes = [c_uint64]
+    lib.cyber_set_max_import_input_bytes.restype = c_int32
+    lib.cyber_max_import_input_bytes.argtypes = []
+    lib.cyber_max_import_input_bytes.restype = c_uint64
+    lib.cyber_set_max_import_faces.argtypes = [c_uint64]
+    lib.cyber_set_max_import_faces.restype = c_int32
+    lib.cyber_max_import_faces.argtypes = []
+    lib.cyber_max_import_faces.restype = c_uint64
+    lib.cyber_set_max_bake_pixels.argtypes = [c_uint64]
+    lib.cyber_set_max_bake_pixels.restype = c_int32
+    lib.cyber_max_bake_pixels.argtypes = []
+    lib.cyber_max_bake_pixels.restype = c_uint64
     # const char* cyber_seamless_solver(void)
     lib.cyber_seamless_solver.argtypes = []
     lib.cyber_seamless_solver.restype = c_char_p
@@ -1083,6 +1112,20 @@ def _declare(lib: ctypes.CDLL) -> None:
         CANCEL_CB, c_void_p, POINTER(c_void_p), POINTER(CyberTargetCountReport),
     ]
     lib.cyber_remesh_with_count_report.restype = c_int32
+    lib.cyber_default_remesh_limits.argtypes = [POINTER(CyberRemeshLimits)]
+    lib.cyber_default_remesh_limits.restype = None
+    lib.cyber_remesh_with_limits.argtypes = [
+        c_void_p, POINTER(CyberRemeshParams), POINTER(CyberRemeshLimits),
+        PROGRESS_CB, CANCEL_CB, c_void_p, POINTER(c_void_p),
+    ]
+    lib.cyber_remesh_with_limits.restype = c_int32
+    lib.cyber_default_remesh_execution_limits.argtypes = [POINTER(CyberRemeshExecutionLimits)]
+    lib.cyber_default_remesh_execution_limits.restype = None
+    lib.cyber_remesh_with_resource_limits.argtypes = [
+        c_void_p, POINTER(CyberRemeshParams), POINTER(CyberRemeshLimits),
+        POINTER(CyberRemeshExecutionLimits), PROGRESS_CB, CANCEL_CB, c_void_p, POINTER(c_void_p),
+    ]
+    lib.cyber_remesh_with_resource_limits.restype = c_int32
 
     # CyberStatus cyber_remesh_guided(const CyberMesh* in, const CyberRemeshParams*,
     #                                 const CyberGuidance*, CyberProgressCb,
@@ -1136,6 +1179,12 @@ def _declare(lib: ctypes.CDLL) -> None:
         POINTER(CyberZRemesherReport),
     ]
     lib.cyber_remesh_zremesher.restype = c_int32
+    lib.cyber_remesh_zremesher_with_resource_limits.argtypes = [
+        c_void_p, POINTER(CyberRemeshParams), POINTER(CyberZRemesherParams),
+        POINTER(CyberGuidanceEx), POINTER(CyberRemeshLimits), POINTER(CyberRemeshExecutionLimits),
+        PROGRESS_CB, CANCEL_CB, WARNING_CB, c_void_p, POINTER(c_void_p), POINTER(CyberZRemesherReport),
+    ]
+    lib.cyber_remesh_zremesher_with_resource_limits.restype = c_int32
 
     # -- surface baking ------------------------------------------------------
     lib.cyber_default_bake_params.argtypes = [POINTER(CyberBakeParams)]

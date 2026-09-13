@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <bit>
 #include <cstdint>
 #include <cstring>
@@ -5,6 +6,7 @@
 #include <map>
 #include <sstream>
 #include <tuple>
+#include <vector>
 
 #include "io_internal.hpp"
 
@@ -31,9 +33,17 @@ struct Welder {
         seen.emplace(key, v);
         return v;
     }
+
+    [[nodiscard]] bool contains(Vec3 p) const {
+        const auto key =
+            std::tuple{std::bit_cast<std::uint32_t>(p.x), std::bit_cast<std::uint32_t>(p.y),
+                       std::bit_cast<std::uint32_t>(p.z)};
+        return seen.contains(key);
+    }
 };
 
-Result<ImportedMesh> importAsciiStl(const std::filesystem::path& path) {
+Result<ImportedMesh> importAsciiStl(const std::filesystem::path& path,
+                                    const ImportOptions& options) {
     std::ifstream file(path);
     if (!file) {
         return Error{ErrorCode::ParseError, "cannot read '" + path.string() + "'"};
@@ -53,6 +63,34 @@ Result<ImportedMesh> importAsciiStl(const std::filesystem::path& path) {
             corners.push_back(p);
         } else if (token == "endfacet") {
             if (corners.size() == 3) {
+                if (options.maxFaces > 0 && out.mesh.faceCount() >= options.maxFaces) {
+                    return Error{ErrorCode::ResourceLimit,
+                                 "'" + path.string() + "' exceeds this host's face ceiling of " +
+                                     std::to_string(options.maxFaces)};
+                }
+                std::vector<Vec3> newPositions;
+                for (const Vec3 corner : corners) {
+                    const bool repeated = std::any_of(
+                        newPositions.begin(), newPositions.end(), [&corner](const Vec3 existing) {
+                            return std::bit_cast<std::uint32_t>(existing.x) ==
+                                       std::bit_cast<std::uint32_t>(corner.x) &&
+                                   std::bit_cast<std::uint32_t>(existing.y) ==
+                                       std::bit_cast<std::uint32_t>(corner.y) &&
+                                   std::bit_cast<std::uint32_t>(existing.z) ==
+                                       std::bit_cast<std::uint32_t>(corner.z);
+                        });
+                    if (!welder.contains(corner) && !repeated) {
+                        newPositions.push_back(corner);
+                    }
+                }
+                const std::size_t newVertices = newPositions.size();
+                if (options.maxVertices > 0 &&
+                    (newVertices > options.maxVertices ||
+                     out.mesh.vertexCount() > options.maxVertices - newVertices)) {
+                    return Error{ErrorCode::ResourceLimit,
+                                 "'" + path.string() + "' exceeds this host's vertex ceiling of " +
+                                     std::to_string(options.maxVertices)};
+                }
                 const VertexId a = welder.add(corners[0]);
                 const VertexId b = welder.add(corners[1]);
                 const VertexId c = welder.add(corners[2]);
@@ -75,7 +113,8 @@ Result<ImportedMesh> importAsciiStl(const std::filesystem::path& path) {
     return out;
 }
 
-Result<ImportedMesh> importBinaryStl(const std::filesystem::path& path, std::uintmax_t fileSize) {
+Result<ImportedMesh> importBinaryStl(const std::filesystem::path& path, std::uintmax_t fileSize,
+                                     const ImportOptions& options) {
     std::ifstream file(path, std::ios::binary);
     if (!file) {
         return Error{ErrorCode::ParseError, "cannot read '" + path.string() + "'"};
@@ -85,6 +124,12 @@ Result<ImportedMesh> importBinaryStl(const std::filesystem::path& path, std::uin
     file.read(reinterpret_cast<char*>(&count), 4);
     if (!file || fileSize != 84 + static_cast<std::uintmax_t>(count) * 50) {
         return Error{ErrorCode::ParseError, "binary STL size mismatch in '" + path.string() + "'"};
+    }
+    if (options.maxFaces > 0 && count > options.maxFaces) {
+        return Error{ErrorCode::ResourceLimit, "'" + path.string() + "' declares " +
+                                                   std::to_string(count) +
+                                                   " facets, over this host's face ceiling of " +
+                                                   std::to_string(options.maxFaces)};
     }
 
     ImportedMesh out;
@@ -116,8 +161,7 @@ Result<ImportedMesh> importBinaryStl(const std::filesystem::path& path, std::uin
 
 }  // namespace
 
-Result<ImportedMesh> importStl(const std::filesystem::path& path,
-                               const ImportOptions& /*options*/) {
+Result<ImportedMesh> importStl(const std::filesystem::path& path, const ImportOptions& options) {
     std::error_code ec;
     const std::uintmax_t size = std::filesystem::file_size(path, ec);
     if (ec || size < 15) {
@@ -134,10 +178,10 @@ Result<ImportedMesh> importStl(const std::filesystem::path& path,
         probe.read(reinterpret_cast<char*>(&count), 4);
         const bool binarySize = size == 84 + static_cast<std::uintmax_t>(count) * 50;
         if (binarySize) {
-            return importBinaryStl(path, size);
+            return importBinaryStl(path, size, options);
         }
         if (std::strncmp(header, "solid", 5) == 0) {
-            return importAsciiStl(path);
+            return importAsciiStl(path, options);
         }
     }
     return Error{ErrorCode::ParseError, "unrecognized STL layout in '" + path.string() + "'"};

@@ -59,6 +59,12 @@ TEST_CASE("the ABI version is reported and is independent of the engine version"
     CHECK(onlyMinor == CYBER_ABI_VERSION_MINOR);
 }
 
+TEST_CASE("remesh execution limits default to disabled") {
+    CyberRemeshExecutionLimits limits{123, 456};
+    cyber_default_remesh_execution_limits(&limits);
+    CHECK(limits.maxDirectFactorBytes == 0);
+}
+
 TEST_CASE("a v0.8-era client header links to this library without overwriting output guards") {
     // This call is compiled from tests/capi/abi_clients/v0_8_legacy.h, an
     // extracted v0.8.0 header subset.  It cannot see current declarations or
@@ -223,6 +229,24 @@ TEST_CASE("the import ceiling refuses a legitimate file over the host's budget")
     REQUIRE(cyber_set_max_import_vertices(0) == CYBER_OK);  // restore for other cases
     std::error_code ec;
     std::filesystem::remove(objPath, ec);
+}
+
+TEST_CASE("C ABI exposes independent input-byte and face import ceilings") {
+    REQUIRE(cyber_max_import_input_bytes() == 0u);
+    REQUIRE(cyber_max_import_faces() == 0u);
+    REQUIRE(cyber_set_max_import_input_bytes(4096) == CYBER_OK);
+    REQUIRE(cyber_set_max_import_faces(128) == CYBER_OK);
+    CHECK(cyber_max_import_input_bytes() == 4096u);
+    CHECK(cyber_max_import_faces() == 128u);
+    REQUIRE(cyber_set_max_import_input_bytes(0) == CYBER_OK);
+    REQUIRE(cyber_set_max_import_faces(0) == CYBER_OK);
+}
+
+TEST_CASE("C ABI exposes an independent bake-pixel ceiling") {
+    REQUIRE(cyber_max_bake_pixels() == 0u);
+    REQUIRE(cyber_set_max_bake_pixels(4096) == CYBER_OK);
+    CHECK(cyber_max_bake_pixels() == 4096u);
+    REQUIRE(cyber_set_max_bake_pixels(0) == CYBER_OK);
 }
 
 TEST_CASE("the solver a build carries is reachable from the ABI") {

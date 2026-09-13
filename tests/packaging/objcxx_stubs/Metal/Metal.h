@@ -51,7 +51,7 @@ static inline MTLSize MTLSizeMake(NSUInteger width, NSUInteger height, NSUIntege
 - (void)setBytes:(const void*)bytes length:(NSUInteger)length atIndex:(NSUInteger)index;
 - (void)setBuffer:(id<MTLBuffer>)buffer offset:(NSUInteger)offset atIndex:(NSUInteger)index;
 - (void)dispatchThreads:(MTLSize)threadsPerGrid
-  threadsPerThreadgroup:(MTLSize)threadsPerThreadgroup;
+    threadsPerThreadgroup:(MTLSize)threadsPerThreadgroup;
 - (void)endEncoding;
 @end
 

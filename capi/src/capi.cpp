@@ -219,6 +219,7 @@ CyberStatus mapIoError(const cyber::io::Error& error) {
         case cyber::io::ErrorCode::ParseError:
         case cyber::io::ErrorCode::WriteFailed:
         case cyber::io::ErrorCode::IncompatibleVersion:
+        case cyber::io::ErrorCode::ResourceLimit:
             break;
     }
     return CYBER_ERR_IO;
@@ -234,6 +235,21 @@ cyber::remesh::Parameters toParameters(const CyberRemeshParams& in) {
     params.pureQuads = in.pureQuads != 0;
     params.holeFillMaxBoundary = in.holeFillMaxBoundary;
     return params;
+}
+
+cyber::remesh::ResourceLimits toResourceLimits(const CyberRemeshLimits& in) {
+    return {static_cast<std::size_t>(in.maxInputVertices),
+            static_cast<std::size_t>(in.maxInputFaces),
+            static_cast<std::size_t>(in.maxIntermediateVertices),
+            static_cast<std::size_t>(in.maxIntermediateFaces),
+            static_cast<std::size_t>(in.maxOutputVertices),
+            static_cast<std::size_t>(in.maxOutputFaces)};
+}
+
+void applyExecutionLimits(const CyberRemeshExecutionLimits& in,
+                          cyber::remesh::ResourceLimits& out) {
+    out.maxDirectFactorBytes = static_cast<std::size_t>(in.maxDirectFactorBytes);
+    out.maxCandidateBytes = static_cast<std::size_t>(in.maxCandidateBytes);
 }
 
 // Adapts the C progress/cancel callbacks into a ProgressSink. Cancellation is
@@ -307,6 +323,18 @@ std::atomic<std::uint64_t>& importVertexCeiling() {
     static std::atomic<std::uint64_t> ceiling{0};
     return ceiling;
 }
+std::atomic<std::uint64_t>& importInputByteCeiling() {
+    static std::atomic<std::uint64_t> ceiling{0};
+    return ceiling;
+}
+std::atomic<std::uint64_t>& importFaceCeiling() {
+    static std::atomic<std::uint64_t> ceiling{0};
+    return ceiling;
+}
+std::atomic<std::uint64_t>& bakePixelCeiling() {
+    static std::atomic<std::uint64_t> ceiling{0};
+    return ceiling;
+}
 
 }  // namespace
 
@@ -319,6 +347,28 @@ CyberStatus cyber_set_max_import_vertices(uint64_t max_vertices) {
 uint64_t cyber_max_import_vertices(void) {
     return importVertexCeiling().load(std::memory_order_relaxed);
 }
+CyberStatus cyber_set_max_import_input_bytes(uint64_t max_bytes) {
+    importInputByteCeiling().store(max_bytes, std::memory_order_relaxed);
+    clearError();
+    return CYBER_OK;
+}
+uint64_t cyber_max_import_input_bytes(void) {
+    return importInputByteCeiling().load(std::memory_order_relaxed);
+}
+CyberStatus cyber_set_max_import_faces(uint64_t max_faces) {
+    importFaceCeiling().store(max_faces, std::memory_order_relaxed);
+    clearError();
+    return CYBER_OK;
+}
+uint64_t cyber_max_import_faces(void) {
+    return importFaceCeiling().load(std::memory_order_relaxed);
+}
+CyberStatus cyber_set_max_bake_pixels(uint64_t max_pixels) {
+    bakePixelCeiling().store(max_pixels, std::memory_order_relaxed);
+    clearError();
+    return CYBER_OK;
+}
+uint64_t cyber_max_bake_pixels(void) { return bakePixelCeiling().load(std::memory_order_relaxed); }
 
 const char* cyber_seamless_solver(void) {
     // The string is owned by a function-local static so the pointer outlives
@@ -497,6 +547,8 @@ CyberStatus cyber_mesh_load(const char* path, CyberMesh** out) {
     try {
         cyber::io::ImportOptions options;
         options.maxVertices = static_cast<std::size_t>(cyber_max_import_vertices());
+        options.maxInputBytes = static_cast<std::size_t>(cyber_max_import_input_bytes());
+        options.maxFaces = static_cast<std::size_t>(cyber_max_import_faces());
         auto result = cyber::io::importMesh(std::filesystem::path(path), options);
         if (!result.ok()) {
             return mapIoError(result.error());
@@ -567,6 +619,18 @@ void cyber_default_params(CyberRemeshParams* params) {
     params->quadMethod = CYBER_QUAD_QUADCOVER;
 }
 
+void cyber_default_remesh_limits(CyberRemeshLimits* limits) {
+    if (limits != nullptr) {
+        *limits = CyberRemeshLimits{};
+    }
+}
+
+void cyber_default_remesh_execution_limits(CyberRemeshExecutionLimits* limits) {
+    if (limits != nullptr) {
+        *limits = CyberRemeshExecutionLimits{};
+    }
+}
+
 void cyber_default_isotropic_params(CyberIsotropicParams* params) {
     if (params == nullptr) {
         return;
@@ -595,7 +659,9 @@ CyberStatus remeshShared(const CyberMesh* in, const CyberRemeshParams* params,
                          const cyber::remesh::Guidance* guidance, CyberProgressCb progress,
                          CyberCancelCb cancel, CyberWarningCb warning, void* user, CyberMesh** out,
                          const CyberCountPolicy* countPolicy = nullptr,
-                         CyberTargetCountReport* countReport = nullptr) {
+                         CyberTargetCountReport* countReport = nullptr,
+                         const CyberRemeshLimits* limits = nullptr,
+                         const CyberRemeshExecutionLimits* execution = nullptr) {
     if (in == nullptr || params == nullptr || out == nullptr) {
         setError("cyber_remesh: null argument");
         return CYBER_ERR_INVALID_ARG;
@@ -684,9 +750,18 @@ CyberStatus remeshShared(const CyberMesh* in, const CyberRemeshParams* params,
         if (quadMethod == CYBER_QUAD_QUADCOVER || quadMethod == CYBER_QUAD_ZREMESHER) {
             fallback = []() { return cyber::remesh::makeFieldAlignedQuadrangulator(); };
         }
+        std::optional<cyber::remesh::ResourceLimits> cppLimits;
+        if (limits != nullptr || execution != nullptr) {
+            cppLimits =
+                limits != nullptr ? toResourceLimits(*limits) : cyber::remesh::ResourceLimits{};
+            if (execution != nullptr) {
+                applyExecutionLimits(*execution, *cppLimits);
+            }
+        }
         cyber::remesh::PipelineResult result = cyber::remesh::remesh(
             in->mesh, cppParams, &sink, &token,
-            [quadMethod, makeQuad]() { return makeQuad(quadMethod); }, fallback, guidance, policy);
+            [quadMethod, makeQuad]() { return makeQuad(quadMethod); }, fallback, guidance, policy,
+            cppLimits ? &*cppLimits : nullptr);
 
         // The loud channel: every clamp, every rejection and every island whose
         // backend could not honor the guidance reaches the caller.
@@ -931,6 +1006,22 @@ CyberStatus cyber_remesh_with_count_report(const CyberMesh* in, const CyberRemes
                         report);
 }
 
+CyberStatus cyber_remesh_with_limits(const CyberMesh* in, const CyberRemeshParams* params,
+                                     const CyberRemeshLimits* limits, CyberProgressCb progress,
+                                     CyberCancelCb cancel, void* user, CyberMesh** out) {
+    return remeshShared(in, params, nullptr, progress, cancel, nullptr, user, out, nullptr, nullptr,
+                        limits);
+}
+
+CyberStatus cyber_remesh_with_resource_limits(const CyberMesh* in, const CyberRemeshParams* params,
+                                              const CyberRemeshLimits* topology,
+                                              const CyberRemeshExecutionLimits* execution,
+                                              CyberProgressCb progress, CyberCancelCb cancel,
+                                              void* user, CyberMesh** out) {
+    return remeshShared(in, params, nullptr, progress, cancel, nullptr, user, out, nullptr, nullptr,
+                        topology, execution);
+}
+
 CyberStatus cyber_remesh_guided(const CyberMesh* in, const CyberRemeshParams* params,
                                 const CyberGuidance* guidance, CyberProgressCb progress,
                                 CyberCancelCb cancel, CyberWarningCb warning, void* user,
@@ -1003,11 +1094,11 @@ void cyber_default_zremesher_params(CyberZRemesherParams* params) {
     params->foldRepair = defaults.foldRepair ? 1 : 0;
 }
 
-CyberStatus cyber_remesh_zremesher(const CyberMesh* in, const CyberRemeshParams* params,
-                                   const CyberZRemesherParams* zr, const CyberGuidanceEx* guidance,
-                                   CyberProgressCb progress, CyberCancelCb cancel,
-                                   CyberWarningCb warning, void* user, CyberMesh** out,
-                                   CyberZRemesherReport* report) {
+static CyberStatus remeshZremesherShared(
+    const CyberMesh* in, const CyberRemeshParams* params, const CyberZRemesherParams* zr,
+    const CyberGuidanceEx* guidance, const CyberRemeshLimits* topology,
+    const CyberRemeshExecutionLimits* execution, CyberProgressCb progress, CyberCancelCb cancel,
+    CyberWarningCb warning, void* user, CyberMesh** out, CyberZRemesherReport* report) {
     if (in == nullptr || params == nullptr || out == nullptr) {
         setError("cyber_remesh_zremesher: null argument");
         return CYBER_ERR_INVALID_ARG;
@@ -1084,10 +1175,17 @@ CyberStatus cyber_remesh_zremesher(const CyberMesh* in, const CyberRemeshParams*
 
         cyber::remesh::SymmetryRunReport symReport;
         const cyber::remesh::Guidance* guidancePtr = converted.empty() ? nullptr : &converted;
+        std::optional<cyber::remesh::ResourceLimits> limits;
+        if (topology != nullptr || execution != nullptr) {
+            limits =
+                topology != nullptr ? toResourceLimits(*topology) : cyber::remesh::ResourceLimits{};
+            if (execution != nullptr) applyExecutionLimits(*execution, *limits);
+        }
         cyber::remesh::PipelineResult result = cyber::remesh::remeshSymmetric(
             in->mesh, cppParams, axis, &symReport, &sink, &token,
             [&options]() { return cyber::remesh::makeZRemesherQuadrangulator(options); },
-            []() { return cyber::remesh::makeFieldAlignedQuadrangulator(); }, guidancePtr);
+            []() { return cyber::remesh::makeFieldAlignedQuadrangulator(); }, guidancePtr,
+            limits ? &*limits : nullptr);
 
         if (warning != nullptr) {
             for (const auto& issue : result.parameterIssues) {
@@ -1148,6 +1246,24 @@ CyberStatus cyber_remesh_zremesher(const CyberMesh* in, const CyberRemeshParams*
         setError("cyber_remesh_zremesher: unknown error");
         return CYBER_ERR_RUNTIME;
     }
+}
+
+CyberStatus cyber_remesh_zremesher(const CyberMesh* in, const CyberRemeshParams* params,
+                                   const CyberZRemesherParams* zr, const CyberGuidanceEx* guidance,
+                                   CyberProgressCb progress, CyberCancelCb cancel,
+                                   CyberWarningCb warning, void* user, CyberMesh** out,
+                                   CyberZRemesherReport* report) {
+    return remeshZremesherShared(in, params, zr, guidance, nullptr, nullptr, progress, cancel,
+                                 warning, user, out, report);
+}
+
+CyberStatus cyber_remesh_zremesher_with_resource_limits(
+    const CyberMesh* in, const CyberRemeshParams* params, const CyberZRemesherParams* zr,
+    const CyberGuidanceEx* guidance, const CyberRemeshLimits* topology,
+    const CyberRemeshExecutionLimits* execution, CyberProgressCb progress, CyberCancelCb cancel,
+    CyberWarningCb warning, void* user, CyberMesh** out, CyberZRemesherReport* report) {
+    return remeshZremesherShared(in, params, zr, guidance, topology, execution, progress, cancel,
+                                 warning, user, out, report);
 }
 
 CyberStatus cyber_mesh_stats(const CyberMesh* mesh, CyberStats* out) {
@@ -1766,10 +1882,11 @@ bool copyAttributeColumn(cyber::AttributeSet& set, const CyberAttributeColumn& c
 
 bool importAttributeColumn(cyber::Mesh& mesh, const CyberAttributeColumn& column,
                            const std::string& name) {
-    cyber::AttributeSet* set = column.domain == CYBER_ATTRIBUTE_VERTEX
-                                   ? &mesh.vertexAttributes()
-                                   : (column.domain == CYBER_ATTRIBUTE_FACE ? &mesh.faceAttributes()
-                                                                            : &mesh.cornerAttributes());
+    cyber::AttributeSet* set =
+        column.domain == CYBER_ATTRIBUTE_VERTEX
+            ? &mesh.vertexAttributes()
+            : (column.domain == CYBER_ATTRIBUTE_FACE ? &mesh.faceAttributes()
+                                                     : &mesh.cornerAttributes());
     switch (column.type) {
         case CYBER_ATTRIBUTE_FLOAT:
             return copyAttributeColumn<float>(*set, column, name);
@@ -1791,7 +1908,7 @@ void forEachAttribute(const cyber::Mesh& mesh, const Fn& fn) {
     const auto visit = [&](const cyber::AttributeSet& set, int domain) {
         set.forEachColumn([&](const std::string& name, const auto& values) {
             using T = typename std::decay_t<decltype(values)>::value_type;
-            constexpr int type = std::is_same_v<T, float>       ? CYBER_ATTRIBUTE_FLOAT
+            constexpr int type = std::is_same_v<T, float>          ? CYBER_ATTRIBUTE_FLOAT
                                  : std::is_same_v<T, std::int32_t> ? CYBER_ATTRIBUTE_INT32
                                  : std::is_same_v<T, cyber::Vec2>  ? CYBER_ATTRIBUTE_FLOAT2
                                  : std::is_same_v<T, cyber::Vec3>  ? CYBER_ATTRIBUTE_FLOAT3
@@ -2469,7 +2586,8 @@ CyberStatus cyber_mesh_from_indexed(const CyberIndexedMesh* input, CyberMesh** o
             setError("cyber_mesh_from_indexed: count exceeds representable range");
             return CYBER_ERR_INVALID_ARG;
         }
-        if (input->face_offsets[0] != 0 || input->face_offsets[input->face_count] != input->index_count) {
+        if (input->face_offsets[0] != 0 ||
+            input->face_offsets[input->face_count] != input->index_count) {
             setError("cyber_mesh_from_indexed: offsets must span exactly the index buffer");
             return CYBER_ERR_INVALID_ARG;
         }
@@ -2483,7 +2601,8 @@ CyberStatus cyber_mesh_from_indexed(const CyberIndexedMesh* input, CyberMesh** o
                 return CYBER_ERR_INVALID_ARG;
             }
             const std::string key = std::to_string(input->attributes[i].domain) + ":" + name;
-            if (std::find(attributeNames.begin(), attributeNames.end(), key) != attributeNames.end()) {
+            if (std::find(attributeNames.begin(), attributeNames.end(), key) !=
+                attributeNames.end()) {
                 setError("cyber_mesh_from_indexed: duplicate attribute domain and name");
                 return CYBER_ERR_INVALID_ARG;
             }
@@ -2508,7 +2627,9 @@ CyberStatus cyber_mesh_from_indexed(const CyberIndexedMesh* input, CyberMesh** o
             const size_t begin = input->face_offsets[face];
             const size_t end = input->face_offsets[face + 1];
             if (end < begin || end > input->index_count || end - begin < 3) {
-                setError("cyber_mesh_from_indexed: offsets must describe faces with at least three corners");
+                setError(
+                    "cyber_mesh_from_indexed: offsets must describe faces with at least three "
+                    "corners");
                 return CYBER_ERR_INVALID_ARG;
             }
             polygon.clear();
@@ -2611,7 +2732,8 @@ size_t cyber_mesh_attribute_count(const CyberMesh* mesh) {
     return count;
 }
 
-CyberStatus cyber_mesh_attribute_info(const CyberMesh* mesh, size_t index, CyberAttributeInfo* out) {
+CyberStatus cyber_mesh_attribute_info(const CyberMesh* mesh, size_t index,
+                                      CyberAttributeInfo* out) {
     return guarded("cyber_mesh_attribute_info", CYBER_ERR_RUNTIME, [&] {
         if (mesh == nullptr || out == nullptr) {
             setError("cyber_mesh_attribute_info: null mesh or output");
@@ -2619,18 +2741,18 @@ CyberStatus cyber_mesh_attribute_info(const CyberMesh* mesh, size_t index, Cyber
         }
         size_t current = 0;
         bool found = false;
-        forEachAttribute(mesh->mesh, [&](const std::string& name, int domain, int type,
-                                         const auto& values) {
-            if (current++ != index) {
-                return;
-            }
-            std::memset(out, 0, sizeof(*out));
-            std::memcpy(out->name, name.data(), std::min(name.size(), sizeof(out->name) - 1));
-            out->domain = domain;
-            out->type = type;
-            out->value_count = values.size();
-            found = true;
-        });
+        forEachAttribute(
+            mesh->mesh, [&](const std::string& name, int domain, int type, const auto& values) {
+                if (current++ != index) {
+                    return;
+                }
+                std::memset(out, 0, sizeof(*out));
+                std::memcpy(out->name, name.data(), std::min(name.size(), sizeof(out->name) - 1));
+                out->domain = domain;
+                out->type = type;
+                out->value_count = values.size();
+                found = true;
+            });
         if (!found) {
             setError("cyber_mesh_attribute_info: index is outside the schema");
             return CYBER_ERR_INVALID_ARG;
@@ -2659,10 +2781,10 @@ size_t copyAuthoredAttribute(const cyber::Mesh& mesh, const std::vector<T>& valu
             for (const cyber::LoopId loop : mesh.faceLoops(face)) order.push_back(loop.value);
         }
     }
-    constexpr size_t components = std::is_same_v<T, float> || std::is_same_v<T, std::int32_t>
-                                      ? 1
-                                      : (std::is_same_v<T, cyber::Vec2> ? 2
-                                                                         : (std::is_same_v<T, cyber::Vec3> ? 3 : 4));
+    constexpr size_t components =
+        std::is_same_v<T, float> || std::is_same_v<T, std::int32_t>
+            ? 1
+            : (std::is_same_v<T, cyber::Vec2> ? 2 : (std::is_same_v<T, cyber::Vec3> ? 3 : 4));
     const size_t required = order.size() * components;
     if (out == nullptr || capacity < required) return required;
     auto* destination = static_cast<float*>(out);
@@ -4720,6 +4842,15 @@ struct CyberImage {
     cyber::bake::Image image;
 };
 
+bool bakePixelBudgetExceeded(const cyber::bake::BakeParams& params) {
+    if (params.maxPixels == 0 || params.width <= 0 || params.height <= 0) {
+        return false;
+    }
+    const std::size_t width = static_cast<std::size_t>(params.width);
+    const std::size_t height = static_cast<std::size_t>(params.height);
+    return width > params.maxPixels / height;
+}
+
 void cyber_default_bake_params(CyberBakeParams* params) {
     if (params == nullptr) {
         return;
@@ -4748,6 +4879,13 @@ CyberStatus cyber_bake(const CyberMesh* low, const CyberMesh* high, CyberBakeMap
             p.aoSamples = params->aoSamples;
             p.aoRadius = params->aoRadius;
             p.curvatureRange = params->curvatureRange;
+        }
+        p.maxPixels = static_cast<std::size_t>(cyber_max_bake_pixels());
+        if (bakePixelBudgetExceeded(p)) {
+            setError("cyber_bake: requested " + std::to_string(p.width) + " x " +
+                     std::to_string(p.height) + " texels, over this host's bake ceiling of " +
+                     std::to_string(p.maxPixels));
+            return CYBER_ERR_RUNTIME;
         }
         cyber::bake::BakeMap m{};
         switch (map) {
@@ -5569,6 +5707,13 @@ CyberStatus cyber_bake_field(const CyberMesh* low, const CyberMesh* high, CyberB
             p.aoSamples = params->aoSamples;
             p.aoRadius = params->aoRadius;
             p.curvatureRange = params->curvatureRange;
+        }
+        p.maxPixels = static_cast<std::size_t>(cyber_max_bake_pixels());
+        if (bakePixelBudgetExceeded(p)) {
+            setError("cyber_bake_field: requested " + std::to_string(p.width) + " x " +
+                     std::to_string(p.height) + " texels, over this host's bake ceiling of " +
+                     std::to_string(p.maxPixels));
+            return CYBER_ERR_RUNTIME;
         }
         p.field = &adapter;
         cyber::bake::BakeMap m{};

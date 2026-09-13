@@ -35,6 +35,7 @@ __all__ = [
     "Mesh",
     "Document",
     "RemeshParams",
+    "RemeshLimits",
     "Statistics",
     "remesh",
     "version",
@@ -108,7 +109,7 @@ def version() -> str:
 #: The C ABI this binding was written against. Mirrors CYBER_ABI_VERSION_* in
 #: cyber_capi.h; ``check_abi()`` compares it against the loaded library.
 ABI_VERSION_MAJOR = 1
-ABI_VERSION_MINOR = 4
+ABI_VERSION_MINOR = 9
 
 
 def abi_version() -> tuple:
@@ -149,6 +150,36 @@ def set_max_import_vertices(max_vertices: int) -> None:
     budget; a ceiling that is never reached is not a ceiling.
     """
     _check(_ffi.get_lib().cyber_set_max_import_vertices(int(max_vertices)))
+
+
+def max_import_input_bytes() -> int:
+    """The current pre-parser input-byte ceiling, or 0 when disabled."""
+    return int(_ffi.get_lib().cyber_max_import_input_bytes())
+
+
+def set_max_import_input_bytes(max_bytes: int) -> None:
+    """Refuse a mesh file before parsing when it exceeds ``max_bytes``."""
+    _check(_ffi.get_lib().cyber_set_max_import_input_bytes(int(max_bytes)))
+
+
+def max_import_faces() -> int:
+    """The current output face ceiling, or 0 when disabled."""
+    return int(_ffi.get_lib().cyber_max_import_faces())
+
+
+def set_max_import_faces(max_faces: int) -> None:
+    """Refuse an import whose declared or realized face count exceeds this limit."""
+    _check(_ffi.get_lib().cyber_set_max_import_faces(int(max_faces)))
+
+
+def max_bake_pixels() -> int:
+    """The current bake texel ceiling, or 0 when disabled."""
+    return int(_ffi.get_lib().cyber_max_bake_pixels())
+
+
+def set_max_bake_pixels(max_pixels: int) -> None:
+    """Refuse a bake before UV rasterization when width * height exceeds this ceiling."""
+    _check(_ffi.get_lib().cyber_set_max_bake_pixels(int(max_pixels)))
 
 
 def check_abi(major: int = ABI_VERSION_MAJOR, minor: int = ABI_VERSION_MINOR) -> None:
@@ -282,6 +313,38 @@ class TargetCountReport:
     final_faces: int
     pure_quads: bool
     islands: tuple[CountIslandOutcome, ...]
+
+
+@dataclass
+class RemeshLimits:
+    """Exact opt-in topology ceilings for a single plain remesh call.
+
+    Zero disables a dimension. These are mesh-count ceilings, not a process-RSS
+    promise; use them to stop topology expansion before the relevant stage.
+    """
+
+    max_input_vertices: int = 0
+    max_input_faces: int = 0
+    max_intermediate_vertices: int = 0
+    max_intermediate_faces: int = 0
+    max_output_vertices: int = 0
+    max_output_faces: int = 0
+    max_direct_factor_bytes: int = 0
+    max_candidate_bytes: int = 0
+
+    def _to_c(self) -> "_ffi.CyberRemeshLimits":
+        values = [
+            self.max_input_vertices, self.max_input_faces,
+            self.max_intermediate_vertices, self.max_intermediate_faces,
+            self.max_output_vertices, self.max_output_faces, self.max_direct_factor_bytes,
+            self.max_candidate_bytes,
+        ]
+        if any(value < 0 for value in values):
+            raise ValueError("remesh limits must be >= 0")
+        return _ffi.CyberRemeshLimits(*values[:6])
+
+    def _execution_to_c(self) -> "_ffi.CyberRemeshExecutionLimits":
+        return _ffi.CyberRemeshExecutionLimits(self.max_direct_factor_bytes, self.max_candidate_bytes)
 
 
 @dataclass
@@ -2196,6 +2259,7 @@ def remesh(
     density_per_face: bool = False,
     zremesher: Optional[ZRemesherParams] = None,
     count_policy: Optional[CountPolicy] = None,
+    limits: Optional[RemeshLimits] = None,
 ) -> Mesh:
     """Run the automatic quad-remeshing pipeline on ``mesh``.
 
@@ -2237,6 +2301,8 @@ def remesh(
         )
     if count_policy is not None and (is_zremesher or guides is not None or density is not None):
         raise ValueError("count_policy currently requires an unguided non-ZRemesher remesh")
+    if limits is not None and (guides is not None or density is not None) and not is_zremesher:
+        raise ValueError("limits with guidance currently require the ZRemesher entry point")
 
     lib = _ffi.get_lib()
 
@@ -2349,18 +2415,22 @@ def remesh(
         # differed from the CLI for the same request.
         c_zr = (zremesher or ZRemesherParams())._to_c()
         c_report = _ffi.CyberZRemesherReport()
-        status = lib.cyber_remesh_zremesher(
-            mesh.handle,
-            ctypes.byref(c_params),
-            ctypes.byref(c_zr),
-            ctypes.byref(c_guidance) if c_guidance is not None else None,
-            progress_cb,
-            cancel_cb,
-            warning_cb,
-            None,
-            ctypes.byref(out_handle),
-            ctypes.byref(c_report),
-        )
+        if limits is not None:
+            c_limits = limits._to_c()
+            c_execution = limits._execution_to_c()
+            status = lib.cyber_remesh_zremesher_with_resource_limits(
+                mesh.handle, ctypes.byref(c_params), ctypes.byref(c_zr),
+                ctypes.byref(c_guidance) if c_guidance is not None else None,
+                ctypes.byref(c_limits), ctypes.byref(c_execution), progress_cb, cancel_cb,
+                warning_cb, None, ctypes.byref(out_handle), ctypes.byref(c_report),
+            )
+        else:
+            status = lib.cyber_remesh_zremesher(
+                mesh.handle, ctypes.byref(c_params), ctypes.byref(c_zr),
+                ctypes.byref(c_guidance) if c_guidance is not None else None,
+                progress_cb, cancel_cb, warning_cb, None, ctypes.byref(out_handle),
+                ctypes.byref(c_report),
+            )
     elif c_guidance is not None:
         status = lib.cyber_remesh_guided_ex(
             mesh.handle,
@@ -2371,6 +2441,13 @@ def remesh(
             warning_cb,
             None,
             ctypes.byref(out_handle),
+        )
+    elif limits is not None:
+        c_limits = limits._to_c()
+        c_execution = limits._execution_to_c()
+        status = lib.cyber_remesh_with_resource_limits(
+            mesh.handle, ctypes.byref(c_params), ctypes.byref(c_limits), ctypes.byref(c_execution),
+            progress_cb, cancel_cb, None, ctypes.byref(out_handle),
         )
     else:
         status = lib.cyber_remesh(

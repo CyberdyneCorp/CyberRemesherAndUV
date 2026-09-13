@@ -23,6 +23,27 @@ namespace cyber::remesh {
 
 namespace {
 
+bool exceeds(std::size_t value, std::size_t limit) { return limit > 0 && value > limit; }
+
+std::string resourceLimitError(std::string_view stage, std::string_view element,
+                               std::size_t requested, std::size_t allowed) {
+    return "resource limit at " + std::string(stage) + ": " + std::string(element) + " requested " +
+           std::to_string(requested) + ", allowed " + std::to_string(allowed);
+}
+
+bool exceedsTopology(const Mesh& mesh, std::size_t maxVertices, std::size_t maxFaces,
+                     std::string_view stage, std::string& error) {
+    if (exceeds(mesh.vertexCount(), maxVertices)) {
+        error = resourceLimitError(stage, "vertices", mesh.vertexCount(), maxVertices);
+        return true;
+    }
+    if (exceeds(mesh.faceCount(), maxFaces)) {
+        error = resourceLimitError(stage, "faces", mesh.faceCount(), maxFaces);
+        return true;
+    }
+    return false;
+}
+
 double totalSurfaceArea(const Mesh& mesh) {
     double area = 0.0;
     for (Index fi = 0; fi < mesh.faceCapacity(); ++fi) {
@@ -587,7 +608,7 @@ void applySmallPatchPolicy(Mesh& mesh, SmallPatchPolicy policy, int minFaces) {
 PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSink* progress,
                       const CancelToken* cancel, const QuadrangulatorFactory& quadrangulator,
                       const QuadrangulatorFactory& fallbackQuadrangulator, const Guidance* guidance,
-                      const CountPolicy* countPolicy) {
+                      const CountPolicy* countPolicy, const ResourceLimits* limits) {
     PipelineResult result;
 
     if (countPolicy != nullptr &&
@@ -595,6 +616,13 @@ PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSi
          !std::isfinite(countPolicy->relativeTolerance) || countPolicy->maxAttempts == 0)) {
         result.status = RunStatus::Error;
         result.error = "invalid target-count policy";
+        return result;
+    }
+    const ResourceLimits unbounded;
+    const ResourceLimits& budget = limits != nullptr ? *limits : unbounded;
+    if (exceedsTopology(input, budget.maxInputVertices, budget.maxInputFaces, "input",
+                        result.error)) {
+        result.status = RunStatus::Error;
         return result;
     }
 
@@ -649,6 +677,11 @@ PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSi
     work.triangulate();
     work = weldCoincidentVertices(work);   // fuse unwelded coincident patches (seam fix)
     work = orientFacesConsistently(work);  // repair inconsistent face winding (robustness)
+    if (exceedsTopology(work, budget.maxIntermediateVertices, budget.maxIntermediateFaces,
+                        "preprocess", result.error)) {
+        result.status = RunStatus::Error;
+        return result;
+    }
     const double area = totalSurfaceArea(work);
 
     // Feature-resolvability floor for the pure-quad base (spec: no silent geometry
@@ -786,6 +819,8 @@ PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSi
         iso.targetEdgeLength = effectiveEdgeLength;
         iso.adaptivity = params.adaptivity;
         iso.smoothNormalDegrees = params.smoothNormalDegrees;
+        iso.maxVertices = budget.maxIntermediateVertices;
+        iso.maxFaces = budget.maxIntermediateFaces;
         iso.density = guidanceField.get();  // null unless painted density was supplied
         ProgressSink isoSink =
             progress ? progress->subrange(base, base + span, "isotropic") : ProgressSink{};
@@ -794,7 +829,8 @@ PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSi
         if (st != IsotropicStatus::Cancelled &&
             (st != IsotropicStatus::Success || m.faceCount() == 0)) {
             oc.stage = "isotropic";
-            oc.reason = st == IsotropicStatus::InvalidInput
+            oc.reason = st == IsotropicStatus::ResourceLimit ? "intermediate topology limit reached"
+                        : st == IsotropicStatus::InvalidInput
                             ? "invalid island input"
                             : "island vanished during isotropic remeshing";
         }
@@ -855,6 +891,11 @@ PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSi
                 result.status = RunStatus::Cancelled;
                 return result;
             }
+            if (isoStatus == IsotropicStatus::ResourceLimit) {
+                result.status = RunStatus::Error;
+                result.error = "resource limit at isotropic: intermediate topology ceiling reached";
+                return result;
+            }
             if (isoStatus != IsotropicStatus::Success || outcome.mesh.faceCount() == 0) {
                 audit.reason = "island failed before quadrangulation: " + outcome.reason;
                 recordAudit(audit);
@@ -873,6 +914,8 @@ PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSi
             return result;
         }
         quad->setCountPolicy(countPolicy);
+        quad->setMaxDirectFactorBytes(budget.maxDirectFactorBytes);
+        quad->setMaxCandidateBytes(budget.maxCandidateBytes);
         // instant-meshes and quad-cover both extract from a smooth field, so the
         // uniform-square shape-match relax lowers their edge-CV ~20% corpus-wide with
         // no change to irregular % and improved surface deviation (measured); only the
@@ -912,7 +955,17 @@ PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSi
             result.status = RunStatus::Cancelled;
             return result;
         }
+        if (quadOutcome.resourceLimit) {
+            result.status = RunStatus::Error;
+            result.error = "resource limit at quadrangulate: " + quadOutcome.failureReason;
+            return result;
+        }
         bool quadOk = quadOutcome.success && outcome.mesh.faceCount() > 0;
+        if (quadOk && exceedsTopology(outcome.mesh, budget.maxIntermediateVertices,
+                                      budget.maxIntermediateFaces, "quadrangulate", result.error)) {
+            result.status = RunStatus::Error;
+            return result;
+        }
         const auto mergeUnhonored = [&audit](const std::vector<std::string>& reasons) {
             for (const std::string& r : reasons) {
                 audit.guidesHonored = false;
@@ -933,9 +986,16 @@ PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSi
                 result.status = RunStatus::Cancelled;
                 return result;
             }
+            if (isoStatus == IsotropicStatus::ResourceLimit) {
+                result.status = RunStatus::Error;
+                result.error = "resource limit at isotropic: intermediate topology ceiling reached";
+                return result;
+            }
             if (isoStatus == IsotropicStatus::Success && outcome.mesh.faceCount() > 0) {
                 std::unique_ptr<IQuadrangulator> fb = fallbackQuadrangulator();
                 fb->setCountPolicy(countPolicy);
+                fb->setMaxDirectFactorBytes(budget.maxDirectFactorBytes);
+                fb->setMaxCandidateBytes(budget.maxCandidateBytes);
                 fieldExtractor = fb->name() == "instant-meshes" || fb->name() == "quad-cover";
                 integerExtractor = fb->name() == "integer";
                 if (guidanceField) {
@@ -962,6 +1022,12 @@ PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSi
                 }
                 mergeUnhonored(fb->unhonoredGuidance());
                 quadOk = fbOutcome.success && outcome.mesh.faceCount() > 0;
+                if (quadOk &&
+                    exceedsTopology(outcome.mesh, budget.maxIntermediateVertices,
+                                    budget.maxIntermediateFaces, "quadrangulate", result.error)) {
+                    result.status = RunStatus::Error;
+                    return result;
+                }
             }
         }
         if (!quadOk) {
@@ -998,6 +1064,46 @@ PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSi
     // Stage 3: deterministic merge (island order), 0.9-1.0.
     std::vector<Vec3> positions;
     std::vector<std::vector<Index>> faces;
+    std::size_t mergedVertices = 0;
+    std::size_t mergedFaces = 0;
+    for (const IslandOutcome& outcome : outcomes) {
+        if (!outcome.ok) {
+            continue;
+        }
+        if (std::numeric_limits<std::size_t>::max() - mergedVertices < outcome.mesh.vertexCount() ||
+            std::numeric_limits<std::size_t>::max() - mergedFaces < outcome.mesh.faceCount()) {
+            result.status = RunStatus::Error;
+            result.error = "resource limit at merge: topology count overflow";
+            return result;
+        }
+        mergedVertices += outcome.mesh.vertexCount();
+        mergedFaces += outcome.mesh.faceCount();
+    }
+    if (exceeds(mergedVertices, budget.maxIntermediateVertices) ||
+        exceeds(mergedFaces, budget.maxIntermediateFaces)) {
+        result.status = RunStatus::Error;
+        result.error =
+            exceeds(mergedVertices, budget.maxIntermediateVertices)
+                ? resourceLimitError("merge", "vertices", mergedVertices,
+                                     budget.maxIntermediateVertices)
+                : resourceLimitError("merge", "faces", mergedFaces, budget.maxIntermediateFaces);
+        return result;
+    }
+    // Without pure-quad subdivision the merge is the final topology build, so
+    // reject its result before reserving the output arrays rather than only
+    // discovering an output ceiling after Mesh::fromIndexed has allocated it.
+    if (!params.pureQuads && (exceeds(mergedVertices, budget.maxOutputVertices) ||
+                              exceeds(mergedFaces, budget.maxOutputFaces))) {
+        result.status = RunStatus::Error;
+        result.error =
+            exceeds(mergedVertices, budget.maxOutputVertices)
+                ? resourceLimitError("merge", "output vertices", mergedVertices,
+                                     budget.maxOutputVertices)
+                : resourceLimitError("merge", "output faces", mergedFaces, budget.maxOutputFaces);
+        return result;
+    }
+    positions.reserve(mergedVertices);
+    faces.reserve(mergedFaces);
     for (std::size_t i = 0; i < outcomes.size(); ++i) {
         const IslandOutcome& outcome = outcomes[i];
         if (!outcome.ok) {
@@ -1030,6 +1136,19 @@ PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSi
             result.mesh.fillHoles(static_cast<std::size_t>(params.holeFillMaxBoundary));
     }
     if (params.pureQuads && result.mesh.faceCount() > 0) {
+        const std::size_t inputFaces = result.mesh.faceCount();
+        const std::size_t inputVertices = result.mesh.vertexCount();
+        const std::size_t inputEdges = result.mesh.edgeCount();
+        if ((budget.maxOutputFaces > 0 && inputFaces > budget.maxOutputFaces / 4) ||
+            (budget.maxOutputVertices > 0 &&
+             (inputVertices > budget.maxOutputVertices ||
+              inputEdges > budget.maxOutputVertices - inputVertices ||
+              inputFaces > budget.maxOutputVertices - inputVertices - inputEdges))) {
+            result.status = RunStatus::Error;
+            result.error =
+                "resource limit at subdivision: output topology ceiling would be exceeded";
+            return result;
+        }
         // The position-field extractor produces an already-uniform base, so we
         // fit every quad to a common-sized square (shape matching) — regularising
         // 90-degree corners AND equal edge lengths at once, tightening angle and
@@ -1203,6 +1322,12 @@ PipelineResult remesh(const Mesh& input, const Parameters& rawParams, ProgressSi
     }
     countFaces(result.mesh, result.stats);
     result.targetCount.finalFaces = result.mesh.faceCount();
+
+    if (exceedsTopology(result.mesh, budget.maxOutputVertices, budget.maxOutputFaces, "output",
+                        result.error)) {
+        result.status = RunStatus::Error;
+        return result;
+    }
 
     if (result.mesh.faceCount() == 0) {
         result.status = RunStatus::Error;

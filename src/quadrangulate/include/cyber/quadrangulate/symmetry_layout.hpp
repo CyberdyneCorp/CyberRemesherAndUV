@@ -24,6 +24,8 @@
 // carefully is the centerline where the two meet.
 namespace cyber::remesh {
 
+struct ResourceLimits;
+
 enum class SymmetryAxis : std::uint8_t {
     None,
     X,
@@ -177,6 +179,7 @@ struct SymmetryRunReport {
     const Mesh& input, const Parameters& rawParams, SymmetryAxis axis,
     SymmetryRunReport* report = nullptr, ProgressSink* progress = nullptr,
     const CancelToken* cancel = nullptr, const QuadrangulatorFactory& quadrangulator = {},
-    const QuadrangulatorFactory& fallbackQuadrangulator = {}, const Guidance* guidance = nullptr);
+    const QuadrangulatorFactory& fallbackQuadrangulator = {}, const Guidance* guidance = nullptr,
+    const ResourceLimits* limits = nullptr);
 
 }  // namespace cyber::remesh

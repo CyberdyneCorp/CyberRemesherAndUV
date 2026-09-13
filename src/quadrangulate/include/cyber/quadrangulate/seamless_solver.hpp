@@ -107,6 +107,11 @@ struct Parameterization {
     int cgIterationsU = 0;
     int cgIterationsV = 0;
     bool valid = false;
+    bool resourceLimitExceeded = false;
+};
+
+struct SeamlessSolveLimits {
+    std::size_t maxDirectFactorBytes = 0;
 };
 
 // Topology-layout options for the seamless solve (ZRemesher, Phase A/B).
@@ -209,7 +214,8 @@ struct SeamlessSolveCache {
                                                      const CancelToken* cancel = nullptr,
                                                      SeamlessSolveCache* cache = nullptr,
                                                      const GuidanceField* density = nullptr,
-                                                     const SeamlessLayoutOptions* layout = nullptr);
+                                                     const SeamlessLayoutOptions* layout = nullptr,
+                                                     const SeamlessSolveLimits* limits = nullptr);
 
 // Relaxed-only calibration probe: runs solveParameterization's assembly + the initial
 // relaxed Poisson solve at `spacing` (no ARAP polish, no integer phase) and returns the

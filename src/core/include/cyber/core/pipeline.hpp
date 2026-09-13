@@ -37,6 +37,20 @@ struct Statistics {
     float targetEdgeLength = 0.0f;
 };
 
+// Opt-in topology ceilings for one pipeline call. They bound exact mesh
+// element counts, not process RSS: dependencies and STL allocations do not
+// share a portable allocator/accounting hook. Zero disables a dimension.
+struct ResourceLimits {
+    std::size_t maxInputVertices = 0;
+    std::size_t maxInputFaces = 0;
+    std::size_t maxIntermediateVertices = 0;
+    std::size_t maxIntermediateFaces = 0;
+    std::size_t maxOutputVertices = 0;
+    std::size_t maxOutputFaces = 0;
+    std::size_t maxDirectFactorBytes = 0;
+    std::size_t maxCandidateBytes = 0;
+};
+
 // Per-island guidance audit (remeshing-pipeline spec, "Guidance is honored
 // loudly or rejected loudly"). One row per island whenever guidance was
 // supplied, whether or not the island's backend could use it.
@@ -104,13 +118,11 @@ struct PipelineResult {
 // into `PipelineResult::islandGuidance`. A null pointer, or a Guidance whose
 // guides and density are both empty, takes exactly the same code path as today.
 using QuadrangulatorFactory = std::function<std::unique_ptr<IQuadrangulator>()>;
-[[nodiscard]] PipelineResult remesh(const Mesh& input, const Parameters& rawParams,
-                                    ProgressSink* progress = nullptr,
-                                    const CancelToken* cancel = nullptr,
-                                    const QuadrangulatorFactory& quadrangulator = {},
-                                    const QuadrangulatorFactory& fallbackQuadrangulator = {},
-                                    const Guidance* guidance = nullptr,
-                                    const CountPolicy* countPolicy = nullptr);
+[[nodiscard]] PipelineResult remesh(
+    const Mesh& input, const Parameters& rawParams, ProgressSink* progress = nullptr,
+    const CancelToken* cancel = nullptr, const QuadrangulatorFactory& quadrangulator = {},
+    const QuadrangulatorFactory& fallbackQuadrangulator = {}, const Guidance* guidance = nullptr,
+    const CountPolicy* countPolicy = nullptr, const ResourceLimits* limits = nullptr);
 
 // Cleanup policy from the canonical parameters, applied per island result:
 // KeepLargest keeps only the biggest connected patch, KeepAll keeps

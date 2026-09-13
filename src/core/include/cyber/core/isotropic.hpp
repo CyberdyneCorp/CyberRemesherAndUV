@@ -40,9 +40,13 @@ struct IsotropicOptions {
     // Null leaves the sizing arithmetic untouched, which is what keeps every
     // existing run byte-identical.
     const std::vector<float>* extraVertexScale = nullptr;
+    // Optional topology ceilings for the evolving mesh. Zero disables a
+    // ceiling. They are checked immediately before a split grows the mesh.
+    std::size_t maxVertices = 0;
+    std::size_t maxFaces = 0;
 };
 
-enum class IsotropicStatus { Success, Cancelled, InvalidInput };
+enum class IsotropicStatus { Success, Cancelled, InvalidInput, ResourceLimit };
 
 // `reference` is the surface to project onto (usually built from the input
 // mesh before remeshing). Pass the same smoothNormalDegrees used to build it

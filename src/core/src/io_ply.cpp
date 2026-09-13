@@ -9,6 +9,7 @@
 #include <optional>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "io_internal.hpp"
@@ -203,11 +204,58 @@ std::optional<std::string> plyHeaderExceedsFile(const std::filesystem::path& pat
     return std::nullopt;
 }
 
+std::optional<std::uintmax_t> declaredPlyElementCount(const std::filesystem::path& path,
+                                                      std::string_view wanted) {
+    std::ifstream file(path, std::ios::binary);
+    if (!file) {
+        return std::nullopt;
+    }
+    std::uintmax_t headerBytes = 0;
+    std::string line;
+    while (headerBytes <= kMaxHeaderBytes && std::getline(file, line)) {
+        headerBytes += line.size() + 1;
+        if (startsWith(line, "element")) {
+            std::istringstream words(line);
+            std::string keyword;
+            std::string name;
+            std::string count;
+            words >> keyword >> name >> count;
+            if (name == wanted) {
+                std::uintmax_t value = 0;
+                parseElementCount(count, value);
+                return value;
+            }
+        }
+        if (startsWith(line, "end_header")) {
+            break;
+        }
+    }
+    return std::nullopt;
+}
+
 }  // namespace
 
 Result<ImportedMesh> importPly(const std::filesystem::path& path, const ImportOptions& options) {
     if (const std::optional<std::string> refusal = plyHeaderExceedsFile(path)) {
         return Error{ErrorCode::ParseError, "'" + path.string() + "' " + *refusal};
+    }
+    if (options.maxVertices > 0) {
+        const std::optional<std::uintmax_t> declared = declaredPlyElementCount(path, "vertex");
+        if (declared && *declared > options.maxVertices) {
+            return Error{ErrorCode::ResourceLimit,
+                         "'" + path.string() + "' declares " + std::to_string(*declared) +
+                             " vertices, over this host's vertex ceiling of " +
+                             std::to_string(options.maxVertices)};
+        }
+    }
+    if (options.maxFaces > 0) {
+        const std::optional<std::uintmax_t> declared = declaredPlyElementCount(path, "face");
+        if (declared && *declared > options.maxFaces) {
+            return Error{ErrorCode::ResourceLimit, "'" + path.string() + "' declares " +
+                                                       std::to_string(*declared) +
+                                                       " faces, over this host's face ceiling of " +
+                                                       std::to_string(options.maxFaces)};
+        }
     }
     try {
         happly::PLYData ply(path.string());

@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "cyber/core/pipeline.hpp"
+#include "cyber/quadrangulate/quadcover_extractor.hpp"
 
 using cyber::CancelToken;
 using cyber::FaceId;
@@ -349,6 +350,61 @@ TEST_CASE("cancellation returns Cancelled and an empty result (spec: atomic)") {
     const auto result = remesh::remesh(sphere, smallRun(400), nullptr, &cancel);
     REQUIRE(result.status == remesh::RunStatus::Cancelled);
     REQUIRE(result.mesh.faceCount() == 0);  // nothing committed
+}
+
+TEST_CASE("pipeline rejects an input topology budget before copying the mesh") {
+    const Mesh sphere = makeSphere(12, 18);
+    remesh::ResourceLimits limits;
+    limits.maxInputFaces = sphere.faceCount() - 1;
+
+    const auto result =
+        remesh::remesh(sphere, smallRun(400), nullptr, nullptr, {}, {}, nullptr, nullptr, &limits);
+    CHECK(result.status == remesh::RunStatus::Error);
+    CHECK(result.error.find("resource limit at input: faces requested") != std::string::npos);
+    CHECK(result.mesh.faceCount() == 0);
+    CHECK(sphere.faceCount() > limits.maxInputFaces);  // the caller input was not edited
+}
+
+TEST_CASE("pipeline refuses pure-quad subdivision before exceeding output budget") {
+    const Mesh sphere = makeSphere(10, 14);
+    remesh::Parameters params = smallRun(300);
+    params.pureQuads = true;
+    remesh::ResourceLimits limits;
+    limits.maxOutputFaces = 20;
+
+    const auto result =
+        remesh::remesh(sphere, params, nullptr, nullptr, {}, {}, nullptr, nullptr, &limits);
+    CHECK(result.status == remesh::RunStatus::Error);
+    CHECK(result.error.find("resource limit at subdivision") != std::string::npos);
+    CHECK(sphere.faceCount() > 0);
+}
+
+TEST_CASE("pipeline reports an intermediate ceiling before an isotropic split grows topology") {
+    const Mesh sphere = makeSphere(8, 12);
+    remesh::ResourceLimits limits;
+    limits.maxIntermediateFaces = sphere.faceCount();
+
+    const auto result = remesh::remesh(sphere, smallRun(2'000), nullptr, nullptr, {}, {}, nullptr,
+                                       nullptr, &limits);
+    CHECK(result.status == remesh::RunStatus::Error);
+    CHECK(result.error.find("resource limit at isotropic") != std::string::npos);
+    CHECK(sphere.faceCount() == limits.maxIntermediateFaces);
+}
+
+TEST_CASE("zremesher candidate selection rejects its storage ceiling before copying") {
+    const Mesh sphere = makeSphere(8, 12);
+    remesh::ResourceLimits limits;
+    limits.maxCandidateBytes = 1;
+    remesh::ZRemesherOptions options;
+    options.quality = remesh::RemeshQualityMode::Best;
+
+    const auto result = remesh::remesh(
+        sphere, smallRun(400), nullptr, nullptr,
+        [&options]() { return remesh::makeZRemesherQuadrangulator(options); }, {}, nullptr, nullptr,
+        &limits);
+    CHECK(result.status == remesh::RunStatus::Error);
+    CHECK(result.error.find("candidate mesh storage ceiling") != std::string::npos);
+    CHECK(sphere.faceCount() > 0);
 }
 
 TEST_CASE("cancel token poll is observed by isCancelled (mid-solve cancellation)") {

@@ -327,8 +327,8 @@ public:
     // `maxFaces` bounds the pass (see faceBudget): the sweep below re-reads its
     // loop bound against the edge array it is growing, so without a ceiling any
     // input the split rule cannot converge on allocates until bad_alloc.
-    SplitPass(Mesh& mesh, const IsotropicOptions& options, std::size_t maxFaces)
-        : Pass(mesh, options), m_maxFaces(maxFaces) {}
+    SplitPass(Mesh& mesh, const IsotropicOptions& options, std::size_t faceBudget)
+        : Pass(mesh, options), m_faceBudget(faceBudget) {}
 
     // Splits every edge longer than 4/3 of its local target (the field
     // sampled at the edge midpoint); each adjacent face (which becomes a quad
@@ -342,7 +342,7 @@ public:
                 if (cancel && cancel->isCancelled()) {
                     return;
                 }
-                if (m_mesh.faceCount() > m_maxFaces) {
+                if (m_mesh.faceCount() >= m_faceBudget) {
                     return;
                 }
             }
@@ -388,6 +388,11 @@ public:
                 !(length(mid - pa) < len && length(mid - pb) < len)) {
                 continue;
             }
+            if ((m_options.maxFaces > 0 && m_mesh.faceCount() >= m_options.maxFaces) ||
+                (m_options.maxVertices > 0 && m_mesh.vertexCount() >= m_options.maxVertices)) {
+                m_resourceLimit = true;
+                return;
+            }
             const VertexId midVertex = m_mesh.splitEdge(e, 0.5f);
             if (!midVertex.valid()) {
                 continue;
@@ -400,6 +405,8 @@ public:
             }
         }
     }
+
+    [[nodiscard]] bool resourceLimitReached() const { return m_resourceLimit; }
 
 private:
     void retriangulate(FaceId f, VertexId mid) {
@@ -414,7 +421,8 @@ private:
         }
     }
 
-    std::size_t m_maxFaces;
+    std::size_t m_faceBudget;
+    bool m_resourceLimit = false;
 };
 
 class CollapsePass : public Pass {
@@ -751,7 +759,11 @@ IsotropicStatus isotropicRemesh(Mesh& mesh, const ReferenceSurface& reference,
          ++iteration) {
         auto a = Clk::now();
         const std::size_t facesBeforeSplit = mesh.faceCount();
-        SplitPass(mesh, options, maxFaces).run(field, cancel);
+        SplitPass split(mesh, options, maxFaces);
+        split.run(field, cancel);
+        if (split.resourceLimitReached()) {
+            return finish(IsotropicStatus::ResourceLimit);
+        }
         splitStillGrowing = static_cast<float>(mesh.faceCount()) >
                             kSplitGrowthConverged * static_cast<float>(facesBeforeSplit);
         if (isoTime) {

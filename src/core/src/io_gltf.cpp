@@ -161,8 +161,7 @@ int findAttribute(const tinygltf::Primitive& prim, const char* name) {
 
 }  // namespace
 
-Result<ImportedMesh> importGltf(const std::filesystem::path& path,
-                                const ImportOptions& /*options*/) {
+Result<ImportedMesh> importGltf(const std::filesystem::path& path, const ImportOptions& options) {
     tinygltf::TinyGLTF loader;
     tinygltf::Model model;
     std::string err, warn;
@@ -200,6 +199,32 @@ Result<ImportedMesh> importGltf(const std::filesystem::path& path,
             if (!positions) {
                 return invalidAccessor("POSITION", posAccessor);
             }
+            const std::optional<AccessorReader> indexReader =
+                prim.indices >= 0 ? AccessorReader::make(model, prim.indices, 1) : std::nullopt;
+            std::size_t triangleCount = positions->count() / 3;
+            if (prim.indices >= 0) {
+                if (!indexReader) {
+                    return invalidAccessor("indices", prim.indices);
+                }
+                triangleCount = indexReader->count() / 3;
+            }
+            const std::size_t existingFaces = out.mesh.faceCount();
+            if (options.maxFaces > 0 && (existingFaces > options.maxFaces ||
+                                         triangleCount > options.maxFaces - existingFaces)) {
+                return Error{ErrorCode::ResourceLimit, "triangle accessor in '" + path.string() +
+                                                           "' exceeds this host's "
+                                                           "face ceiling of " +
+                                                           std::to_string(options.maxFaces)};
+            }
+            const std::size_t existingVertices = out.mesh.vertexCount();
+            if (options.maxVertices > 0 &&
+                (positions->count() >
+                 options.maxVertices - std::min(options.maxVertices, existingVertices))) {
+                return Error{ErrorCode::ResourceLimit, "POSITION accessor in '" + path.string() +
+                                                           "' exceeds this host's "
+                                                           "vertex ceiling of " +
+                                                           std::to_string(options.maxVertices)};
+            }
             std::vector<VertexId> ids;
             ids.reserve(positions->count());
             for (std::size_t i = 0; i < positions->count(); ++i) {
@@ -222,15 +247,10 @@ Result<ImportedMesh> importGltf(const std::filesystem::path& path,
 
             // Triangle list (indexed or sequential).
             std::vector<std::uint32_t> indices;
-            if (prim.indices >= 0) {
-                const std::optional<AccessorReader> reader =
-                    AccessorReader::make(model, prim.indices, 1);
-                if (!reader) {
-                    return invalidAccessor("indices", prim.indices);
-                }
-                indices.reserve(reader->count());
-                for (std::size_t i = 0; i < reader->count(); ++i) {
-                    indices.push_back(reader->index(i));
+            if (indexReader) {
+                indices.reserve(indexReader->count());
+                for (std::size_t i = 0; i < indexReader->count(); ++i) {
+                    indices.push_back(indexReader->index(i));
                 }
             } else {
                 indices.resize(positions->count());

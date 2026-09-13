@@ -120,6 +120,10 @@ public:
     [[nodiscard]] std::size_t edgeCapacity() const { return m_edges.size(); }
     [[nodiscard]] std::size_t faceCapacity() const { return m_faces.size(); }
     [[nodiscard]] std::size_t loopCapacity() const { return m_loops.size(); }
+    // Bytes in element and attribute vector buffers owned by this mesh. This
+    // excludes allocator/map bookkeeping and process RSS; it is intended for
+    // exact preflight of mesh copies retained by an operation.
+    [[nodiscard]] std::size_t ownedBufferBytes() const;
 
     [[nodiscard]] bool isAlive(VertexId v) const {
         return v.value < m_vertices.size() && m_vertices[v.value].alive;

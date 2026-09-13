@@ -334,13 +334,15 @@ public final class ZRemesherOperation {
     private let params: RemeshParameters
     private let zremesher: ZRemesherParameters
     private let guidance: Guidance
+    private let limits: RemeshLimits?
     private let control: RemeshControlBox
 
     init(
         input: Mesh,
         params: RemeshParameters,
         zremesher: ZRemesherParameters,
-        guidance: Guidance
+        guidance: Guidance,
+        limits: RemeshLimits?
     ) {
         let (stream, continuation) = AsyncStream<Double>.makeStream(
             of: Double.self,
@@ -351,6 +353,7 @@ public final class ZRemesherOperation {
         self.params = params
         self.zremesher = zremesher
         self.guidance = guidance
+        self.limits = limits
         self.control = RemeshControlBox(progressContinuation: continuation)
     }
 
@@ -367,11 +370,12 @@ public final class ZRemesherOperation {
                 let params = self.params
                 let zremesher = self.zremesher
                 let guidance = self.guidance
+                let limits = self.limits
                 let control = self.control
                 Thread.detachNewThread {
                     let result = ZRemesherOperation.run(
                         input: input, params: params,
-                        zremesher: zremesher, guidance: guidance, control: control
+                        zremesher: zremesher, guidance: guidance, limits: limits, control: control
                     )
                     control.finishProgress()
                     continuation.resume(with: result)
@@ -388,6 +392,7 @@ public final class ZRemesherOperation {
         params: RemeshParameters,
         zremesher: ZRemesherParameters,
         guidance: Guidance,
+        limits: RemeshLimits?,
         control: RemeshControlBox
     ) -> Result<ZRemesherResult, Error> {
         // Validated here rather than in C, for the same reason the Python
@@ -418,10 +423,19 @@ public final class ZRemesherOperation {
         // are built inside nested `withUnsafeBufferPointer` scopes rather than
         // from temporaries that would be gone by the time the engine reads them.
         let status = withGuidance(guidance) { guidancePtr in
-            cyber_remesh_zremesher(
+            guard let limits else {
+                return cyber_remesh_zremesher(
+                    input.handle, &cparams, &czr, guidancePtr,
+                    zremesherProgressCb, zremesherCancelCb, zremesherWarningCb, user,
+                    &out, &creport
+                )
+            }
+            var topology = limits.cValue
+            var execution = limits.executionCValue
+            return cyber_remesh_zremesher_with_resource_limits(
                 input.handle, &cparams, &czr, guidancePtr,
-                zremesherProgressCb, zremesherCancelCb, zremesherWarningCb, user,
-                &out, &creport
+                &topology, &execution, zremesherProgressCb, zremesherCancelCb,
+                zremesherWarningCb, user, &out, &creport
             )
         }
         withExtendedLifetime(input) {}
@@ -502,10 +516,11 @@ public extension Mesh {
     func remesh(
         params: RemeshParameters,
         zremesher: ZRemesherParameters,
-        guidance: Guidance = Guidance()
+        guidance: Guidance = Guidance(),
+        limits: RemeshLimits? = nil
     ) -> ZRemesherOperation {
         ZRemesherOperation(
-            input: self, params: params, zremesher: zremesher, guidance: guidance
+            input: self, params: params, zremesher: zremesher, guidance: guidance, limits: limits
         )
     }
 
@@ -516,9 +531,10 @@ public extension Mesh {
         params: RemeshParameters,
         zremesher: ZRemesherParameters,
         guidance: Guidance = Guidance(),
+        limits: RemeshLimits? = nil,
         onProgress: @escaping @Sendable (Double) -> Void
     ) async throws -> ZRemesherResult {
-        let operation = remesh(params: params, zremesher: zremesher, guidance: guidance)
+        let operation = remesh(params: params, zremesher: zremesher, guidance: guidance, limits: limits)
         let pump = Task {
             for await value in operation.progress {
                 onProgress(value)
