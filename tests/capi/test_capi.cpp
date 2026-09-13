@@ -485,6 +485,11 @@ TEST_CASE("capi bakes a normal map onto a UV plane") {
     params.height = 16;
 
     CyberImage* image = nullptr;
+    REQUIRE(cyber_set_max_bake_pixels(255) == CYBER_OK);
+    CHECK(cyber_bake(low, high, CYBER_BAKE_NORMAL, &params, &image) == CYBER_ERR_RUNTIME);
+    CHECK(image == nullptr);
+    CHECK(std::string(cyber_last_error()).find("bake ceiling") != std::string::npos);
+    REQUIRE(cyber_set_max_bake_pixels(0) == CYBER_OK);
     REQUIRE(cyber_bake(low, high, CYBER_BAKE_NORMAL, &params, &image) == CYBER_OK);
     REQUIRE(image != nullptr);
     REQUIRE(cyber_image_width(image) == 16);

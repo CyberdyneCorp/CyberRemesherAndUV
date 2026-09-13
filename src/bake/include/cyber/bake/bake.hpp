@@ -82,6 +82,10 @@ struct BakeParams {
     // over the Target, which is scale-independent and keeps one pinched vertex
     // from flattening the map to mid-gray. Finite (a negative value is auto too).
     float curvatureRange = 0.0f;
+    // Exact ceiling on output texels. Zero disables it. This is intentionally
+    // separate from dimensions: an image can be tall, wide or square while a
+    // host's allocation budget is about their product.
+    std::size_t maxPixels = 0;
     // Optional field evaluator (pipeline-bridge spec, "Field-sampled baking").
     // When set, Normal / AmbientOcclusion / Curvature / Cavity sample the field
     // directly — the cage ray is sphere-traced through it and normals come from

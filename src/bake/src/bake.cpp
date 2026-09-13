@@ -5,6 +5,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <optional>
 #include <string>
 
@@ -385,6 +386,12 @@ std::array<float, 3> neutralPadding(BakeMap map) {
 // stay unchecked: a bake that worked before still works.
 bool paramsUsable(BakeMap map, const BakeParams& params, bool useField) {
     if (params.width <= 0 || params.height <= 0) {
+        return false;
+    }
+    const std::size_t width = static_cast<std::size_t>(params.width);
+    const std::size_t height = static_cast<std::size_t>(params.height);
+    if (width > std::numeric_limits<std::size_t>::max() / height ||
+        (params.maxPixels > 0 && width > params.maxPixels / height)) {
         return false;
     }
     if (!std::isfinite(params.cageDistance) || params.cageDistance < 0.0f) {

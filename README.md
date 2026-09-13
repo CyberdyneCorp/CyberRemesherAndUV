@@ -1063,7 +1063,7 @@ There are **two** version numbers and they answer different questions.
 
 ```c
 #define CYBER_ABI_VERSION_MAJOR 1     /* the SHAPE of cyber_capi.h */
-#define CYBER_ABI_VERSION_MINOR 6
+#define CYBER_ABI_VERSION_MINOR 7
 
 void       cyber_abi_version(int* major, int* minor);
 CyberStatus cyber_abi_check(int compiled_major, int compiled_minor);
@@ -1095,7 +1095,7 @@ full increment rules, including why appending an enumerator is *not* additive.
 (`libcyber_capi.so.1`) rather than tracking the project's `0.x`.
 
 Every release and supported CTest toolchain compares
-[`capi/abi/cyber_capi-1.6.json`](capi/abi/cyber_capi-1.6.json) with a
+[`capi/abi/cyber_capi-1.7.json`](capi/abi/cyber_capi-1.7.json) with a
 compiler-measured manifest of this header. It records signatures, enum values,
 field types and padding—not merely `sizeof`—and compiles a retained v0.8 client
 surface against the current library. Extend the ABI with a new sibling entry

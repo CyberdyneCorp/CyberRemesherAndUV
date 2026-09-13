@@ -325,6 +325,10 @@ std::atomic<std::uint64_t>& importFaceCeiling() {
     static std::atomic<std::uint64_t> ceiling{0};
     return ceiling;
 }
+std::atomic<std::uint64_t>& bakePixelCeiling() {
+    static std::atomic<std::uint64_t> ceiling{0};
+    return ceiling;
+}
 
 }  // namespace
 
@@ -350,6 +354,14 @@ CyberStatus cyber_set_max_import_faces(uint64_t max_faces) {
 }
 uint64_t cyber_max_import_faces(void) {
     return importFaceCeiling().load(std::memory_order_relaxed);
+}
+CyberStatus cyber_set_max_bake_pixels(uint64_t max_pixels) {
+    bakePixelCeiling().store(max_pixels, std::memory_order_relaxed);
+    clearError();
+    return CYBER_OK;
+}
+uint64_t cyber_max_bake_pixels(void) {
+    return bakePixelCeiling().load(std::memory_order_relaxed);
 }
 
 const char* cyber_seamless_solver(void) {
@@ -4771,6 +4783,15 @@ struct CyberImage {
     cyber::bake::Image image;
 };
 
+bool bakePixelBudgetExceeded(const cyber::bake::BakeParams& params) {
+    if (params.maxPixels == 0 || params.width <= 0 || params.height <= 0) {
+        return false;
+    }
+    const std::size_t width = static_cast<std::size_t>(params.width);
+    const std::size_t height = static_cast<std::size_t>(params.height);
+    return width > params.maxPixels / height;
+}
+
 void cyber_default_bake_params(CyberBakeParams* params) {
     if (params == nullptr) {
         return;
@@ -4799,6 +4820,13 @@ CyberStatus cyber_bake(const CyberMesh* low, const CyberMesh* high, CyberBakeMap
             p.aoSamples = params->aoSamples;
             p.aoRadius = params->aoRadius;
             p.curvatureRange = params->curvatureRange;
+        }
+        p.maxPixels = static_cast<std::size_t>(cyber_max_bake_pixels());
+        if (bakePixelBudgetExceeded(p)) {
+            setError("cyber_bake: requested " + std::to_string(p.width) + " x " +
+                     std::to_string(p.height) + " texels, over this host's bake ceiling of " +
+                     std::to_string(p.maxPixels));
+            return CYBER_ERR_RUNTIME;
         }
         cyber::bake::BakeMap m{};
         switch (map) {
@@ -5620,6 +5648,13 @@ CyberStatus cyber_bake_field(const CyberMesh* low, const CyberMesh* high, CyberB
             p.aoSamples = params->aoSamples;
             p.aoRadius = params->aoRadius;
             p.curvatureRange = params->curvatureRange;
+        }
+        p.maxPixels = static_cast<std::size_t>(cyber_max_bake_pixels());
+        if (bakePixelBudgetExceeded(p)) {
+            setError("cyber_bake_field: requested " + std::to_string(p.width) + " x " +
+                     std::to_string(p.height) + " texels, over this host's bake ceiling of " +
+                     std::to_string(p.maxPixels));
+            return CYBER_ERR_RUNTIME;
         }
         p.field = &adapter;
         cyber::bake::BakeMap m{};

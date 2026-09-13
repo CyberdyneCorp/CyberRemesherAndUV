@@ -109,7 +109,7 @@ def version() -> str:
 #: The C ABI this binding was written against. Mirrors CYBER_ABI_VERSION_* in
 #: cyber_capi.h; ``check_abi()`` compares it against the loaded library.
 ABI_VERSION_MAJOR = 1
-ABI_VERSION_MINOR = 6
+ABI_VERSION_MINOR = 7
 
 
 def abi_version() -> tuple:
@@ -170,6 +170,16 @@ def max_import_faces() -> int:
 def set_max_import_faces(max_faces: int) -> None:
     """Refuse an import whose declared or realized face count exceeds this limit."""
     _check(_ffi.get_lib().cyber_set_max_import_faces(int(max_faces)))
+
+
+def max_bake_pixels() -> int:
+    """The current bake texel ceiling, or 0 when disabled."""
+    return int(_ffi.get_lib().cyber_max_bake_pixels())
+
+
+def set_max_bake_pixels(max_pixels: int) -> None:
+    """Refuse a bake before UV rasterization when width * height exceeds this ceiling."""
+    _check(_ffi.get_lib().cyber_set_max_bake_pixels(int(max_pixels)))
 
 
 def check_abi(major: int = ABI_VERSION_MAJOR, minor: int = ABI_VERSION_MINOR) -> None:

@@ -940,6 +940,10 @@ def _declare(lib: ctypes.CDLL) -> None:
     lib.cyber_set_max_import_faces.restype = c_int32
     lib.cyber_max_import_faces.argtypes = []
     lib.cyber_max_import_faces.restype = c_uint64
+    lib.cyber_set_max_bake_pixels.argtypes = [c_uint64]
+    lib.cyber_set_max_bake_pixels.restype = c_int32
+    lib.cyber_max_bake_pixels.argtypes = []
+    lib.cyber_max_bake_pixels.restype = c_uint64
     # const char* cyber_seamless_solver(void)
     lib.cyber_seamless_solver.argtypes = []
     lib.cyber_seamless_solver.restype = c_char_p

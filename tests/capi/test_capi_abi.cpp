@@ -236,6 +236,13 @@ TEST_CASE("C ABI exposes independent input-byte and face import ceilings") {
     REQUIRE(cyber_set_max_import_faces(0) == CYBER_OK);
 }
 
+TEST_CASE("C ABI exposes an independent bake-pixel ceiling") {
+    REQUIRE(cyber_max_bake_pixels() == 0u);
+    REQUIRE(cyber_set_max_bake_pixels(4096) == CYBER_OK);
+    CHECK(cyber_max_bake_pixels() == 4096u);
+    REQUIRE(cyber_set_max_bake_pixels(0) == CYBER_OK);
+}
+
 TEST_CASE("the solver a build carries is reachable from the ABI") {
     // The difference is invisible and consequential: a build without the
     // vendored Geogram solver does not fail, it routes to the portable
