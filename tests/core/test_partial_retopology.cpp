@@ -58,6 +58,8 @@ TEST_CASE("partial retopology replaces only the selected region") {
     Mesh source = makePatch();
     auto& weights = source.vertexAttributes().create<float>("weight");
     auto& groups = source.vertexAttributes().create<std::int32_t>("group_id");
+    auto& materials = source.faceAttributes().create<std::int32_t>("material_id");
+    materials[5] = 42;
     source.cornerAttributes().create<cyber::Vec2>("uv");
     for (Index vertex = 0; vertex < source.vertexCapacity(); ++vertex) {
         weights[vertex] = static_cast<float>(vertex);
@@ -88,6 +90,9 @@ TEST_CASE("partial retopology replaces only the selected region") {
     const auto* transferredGroups = result.mesh.vertexAttributes().find<std::int32_t>("group_id");
     REQUIRE(transferredWeights != nullptr);
     REQUIRE(transferredGroups != nullptr);
+    const auto* transferredMaterials =
+        result.mesh.faceAttributes().find<std::int32_t>("material_id");
+    REQUIRE(transferredMaterials != nullptr);
     for (const remesh::SourceCorrespondence& correspondence : result.correspondences) {
         CHECK(correspondence.sourceFace == FaceId{5});
         CHECK(correspondence.distance == doctest::Approx(0.0f));
@@ -110,6 +115,9 @@ TEST_CASE("partial retopology replaces only the selected region") {
     for (std::size_t face = 0; face < result.mesh.faceCapacity(); ++face) {
         if (result.mesh.isAlive(FaceId{static_cast<Index>(face)})) {
             CHECK(result.mesh.faceSize(FaceId{static_cast<Index>(face)}) == 4);
+            if (face >= 16 || face == 5) {
+                CHECK((*transferredMaterials)[face] == 42);
+            }
         }
     }
 }

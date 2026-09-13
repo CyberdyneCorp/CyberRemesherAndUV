@@ -95,8 +95,13 @@ void listUntransferredAttributes(const Mesh& source, PartialRetopologyResult& re
         });
     };
     listDomain("edge", source.edgeAttributes());
-    listDomain("face", source.faceAttributes());
     listDomain("corner", source.cornerAttributes());
+}
+
+void transferFaceAttributes(const Mesh& source, Mesh& output, FaceId outputFace,
+                            FaceId sourceFace) {
+    output.faceAttributes().applyRow(outputFace.value,
+                                     source.faceAttributes().extractRow(sourceFace.value));
 }
 
 }  // namespace
@@ -232,20 +237,25 @@ PartialRetopologyResult partialRetopologize(const Mesh& source,
                                      result.mesh.position(inner.back())));
         transferVertexAttributes(source, result.mesh, result.correspondences.back());
     }
+    const FaceId attributeSource = result.analysis.selectedFaces.front();
     for (std::size_t i = 0; i < boundary.size(); ++i) {
         const std::vector<VertexId> quad = {boundary[i], boundary[(i + 1) % boundary.size()],
                                             inner[(i + 1) % inner.size()], inner[i]};
-        if (!result.mesh.addFace(quad).valid()) {
+        const FaceId newFace = result.mesh.addFace(quad);
+        if (!newFace.valid()) {
             result.mesh = source;
             result.reason = "failed to stitch the replacement boundary";
             return result;
         }
+        transferFaceAttributes(source, result.mesh, newFace, attributeSource);
     }
-    if (!result.mesh.addFace(inner).valid()) {
+    const FaceId centerFace = result.mesh.addFace(inner);
+    if (!centerFace.valid()) {
         result.mesh = source;
         result.reason = "failed to create the replacement center quad";
         return result;
     }
+    transferFaceAttributes(source, result.mesh, centerFace, attributeSource);
     if (!result.mesh.validate().empty()) {
         result.mesh = source;
         result.reason = "replacement violated mesh structural invariants";
