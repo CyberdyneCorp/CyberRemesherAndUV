@@ -186,7 +186,8 @@ TEST_CASE("capi bulk indexed exchange retains vertex face and corner attributes"
     CHECK(cyber_mesh_copy_attribute(mesh, &info, copied.data(), copied.size()) == copied.size());
     CHECK(copied == std::vector<float>(uv, uv + 8));
     const float nan = std::numeric_limits<float>::quiet_NaN();
-    const CyberAttributeColumn invalid[] = {{"bad", CYBER_ATTRIBUTE_VERTEX, CYBER_ATTRIBUTE_FLOAT, &nan, 4}};
+    const CyberAttributeColumn invalid[] = {
+        {"bad", CYBER_ATTRIBUTE_VERTEX, CYBER_ATTRIBUTE_FLOAT, &nan, 4}};
     const CyberIndexedMesh rejected{positions, 4, offsets, 1, indices, 4, invalid, 1};
     CyberMesh* untouched = mesh;
     CHECK(cyber_mesh_from_indexed(&rejected, &untouched) == CYBER_ERR_INVALID_ARG);
