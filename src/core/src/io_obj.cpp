@@ -9,6 +9,31 @@ namespace cyber::io::detail {
 
 namespace {
 
+Result<std::size_t> preflightObjVertices(const std::filesystem::path& path,
+                                         const ImportOptions& options) {
+    if (options.maxVertices == 0) {
+        return std::size_t{0};
+    }
+    std::ifstream input(path);
+    if (!input) {
+        return Error{ErrorCode::ParseError, "cannot open '" + path.string() + "'"};
+    }
+    std::size_t vertices = 0;
+    std::string line;
+    while (std::getline(input, line)) {
+        if (line.size() >= 2 && line[0] == 'v' &&
+            (line[1] == ' ' || line[1] == '\t')) {
+            ++vertices;
+            if (vertices > options.maxVertices) {
+                return Error{ErrorCode::ResourceLimit,
+                             "'" + path.string() + "' declares more than this host's vertex "
+                             "ceiling of " + std::to_string(options.maxVertices)};
+            }
+        }
+    }
+    return vertices;
+}
+
 // tinyobjloader hands out-of-range vt/vn indices through unchanged — it only appends a
 // warning string and still reports success — so every attribute index has to be range
 // checked here before it is used as a subscript. A negative index means "absent", which
@@ -23,6 +48,10 @@ bool attributeIndexInRange(int index, std::size_t componentCount, std::size_t st
 }  // namespace
 
 Result<ImportedMesh> importObj(const std::filesystem::path& path, const ImportOptions& options) {
+    const Result<std::size_t> preflight = preflightObjVertices(path, options);
+    if (!preflight.ok()) {
+        return preflight.error();
+    }
     tinyobj::ObjReaderConfig config;
     config.triangulate = false;  // arity preserved; policy applied afterwards
     config.vertex_color = true;

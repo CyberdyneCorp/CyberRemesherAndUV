@@ -34,6 +34,19 @@ Result<ImportedMesh> importMesh(const std::filesystem::path& path, const ImportO
     if (!std::filesystem::exists(path, ec)) {
         return Error{ErrorCode::FileNotFound, "no such file: '" + path.string() + "'"};
     }
+    if (options.maxInputBytes > 0) {
+        const std::uintmax_t bytes = std::filesystem::file_size(path, ec);
+        if (ec) {
+            return Error{ErrorCode::ParseError,
+                         "cannot determine size of '" + path.string() + "': " + ec.message()};
+        }
+        if (bytes > options.maxInputBytes) {
+            return Error{ErrorCode::ResourceLimit,
+                         "input '" + path.string() + "' is " + std::to_string(bytes) +
+                             " bytes, over this host's input budget of " +
+                             std::to_string(options.maxInputBytes)};
+        }
+    }
     const std::string ext = detail::lowercaseExtension(path);
     Result<ImportedMesh> imported = [&]() -> Result<ImportedMesh> {
         if (ext == ".obj") {
@@ -68,7 +81,7 @@ Result<ImportedMesh> importMesh(const std::filesystem::path& path, const ImportO
     // bound and a different quantity from this one.
     if (options.maxVertices > 0 && imported.ok() &&
         imported.value().mesh.vertexCount() > options.maxVertices) {
-        return Error{ErrorCode::ParseError,
+        return Error{ErrorCode::ResourceLimit,
                      "'" + path.string() + "' carries " +
                          std::to_string(imported.value().mesh.vertexCount()) +
                          " vertices, over this host's ceiling of " +

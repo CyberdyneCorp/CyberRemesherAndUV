@@ -23,6 +23,7 @@ enum class ErrorCode {
     // engine does not support. Distinct from ParseError because the file is
     // well-formed -- it is the contract that does not match.
     IncompatibleVersion,
+    ResourceLimit,
 };
 
 struct Error {
@@ -76,6 +77,9 @@ struct ImportOptions {
     // a workstation or useless on a phone. An embedder sets its own; a ceiling
     // that is never reached is not a ceiling.
     std::size_t maxVertices = 0;
+    // Refuse an input before its format parser reads or allocates for it. This
+    // is a hard input-byte budget, distinct from the decoded mesh budget.
+    std::size_t maxInputBytes = 0;
 };
 
 struct ImportedMesh {
