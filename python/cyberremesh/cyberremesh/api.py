@@ -846,7 +846,9 @@ class Mesh:
     :meth:`close` or garbage collection.
     """
 
-    __slots__ = ("_handle", "_stats", "guidance_warnings", "zremesher_report")
+    __slots__ = (
+        "_handle", "_stats", "guidance_warnings", "zremesher_report", "target_count_report"
+    )
 
     def __init__(self, handle: Optional[int] = None):
         if handle is None:
@@ -862,6 +864,8 @@ class Mesh:
         # not come from that path. Always present so callers can test it
         # without hasattr.
         self.zremesher_report: Optional["ZRemesherReport"] = None
+        # Count calibration outcome, present only for a count-policy run.
+        self.target_count_report: Optional["TargetCountReport"] = None
 
     @classmethod
     def from_indexed(cls, positions, face_offsets: Sequence[int], indices: Sequence[int],
@@ -973,6 +977,7 @@ class Mesh:
         copy._stats = self._stats
         copy.guidance_warnings = list(self.guidance_warnings)
         copy.zremesher_report = self.zremesher_report
+        copy.target_count_report = self.target_count_report
         return copy
 
     def __copy__(self) -> "Mesh":
