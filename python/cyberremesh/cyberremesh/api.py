@@ -51,6 +51,7 @@ __all__ = [
     "Snapper",
     "SnapReport",
     "SoftTransformReport",
+    "PartialRetopologyReport",
     "SeamCostParams",
     "SeamSet",
     "SeamPath",
@@ -109,7 +110,7 @@ def version() -> str:
 #: The C ABI this binding was written against. Mirrors CYBER_ABI_VERSION_* in
 #: cyber_capi.h; ``check_abi()`` compares it against the loaded library.
 ABI_VERSION_MAJOR = 1
-ABI_VERSION_MINOR = 11
+ABI_VERSION_MINOR = 12
 
 
 def abi_version() -> tuple:
@@ -218,6 +219,25 @@ class Statistics:
             islands=int(c.island_count),
             islands_failed=int(c.islands_failed),
         )
+
+
+@dataclass(frozen=True)
+class PartialRetopologyReport:
+    """Outcome counters for :meth:`Mesh.partial_retopologize`.
+
+    Generated vertex correspondence is retained by the native core; this C
+    binding reports whether callers need an explicit policy for edge, face, or
+    corner attributes before consuming the resulting mesh.
+    """
+
+    boundary_vertex_count: int
+    generated_vertex_count: int
+    untransferred_attribute_count: int
+
+    @classmethod
+    def _from_c(cls, report: "_ffi.CyberPartialRetopologyReport") -> "PartialRetopologyReport":
+        return cls(int(report.boundary_vertex_count), int(report.generated_vertex_count),
+                   int(report.untransferred_attribute_count))
 
 
 @dataclass
@@ -1333,6 +1353,23 @@ class Mesh:
         )
         self._stats = None
         return removed.value
+
+    def partial_retopologize(self, faces: Sequence[int]) -> PartialRetopologyReport:
+        """Replace one supported interior region without changing its exterior.
+
+        Exact mode currently accepts an edge-connected selected region with one
+        simple, manifold four-edge interior boundary. Unsupported selections
+        raise :class:`CyberError` with ``UNSUPPORTED_TOPOLOGY`` and leave this
+        mesh unchanged. Boundary IDs and positions survive; generated vertices
+        are reported along with the count of non-vertex attribute columns that
+        require an explicit host transfer policy.
+        """
+        face_ids, count = _ids(faces)
+        report = _ffi.CyberPartialRetopologyReport()
+        _check(_ffi.get_lib().cyber_retopo_partial_remesh(
+            self.handle, face_ids, count, ctypes.byref(report)))
+        self._stats = None
+        return PartialRetopologyReport._from_c(report)
 
     def dissolve_edges(self, edges: Sequence[int]) -> int:
         """Dissolve interior edges, returning how many actually dissolved.

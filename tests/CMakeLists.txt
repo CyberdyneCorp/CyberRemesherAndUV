@@ -36,6 +36,7 @@ add_executable(cyber_tests
     core/test_io_obj.cpp
     core/test_isotropic.cpp
     core/test_parallel_chunks.cpp
+    core/test_partial_retopology.cpp
     core/test_pipeline.cpp
     core/test_pure_quad_quality.cpp
     core/test_reference_surface.cpp

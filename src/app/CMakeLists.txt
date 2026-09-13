@@ -2,6 +2,7 @@ add_library(cyber_app STATIC
     src/document.cpp
     src/undo.cpp
     src/input.cpp
+    src/partial_retopology.cpp
 )
 add_library(cyber::app ALIAS cyber_app)
 

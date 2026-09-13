@@ -8,6 +8,7 @@
 
 #include "cyber/app/document.hpp"
 #include "cyber/app/input.hpp"
+#include "cyber/app/partial_retopology.hpp"
 #include "cyber/app/shell_desktop.hpp"
 #include "cyber/app/undo.hpp"
 #include "cyber/core/mesh.hpp"
@@ -37,6 +38,23 @@ Mesh makeGridMesh() {
     }
     const std::vector<std::vector<Index>> faces = {
         {0, 1, 4, 3}, {1, 2, 5, 4}, {3, 4, 7, 6}, {4, 5, 8, 7}};
+    return Mesh::fromIndexed(positions, faces);
+}
+
+Mesh makeLargeGridMesh() {
+    std::vector<Vec3> positions;
+    std::vector<std::vector<Index>> faces;
+    for (Index y = 0; y < 5; ++y) {
+        for (Index x = 0; x < 5; ++x) {
+            positions.push_back({static_cast<float>(x), static_cast<float>(y), 0.0f});
+        }
+    }
+    for (Index y = 0; y < 4; ++y) {
+        for (Index x = 0; x < 4; ++x) {
+            const Index base = y * 5 + x;
+            faces.push_back({base, base + 1, base + 6, base + 5});
+        }
+    }
     return Mesh::fromIndexed(positions, faces);
 }
 
@@ -569,6 +587,27 @@ TEST_CASE("autosave fires only when dirty") {
 
     CHECK_FALSE(doc.autosaveIfDirty(sink));  // no longer dirty
     CHECK(saves == 1);
+}
+
+TEST_CASE("partial retopology is one undoable document operation") {
+    app::Document document;
+    document.editMesh = makeLargeGridMesh();
+    app::UndoStack undo(1 << 20);
+
+    const auto applied = app::applyPartialRetopology(document, undo, {{cyber::FaceId{5}}, true});
+    REQUIRE(applied.status == cyber::remesh::PartialRetopologyStatus::Applied);
+    CHECK(document.editMesh.faceCount() == 20);
+    CHECK(undo.undoDepth() == 1);
+    CHECK(undo.undo());
+    CHECK(document.editMesh.faceCount() == 16);
+    CHECK(undo.redo());
+    CHECK(document.editMesh.faceCount() == 20);
+
+    const auto rejected =
+        app::applyPartialRetopology(document, undo, {{cyber::FaceId{5}, cyber::FaceId{6}}, true});
+    CHECK(rejected.status == cyber::remesh::PartialRetopologyStatus::Rejected);
+    CHECK(document.editMesh.faceCount() == 20);
+    CHECK(undo.undoDepth() == 1);
 }
 
 TEST_CASE("undo/redo respects the memory budget, evicting oldest") {

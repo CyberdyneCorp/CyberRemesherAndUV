@@ -608,6 +608,23 @@ std::vector<float> positionsOf(const CyberMesh* mesh) {
 
 }  // namespace
 
+TEST_CASE("capi partial retopology replaces a selected interior quad atomically") {
+    CyberMesh* mesh = makeGridMesh(5, 5, 0.0f);
+    const uint32_t selected = 5;
+    CyberPartialRetopologyReport report{};
+
+    REQUIRE(cyber_retopo_partial_remesh(mesh, &selected, 1, &report) == CYBER_OK);
+    CHECK(report.boundary_vertex_count == 4);
+    CHECK(report.generated_vertex_count == 4);
+    CHECK(cyber_mesh_face_count(mesh) == 20);
+
+    const uint32_t unsupported[] = {5, 6};
+    REQUIRE(cyber_retopo_partial_remesh(mesh, unsupported, 2, nullptr) ==
+            CYBER_ERR_UNSUPPORTED_TOPOLOGY);
+    CHECK(cyber_mesh_face_count(mesh) == 20);
+    cyber_mesh_free(mesh);
+}
+
 TEST_CASE("capi soft selection: line select, smooth, weighted transform with glue") {
     CyberMesh* target = makeGridMesh(9, 9, 0.0f);
     CyberSnapper* snapper = nullptr;

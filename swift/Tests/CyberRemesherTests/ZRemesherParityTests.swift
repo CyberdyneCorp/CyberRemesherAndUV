@@ -67,6 +67,28 @@ private func zremesherParams(targetQuads: Int = 800) -> RemeshParameters {
 }
 
 final class ZRemesherParityTests: XCTestCase {
+    func testPartialRetopologyReachesSwiftAndIsAtomic() throws {
+        var positions: [Float] = []
+        var indices: [UInt32] = []
+        for y in 0..<5 {
+            for x in 0..<5 { positions += [Float(x), Float(y), 0] }
+        }
+        for y in 0..<4 {
+            for x in 0..<4 {
+                let base = UInt32(y * 5 + x)
+                indices += [base, base + 1, base + 6, base + 5]
+            }
+        }
+        let offsets = stride(from: 0, through: indices.count, by: 4).map { $0 }
+        let mesh = try Mesh(positions: positions, faceOffsets: offsets, indices: indices)
+        let report = try mesh.partialRetopologize(faces: [5])
+        XCTAssertEqual(report.boundaryVertexCount, 4)
+        XCTAssertEqual(report.generatedVertexCount, 4)
+        XCTAssertEqual(mesh.faceCount, 20)
+        XCTAssertThrowsError(try mesh.partialRetopologize(faces: [5, 6]))
+        XCTAssertEqual(mesh.faceCount, 20)
+    }
+
     func testBulkPolygonExchangePreservesAuthoredArity() throws {
         var positions: [Float] = [
             0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0,

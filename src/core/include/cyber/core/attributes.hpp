@@ -217,7 +217,7 @@ public:
     }
 
     template <typename Fn>
-    void forEachColumnPaired(AttributeSet& other, const Fn& fn) {
+    void forEachColumnPaired(AttributeSet& other, const Fn& fn) const {
         for (auto& [name, column] : m_columns) {
             auto it = other.m_columns.find(name);
             if (it == other.m_columns.end()) {

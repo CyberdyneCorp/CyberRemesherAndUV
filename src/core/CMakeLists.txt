@@ -12,6 +12,7 @@ add_library(cyber_core STATIC
     src/mesh.cpp
     src/mesh_diagnostics.cpp
     src/mesh_ops.cpp
+    src/partial_retopology.cpp
     src/pipeline.cpp
     src/quadrangulate.cpp
     src/reference_surface.cpp

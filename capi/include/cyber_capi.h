@@ -92,7 +92,7 @@ typedef enum CyberStatus {
  * Do not compare these numbers by hand: cyber_abi_check() applies the rule
  * above in one place, so every binding gets the same answer. */
 #define CYBER_ABI_VERSION_MAJOR 1
-#define CYBER_ABI_VERSION_MINOR 11
+#define CYBER_ABI_VERSION_MINOR 12
 
 /* The ABI this build implements. Cannot fail; either pointer may be NULL. */
 void cyber_abi_version(int* major, int* minor);
@@ -1411,6 +1411,26 @@ CyberStatus cyber_retopo_erase(CyberMesh* mesh, const float center[3], float bas
  * *out_removed (may be NULL). */
 CyberStatus cyber_retopo_delete_faces(CyberMesh* mesh, const uint32_t* faces, size_t face_count,
                                       size_t* out_removed);
+
+/* Exact-border partial retopology. `faces` selects one edge-connected region;
+ * on success only that region is replaced, while every exterior element and
+ * boundary vertex keeps its identity and position. The first solver accepts a
+ * simple, manifold four-edge interior boundary and builds a five-quad patch.
+ * Unsupported topology returns CYBER_ERR_UNSUPPORTED_TOPOLOGY without
+ * changing `mesh`; cyber_last_error explains the rejected constraint.
+ *
+ * `out_report` is optional. `untransferred_attribute_count` tells the host
+ * that edge/face/corner columns need an explicit transfer policy; they are not
+ * silently claimed to have been transferred. This operation invalidates
+ * topology-keyed handle state exactly once on success. */
+typedef struct CyberPartialRetopologyReport {
+    size_t boundary_vertex_count;
+    size_t generated_vertex_count;
+    size_t untransferred_attribute_count;
+} CyberPartialRetopologyReport;
+
+CyberStatus cyber_retopo_partial_remesh(CyberMesh* mesh, const uint32_t* faces, size_t face_count,
+                                        CyberPartialRetopologyReport* out_report);
 
 /* Inserts a COMPLETE edge loop around the quad ring through `edge` (the
  * "line across a face ring" gesture, task 3.4): every ring edge is split
