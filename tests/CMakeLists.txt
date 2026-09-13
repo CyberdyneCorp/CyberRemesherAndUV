@@ -286,6 +286,16 @@ if(CYBER_BUILD_CLI AND Python3_FOUND)
         COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/bench/test_mesh_metrics.py)
     set_tests_properties(bench_metrics PROPERTIES TIMEOUT 60)
 
+    if(NOT CMAKE_CROSSCOMPILING)
+        add_test(NAME acceptance_corpus
+            COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tools/bench/bench.py
+                    run --corpus acceptance --solvers cyber
+                    --cyber-binary $<TARGET_FILE:cyberremesh>
+                    --cache-dir ${PROJECT_BINARY_DIR}/acceptance-cache
+                    --results ${PROJECT_BINARY_DIR}/acceptance-results.json)
+        set_tests_properties(acceptance_corpus PROPERTIES TIMEOUT 900)
+    endif()
+
     add_test(NAME cli
         COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/cli/test_cli.py
                 $<TARGET_FILE:cyberremesh>)

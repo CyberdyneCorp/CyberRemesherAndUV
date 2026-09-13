@@ -87,7 +87,8 @@ def run_solver(spec: dict, input_path: Path, output_path: Path, faces: int,
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired:
-        return {"ok": False, "error": f"timeout after {timeout}s"}
+        return {"ok": False, "error": f"timeout after {timeout}s",
+                "command": shlex.join(cmd)}
     seconds = time.monotonic() - start
     suffix = spec.get("output_from_input_suffix")
     if suffix:  # solvers that name their own output next to the input
@@ -100,9 +101,9 @@ def run_solver(spec: dict, input_path: Path, output_path: Path, faces: int,
                                           not spec.get("ignore_exit_code"))
     if failed:
         detail = (proc.stderr or proc.stdout or "").strip()[-400:]
-        return {"ok": False,
+        return {"ok": False, "command": shlex.join(cmd),
                 "error": f"exit {proc.returncode}, cmd: {shlex.join(cmd)}\n{detail}"}
-    return {"ok": True, "seconds": round(seconds, 3)}
+    return {"ok": True, "seconds": round(seconds, 3), "command": shlex.join(cmd)}
 
 
 def benchmark(meshes: list[dict], solvers: dict, out_dir: Path, samples: int,
@@ -112,9 +113,12 @@ def benchmark(meshes: list[dict], solvers: dict, out_dir: Path, samples: int,
     for mesh in meshes:
         for name, spec in solvers.items():
             output = out_dir / f"{mesh['name']}.{name}.obj"
-            row = {"mesh": mesh["name"], "solver": name,
+            row = {"metric_version": 1, "mesh": mesh["name"], "solver": name,
                    "target_quads": mesh["target_quads"], "input": str(mesh["path"]),
-                   "output": str(output)}
+                   "output": str(output), "seed": None,
+                   "platform": platform.platform(), "toolchain": toolchain_identity(),
+                   "solver_identity": solver_identity(Path(spec["exe"])) if name == "cyber" else "",
+                   "build_identity": ""}
             if "sha256" in mesh:
                 row["corpus_version"] = 1
                 row["input_sha256"] = mesh["sha256"]
@@ -122,6 +126,8 @@ def benchmark(meshes: list[dict], solvers: dict, out_dir: Path, samples: int,
             outcome = run_solver(spec, mesh["path"], output, mesh["target_quads"],
                                  timeout)
             row.update(outcome)
+            if name == "cyber":
+                row["build_identity"] = engine_identity(Path(spec["exe"]))
             if mesh.get("expected_input") == "rejected":
                 if outcome["ok"]:
                     row.update(ok=False, error="malformed input was accepted")
@@ -139,6 +145,7 @@ def benchmark(meshes: list[dict], solvers: dict, out_dir: Path, samples: int,
                     row.update(ok=False, error=f"unmeasurable output: {exc}")
                 else:
                     validity = row["metrics"]
+                    row["achieved_faces"] = validity.get("faces", 0)
                     if not validity["valid"]:
                         defects = ", ".join(
                             f"{name}={value}" for name, value in validity.items()
@@ -261,6 +268,15 @@ def solver_identity(cyber_binary: Path) -> str:
         if line.startswith("seamless-uv-solver "):
             return line.split(" ", 1)[1].strip()
     return ""
+
+
+def engine_identity(cyber_binary: Path) -> str:
+    """Return the complete engine identity reported by the executable."""
+    try:
+        return subprocess.run([str(cyber_binary), "--version"], capture_output=True,
+                              text=True, timeout=60, check=False).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return ""
 
 
 def check_against_baselines(results: list[dict], path: Path) -> int:

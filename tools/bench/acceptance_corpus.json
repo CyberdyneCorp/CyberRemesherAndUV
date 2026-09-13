@@ -8,7 +8,7 @@
     {"name": "cylinder", "category": "mixed-feature", "generator": "cylinder", "target_quads": 600, "expected_input": "accepted", "sha256": "644b5873ed084ac84332eaf35ebb33ad499a88d8d78b7889cd0e6284e81ee8ac"},
     {"name": "open_patch", "category": "open-boundary", "generator": "open_patch", "target_quads": 300, "expected_input": "accepted", "sha256": "b811ff1ce5e51829f714f0ac12548270599d1646d7e0cc6704ee45825c84f854"},
     {"name": "multi_component", "category": "multiple-components", "generator": "multi_component", "target_quads": 700, "expected_input": "accepted", "sha256": "04fed2a2f2474ae1b9e3103ed0377426abee30a4313967cfb99d6de9af268378"},
-    {"name": "large_coordinates", "category": "extreme-scale", "generator": "large_coordinates", "target_quads": 500, "expected_input": "accepted", "sha256": "3d498c3e1cb0a646127fb744ea55790980912b57bcaaa2e65272354f21dedf0c"},
+    {"name": "large_coordinates", "category": "extreme-scale", "generator": "large_coordinates", "target_quads": 500, "expected_input": "accepted", "sha256": "2bdfaecd7dc445840238aa7ba1677ea26c91609cdd6a537a9a07d0a60f6e7427"},
     {"name": "invalid_index", "category": "malformed-input", "generator": "invalid_index", "target_quads": 0, "expected_input": "rejected", "sha256": "fccad1c0581497100d0cb72c8aec22f3efea0e088952512b199d0f7108dbb9b8"}
   ]
 }

@@ -136,6 +136,23 @@ jobs:
             exit 1
           fi
 
+      - name: Offline acceptance corpus
+        run: |
+          set -euo pipefail
+          python3 tools/bench/bench.py run --corpus acceptance --solvers cyber \
+            --cyber-binary build/cpu-headless/apps/cli/cyberremesh \
+            --cache-dir build/cpu-headless/acceptance-cache \
+            --results acceptance-results.json
+      - name: Upload acceptance evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: acceptance-corpus-evidence
+          path: |
+            acceptance-results.json
+            build/cpu-headless/acceptance-cache/out
+          if-no-files-found: warn
+
       # The baselines are toolchain-specific (the solve reads unordered-container
       # iteration order), so a SKIP above means this runner has none of its own.
       # Re-run this workflow with record_bench_baselines=true to produce them,

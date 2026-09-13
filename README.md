@@ -946,6 +946,27 @@ thirdparty/      vendored permissive dependencies (manifest.json)
 
 ## Build
 
+### Offline retopology acceptance corpus
+
+The merge-safe corpus is procedural, versioned, and does not download assets.
+It checks required organic, CAD, open-boundary, multi-component, extreme-scale,
+and malformed-input cases before a quality score is considered. Run it against
+a built CLI and retain the JSON record with any review:
+
+```sh
+python3 tools/bench/bench.py run --corpus acceptance --solvers cyber \
+  --cyber-binary build/cpu-headless/apps/cli/cyberremesh \
+  --cache-dir build/cpu-headless/acceptance-cache \
+  --results acceptance-results.json
+```
+
+The command fails on missing/changed fixtures, an unexpected malformed-input
+outcome, subprocess failure, or invalid topology. Its output records the corpus
+and input identity, command, requested and achieved counts, solver/build
+identity, host toolchain, metric version, and output artifact path. It is a
+correctness gate; controlled-device runtime/RSS/thermal profiling remains a
+separate release measurement.
+
 Requires CMake ≥ 3.24, Ninja, and a C++20 compiler. A [`just`](https://github.com/casey/just)
 task runner mirrors the sibling CyberdyneCorp libraries (SciPP / NumPP):
 

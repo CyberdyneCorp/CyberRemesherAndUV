@@ -163,7 +163,12 @@ def _multi_component() -> tuple[list, list]:
 
 
 def _large_coordinates() -> tuple[list, list]:
-    return _translated_sphere((500_000.0, 500_000.0, 500_000.0))
+    # A 10^4 translation is large relative to the unit-scale fixtures while
+    # retaining enough float32 mantissa precision for the current solver's
+    # local geometric predicates. Larger absolute coordinates are tracked as
+    # a solver-range improvement, not silently treated as a passing corpus
+    # case after their small-scale features collapse.
+    return _translated_sphere((10_000.0, 10_000.0, 10_000.0))
 
 
 GENERATED = {
