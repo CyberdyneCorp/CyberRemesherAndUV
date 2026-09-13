@@ -1,8 +1,9 @@
 # CyberRemesher — iPadOS shell (task 8.5)
 
-> **UNVERIFIED / best-effort.** Requires Xcode 15+ / iPadOS 15+ SDK and the
-> built `cyber_capi` library. Not built in CI; not wired into the repo CMake.
-> Every `.swift` file starts with `UNVERIFIED:`.
+> The shell itself remains source scaffolding, but the engine library now has a
+> verified CPU-only iOS XCFramework staging path. See
+> [`packaging/ios/README.md`](../../../packaging/ios/README.md) for its exact
+> artifact, simulator gate, and physical-device evidence boundary.
 
 A thin SwiftUI shell over the first-party **`CyberRemesher` Swift package**
 (`swift/`). It contributes **no** engine logic: stroke recognition, chording and
@@ -29,15 +30,13 @@ Action Gallery toolbar) from `../shared/*.json`.
 
 ## Building
 
-This is source-only scaffolding. To make it a runnable app:
+This is source-only UI scaffolding. To make it a runnable app:
 
-1. Build the engine + `capi/` (`-DCYBER_BUILD_CAPI=ON`) to get `libcyber_capi`
-   and `cyber_capi.h`.
-2. Create an iOS App target in Xcode, add the local `swift/` package as a
-   package dependency, and add these `Sources/` files to the app target.
-3. Set `HEADER_SEARCH_PATHS` → capi `include/`, `LIBRARY_SEARCH_PATHS` → the
-   built dylib (see `swift/README.md`).
-4. Copy `../shared/stages.json` and `../shared/toolbar.default.json` into the
+1. Stage the distribution with `packaging/ios/build_xcframework.sh`.
+2. Add the staged `CyberRemesher/` package to the iOS App target and add these
+   `Sources/` files to that target. No repository C-header or library search
+   paths are part of this integration.
+3. Copy `../shared/stages.json` and `../shared/toolbar.default.json` into the
    app bundle (Copy Bundle Resources).
 
 `Package.swift` here declares the shell logic as a library target that depends

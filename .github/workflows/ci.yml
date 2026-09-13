@@ -126,6 +126,20 @@ jobs:
             -Xlinker -L"${GITHUB_WORKSPACE}/build/swift/capi" \
             -Xlinker -rpath -Xlinker "${GITHUB_WORKSPACE}/build/swift/capi"
 
+  ios-xcframework:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: lukka/get-cmake@latest
+      - name: Select Xcode
+        run: sudo xcode-select -switch /Applications/Xcode_15.4.app
+      - name: Build XCFramework and clean simulator consumer
+        run: |
+          set -euo pipefail
+          CMAKE_BUILD_PARALLEL_LEVEL=4 packaging/ios/validate_xcframework.sh
+
   # The GPU backends, compiled. Every other lane builds cpu-headless, where
   # CYBER_ENABLE_CUDA/OPENCL/METAL are all OFF, so cuda_backend.cu,
   # opencl_backend.cpp and metal_backend.mm were never fed to a compiler by this
