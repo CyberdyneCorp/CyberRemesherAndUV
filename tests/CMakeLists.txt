@@ -286,6 +286,42 @@ if(Python3_FOUND)
 endif()
 
 if(CYBER_BUILD_CLI AND Python3_FOUND)
+    # The metric unit test and the acceptance corpus import numpy/scipy. Keep
+    # them visible and mandatory in the hardening bench lane, which installs
+    # those dependencies, but do not make unrelated platform lanes red merely
+    # because their minimal Python image intentionally omits the harness.
+    execute_process(
+        COMMAND ${Python3_EXECUTABLE} -c "import numpy; import scipy"
+        RESULT_VARIABLE _cyber_bench_dependencies_result
+        OUTPUT_QUIET
+        ERROR_QUIET)
+    if(_cyber_bench_dependencies_result EQUAL 0)
+    add_test(NAME bench_metrics
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/bench/test_mesh_metrics.py)
+    set_tests_properties(bench_metrics PROPERTIES TIMEOUT 60)
+
+    if(NOT CMAKE_CROSSCOMPILING)
+        add_test(NAME acceptance_corpus
+            COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tools/bench/bench.py
+                    check --corpus acceptance
+                    --cyber-binary $<TARGET_FILE:cyberremesh>
+                    --cache-dir ${PROJECT_BINARY_DIR}/acceptance-cache
+                    --results ${PROJECT_BINARY_DIR}/acceptance-results.json)
+        # Corpus baselines are solver-specific. The ordinary CI matrix builds
+        # the dependency-free native path, while the checked-in baselines are
+        # recorded on the shipped native+geogram configuration. bench.py uses
+        # 77 to state that such a comparison has no meaning; report that as a
+        # visible CTest skip here. hardening.yml installs the matching solver
+        # and rejects this skip, so the actual release-quality gate remains
+        # mandatory rather than being hidden by the broader build matrix.
+        set_tests_properties(acceptance_corpus PROPERTIES
+            TIMEOUT 900
+            SKIP_RETURN_CODE 77)
+    endif()
+    else()
+        message(STATUS "bench metric and acceptance tests skipped: numpy/scipy unavailable")
+    endif()
+
     add_test(NAME cli
         COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/cli/test_cli.py
                 $<TARGET_FILE:cyberremesh>)

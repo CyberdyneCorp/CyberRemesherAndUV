@@ -19,10 +19,18 @@ from pathlib import Path
 
 BENCH_DIR = Path(__file__).resolve().parent
 MANIFEST = BENCH_DIR / "corpus.json"
+ACCEPTANCE_MANIFEST = BENCH_DIR / "acceptance_corpus.json"
+REQUIRED_ACCEPTANCE_CATEGORIES = {
+    "organic", "cad-feature", "open-boundary", "multiple-components",
+    "extreme-scale", "malformed-input",
+}
 
 
 def _write_obj(path: Path, verts: list, faces: list) -> None:
-    with path.open("w") as f:
+    # Hashes in acceptance_corpus.json describe bytes, not platform text-mode
+    # newline conversion. Force LF so the generated corpus is identical on
+    # Windows, macOS and Linux.
+    with path.open("w", newline="\n") as f:
         for v in verts:
             f.write(f"v {v[0]:.9g} {v[1]:.9g} {v[2]:.9g}\n")
         for face in faces:
@@ -139,11 +147,48 @@ def _cylinder(segments: int = 48, height_divs: int = 12) -> tuple[list, list]:
     return verts, faces
 
 
+def _open_patch() -> tuple[list, list]:
+    return ([(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (1.0, 1.0, 0.0), (0.0, 1.0, 0.0)],
+            [(0, 1, 2), (0, 2, 3)])
+
+
+def _translated_sphere(offset: tuple[float, float, float]) -> tuple[list, list]:
+    vertices, faces = _sphere(rings=12, segments=18)
+    return ([tuple(value + offset[axis] for axis, value in enumerate(vertex))
+             for vertex in vertices], faces)
+
+
+def _multi_component() -> tuple[list, list]:
+    left, left_faces = _translated_sphere((-1.5, 0.0, 0.0))
+    right, right_faces = _translated_sphere((1.5, 0.0, 0.0))
+    return left + right, left_faces + [tuple(index + len(left) for index in face)
+                                       for face in right_faces]
+
+
+def _large_coordinates() -> tuple[list, list]:
+    # A 10^4 translation is large relative to the unit-scale fixtures while
+    # retaining enough float32 mantissa precision for the current solver's
+    # local geometric predicates. Larger absolute coordinates are tracked as
+    # a solver-range improvement, not silently treated as a passing corpus
+    # case after their small-scale features collapse.
+    return _translated_sphere((10_000.0, 10_000.0, 10_000.0))
+
+
 GENERATED = {
     "sphere": (_sphere, 800),        # name -> (builder, default target quads)
     "box_sharp": (_box, 600),
     "torus": (_torus, 700),
     "cylinder": (_cylinder, 600),
+}
+
+ACCEPTANCE_GENERATORS = {
+    "sphere": _sphere,
+    "box": _box,
+    "torus": _torus,
+    "cylinder": _cylinder,
+    "open_patch": _open_patch,
+    "multi_component": _multi_component,
+    "large_coordinates": _large_coordinates,
 }
 
 
@@ -156,6 +201,56 @@ def generated_meshes(cache_dir: Path) -> list[dict]:
             verts, faces = builder()
             _write_obj(path, verts, faces)
         entries.append({"name": name, "path": path, "target_quads": target_quads})
+    return entries
+
+
+def acceptance_meshes(cache_dir: Path) -> list[dict]:
+    """Materialize the versioned offline acceptance corpus without a network."""
+    manifest = json.loads(ACCEPTANCE_MANIFEST.read_text())
+    if manifest.get("schema_version") != 1:
+        raise RuntimeError("unsupported acceptance corpus schema")
+    fixtures = manifest.get("fixtures")
+    if not isinstance(fixtures, list):
+        raise RuntimeError("acceptance corpus fixtures must be a list")
+    names: set[str] = set()
+    categories: set[str] = set()
+    for item in fixtures:
+        required = {"name", "category", "generator", "target_quads", "expected_input", "sha256"}
+        missing = required - set(item)
+        if missing:
+            raise RuntimeError(f"acceptance fixture missing fields: {sorted(missing)}")
+        if item["name"] in names:
+            raise RuntimeError(f"duplicate acceptance fixture: {item['name']}")
+        if item["expected_input"] not in {"accepted", "rejected"}:
+            raise RuntimeError(f"{item['name']}: invalid expected_input")
+        if len(item["sha256"]) != 64:
+            raise RuntimeError(f"{item['name']}: sha256 must be pinned")
+        names.add(item["name"])
+        categories.add(item["category"])
+    missing_categories = REQUIRED_ACCEPTANCE_CATEGORIES - categories
+    if missing_categories:
+        raise RuntimeError(f"acceptance corpus missing categories: {sorted(missing_categories)}")
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    entries = []
+    for item in fixtures:
+        path = cache_dir / f"{item['name']}.obj"
+        generator = item["generator"]
+        if generator == "invalid_index":
+            path.write_text("v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 4\n", newline="\n")
+        else:
+            builder = ACCEPTANCE_GENERATORS.get(generator)
+            if builder is None:
+                raise RuntimeError(f"unknown acceptance generator: {generator}")
+            vertices, faces = builder()
+            _write_obj(path, vertices, faces)
+        digest = _sha256(path)
+        expected = item.get("sha256")
+        if expected is not None and digest != expected:
+            raise RuntimeError(
+                f"{item['name']}: generated content hash changed "
+                f"(got {digest}, expected {expected})"
+            )
+        entries.append({**item, "path": path, "sha256": digest})
     return entries
 
 
