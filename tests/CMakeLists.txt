@@ -231,6 +231,10 @@ if(Python3_FOUND)
         COMMAND ${Python3_EXECUTABLE}
                 ${CMAKE_CURRENT_SOURCE_DIR}/packaging/test_swift_abi_parity.py)
 
+    add_test(NAME ipados_remesh_cancellation
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/packaging/test_ipados_remesh_cancellation.py)
+
     # The checked-in manifest combines source-level type identities with
     # layouts measured by this exact compiler.  It must run on every supported
     # architecture: a manifest generated on one host is evidence, not a

@@ -160,16 +160,32 @@ final class RemeshControlBox {
     private let progressContinuation: AsyncStream<Double>.Continuation
     private let lock = NSLock()
     private var cancelled = false
+    private var finished = false
+    private var progress = 0.0
 
     init(progressContinuation: AsyncStream<Double>.Continuation) {
         self.progressContinuation = progressContinuation
     }
 
     func reportProgress(_ value: Double) {
-        progressContinuation.yield(value)
+        lock.lock()
+        guard !finished else {
+            lock.unlock()
+            return
+        }
+        progress = max(progress, min(1.0, value))
+        progressContinuation.yield(progress)
+        lock.unlock()
     }
 
     func finishProgress() {
+        lock.lock()
+        guard !finished else {
+            lock.unlock()
+            return
+        }
+        finished = true
+        lock.unlock()
         progressContinuation.finish()
     }
 
@@ -183,6 +199,114 @@ final class RemeshControlBox {
         lock.lock()
         defer { lock.unlock() }
         return cancelled
+    }
+}
+
+/// A lock-backed, single-execution asynchronous job.
+///
+/// This deliberately uses a lock rather than an actor: the C ABI calls the
+/// cancellation and progress bridges synchronously from native worker threads.
+/// The lock protects lifecycle transitions and continuation ownership without
+/// requiring those callbacks to suspend.
+final class RemeshJob<Value>: @unchecked Sendable {
+    private enum State {
+        case created
+        case running
+        case cancelling
+        case finished(Result<Value, Error>)
+    }
+
+    private let lock = NSLock()
+    private let work: () -> Result<Value, Error>
+    private let didFinish: () -> Void
+    private let requestCancellation: () -> Void
+    private var state: State = .created
+    private var workerStarted = false
+    private var waiters: [CheckedContinuation<Value, Error>] = []
+
+    init(
+        work: @escaping () -> Result<Value, Error>,
+        didFinish: @escaping () -> Void,
+        requestCancellation: @escaping () -> Void
+    ) {
+        self.work = work
+        self.didFinish = didFinish
+        self.requestCancellation = requestCancellation
+    }
+
+    func value() async throws -> Value {
+        try await withTaskCancellationHandler(operation: {
+            try await waitForValue()
+        }, onCancel: {
+            cancel()
+        })
+    }
+
+    func cancel() {
+        lock.lock()
+        switch state {
+        case .finished:
+            lock.unlock()
+            return
+        case .created, .running:
+            state = .cancelling
+        case .cancelling:
+            lock.unlock()
+            return
+        }
+        lock.unlock()
+        requestCancellation()
+    }
+
+    private func waitForValue() async throws -> Value {
+        try await withCheckedThrowingContinuation { continuation in
+            var terminal: Result<Value, Error>?
+            var start = false
+
+            lock.lock()
+            switch state {
+            case .finished(let result):
+                terminal = result
+            case .created:
+                state = .running
+                waiters.append(continuation)
+                workerStarted = true
+                start = true
+            case .running:
+                waiters.append(continuation)
+            case .cancelling:
+                waiters.append(continuation)
+                if !workerStarted {
+                    workerStarted = true
+                    start = true
+                }
+            }
+            lock.unlock()
+
+            if let terminal {
+                continuation.resume(with: terminal)
+            } else if start {
+                Thread.detachNewThread { [self] in
+                    finish(work())
+                }
+            }
+        }
+    }
+
+    private func finish(_ result: Result<Value, Error>) {
+        lock.lock()
+        guard case .finished = state else {
+            state = .finished(result)
+            let pending = waiters
+            waiters.removeAll(keepingCapacity: false)
+            lock.unlock()
+            didFinish()
+            for waiter in pending {
+                waiter.resume(with: result)
+            }
+            return
+        }
+        lock.unlock()
     }
 }
 
@@ -208,14 +332,14 @@ let remeshCancelCb: CyberCancelCb = { user in
 /// Task { for await p in op.progress { updateBar(p) } }
 /// let quadMesh = try await op.value()   // throws .cancelled if the Task is cancelled
 /// ```
+/// The input mesh is borrowed by the operation and retained until its terminal
+/// result. Callers must not mutate that mesh while the operation is active.
 public final class RemeshOperation {
     /// Monotonic-ish progress in `0...1`; finishes when the operation ends.
     public let progress: AsyncStream<Double>
 
-    private let input: Mesh
-    private let params: RemeshParameters
-    private let limits: RemeshLimits?
     private let box: RemeshControlBox
+    private let job: RemeshJob<Mesh>
 
     init(input: Mesh, params: RemeshParameters, limits: RemeshLimits?) {
         let (stream, continuation) = AsyncStream<Double>.makeStream(
@@ -223,32 +347,31 @@ public final class RemeshOperation {
             bufferingPolicy: .bufferingNewest(1)
         )
         self.progress = stream
-        self.input = input
-        self.params = params
-        self.limits = limits
         self.box = RemeshControlBox(progressContinuation: continuation)
+        let box = self.box
+        self.job = RemeshJob(
+            work: { RemeshOperation.run(input: input, params: params, limits: limits, box: box) },
+            didFinish: { box.finishProgress() },
+            requestCancellation: { box.requestCancel() }
+        )
+    }
+
+    /// Requests cooperative cancellation of this job.
+    ///
+    /// The request is idempotent. It does not release the job's callbacks or
+    /// input early: the native worker owns those until it reports its terminal
+    /// result. Dropping a `RemeshOperation` does not itself request cancellation.
+    public func cancel() {
+        job.cancel()
     }
 
     /// Awaits the remeshed result, bridging `Task` cancellation to the engine.
     ///
+    /// Calling this method more than once joins one native execution. Every
+    /// awaiter receives the same independently-owned result or terminal error.
     /// - Throws: ``CyberError`` (`.cancelled` on cooperative cancellation).
     public func value() async throws -> Mesh {
-        try await withTaskCancellationHandler {
-            try await withCheckedThrowingContinuation {
-                (continuation: CheckedContinuation<Mesh, Error>) in
-                let input = self.input
-                let params = self.params
-                let limits = self.limits
-                let box = self.box
-                Thread.detachNewThread {
-                    let result = RemeshOperation.run(input: input, params: params, limits: limits, box: box)
-                    box.finishProgress()
-                    continuation.resume(with: result)
-                }
-            }
-        } onCancel: {
-            self.box.requestCancel()
-        }
+        try await job.value()
     }
 
     /// Runs the blocking C call. Executed on a dedicated thread.
