@@ -77,6 +77,9 @@ struct ImportOptions {
     // a workstation or useless on a phone. An embedder sets its own; a ceiling
     // that is never reached is not a ceiling.
     std::size_t maxVertices = 0;
+    // Maximum accepted output faces. Binary STL can enforce this from its
+    // header before constructing its weld map or mesh.
+    std::size_t maxFaces = 0;
     // Refuse an input before its format parser reads or allocates for it. This
     // is a hard input-byte budget, distinct from the decoded mesh budget.
     std::size_t maxInputBytes = 0;

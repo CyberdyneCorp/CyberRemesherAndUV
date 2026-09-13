@@ -175,6 +175,16 @@ TEST_CASE("corrupt STL is a typed ParseError") {
     REQUIRE(result.error().code == io::ErrorCode::ParseError);
 }
 
+TEST_CASE("binary STL face ceiling rejects the header declaration before import") {
+    const fs::path path = tempDir() / "over_face_budget.stl";
+    REQUIRE(io::exportMesh(makeCorpusCube(), path).ok());
+    io::ImportOptions options;
+    options.maxFaces = 1;
+    const auto result = io::importMesh(path, options);
+    REQUIRE(!result.ok());
+    CHECK(result.error().code == io::ErrorCode::ResourceLimit);
+}
+
 TEST_CASE("glTF round-trip preserves geometry, colors and UVs (.gltf and .glb)") {
     const Mesh cube = makeCorpusCube();
     for (const char* name : {"cube.gltf", "cube.glb"}) {
