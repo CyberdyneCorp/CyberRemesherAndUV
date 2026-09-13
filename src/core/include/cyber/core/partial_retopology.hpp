@@ -50,6 +50,10 @@ struct PartialRetopologyResult {
     // `mesh`; exact-border mode preserves all source vertices by identity.
     std::vector<VertexId> sourceVertexToOutput;
     std::vector<SourceCorrespondence> correspondences;
+    // Attribute columns in domains where the first exact-border solver cannot
+    // derive every generated row. Names are `domain:name`; callers must choose
+    // a transfer policy rather than receiving silently defaulted data.
+    std::vector<std::string> untransferredAttributes;
     std::string reason;
 };
 

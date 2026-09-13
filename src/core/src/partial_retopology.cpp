@@ -88,6 +88,17 @@ void transferVertexAttributes(const Mesh& source, Mesh& output,
         });
 }
 
+void listUntransferredAttributes(const Mesh& source, PartialRetopologyResult& result) {
+    const auto listDomain = [&](const char* domain, const AttributeSet& attributes) {
+        attributes.forEachColumn([&](const std::string& name, const auto&) {
+            result.untransferredAttributes.push_back(std::string(domain) + ":" + name);
+        });
+    };
+    listDomain("edge", source.edgeAttributes());
+    listDomain("face", source.faceAttributes());
+    listDomain("corner", source.cornerAttributes());
+}
+
 }  // namespace
 
 PartialRetopologyAnalysis analyzePartialRetopology(const Mesh& source,
@@ -199,6 +210,7 @@ PartialRetopologyResult partialRetopologize(const Mesh& source,
         result.reason = result.analysis.reason;
         return result;
     }
+    listUntransferredAttributes(source, result);
 
     const std::vector<VertexId>& boundary = result.analysis.boundary;
     Vec3 center;

@@ -58,6 +58,7 @@ TEST_CASE("partial retopology replaces only the selected region") {
     Mesh source = makePatch();
     auto& weights = source.vertexAttributes().create<float>("weight");
     auto& groups = source.vertexAttributes().create<std::int32_t>("group_id");
+    source.cornerAttributes().create<cyber::Vec2>("uv");
     for (Index vertex = 0; vertex < source.vertexCapacity(); ++vertex) {
         weights[vertex] = static_cast<float>(vertex);
         groups[vertex] = static_cast<std::int32_t>(vertex);
@@ -81,6 +82,8 @@ TEST_CASE("partial retopology replaces only the selected region") {
     REQUIRE(result.correspondences.size() == 4);
     REQUIRE(result.sourceVertexToOutput.size() == source.vertexCapacity());
     CHECK(result.sourceVertexToOutput[6] == cyber::VertexId{6});
+    REQUIRE(result.untransferredAttributes.size() == 1);
+    CHECK(result.untransferredAttributes[0] == "corner:uv");
     const auto* transferredWeights = result.mesh.vertexAttributes().find<float>("weight");
     const auto* transferredGroups = result.mesh.vertexAttributes().find<std::int32_t>("group_id");
     REQUIRE(transferredWeights != nullptr);
