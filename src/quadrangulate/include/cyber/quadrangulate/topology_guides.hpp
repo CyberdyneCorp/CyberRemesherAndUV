@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <string>
 #include <vector>
 
 #include "cyber/core/guidance.hpp"
@@ -72,5 +73,40 @@ struct GuideAdherence {
 // `maxAngleDegrees` is how far it may deviate from the guide's local tangent.
 [[nodiscard]] GuideAdherence measureGuideAdherence(const Mesh& output, const FlowGuide& guide,
                                                    float tolerance, float maxAngleDegrees = 45.0f);
+
+// A face-domain int32 `group_id` or `material_id` column declares a semantic
+// boundary. These records turn each non-branching boundary component into the
+// same explicit curve representation used for artist topology guides. `id` is
+// stable for a fixed mesh (attribute name plus the component's least edge id),
+// so callers can correlate a final result without relying on traversal order.
+// Branching components are rejected rather than quietly split into unrelated
+// curves, because a hard semantic request must not be weakened invisibly.
+struct SemanticBoundaryRequest {
+    std::string id;
+    FlowGuide guide;
+    std::size_t sourceEdges = 0;
+    std::string rejectionReason;
+};
+
+[[nodiscard]] std::vector<SemanticBoundaryRequest> collectSemanticBoundaryRequests(
+    const Mesh& mesh);
+
+// Final-mesh evidence for one semantic request. A closed request is realized
+// only if its sampled guide coverage is complete AND an aligned output edge
+// component itself closes; coverage alone can otherwise be assembled from
+// disconnected fragments.
+struct SemanticBoundaryAdherence {
+    std::string id;
+    std::size_t sourceEdges = 0;
+    bool requestedClosed = false;
+    bool outputClosed = false;
+    bool realized = false;
+    GuideAdherence adherence;
+    std::string reason;
+};
+
+[[nodiscard]] SemanticBoundaryAdherence measureSemanticBoundaryAdherence(
+    const Mesh& output, const SemanticBoundaryRequest& request, float tolerance,
+    float maxAngleDegrees = 45.0f);
 
 }  // namespace cyber::remesh

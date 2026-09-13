@@ -3,7 +3,9 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <map>
 #include <queue>
+#include <string>
 #include <utility>
 
 namespace cyber::remesh {
@@ -107,6 +109,177 @@ float distanceToGuide(const std::vector<Vec3>& points, bool closed, Vec3 p) {
         best = std::min(best, length(p - (a + ab * t)));
     }
     return best;
+}
+
+std::vector<EdgeId> semanticEdges(const Mesh& mesh, const std::vector<std::int32_t>& values) {
+    std::vector<EdgeId> out;
+    for (Index edge = 0; edge < mesh.edgeCapacity(); ++edge) {
+        const EdgeId id{edge};
+        if (!mesh.isAlive(id) || mesh.edgeFaceCount(id) != 2) {
+            continue;
+        }
+        const auto faces = mesh.edgeFaces(id);
+        if (faces[0].value < values.size() && faces[1].value < values.size() &&
+            values[faces[0].value] != values[faces[1].value]) {
+            out.push_back(id);
+        }
+    }
+    return out;
+}
+
+std::vector<SemanticBoundaryRequest> collectAttributeBoundaries(
+    const Mesh& mesh, const std::string& name, const std::vector<std::int32_t>& values) {
+    std::vector<SemanticBoundaryRequest> out;
+    const std::vector<EdgeId> edges = semanticEdges(mesh, values);
+    std::vector<char> seen(mesh.edgeCapacity(), 0);
+    for (const EdgeId seed : edges) {
+        if (seen[seed.value]) {
+            continue;
+        }
+        std::vector<EdgeId> component;
+        std::map<Index, std::vector<EdgeId>> incident;
+        std::queue<EdgeId> pending;
+        pending.push(seed);
+        seen[seed.value] = 1;
+        while (!pending.empty()) {
+            const EdgeId edge = pending.front();
+            pending.pop();
+            component.push_back(edge);
+            const auto [a, b] = mesh.edgeVertices(edge);
+            incident[a.value].push_back(edge);
+            incident[b.value].push_back(edge);
+            for (const VertexId vertex : {a, b}) {
+                for (const EdgeId next : mesh.vertexEdges(vertex)) {
+                    if (next.value >= seen.size() || seen[next.value] ||
+                        std::find(edges.begin(), edges.end(), next) == edges.end()) {
+                        continue;
+                    }
+                    seen[next.value] = 1;
+                    pending.push(next);
+                }
+            }
+        }
+        std::sort(component.begin(), component.end(),
+                  [](EdgeId a, EdgeId b) { return a.value < b.value; });
+        SemanticBoundaryRequest request;
+        request.id = name + ":" + std::to_string(component.front().value);
+        request.sourceEdges = component.size();
+        const auto endpoint = std::find_if(incident.begin(), incident.end(),
+                                           [](const auto& item) { return item.second.size() == 1; });
+        const bool open = endpoint != incident.end();
+        const bool degreesValid = std::all_of(
+            incident.begin(), incident.end(), [open](const auto& item) {
+                return item.second.size() == 2 || (open && item.second.size() == 1);
+            });
+        const std::size_t endpoints = static_cast<std::size_t>(std::count_if(
+            incident.begin(), incident.end(), [](const auto& item) { return item.second.size() == 1; }));
+        if (!degreesValid || (open && endpoints != 2)) {
+            request.rejectionReason = "semantic boundary component branches";
+            out.push_back(std::move(request));
+            continue;
+        }
+        VertexId current{open ? endpoint->first : incident.begin()->first};
+        EdgeId previous{};
+        request.guide.mode = GuideMode::Topology;
+        request.guide.closed = !open;
+        request.guide.points.push_back(mesh.position(current));
+        for (std::size_t step = 0; step < component.size(); ++step) {
+            const auto& choices = incident[current.value];
+            const auto nextIt = std::find_if(choices.begin(), choices.end(),
+                                             [previous](EdgeId edge) { return edge != previous; });
+            if (nextIt == choices.end()) {
+                request.rejectionReason = "semantic boundary traversal stopped early";
+                request.guide.points.clear();
+                break;
+            }
+            const EdgeId next = *nextIt;
+            const auto [a, b] = mesh.edgeVertices(next);
+            const VertexId following = a == current ? b : a;
+            request.guide.points.push_back(mesh.position(following));
+            previous = next;
+            current = following;
+            if (request.guide.closed && current == VertexId{incident.begin()->first}) {
+                break;
+            }
+        }
+        if (request.guide.closed && request.guide.points.size() > 1) {
+            // FlowGuide closes by wrapping its final segment to point zero. Do
+            // not store point zero twice: the duplicate would manufacture a
+            // degenerate segment for every consumer of this curve.
+            request.guide.points.pop_back();
+        }
+        const std::size_t expectedPoints =
+            request.guide.closed ? component.size() : component.size() + 1;
+        if (request.rejectionReason.empty() && request.guide.points.size() != expectedPoints) {
+            request.rejectionReason = "semantic boundary traversal did not cover its component";
+            request.guide.points.clear();
+        }
+        out.push_back(std::move(request));
+    }
+    return out;
+}
+
+bool edgeAlignedToGuide(const Mesh& mesh, EdgeId edge, const FlowGuide& guide, float tolerance,
+                        float cosLimit) {
+    const auto [a, b] = mesh.edgeVertices(edge);
+    const Vec3 pa = mesh.position(a);
+    const Vec3 pb = mesh.position(b);
+    const Vec3 midpoint = (pa + pb) * 0.5f;
+    const Vec3 direction = normalized(pb - pa);
+    const std::size_t segments = guide.closed ? guide.points.size() : guide.points.size() - 1;
+    for (std::size_t i = 0; i < segments; ++i) {
+        const Vec3 first = guide.points[i];
+        const Vec3 second = guide.points[(i + 1) % guide.points.size()];
+        const Vec3 segment = second - first;
+        const float len2 = dot(segment, segment);
+        const float t = len2 > 1e-20f ? std::clamp(dot(midpoint - first, segment) / len2, 0.0f, 1.0f)
+                                      : 0.0f;
+        if (length(midpoint - (first + segment * t)) <= tolerance &&
+            std::abs(dot(direction, normalized(segment))) >= cosLimit) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool hasClosedAlignedComponent(const Mesh& mesh, const FlowGuide& guide, float tolerance,
+                               float maxAngleDegrees) {
+    const float cosLimit = std::cos(maxAngleDegrees * 3.14159265358979323846f / 180.0f);
+    std::map<Index, std::vector<Index>> graph;
+    for (Index edge = 0; edge < mesh.edgeCapacity(); ++edge) {
+        const EdgeId id{edge};
+        if (!mesh.isAlive(id) || !edgeAlignedToGuide(mesh, id, guide, tolerance, cosLimit)) {
+            continue;
+        }
+        const auto [a, b] = mesh.edgeVertices(id);
+        graph[a.value].push_back(b.value);
+        graph[b.value].push_back(a.value);
+    }
+    std::map<Index, bool> visited;
+    for (const auto& [seed, _] : graph) {
+        if (visited[seed]) {
+            continue;
+        }
+        bool closed = true;
+        std::queue<Index> pending;
+        pending.push(seed);
+        visited[seed] = true;
+        while (!pending.empty()) {
+            const Index vertex = pending.front();
+            pending.pop();
+            closed = closed && graph[vertex].size() == 2;
+            for (const Index next : graph[vertex]) {
+                if (!visited[next]) {
+                    visited[next] = true;
+                    pending.push(next);
+                }
+            }
+        }
+        if (closed) {
+            return true;
+        }
+    }
+    return false;
 }
 
 }  // namespace
@@ -258,6 +431,44 @@ GuideAdherence measureGuideAdherence(const Mesh& output, const FlowGuide& guide,
     }
     out.meanDistance = sum / static_cast<float>(samples.size());
     out.edgeChainCoverage = static_cast<float>(covered) / static_cast<float>(samples.size());
+    return out;
+}
+
+std::vector<SemanticBoundaryRequest> collectSemanticBoundaryRequests(const Mesh& mesh) {
+    std::vector<SemanticBoundaryRequest> out;
+    for (const char* name : {"group_id", "material_id"}) {
+        const auto* values = mesh.faceAttributes().find<std::int32_t>(name);
+        if (values == nullptr) {
+            continue;
+        }
+        std::vector<SemanticBoundaryRequest> requests =
+            collectAttributeBoundaries(mesh, name, *values);
+        out.insert(out.end(), std::make_move_iterator(requests.begin()),
+                   std::make_move_iterator(requests.end()));
+    }
+    return out;
+}
+
+SemanticBoundaryAdherence measureSemanticBoundaryAdherence(const Mesh& output,
+                                                           const SemanticBoundaryRequest& request,
+                                                           float tolerance,
+                                                           float maxAngleDegrees) {
+    SemanticBoundaryAdherence out;
+    out.id = request.id;
+    out.sourceEdges = request.sourceEdges;
+    out.requestedClosed = request.guide.closed;
+    if (!request.rejectionReason.empty()) {
+        out.reason = request.rejectionReason;
+        return out;
+    }
+    out.adherence = measureGuideAdherence(output, request.guide, tolerance, maxAngleDegrees);
+    out.outputClosed = !out.requestedClosed ||
+                       hasClosedAlignedComponent(output, request.guide, tolerance, maxAngleDegrees);
+    out.realized = out.adherence.edgeChainCoverage >= 0.999f && out.outputClosed;
+    if (!out.realized) {
+        out.reason = out.outputClosed ? "output edge-chain coverage is incomplete"
+                                      : "output edge chain does not close";
+    }
     return out;
 }
 

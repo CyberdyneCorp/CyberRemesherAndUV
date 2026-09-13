@@ -1,5 +1,6 @@
 #include <doctest.h>
 
+#include <cstdint>
 #include <vector>
 
 #include "cyber/core/guidance.hpp"
@@ -17,6 +18,8 @@ using cyber::remesh::insertGuideArcs;
 using cyber::remesh::LayoutArcKind;
 using cyber::remesh::LayoutNodeKind;
 using cyber::remesh::measureGuideAdherence;
+using cyber::remesh::collectSemanticBoundaryRequests;
+using cyber::remesh::measureSemanticBoundaryAdherence;
 using cyber::remesh::projectGuideToPath;
 using cyber::remesh::TopologyLayout;
 
@@ -173,6 +176,43 @@ TEST_CASE("guide adherence is measured against output EDGES, not vertices") {
     // the nearest edge of any orientation is only a quarter cell away. A metric
     // built on proximity alone would have called this a good result.
     CHECK(missed.meanDistance < 0.3f);
+}
+
+TEST_CASE("semantic face boundary becomes an open final-mesh constraint") {
+    Mesh mesh = grid(4);
+    auto& groups = mesh.faceAttributes().create<std::int32_t>("group_id");
+    for (int y = 0; y < 4; ++y) {
+        for (int x = 0; x < 4; ++x) {
+            groups[static_cast<std::size_t>(y * 4 + x)] = x < 2 ? 0 : 1;
+        }
+    }
+
+    const auto requests = collectSemanticBoundaryRequests(mesh);
+    REQUIRE(requests.size() == 1);
+    CHECK(requests[0].id == "group_id:5");
+    CHECK_FALSE(requests[0].guide.closed);
+    CHECK(requests[0].sourceEdges == 4);
+    const auto result = measureSemanticBoundaryAdherence(mesh, requests[0], 0.05f);
+    CHECK(result.realized);
+    CHECK(result.adherence.edgeChainCoverage == doctest::Approx(1.0f));
+}
+
+TEST_CASE("semantic closed boundary requires an output closed chain") {
+    Mesh mesh = grid(4);
+    auto& materials = mesh.faceAttributes().create<std::int32_t>("material_id");
+    for (int y = 0; y < 4; ++y) {
+        for (int x = 0; x < 4; ++x) {
+            materials[static_cast<std::size_t>(y * 4 + x)] =
+                x >= 1 && x <= 2 && y >= 1 && y <= 2 ? 1 : 0;
+        }
+    }
+
+    const auto requests = collectSemanticBoundaryRequests(mesh);
+    REQUIRE(requests.size() == 1);
+    CHECK(requests[0].guide.closed);
+    const auto result = measureSemanticBoundaryAdherence(mesh, requests[0], 0.05f);
+    CHECK(result.outputClosed);
+    CHECK(result.realized);
 }
 
 TEST_CASE("guide mode defaults to orientation, so old guides are unchanged") {
