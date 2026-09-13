@@ -87,6 +87,14 @@ Result<ImportedMesh> importMesh(const std::filesystem::path& path, const ImportO
                          " vertices, over this host's ceiling of " +
                          std::to_string(options.maxVertices)};
     }
+    if (options.maxFaces > 0 && imported.ok() &&
+        imported.value().mesh.faceCount() > options.maxFaces) {
+        return Error{ErrorCode::ResourceLimit,
+                     "'" + path.string() + "' carries " +
+                         std::to_string(imported.value().mesh.faceCount()) +
+                         " faces, over this host's ceiling of " +
+                         std::to_string(options.maxFaces)};
+    }
     return imported;
 }
 
