@@ -261,6 +261,30 @@ TEST_CASE("symmetry detection rejects a deliberate asymmetric accessory") {
     CHECK(report.unmatchedVertices > 0);
 }
 
+TEST_CASE("symmetry detection reports a rotated plane without projecting it to an axis") {
+    Mesh mesh = centredGrid(3);
+    constexpr float angle = 0.61f;
+    const float cosine = std::cos(angle);
+    const float sine = std::sin(angle);
+    for (Index v = 0; v < mesh.vertexCapacity(); ++v) {
+        const VertexId id{v};
+        if (!mesh.isAlive(id)) {
+            continue;
+        }
+        Vec3 position = mesh.position(id);
+        position.z += 0.2f * position.y * position.y;
+        mesh.setPosition(id, Vec3{cosine * position.x - sine * position.y,
+                                  sine * position.x + cosine * position.y, position.z});
+    }
+
+    const auto report = detectSymmetry(mesh);
+    const Vec3 expectedNormal{cosine, sine, 0.0f};
+    CHECK(report.detected);
+    CHECK(report.axis == SymmetryAxis::None);
+    CHECK(std::abs(cyber::dot(report.plane.normal, expectedNormal)) > 0.999f);
+    CHECK(report.unmatchedSurfacePoints == 0);
+}
+
 TEST_CASE("mirroring is deterministic") {
     const Mesh mesh = centredGrid(4);
     const auto split = splitAtPlane(mesh, planeX(), true);

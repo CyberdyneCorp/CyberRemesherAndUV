@@ -180,10 +180,11 @@ void scoreSurface(const Mesh& mesh, const Plane& plane, float tolerance,
     }
 }
 
-SymmetryDetectionReport scoreAxis(const Mesh& mesh, SymmetryAxis axis, float tolerance) {
+SymmetryDetectionReport scorePlane(const Mesh& mesh, const Plane& plane, SymmetryAxis axis,
+                                   float tolerance) {
     SymmetryDetectionReport report;
     report.axis = axis;
-    report.plane = symmetryPlane(mesh, axis);
+    report.plane = plane;
     report.sampledVertices = mesh.vertexCount();
     report.matchTolerance = tolerance;
     const VertexGrid grid(mesh, tolerance);
@@ -226,6 +227,92 @@ SymmetryDetectionReport scoreAxis(const Mesh& mesh, SymmetryAxis axis, float tol
     return report;
 }
 
+Vec3 centroidOf(const Mesh& mesh, const Bounds& bounds) {
+    Vec3 centroid{};
+    for (Index v = 0; v < mesh.vertexCapacity(); ++v) {
+        const VertexId id{v};
+        if (mesh.isAlive(id)) {
+            centroid += mesh.position(id);
+        }
+    }
+    return centroid / static_cast<float>(bounds.vertices);
+}
+
+struct PrincipalAxes {
+    std::array<Vec3, 3> vectors{};
+    std::array<float, 3> values{};
+};
+
+PrincipalAxes principalAxes(const Mesh& mesh, const Bounds& bounds) {
+    const Vec3 centroid = centroidOf(mesh, bounds);
+    float covariance[3][3]{};
+    for (Index v = 0; v < mesh.vertexCapacity(); ++v) {
+        const VertexId id{v};
+        if (!mesh.isAlive(id)) {
+            continue;
+        }
+        const Vec3 p = mesh.position(id) - centroid;
+        const float values[3] = {p.x, p.y, p.z};
+        for (int row = 0; row < 3; ++row) {
+            for (int column = 0; column < 3; ++column) {
+                covariance[row][column] += values[row] * values[column];
+            }
+        }
+    }
+    float vectors[3][3] = {{1.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f}};
+    for (int iteration = 0; iteration < 12; ++iteration) {
+        int row = 0;
+        int column = 1;
+        for (int candidateRow = 0; candidateRow < 3; ++candidateRow) {
+            for (int candidateColumn = candidateRow + 1; candidateColumn < 3; ++candidateColumn) {
+                if (std::abs(covariance[candidateRow][candidateColumn]) >
+                    std::abs(covariance[row][column])) {
+                    row = candidateRow;
+                    column = candidateColumn;
+                }
+            }
+        }
+        if (std::abs(covariance[row][column]) <= 1e-7f) {
+            break;
+        }
+        const float angle = 0.5f * std::atan2(2.0f * covariance[row][column],
+                                              covariance[column][column] - covariance[row][row]);
+        const float cosine = std::cos(angle);
+        const float sine = std::sin(angle);
+        for (int i = 0; i < 3; ++i) {
+            const float left = covariance[i][row];
+            const float right = covariance[i][column];
+            covariance[i][row] = cosine * left - sine * right;
+            covariance[i][column] = sine * left + cosine * right;
+        }
+        for (int i = 0; i < 3; ++i) {
+            const float left = covariance[row][i];
+            const float right = covariance[column][i];
+            covariance[row][i] = cosine * left - sine * right;
+            covariance[column][i] = sine * left + cosine * right;
+            const float vectorLeft = vectors[i][row];
+            const float vectorRight = vectors[i][column];
+            vectors[i][row] = cosine * vectorLeft - sine * vectorRight;
+            vectors[i][column] = sine * vectorLeft + cosine * vectorRight;
+        }
+    }
+    PrincipalAxes result;
+    for (std::size_t i = 0; i < 3; ++i) {
+        result.values[i] = covariance[i][i];
+        result.vectors[i] = normalized(Vec3{vectors[0][i], vectors[1][i], vectors[2][i]});
+    }
+    return result;
+}
+
+bool duplicatesPlane(const std::vector<Plane>& candidates, const Plane& candidate) {
+    for (const Plane& existing : candidates) {
+        if (std::abs(dot(normalized(existing.normal), normalized(candidate.normal))) > 0.9999f) {
+            return true;
+        }
+    }
+    return false;
+}
+
 }  // namespace
 
 SymmetryDetectionReport detectSymmetry(const Mesh& mesh) {
@@ -234,9 +321,29 @@ SymmetryDetectionReport detectSymmetry(const Mesh& mesh) {
         return {};
     }
     const float tolerance = detectionTolerance(mesh, bounds);
-    std::array<SymmetryDetectionReport, 3> candidates{
-        scoreAxis(mesh, SymmetryAxis::X, tolerance), scoreAxis(mesh, SymmetryAxis::Y, tolerance),
-        scoreAxis(mesh, SymmetryAxis::Z, tolerance)};
+    std::vector<Plane> planes{symmetryPlane(mesh, SymmetryAxis::X),
+                              symmetryPlane(mesh, SymmetryAxis::Y),
+                              symmetryPlane(mesh, SymmetryAxis::Z)};
+    std::vector<SymmetryAxis> axes{SymmetryAxis::X, SymmetryAxis::Y, SymmetryAxis::Z};
+    const PrincipalAxes pca = principalAxes(mesh, bounds);
+    const float magnitude = std::max({std::abs(pca.values[0]), std::abs(pca.values[1]),
+                                      std::abs(pca.values[2]), 1e-8f});
+    for (std::size_t i = 0; i < 3; ++i) {
+        bool unique = true;
+        for (std::size_t j = 0; j < 3; ++j) {
+            unique = unique && (i == j || std::abs(pca.values[i] - pca.values[j]) > magnitude * 1e-4f);
+        }
+        const Plane candidate{centroidOf(mesh, bounds), pca.vectors[i]};
+        if (unique && !duplicatesPlane(planes, candidate)) {
+            planes.push_back(candidate);
+            axes.push_back(SymmetryAxis::None);
+        }
+    }
+    std::vector<SymmetryDetectionReport> candidates;
+    candidates.reserve(planes.size());
+    for (std::size_t i = 0; i < planes.size(); ++i) {
+        candidates.push_back(scorePlane(mesh, planes[i], axes[i], tolerance));
+    }
     std::sort(candidates.begin(), candidates.end(),
               [](const auto& a, const auto& b) { return a.confidence > b.confidence; });
     SymmetryDetectionReport result = candidates.front();

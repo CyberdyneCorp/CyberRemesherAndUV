@@ -331,10 +331,11 @@ candidate selection, forced symmetry (seam included), the binding surface for al
 of it and the CLI's own report and export are **done**.
 
 Still open, and each for a stated reason rather than for lack of attention:
-automatic symmetry detection currently provides a **detect-only, axis-aligned
-C++ advisory** with vertex diagnostics plus reflected surface and normal
-measurements; it neither mutates a mesh nor selects forced symmetry, and
-arbitrary-plane detection and corpus calibration remain open; semantic
+automatic symmetry detection currently provides a **detect-only C++ advisory**
+with explicit-axis and unambiguous PCA plane hypotheses, vertex diagnostics,
+and reflected surface/normal measurements; it neither mutates a mesh nor
+selects forced symmetry. Arbitrary detected planes report no forced axis, and
+corpus calibration remains open; semantic
 group/material boundaries now travel through the typed indexed input, become
 hard features, and return per-component final-mesh evidence in C, Python and
 Swift; a `balanced` quality mode is **deliberately not built** — with five corpus

@@ -35,8 +35,9 @@ enum class SymmetryAxis : std::uint8_t {
 
 // An advisory result from symmetry analysis. Detection is deliberately
 // axis-aligned in this first release: callers must not mistake a PCA guess for
-// support for arbitrary rotated planes. It never changes the mesh and never
-// selects forced symmetry for a remesh. Vertex measurements are useful for
+// forced-symmetry support on arbitrary rotated planes. An arbitrary detected
+// plane reports axis None with detected true. It never changes the mesh and
+// never selects forced symmetry for a remesh. Vertex measurements are useful for
 // diagnosing exact correspondence, while surface samples permit differently
 // tessellated but geometrically matching halves to be assessed fairly.
 struct SymmetryDetectionReport {
@@ -60,8 +61,8 @@ struct SymmetryDetectionReport {
     bool ambiguous = false;
 };
 
-// Analyse X/Y/Z midplanes and return the strongest geometric symmetry
-// hypothesis. Vertex partners are found by nearest-within-tolerance lookup,
+// Analyse X/Y/Z midplanes plus unambiguous PCA hypotheses and return the
+// strongest geometric symmetry hypothesis. Vertex partners are found by nearest-within-tolerance lookup,
 // never exact or quantized-key equality. Face-centroid samples are reflected
 // and queried against the input surface, and their reflected normals are
 // compared with the hit face normals. The tolerance scales with the model's

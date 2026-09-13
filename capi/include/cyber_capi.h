@@ -557,7 +557,8 @@ typedef struct CyberZRemesherReport {
 /* Advisory-only automatic symmetry analysis.  `detected` never changes the
  * mesh and never enables forced symmetry; applications must opt in to a later
  * remesh request themselves.  Version 1 initially evaluates axis-aligned
- * planes only (axis: 0 none, 1 X, 2 Y, 3 Z). */
+ * planes plus unambiguous PCA-derived planes. `axis` is 0 for an arbitrary
+ * detected plane (or for no detection), and 1 X, 2 Y, 3 Z otherwise. */
 typedef struct CyberSymmetryDetectionReport {
     int detected;
     int axis;
