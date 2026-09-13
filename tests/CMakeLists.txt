@@ -303,7 +303,16 @@ if(CYBER_BUILD_CLI AND Python3_FOUND)
                     --cyber-binary $<TARGET_FILE:cyberremesh>
                     --cache-dir ${PROJECT_BINARY_DIR}/acceptance-cache
                     --results ${PROJECT_BINARY_DIR}/acceptance-results.json)
-        set_tests_properties(acceptance_corpus PROPERTIES TIMEOUT 900)
+        # Corpus baselines are solver-specific. The ordinary CI matrix builds
+        # the dependency-free native path, while the checked-in baselines are
+        # recorded on the shipped native+geogram configuration. bench.py uses
+        # 77 to state that such a comparison has no meaning; report that as a
+        # visible CTest skip here. hardening.yml installs the matching solver
+        # and rejects this skip, so the actual release-quality gate remains
+        # mandatory rather than being hidden by the broader build matrix.
+        set_tests_properties(acceptance_corpus PROPERTIES
+            TIMEOUT 900
+            SKIP_RETURN_CODE 77)
     endif()
     else()
         message(STATUS "bench metric and acceptance tests skipped: numpy/scipy unavailable")
