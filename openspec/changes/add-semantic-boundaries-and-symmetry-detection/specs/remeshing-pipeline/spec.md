@@ -4,11 +4,14 @@
 
 ### Requirement: Semantic boundaries are preserved as edge loops
 
-The pipeline SHALL accept per-face group / material ids through a dedicated
-entry point, and SHALL treat the edges where adjacent faces disagree as feature
+The pipeline SHALL accept per-face group / material ids through the typed bulk
+indexed-mesh descriptor: a face-domain `int32` column named `group_id` or
+`material_id`. It SHALL treat the edges where adjacent faces disagree as feature
 edges — pinned by the seamless solve, present in the topology layout, and
 honoured by the sizing field — so a material boundary comes back as an edge loop
-rather than being crossed by quads.
+rather than being crossed by quads. OBJ `g` / `usemtl` records are not imported
+as semantic ids; callers needing that identity SHALL use the explicit typed
+descriptor rather than relying on an implicit file-format mapping.
 
 #### Scenario: A material boundary survives remeshing
 

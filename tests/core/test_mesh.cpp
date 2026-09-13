@@ -2,6 +2,7 @@
 
 #include <array>
 #include <chrono>
+#include <cstdint>
 #include <vector>
 
 #include "cyber/core/mesh.hpp"
@@ -113,6 +114,30 @@ TEST_CASE("flat plane has no feature edges at 90 degrees") {
     Mesh mesh = makeQuadAndTri();
     mesh.tagFeatureEdges(90.0f);
     // Interior shared edge is flat -> not a feature; boundary edges are.
+    const auto shared = mesh.edgeBetween(VertexId{1}, VertexId{2});
+    REQUIRE(!mesh.isFeatureEdge(shared));
+}
+
+TEST_CASE("semantic face ids retain a coplanar group boundary as a feature") {
+    Mesh mesh = makeQuadAndTri();
+    auto& groups = mesh.faceAttributes().create<std::int32_t>("group_id");
+    groups[0] = 7;
+    groups[1] = 9;
+
+    mesh.tagFeatureEdges(90.0f);
+
+    const auto shared = mesh.edgeBetween(VertexId{1}, VertexId{2});
+    REQUIRE(mesh.isFeatureEdge(shared));
+}
+
+TEST_CASE("matching semantic face ids do not invent a coplanar feature") {
+    Mesh mesh = makeQuadAndTri();
+    auto& materials = mesh.faceAttributes().create<std::int32_t>("material_id");
+    materials[0] = 4;
+    materials[1] = 4;
+
+    mesh.tagFeatureEdges(90.0f);
+
     const auto shared = mesh.edgeBetween(VertexId{1}, VertexId{2});
     REQUIRE(!mesh.isFeatureEdge(shared));
 }

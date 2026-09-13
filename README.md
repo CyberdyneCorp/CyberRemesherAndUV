@@ -1145,6 +1145,14 @@ remain aligned to polygon indices, preserving UV seams. Swift uses
 `MeshAttribute`, Python uses `Mesh.from_indexed(..., attributes=...)` and
 `authored_attributes()`, while Rust intentionally exposes geometry only.
 
+For semantic retopology boundaries, attach a face-domain `int32` column named
+`group_id` or `material_id`. An edge between unequal values is treated as a
+hard feature even when the adjacent faces are coplanar; the normal feature
+retagging cannot demote it. OBJ `g` and `usemtl` tokens are intentionally not
+imported into these attributes yet: use the in-memory indexed route when that
+semantic identity is required, rather than assuming a file-format round-trip
+preserves it.
+
 #### Two things an embedder should wire up
 
 **Element ids move, and you can now detect it.** The ELEMENT-ID STABILITY block

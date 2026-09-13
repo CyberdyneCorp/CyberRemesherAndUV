@@ -940,6 +940,9 @@ typedef struct CyberIndexedMesh {
     size_t face_count;
     const uint32_t* indices;
     size_t index_count;
+    /* Optional typed columns. A face-domain CYBER_ATTRIBUTE_INT32 column
+     * named "group_id" or "material_id" is a semantic retopology boundary:
+     * unequal adjacent values are retained as a hard feature. */
     const CyberAttributeColumn* attributes;
     size_t attribute_count;
 } CyberIndexedMesh;

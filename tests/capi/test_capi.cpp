@@ -192,11 +192,14 @@ TEST_CASE("capi bulk indexed exchange retains vertex face and corner attributes"
     const size_t offsets[] = {0, 4};
     const uint32_t indices[] = {0, 1, 2, 3};
     const float weights[] = {1, 2, 3, 4};
-    const int32_t material[] = {7};
+    const int32_t materialIds[] = {7};
     const float uv[] = {0, 0, 1, 0, 1, 1, 0, 1};
     const CyberAttributeColumn attributes[] = {
         {"weight", CYBER_ATTRIBUTE_VERTEX, CYBER_ATTRIBUTE_FLOAT, weights, 4},
-        {"material", CYBER_ATTRIBUTE_FACE, CYBER_ATTRIBUTE_INT32, material, 1},
+        // `material_id` is the public semantic-boundary convention. It is
+        // still an ordinary face attribute, so hosts can read it back before
+        // remeshing and it does not require an ABI-breaking params extension.
+        {"material_id", CYBER_ATTRIBUTE_FACE, CYBER_ATTRIBUTE_INT32, materialIds, 1},
         {"uv", CYBER_ATTRIBUTE_CORNER, CYBER_ATTRIBUTE_FLOAT2, uv, 4},
     };
     const CyberIndexedMesh source{positions, 4, offsets, 1, indices, 4, attributes, 3};
@@ -205,6 +208,16 @@ TEST_CASE("capi bulk indexed exchange retains vertex face and corner attributes"
     REQUIRE(cyber_mesh_attribute_count(mesh) == 3u);
 
     CyberAttributeInfo info{};
+    REQUIRE(cyber_mesh_attribute_info(mesh, 1, &info) == CYBER_OK);
+    CHECK(std::string(info.name) == "material_id");
+    CHECK(info.domain == CYBER_ATTRIBUTE_FACE);
+    CHECK(info.type == CYBER_ATTRIBUTE_INT32);
+    std::vector<int32_t> copiedMaterial(cyber_mesh_copy_attribute(mesh, &info, nullptr, 0));
+    REQUIRE(copiedMaterial.size() == 1u);
+    CHECK(cyber_mesh_copy_attribute(mesh, &info, copiedMaterial.data(), copiedMaterial.size()) ==
+          copiedMaterial.size());
+    CHECK(copiedMaterial == std::vector<int32_t>(materialIds, materialIds + 1));
+
     REQUIRE(cyber_mesh_attribute_info(mesh, 2, &info) == CYBER_OK);
     CHECK(std::string(info.name) == "uv");
     CHECK(info.domain == CYBER_ATTRIBUTE_CORNER);

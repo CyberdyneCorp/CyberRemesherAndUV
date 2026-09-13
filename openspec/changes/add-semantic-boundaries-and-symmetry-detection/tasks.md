@@ -6,13 +6,16 @@ first.
 
 ## Milestone 1 — the missing input
 
-- [ ] M1. A sibling ABI entry point carrying per-face group / material ids.
-      `CyberRemeshParams` cannot grow fields without breaking compiled callers,
-      so this is a new entry point, not an extension.
+- [x] M1. A sibling ABI entry point carrying per-face group / material ids.
+      The existing typed `CyberIndexedMesh` bulk descriptor is the additive
+      sibling surface: face-domain `int32` `group_id` / `material_id` columns
+      retain their values and need no ABI-breaking `CyberRemeshParams` growth.
       Gate: a caller supplies group ids and reads them back unchanged; existing
       compiled callers keep working against the unchanged struct.
-- [ ] M2. Decide whether the OBJ loader retains `g` / `usemtl`, and record the
-      decision either way.
+- [x] M2. Decide whether the OBJ loader retains `g` / `usemtl`, and record the
+      decision either way. Decision: it does not; the explicit typed descriptor
+      is the only supported semantic input route until a lossless OBJ mapping
+      can be specified and tested.
       Gate: the decision is written down in the spec, with its cost.
 
 ## Milestone 2 — boundaries reach the field

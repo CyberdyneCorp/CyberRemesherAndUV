@@ -187,6 +187,8 @@ void Mesh::tagFeatureEdges(float dihedralAngleDegrees) {
     // rim with the default 90° parameter) tags deterministically instead of
     // per-edge float coin-flips; over-tagging is the safe direction.
     const float normalAngleThreshold = degreesToRadians(180.0f - dihedralAngleDegrees) - 1e-3f;
+    const auto* groupIds = m_faceAttrs.find<std::int32_t>("group_id");
+    const auto* materialIds = m_faceAttrs.find<std::int32_t>("material_id");
     for (Index i = 0; i < m_edges.size(); ++i) {
         if (!m_edges[i].alive) {
             continue;
@@ -201,7 +203,11 @@ void Mesh::tagFeatureEdges(float dihedralAngleDegrees) {
         const Vec3 n1 = faceNormal(faces[1]);
         const float cosAngle = std::clamp(dot(n0, n1), -1.0f, 1.0f);
         const float normalAngle = std::acos(cosAngle);
-        m_edges[i].feature = normalAngle >= normalAngleThreshold;
+        const bool groupBoundary = groupIds != nullptr &&
+                                   (*groupIds)[faces[0].value] != (*groupIds)[faces[1].value];
+        const bool materialBoundary = materialIds != nullptr &&
+                                      (*materialIds)[faces[0].value] != (*materialIds)[faces[1].value];
+        m_edges[i].feature = normalAngle >= normalAngleThreshold || groupBoundary || materialBoundary;
     }
 }
 
