@@ -1092,11 +1092,11 @@ void cyber_default_zremesher_params(CyberZRemesherParams* params) {
     params->foldRepair = defaults.foldRepair ? 1 : 0;
 }
 
-CyberStatus cyber_remesh_zremesher(const CyberMesh* in, const CyberRemeshParams* params,
-                                   const CyberZRemesherParams* zr, const CyberGuidanceEx* guidance,
-                                   CyberProgressCb progress, CyberCancelCb cancel,
-                                   CyberWarningCb warning, void* user, CyberMesh** out,
-                                   CyberZRemesherReport* report) {
+static CyberStatus remeshZremesherShared(
+    const CyberMesh* in, const CyberRemeshParams* params, const CyberZRemesherParams* zr,
+    const CyberGuidanceEx* guidance, const CyberRemeshLimits* topology,
+    const CyberRemeshExecutionLimits* execution, CyberProgressCb progress, CyberCancelCb cancel,
+    CyberWarningCb warning, void* user, CyberMesh** out, CyberZRemesherReport* report) {
     if (in == nullptr || params == nullptr || out == nullptr) {
         setError("cyber_remesh_zremesher: null argument");
         return CYBER_ERR_INVALID_ARG;
@@ -1173,10 +1173,16 @@ CyberStatus cyber_remesh_zremesher(const CyberMesh* in, const CyberRemeshParams*
 
         cyber::remesh::SymmetryRunReport symReport;
         const cyber::remesh::Guidance* guidancePtr = converted.empty() ? nullptr : &converted;
+        std::optional<cyber::remesh::ResourceLimits> limits;
+        if (topology != nullptr || execution != nullptr) {
+            limits = topology != nullptr ? toResourceLimits(*topology) : cyber::remesh::ResourceLimits{};
+            if (execution != nullptr) applyExecutionLimits(*execution, *limits);
+        }
         cyber::remesh::PipelineResult result = cyber::remesh::remeshSymmetric(
             in->mesh, cppParams, axis, &symReport, &sink, &token,
             [&options]() { return cyber::remesh::makeZRemesherQuadrangulator(options); },
-            []() { return cyber::remesh::makeFieldAlignedQuadrangulator(); }, guidancePtr);
+            []() { return cyber::remesh::makeFieldAlignedQuadrangulator(); }, guidancePtr,
+            limits ? &*limits : nullptr);
 
         if (warning != nullptr) {
             for (const auto& issue : result.parameterIssues) {
@@ -1237,6 +1243,24 @@ CyberStatus cyber_remesh_zremesher(const CyberMesh* in, const CyberRemeshParams*
         setError("cyber_remesh_zremesher: unknown error");
         return CYBER_ERR_RUNTIME;
     }
+}
+
+CyberStatus cyber_remesh_zremesher(const CyberMesh* in, const CyberRemeshParams* params,
+                                   const CyberZRemesherParams* zr, const CyberGuidanceEx* guidance,
+                                   CyberProgressCb progress, CyberCancelCb cancel,
+                                   CyberWarningCb warning, void* user, CyberMesh** out,
+                                   CyberZRemesherReport* report) {
+    return remeshZremesherShared(in, params, zr, guidance, nullptr, nullptr, progress, cancel,
+                                 warning, user, out, report);
+}
+
+CyberStatus cyber_remesh_zremesher_with_resource_limits(
+    const CyberMesh* in, const CyberRemeshParams* params, const CyberZRemesherParams* zr,
+    const CyberGuidanceEx* guidance, const CyberRemeshLimits* topology,
+    const CyberRemeshExecutionLimits* execution, CyberProgressCb progress, CyberCancelCb cancel,
+    CyberWarningCb warning, void* user, CyberMesh** out, CyberZRemesherReport* report) {
+    return remeshZremesherShared(in, params, zr, guidance, topology, execution, progress, cancel,
+                                 warning, user, out, report);
 }
 
 CyberStatus cyber_mesh_stats(const CyberMesh* mesh, CyberStats* out) {

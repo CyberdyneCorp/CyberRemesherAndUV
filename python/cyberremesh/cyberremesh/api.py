@@ -109,7 +109,7 @@ def version() -> str:
 #: The C ABI this binding was written against. Mirrors CYBER_ABI_VERSION_* in
 #: cyber_capi.h; ``check_abi()`` compares it against the loaded library.
 ABI_VERSION_MAJOR = 1
-ABI_VERSION_MINOR = 8
+ABI_VERSION_MINOR = 9
 
 
 def abi_version() -> tuple:
@@ -2301,8 +2301,8 @@ def remesh(
         )
     if count_policy is not None and (is_zremesher or guides is not None or density is not None):
         raise ValueError("count_policy currently requires an unguided non-ZRemesher remesh")
-    if limits is not None and (is_zremesher or guides is not None or density is not None):
-        raise ValueError("limits currently require the plain unguided remesh entry point")
+    if limits is not None and (guides is not None or density is not None) and not is_zremesher:
+        raise ValueError("limits with guidance currently require the ZRemesher entry point")
 
     lib = _ffi.get_lib()
 
@@ -2415,18 +2415,22 @@ def remesh(
         # differed from the CLI for the same request.
         c_zr = (zremesher or ZRemesherParams())._to_c()
         c_report = _ffi.CyberZRemesherReport()
-        status = lib.cyber_remesh_zremesher(
-            mesh.handle,
-            ctypes.byref(c_params),
-            ctypes.byref(c_zr),
-            ctypes.byref(c_guidance) if c_guidance is not None else None,
-            progress_cb,
-            cancel_cb,
-            warning_cb,
-            None,
-            ctypes.byref(out_handle),
-            ctypes.byref(c_report),
-        )
+        if limits is not None:
+            c_limits = limits._to_c()
+            c_execution = limits._execution_to_c()
+            status = lib.cyber_remesh_zremesher_with_resource_limits(
+                mesh.handle, ctypes.byref(c_params), ctypes.byref(c_zr),
+                ctypes.byref(c_guidance) if c_guidance is not None else None,
+                ctypes.byref(c_limits), ctypes.byref(c_execution), progress_cb, cancel_cb,
+                warning_cb, None, ctypes.byref(out_handle), ctypes.byref(c_report),
+            )
+        else:
+            status = lib.cyber_remesh_zremesher(
+                mesh.handle, ctypes.byref(c_params), ctypes.byref(c_zr),
+                ctypes.byref(c_guidance) if c_guidance is not None else None,
+                progress_cb, cancel_cb, warning_cb, None, ctypes.byref(out_handle),
+                ctypes.byref(c_report),
+            )
     elif c_guidance is not None:
         status = lib.cyber_remesh_guided_ex(
             mesh.handle,

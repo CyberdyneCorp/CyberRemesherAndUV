@@ -132,6 +132,8 @@ public struct RemeshLimits: Sendable {
     public var maxIntermediateFaces: UInt64 = 0
     public var maxOutputVertices: UInt64 = 0
     public var maxOutputFaces: UInt64 = 0
+    public var maxDirectFactorBytes: UInt64 = 0
+    public var maxCandidateBytes: UInt64 = 0
 
     public init() {}
 
@@ -140,6 +142,11 @@ public struct RemeshLimits: Sendable {
                            maxIntermediateVertices: maxIntermediateVertices,
                            maxIntermediateFaces: maxIntermediateFaces,
                            maxOutputVertices: maxOutputVertices, maxOutputFaces: maxOutputFaces)
+    }
+
+    var executionCValue: CyberRemeshExecutionLimits {
+        CyberRemeshExecutionLimits(maxDirectFactorBytes: maxDirectFactorBytes,
+                                   maxCandidateBytes: maxCandidateBytes)
     }
 }
 

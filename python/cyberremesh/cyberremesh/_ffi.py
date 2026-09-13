@@ -1179,6 +1179,12 @@ def _declare(lib: ctypes.CDLL) -> None:
         POINTER(CyberZRemesherReport),
     ]
     lib.cyber_remesh_zremesher.restype = c_int32
+    lib.cyber_remesh_zremesher_with_resource_limits.argtypes = [
+        c_void_p, POINTER(CyberRemeshParams), POINTER(CyberZRemesherParams),
+        POINTER(CyberGuidanceEx), POINTER(CyberRemeshLimits), POINTER(CyberRemeshExecutionLimits),
+        PROGRESS_CB, CANCEL_CB, WARNING_CB, c_void_p, POINTER(c_void_p), POINTER(CyberZRemesherReport),
+    ]
+    lib.cyber_remesh_zremesher_with_resource_limits.restype = c_int32
 
     # -- surface baking ------------------------------------------------------
     lib.cyber_default_bake_params.argtypes = [POINTER(CyberBakeParams)]
