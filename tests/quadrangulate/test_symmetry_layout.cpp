@@ -79,8 +79,9 @@ Mesh unequallyTessellatedSymmetricStrip() {
         const float upperWidth = 1.0f + 0.2f * static_cast<float>(y + 1);
         faces.push_back({at(-1, y), at(0, y), at(0, y + 1), at(-1, y + 1)});
         const Index center = static_cast<Index>(positions.size());
-        positions.push_back(Vec3{0.25f * (lowerWidth + upperWidth), static_cast<float>(y) + 0.5f,
-                                 0.2f * (static_cast<float>(y * y) + static_cast<float>(y) + 0.5f)});
+        positions.push_back(
+            Vec3{0.25f * (lowerWidth + upperWidth), static_cast<float>(y) + 0.5f,
+                 0.2f * (static_cast<float>(y * y) + static_cast<float>(y) + 0.5f)});
         faces.push_back({at(0, y), at(1, y), center});
         faces.push_back({at(1, y), at(1, y + 1), center});
         faces.push_back({at(1, y + 1), at(0, y + 1), center});
