@@ -135,6 +135,10 @@ struct QualityScore {
     std::size_t boundaryComponents = 0;
     std::size_t nonManifoldEdges = 0;
     double medianAngleDegrees = 0.0;
+    // Mean absolute deviation from 90 degrees in the worst five percent of
+    // corners.  Unlike a median, this makes a localized collapsed corner
+    // visible to candidate selection.
+    double worstFivePercentAngleDeviationDegrees = 0.0;
     double edgeLengthCv = 0.0;
     std::size_t irregularVertices = 0;
     std::size_t interiorVertices = 0;

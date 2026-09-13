@@ -377,11 +377,25 @@ TEST_CASE("quality score: a perfect quad grid scores near the top") {
     CHECK(s.nonQuadFaces == 0);
     CHECK(s.quadPurity == doctest::Approx(1.0));
     CHECK(s.medianAngleDegrees == doctest::Approx(90.0));
+    CHECK(s.worstFivePercentAngleDeviationDegrees == doctest::Approx(0.0));
     CHECK(s.angle == doctest::Approx(1.0));
     CHECK(s.edgeUniformity == doctest::Approx(1.0));
     // Every interior vertex of a regular grid has valence 4.
     CHECK(s.irregularVertices == 0);
     CHECK(s.topologicalDefects == doctest::Approx(0.0));
+}
+
+TEST_CASE("quality score: tail angle catches a catastrophic corner hidden by the median") {
+    Mesh regular = flatGrid(10);
+    Mesh outlier = regular;
+    // One local corner becomes nearly collapsed; the remaining grid corners
+    // retain a median of 90 degrees, which must not make it a perfect result.
+    outlier.setPosition(VertexId{1}, Vec3{0.01f, 0.01f, 0.0f});
+    const QualityScore a = scoreQuality(regular, nullptr, false);
+    const QualityScore b = scoreQuality(outlier, nullptr, false);
+    CHECK(b.medianAngleDegrees == doctest::Approx(a.medianAngleDegrees));
+    CHECK(b.worstFivePercentAngleDeviationDegrees > a.worstFivePercentAngleDeviationDegrees);
+    CHECK(b.angle < a.angle);
 }
 
 TEST_CASE("quality score: an open border is a defect only when the input was closed") {

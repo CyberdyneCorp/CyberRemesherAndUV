@@ -187,11 +187,27 @@ QualityScore scoreQuality(const Mesh& mesh, const SingularityMetrics* singularit
     }
     out.boundaryComponents = boundaryComponentCount(mesh);
 
-    // Angle quality: how close the median interior angle is to 90 degrees. A
-    // quad mesh cannot do better than 90, and the distance from it is what
-    // "squareness" means.
+    // Keep the median as a diagnostic, but rank by the mean absolute deviation
+    // in the worst five percent of corners. A median alone lets a single
+    // collapsed corner disappear behind an otherwise regular mesh.
     out.medianAngleDegrees = median(angles);
-    out.angle = std::clamp(1.0 - std::abs(out.medianAngleDegrees - 90.0) / 90.0, 0.0, 1.0);
+    std::vector<double> deviations;
+    deviations.reserve(angles.size());
+    for (const double angle : angles) {
+        deviations.push_back(std::abs(angle - 90.0));
+    }
+    if (!deviations.empty()) {
+        const std::size_t tailCount = std::max<std::size_t>(1, (deviations.size() + 19) / 20);
+        std::sort(deviations.begin(), deviations.end(), std::greater<>{});
+        double tailSum = 0.0;
+        for (std::size_t i = 0; i < tailCount; ++i) {
+            tailSum += deviations[i];
+        }
+        out.worstFivePercentAngleDeviationDegrees =
+            tailSum / static_cast<double>(tailCount);
+        out.angle = std::clamp(
+            1.0 - out.worstFivePercentAngleDeviationDegrees / 90.0, 0.0, 1.0);
+    }
 
     // Edge uniformity as 1 - coefficient of variation, so a perfectly uniform
     // mesh scores 1 and a wildly varying one approaches 0.
