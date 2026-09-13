@@ -110,7 +110,7 @@ def version() -> str:
 #: The C ABI this binding was written against. Mirrors CYBER_ABI_VERSION_* in
 #: cyber_capi.h; ``check_abi()`` compares it against the loaded library.
 ABI_VERSION_MAJOR = 1
-ABI_VERSION_MINOR = 14
+ABI_VERSION_MINOR = 15
 
 
 def abi_version() -> tuple:
@@ -942,6 +942,9 @@ class SymmetryDetectionReport:
     mean_surface_error: float
     max_surface_error: float
     mean_normal_agreement: float
+    component_consistent_surface_points: int
+    sampled_semantic_surface_points: int
+    semantic_consistent_surface_points: int
     confidence: float
     ambiguous: bool
 
@@ -1092,6 +1095,9 @@ class Mesh:
         """Return a report-only symmetry hypothesis without changing this mesh."""
         evidence = _ffi.CyberSymmetryDetectionEvidence()
         _check(_ffi.get_lib().cyber_detect_symmetry_evidence(self.handle, ctypes.byref(evidence)))
+        correspondence = _ffi.CyberSymmetryCorrespondenceEvidence()
+        _check(_ffi.get_lib().cyber_detect_symmetry_correspondence(
+            self.handle, ctypes.byref(correspondence)))
         out = evidence.hypothesis
         axis = {0: "none", 1: "x", 2: "y", 3: "z"}.get(int(out.axis), "none")
         return SymmetryDetectionReport(
@@ -1109,6 +1115,9 @@ class Mesh:
             mean_surface_error=float(evidence.mean_surface_error),
             max_surface_error=float(evidence.max_surface_error),
             mean_normal_agreement=float(evidence.mean_normal_agreement),
+            component_consistent_surface_points=int(correspondence.component_consistent_surface_points),
+            sampled_semantic_surface_points=int(correspondence.sampled_semantic_surface_points),
+            semantic_consistent_surface_points=int(correspondence.semantic_consistent_surface_points),
             confidence=float(out.confidence),
             ambiguous=bool(out.ambiguous),
         )

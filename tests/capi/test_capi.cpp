@@ -209,8 +209,13 @@ TEST_CASE("capi symmetry detection reports ambiguity without editing") {
     CHECK(evidence.sampledSurfacePoints > 0);
     CHECK(evidence.matchedSurfacePoints == evidence.sampledSurfacePoints);
     CHECK(evidence.normalConsistentSurfacePoints == evidence.sampledSurfacePoints);
+    CyberSymmetryCorrespondenceEvidence correspondence{};
+    REQUIRE(cyber_detect_symmetry_correspondence(mesh, &correspondence) == CYBER_OK);
+    CHECK(correspondence.matchedSurfacePoints == evidence.matchedSurfacePoints);
+    CHECK(correspondence.componentConsistentSurfacePoints == correspondence.matchedSurfacePoints);
     CHECK(cyber_detect_symmetry(nullptr, &report) == CYBER_ERR_INVALID_ARG);
     CHECK(cyber_detect_symmetry_evidence(nullptr, &evidence) == CYBER_ERR_INVALID_ARG);
+    CHECK(cyber_detect_symmetry_correspondence(nullptr, &correspondence) == CYBER_ERR_INVALID_ARG);
     cyber_mesh_free(mesh);
 }
 

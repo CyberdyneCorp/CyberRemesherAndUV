@@ -69,6 +69,9 @@ public struct SymmetryDetectionReport: Equatable {
     public let meanSurfaceError: Float
     public let maxSurfaceError: Float
     public let meanNormalAgreement: Float
+    public let componentConsistentSurfacePoints: Int
+    public let sampledSemanticSurfacePoints: Int
+    public let semanticConsistentSurfacePoints: Int
 }
 
 /// A triangle or quad-dominant mesh owned by the engine.
@@ -204,6 +207,8 @@ public final class Mesh {
     public func detectSymmetry() throws -> SymmetryDetectionReport {
         var evidence = CyberSymmetryDetectionEvidence()
         try CyberError.check(cyber_detect_symmetry_evidence(handle, &evidence))
+        var correspondence = CyberSymmetryCorrespondenceEvidence()
+        try CyberError.check(cyber_detect_symmetry_correspondence(handle, &correspondence))
         let report = evidence.hypothesis
         let axis = ["none", "x", "y", "z"]
         let rawAxis = Int(report.axis)
@@ -221,7 +226,10 @@ public final class Mesh {
             normalConsistentSurfacePoints: Int(evidence.normalConsistentSurfacePoints),
             meanSurfaceError: evidence.meanSurfaceError,
             maxSurfaceError: evidence.maxSurfaceError,
-            meanNormalAgreement: evidence.meanNormalAgreement)
+            meanNormalAgreement: evidence.meanNormalAgreement,
+            componentConsistentSurfacePoints: Int(correspondence.componentConsistentSurfacePoints),
+            sampledSemanticSurfacePoints: Int(correspondence.sampledSemanticSurfacePoints),
+            semanticConsistentSurfacePoints: Int(correspondence.semanticConsistentSurfacePoints))
     }
 
     /// Copies vertex positions out as a flat `x,y,z` buffer, in the engine's

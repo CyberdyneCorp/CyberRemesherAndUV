@@ -1428,6 +1428,30 @@ CyberStatus cyber_detect_symmetry_evidence(const CyberMesh* mesh,
     }
 }
 
+CyberStatus cyber_detect_symmetry_correspondence(
+    const CyberMesh* mesh, CyberSymmetryCorrespondenceEvidence* report) {
+    if (mesh == nullptr || report == nullptr) {
+        setError("cyber_detect_symmetry_correspondence: null argument");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    try {
+        const cyber::remesh::SymmetryDetectionReport detected =
+            cyber::remesh::detectSymmetry(mesh->mesh);
+        *report = CyberSymmetryCorrespondenceEvidence{};
+        report->matchedSurfacePoints = detected.matchedSurfacePoints;
+        report->componentConsistentSurfacePoints = detected.componentConsistentSurfacePoints;
+        report->sampledSemanticSurfacePoints = detected.sampledSemanticSurfacePoints;
+        report->semanticConsistentSurfacePoints = detected.semanticConsistentSurfacePoints;
+        return CYBER_OK;
+    } catch (const std::exception& e) {
+        setError(std::string("cyber_detect_symmetry_correspondence: ") + e.what());
+        return CYBER_ERR_RUNTIME;
+    } catch (...) {
+        setError("cyber_detect_symmetry_correspondence: unknown error");
+        return CYBER_ERR_RUNTIME;
+    }
+}
+
 CyberStatus cyber_remesh_zremesher_with_injectability_report(
     const CyberMesh* in, const CyberRemeshParams* params, const CyberZRemesherParams* zr,
     const CyberGuidanceEx* guidance, CyberProgressCb progress, CyberCancelCb cancel,

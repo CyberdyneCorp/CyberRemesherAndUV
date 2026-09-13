@@ -92,7 +92,7 @@ typedef enum CyberStatus {
  * Do not compare these numbers by hand: cyber_abi_check() applies the rule
  * above in one place, so every binding gets the same answer. */
 #define CYBER_ABI_VERSION_MAJOR 1
-#define CYBER_ABI_VERSION_MINOR 14
+#define CYBER_ABI_VERSION_MINOR 15
 
 /* The ABI this build implements. Cannot fail; either pointer may be NULL. */
 void cyber_abi_version(int* major, int* minor);
@@ -587,6 +587,15 @@ typedef struct CyberSymmetryDetectionEvidence {
     float meanNormalAgreement;
 } CyberSymmetryDetectionEvidence;
 
+/* Component and face-semantic correspondence for the same advisory analysis.
+ * Separate output storage preserves the ABI 1.14 evidence record's layout. */
+typedef struct CyberSymmetryCorrespondenceEvidence {
+    size_t matchedSurfacePoints;
+    size_t componentConsistentSurfacePoints;
+    size_t sampledSemanticSurfacePoints;
+    size_t semanticConsistentSurfacePoints;
+} CyberSymmetryCorrespondenceEvidence;
+
 /* Diagnostics for the symbolic layout-to-integer hand-off. This is a separate
  * POD rather than an extension of CyberZRemesherReport: callers compiled
  * against an older report allocate its historical size, so extending it would
@@ -720,6 +729,8 @@ CyberStatus cyber_remesh_zremesher(const CyberMesh* in, const CyberRemeshParams*
 CyberStatus cyber_detect_symmetry(const CyberMesh* mesh, CyberSymmetryDetectionReport* report);
 CyberStatus cyber_detect_symmetry_evidence(const CyberMesh* mesh,
                                            CyberSymmetryDetectionEvidence* report);
+CyberStatus cyber_detect_symmetry_correspondence(
+    const CyberMesh* mesh, CyberSymmetryCorrespondenceEvidence* report);
 
 /* Like cyber_remesh_zremesher, and additionally returns the per-run symbolic
  * injectability diagnostics through a separately versioned-safe POD. Either

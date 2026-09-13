@@ -289,6 +289,15 @@ class CyberSymmetryDetectionEvidence(Structure):
     ]
 
 
+class CyberSymmetryCorrespondenceEvidence(Structure):
+    _fields_ = [
+        ("matched_surface_points", c_size_t),
+        ("component_consistent_surface_points", c_size_t),
+        ("sampled_semantic_surface_points", c_size_t),
+        ("semantic_consistent_surface_points", c_size_t),
+    ]
+
+
 class CyberZRemesherInjectabilityReport(Structure):
     """Mirror of the additive symbolic injectability report."""
 
@@ -1266,6 +1275,8 @@ def _declare(lib: ctypes.CDLL) -> None:
     lib.cyber_detect_symmetry.restype = c_int32
     lib.cyber_detect_symmetry_evidence.argtypes = [c_void_p, POINTER(CyberSymmetryDetectionEvidence)]
     lib.cyber_detect_symmetry_evidence.restype = c_int32
+    lib.cyber_detect_symmetry_correspondence.argtypes = [c_void_p, POINTER(CyberSymmetryCorrespondenceEvidence)]
+    lib.cyber_detect_symmetry_correspondence.restype = c_int32
     lib.cyber_remesh_zremesher_with_injectability_report.argtypes = [
         c_void_p, POINTER(CyberRemeshParams), POINTER(CyberZRemesherParams),
         POINTER(CyberGuidanceEx), PROGRESS_CB, CANCEL_CB, WARNING_CB, c_void_p,
