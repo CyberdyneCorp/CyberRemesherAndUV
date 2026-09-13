@@ -97,6 +97,103 @@ TEST_CASE("capi version and status strings are well-formed") {
     REQUIRE(std::string(cyber_status_string(CYBER_ERR_INVALID_PARAM)).size() > 0);
 }
 
+TEST_CASE("capi bulk indexed exchange preserves authored polygons transactionally") {
+    std::vector<float> positions = {
+        0.0f, 0.0f, 0.0f,  // 0
+        1.0f, 0.0f, 0.0f,  // 1
+        1.0f, 1.0f, 0.0f,  // 2
+        0.0f, 1.0f, 0.0f,  // 3
+        9.0f, 9.0f, 9.0f,  // unused, but intentionally retained
+    };
+    const std::vector<size_t> offsets = {0, 3, 7};
+    const std::vector<uint32_t> indices = {0, 1, 2, 0, 2, 3, 1};
+    const CyberIndexedMesh input = {
+        .positions = positions.data(),
+        .vertex_count = positions.size() / 3,
+        .face_offsets = offsets.data(),
+        .face_count = offsets.size() - 1,
+        .indices = indices.data(),
+        .index_count = indices.size(),
+    };
+
+    CyberMesh* mesh = nullptr;
+    REQUIRE(cyber_mesh_from_indexed(&input, &mesh) == CYBER_OK);
+    REQUIRE(mesh != nullptr);
+    CHECK(cyber_mesh_vertex_count(mesh) == 5);
+    CHECK(cyber_mesh_face_count(mesh) == 2);
+
+    // Import copies caller buffers; a host may reuse them as soon as the call returns.
+    positions[0] = 42.0f;
+    std::vector<float> copiedPositions(cyber_mesh_copy_positions(mesh, nullptr, 0));
+    REQUIRE(cyber_mesh_copy_positions(mesh, copiedPositions.data(), copiedPositions.size()) ==
+            copiedPositions.size());
+    CHECK(copiedPositions[0] == doctest::Approx(0.0f));
+
+    std::vector<size_t> copiedOffsets(cyber_mesh_copy_face_offsets(mesh, nullptr, 0));
+    std::vector<uint32_t> copiedIndices(cyber_mesh_copy_polygon_indices(mesh, nullptr, 0));
+    REQUIRE(cyber_mesh_copy_face_offsets(mesh, copiedOffsets.data(), copiedOffsets.size()) ==
+            copiedOffsets.size());
+    REQUIRE(cyber_mesh_copy_polygon_indices(mesh, copiedIndices.data(), copiedIndices.size()) ==
+            copiedIndices.size());
+    CHECK(copiedOffsets == offsets);
+    CHECK(copiedIndices == indices);
+
+    const size_t sentinel = 99;
+    size_t shortOffsets[1] = {sentinel};
+    CHECK(cyber_mesh_copy_face_offsets(mesh, shortOffsets, 1) == copiedOffsets.size());
+    CHECK(shortOffsets[0] == sentinel);
+
+    CyberMesh* preserved = mesh;
+    const size_t invalidOffsets[] = {0, 2, 7};
+    const CyberIndexedMesh malformed = {
+        .positions = positions.data(),
+        .vertex_count = positions.size() / 3,
+        .face_offsets = invalidOffsets,
+        .face_count = 2,
+        .indices = indices.data(),
+        .index_count = indices.size(),
+    };
+    CHECK(cyber_mesh_from_indexed(&malformed, &mesh) == CYBER_ERR_INVALID_ARG);
+    CHECK(mesh == preserved);
+    cyber_mesh_free(mesh);
+}
+
+TEST_CASE("capi bulk indexed exchange retains vertex face and corner attributes") {
+    const float positions[] = {0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0};
+    const size_t offsets[] = {0, 4};
+    const uint32_t indices[] = {0, 1, 2, 3};
+    const float weights[] = {1, 2, 3, 4};
+    const int32_t material[] = {7};
+    const float uv[] = {0, 0, 1, 0, 1, 1, 0, 1};
+    const CyberAttributeColumn attributes[] = {
+        {"weight", CYBER_ATTRIBUTE_VERTEX, CYBER_ATTRIBUTE_FLOAT, weights, 4},
+        {"material", CYBER_ATTRIBUTE_FACE, CYBER_ATTRIBUTE_INT32, material, 1},
+        {"uv", CYBER_ATTRIBUTE_CORNER, CYBER_ATTRIBUTE_FLOAT2, uv, 4},
+    };
+    const CyberIndexedMesh source{positions, 4, offsets, 1, indices, 4, attributes, 3};
+    CyberMesh* mesh = nullptr;
+    REQUIRE(cyber_mesh_from_indexed(&source, &mesh) == CYBER_OK);
+    REQUIRE(cyber_mesh_attribute_count(mesh) == 3u);
+
+    CyberAttributeInfo info{};
+    REQUIRE(cyber_mesh_attribute_info(mesh, 2, &info) == CYBER_OK);
+    CHECK(std::string(info.name) == "uv");
+    CHECK(info.domain == CYBER_ATTRIBUTE_CORNER);
+    CHECK(info.type == CYBER_ATTRIBUTE_FLOAT2);
+    CHECK(info.value_count == 4u);
+    std::vector<float> copied(cyber_mesh_copy_attribute(mesh, &info, nullptr, 0));
+    REQUIRE(copied.size() == 8u);
+    CHECK(cyber_mesh_copy_attribute(mesh, &info, copied.data(), copied.size()) == copied.size());
+    CHECK(copied == std::vector<float>(uv, uv + 8));
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    const CyberAttributeColumn invalid[] = {{"bad", CYBER_ATTRIBUTE_VERTEX, CYBER_ATTRIBUTE_FLOAT, &nan, 4}};
+    const CyberIndexedMesh rejected{positions, 4, offsets, 1, indices, 4, invalid, 1};
+    CyberMesh* untouched = mesh;
+    CHECK(cyber_mesh_from_indexed(&rejected, &untouched) == CYBER_ERR_INVALID_ARG);
+    CHECK(untouched == mesh);
+    cyber_mesh_free(mesh);
+}
+
 TEST_CASE("capi backend selection reports what it actually selected") {
     // The C ABI used to expose no backend selection at all: a host embedding
     // libcyber_capi could only steer the engine with the CYBER_BACKEND

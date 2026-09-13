@@ -56,6 +56,12 @@ The `-sys` crate binds the whole ABI (192 entry points). The safe wrapper
 currently covers version/ABI, errors, and mesh load/save/inspect. UV, baking,
 remeshing and conform are reachable through `Mesh::as_raw` until wrapped.
 
+`Mesh::from_indexed` and `Mesh::authored_polygons` copy CSR-authored geometry
+without triangulating quads or n-gons. The Rust wrapper intentionally stops at
+geometry; hosts needing the C ABI's typed vertex, face, or corner attributes
+should call the raw ABI rather than losing domain/type information in a partial
+safe abstraction.
+
 ## Credit
 
 The build script is written with

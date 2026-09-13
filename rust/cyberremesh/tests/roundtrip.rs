@@ -8,6 +8,25 @@ use cyberremesh::{abi, check_abi, solver, version, Mesh, Solver};
 
 const PLANE_OBJ: &str = "v 0 0 0\nv 1 0 0\nv 1 1 0\nv 0 1 0\nf 1 2 3 4\n";
 
+#[test]
+fn bulk_indexed_mesh_preserves_authored_quad() {
+    let mesh = Mesh::from_indexed(
+        &[
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [0.0, 1.0, 0.0],
+        ],
+        &[0, 4],
+        &[0, 1, 2, 3],
+    )
+    .expect("the bulk mesh should import");
+    assert_eq!(
+        mesh.authored_polygons().expect("polygon export"),
+        (vec![0, 4], vec![0, 1, 2, 3])
+    );
+}
+
 fn write_plane(name: &str) -> std::path::PathBuf {
     let path = std::env::temp_dir().join(name);
     std::fs::write(&path, PLANE_OBJ).expect("the fixture should be writable");
