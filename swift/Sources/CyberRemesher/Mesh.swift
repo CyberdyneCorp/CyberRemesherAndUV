@@ -62,6 +62,13 @@ public struct SymmetryDetectionReport: Equatable {
     public let sampledVertices: Int
     public let matchedVertices: Int
     public let unmatchedVertices: Int
+    public let sampledSurfacePoints: Int
+    public let matchedSurfacePoints: Int
+    public let unmatchedSurfacePoints: Int
+    public let normalConsistentSurfacePoints: Int
+    public let meanSurfaceError: Float
+    public let maxSurfaceError: Float
+    public let meanNormalAgreement: Float
 }
 
 /// A triangle or quad-dominant mesh owned by the engine.
@@ -195,8 +202,9 @@ public final class Mesh {
 
     /// Analyses the axis-aligned symmetry hypotheses without modifying this mesh.
     public func detectSymmetry() throws -> SymmetryDetectionReport {
-        var report = CyberSymmetryDetectionReport()
-        try CyberError.check(cyber_detect_symmetry(handle, &report))
+        var evidence = CyberSymmetryDetectionEvidence()
+        try CyberError.check(cyber_detect_symmetry_evidence(handle, &evidence))
+        let report = evidence.hypothesis
         let axis = ["none", "x", "y", "z"]
         let rawAxis = Int(report.axis)
         return SymmetryDetectionReport(
@@ -206,7 +214,14 @@ public final class Mesh {
             ambiguous: report.ambiguous != 0,
             sampledVertices: Int(report.sampledVertices),
             matchedVertices: Int(report.matchedVertices),
-            unmatchedVertices: Int(report.unmatchedVertices))
+            unmatchedVertices: Int(report.unmatchedVertices),
+            sampledSurfacePoints: Int(evidence.sampledSurfacePoints),
+            matchedSurfacePoints: Int(evidence.matchedSurfacePoints),
+            unmatchedSurfacePoints: Int(evidence.unmatchedSurfacePoints),
+            normalConsistentSurfacePoints: Int(evidence.normalConsistentSurfacePoints),
+            meanSurfaceError: evidence.meanSurfaceError,
+            maxSurfaceError: evidence.maxSurfaceError,
+            meanNormalAgreement: evidence.meanNormalAgreement)
     }
 
     /// Copies vertex positions out as a flat `x,y,z` buffer, in the engine's

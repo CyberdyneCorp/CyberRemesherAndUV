@@ -1384,6 +1384,50 @@ CyberStatus cyber_detect_symmetry(const CyberMesh* mesh, CyberSymmetryDetectionR
     }
 }
 
+CyberStatus cyber_detect_symmetry_evidence(const CyberMesh* mesh,
+                                           CyberSymmetryDetectionEvidence* report) {
+    if (mesh == nullptr || report == nullptr) {
+        setError("cyber_detect_symmetry_evidence: null argument");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    try {
+        const cyber::remesh::SymmetryDetectionReport detected =
+            cyber::remesh::detectSymmetry(mesh->mesh);
+        *report = CyberSymmetryDetectionEvidence{};
+        CyberSymmetryDetectionReport& hypothesis = report->hypothesis;
+        hypothesis.detected = detected.detected ? 1 : 0;
+        hypothesis.axis = static_cast<int>(detected.axis);
+        hypothesis.point[0] = detected.plane.point.x;
+        hypothesis.point[1] = detected.plane.point.y;
+        hypothesis.point[2] = detected.plane.point.z;
+        hypothesis.normal[0] = detected.plane.normal.x;
+        hypothesis.normal[1] = detected.plane.normal.y;
+        hypothesis.normal[2] = detected.plane.normal.z;
+        hypothesis.sampledVertices = detected.sampledVertices;
+        hypothesis.matchedVertices = detected.matchedVertices;
+        hypothesis.unmatchedVertices = detected.unmatchedVertices;
+        hypothesis.matchTolerance = detected.matchTolerance;
+        hypothesis.meanMatchError = detected.meanMatchError;
+        hypothesis.maxMatchError = detected.maxMatchError;
+        hypothesis.confidence = detected.confidence;
+        hypothesis.ambiguous = detected.ambiguous ? 1 : 0;
+        report->sampledSurfacePoints = detected.sampledSurfacePoints;
+        report->matchedSurfacePoints = detected.matchedSurfacePoints;
+        report->unmatchedSurfacePoints = detected.unmatchedSurfacePoints;
+        report->normalConsistentSurfacePoints = detected.normalConsistentSurfacePoints;
+        report->meanSurfaceError = detected.meanSurfaceError;
+        report->maxSurfaceError = detected.maxSurfaceError;
+        report->meanNormalAgreement = detected.meanNormalAgreement;
+        return CYBER_OK;
+    } catch (const std::exception& e) {
+        setError(std::string("cyber_detect_symmetry_evidence: ") + e.what());
+        return CYBER_ERR_RUNTIME;
+    } catch (...) {
+        setError("cyber_detect_symmetry_evidence: unknown error");
+        return CYBER_ERR_RUNTIME;
+    }
+}
+
 CyberStatus cyber_remesh_zremesher_with_injectability_report(
     const CyberMesh* in, const CyberRemeshParams* params, const CyberZRemesherParams* zr,
     const CyberGuidanceEx* guidance, CyberProgressCb progress, CyberCancelCb cancel,

@@ -110,7 +110,7 @@ def version() -> str:
 #: The C ABI this binding was written against. Mirrors CYBER_ABI_VERSION_* in
 #: cyber_capi.h; ``check_abi()`` compares it against the loaded library.
 ABI_VERSION_MAJOR = 1
-ABI_VERSION_MINOR = 13
+ABI_VERSION_MINOR = 14
 
 
 def abi_version() -> tuple:
@@ -935,6 +935,13 @@ class SymmetryDetectionReport:
     match_tolerance: float
     mean_match_error: float
     max_match_error: float
+    sampled_surface_points: int
+    matched_surface_points: int
+    unmatched_surface_points: int
+    normal_consistent_surface_points: int
+    mean_surface_error: float
+    max_surface_error: float
+    mean_normal_agreement: float
     confidence: float
     ambiguous: bool
 
@@ -1083,8 +1090,9 @@ class Mesh:
 
     def detect_symmetry(self) -> SymmetryDetectionReport:
         """Return a report-only symmetry hypothesis without changing this mesh."""
-        out = _ffi.CyberSymmetryDetectionReport()
-        _check(_ffi.get_lib().cyber_detect_symmetry(self.handle, ctypes.byref(out)))
+        evidence = _ffi.CyberSymmetryDetectionEvidence()
+        _check(_ffi.get_lib().cyber_detect_symmetry_evidence(self.handle, ctypes.byref(evidence)))
+        out = evidence.hypothesis
         axis = {0: "none", 1: "x", 2: "y", 3: "z"}.get(int(out.axis), "none")
         return SymmetryDetectionReport(
             detected=bool(out.detected), axis=axis,
@@ -1093,7 +1101,15 @@ class Mesh:
             sampled_vertices=int(out.sampled_vertices), matched_vertices=int(out.matched_vertices),
             unmatched_vertices=int(out.unmatched_vertices),
             match_tolerance=float(out.match_tolerance), mean_match_error=float(out.mean_match_error),
-            max_match_error=float(out.max_match_error), confidence=float(out.confidence),
+            max_match_error=float(out.max_match_error),
+            sampled_surface_points=int(evidence.sampled_surface_points),
+            matched_surface_points=int(evidence.matched_surface_points),
+            unmatched_surface_points=int(evidence.unmatched_surface_points),
+            normal_consistent_surface_points=int(evidence.normal_consistent_surface_points),
+            mean_surface_error=float(evidence.mean_surface_error),
+            max_surface_error=float(evidence.max_surface_error),
+            mean_normal_agreement=float(evidence.mean_normal_agreement),
+            confidence=float(out.confidence),
             ambiguous=bool(out.ambiguous),
         )
 
