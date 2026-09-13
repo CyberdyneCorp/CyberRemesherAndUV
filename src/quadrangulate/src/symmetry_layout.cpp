@@ -122,7 +122,8 @@ float detectionTolerance(const Mesh& mesh, const Bounds& bounds) {
         ++edges;
     }
     const float scaleTolerance = std::max(diagonal, 1.0f) * 1e-4f;
-    const float samplingTolerance = edges == 0 ? scaleTolerance : edgeTotal / edges * 1e-3f;
+    const float samplingTolerance =
+        edges == 0 ? scaleTolerance : edgeTotal / static_cast<float>(edges) * 1e-3f;
     return std::max(1e-6f, std::min(scaleTolerance, samplingTolerance));
 }
 
