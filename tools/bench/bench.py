@@ -80,6 +80,7 @@ def load_solvers(cyber_binary: Path) -> dict:
 
 def run_solver(spec: dict, input_path: Path, output_path: Path, faces: int,
                timeout: int) -> dict:
+    output_path.unlink(missing_ok=True)
     cmd = [arg.format(exe=spec["exe"], input=input_path, output=output_path,
                       faces=faces) for arg in spec["cmd"]]
     start = time.monotonic()
@@ -114,9 +115,22 @@ def benchmark(meshes: list[dict], solvers: dict, out_dir: Path, samples: int,
             row = {"mesh": mesh["name"], "solver": name,
                    "target_quads": mesh["target_quads"], "input": str(mesh["path"]),
                    "output": str(output)}
+            if "sha256" in mesh:
+                row["corpus_version"] = 1
+                row["input_sha256"] = mesh["sha256"]
+                row["expected_input"] = mesh["expected_input"]
             outcome = run_solver(spec, mesh["path"], output, mesh["target_quads"],
                                  timeout)
             row.update(outcome)
+            if mesh.get("expected_input") == "rejected":
+                if outcome["ok"]:
+                    row.update(ok=False, error="malformed input was accepted")
+                else:
+                    row.update(ok=True, expected_rejection=True,
+                               rejection_reason=outcome["error"])
+                print(format_row(row))
+                results.append(row)
+                continue
             if outcome["ok"]:
                 try:
                     row["metrics"] = mesh_metrics.compute_all(
@@ -137,6 +151,8 @@ def benchmark(meshes: list[dict], solvers: dict, out_dir: Path, samples: int,
 
 
 def format_row(row: dict) -> str:
+    if row.get("expected_rejection"):
+        return f"{row['mesh']:<12} {row['solver']:<14} rejected as required"
     if not row.get("ok"):
         artifact = row.get("output", "")
         suffix = f" (artifact: {artifact})" if artifact else ""
@@ -311,8 +327,7 @@ def main() -> int:
     if args.corpus in ("generated", "all"):
         meshes += corpus.generated_meshes(args.cache_dir / "generated")
     if args.corpus in ("acceptance", "all"):
-        meshes += [mesh for mesh in corpus.acceptance_meshes(args.cache_dir / "acceptance")
-                   if mesh["expected_input"] == "accepted"]
+        meshes += corpus.acceptance_meshes(args.cache_dir / "acceptance")
     if args.corpus in ("downloaded", "all"):
         meshes += corpus.downloaded_meshes(args.cache_dir / "downloaded")
 

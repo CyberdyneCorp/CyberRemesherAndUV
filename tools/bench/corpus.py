@@ -20,6 +20,10 @@ from pathlib import Path
 BENCH_DIR = Path(__file__).resolve().parent
 MANIFEST = BENCH_DIR / "corpus.json"
 ACCEPTANCE_MANIFEST = BENCH_DIR / "acceptance_corpus.json"
+REQUIRED_ACCEPTANCE_CATEGORIES = {
+    "organic", "cad-feature", "open-boundary", "multiple-components",
+    "extreme-scale", "malformed-input",
+}
 
 
 def _write_obj(path: Path, verts: list, faces: list) -> None:
@@ -197,9 +201,30 @@ def acceptance_meshes(cache_dir: Path) -> list[dict]:
     manifest = json.loads(ACCEPTANCE_MANIFEST.read_text())
     if manifest.get("schema_version") != 1:
         raise RuntimeError("unsupported acceptance corpus schema")
+    fixtures = manifest.get("fixtures")
+    if not isinstance(fixtures, list):
+        raise RuntimeError("acceptance corpus fixtures must be a list")
+    names: set[str] = set()
+    categories: set[str] = set()
+    for item in fixtures:
+        required = {"name", "category", "generator", "target_quads", "expected_input", "sha256"}
+        missing = required - set(item)
+        if missing:
+            raise RuntimeError(f"acceptance fixture missing fields: {sorted(missing)}")
+        if item["name"] in names:
+            raise RuntimeError(f"duplicate acceptance fixture: {item['name']}")
+        if item["expected_input"] not in {"accepted", "rejected"}:
+            raise RuntimeError(f"{item['name']}: invalid expected_input")
+        if len(item["sha256"]) != 64:
+            raise RuntimeError(f"{item['name']}: sha256 must be pinned")
+        names.add(item["name"])
+        categories.add(item["category"])
+    missing_categories = REQUIRED_ACCEPTANCE_CATEGORIES - categories
+    if missing_categories:
+        raise RuntimeError(f"acceptance corpus missing categories: {sorted(missing_categories)}")
     cache_dir.mkdir(parents=True, exist_ok=True)
     entries = []
-    for item in manifest["fixtures"]:
+    for item in fixtures:
         path = cache_dir / f"{item['name']}.obj"
         generator = item["generator"]
         if generator == "invalid_index":
