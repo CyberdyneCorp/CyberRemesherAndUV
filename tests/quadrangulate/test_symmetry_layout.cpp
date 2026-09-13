@@ -1,6 +1,7 @@
 #include <doctest.h>
 
 #include <cmath>
+#include <cstdint>
 #include <vector>
 
 #include "cyber/core/mesh.hpp"
@@ -327,6 +328,22 @@ TEST_CASE("symmetry detection rejects a partial scan") {
     const auto report = detectSymmetry(partial.half);
     CHECK_FALSE(report.detected);
     CHECK(report.unmatchedSurfacePoints > 0);
+}
+
+TEST_CASE("symmetry detection reports semantic correspondence separately from geometry") {
+    Mesh mesh = unequallyTessellatedSymmetricStrip();
+    auto& groups = mesh.faceAttributes().create<std::int32_t>("group_id");
+    for (Index f = 0; f < mesh.faceCapacity(); ++f) {
+        const FaceId face{f};
+        if (mesh.isAlive(face)) {
+            groups[f] = mesh.faceCentroid(face).x < 0.0f ? 1 : 2;
+        }
+    }
+    const auto report = detectSymmetry(mesh);
+    CHECK(report.detected);
+    CHECK(report.sampledSemanticSurfacePoints == report.sampledSurfacePoints);
+    CHECK(report.semanticConsistentSurfacePoints < report.sampledSemanticSurfacePoints);
+    CHECK(report.componentConsistentSurfacePoints == report.matchedSurfacePoints);
 }
 
 TEST_CASE("mirroring is deterministic") {

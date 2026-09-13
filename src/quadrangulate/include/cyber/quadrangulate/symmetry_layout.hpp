@@ -54,6 +54,9 @@ struct SymmetryDetectionReport {
     std::size_t matchedSurfacePoints = 0;
     std::size_t unmatchedSurfacePoints = 0;
     std::size_t normalConsistentSurfacePoints = 0;
+    std::size_t componentConsistentSurfacePoints = 0;
+    std::size_t sampledSemanticSurfacePoints = 0;
+    std::size_t semanticConsistentSurfacePoints = 0;
     float meanSurfaceError = 0.0f;
     float maxSurfaceError = 0.0f;
     float meanNormalAgreement = 0.0f;

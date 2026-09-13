@@ -35,8 +35,9 @@ first.
       Matching is nearest-within-tolerance — never a quantized tolerance grid,
       which both collides distinct vertices and misses partners across a cell
       boundary. The in-progress detector also measures reflected triangle
-      samples against the source BVH and reports reflected-normal agreement;
-      those measurements are not yet corpus-calibrated.
+      samples against the source BVH and reports reflected-normal, component,
+      and declared `group_id` / `material_id` correspondence; those
+      measurements are not yet corpus-calibrated.
       Gate: the corpus's symmetric models report their plane; the asymmetric
       ones report none, and nothing about the output changes.
 - [ ] M6. Only once M5's threshold is calibrated on the corpus, allow detection

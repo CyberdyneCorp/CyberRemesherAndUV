@@ -140,6 +140,17 @@ void scoreSurface(const Mesh& mesh, const Plane& plane, float tolerance,
 
     float totalError = 0.0f;
     float totalNormalAgreement = 0.0f;
+    std::vector<std::size_t> componentByFace(mesh.faceCapacity(), kInvalidIndex);
+    const std::vector<std::vector<FaceId>> components = mesh.islands();
+    for (std::size_t component = 0; component < components.size(); ++component) {
+        for (const FaceId face : components[component]) {
+            componentByFace[face.value] = component;
+        }
+    }
+    const auto* groups = mesh.faceAttributes().find<std::int32_t>("group_id");
+    const auto* materials = mesh.faceAttributes().find<std::int32_t>("material_id");
+    std::map<std::size_t, std::size_t> reflectedComponents;
+    std::set<std::size_t> claimedComponents;
     for (Index f = 0; f < mesh.faceCapacity(); ++f) {
         const FaceId face{f};
         if (!mesh.isAlive(face)) {
@@ -170,6 +181,26 @@ void scoreSurface(const Mesh& mesh, const Plane& plane, float tolerance,
             totalNormalAgreement += agreement;
             if (agreement >= 0.9f) {
                 ++report.normalConsistentSurfacePoints;
+            }
+            const std::size_t sourceComponent = componentByFace[face.value];
+            const std::size_t targetComponent = componentByFace[hit.face.value];
+            const auto [mapping, inserted] = reflectedComponents.emplace(sourceComponent, targetComponent);
+            if (inserted) {
+                if (!claimedComponents.insert(targetComponent).second) {
+                    mapping->second = kInvalidIndex;
+                }
+            }
+            if (mapping->second == targetComponent) {
+                ++report.componentConsistentSurfacePoints;
+            }
+            if (groups != nullptr || materials != nullptr) {
+                ++report.sampledSemanticSurfacePoints;
+                const bool groupMatches = groups == nullptr || (*groups)[face.value] == (*groups)[hit.face.value];
+                const bool materialMatches =
+                    materials == nullptr || (*materials)[face.value] == (*materials)[hit.face.value];
+                if (groupMatches && materialMatches) {
+                    ++report.semanticConsistentSurfacePoints;
+                }
             }
         }
     }
