@@ -318,6 +318,19 @@ if(CYBER_BUILD_CLI AND Python3_FOUND)
         set_tests_properties(acceptance_corpus PROPERTIES
             TIMEOUT 900
             SKIP_RETURN_CODE 77)
+
+        # The layout-to-mesh handoff must be an observable path, not merely a
+        # report. This offline corpus test reconciles every injectability cause
+        # and forces a feasible Bi-MDF perturbation whose OBJ hash must change.
+        add_test(NAME injectability_output_reach
+            COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tools/bench/injectability.py
+                    --binary $<TARGET_FILE:cyberremesh>
+                    --corpus generated
+                    --target-quads 600
+                    --cache ${PROJECT_BINARY_DIR}/injectability-cache
+                    --csv ${PROJECT_BINARY_DIR}/injectability.csv
+                    --verify-output-reach)
+        set_tests_properties(injectability_output_reach PROPERTIES TIMEOUT 120)
     endif()
     else()
         message(STATUS "bench metric and acceptance tests skipped: numpy/scipy unavailable")
