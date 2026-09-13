@@ -110,7 +110,7 @@ TEST_CASE("capi count report is additive and caller-owned") {
     CyberTargetCountReport report{};
     CyberMesh* output = nullptr;
     REQUIRE(cyber_remesh_with_count_report(input, &params, &policy, nullptr, nullptr, nullptr,
-                                            &output, &report) == CYBER_OK);
+                                           &output, &report) == CYBER_OK);
     REQUIRE(output != nullptr);
     CHECK(report.requestedQuads == 400);
     CHECK(report.effectiveBaseQuads == 400);
