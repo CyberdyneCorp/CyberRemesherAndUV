@@ -33,6 +33,31 @@ enum class SymmetryAxis : std::uint8_t {
     Z,
 };
 
+// An advisory result from symmetry analysis.  Detection is deliberately
+// axis-aligned in this first release: callers must not mistake a PCA guess for
+// support for arbitrary rotated planes.  It never changes the mesh and never
+// selects forced symmetry for a remesh.
+struct SymmetryDetectionReport {
+    bool detected = false;
+    SymmetryAxis axis = SymmetryAxis::None;
+    Plane plane{};
+    std::size_t sampledVertices = 0;
+    std::size_t matchedVertices = 0;
+    std::size_t unmatchedVertices = 0;
+    float matchTolerance = 0.0f;
+    float meanMatchError = 0.0f;
+    float maxMatchError = 0.0f;
+    float confidence = 0.0f;
+    bool ambiguous = false;
+};
+
+// Analyse X/Y/Z midplanes and return the strongest geometric symmetry
+// hypothesis.  Partners are found by nearest-within-tolerance lookup, never
+// exact or quantized-key equality.  The tolerance scales with the model's
+// bounding-box diagonal and is capped by the mean edge length, which keeps a
+// sparse model from accepting a visibly asymmetric displacement.
+[[nodiscard]] SymmetryDetectionReport detectSymmetry(const Mesh& mesh);
+
 // The plane for an axis through the mesh's bounding-box centre. Returns a plane
 // with a zero normal for `None`, which every operation below treats as "no
 // symmetry".

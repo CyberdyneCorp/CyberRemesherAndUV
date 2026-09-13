@@ -13,6 +13,7 @@ using cyber::Mesh;
 using cyber::Plane;
 using cyber::Vec3;
 using cyber::VertexId;
+using cyber::remesh::detectSymmetry;
 using cyber::remesh::isTopologicallySymmetric;
 using cyber::remesh::mirrorAcross;
 using cyber::remesh::splitAtPlane;
@@ -212,6 +213,37 @@ TEST_CASE("a mesh that is already symmetric is recognised as such") {
     // the negative cases above meaningless.
     const Mesh mesh = centredGrid(3);
     CHECK(isTopologicallySymmetric(mesh, planeX()));
+}
+
+TEST_CASE("symmetry detection is advisory, conservative, and translation invariant") {
+    Mesh mesh = centredGrid(3);
+    // Break the horizontal midplane while retaining every X reflection pair.
+    mesh.setPosition(VertexId{0}, mesh.position(VertexId{0}) + Vec3{0.0f, 0.2f, 0.3f});
+    mesh.setPosition(VertexId{6}, mesh.position(VertexId{6}) + Vec3{0.0f, 0.2f, 0.3f});
+    for (Index v = 0; v < mesh.vertexCapacity(); ++v) {
+        const VertexId id{v};
+        if (mesh.isAlive(id)) {
+            mesh.setPosition(id, mesh.position(id) * 7.0f + Vec3{13.0f, -4.0f, 2.0f});
+        }
+    }
+    const auto report = detectSymmetry(mesh);
+    CHECK(report.detected);
+    CHECK(report.axis == SymmetryAxis::X);
+    CHECK(report.confidence == doctest::Approx(1.0f));
+    CHECK(report.unmatchedVertices == 0);
+    CHECK(report.plane.point.x == doctest::Approx(13.0f));
+
+    // Detection must not mutate the source: it is only advice for a caller
+    // that may later opt into forced symmetry.
+    CHECK(mesh.position(VertexId{0}).x == doctest::Approx(-8.0f));
+}
+
+TEST_CASE("symmetry detection rejects a deliberate asymmetric accessory") {
+    Mesh mesh = centredGrid(3);
+    mesh.setPosition(VertexId{0}, mesh.position(VertexId{0}) + Vec3{0.2f, 0.0f, 0.0f});
+    const auto report = detectSymmetry(mesh);
+    CHECK_FALSE(report.detected);
+    CHECK(report.unmatchedVertices > 0);
 }
 
 TEST_CASE("mirroring is deterministic") {

@@ -83,7 +83,109 @@ private:
     std::map<std::array<long long, 3>, std::vector<Index>> m_cells;
 };
 
+struct Bounds {
+    Vec3 low{kInf, kInf, kInf};
+    Vec3 high{-kInf, -kInf, -kInf};
+    std::size_t vertices = 0;
+};
+
+Bounds boundsOf(const Mesh& mesh) {
+    Bounds bounds;
+    for (Index v = 0; v < mesh.vertexCapacity(); ++v) {
+        const VertexId id{v};
+        if (!mesh.isAlive(id)) {
+            continue;
+        }
+        const Vec3 p = mesh.position(id);
+        bounds.low = Vec3{std::min(bounds.low.x, p.x), std::min(bounds.low.y, p.y),
+                          std::min(bounds.low.z, p.z)};
+        bounds.high = Vec3{std::max(bounds.high.x, p.x), std::max(bounds.high.y, p.y),
+                           std::max(bounds.high.z, p.z)};
+        ++bounds.vertices;
+    }
+    return bounds;
+}
+
+float detectionTolerance(const Mesh& mesh, const Bounds& bounds) {
+    const float diagonal = length(bounds.high - bounds.low);
+    float edgeTotal = 0.0f;
+    std::size_t edges = 0;
+    for (Index e = 0; e < mesh.edgeCapacity(); ++e) {
+        const EdgeId id{e};
+        if (!mesh.isAlive(id)) {
+            continue;
+        }
+        const auto [a, b] = mesh.edgeVertices(id);
+        edgeTotal += length(mesh.position(a) - mesh.position(b));
+        ++edges;
+    }
+    const float scaleTolerance = std::max(diagonal, 1.0f) * 1e-4f;
+    const float samplingTolerance = edges == 0 ? scaleTolerance : edgeTotal / edges * 1e-3f;
+    return std::max(1e-6f, std::min(scaleTolerance, samplingTolerance));
+}
+
+SymmetryDetectionReport scoreAxis(const Mesh& mesh, SymmetryAxis axis, float tolerance,
+                                  std::size_t vertices) {
+    SymmetryDetectionReport report;
+    report.axis = axis;
+    report.plane = symmetryPlane(mesh, axis);
+    report.sampledVertices = vertices;
+    report.matchTolerance = tolerance;
+    const VertexGrid grid(mesh, tolerance);
+    float totalError = 0.0f;
+    for (Index v = 0; v < mesh.vertexCapacity(); ++v) {
+        const VertexId id{v};
+        if (!mesh.isAlive(id)) {
+            continue;
+        }
+        const Vec3 reflected = mirrorAcrossPlane(report.plane, mesh.position(id));
+        const Index partner = grid.nearest(mesh, reflected, tolerance);
+        if (partner == kInvalidIndex) {
+            ++report.unmatchedVertices;
+            continue;
+        }
+        const float error = length(mesh.position(VertexId{partner}) - reflected);
+        ++report.matchedVertices;
+        totalError += error;
+        report.maxMatchError = std::max(report.maxMatchError, error);
+    }
+    if (report.matchedVertices != 0) {
+        report.meanMatchError = totalError / static_cast<float>(report.matchedVertices);
+    }
+    const float coverage =
+        vertices == 0 ? 0.0f : static_cast<float>(report.matchedVertices) / vertices;
+    const float accuracy = tolerance == 0.0f ? 0.0f : 1.0f - report.meanMatchError / tolerance;
+    report.confidence = std::clamp(coverage * std::max(0.0f, accuracy), 0.0f, 1.0f);
+    // Detection stays deliberately strict until corpus calibration establishes
+    // an application threshold.  A caller can inspect weaker hypotheses, but
+    // no hypothesis changes the mesh.
+    report.detected = report.unmatchedVertices == 0 && report.confidence >= 0.995f;
+    return report;
+}
+
 }  // namespace
+
+SymmetryDetectionReport detectSymmetry(const Mesh& mesh) {
+    const Bounds bounds = boundsOf(mesh);
+    if (bounds.vertices < 3) {
+        return {};
+    }
+    const float tolerance = detectionTolerance(mesh, bounds);
+    std::array<SymmetryDetectionReport, 3> candidates{
+        scoreAxis(mesh, SymmetryAxis::X, tolerance, bounds.vertices),
+        scoreAxis(mesh, SymmetryAxis::Y, tolerance, bounds.vertices),
+        scoreAxis(mesh, SymmetryAxis::Z, tolerance, bounds.vertices)};
+    std::sort(candidates.begin(), candidates.end(),
+              [](const auto& a, const auto& b) { return a.confidence > b.confidence; });
+    SymmetryDetectionReport result = candidates.front();
+    result.ambiguous =
+        candidates[1].detected && std::abs(candidates[1].confidence - result.confidence) < 1e-4f;
+    if (result.ambiguous) {
+        result.detected = false;
+        result.axis = SymmetryAxis::None;
+    }
+    return result;
+}
 
 Plane symmetryPlane(const Mesh& mesh, SymmetryAxis axis) {
     Plane plane;
