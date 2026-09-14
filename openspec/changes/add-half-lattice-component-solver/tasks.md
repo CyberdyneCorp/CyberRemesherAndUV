@@ -1,12 +1,12 @@
 ## 1. Component model and exact arithmetic
 
-- [ ] 1.1 Define internal equation, dependency-sentinel, component, rejection,
+- [x] 1.1 Define internal equation, dependency-sentinel, component, rejection,
       and parity-witness types without changing quantizer behavior.
-- [ ] 1.2 Normalize supported arc equations into checked doubled-lattice
+- [x] 1.2 Normalize supported arc equations into checked doubled-lattice
       integer rows; classify overflow and non-half coefficients explicitly.
-- [ ] 1.3 Build stable bipartite components over equations, reduced variables,
+- [x] 1.3 Build stable bipartite components over equations, reduced variables,
       and sentinel dependencies.
-- [ ] 1.4 Implement deterministic GF(2) parity solving with contradiction
+- [x] 1.4 Implement deterministic GF(2) parity solving with contradiction
       witnesses and unit tests for satisfiable and unsatisfiable cycles.
 
 ## 2. Complete component admission

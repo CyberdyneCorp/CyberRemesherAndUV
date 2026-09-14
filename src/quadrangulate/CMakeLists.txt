@@ -5,6 +5,7 @@ add_library(cyber_quadrangulate STATIC
     src/position_field.cpp
     src/quad_extract.cpp
     src/seamless_solver.cpp
+    src/half_lattice_components.cpp
     src/bimdf_quantize.cpp
     src/geometry_analysis.cpp
     src/layout_score.cpp
