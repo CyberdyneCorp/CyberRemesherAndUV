@@ -1,0 +1,4 @@
+schema: spec-driven
+created: 2026-09-14
+goal: Specify a component-scoped parity solver that can safely connect Bi-MDF
+  layout targets to the final seamless quantizer.
