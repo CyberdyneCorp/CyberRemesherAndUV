@@ -160,22 +160,28 @@ targets onto a legal component assignment; partial pinning is not permitted.
 original Bi-MDF targets fail exact residual validation. It rounds the relaxed
 solution on the component's mixed domain (integer basis variables stay
 integer), derives every component target by exact substitution, re-solves it,
-and injects all resulting pins atomically. A component touching an excluded,
-empty, or otherwise rejected arc cannot enter this path. The original target
-residual remains visible in default and `inject` reporting; projected and
-projected-injected component counts are separate report fields.
+and adds every resulting arc as one low-weight steering objective. A component
+touching an excluded, empty, or otherwise rejected arc cannot enter this path.
+The original target residual remains visible in default and `inject` reporting;
+projected and projected-guided component counts are separate report fields.
 
 This is intentionally experimental: target projection optimizes consistency
-with the relaxed layout, not the original independent Bi-MDF arc targets. It
-must remain opt-in until the generated corpus quality and validity comparison
-shows no regression.
+with the relaxed layout, not the original independent Bi-MDF arc targets. Its
+default steering weight is 0.001 and it must remain opt-in until the generated
+corpus quality and validity comparison shows no regression.
 
-The first generated-corpus comparison did not clear that gate. At 100 target
-quads, the sphere admitted and injected one 39-arc projected component, but
-quality regressed while remaining structurally valid: singularities 9 -> 10,
-Hausdorff p99 0.0390 -> 0.0435, and mean angle deviation 17.9 -> 21.3 degrees.
-At the standard corpus targets, cylinder admitted two projected components and
-also regressed (singularities 4 -> 8 and feature recall 0.958 -> 0.927).
-Sphere, box, and torus were unchanged at those targets. Therefore projection
-is not a promotion candidate; it remains an explicit experimental diagnostic
-and output-reach mode until its target-selection objective is improved.
+Hard pinning was rejected: at 100 target quads, it made sphere singularities
+9 -> 10, Hausdorff p99 0.0390 -> 0.0435, and mean angle deviation 17.9 ->
+21.3 degrees. The low-weight complete-component guide avoids those changes;
+the corpus gate records the remaining numerical deltas and determines whether
+it can be promoted.
+
+`tools/bench/half_lattice_component_gate.py` is that gate. It runs baseline
+and opt-in output under identical OBJ names (so material-file names cannot
+create a false hash difference), proves the sphere@100 component is complete,
+guided, output-changing, and repeatable, then checks layout and mesh validity,
+realized deviation energy, quad ratio, irregularity, distance, median angle,
+edge-length CV, flow, and feature recall at target 100 and the generated
+corpus's standard targets. The 0.001 guide passed these existing corpus
+tolerances; its default remains opt-in pending the broader report-only and
+downloaded-corpus tasks.

@@ -12,7 +12,7 @@
 ## 2. Complete component admission
 
 - [x] 2.1 Implement the bounded integer-affine completion after parity solving.
-- [ ] 2.2 Substitute every candidate result into its original rows and enforce
+- [x] 2.2 Substitute every candidate result into its original rows and enforce
       target residual, integer-domain, and ownership checks.
 - [ ] 2.3 Reject entire components for unsupported relation, parity conflict,
       bound violation, residual, or resource limit; add regression tests that
@@ -41,7 +41,7 @@
 
 - [ ] 5.1 Establish and commit deterministic report-only component baselines
       for cube, spot, fandisk, rocker-arm, cheburashka, and stanford-bunny.
-- [ ] 5.2 Run opt-in corpus comparisons for output hashes, layout/mesh validity,
+- [x] 5.2 Run opt-in corpus comparisons for output hashes, layout/mesh validity,
       realized deviation energy, median angle, edge-length CV, and irregularity.
 - [ ] 5.3 Mutation-verify parity and ownership gates, confirming diagnostics and
       injection-enabled output both change.

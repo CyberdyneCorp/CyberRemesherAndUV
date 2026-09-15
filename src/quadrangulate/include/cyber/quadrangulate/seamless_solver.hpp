@@ -166,8 +166,8 @@ struct InjectabilityStats {
     std::size_t halfLatticeInjectedArcs = 0;
     std::size_t halfLatticeProjectedComponents = 0;
     std::size_t halfLatticeProjectedArcs = 0;
-    std::size_t halfLatticeInjectedProjectedComponents = 0;
-    std::size_t halfLatticeInjectedProjectedArcs = 0;
+    std::size_t halfLatticeGuidedProjectedComponents = 0;
+    std::size_t halfLatticeGuidedProjectedArcs = 0;
     std::size_t halfLatticeRejectedDependencies = 0;
     std::size_t halfLatticeRejectedParity = 0;
     std::size_t halfLatticeRejectedBounds = 0;

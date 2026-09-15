@@ -3556,11 +3556,24 @@ int solveSeamlessReduced(
                                 }
                                 ++injectability.halfLatticeProjectedComponents;
                                 injectability.halfLatticeProjectedArcs += component.equations.size();
-                                for (const auto& [variable, value] : projected.values) {
-                                    halfLatticePins.push_back({variable, 0.5 * static_cast<double>(value)});
+                                const char* projectMuEnv =
+                                    std::getenv("CYBER_ZR_HALF_LATTICE_PROJECT_MU");
+                                const double requestedMu = projectMuEnv != nullptr
+                                                               ? std::atof(projectMuEnv)
+                                                               : 0.001;
+                                const double projectMu = std::isfinite(requestedMu) &&
+                                                                 requestedMu >= 0.0 && requestedMu <= 0.01
+                                                             ? requestedMu
+                                                             : 0.001;
+                                for (const std::size_t rowIndex : component.equations) {
+                                    SteerRow row;
+                                    row.a = bimdfArcRows[halfLatticeRows[rowIndex].arc];
+                                    row.len = 0.25 * static_cast<double>(projection.equations[rowIndex].rhs);
+                                    row.mu = projectMu;
+                                    steerRows.push_back(std::move(row));
                                 }
-                                ++injectability.halfLatticeInjectedProjectedComponents;
-                                injectability.halfLatticeInjectedProjectedArcs += component.equations.size();
+                                ++injectability.halfLatticeGuidedProjectedComponents;
+                                injectability.halfLatticeGuidedProjectedArcs += component.equations.size();
                             } else if (projected.rejection == halflattice::RejectionReason::BoundViolation) {
                                 ++injectability.halfLatticeRejectedBounds;
                             } else {
@@ -3864,9 +3877,9 @@ int solveSeamlessReduced(
             aggregate.halfLatticeInjectedArcs += injectability.halfLatticeInjectedArcs;
             aggregate.halfLatticeProjectedComponents += injectability.halfLatticeProjectedComponents;
             aggregate.halfLatticeProjectedArcs += injectability.halfLatticeProjectedArcs;
-            aggregate.halfLatticeInjectedProjectedComponents +=
-                injectability.halfLatticeInjectedProjectedComponents;
-            aggregate.halfLatticeInjectedProjectedArcs += injectability.halfLatticeInjectedProjectedArcs;
+            aggregate.halfLatticeGuidedProjectedComponents +=
+                injectability.halfLatticeGuidedProjectedComponents;
+            aggregate.halfLatticeGuidedProjectedArcs += injectability.halfLatticeGuidedProjectedArcs;
             aggregate.halfLatticeRejectedDependencies += injectability.halfLatticeRejectedDependencies;
             aggregate.halfLatticeRejectedParity += injectability.halfLatticeRejectedParity;
             aggregate.halfLatticeRejectedBounds += injectability.halfLatticeRejectedBounds;

@@ -79,8 +79,8 @@ def row_for(binary: Path, mesh: dict, target_quads: int, work: Path, env: dict |
         "half_lattice_components": stats["halfLatticeComponents"],
         "half_lattice_accepted_components": stats["halfLatticeAcceptedComponents"],
         "half_lattice_projected_components": stats["halfLatticeProjectedComponents"],
-        "half_lattice_injected_projected_components":
-            stats["halfLatticeInjectedProjectedComponents"],
+        "half_lattice_guided_projected_components":
+            stats["halfLatticeGuidedProjectedComponents"],
     }
 
 
