@@ -5,12 +5,14 @@
 #include <vector>
 
 #include "../../src/quadrangulate/src/bimdf_quantize.hpp"
+#include "../../src/quadrangulate/src/half_lattice_components.hpp"
 
 using cyber::remesh::bimdf::Arc;
 using cyber::remesh::bimdf::BimdfResult;
 using cyber::remesh::bimdf::Patch;
 using cyber::remesh::bimdf::solveBimdf;
 using cyber::remesh::bimdf::TMesh;
+namespace half = cyber::remesh::halflattice;
 
 namespace {
 
@@ -64,6 +66,134 @@ TMesh cubeTMesh(double tx, double ty, double tz) {
 long long classValue(const BimdfResult& r, std::size_t first) { return r.arcLenHalf[first]; }
 
 }  // namespace
+
+TEST_CASE("half lattice normalizes half-step coefficients without rounding") {
+    half::SourceRow source;
+    source.arc = 7;
+    source.targetHalf = 5;
+    source.terms = {{4, 0.5}, {2, -1.0}, {4, 0.5}};
+    const half::Equation equation = half::normalize(source);
+    CHECK(equation.arc == 7);
+    CHECK(equation.rhs == 10);
+    REQUIRE(equation.terms.size() == 2);
+    CHECK(equation.terms[0] == std::pair<std::size_t, std::int64_t>{2, -2});
+    CHECK(equation.terms[1] == std::pair<std::size_t, std::int64_t>{4, 2});
+    CHECK(equation.rejection == half::RejectionReason::None);
+
+    source.terms = {{0, 0.25}};
+    CHECK(half::normalize(source).rejection == half::RejectionReason::FractionalCoefficient);
+}
+
+TEST_CASE("half lattice rejects an entire component with a sentinel dependency") {
+    std::vector<half::Equation> equations;
+    equations.push_back(half::normalize({0, {{0, 1.0}}, 2, half::RejectionReason::None}));
+    equations.push_back(
+        half::normalize({1, {{0, 0.5}, {1, 1.0}}, 3, half::RejectionReason::ContinuousDependency}));
+    equations.push_back(half::normalize({2, {{2, 1.0}}, 4, half::RejectionReason::None}));
+    const std::vector<half::Component> components = half::buildComponents(equations);
+    REQUIRE(components.size() == 2);
+    CHECK(components[0].equations == std::vector<std::size_t>{0, 1});
+    CHECK(components[0].rejection == half::RejectionReason::ContinuousDependency);
+    CHECK(components[1].equations == std::vector<std::size_t>{2});
+    CHECK(components[1].rejection == half::RejectionReason::None);
+}
+
+TEST_CASE("half lattice parity solver identifies a contradictory cycle") {
+    const std::vector<half::Equation> equations = {
+        {0, {{0, 1}, {1, 1}}, 0, half::RejectionReason::None},
+        {1, {{0, 1}, {1, 1}}, 1, half::RejectionReason::None},
+    };
+    const half::Component component = half::buildComponents(equations).front();
+    const half::ParityResult result = half::solveParity(equations, component);
+    CHECK_FALSE(result.consistent);
+    CHECK(result.rank == 1);
+    CHECK(result.witnessEquation != static_cast<std::size_t>(-1));
+    CHECK(result.witnessEquations == std::vector<std::size_t>{0, 1});
+}
+
+TEST_CASE("half lattice parity solver is deterministic for a feasible component") {
+    const std::vector<half::Equation> equations = {
+        {8, {{3, 1}, {7, 1}}, 1, half::RejectionReason::None},
+        {9, {{7, 1}, {11, 2}}, 1, half::RejectionReason::None},
+    };
+    const half::Component component = half::buildComponents(equations).front();
+    const half::ParityResult first = half::solveParity(equations, component);
+    const half::ParityResult second = half::solveParity(equations, component);
+    CHECK(first.consistent);
+    CHECK(first.rank == 2);
+    CHECK(first.witnessEquation == static_cast<std::size_t>(-1));
+    CHECK(first.rank == second.rank);
+    CHECK(first.witnessEquation == second.witnessEquation);
+}
+
+TEST_CASE("half lattice completion is bounded, exact, and component-atomic") {
+    const std::vector<half::Equation> equations = {
+        {0, {{0, 2}}, 8, half::RejectionReason::None},
+        {1, {{1, 1}, {0, 1}}, 7, half::RejectionReason::None},
+    };
+    const half::Component component = half::buildComponents(equations).front();
+    const half::CompletionResult complete = half::completeBounded(equations, component, -10, 10);
+    REQUIRE(complete.rejection == half::RejectionReason::None);
+    CHECK(complete.values == std::vector<std::pair<std::size_t, std::int64_t>>{{0, 4}, {1, 3}});
+
+    const half::CompletionResult bounded = half::completeBounded(equations, component, -2, 2);
+    CHECK(bounded.rejection == half::RejectionReason::BoundViolation);
+
+    const std::vector<half::Equation> rejected = {
+        {0, {{0, 1}}, 2, half::RejectionReason::ExcludedArc},
+        {1, {{0, 1}, {1, 1}}, 4, half::RejectionReason::None},
+    };
+    const half::Component rejectedComponent = half::buildComponents(rejected).front();
+    CHECK(half::completeBounded(rejected, rejectedComponent, -10, 10).rejection ==
+          half::RejectionReason::ExcludedArc);
+}
+
+TEST_CASE("half lattice completion eliminates coupled equations deterministically") {
+    const std::vector<half::Equation> equations = {
+        {0, {{0, 1}, {1, 1}}, 4, half::RejectionReason::None},
+        {1, {{0, 1}, {1, -1}}, 0, half::RejectionReason::None},
+    };
+    const half::Component component = half::buildComponents(equations).front();
+    const half::CompletionResult result = half::completeBounded(equations, component, -10, 10);
+    REQUIRE(result.rejection == half::RejectionReason::None);
+    CHECK(result.values == std::vector<std::pair<std::size_t, std::int64_t>>{{0, 2}, {1, 2}});
+}
+
+TEST_CASE("half lattice target projection is exact and component-atomic") {
+    const std::vector<half::Equation> equations = {
+        {0, {{0, 2}, {1, 1}}, 1, half::RejectionReason::None},
+        {1, {{0, 1}, {1, 2}}, 1, half::RejectionReason::None},
+    };
+    const half::Component component = half::buildComponents(equations).front();
+    CHECK(half::completeBounded(equations, component, -10, 10).rejection ==
+          half::RejectionReason::TargetResidual);
+    const half::ProjectionResult projection =
+        half::projectTargets(equations, component, {{0, 2}, {1, 2}});
+    REQUIRE(projection.rejection == half::RejectionReason::None);
+    const half::CompletionResult projected =
+        half::completeBounded(projection.equations, component, -10, 10);
+    CHECK(projected.rejection == half::RejectionReason::None);
+    CHECK(projected.values == std::vector<std::pair<std::size_t, std::int64_t>>{{0, 2}, {1, 2}});
+
+    const std::vector<half::Equation> rejected = {
+        {0, {{0, 1}}, 2, half::RejectionReason::ExcludedArc},
+    };
+    const half::Component blocked = half::buildComponents(rejected).front();
+    CHECK(half::projectTargets(rejected, blocked, {{0, 2}}).rejection ==
+          half::RejectionReason::ExcludedArc);
+}
+
+TEST_CASE("half lattice ownership audit blocks variables shared with exclusions") {
+    const std::vector<half::Equation> equations = {
+        {0, {{0, 1}}, 2, half::RejectionReason::None},
+        {1, {{0, 1}, {1, 1}}, 3, half::RejectionReason::ExcludedArc},
+        {2, {{2, 1}}, 4, half::RejectionReason::None},
+    };
+    const half::OwnershipAudit audit = half::auditRejectedOwnership(equations);
+    CHECK(audit.sharedRejectedVariables == 2);
+    CHECK(audit.blockedComponents == 1);
+    CHECK(audit.isolatedComponents == 1);
+}
 
 TEST_CASE("bimdf cube quantizes each parallel class to the rounded target") {
     const TMesh tm = cubeTMesh(4.2, 3.7, 5.5);

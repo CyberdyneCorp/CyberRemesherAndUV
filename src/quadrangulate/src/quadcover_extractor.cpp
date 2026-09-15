@@ -4139,6 +4139,24 @@ private:
         aggregate.injectedPivots += inject.injectedPivots;
         aggregate.optimumDeviationEnergy += inject.optimumDeviationEnergy;
         aggregate.realizedDeviationEnergy += inject.realizedDeviationEnergy;
+        aggregate.halfLatticeComponents += inject.halfLatticeComponents;
+        aggregate.halfLatticeAcceptedComponents += inject.halfLatticeAcceptedComponents;
+        aggregate.halfLatticeAcceptedArcs += inject.halfLatticeAcceptedArcs;
+        aggregate.halfLatticeInjectedComponents += inject.halfLatticeInjectedComponents;
+        aggregate.halfLatticeInjectedArcs += inject.halfLatticeInjectedArcs;
+        aggregate.halfLatticeProjectedComponents += inject.halfLatticeProjectedComponents;
+        aggregate.halfLatticeProjectedArcs += inject.halfLatticeProjectedArcs;
+        aggregate.halfLatticeGuidedProjectedComponents +=
+            inject.halfLatticeGuidedProjectedComponents;
+        aggregate.halfLatticeGuidedProjectedArcs += inject.halfLatticeGuidedProjectedArcs;
+        aggregate.halfLatticeRejectedDependencies += inject.halfLatticeRejectedDependencies;
+        aggregate.halfLatticeRejectedParity += inject.halfLatticeRejectedParity;
+        aggregate.halfLatticeRejectedBounds += inject.halfLatticeRejectedBounds;
+        aggregate.halfLatticeRejectedResidual += inject.halfLatticeRejectedResidual;
+        aggregate.halfLatticeRejectedUnderdetermined += inject.halfLatticeRejectedUnderdetermined;
+        aggregate.halfLatticeIsolatedAfterExclusion += inject.halfLatticeIsolatedAfterExclusion;
+        aggregate.halfLatticeBlockedByExcludedOwnership +=
+            inject.halfLatticeBlockedByExcludedOwnership;
         if (target.invalidReason.empty()) {
             target.invalidReason = source.invalidReason;
         }

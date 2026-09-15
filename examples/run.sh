@@ -11,7 +11,14 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
-LIB="$(find "$ROOT/build" -name 'libcyber_capi.so' 2>/dev/null | head -1)"
+case "$(uname -s)" in
+  Darwin)
+    LIB="$(find "$ROOT/build" -name 'libcyber_capi.dylib' 2>/dev/null | head -1)"
+    ;;
+  *)
+    LIB="$(find "$ROOT/build" -name 'libcyber_capi.so' 2>/dev/null | head -1)"
+    ;;
+esac
 if [ -z "$LIB" ]; then
   echo "C-ABI shared library not found. Build it first:" >&2
   echo "  cmake --preset cpu-headless && cmake --build --preset cpu-headless --target cyber_capi_shared" >&2

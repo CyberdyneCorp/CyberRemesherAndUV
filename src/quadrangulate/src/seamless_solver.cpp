@@ -25,6 +25,7 @@
 #include "cyber/core/math.hpp"
 #include "cyber/quadrangulate/geometry_analysis.hpp"
 #include "cyber/quadrangulate/layout_score.hpp"
+#include "half_lattice_components.hpp"
 #include "sparse_cholesky.hpp"
 #include "topology_layout_build.hpp"
 
@@ -3008,7 +3009,13 @@ int solveSeamlessReduced(
     // the untouched greedy schedule below.
     std::unique_ptr<bimdf::TMesh> bimdfTm;
     std::vector<std::vector<std::pair<std::size_t, double>>> bimdfArcRows;
-    std::vector<std::pair<std::size_t, double>> bimdfPins;  // (intFree ordinal, value)
+    std::vector<std::pair<std::size_t, double>> bimdfPins;        // (intFree ordinal, value)
+    std::vector<std::pair<std::size_t, double>> halfLatticePins;  // (reduced free, value)
+    const char* halfLatticeMode = std::getenv("CYBER_ZR_HALF_LATTICE");
+    const bool injectHalfLattice =
+        halfLatticeMode != nullptr && std::string(halfLatticeMode) == "inject";
+    const bool projectHalfLattice =
+        halfLatticeMode != nullptr && std::string(halfLatticeMode) == "project";
     InjectabilityStats injectability;
     if (bimdfCharts != nullptr) {
         bimdfCharts->u = relaxedUv.data();
@@ -3463,6 +3470,143 @@ int solveSeamlessReduced(
                     // the counters reconcilable instead of an overlapping
                     // list of symptoms.
                     injectability = {};
+                    std::vector<halflattice::Equation> halfLatticeRows;
+                    halfLatticeRows.reserve(tmesh.arcs.size());
+                    for (std::size_t a = 0; a < tmesh.arcs.size(); ++a) {
+                        halflattice::RejectionReason reason = halflattice::RejectionReason::None;
+                        if ((a < tmesh.arcExcluded.size() && tmesh.arcExcluded[a] != 0) ||
+                            (a < sol.arcOutside.size() && sol.arcOutside[a] != 0) ||
+                            injDrop[a] != 0) {
+                            reason = halflattice::RejectionReason::ExcludedArc;
+                        } else if (bimdfArcRows[a].empty()) {
+                            reason = halflattice::RejectionReason::EmptyRow;
+                        }
+                        halfLatticeRows.push_back(halflattice::normalize(
+                            {a, bimdfArcRows[a], sol.arcLenHalf[a], reason}));
+                    }
+                    const std::vector<halflattice::Component> halfComponents =
+                        halflattice::buildComponents(halfLatticeRows);
+                    const halflattice::OwnershipAudit ownership =
+                        halflattice::auditRejectedOwnership(halfLatticeRows);
+                    injectability.halfLatticeComponents = halfComponents.size();
+                    injectability.halfLatticeIsolatedAfterExclusion = ownership.isolatedComponents;
+                    injectability.halfLatticeBlockedByExcludedOwnership =
+                        ownership.blockedComponents;
+                    for (const halflattice::Component& component : halfComponents) {
+                        const halflattice::CompletionResult completion =
+                            halflattice::completeBounded(halfLatticeRows, component,
+                                                         static_cast<std::int64_t>(-tCap * 2.0),
+                                                         static_cast<std::int64_t>(tCap * 2.0));
+                        if (completion.rejection == halflattice::RejectionReason::None) {
+                            ++injectability.halfLatticeAcceptedComponents;
+                            injectability.halfLatticeAcceptedArcs += component.equations.size();
+                            if (injectHalfLattice) {
+                                bool integerDomain = true;
+                                for (const auto& [variable, value] : completion.values) {
+                                    if (ordinalOf[variable] != kInvalidIndex && value % 2 != 0) {
+                                        integerDomain = false;
+                                        break;
+                                    }
+                                }
+                                if (integerDomain) {
+                                    for (const auto& [variable, value] : completion.values) {
+                                        halfLatticePins.push_back(
+                                            {variable, 0.5 * static_cast<double>(value)});
+                                    }
+                                    ++injectability.halfLatticeInjectedComponents;
+                                    injectability.halfLatticeInjectedArcs +=
+                                        component.equations.size();
+                                }
+                            }
+                        } else if (completion.rejection ==
+                                       halflattice::RejectionReason::TargetResidual &&
+                                   projectHalfLattice &&
+                                   component.rejection == halflattice::RejectionReason::None) {
+                            std::vector<std::pair<std::size_t, std::int64_t>> relaxedValues;
+                            relaxedValues.reserve(component.variables.size());
+                            bool inBounds = true;
+                            for (const std::size_t variable : component.variables) {
+                                const double doubled =
+                                    ordinalOf[variable] == kInvalidIndex
+                                        ? std::round(2.0 * static_cast<double>(w[variable]))
+                                        : 2.0 * std::round(static_cast<double>(w[variable]));
+                                if (!std::isfinite(doubled) || doubled < -tCap * 2.0 ||
+                                    doubled > tCap * 2.0) {
+                                    inBounds = false;
+                                    break;
+                                }
+                                relaxedValues.push_back(
+                                    {variable, static_cast<std::int64_t>(doubled)});
+                            }
+                            const halflattice::ProjectionResult projection =
+                                inBounds ? halflattice::projectTargets(halfLatticeRows, component,
+                                                                       relaxedValues)
+                                         : halflattice::ProjectionResult{
+                                               halflattice::RejectionReason::BoundViolation, {}};
+                            const halflattice::CompletionResult projected =
+                                projection.rejection == halflattice::RejectionReason::None
+                                    ? halflattice::completeBounded(
+                                          projection.equations, component,
+                                          static_cast<std::int64_t>(-tCap * 2.0),
+                                          static_cast<std::int64_t>(tCap * 2.0))
+                                    : halflattice::CompletionResult{projection.rejection, {}};
+                            if (projected.rejection == halflattice::RejectionReason::None) {
+                                bool integerDomain = true;
+                                for (const auto& [variable, value] : projected.values) {
+                                    if (ordinalOf[variable] != kInvalidIndex && value % 2 != 0) {
+                                        integerDomain = false;
+                                        break;
+                                    }
+                                }
+                                if (!integerDomain) {
+                                    ++injectability.halfLatticeRejectedParity;
+                                    continue;
+                                }
+                                ++injectability.halfLatticeProjectedComponents;
+                                injectability.halfLatticeProjectedArcs +=
+                                    component.equations.size();
+                                const char* projectMuEnv =
+                                    std::getenv("CYBER_ZR_HALF_LATTICE_PROJECT_MU");
+                                const double requestedMu =
+                                    projectMuEnv != nullptr ? std::atof(projectMuEnv) : 0.001;
+                                const double projectMu = std::isfinite(requestedMu) &&
+                                                                 requestedMu >= 0.0 &&
+                                                                 requestedMu <= 0.01
+                                                             ? requestedMu
+                                                             : 0.001;
+                                for (const std::size_t rowIndex : component.equations) {
+                                    SteerRow row;
+                                    row.a = bimdfArcRows[halfLatticeRows[rowIndex].arc];
+                                    row.len = 0.25 * static_cast<double>(
+                                                         projection.equations[rowIndex].rhs);
+                                    row.mu = projectMu;
+                                    steerRows.push_back(std::move(row));
+                                }
+                                ++injectability.halfLatticeGuidedProjectedComponents;
+                                injectability.halfLatticeGuidedProjectedArcs +=
+                                    component.equations.size();
+                            } else if (projected.rejection ==
+                                       halflattice::RejectionReason::BoundViolation) {
+                                ++injectability.halfLatticeRejectedBounds;
+                            } else {
+                                ++injectability.halfLatticeRejectedResidual;
+                            }
+                        } else if (completion.rejection ==
+                                   halflattice::RejectionReason::ParityConflict) {
+                            ++injectability.halfLatticeRejectedParity;
+                        } else if (completion.rejection ==
+                                   halflattice::RejectionReason::BoundViolation) {
+                            ++injectability.halfLatticeRejectedBounds;
+                        } else if (completion.rejection ==
+                                   halflattice::RejectionReason::TargetResidual) {
+                            ++injectability.halfLatticeRejectedResidual;
+                        } else if (completion.rejection ==
+                                   halflattice::RejectionReason::Underdetermined) {
+                            ++injectability.halfLatticeRejectedUnderdetermined;
+                        } else {
+                            ++injectability.halfLatticeRejectedDependencies;
+                        }
+                    }
                     injectability.arcs = tmesh.arcs.size();
                     injectability.fractionalPivotRows = fracRows.size();
                     injectability.droppedRows = injDropped;
@@ -3530,7 +3674,7 @@ int solveSeamlessReduced(
     // schedule's first scan sees the attracted relaxed values. The bordered
     // direct engine factorized the UNATTRACTED operator, so guided rounds
     // fall back to the masked CG.
-    if (!steerRows.empty() && bimdfPins.empty()) {
+    if (!steerRows.empty() && bimdfPins.empty() && halfLatticePins.empty()) {
         steering = true;
         for (const SteerRow& sr : steerRows) {
             for (const auto& [ri, cf] : sr.a) {
@@ -3567,6 +3711,32 @@ int solveSeamlessReduced(
         } else {
             maskedSolve(mask);
         }
+    }
+    // A complete doubled-lattice component owns every constrained reduced
+    // degree of freedom. Pin it atomically, then solve only the independent
+    // remainder. This remains opt-in until corpus gates promote it.
+    if (!halfLatticePins.empty()) {
+        if (useDirect) {
+            direct.finalize(mask, w);
+            useDirect = false;
+        }
+        std::vector<std::size_t> integerOrdinal(W, kInvalidIndex);
+        for (std::size_t k = 0; k < intFree.size(); ++k) {
+            integerOrdinal[intFree[k]] = k;
+        }
+        for (const auto& [reducedVariable, value] : halfLatticePins) {
+            if (mask[reducedVariable] == 0) {
+                continue;
+            }
+            w[reducedVariable] = static_cast<float>(value);
+            mask[reducedVariable] = 0;
+            const std::size_t ordinal = integerOrdinal[reducedVariable];
+            if (ordinal != kInvalidIndex && intPinned[ordinal] == 0) {
+                intPinned[ordinal] = 1;
+                --remaining;
+            }
+        }
+        maskedSolve(mask);
     }
     while (remaining > 0) {
         if (cancel != nullptr && cancel->isCancelled()) {
@@ -3716,6 +3886,29 @@ int solveSeamlessReduced(
             aggregate.injectedPivots += injectability.injectedPivots;
             aggregate.optimumDeviationEnergy += injectability.optimumDeviationEnergy;
             aggregate.realizedDeviationEnergy += injectability.realizedDeviationEnergy;
+            aggregate.halfLatticeComponents += injectability.halfLatticeComponents;
+            aggregate.halfLatticeAcceptedComponents += injectability.halfLatticeAcceptedComponents;
+            aggregate.halfLatticeAcceptedArcs += injectability.halfLatticeAcceptedArcs;
+            aggregate.halfLatticeInjectedComponents += injectability.halfLatticeInjectedComponents;
+            aggregate.halfLatticeInjectedArcs += injectability.halfLatticeInjectedArcs;
+            aggregate.halfLatticeProjectedComponents +=
+                injectability.halfLatticeProjectedComponents;
+            aggregate.halfLatticeProjectedArcs += injectability.halfLatticeProjectedArcs;
+            aggregate.halfLatticeGuidedProjectedComponents +=
+                injectability.halfLatticeGuidedProjectedComponents;
+            aggregate.halfLatticeGuidedProjectedArcs +=
+                injectability.halfLatticeGuidedProjectedArcs;
+            aggregate.halfLatticeRejectedDependencies +=
+                injectability.halfLatticeRejectedDependencies;
+            aggregate.halfLatticeRejectedParity += injectability.halfLatticeRejectedParity;
+            aggregate.halfLatticeRejectedBounds += injectability.halfLatticeRejectedBounds;
+            aggregate.halfLatticeRejectedResidual += injectability.halfLatticeRejectedResidual;
+            aggregate.halfLatticeRejectedUnderdetermined +=
+                injectability.halfLatticeRejectedUnderdetermined;
+            aggregate.halfLatticeIsolatedAfterExclusion +=
+                injectability.halfLatticeIsolatedAfterExclusion;
+            aggregate.halfLatticeBlockedByExcludedOwnership +=
+                injectability.halfLatticeBlockedByExcludedOwnership;
         }
         std::fprintf(stderr,
                      "[qc] bimdf realized: arcDeviationEnergy=%.3f injected=%zu injectable=%zu "

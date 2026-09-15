@@ -156,6 +156,25 @@ struct InjectabilityStats {
     std::size_t injectedPivots = 0;
     double optimumDeviationEnergy = 0.0;
     double realizedDeviationEnergy = 0.0;
+    // Report-only census for the guarded doubled-lattice component solver.
+    // These fields stay internal until injection policy and ABI semantics are
+    // established; they make every admission decision inspectable meanwhile.
+    std::size_t halfLatticeComponents = 0;
+    std::size_t halfLatticeAcceptedComponents = 0;
+    std::size_t halfLatticeAcceptedArcs = 0;
+    std::size_t halfLatticeInjectedComponents = 0;
+    std::size_t halfLatticeInjectedArcs = 0;
+    std::size_t halfLatticeProjectedComponents = 0;
+    std::size_t halfLatticeProjectedArcs = 0;
+    std::size_t halfLatticeGuidedProjectedComponents = 0;
+    std::size_t halfLatticeGuidedProjectedArcs = 0;
+    std::size_t halfLatticeRejectedDependencies = 0;
+    std::size_t halfLatticeRejectedParity = 0;
+    std::size_t halfLatticeRejectedBounds = 0;
+    std::size_t halfLatticeRejectedResidual = 0;
+    std::size_t halfLatticeRejectedUnderdetermined = 0;
+    std::size_t halfLatticeIsolatedAfterExclusion = 0;
+    std::size_t halfLatticeBlockedByExcludedOwnership = 0;
 };
 
 struct LayoutRunReport {
