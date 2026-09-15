@@ -161,6 +161,31 @@ TEST_CASE("half lattice completion eliminates coupled equations deterministicall
           std::vector<std::pair<std::size_t, std::int64_t>>{{0, 2}, {1, 2}});
 }
 
+TEST_CASE("half lattice target projection is exact and component-atomic") {
+    const std::vector<half::Equation> equations = {
+        {0, {{0, 2}, {1, 1}}, 1, half::RejectionReason::None},
+        {1, {{0, 1}, {1, 2}}, 1, half::RejectionReason::None},
+    };
+    const half::Component component = half::buildComponents(equations).front();
+    CHECK(half::completeBounded(equations, component, -10, 10).rejection ==
+          half::RejectionReason::TargetResidual);
+    const half::ProjectionResult projection = half::projectTargets(
+        equations, component, {{0, 2}, {1, 2}});
+    REQUIRE(projection.rejection == half::RejectionReason::None);
+    const half::CompletionResult projected =
+        half::completeBounded(projection.equations, component, -10, 10);
+    CHECK(projected.rejection == half::RejectionReason::None);
+    CHECK(projected.values ==
+          std::vector<std::pair<std::size_t, std::int64_t>>{{0, 2}, {1, 2}});
+
+    const std::vector<half::Equation> rejected = {
+        {0, {{0, 1}}, 2, half::RejectionReason::ExcludedArc},
+    };
+    const half::Component blocked = half::buildComponents(rejected).front();
+    CHECK(half::projectTargets(rejected, blocked, {{0, 2}}).rejection ==
+          half::RejectionReason::ExcludedArc);
+}
+
 TEST_CASE("half lattice ownership audit blocks variables shared with exclusions") {
     const std::vector<half::Equation> equations = {
         {0, {{0, 1}}, 2, half::RejectionReason::None},

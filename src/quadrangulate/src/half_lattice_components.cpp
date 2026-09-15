@@ -219,6 +219,38 @@ ParityResult solveParity(const std::vector<Equation>& equations, const Component
     return result;
 }
 
+ProjectionResult projectTargets(
+    const std::vector<Equation>& equations, const Component& component,
+    const std::vector<std::pair<std::size_t, std::int64_t>>& suppliedValues) {
+    ProjectionResult result;
+    if (component.rejection != RejectionReason::None) {
+        result.rejection = component.rejection;
+        return result;
+    }
+    std::map<std::size_t, std::int64_t> values(suppliedValues.begin(), suppliedValues.end());
+    for (const std::size_t variable : component.variables) {
+        if (!values.contains(variable)) {
+            result.rejection = RejectionReason::Underdetermined;
+            return result;
+        }
+    }
+    result.equations = equations;
+    for (const std::size_t rowIndex : component.equations) {
+        std::int64_t rhs = 0;
+        for (const auto& [variable, coefficient] : result.equations[rowIndex].terms) {
+            std::int64_t contribution = 0;
+            if (!multiplyChecked(coefficient, values.at(variable), contribution) ||
+                !addChecked(rhs, contribution)) {
+                result.rejection = RejectionReason::Overflow;
+                result.equations.clear();
+                return result;
+            }
+        }
+        result.equations[rowIndex].rhs = rhs;
+    }
+    return result;
+}
+
 CompletionResult completeBounded(const std::vector<Equation>& equations, const Component& component,
                                  const std::int64_t minimum, const std::int64_t maximum) {
     CompletionResult result;

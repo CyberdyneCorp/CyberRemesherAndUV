@@ -35,6 +35,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--csv", type=Path, default=REPO / "tools/bench/injectability.csv")
     parser.add_argument("--verify-output-reach", action="store_true",
                         help="force partial Bi-MDF pinning and require a changed output hash")
+    parser.add_argument("--half-lattice-mode", choices=("off", "inject", "project"), default="off",
+                        help="measure an opt-in complete-component mode")
     return parser.parse_args()
 
 
@@ -74,6 +76,11 @@ def row_for(binary: Path, mesh: dict, target_quads: int, work: Path, env: dict |
         "clean_pivots": stats["cleanPivots"], "injected_pivots": stats["injectedPivots"],
         "optimum_deviation_energy": stats["optimumDeviationEnergy"],
         "realized_deviation_energy": stats["realizedDeviationEnergy"],
+        "half_lattice_components": stats["halfLatticeComponents"],
+        "half_lattice_accepted_components": stats["halfLatticeAcceptedComponents"],
+        "half_lattice_projected_components": stats["halfLatticeProjectedComponents"],
+        "half_lattice_injected_projected_components":
+            stats["halfLatticeInjectedProjectedComponents"],
     }
 
 
@@ -102,7 +109,9 @@ def main() -> int:
               else downloaded_meshes(args.cache / "meshes"))
     with tempfile.TemporaryDirectory(prefix="cyber-injectability-") as temporary:
         work = Path(temporary)
-        rows = [row_for(binary, mesh, args.target_quads, work / "measure") for mesh in meshes]
+        env = ({} if args.half_lattice_mode == "off"
+               else {"CYBER_ZR_HALF_LATTICE": args.half_lattice_mode})
+        rows = [row_for(binary, mesh, args.target_quads, work / "measure", env) for mesh in meshes]
         if args.verify_output_reach:
             candidate = next((mesh for mesh, row in zip(meshes, rows)
                               if row["injectable_arcs"] > 0), None)

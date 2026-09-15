@@ -85,6 +85,18 @@ struct CompletionResult {
     std::vector<std::pair<std::size_t, std::int64_t>> values;
 };
 
+struct ProjectionResult {
+    RejectionReason rejection = RejectionReason::None;
+    std::vector<Equation> equations;
+};
+
+// Replaces the targets of one complete component with the exact targets
+// implied by supplied doubled-lattice values. Rejected or partially owned
+// components remain rejected; no subset is projected.
+ProjectionResult projectTargets(const std::vector<Equation>& equations,
+                                const Component& component,
+                                const std::vector<std::pair<std::size_t, std::int64_t>>& values);
+
 // Completes a closed component only when deterministic integral elimination
 // determines every doubled-lattice variable within [minimum, maximum].
 CompletionResult completeBounded(const std::vector<Equation>& equations,
