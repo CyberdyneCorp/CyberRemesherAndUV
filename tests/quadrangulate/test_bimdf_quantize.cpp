@@ -74,7 +74,7 @@ TEST_CASE("half lattice normalizes half-step coefficients without rounding") {
     source.terms = {{4, 0.5}, {2, -1.0}, {4, 0.5}};
     const half::Equation equation = half::normalize(source);
     CHECK(equation.arc == 7);
-    CHECK(equation.rhs == 5);
+    CHECK(equation.rhs == 10);
     REQUIRE(equation.terms.size() == 2);
     CHECK(equation.terms[0] == std::pair<std::size_t, std::int64_t>{2, -2});
     CHECK(equation.terms[1] == std::pair<std::size_t, std::int64_t>{4, 2});
@@ -147,6 +147,18 @@ TEST_CASE("half lattice completion is bounded, exact, and component-atomic") {
     const half::Component rejectedComponent = half::buildComponents(rejected).front();
     CHECK(half::completeBounded(rejected, rejectedComponent, -10, 10).rejection ==
           half::RejectionReason::ExcludedArc);
+}
+
+TEST_CASE("half lattice ownership audit blocks variables shared with exclusions") {
+    const std::vector<half::Equation> equations = {
+        {0, {{0, 1}}, 2, half::RejectionReason::None},
+        {1, {{0, 1}, {1, 1}}, 3, half::RejectionReason::ExcludedArc},
+        {2, {{2, 1}}, 4, half::RejectionReason::None},
+    };
+    const half::OwnershipAudit audit = half::auditRejectedOwnership(equations);
+    CHECK(audit.sharedRejectedVariables == 2);
+    CHECK(audit.blockedComponents == 1);
+    CHECK(audit.isolatedComponents == 1);
 }
 
 TEST_CASE("bimdf cube quantizes each parallel class to the rounded target") {

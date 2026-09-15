@@ -4147,6 +4147,8 @@ private:
         aggregate.halfLatticeRejectedBounds += inject.halfLatticeRejectedBounds;
         aggregate.halfLatticeRejectedResidual += inject.halfLatticeRejectedResidual;
         aggregate.halfLatticeRejectedUnderdetermined += inject.halfLatticeRejectedUnderdetermined;
+        aggregate.halfLatticeIsolatedAfterExclusion += inject.halfLatticeIsolatedAfterExclusion;
+        aggregate.halfLatticeBlockedByExcludedOwnership += inject.halfLatticeBlockedByExcludedOwnership;
         if (target.invalidReason.empty()) {
             target.invalidReason = source.invalidReason;
         }

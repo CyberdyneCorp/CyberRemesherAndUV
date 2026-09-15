@@ -3474,21 +3474,17 @@ int solveSeamlessReduced(
                             reason = halflattice::RejectionReason::ExcludedArc;
                         } else if (bimdfArcRows[a].empty()) {
                             reason = halflattice::RejectionReason::EmptyRow;
-                        } else {
-                            for (const auto& [reducedVariable, coefficient] : bimdfArcRows[a]) {
-                                (void)coefficient;
-                                if (ordinalOf[reducedVariable] == kInvalidIndex) {
-                                    reason = halflattice::RejectionReason::ContinuousDependency;
-                                    break;
-                                }
-                            }
                         }
                         halfLatticeRows.push_back(halflattice::normalize(
                             {a, bimdfArcRows[a], sol.arcLenHalf[a], reason}));
                     }
                     const std::vector<halflattice::Component> halfComponents =
                         halflattice::buildComponents(halfLatticeRows);
+                    const halflattice::OwnershipAudit ownership =
+                        halflattice::auditRejectedOwnership(halfLatticeRows);
                     injectability.halfLatticeComponents = halfComponents.size();
+                    injectability.halfLatticeIsolatedAfterExclusion = ownership.isolatedComponents;
+                    injectability.halfLatticeBlockedByExcludedOwnership = ownership.blockedComponents;
                     for (const halflattice::Component& component : halfComponents) {
                         const halflattice::CompletionResult completion = halflattice::completeBounded(
                             halfLatticeRows, component, static_cast<std::int64_t>(-tCap * 2.0),
@@ -3769,6 +3765,9 @@ int solveSeamlessReduced(
             aggregate.halfLatticeRejectedBounds += injectability.halfLatticeRejectedBounds;
             aggregate.halfLatticeRejectedResidual += injectability.halfLatticeRejectedResidual;
             aggregate.halfLatticeRejectedUnderdetermined += injectability.halfLatticeRejectedUnderdetermined;
+            aggregate.halfLatticeIsolatedAfterExclusion += injectability.halfLatticeIsolatedAfterExclusion;
+            aggregate.halfLatticeBlockedByExcludedOwnership +=
+                injectability.halfLatticeBlockedByExcludedOwnership;
         }
         std::fprintf(stderr,
                      "[qc] bimdf realized: arcDeviationEnergy=%.3f injected=%zu injectable=%zu "

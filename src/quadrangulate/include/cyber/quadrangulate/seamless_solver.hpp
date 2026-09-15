@@ -167,6 +167,8 @@ struct InjectabilityStats {
     std::size_t halfLatticeRejectedBounds = 0;
     std::size_t halfLatticeRejectedResidual = 0;
     std::size_t halfLatticeRejectedUnderdetermined = 0;
+    std::size_t halfLatticeIsolatedAfterExclusion = 0;
+    std::size_t halfLatticeBlockedByExcludedOwnership = 0;
 };
 
 struct LayoutRunReport {

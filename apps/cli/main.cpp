@@ -975,6 +975,8 @@ int writeReport(const CliOptions& options, const remesh::PipelineResult& result,
                  {"halfLatticeRejectedBounds", injectability.halfLatticeRejectedBounds},
                  {"halfLatticeRejectedResidual", injectability.halfLatticeRejectedResidual},
                  {"halfLatticeRejectedUnderdetermined", injectability.halfLatticeRejectedUnderdetermined},
+                 {"halfLatticeIsolatedAfterExclusion", injectability.halfLatticeIsolatedAfterExclusion},
+                 {"halfLatticeBlockedByExcludedOwnership", injectability.halfLatticeBlockedByExcludedOwnership},
              }},
         };
         if (!zremesher.layout.invalidReason.empty()) {

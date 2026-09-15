@@ -47,10 +47,21 @@ struct Component {
     RejectionReason rejection = RejectionReason::None;
 };
 
+struct OwnershipAudit {
+    std::size_t isolatedComponents = 0;
+    std::size_t blockedComponents = 0;
+    std::size_t sharedRejectedVariables = 0;
+};
+
 // Components connect equations only through shared variables. A rejection on
 // any member makes the complete component ineligible; it is never separated
 // into a clean injectable subset.
 std::vector<Component> buildComponents(const std::vector<Equation>& equations);
+
+// Rebuilds components from supported equations only, then proves whether each
+// would still share a variable with a rejected equation. Only isolated
+// components can be admitted for guarded injection.
+OwnershipAudit auditRejectedOwnership(const std::vector<Equation>& equations);
 
 struct ParityResult {
     bool consistent = true;

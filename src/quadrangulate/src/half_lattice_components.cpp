@@ -43,8 +43,11 @@ void xorProvenance(std::vector<std::size_t>& destination, const std::vector<std:
 Equation normalize(const SourceRow& source) {
     Equation result;
     result.arc = source.arc;
-    result.rhs = source.targetHalf;
     result.rejection = source.dependency;
+    if (!multiplyChecked(source.targetHalf, 2, result.rhs)) {
+        result.rejection = RejectionReason::Overflow;
+        return result;
+    }
 
     std::map<std::size_t, std::int64_t> merged;
     for (const auto& [variable, coefficient] : source.terms) {
@@ -118,6 +121,40 @@ std::vector<Component> buildComponents(const std::vector<Equation>& equations) {
         components.push_back(std::move(component));
     }
     return components;
+}
+
+OwnershipAudit auditRejectedOwnership(const std::vector<Equation>& equations) {
+    std::vector<Equation> supported;
+    std::vector<std::size_t> rejectedVariables;
+    for (const Equation& equation : equations) {
+        if (equation.rejection == RejectionReason::None) {
+            supported.push_back(equation);
+            continue;
+        }
+        for (const auto& [variable, coefficient] : equation.terms) {
+            if (coefficient != 0) {
+                rejectedVariables.push_back(variable);
+            }
+        }
+    }
+    std::sort(rejectedVariables.begin(), rejectedVariables.end());
+    rejectedVariables.erase(std::unique(rejectedVariables.begin(), rejectedVariables.end()),
+                            rejectedVariables.end());
+    OwnershipAudit audit;
+    for (const Component& component : buildComponents(supported)) {
+        const bool shared = std::any_of(component.variables.begin(), component.variables.end(),
+                                        [&rejectedVariables](const std::size_t variable) {
+                                            return std::binary_search(rejectedVariables.begin(),
+                                                                      rejectedVariables.end(), variable);
+                                        });
+        if (shared) {
+            ++audit.blockedComponents;
+        } else {
+            ++audit.isolatedComponents;
+        }
+    }
+    audit.sharedRejectedVariables = rejectedVariables.size();
+    return audit;
 }
 
 ParityResult solveParity(const std::vector<Equation>& equations, const Component& component) {
