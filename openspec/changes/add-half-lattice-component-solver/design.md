@@ -178,10 +178,12 @@ it can be promoted.
 
 `tools/bench/half_lattice_component_gate.py` is that gate. It runs baseline
 and opt-in output under identical OBJ names (so material-file names cannot
-create a false hash difference), proves the sphere@100 component is complete,
-guided, output-changing, and repeatable, then checks layout and mesh validity,
-realized deviation energy, quad ratio, irregularity, distance, median angle,
-edge-length CV, flow, and feature recall at target 100 and the generated
-corpus's standard targets. The 0.001 guide passed these existing corpus
+create a false hash difference), then checks layout and mesh validity, realized
+deviation energy, quad ratio, irregularity, distance, median angle, edge-length
+CV, flow, and feature recall at target 100 and the generated corpus's standard
+targets. macOS additionally requires the recorded sphere@100 component to be
+complete, guided, output-changing, and repeatable. Other toolchains retain the
+quality gate but do not promise the same component census, since their linear
+solver and layout choices differ. The 0.001 guide passed these existing corpus
 tolerances; its default remains opt-in pending the broader report-only and
 downloaded-corpus tasks.

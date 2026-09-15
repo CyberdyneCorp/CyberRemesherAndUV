@@ -337,10 +337,18 @@ if(CYBER_BUILD_CLI AND Python3_FOUND)
         # by the benchmark gate. The script runs baseline and opt-in guide
         # outputs under identical filenames, so its hash comparison is not
         # confused by OBJ material-file naming.
+        set(_half_lattice_component_gate_args)
+        if(APPLE)
+            # The exact component census is solver/toolchain sensitive. macOS
+            # is the recorded output-reach fixture; other platforms still run
+            # the corpus validity and non-regression portions of the gate.
+            list(APPEND _half_lattice_component_gate_args --require-output-reach)
+        endif()
         add_test(NAME half_lattice_component_gate
             COMMAND ${Python3_EXECUTABLE}
                     ${PROJECT_SOURCE_DIR}/tools/bench/half_lattice_component_gate.py
-                    --binary $<TARGET_FILE:cyberremesh>)
+                    --binary $<TARGET_FILE:cyberremesh>
+                    ${_half_lattice_component_gate_args})
         set_tests_properties(half_lattice_component_gate PROPERTIES TIMEOUT 300)
     endif()
     else()
