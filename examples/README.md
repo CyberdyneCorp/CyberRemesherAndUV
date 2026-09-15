@@ -40,7 +40,7 @@ so quad-dominance reads at a glance.
 | `23_thin_features.py` | do plates, fins and tubes survive a target edge coarser than they are thick | text report |
 | `24_topology_guides.py` | `mode="topology"` guides — a stroke that becomes an actual edge loop, not just a field bias | `output/24_topology_guides.png` |
 | `25_symmetry.py` | `--symmetry x` — mirrored CONNECTIVITY, verified by matching every vertex and face to its reflection | `output/25_symmetry.png` |
-| `run_all.py` | runs all of the above + a stitched `output/gallery.png` | `output/gallery.png` |
+| `run_all.py` | runs the visual feature set + a stitched `output/gallery.png` (benchmarks stay separate) | `output/gallery.png` |
 
 `08_load_model.py` loads a mesh and converts it to quads. It defaults to a
 procedural torus knot but takes `--input <file>` for your own model:
@@ -141,7 +141,7 @@ cmake --build --preset cpu-headless --target cyber_capi_shared
 
 pip install -r examples/requirements.txt
 
-examples/run.sh examples/run_all.py        # everything + the gallery
+examples/run.sh examples/run_all.py        # visual feature gallery
 examples/run.sh examples/01_quad_remesh.py # a single example
 ```
 

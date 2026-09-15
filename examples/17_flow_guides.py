@@ -27,7 +27,7 @@ sys.path.insert(0, os.path.join(_REPO, "python", "cyberremesh"))
 from cyberremesh import FlowGuide, Mesh, RemeshParams, remesh  # noqa: E402
 
 MODELS = os.path.join(_REPO, "examples", "models")
-OUTPUT = os.path.join(_REPO, "examples", "output")
+OUTPUT = os.environ.get("CYBER_EXAMPLES_OUTPUT", os.path.join(_REPO, "examples", "output"))
 
 
 def load_obj(path):

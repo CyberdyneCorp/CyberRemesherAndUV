@@ -77,7 +77,11 @@ cross field, ~95%+ quad-dominance, strongest on box/CAD geometry),
 
 Twenty-six runnable examples drive the engine through the Python binding and
 render what they do; [`examples/README.md`](examples/README.md) indexes them,
-and `examples/run_all.py` runs the lot into a stitched gallery.
+and `examples/run_all.py` runs the eighteen visual feature examples into a
+stitched gallery. The reference/benchmark examples stay separate because they
+may build external solvers. To verify the gallery without overwriting checked-in
+images, use `CYBER_EXAMPLES_OUTPUT=/tmp/cyber-gallery examples/run.sh
+examples/run_all.py` after installing `examples/requirements.txt`.
 
 Every strategy feeds a pure-quad path (subdivision + surface-projected relaxation)
 for a 100%-quad result. `examples/10_vs_reference.py` and `examples/11_benchmark.py`
@@ -212,9 +216,17 @@ free end-to-end check that the layout agrees with the field it came from:
 | rocker-arm | 489 | 692 | 199 | 98 | 1 | 0 |
 | stanford-bunny | 628 | 771 | 189 | 133 | 0 | 8 |
 
-Building the layout **cannot change the quantized result** — the tracer's
-geometry capture is write-only with respect to the solver, verified
-byte-identical with capture on versus off across the corpus.
+With its default settings, building the layout **cannot change the quantized
+result** — the tracer's geometry capture is write-only with respect to the
+solver, verified byte-identical with capture on versus off across the corpus.
+
+`CYBER_ZR_HALF_LATTICE=project` is an opt-in experimental bridge from one
+fully-owned organic layout component into the quantizer. It derives a
+target-consistent doubled-lattice assignment, then applies every arc in that
+component as a bounded low-weight guide rather than hard-pinning a partial
+subset. The generated-corpus gate proves a deterministic output change for its
+sphere component while preserving layout/mesh validity and the benchmark's
+quality tolerances. It remains opt-in while the broader corpus work continues.
 
 The next milestone is making the tracing robust to the foldovers the relaxed
 parameterization genuinely has near high-distortion cones. That work is
