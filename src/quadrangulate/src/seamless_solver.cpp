@@ -3010,6 +3010,10 @@ int solveSeamlessReduced(
     std::unique_ptr<bimdf::TMesh> bimdfTm;
     std::vector<std::vector<std::pair<std::size_t, double>>> bimdfArcRows;
     std::vector<std::pair<std::size_t, double>> bimdfPins;  // (intFree ordinal, value)
+    std::vector<std::pair<std::size_t, double>> halfLatticePins;  // (reduced free, value)
+    const char* halfLatticeMode = std::getenv("CYBER_ZR_HALF_LATTICE");
+    const bool injectHalfLattice =
+        halfLatticeMode != nullptr && std::string(halfLatticeMode) == "inject";
     InjectabilityStats injectability;
     if (bimdfCharts != nullptr) {
         bimdfCharts->u = relaxedUv.data();
@@ -3492,6 +3496,23 @@ int solveSeamlessReduced(
                         if (completion.rejection == halflattice::RejectionReason::None) {
                             ++injectability.halfLatticeAcceptedComponents;
                             injectability.halfLatticeAcceptedArcs += component.equations.size();
+                            if (injectHalfLattice) {
+                                bool integerDomain = true;
+                                for (const auto& [variable, value] : completion.values) {
+                                    if (ordinalOf[variable] != kInvalidIndex && value % 2 != 0) {
+                                        integerDomain = false;
+                                        break;
+                                    }
+                                }
+                                if (integerDomain) {
+                                    for (const auto& [variable, value] : completion.values) {
+                                        halfLatticePins.push_back(
+                                            {variable, 0.5 * static_cast<double>(value)});
+                                    }
+                                    ++injectability.halfLatticeInjectedComponents;
+                                    injectability.halfLatticeInjectedArcs += component.equations.size();
+                                }
+                            }
                         } else if (completion.rejection == halflattice::RejectionReason::ParityConflict) {
                             ++injectability.halfLatticeRejectedParity;
                         } else if (completion.rejection == halflattice::RejectionReason::BoundViolation) {
@@ -3571,7 +3592,7 @@ int solveSeamlessReduced(
     // schedule's first scan sees the attracted relaxed values. The bordered
     // direct engine factorized the UNATTRACTED operator, so guided rounds
     // fall back to the masked CG.
-    if (!steerRows.empty() && bimdfPins.empty()) {
+    if (!steerRows.empty() && bimdfPins.empty() && halfLatticePins.empty()) {
         steering = true;
         for (const SteerRow& sr : steerRows) {
             for (const auto& [ri, cf] : sr.a) {
@@ -3608,6 +3629,32 @@ int solveSeamlessReduced(
         } else {
             maskedSolve(mask);
         }
+    }
+    // A complete doubled-lattice component owns every constrained reduced
+    // degree of freedom. Pin it atomically, then solve only the independent
+    // remainder. This remains opt-in until corpus gates promote it.
+    if (!halfLatticePins.empty()) {
+        if (useDirect) {
+            direct.finalize(mask, w);
+            useDirect = false;
+        }
+        std::vector<std::size_t> integerOrdinal(W, kInvalidIndex);
+        for (std::size_t k = 0; k < intFree.size(); ++k) {
+            integerOrdinal[intFree[k]] = k;
+        }
+        for (const auto& [reducedVariable, value] : halfLatticePins) {
+            if (mask[reducedVariable] == 0) {
+                continue;
+            }
+            w[reducedVariable] = static_cast<float>(value);
+            mask[reducedVariable] = 0;
+            const std::size_t ordinal = integerOrdinal[reducedVariable];
+            if (ordinal != kInvalidIndex && intPinned[ordinal] == 0) {
+                intPinned[ordinal] = 1;
+                --remaining;
+            }
+        }
+        maskedSolve(mask);
     }
     while (remaining > 0) {
         if (cancel != nullptr && cancel->isCancelled()) {
@@ -3760,6 +3807,8 @@ int solveSeamlessReduced(
             aggregate.halfLatticeComponents += injectability.halfLatticeComponents;
             aggregate.halfLatticeAcceptedComponents += injectability.halfLatticeAcceptedComponents;
             aggregate.halfLatticeAcceptedArcs += injectability.halfLatticeAcceptedArcs;
+            aggregate.halfLatticeInjectedComponents += injectability.halfLatticeInjectedComponents;
+            aggregate.halfLatticeInjectedArcs += injectability.halfLatticeInjectedArcs;
             aggregate.halfLatticeRejectedDependencies += injectability.halfLatticeRejectedDependencies;
             aggregate.halfLatticeRejectedParity += injectability.halfLatticeRejectedParity;
             aggregate.halfLatticeRejectedBounds += injectability.halfLatticeRejectedBounds;

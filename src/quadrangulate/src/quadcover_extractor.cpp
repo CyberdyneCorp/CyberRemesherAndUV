@@ -4142,6 +4142,8 @@ private:
         aggregate.halfLatticeComponents += inject.halfLatticeComponents;
         aggregate.halfLatticeAcceptedComponents += inject.halfLatticeAcceptedComponents;
         aggregate.halfLatticeAcceptedArcs += inject.halfLatticeAcceptedArcs;
+        aggregate.halfLatticeInjectedComponents += inject.halfLatticeInjectedComponents;
+        aggregate.halfLatticeInjectedArcs += inject.halfLatticeInjectedArcs;
         aggregate.halfLatticeRejectedDependencies += inject.halfLatticeRejectedDependencies;
         aggregate.halfLatticeRejectedParity += inject.halfLatticeRejectedParity;
         aggregate.halfLatticeRejectedBounds += inject.halfLatticeRejectedBounds;
