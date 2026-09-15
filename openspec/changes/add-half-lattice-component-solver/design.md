@@ -139,3 +139,17 @@ completion.
 5. Run the full corpus and mutation checks. Promote only after the documented
    gates pass; otherwise retain the opt-in implementation and record the
    observed blocker.
+
+## First admission sweep
+
+The opt-in endpoint was verified on the crease-pinned box at 200 target quads:
+three complete components covering 12 arcs changed the output hash only with
+`CYBER_ZR_HALF_LATTICE=inject`; default output stayed unchanged. This proves
+the endpoint is wired through extraction, but is not the organic gate.
+
+On the generated sphere (six tessellations, targets 30–400) and torus (targets
+20–2000), no component both avoided excluded ownership and passed exact
+residual validation. The one low-resolution sphere component that was isolated
+after exclusions failed exact residual validation. Organic progress therefore
+requires target-consistent component construction or a projection of Bi-MDF
+targets onto a legal component assignment; partial pinning is not permitted.

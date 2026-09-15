@@ -29,7 +29,7 @@
 
 ## 4. Guarded injection and rollback
 
-- [ ] 4.1 Add an opt-in selector that applies only complete admitted components
+- [x] 4.1 Add an opt-in selector that applies only complete admitted components
       in one batch and leaves all other components to guided/greedy rounding.
 - [ ] 4.2 Add island-level rollback when layout validity, mesh validity,
       non-finiteness, or component residual checks fail; report the gate that
