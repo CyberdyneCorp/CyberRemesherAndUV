@@ -14,6 +14,10 @@ enum class RejectionReason : std::uint8_t {
     ExcludedArc,
     FractionalCoefficient,
     Overflow,
+    ParityConflict,
+    BoundViolation,
+    TargetResidual,
+    Underdetermined,
 };
 
 struct SourceRow {
@@ -64,5 +68,16 @@ struct ParityResult {
 // entire component before any integer assignment is considered.
 ParityResult solveParity(const std::vector<Equation>& equations,
                          const Component& component);
+
+struct CompletionResult {
+    RejectionReason rejection = RejectionReason::None;
+    std::vector<std::pair<std::size_t, std::int64_t>> values;
+};
+
+// Completes a closed component only when deterministic integral elimination
+// determines every doubled-lattice variable within [minimum, maximum].
+CompletionResult completeBounded(const std::vector<Equation>& equations,
+                                 const Component& component, std::int64_t minimum,
+                                 std::int64_t maximum);
 
 }  // namespace cyber::remesh::halflattice

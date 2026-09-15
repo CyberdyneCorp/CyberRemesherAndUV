@@ -4139,6 +4139,14 @@ private:
         aggregate.injectedPivots += inject.injectedPivots;
         aggregate.optimumDeviationEnergy += inject.optimumDeviationEnergy;
         aggregate.realizedDeviationEnergy += inject.realizedDeviationEnergy;
+        aggregate.halfLatticeComponents += inject.halfLatticeComponents;
+        aggregate.halfLatticeAcceptedComponents += inject.halfLatticeAcceptedComponents;
+        aggregate.halfLatticeAcceptedArcs += inject.halfLatticeAcceptedArcs;
+        aggregate.halfLatticeRejectedDependencies += inject.halfLatticeRejectedDependencies;
+        aggregate.halfLatticeRejectedParity += inject.halfLatticeRejectedParity;
+        aggregate.halfLatticeRejectedBounds += inject.halfLatticeRejectedBounds;
+        aggregate.halfLatticeRejectedResidual += inject.halfLatticeRejectedResidual;
+        aggregate.halfLatticeRejectedUnderdetermined += inject.halfLatticeRejectedUnderdetermined;
         if (target.invalidReason.empty()) {
             target.invalidReason = source.invalidReason;
         }

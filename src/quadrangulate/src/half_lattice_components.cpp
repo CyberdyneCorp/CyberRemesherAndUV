@@ -22,6 +22,10 @@ bool addChecked(std::int64_t& target, const std::int64_t value) {
     return true;
 }
 
+bool multiplyChecked(const std::int64_t left, const std::int64_t right, std::int64_t& product) {
+    return !__builtin_mul_overflow(left, right, &product);
+}
+
 RejectionReason firstRejection(const RejectionReason current, const RejectionReason candidate) {
     return current == RejectionReason::None ? candidate : current;
 }
@@ -175,6 +179,80 @@ ParityResult solveParity(const std::vector<Equation>& equations, const Component
         }
     }
     result.witnessEquation = kNoWitness;
+    return result;
+}
+
+CompletionResult completeBounded(const std::vector<Equation>& equations, const Component& component,
+                                 const std::int64_t minimum, const std::int64_t maximum) {
+    CompletionResult result;
+    if (component.rejection != RejectionReason::None) {
+        result.rejection = component.rejection;
+        return result;
+    }
+    if (!solveParity(equations, component).consistent) {
+        result.rejection = RejectionReason::ParityConflict;
+        return result;
+    }
+    std::map<std::size_t, std::int64_t> values;
+    bool progressed = true;
+    while (progressed && values.size() < component.variables.size()) {
+        progressed = false;
+        for (const std::size_t rowIndex : component.equations) {
+            const Equation& equation = equations[rowIndex];
+            std::int64_t rhs = equation.rhs;
+            std::size_t unknown = static_cast<std::size_t>(-1);
+            std::int64_t coefficient = 0;
+            for (const auto& [variable, term] : equation.terms) {
+                const auto known = values.find(variable);
+                if (known == values.end()) {
+                    if (unknown != static_cast<std::size_t>(-1)) {
+                        unknown = static_cast<std::size_t>(-1);
+                        break;
+                    }
+                    unknown = variable;
+                    coefficient = term;
+                } else {
+                    std::int64_t contribution = 0;
+                    if (!multiplyChecked(term, known->second, contribution) ||
+                        !addChecked(rhs, -contribution)) {
+                        result.rejection = RejectionReason::Overflow;
+                        return result;
+                    }
+                }
+            }
+            if (unknown == static_cast<std::size_t>(-1) || coefficient == 0 ||
+                rhs % coefficient != 0) {
+                continue;
+            }
+            const std::int64_t value = rhs / coefficient;
+            if (value < minimum || value > maximum) {
+                result.rejection = RejectionReason::BoundViolation;
+                return result;
+            }
+            values.emplace(unknown, value);
+            progressed = true;
+        }
+    }
+    if (values.size() != component.variables.size()) {
+        result.rejection = RejectionReason::Underdetermined;
+        return result;
+    }
+    for (const std::size_t rowIndex : component.equations) {
+        std::int64_t sum = 0;
+        for (const auto& [variable, coefficient] : equations[rowIndex].terms) {
+            std::int64_t contribution = 0;
+            if (!multiplyChecked(coefficient, values.at(variable), contribution) ||
+                !addChecked(sum, contribution)) {
+                result.rejection = RejectionReason::Overflow;
+                return result;
+            }
+        }
+        if (sum != equations[rowIndex].rhs) {
+            result.rejection = RejectionReason::TargetResidual;
+            return result;
+        }
+    }
+    result.values.assign(values.begin(), values.end());
     return result;
 }
 

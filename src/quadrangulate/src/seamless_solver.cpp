@@ -20,6 +20,7 @@
 #include <vector>
 
 #include "bimdf_quantize.hpp"
+#include "half_lattice_components.hpp"
 #include "cyber/accel/buffer.hpp"
 #include "cyber/accel/primitives.hpp"
 #include "cyber/core/math.hpp"
@@ -3463,6 +3464,50 @@ int solveSeamlessReduced(
                     // the counters reconcilable instead of an overlapping
                     // list of symptoms.
                     injectability = {};
+                    std::vector<halflattice::Equation> halfLatticeRows;
+                    halfLatticeRows.reserve(tmesh.arcs.size());
+                    for (std::size_t a = 0; a < tmesh.arcs.size(); ++a) {
+                        halflattice::RejectionReason reason = halflattice::RejectionReason::None;
+                        if ((a < tmesh.arcExcluded.size() && tmesh.arcExcluded[a] != 0) ||
+                            (a < sol.arcOutside.size() && sol.arcOutside[a] != 0) ||
+                            injDrop[a] != 0) {
+                            reason = halflattice::RejectionReason::ExcludedArc;
+                        } else if (bimdfArcRows[a].empty()) {
+                            reason = halflattice::RejectionReason::EmptyRow;
+                        } else {
+                            for (const auto& [reducedVariable, coefficient] : bimdfArcRows[a]) {
+                                (void)coefficient;
+                                if (ordinalOf[reducedVariable] == kInvalidIndex) {
+                                    reason = halflattice::RejectionReason::ContinuousDependency;
+                                    break;
+                                }
+                            }
+                        }
+                        halfLatticeRows.push_back(halflattice::normalize(
+                            {a, bimdfArcRows[a], sol.arcLenHalf[a], reason}));
+                    }
+                    const std::vector<halflattice::Component> halfComponents =
+                        halflattice::buildComponents(halfLatticeRows);
+                    injectability.halfLatticeComponents = halfComponents.size();
+                    for (const halflattice::Component& component : halfComponents) {
+                        const halflattice::CompletionResult completion = halflattice::completeBounded(
+                            halfLatticeRows, component, static_cast<std::int64_t>(-tCap * 2.0),
+                            static_cast<std::int64_t>(tCap * 2.0));
+                        if (completion.rejection == halflattice::RejectionReason::None) {
+                            ++injectability.halfLatticeAcceptedComponents;
+                            injectability.halfLatticeAcceptedArcs += component.equations.size();
+                        } else if (completion.rejection == halflattice::RejectionReason::ParityConflict) {
+                            ++injectability.halfLatticeRejectedParity;
+                        } else if (completion.rejection == halflattice::RejectionReason::BoundViolation) {
+                            ++injectability.halfLatticeRejectedBounds;
+                        } else if (completion.rejection == halflattice::RejectionReason::TargetResidual) {
+                            ++injectability.halfLatticeRejectedResidual;
+                        } else if (completion.rejection == halflattice::RejectionReason::Underdetermined) {
+                            ++injectability.halfLatticeRejectedUnderdetermined;
+                        } else {
+                            ++injectability.halfLatticeRejectedDependencies;
+                        }
+                    }
                     injectability.arcs = tmesh.arcs.size();
                     injectability.fractionalPivotRows = fracRows.size();
                     injectability.droppedRows = injDropped;
@@ -3716,6 +3761,14 @@ int solveSeamlessReduced(
             aggregate.injectedPivots += injectability.injectedPivots;
             aggregate.optimumDeviationEnergy += injectability.optimumDeviationEnergy;
             aggregate.realizedDeviationEnergy += injectability.realizedDeviationEnergy;
+            aggregate.halfLatticeComponents += injectability.halfLatticeComponents;
+            aggregate.halfLatticeAcceptedComponents += injectability.halfLatticeAcceptedComponents;
+            aggregate.halfLatticeAcceptedArcs += injectability.halfLatticeAcceptedArcs;
+            aggregate.halfLatticeRejectedDependencies += injectability.halfLatticeRejectedDependencies;
+            aggregate.halfLatticeRejectedParity += injectability.halfLatticeRejectedParity;
+            aggregate.halfLatticeRejectedBounds += injectability.halfLatticeRejectedBounds;
+            aggregate.halfLatticeRejectedResidual += injectability.halfLatticeRejectedResidual;
+            aggregate.halfLatticeRejectedUnderdetermined += injectability.halfLatticeRejectedUnderdetermined;
         }
         std::fprintf(stderr,
                      "[qc] bimdf realized: arcDeviationEnergy=%.3f injected=%zu injectable=%zu "

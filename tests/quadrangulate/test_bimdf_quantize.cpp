@@ -126,6 +126,29 @@ TEST_CASE("half lattice parity solver is deterministic for a feasible component"
     CHECK(first.witnessEquation == second.witnessEquation);
 }
 
+TEST_CASE("half lattice completion is bounded, exact, and component-atomic") {
+    const std::vector<half::Equation> equations = {
+        {0, {{0, 2}}, 8, half::RejectionReason::None},
+        {1, {{1, 1}, {0, 1}}, 7, half::RejectionReason::None},
+    };
+    const half::Component component = half::buildComponents(equations).front();
+    const half::CompletionResult complete = half::completeBounded(equations, component, -10, 10);
+    REQUIRE(complete.rejection == half::RejectionReason::None);
+    CHECK(complete.values ==
+          std::vector<std::pair<std::size_t, std::int64_t>>{{0, 4}, {1, 3}});
+
+    const half::CompletionResult bounded = half::completeBounded(equations, component, -2, 2);
+    CHECK(bounded.rejection == half::RejectionReason::BoundViolation);
+
+    const std::vector<half::Equation> rejected = {
+        {0, {{0, 1}}, 2, half::RejectionReason::ExcludedArc},
+        {1, {{0, 1}, {1, 1}}, 4, half::RejectionReason::None},
+    };
+    const half::Component rejectedComponent = half::buildComponents(rejected).front();
+    CHECK(half::completeBounded(rejected, rejectedComponent, -10, 10).rejection ==
+          half::RejectionReason::ExcludedArc);
+}
+
 TEST_CASE("bimdf cube quantizes each parallel class to the rounded target") {
     const TMesh tm = cubeTMesh(4.2, 3.7, 5.5);
     const BimdfResult r = solveBimdf(tm);
