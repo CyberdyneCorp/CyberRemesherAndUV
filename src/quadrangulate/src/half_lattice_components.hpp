@@ -77,8 +77,7 @@ struct ParityResult {
 // Checks sum((a_i mod 2) * z_i) = rhs mod 2 using deterministic elimination.
 // The caller supplies one complete component, so a failed result rejects that
 // entire component before any integer assignment is considered.
-ParityResult solveParity(const std::vector<Equation>& equations,
-                         const Component& component);
+ParityResult solveParity(const std::vector<Equation>& equations, const Component& component);
 
 struct CompletionResult {
     RejectionReason rejection = RejectionReason::None;
@@ -93,14 +92,12 @@ struct ProjectionResult {
 // Replaces the targets of one complete component with the exact targets
 // implied by supplied doubled-lattice values. Rejected or partially owned
 // components remain rejected; no subset is projected.
-ProjectionResult projectTargets(const std::vector<Equation>& equations,
-                                const Component& component,
+ProjectionResult projectTargets(const std::vector<Equation>& equations, const Component& component,
                                 const std::vector<std::pair<std::size_t, std::int64_t>>& values);
 
 // Completes a closed component only when deterministic integral elimination
 // determines every doubled-lattice variable within [minimum, maximum].
-CompletionResult completeBounded(const std::vector<Equation>& equations,
-                                 const Component& component, std::int64_t minimum,
-                                 std::int64_t maximum);
+CompletionResult completeBounded(const std::vector<Equation>& equations, const Component& component,
+                                 std::int64_t minimum, std::int64_t maximum);
 
 }  // namespace cyber::remesh::halflattice

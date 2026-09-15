@@ -20,12 +20,12 @@
 #include <vector>
 
 #include "bimdf_quantize.hpp"
-#include "half_lattice_components.hpp"
 #include "cyber/accel/buffer.hpp"
 #include "cyber/accel/primitives.hpp"
 #include "cyber/core/math.hpp"
 #include "cyber/quadrangulate/geometry_analysis.hpp"
 #include "cyber/quadrangulate/layout_score.hpp"
+#include "half_lattice_components.hpp"
 #include "sparse_cholesky.hpp"
 #include "topology_layout_build.hpp"
 
@@ -3009,7 +3009,7 @@ int solveSeamlessReduced(
     // the untouched greedy schedule below.
     std::unique_ptr<bimdf::TMesh> bimdfTm;
     std::vector<std::vector<std::pair<std::size_t, double>>> bimdfArcRows;
-    std::vector<std::pair<std::size_t, double>> bimdfPins;  // (intFree ordinal, value)
+    std::vector<std::pair<std::size_t, double>> bimdfPins;        // (intFree ordinal, value)
     std::vector<std::pair<std::size_t, double>> halfLatticePins;  // (reduced free, value)
     const char* halfLatticeMode = std::getenv("CYBER_ZR_HALF_LATTICE");
     const bool injectHalfLattice =
@@ -3490,11 +3490,13 @@ int solveSeamlessReduced(
                         halflattice::auditRejectedOwnership(halfLatticeRows);
                     injectability.halfLatticeComponents = halfComponents.size();
                     injectability.halfLatticeIsolatedAfterExclusion = ownership.isolatedComponents;
-                    injectability.halfLatticeBlockedByExcludedOwnership = ownership.blockedComponents;
+                    injectability.halfLatticeBlockedByExcludedOwnership =
+                        ownership.blockedComponents;
                     for (const halflattice::Component& component : halfComponents) {
-                        const halflattice::CompletionResult completion = halflattice::completeBounded(
-                            halfLatticeRows, component, static_cast<std::int64_t>(-tCap * 2.0),
-                            static_cast<std::int64_t>(tCap * 2.0));
+                        const halflattice::CompletionResult completion =
+                            halflattice::completeBounded(halfLatticeRows, component,
+                                                         static_cast<std::int64_t>(-tCap * 2.0),
+                                                         static_cast<std::int64_t>(tCap * 2.0));
                         if (completion.rejection == halflattice::RejectionReason::None) {
                             ++injectability.halfLatticeAcceptedComponents;
                             injectability.halfLatticeAcceptedArcs += component.equations.size();
@@ -3512,20 +3514,24 @@ int solveSeamlessReduced(
                                             {variable, 0.5 * static_cast<double>(value)});
                                     }
                                     ++injectability.halfLatticeInjectedComponents;
-                                    injectability.halfLatticeInjectedArcs += component.equations.size();
+                                    injectability.halfLatticeInjectedArcs +=
+                                        component.equations.size();
                                 }
                             }
-                        } else if (completion.rejection == halflattice::RejectionReason::TargetResidual &&
+                        } else if (completion.rejection ==
+                                       halflattice::RejectionReason::TargetResidual &&
                                    projectHalfLattice &&
                                    component.rejection == halflattice::RejectionReason::None) {
                             std::vector<std::pair<std::size_t, std::int64_t>> relaxedValues;
                             relaxedValues.reserve(component.variables.size());
                             bool inBounds = true;
                             for (const std::size_t variable : component.variables) {
-                                const double doubled = ordinalOf[variable] == kInvalidIndex
-                                                           ? std::round(2.0 * static_cast<double>(w[variable]))
-                                                           : 2.0 * std::round(static_cast<double>(w[variable]));
-                                if (!std::isfinite(doubled) || doubled < -tCap * 2.0 || doubled > tCap * 2.0) {
+                                const double doubled =
+                                    ordinalOf[variable] == kInvalidIndex
+                                        ? std::round(2.0 * static_cast<double>(w[variable]))
+                                        : 2.0 * std::round(static_cast<double>(w[variable]));
+                                if (!std::isfinite(doubled) || doubled < -tCap * 2.0 ||
+                                    doubled > tCap * 2.0) {
                                     inBounds = false;
                                     break;
                                 }
@@ -3533,8 +3539,10 @@ int solveSeamlessReduced(
                                     {variable, static_cast<std::int64_t>(doubled)});
                             }
                             const halflattice::ProjectionResult projection =
-                                inBounds ? halflattice::projectTargets(halfLatticeRows, component, relaxedValues)
-                                         : halflattice::ProjectionResult{halflattice::RejectionReason::BoundViolation, {}};
+                                inBounds ? halflattice::projectTargets(halfLatticeRows, component,
+                                                                       relaxedValues)
+                                         : halflattice::ProjectionResult{
+                                               halflattice::RejectionReason::BoundViolation, {}};
                             const halflattice::CompletionResult projected =
                                 projection.rejection == halflattice::RejectionReason::None
                                     ? halflattice::completeBounded(
@@ -3555,37 +3563,45 @@ int solveSeamlessReduced(
                                     continue;
                                 }
                                 ++injectability.halfLatticeProjectedComponents;
-                                injectability.halfLatticeProjectedArcs += component.equations.size();
+                                injectability.halfLatticeProjectedArcs +=
+                                    component.equations.size();
                                 const char* projectMuEnv =
                                     std::getenv("CYBER_ZR_HALF_LATTICE_PROJECT_MU");
-                                const double requestedMu = projectMuEnv != nullptr
-                                                               ? std::atof(projectMuEnv)
-                                                               : 0.001;
+                                const double requestedMu =
+                                    projectMuEnv != nullptr ? std::atof(projectMuEnv) : 0.001;
                                 const double projectMu = std::isfinite(requestedMu) &&
-                                                                 requestedMu >= 0.0 && requestedMu <= 0.01
+                                                                 requestedMu >= 0.0 &&
+                                                                 requestedMu <= 0.01
                                                              ? requestedMu
                                                              : 0.001;
                                 for (const std::size_t rowIndex : component.equations) {
                                     SteerRow row;
                                     row.a = bimdfArcRows[halfLatticeRows[rowIndex].arc];
-                                    row.len = 0.25 * static_cast<double>(projection.equations[rowIndex].rhs);
+                                    row.len = 0.25 * static_cast<double>(
+                                                         projection.equations[rowIndex].rhs);
                                     row.mu = projectMu;
                                     steerRows.push_back(std::move(row));
                                 }
                                 ++injectability.halfLatticeGuidedProjectedComponents;
-                                injectability.halfLatticeGuidedProjectedArcs += component.equations.size();
-                            } else if (projected.rejection == halflattice::RejectionReason::BoundViolation) {
+                                injectability.halfLatticeGuidedProjectedArcs +=
+                                    component.equations.size();
+                            } else if (projected.rejection ==
+                                       halflattice::RejectionReason::BoundViolation) {
                                 ++injectability.halfLatticeRejectedBounds;
                             } else {
                                 ++injectability.halfLatticeRejectedResidual;
                             }
-                        } else if (completion.rejection == halflattice::RejectionReason::ParityConflict) {
+                        } else if (completion.rejection ==
+                                   halflattice::RejectionReason::ParityConflict) {
                             ++injectability.halfLatticeRejectedParity;
-                        } else if (completion.rejection == halflattice::RejectionReason::BoundViolation) {
+                        } else if (completion.rejection ==
+                                   halflattice::RejectionReason::BoundViolation) {
                             ++injectability.halfLatticeRejectedBounds;
-                        } else if (completion.rejection == halflattice::RejectionReason::TargetResidual) {
+                        } else if (completion.rejection ==
+                                   halflattice::RejectionReason::TargetResidual) {
                             ++injectability.halfLatticeRejectedResidual;
-                        } else if (completion.rejection == halflattice::RejectionReason::Underdetermined) {
+                        } else if (completion.rejection ==
+                                   halflattice::RejectionReason::Underdetermined) {
                             ++injectability.halfLatticeRejectedUnderdetermined;
                         } else {
                             ++injectability.halfLatticeRejectedDependencies;
@@ -3875,17 +3891,22 @@ int solveSeamlessReduced(
             aggregate.halfLatticeAcceptedArcs += injectability.halfLatticeAcceptedArcs;
             aggregate.halfLatticeInjectedComponents += injectability.halfLatticeInjectedComponents;
             aggregate.halfLatticeInjectedArcs += injectability.halfLatticeInjectedArcs;
-            aggregate.halfLatticeProjectedComponents += injectability.halfLatticeProjectedComponents;
+            aggregate.halfLatticeProjectedComponents +=
+                injectability.halfLatticeProjectedComponents;
             aggregate.halfLatticeProjectedArcs += injectability.halfLatticeProjectedArcs;
             aggregate.halfLatticeGuidedProjectedComponents +=
                 injectability.halfLatticeGuidedProjectedComponents;
-            aggregate.halfLatticeGuidedProjectedArcs += injectability.halfLatticeGuidedProjectedArcs;
-            aggregate.halfLatticeRejectedDependencies += injectability.halfLatticeRejectedDependencies;
+            aggregate.halfLatticeGuidedProjectedArcs +=
+                injectability.halfLatticeGuidedProjectedArcs;
+            aggregate.halfLatticeRejectedDependencies +=
+                injectability.halfLatticeRejectedDependencies;
             aggregate.halfLatticeRejectedParity += injectability.halfLatticeRejectedParity;
             aggregate.halfLatticeRejectedBounds += injectability.halfLatticeRejectedBounds;
             aggregate.halfLatticeRejectedResidual += injectability.halfLatticeRejectedResidual;
-            aggregate.halfLatticeRejectedUnderdetermined += injectability.halfLatticeRejectedUnderdetermined;
-            aggregate.halfLatticeIsolatedAfterExclusion += injectability.halfLatticeIsolatedAfterExclusion;
+            aggregate.halfLatticeRejectedUnderdetermined +=
+                injectability.halfLatticeRejectedUnderdetermined;
+            aggregate.halfLatticeIsolatedAfterExclusion +=
+                injectability.halfLatticeIsolatedAfterExclusion;
             aggregate.halfLatticeBlockedByExcludedOwnership +=
                 injectability.halfLatticeBlockedByExcludedOwnership;
         }

@@ -4146,7 +4146,8 @@ private:
         aggregate.halfLatticeInjectedArcs += inject.halfLatticeInjectedArcs;
         aggregate.halfLatticeProjectedComponents += inject.halfLatticeProjectedComponents;
         aggregate.halfLatticeProjectedArcs += inject.halfLatticeProjectedArcs;
-        aggregate.halfLatticeGuidedProjectedComponents += inject.halfLatticeGuidedProjectedComponents;
+        aggregate.halfLatticeGuidedProjectedComponents +=
+            inject.halfLatticeGuidedProjectedComponents;
         aggregate.halfLatticeGuidedProjectedArcs += inject.halfLatticeGuidedProjectedArcs;
         aggregate.halfLatticeRejectedDependencies += inject.halfLatticeRejectedDependencies;
         aggregate.halfLatticeRejectedParity += inject.halfLatticeRejectedParity;
@@ -4154,7 +4155,8 @@ private:
         aggregate.halfLatticeRejectedResidual += inject.halfLatticeRejectedResidual;
         aggregate.halfLatticeRejectedUnderdetermined += inject.halfLatticeRejectedUnderdetermined;
         aggregate.halfLatticeIsolatedAfterExclusion += inject.halfLatticeIsolatedAfterExclusion;
-        aggregate.halfLatticeBlockedByExcludedOwnership += inject.halfLatticeBlockedByExcludedOwnership;
+        aggregate.halfLatticeBlockedByExcludedOwnership +=
+            inject.halfLatticeBlockedByExcludedOwnership;
         if (target.invalidReason.empty()) {
             target.invalidReason = source.invalidReason;
         }

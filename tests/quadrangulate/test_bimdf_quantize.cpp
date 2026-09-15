@@ -134,8 +134,7 @@ TEST_CASE("half lattice completion is bounded, exact, and component-atomic") {
     const half::Component component = half::buildComponents(equations).front();
     const half::CompletionResult complete = half::completeBounded(equations, component, -10, 10);
     REQUIRE(complete.rejection == half::RejectionReason::None);
-    CHECK(complete.values ==
-          std::vector<std::pair<std::size_t, std::int64_t>>{{0, 4}, {1, 3}});
+    CHECK(complete.values == std::vector<std::pair<std::size_t, std::int64_t>>{{0, 4}, {1, 3}});
 
     const half::CompletionResult bounded = half::completeBounded(equations, component, -2, 2);
     CHECK(bounded.rejection == half::RejectionReason::BoundViolation);
@@ -157,8 +156,7 @@ TEST_CASE("half lattice completion eliminates coupled equations deterministicall
     const half::Component component = half::buildComponents(equations).front();
     const half::CompletionResult result = half::completeBounded(equations, component, -10, 10);
     REQUIRE(result.rejection == half::RejectionReason::None);
-    CHECK(result.values ==
-          std::vector<std::pair<std::size_t, std::int64_t>>{{0, 2}, {1, 2}});
+    CHECK(result.values == std::vector<std::pair<std::size_t, std::int64_t>>{{0, 2}, {1, 2}});
 }
 
 TEST_CASE("half lattice target projection is exact and component-atomic") {
@@ -169,14 +167,13 @@ TEST_CASE("half lattice target projection is exact and component-atomic") {
     const half::Component component = half::buildComponents(equations).front();
     CHECK(half::completeBounded(equations, component, -10, 10).rejection ==
           half::RejectionReason::TargetResidual);
-    const half::ProjectionResult projection = half::projectTargets(
-        equations, component, {{0, 2}, {1, 2}});
+    const half::ProjectionResult projection =
+        half::projectTargets(equations, component, {{0, 2}, {1, 2}});
     REQUIRE(projection.rejection == half::RejectionReason::None);
     const half::CompletionResult projected =
         half::completeBounded(projection.equations, component, -10, 10);
     CHECK(projected.rejection == half::RejectionReason::None);
-    CHECK(projected.values ==
-          std::vector<std::pair<std::size_t, std::int64_t>>{{0, 2}, {1, 2}});
+    CHECK(projected.values == std::vector<std::pair<std::size_t, std::int64_t>>{{0, 2}, {1, 2}});
 
     const std::vector<half::Equation> rejected = {
         {0, {{0, 1}}, 2, half::RejectionReason::ExcludedArc},

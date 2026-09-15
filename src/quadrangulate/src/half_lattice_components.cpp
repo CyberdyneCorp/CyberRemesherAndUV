@@ -33,8 +33,8 @@ RejectionReason firstRejection(const RejectionReason current, const RejectionRea
 void xorProvenance(std::vector<std::size_t>& destination, const std::vector<std::size_t>& source) {
     std::vector<std::size_t> merged;
     merged.reserve(destination.size() + source.size());
-    std::set_symmetric_difference(destination.begin(), destination.end(), source.begin(), source.end(),
-                                  std::back_inserter(merged));
+    std::set_symmetric_difference(destination.begin(), destination.end(), source.begin(),
+                                  source.end(), std::back_inserter(merged));
     destination = std::move(merged);
 }
 
@@ -52,8 +52,7 @@ Equation normalize(const SourceRow& source) {
     std::map<std::size_t, std::int64_t> merged;
     for (const auto& [variable, coefficient] : source.terms) {
         const double doubled = coefficient * 2.0;
-        if (!std::isfinite(doubled) ||
-            std::abs(doubled - std::round(doubled)) > kHalfTolerance ||
+        if (!std::isfinite(doubled) || std::abs(doubled - std::round(doubled)) > kHalfTolerance ||
             doubled < static_cast<double>(std::numeric_limits<std::int64_t>::min()) ||
             doubled > static_cast<double>(std::numeric_limits<std::int64_t>::max())) {
             result.rejection = RejectionReason::FractionalCoefficient;
@@ -116,8 +115,9 @@ std::vector<Component> buildComponents(const std::vector<Equation>& equations) {
         }
         std::sort(component.equations.begin(), component.equations.end());
         std::sort(component.variables.begin(), component.variables.end());
-        component.variables.erase(std::unique(component.variables.begin(), component.variables.end()),
-                                  component.variables.end());
+        component.variables.erase(
+            std::unique(component.variables.begin(), component.variables.end()),
+            component.variables.end());
         components.push_back(std::move(component));
     }
     return components;
@@ -142,11 +142,12 @@ OwnershipAudit auditRejectedOwnership(const std::vector<Equation>& equations) {
                             rejectedVariables.end());
     OwnershipAudit audit;
     for (const Component& component : buildComponents(supported)) {
-        const bool shared = std::any_of(component.variables.begin(), component.variables.end(),
-                                        [&rejectedVariables](const std::size_t variable) {
-                                            return std::binary_search(rejectedVariables.begin(),
-                                                                      rejectedVariables.end(), variable);
-                                        });
+        const bool shared =
+            std::any_of(component.variables.begin(), component.variables.end(),
+                        [&rejectedVariables](const std::size_t variable) {
+                            return std::binary_search(rejectedVariables.begin(),
+                                                      rejectedVariables.end(), variable);
+                        });
         if (shared) {
             ++audit.blockedComponents;
         } else {
@@ -325,7 +326,8 @@ CompletionResult completeBounded(const std::vector<Equation>& equations, const C
         const long double value = matrix[row][columns];
         if (!std::isfinite(static_cast<double>(value)) ||
             std::abs(value - std::round(value)) > kPivotTolerance ||
-            value < static_cast<long double>(minimum) || value > static_cast<long double>(maximum)) {
+            value < static_cast<long double>(minimum) ||
+            value > static_cast<long double>(maximum)) {
             result.rejection = value < static_cast<long double>(minimum) ||
                                        value > static_cast<long double>(maximum)
                                    ? RejectionReason::BoundViolation
