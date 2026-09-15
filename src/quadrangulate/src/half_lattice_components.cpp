@@ -230,49 +230,81 @@ CompletionResult completeBounded(const std::vector<Equation>& equations, const C
         result.rejection = RejectionReason::ParityConflict;
         return result;
     }
-    std::map<std::size_t, std::int64_t> values;
-    bool progressed = true;
-    while (progressed && values.size() < component.variables.size()) {
-        progressed = false;
-        for (const std::size_t rowIndex : component.equations) {
-            const Equation& equation = equations[rowIndex];
-            std::int64_t rhs = equation.rhs;
-            std::size_t unknown = static_cast<std::size_t>(-1);
-            std::int64_t coefficient = 0;
-            for (const auto& [variable, term] : equation.terms) {
-                const auto known = values.find(variable);
-                if (known == values.end()) {
-                    if (unknown != static_cast<std::size_t>(-1)) {
-                        unknown = static_cast<std::size_t>(-1);
-                        break;
-                    }
-                    unknown = variable;
-                    coefficient = term;
-                } else {
-                    std::int64_t contribution = 0;
-                    if (!multiplyChecked(term, known->second, contribution) ||
-                        !addChecked(rhs, -contribution)) {
-                        result.rejection = RejectionReason::Overflow;
-                        return result;
-                    }
-                }
-            }
-            if (unknown == static_cast<std::size_t>(-1) || coefficient == 0 ||
-                rhs % coefficient != 0) {
+    std::map<std::size_t, std::size_t> columnOf;
+    for (std::size_t column = 0; column < component.variables.size(); ++column) {
+        columnOf.emplace(component.variables[column], column);
+    }
+    const std::size_t columns = component.variables.size();
+    std::vector<std::vector<long double>> matrix(component.equations.size(),
+                                                 std::vector<long double>(columns + 1, 0.0L));
+    for (std::size_t row = 0; row < component.equations.size(); ++row) {
+        const Equation& equation = equations[component.equations[row]];
+        for (const auto& [variable, coefficient] : equation.terms) {
+            matrix[row][columnOf.at(variable)] = static_cast<long double>(coefficient);
+        }
+        matrix[row][columns] = static_cast<long double>(equation.rhs);
+    }
+
+    constexpr long double kPivotTolerance = 1e-12L;
+    std::vector<std::size_t> pivotColumn;
+    std::size_t pivotRow = 0;
+    for (std::size_t column = 0; column < columns && pivotRow < matrix.size(); ++column) {
+        std::size_t source = pivotRow;
+        while (source < matrix.size() && std::abs(matrix[source][column]) <= kPivotTolerance) {
+            ++source;
+        }
+        if (source == matrix.size()) {
+            continue;
+        }
+        std::swap(matrix[pivotRow], matrix[source]);
+        const long double divisor = matrix[pivotRow][column];
+        for (std::size_t entry = column; entry <= columns; ++entry) {
+            matrix[pivotRow][entry] /= divisor;
+        }
+        for (std::size_t row = 0; row < matrix.size(); ++row) {
+            if (row == pivotRow || std::abs(matrix[row][column]) <= kPivotTolerance) {
                 continue;
             }
-            const std::int64_t value = rhs / coefficient;
-            if (value < minimum || value > maximum) {
-                result.rejection = RejectionReason::BoundViolation;
-                return result;
+            const long double factor = matrix[row][column];
+            for (std::size_t entry = column; entry <= columns; ++entry) {
+                matrix[row][entry] -= factor * matrix[pivotRow][entry];
             }
-            values.emplace(unknown, value);
-            progressed = true;
+        }
+        pivotColumn.push_back(column);
+        ++pivotRow;
+    }
+    for (std::size_t row = pivotRow; row < matrix.size(); ++row) {
+        bool zero = true;
+        for (std::size_t column = 0; column < columns; ++column) {
+            zero &= std::abs(matrix[row][column]) <= kPivotTolerance;
+        }
+        if (zero && std::abs(matrix[row][columns]) > kPivotTolerance) {
+            result.rejection = RejectionReason::TargetResidual;
+            return result;
         }
     }
-    if (values.size() != component.variables.size()) {
-        result.rejection = RejectionReason::Underdetermined;
-        return result;
+
+    // A rank-deficient component has a translation/gauge freedom. Fix every
+    // free doubled-lattice variable to zero in stable variable order; the
+    // resulting RREF solution is deterministic and still undergoes exact
+    // integer substitution below.
+    std::map<std::size_t, std::int64_t> values;
+    for (std::size_t row = 0; row < pivotColumn.size(); ++row) {
+        const long double value = matrix[row][columns];
+        if (!std::isfinite(static_cast<double>(value)) ||
+            std::abs(value - std::round(value)) > kPivotTolerance ||
+            value < static_cast<long double>(minimum) || value > static_cast<long double>(maximum)) {
+            result.rejection = value < static_cast<long double>(minimum) ||
+                                       value > static_cast<long double>(maximum)
+                                   ? RejectionReason::BoundViolation
+                                   : RejectionReason::TargetResidual;
+            return result;
+        }
+        values.emplace(component.variables[pivotColumn[row]],
+                       static_cast<std::int64_t>(std::llround(value)));
+    }
+    for (const std::size_t variable : component.variables) {
+        values.try_emplace(variable, 0);
     }
     for (const std::size_t rowIndex : component.equations) {
         std::int64_t sum = 0;

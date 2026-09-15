@@ -149,6 +149,18 @@ TEST_CASE("half lattice completion is bounded, exact, and component-atomic") {
           half::RejectionReason::ExcludedArc);
 }
 
+TEST_CASE("half lattice completion eliminates coupled equations deterministically") {
+    const std::vector<half::Equation> equations = {
+        {0, {{0, 1}, {1, 1}}, 4, half::RejectionReason::None},
+        {1, {{0, 1}, {1, -1}}, 0, half::RejectionReason::None},
+    };
+    const half::Component component = half::buildComponents(equations).front();
+    const half::CompletionResult result = half::completeBounded(equations, component, -10, 10);
+    REQUIRE(result.rejection == half::RejectionReason::None);
+    CHECK(result.values ==
+          std::vector<std::pair<std::size_t, std::int64_t>>{{0, 2}, {1, 2}});
+}
+
 TEST_CASE("half lattice ownership audit blocks variables shared with exclusions") {
     const std::vector<half::Equation> equations = {
         {0, {{0, 1}}, 2, half::RejectionReason::None},
