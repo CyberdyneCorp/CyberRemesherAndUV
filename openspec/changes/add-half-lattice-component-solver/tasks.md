@@ -11,7 +11,7 @@
 
 ## 2. Complete component admission
 
-- [ ] 2.1 Implement the bounded integer-affine completion after parity solving.
+- [x] 2.1 Implement the bounded integer-affine completion after parity solving.
 - [ ] 2.2 Substitute every candidate result into its original rows and enforce
       target residual, integer-domain, and ownership checks.
 - [ ] 2.3 Reject entire components for unsupported relation, parity conflict,
