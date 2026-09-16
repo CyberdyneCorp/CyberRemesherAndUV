@@ -820,6 +820,36 @@ class CyberContourReport(Structure):
     ]
 
 
+class CyberSymmetry(Structure):
+    """A mirror plane plus its weld/working-side policy.
+
+    ``normal`` need not be unit length but must be non-degenerate.
+    ``weld_tolerance`` is how close a vertex must be to count as ON the plane.
+    ``working_side_positive`` picks the authored half: the one the normal points
+    into (1) or away from (0).
+    """
+
+    _fields_ = [
+        ("origin", c_float * 3),
+        ("normal", c_float * 3),
+        ("weld_tolerance", c_float),
+        ("working_side_positive", c_int32),
+    ]
+
+
+class CyberResymmetrizeReport(Structure):
+    _fields_ = [
+        ("snapped", c_uint32),
+        ("matched", c_uint32),
+        ("unmatched", c_uint32),
+        ("max_correction", c_float),
+    ]
+
+
+class CyberLoopSlideReport(Structure):
+    _fields_ = [("loop_vertex_count", c_size_t), ("moved_count", c_size_t)]
+
+
 class CyberSoftTransformReport(Structure):
     """Mirror of ``CyberSoftTransformReport`` — weighted transform/relax report."""
 
@@ -1385,6 +1415,7 @@ def _declare(lib: ctypes.CDLL) -> None:
     _declare_mesh_queries(lib)
     _declare_snapper_queries(lib)
     _declare_stroke_grammar(lib)
+    _declare_retopology_feel(lib)
     _declare_document(lib)
     _declare_seam_path(lib)
     _declare_bridge(lib)
@@ -1695,6 +1726,40 @@ def _declare_stroke_grammar(lib: ctypes.CDLL) -> None:
         c_void_p, POINTER(c_size_t), POINTER(c_size_t),
     ]
     lib.cyber_stroke_interpretation_grid_size.restype = c_int32
+
+
+
+def _declare_retopology_feel(lib: ctypes.CDLL) -> None:
+    """What makes the toolset feel right rather than merely work: a relax scoped
+    to the edit, loop slide, and interactive symmetry."""
+    # CyberStatus cyber_retopo_relax_region(CyberMesh*, const uint32_t*, size_t,
+    #     int, float, int, int, const uint32_t*, size_t, const CyberSnapper*,
+    #     float, CyberSoftTransformReport*)
+    lib.cyber_retopo_relax_region.argtypes = [
+        c_void_p, POINTER(c_uint32), c_size_t, c_int32, c_float, c_int32, c_int32,
+        POINTER(c_uint32), c_size_t, c_void_p, c_float, POINTER(CyberSoftTransformReport),
+    ]
+    lib.cyber_retopo_relax_region.restype = c_int32
+
+    # CyberStatus cyber_retopo_slide_loop(CyberMesh*, uint32_t, float,
+    #     const CyberSnapper*, CyberLoopSlideReport*)
+    lib.cyber_retopo_slide_loop.argtypes = [
+        c_void_p, c_uint32, c_float, c_void_p, POINTER(CyberLoopSlideReport),
+    ]
+    lib.cyber_retopo_slide_loop.restype = c_int32
+
+    lib.cyber_retopo_snap_symmetry_plane.argtypes = [
+        c_void_p, POINTER(CyberSymmetry), POINTER(c_size_t),
+    ]
+    lib.cyber_retopo_snap_symmetry_plane.restype = c_int32
+    lib.cyber_retopo_apply_symmetry.argtypes = [
+        c_void_p, POINTER(CyberSymmetry), c_void_p, POINTER(c_size_t),
+    ]
+    lib.cyber_retopo_apply_symmetry.restype = c_int32
+    lib.cyber_retopo_resymmetrize.argtypes = [
+        c_void_p, POINTER(CyberSymmetry), c_float, POINTER(CyberResymmetrizeReport),
+    ]
+    lib.cyber_retopo_resymmetrize.restype = c_int32
 
 
 def _declare_document(lib: ctypes.CDLL) -> None:

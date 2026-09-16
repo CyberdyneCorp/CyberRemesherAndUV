@@ -73,11 +73,6 @@ PENDING_REGISTRATIONS: dict[str, str] = {
     "cyber_set_backend": "harness is CPU-only by design",
     "cyber_set_max_worker_threads": "harness is CPU-only by design",
     "cyber_max_worker_threads": "harness is CPU-only by design",
-    # --- retopology follow-ups --------------------------------------------
-    # Wanted, not yet written. Listed rather than invisible.
-    "cyber_retopo_apply_symmetry": "retopology follow-up",
-    "cyber_retopo_resymmetrize": "retopology follow-up",
-    "cyber_retopo_snap_symmetry_plane": "retopology follow-up",
 }
 
 STRING_PREFIX = re.compile(r"^[rRbBuUfF]{0,2}('''|\"\"\"|'|\")")

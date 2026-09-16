@@ -157,4 +157,68 @@ inline void relax(Mesh& mesh, const RelaxParams& params, const PinSet* pins = nu
     detail::relaxSweep(mesh, params, pins, snap, 0.0f, [](VertexId) { return 1.0f; }, adjacency);
 }
 
+// Auto Relax, scoped to an edit (manual-retopology spec, "Auto Relax mode").
+//
+// The spec asks for "an automatic local relax of surrounding topology" after a
+// topology-modifying operation — "the new and neighboring vertices". The
+// whole-mesh autoRelax() in commands.hpp is NOT that: run after every stroke it
+// would move topology the artist placed carefully on the far side of the model,
+// and at 100k EditMesh vertices it would spend the interactive frame budget on
+// vertices nobody touched.
+//
+// The region is TOPOLOGICAL, not spatial: every vertex within `rings` edge hops
+// of a seed. A spatial sphere is the wrong shape for the edits this follows. A
+// strip drawn down a thin limb is long and narrow, and a sphere large enough to
+// cover it also reaches through to the other side of the limb — the same reason
+// `move` is seeded from a vertex rather than a point in space.
+//
+// Weight falls off smoothly with ring distance, full at the seeds and zero one
+// ring past `rings`, so the boundary between relaxed and untouched topology
+// shows no step in quad size. Everything outside the region is left
+// BIT-IDENTICAL: relaxSweep neither moves nor re-snaps a zero-weight vertex.
+//
+// Seeds that are dead are ignored. Returns the same distinct-vertex report as
+// the weighted relax.
+[[nodiscard]] inline ResnapReport relaxRegion(Mesh& mesh, std::span<const VertexId> seeds,
+                                              int rings, const RelaxParams& params,
+                                              const PinSet* pins = nullptr,
+                                              const SurfaceSnapper* snap = nullptr,
+                                              float resnapEpsilon = 0.0f) {
+    constexpr int kUnreached = -1;
+    std::vector<int> hops(mesh.vertexCapacity(), kUnreached);
+    std::vector<VertexId> frontier;
+    for (const VertexId seed : seeds) {
+        if (mesh.isAlive(seed) && hops[seed.value] == kUnreached) {
+            hops[seed.value] = 0;
+            frontier.push_back(seed);
+        }
+    }
+    if (frontier.empty() || rings < 0) {
+        return {};
+    }
+
+    // Breadth-first over edge adjacency, one ring per pass.
+    std::vector<VertexId> next;
+    for (int ring = 1; ring <= rings && !frontier.empty(); ++ring) {
+        next.clear();
+        for (const VertexId v : frontier) {
+            for (const VertexId n : oneRing(mesh, v)) {
+                if (mesh.isAlive(n) && hops[n.value] == kUnreached) {
+                    hops[n.value] = ring;
+                    next.push_back(n);
+                }
+            }
+        }
+        frontier.swap(next);
+    }
+
+    RelaxParams scoped = params;
+    scoped.brushRadius = 0.0f;  // the ring distance IS the mask; no spatial one on top
+    const float span = static_cast<float>(rings + 1);
+    return detail::relaxSweep(mesh, scoped, pins, snap, resnapEpsilon, [&](VertexId v) {
+        const int h = v.value < hops.size() ? hops[v.value] : kUnreached;
+        return h == kUnreached ? 0.0f : brushFalloff(static_cast<float>(h), span);
+    });
+}
+
 }  // namespace cyber::retopo

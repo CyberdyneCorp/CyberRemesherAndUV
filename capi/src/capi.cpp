@@ -3652,6 +3652,28 @@ CyberStatus cyber_retopo_draw_strip(CyberMesh* mesh, const float* path_xyz, size
     });
 }
 
+CyberStatus cyber_retopo_slide_loop(CyberMesh* mesh, uint32_t edge, float t,
+                                    const CyberSnapper* snapper, CyberLoopSlideReport* out_report) {
+    return runPositionEdit(mesh, "cyber_retopo_slide_loop", [&] {
+        const cyber::EdgeId e{edge};
+        if (!mesh->mesh.isAlive(e)) {
+            setError("cyber_retopo_slide_loop: dead edge id");
+            return CYBER_ERR_INVALID_ARG;
+        }
+        if (!(std::abs(t) < 1.0f)) {  // also rejects NaN
+            setError("cyber_retopo_slide_loop: |t| must be < 1 (at 1 every rail collapses)");
+            return CYBER_ERR_INVALID_PARAM;
+        }
+        const cyber::retopo::LoopSlideResult r =
+            cyber::retopo::slideLoop(mesh->mesh, e, t, snapperOf(snapper));
+        if (out_report != nullptr) {
+            out_report->loop_vertex_count = r.loopVertices;
+            out_report->moved_count = r.moved;
+        }
+        return CYBER_OK;
+    });
+}
+
 CyberStatus cyber_retopo_contours(CyberMesh* mesh, const CyberMesh* target,
                                   const float* strokes_xyz, const size_t* stroke_offsets,
                                   size_t stroke_count, size_t spans, const CyberSnapper* snapper,
@@ -4428,6 +4450,47 @@ CyberStatus cyber_retopo_selection_relax(CyberMesh* mesh, float strength, int it
         fillReport(out_report, cyber::retopo::relaxWeighted(mesh->mesh, mesh->selection, params,
                                                             snapperOf(snapper), &pins, eps,
                                                             ensureAdjacency(mesh)));
+        return CYBER_OK;
+    });
+}
+
+CyberStatus cyber_retopo_relax_region(CyberMesh* mesh, const uint32_t* seeds, size_t seed_count,
+                                      int rings, float strength, int iterations,
+                                      int auto_pin_corners, const uint32_t* pinned,
+                                      size_t pinned_count, const CyberSnapper* snapper,
+                                      float resnap_epsilon, CyberSoftTransformReport* out_report) {
+    return runPositionEdit(mesh, "cyber_retopo_relax_region", [&] {
+        if (seeds == nullptr && seed_count != 0) {
+            setError("cyber_retopo_relax_region: null seed array with a non-zero count");
+            return CYBER_ERR_INVALID_ARG;
+        }
+        if (rings < 0) {
+            setError("cyber_retopo_relax_region: rings must be >= 0");
+            return CYBER_ERR_INVALID_PARAM;
+        }
+        if (iterations < 1) {
+            setError("cyber_retopo_relax_region: iterations must be >= 1");
+            return CYBER_ERR_INVALID_PARAM;
+        }
+        // Same range gate as cyber_retopo_relax: an unvalidated NaN strength
+        // reaches every vertex in the region through the sweep.
+        if (!(strength >= 0.0f && strength <= 1.0f)) {
+            setError("cyber_retopo_relax_region: strength must be in [0,1]");
+            return CYBER_ERR_INVALID_PARAM;
+        }
+        std::vector<cyber::VertexId> seedIds;
+        seedIds.reserve(seed_count);
+        for (size_t i = 0; i < seed_count; ++i) {
+            seedIds.push_back(cyber::VertexId{seeds[i]});
+        }
+        cyber::retopo::RelaxParams params;
+        params.strength = strength;
+        params.iterations = iterations;
+        params.autoPinCorners = auto_pin_corners != 0;
+        const cyber::retopo::PinSet pins = makePinSet(pinned, pinned_count);
+        const float eps = resnap_epsilon >= 0.0f ? resnap_epsilon : 0.0f;
+        fillReport(out_report, cyber::retopo::relaxRegion(mesh->mesh, seedIds, rings, params, &pins,
+                                                          snapperOf(snapper), eps));
         return CYBER_OK;
     });
 }

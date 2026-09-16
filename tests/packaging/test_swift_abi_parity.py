@@ -139,9 +139,6 @@ PENDING_REGISTRATIONS: dict[str, str] = {
     # --- retopology follow-ups --------------------------------------------
     # Genuinely wanted on mobile and not yet written. Listed rather than left
     # invisible, which is the whole point of this file.
-    "cyber_retopo_apply_symmetry": "retopology follow-up",
-    "cyber_retopo_resymmetrize": "retopology follow-up",
-    "cyber_retopo_snap_symmetry_plane": "retopology follow-up",
     "cyber_retopo_grow_boundary_edge": "retopology follow-up",
     "cyber_retopo_loop_subdivide": "retopology follow-up",
     "cyber_conform": "retopology follow-up",

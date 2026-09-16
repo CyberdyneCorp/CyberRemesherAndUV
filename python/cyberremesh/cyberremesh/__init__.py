@@ -86,6 +86,9 @@ from .api import (
     RayHit,
     LoopMetrics,
     ContourReport,
+    Symmetry,
+    ResymmetrizeReport,
+    LoopSlideReport,
 )
 
 # The gesture grammar. Kept in its own module because it is interpretation
@@ -142,6 +145,9 @@ __all__ = [
     "RayHit",
     "LoopMetrics",
     "ContourReport",
+    "Symmetry",
+    "ResymmetrizeReport",
+    "LoopSlideReport",
     "strokes",
     "interpret",
     "Interpretation",
