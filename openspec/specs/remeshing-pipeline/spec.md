@@ -8,9 +8,7 @@ inspectable rather than emergent — output is toolchain-independent, target
 counts are computed under a guard, an island that fails is reported instead of
 silently dropped, and cleanup policies are explicit choices rather than
 incidental side effects.
-
 ## Requirements
-
 ### Requirement: Pipeline stages
 The automatic remesher SHALL execute, in order: (1) derive the target edge length from total surface area and the target quad count; (2) split the input into islands (accounting for every face — see mesh-core); (3) adaptively isotropic-remesh each island; (4) compute a frame-field-guided global parameterization per island; (5) extract quad-dominant faces by tracing integer UV isolines; (6) run cleanup passes; (7) merge per-island results deterministically (stable island order). Islands SHALL be processed in parallel where the solver permits.
 
@@ -397,15 +395,154 @@ The pipeline SHALL support a quality mode that solves more than one candidate
 and selects between them by a single published score covering geometry, quad
 shape, topology, flow, guide adherence, features and symmetry. Selection SHALL
 be deterministic, with a stable tie-break, and the selected candidate SHALL be
-named in the run report.
+named in the run report. A candidate with non-manifold edges, a boundary
+component count different from the input's, non-finite live-vertex positions,
+zero-length live edges, or no faces SHALL be ineligible before aesthetic terms
+are compared; the number of edges used to tessellate a preserved boundary
+SHALL NOT itself make an otherwise eligible candidate lose. Quad-corner shape
+SHALL use a documented upper-tail absolute
+deviation from 90 degrees; a favorable median angle alone SHALL NOT allow a
+candidate with severely distorted corners to win.
+
+#### Scenario: Invalid candidate is rejected
+
+- **WHEN** one quality-mode candidate has a non-finite coordinate, zero-length
+  edge, or no faces and another is geometry-eligible
+- **THEN** the invalid candidate SHALL lose regardless of its aesthetic score
 
 #### Scenario: Best mode never picks a worse candidate
 
 - **WHEN** the quality mode solves two candidates
 - **THEN** the selected candidate's score SHALL be greater than or equal to
-  every other candidate's score, and the report SHALL name it
+  every other eligible candidate's score, and the report SHALL name it
+
+#### Scenario: Open boundary is preserved
+
+- **WHEN** two candidates for an open input preserve its boundary-component
+  count but use different numbers of boundary edges
+- **THEN** selection SHALL rank them by their quality score rather than raw
+  boundary-edge count
+
+#### Scenario: New boundary component is rejected
+
+- **WHEN** a candidate for an open input introduces an additional boundary
+  component
+- **THEN** it SHALL lose to an otherwise eligible candidate regardless of its
+  aesthetic score
+
+#### Scenario: Tail distortion affects selection
+
+- **WHEN** two geometry-eligible candidates have similarly favorable median
+  angles but one has a worse upper tail of corner-angle deviation
+- **THEN** the candidate with the better tail statistic SHALL receive the
+  higher angle-quality term
 
 #### Scenario: Selection is stable
 
-- **WHEN** two candidates score equal within tolerance
+- **WHEN** two eligible candidates score equal within tolerance
 - **THEN** the same candidate SHALL be selected on every run of the same input
+
+### Requirement: Layout arcs are injectable on organic meshes
+
+The quantized topology layout SHALL reach the output mesh on organic input, not
+only on crease-pinned input. Injectability SHALL be MEASURED and reported per
+run — the fraction of layout arcs whose length reduces onto the solver's integer
+free variables — with the failure attributed by cause rather than counted as one
+opaque total.
+
+Injectability alone SHALL NOT be treated as success. It can be driven to 1.0
+without changing any output mesh, which is the failure mode this track has
+already hit twice, so it SHALL be paired with a measure of how much of the
+Bi-MDF optimum the realized integers actually achieve.
+
+#### Scenario: The injectability of a run is reportable
+
+- **WHEN** a caller runs the ZRemesher path with a run report attached
+- **THEN** the report SHALL carry the arc count, the non-injectable count split
+  by cause, and the number of arcs actually injected
+
+#### Scenario: A crease-pinned mesh stays fully injectable
+
+- **WHEN** a mesh whose arcs run between pinned crease isolines is remeshed
+- **THEN** every arc SHALL remain injectable, so the change cannot regress the
+  case that already works
+
+#### Scenario: Output reach is measured alongside injectability
+
+- **WHEN** injectability improves on an organic mesh
+- **THEN** the realized arc-deviation energy SHALL be reported against the
+  Bi-MDF optimum, so an improvement that does not reach the mesh is visible as
+  such rather than read as success
+
+### Requirement: Semantic boundaries are preserved as edge loops
+
+The pipeline SHALL accept per-face group / material ids through the typed bulk
+indexed-mesh descriptor: a face-domain `int32` column named `group_id` or
+`material_id`. It SHALL treat the edges where adjacent faces disagree as feature
+edges — pinned by the seamless solve, present in the topology layout, and
+honoured by the sizing field — so a material boundary comes back as an edge loop
+rather than being crossed by quads. OBJ `g` / `usemtl` records are not imported
+as semantic ids; callers needing that identity SHALL use the explicit typed
+descriptor rather than relying on an implicit file-format mapping.
+
+#### Scenario: A material boundary survives remeshing
+
+- **WHEN** a mesh carrying two materials is remeshed
+- **THEN** the boundary between them SHALL appear in the output as a continuous
+  edge loop, and SHALL be reported in the layout as arcs
+
+#### Scenario: Semantic tags are never demoted
+
+- **WHEN** a semantic boundary edge lies on a surface the dihedral re-tag would
+  classify as smooth
+- **THEN** the edge SHALL remain tagged as a feature, because semantic tagging
+  is applied after the dihedral re-tag
+
+### Requirement: Symmetry is detected and reported before it is applied
+
+The pipeline SHALL be able to detect a symmetry plane and report it WITHOUT
+applying it. Vertex matching SHALL be nearest-within-tolerance; quantizing
+positions to a tolerance grid and comparing keys SHALL NOT be used, because it
+both collides distinct vertices and misses partners across a cell boundary.
+Detection SHALL NOT select the symmetry axis automatically until its threshold
+has been calibrated on the corpus.
+
+#### Scenario: A symmetric model reports its plane
+
+- **WHEN** a symmetric model is analysed
+- **THEN** the run report SHALL name the detected plane, and the output SHALL be
+  unchanged by the detection
+
+#### Scenario: A nearly-symmetric model is not silently mirrored
+
+- **WHEN** a model is symmetric only within a loose tolerance
+- **THEN** detection SHALL NOT apply symmetry, because applying it would be a
+  silent lossy edit
+
+### Requirement: Caller-configured topology ceilings
+
+The remeshing pipeline SHALL accept optional independent ceilings for input,
+intermediate and output vertex and face counts. A zero ceiling SHALL disable
+only that dimension. The pipeline SHALL reject a limit before the operation
+that would exceed it, name the stage, requested count and allowed count, and
+leave the caller input unchanged.
+
+#### Scenario: Input is over its budget
+
+- **GIVEN** an input mesh has more faces than `maxInputFaces`
+- **WHEN** remeshing starts
+- **THEN** it SHALL fail before making the pipeline work copy
+
+#### Scenario: Adaptive refinement reaches an intermediate ceiling
+
+- **GIVEN** a coarse mesh requires splits to reach its target edge length
+- **AND** `maxIntermediateFaces` is lower than the next split result
+- **WHEN** the isotropic stage runs
+- **THEN** it SHALL stop before creating that result and report the limit
+
+#### Scenario: Limits are disabled
+
+- **GIVEN** every limit is zero
+- **WHEN** remeshing runs
+- **THEN** it SHALL use the existing unbounded behaviour
+

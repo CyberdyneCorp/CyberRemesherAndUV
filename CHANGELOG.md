@@ -3,7 +3,7 @@
 > Note: releases 0.3.0, 0.4.0 and 0.5.0 were tagged without changelog entries;
 > their content is recorded in `docs/ROADMAP.md`. Entries resume here.
 
-## [Unreleased]
+## [0.9.0] - 2026-09-15
 
 ### Added
 
@@ -116,6 +116,212 @@
   client's side — the same hazard `enumCode()` exists for, from the other
   direction. New states arrive as new fields or new entry points.
 
+- **Exact-border partial retopology — remesh a face selection, not the whole
+  mesh.** Every retopology path the engine offered consumed a mesh and returned
+  a different mesh, so an artist who wanted a cleaner shoulder had to accept a
+  new head as well. `cyber_retopo_partial_remesh()` takes a face selection and
+  rebuilds only that region.
+
+  The border is EXACT, not approximate: the selection's boundary vertices are
+  the ones the new region is stitched to, by identity, so the untouched majority
+  of the mesh keeps its vertices, its ids and its attributes and there is no
+  seam to weld afterwards. The whole operation is transactional — a selection
+  whose border is not a valid closed loop, or that would produce a non-manifold
+  join, leaves `mesh` byte-for-byte unchanged and explains the rejected
+  constraint through `cyber_last_error()`, rather than half-applying.
+
+  Attribute transfer is reported rather than assumed. Vertex, face and corner
+  columns are carried across by source correspondence;
+  `untransferred_attribute_count` names how many columns need an explicit policy
+  from the host instead of silently claiming they survived. Topology-keyed
+  handle state is invalidated exactly once, on success — see
+  `cyber_mesh_topology_generation()` above, which is how a host observes it.
+
+  `partial_remesh()` from Python, `Mesh.partialRemesh` from Swift, and undoable
+  in the iPadOS document app.
+
+- **Automatic symmetry detection — advisory by default, opt-in as a mode.**
+  Exact X/Y/Z symmetry has produced mirrored CONNECTIVITY since 0.8.0, but the
+  caller had to know which axis, and a wrong guess is worse than none.
+
+  `cyber_detect_symmetry()` evaluates explicit-axis and unambiguous PCA plane
+  hypotheses against nearest surface samples, reflected normals, component
+  correspondence and declared face semantics, and REPORTS. It does not mutate
+  the input, and nothing in the pipeline consults it unless asked.
+
+  `CYBER_ZR_SYMMETRY_AUTO` is the ZRemesher opt-in that does. It applies only a
+  confident, unambiguous X/Y/Z result whose components and semantics also match;
+  an ambiguous, arbitrary, partial or semantically inconsistent input **fails**
+  rather than falling back. That is the whole point of the mode: silently
+  resolving uncertainty to "no symmetry" gives an artist an asymmetric mesh with
+  no explanation, and resolving it to an arbitrary axis gives them a mirrored
+  one across the wrong plane. Calibration evidence is recorded against the
+  acceptance corpus in `docs/symmetry-detection-calibration.md`. The CLI's
+  `--symmetry` still takes `none|x|y|z` only — `auto` is a binding-level option
+  for now.
+
+  `detect_symmetry()` from Python, `Mesh.detectSymmetry()` from Swift.
+
+- **Semantic face boundaries are retained, and their adherence is reported.**
+  `group_id` and `material_id` are the boundaries an artist actually authored —
+  where the armour meets the cloth — and retopology walked straight through
+  them, because they are not creases and a coplanar material change has no
+  geometric signal at all. They are now retained as hard features, coplanar ones
+  included, and non-branching semantic components become topology constraints.
+
+  What comes back is evidence about the FINAL mesh, not a promise made before
+  the solve: coverage, closure, distance, and a realized / partial / rejected
+  verdict with a reason. A constraint the solver could not honor says so and
+  says why, which is the difference between a feature and a hope. Resource-
+  limited runs retain this report alongside the injectability diagnostics.
+
+  Available through the C ABI, Python and Swift.
+
+- **Bulk indexed mesh exchange — CSR polygons and typed attribute columns
+  (ABI 1.3).** The C ABI moved geometry one element at a time, so a host with a
+  million-polygon mesh paid a call per polygon, and there was no way to hand
+  over an authored quad or n-gon at all: everything arrived triangulated, and
+  the authored topology the artist built was destroyed at the boundary.
+
+  `cyber_mesh_from_indexed()` takes triangles, quads and n-gons as a copying CSR
+  pair (face offsets plus a flat index array), validated TRANSACTIONALLY — the
+  whole exchange is accepted or the mesh is untouched — and
+  `cyber_mesh_copy_face_offsets()` / `cyber_mesh_copy_polygon_indices()` export
+  authored topology back in the same shape. `cyber_mesh_attribute_count()`,
+  `_attribute_info()` and `_copy_attribute()` carry typed vertex, face and
+  corner columns across, including seam-safe corner UVs, which is the case that
+  cannot be expressed per-vertex at all.
+
+  Copying, not borrowing, and deliberately: a borrowed buffer makes the host
+  responsible for a lifetime it cannot see the end of, and this ABI runs inside
+  someone else's process. Exposed in Swift and Python, and in the documented
+  geometry-only subset of the Rust crate.
+
+- **Target-count calibration is now reported, and its policy is selectable
+  (ABI 1.4).** `targetQuadCount` is a request the solver negotiates with, and
+  0.8.0 could return 1.33x the requested count on one model and within 1% on
+  another with no bug involved — correctly, per the acceptance band, and with
+  nothing said about it.
+
+  `cyber_remesh_with_count_report()` returns the requested, effective-base,
+  calibrated and final counts, per run AND per island, so a host can see which
+  stage moved the number and by how much. The CLI emits the same values in its
+  JSON. Alongside it, bounded QuadCover count policies retain feasible
+  incumbents instead of discarding them, and a policy the backend does not
+  implement is **rejected by name** rather than silently ignored — the failure
+  mode where a knob reports success while doing nothing.
+
+- **Bounded import and remeshing resources across every entry point (ABI 1.9).**
+  `cyber_set_max_import_vertices()` above was the first of these; the rest of
+  the family landed with it. Oversized input BYTES and declared-or-streamed
+  topology are now refused before the relevant importer allocates — OBJ, PLY,
+  FBX, glTF, binary STL and streaming ASCII STL each preflight their own counts,
+  because a budget enforced after the parse is not a budget.
+
+  Beyond import, there are per-operation input, intermediate, output,
+  direct-factor and candidate-buffer limits (`cyber_remesh_with_limits()`,
+  `cyber_remesh_with_resource_limits()`, and the ZRemesher equivalents), and a
+  bake texel ceiling (`cyber_set_max_bake_pixels()`). Exhaustion is a typed
+  diagnostic naming which budget was hit, not a bad_alloc from somewhere in the
+  middle of a solve.
+
+  All of it is off by default, for the same reason as the import ceiling: the
+  engine cannot know a host's budget, and a value chosen here is too small for a
+  workstation and useless on a phone. `cyber_default_remesh_limits()` and
+  `cyber_default_remesh_execution_limits()` give a host a starting point to
+  modify rather than a struct to fill in blind. Reachable from C, Python, Swift
+  and the ZRemesher entry points, with iOS memory-profile harnesses under
+  `packaging/ios`.
+
+- **Layout injectability diagnostics — why a layout did not become integers
+  (ABI 1.10).** ZRemesher's quality ceiling is the layout-to-integer step, and
+  when it fell short there was nothing to look at.
+  `cyber_remesh_zremesher_with_injectability_report()` reports mutually
+  exclusive blocker causes per row — excluded, empty, lattice-free,
+  fractional-coefficient — plus pivot and drop counts and the optimal versus
+  realized deviation energy, in a separate report struct so the existing
+  ZRemesher report layout is untouched.
+
+  The numbers are unflattering and that is the point. Organic corpus at 2,000
+  quads: spot **0 of 876** rows injectable (all lattice-free), nefertiti 274 of
+  5204, armadillo 90 of 5232; a generated sharp-box control is 24 of 24. The
+  CLI JSON now identifies each best-quality candidate individually, selects
+  exactly one, and writes candidate layout exports to unique paths instead of
+  last-write-wins. `tools/bench/injectability.py` checks that the reported
+  causes reconcile and verifies output REACH — that forcing pinning actually
+  changes the output hash — because a diagnostic nothing can move is decoration.
+
+- **Remesh operations are cancellable jobs in Swift.** `RemeshOperation` is now
+  a lock-protected, single-execution job: concurrent and repeated `value()`
+  calls share ONE native run and one terminal result, rather than each await
+  starting another solve. `cancel()` is explicit and idempotent, Swift task
+  cancellation bridges to the same cooperative request, and progress is
+  delivered monotonically with the C callback's control state retained through
+  native completion.
+
+  The iPadOS Cancel button cancelled its progress observer and left the solve
+  running; it now cancels the operation. Borrowed-input, result-ownership,
+  repeat-await and cancellation semantics are documented rather than inferred.
+
+- **iOS XCFramework — the C ABI as a binary SwiftPM dependency.** arm64 device
+  and simulator slices, CPU-only, with a binary-backed SwiftPM surface, an
+  iOS-target assertion for consumer binaries, and physical-device signing
+  validation.
+
+  Validated on a signed physical iPad Air 13-inch (M3, iPad15,5) running
+  iPadOS 26.5.2, not only in the simulator: four smoke runs completed the ABI,
+  remesh, authored-polygon, progress and pre-start-cancellation checks at
+  16.05–17.82 ms remesh, 7.24–7.29 MB sampled resident peak, 0.042–0.045 ms
+  cancellation, thermal state nominal before and after. Those are recorded as
+  **smoke-fixture** numbers on a two-triangle input, explicitly not a general
+  workload limit.
+
+- **An offline retopology acceptance corpus, gated in CI.** Performance was
+  measured and correctness was not. The corpus is versioned and procedural — no
+  downloads, so it runs offline — and covers closed, open, sharp-feature,
+  multi-component, large-coordinate and deliberately invalid inputs, recording
+  validity, quality and reproducibility as machine-readable result rows.
+
+  It is gated against committed Darwin and Linux baselines SEPARATELY, because
+  this repo already knows that solver output differs between toolchains for
+  reasons that are not bugs; one shared baseline would either fail constantly or
+  be loosened until it proved nothing. Recording a new baseline is a manual,
+  controlled hardening-workflow path, so a baseline cannot be refreshed into
+  agreement with a regression by an ordinary push.
+
+- **Opt-in half-lattice component guidance for ZRemesher.** Checked
+  doubled-lattice component completion, ownership auditing, parity checks and
+  target-consistency projection; complete projected components are GUIDED at
+  bounded low weight rather than hard-pinned from partial assignments, because
+  pinning a partial assignment is how the layout step produces a worse mesh than
+  not trying. A generated-corpus gate proves deterministic output reach on a
+  sphere while holding layout/mesh validity and the established quality
+  tolerances.
+
+  **Off by default** — `CYBER_ZR_HALF_LATTICE=project` opts in, and default
+  ZRemesher output is unchanged.
+
+- **A type-aware C ABI manifest, pinned and checked.** The ABI's additive-only
+  rule was documented and unenforced, so a same-layout change — a pointer type
+  swapped, a field moved into trailing padding — passed every test while
+  breaking every compiled client. The manifest is generated from
+  `cyber_capi.h` plus compiler-MEASURED struct and enum layouts, so it records
+  what the compiler actually produces rather than what the header appears to
+  say, and both mutation classes are now rejected.
+
+  Alongside it, a retained v0.8 client surface is compiled and EXECUTED against
+  the current shared library with guarded array and out-param buffers — the
+  `CyberAtlasResult` incident from v0.5.0 → v0.6.0, where the callee wrote past
+  an older caller's buffer, reproduced as a test instead of a note.
+
+- **`docs/CURRENT_STATUS.md` — one current capability and integration
+  contract.** The documentation had accumulated enough historical research that
+  a reader could not tell a normative specification from a plan that was
+  abandoned. This separates the two, states the current C ABI / Swift / mobile
+  boundaries, and explicitly prevents cross-compilation from being read as
+  device evidence or all-quad output as production-topology evidence — both
+  claims this repo has made about itself and had to retract.
+
 ### Changed
 
 - **`FieldEvaluator::occlusion` is now `openness`, in C++ and Python.** It was
@@ -134,6 +340,22 @@
   inverting in the shim would flip a map that was correct before.
 
   Breaking for a C++ implementer of `FieldEvaluator` (a pure virtual moved).
+
+- **Candidate corner scoring is p95 absolute deviation from 90°, not the
+  median.** Best-of-two selection ranked candidates on median corner quality,
+  which is a measure of the quads an artist is not looking at. A mesh with a
+  clean bulk and a band of badly sheared quads scored better than a uniformly
+  decent one, and the sheared band is the thing anybody notices. The p95 is
+  documented where it is computed, because a percentile with no stated polarity
+  is the same trap `occlusion` was.
+
+- **The C ABI's remesh orchestration moved behind private adapters.**
+  C-to-C++ request and guidance lowering, and ZRemesher / injectability /
+  semantic-boundary report conversion, are extracted from the facade into a
+  private capability adapter. Exported entry points, callbacks, ownership and
+  ABI layout are all preserved — this is the refactor that makes the orchestrator
+  readable again, not a behavior change, and the pinned ABI manifest is what
+  proves it.
 
 ### Fixed
 
@@ -213,6 +435,50 @@
   `NaN != 0.0f` is true, so a NaN passed the filter and reached
   `weightedPercentile`, where comparing it violates strict weak ordering — UB in
   the sort itself, not merely a poisoned auto range.
+
+- **Candidate selection treated a legitimate open border as a defect.**
+  `scoreQuality` had already classified borders correctly for open inputs, and
+  then best-of-two threw that away by counting every raw boundary edge as an
+  absolute defect. A FINER valid tessellation of the same source rim has more
+  boundary edges than a coarser one, so on any open mesh the better candidate
+  lost before its quality score was read.
+
+  Eligibility is now about boundary COMPONENTS, not boundary edges: a candidate
+  qualifies when it preserves the input's connected boundary-component count and
+  introduces no non-manifold edge. That distinction is exactly the one that
+  matters — a denser rim is the same component and stays eligible, a new crack
+  is a new component and is rejected. Eligible candidates are then ranked by the
+  existing deterministic score; when every candidate is invalid the old
+  least-bad pick survives for diagnostics only.
+
+- **Invalid candidates reached the aesthetic comparison at all.** Empty,
+  non-finite and zero-length-edge candidates were scored as though they were
+  meshes. They are rejected before ranking now, which also means a NaN can no
+  longer win on a tie-break.
+
+- **C ABI selector paths now honor `adaptivity`.** `cyber_remesh` forwarded
+  the value through the ordinary pipeline but replaced it with `0.0` while
+  constructing both the quad-cover default and `CYBER_QUAD_ZREMESHER`. The CLI
+  forwarded the requested value (default `1.0`), so the same request could
+  produce different meshes depending on the frontend. Explicit `0.0` retains
+  the historical uniform behavior; the C ABI default now matches the CLI.
+  Regression coverage uses a torus, whose varying curvature distinguishes
+  uniform from adaptive sizing, and exercises both selector methods.
+
+- **Quad-cover's boundary tally accumulated through a signed intermediate.**
+  `inputBoundary += cond ? 1 : 0` gave the ternary type `int` and converted on
+  every edge. The values are 0 and 1 so no count was ever wrong, but it is the
+  shape that IS wrong elsewhere, and it kept a sign-conversion warning alive in
+  the file where a real narrowing would hide.
+
+- **Corpus hashes were unstable on Windows**, so the bench gate reported a
+  difference between runs on the same commit and there was nothing to compare
+  against. The harness also required its dependencies implicitly: a missing one
+  skipped the test and reported green, which is the CI-invisible failure this
+  repo has hit before.
+
+- **The iOS profile harness used an absolute include path**, so it built only
+  in the tree it was authored in.
 
 ## [0.8.0] - 2026-09-07
 
@@ -478,15 +744,6 @@
   exactly).
 
 ### Fixed
-
-- **C ABI selector paths now honor `adaptivity`.** `cyber_remesh` forwarded
-  the value through the ordinary pipeline but replaced it with `0.0` while
-  constructing both the quad-cover default and `CYBER_QUAD_ZREMESHER`. The CLI
-  forwarded the requested value (default `1.0`), so the same request could
-  produce different meshes depending on the frontend. Explicit `0.0` retains
-  the historical uniform behavior; the C ABI default now matches the CLI.
-  Regression coverage uses a torus, whose varying curvature distinguishes
-  uniform from adaptive sizing, and exercises both selector methods.
 
 - **Guidance counts were bounded after the pointer arithmetic, not before.**
   `toGuidance` built its density range as `src + count` and relied on the

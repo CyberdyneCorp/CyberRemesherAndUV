@@ -8,9 +8,7 @@ convenience layer — Python is the integration-test harness the suite actually
 runs, so a capability that is unreachable from a binding is untested, and
 parity between the CLI, C and Python surfaces is a release rule rather than an
 aspiration.
-
 ## Requirements
-
 ### Requirement: Full-surface C ABI facade
 The library SHALL be exposed through a versioned C ABI (opaque handles, plain C types, integer error codes, C function-pointer callbacks) covering the **entire library surface**, not only the headless pipeline: mesh I/O and inspection, the remeshing pipeline with canonical parameters, the document/session layer (create/open/save documents, Target/EditMesh access, stage switching), the tool command layer (invoke any retopo/UV/bake action, inject synthetic input — stroke point sequences, taps, modifier chords), undo/redo, UV unwrap/pack, baking, diagnostics, and compute-backend selection. No C++ types SHALL cross the boundary. The ABI SHALL carry a runtime-queryable semantic version; minor releases SHALL be additive only.
 
@@ -53,6 +51,10 @@ The project's integration and interaction test suites (stroke-grammar traces, go
 ### Requirement: Swift package is the supported path to the library on iPad
 The project SHALL ship a Swift package (SwiftPM; iPadOS/iOS and macOS) wrapping the same C ABI with idiomatic Swift — typed `throws` errors, value-type parameters, async/await for long operations with progress, Task-cancellation bridging — sufficient to build a complete iPad experience on top of it: document/session control, all tool actions, forwarding of UIKit/PencilKit touch and stylus events into the input layer, viewport attachment to a caller-supplied `CAMetalLayer`, and export/bake. The project's own iPadOS shell SHALL consume this package (not private hooks), guaranteeing third parties get the same capability surface.
 
+For iOS consumers, the supported package distribution SHALL resolve its native C ABI from a versioned XCFramework rather than requiring repository-relative unsafe include or linker flags. It SHALL support both device and simulator builds under the same public Swift API and SHALL document the CPU solver profile and optional-solver availability of the distributed artifact.
+
+Each Swift remesh operation SHALL represent exactly one native execution. It SHALL expose idempotent explicit cancellation, borrow and retain its input until that execution has reached a terminal state, and document that callers MUST NOT mutate that input while the job is active. It SHALL give every concurrent or subsequent awaiter the same terminal result or error. Task cancellation while awaiting SHALL request cancellation of that shared job without abandoning its native worker. Progress delivery SHALL be monotonic, serialized for consumers, and finish exactly once; callbacks SHALL never outlive the operation's retained control state. A successful result SHALL be independently owned by the caller, while cancellation and failure SHALL not mutate the input.
+
 #### Scenario: Third-party iPad app hosts the library
 - **WHEN** an external iPad app adds the Swift package, attaches a Metal layer, loads a Target, and forwards Apple Pencil events
 - **THEN** stroke-based retopology SHALL function inside that app with the same behavior as the first-party shell
@@ -60,6 +62,14 @@ The project SHALL ship a Swift package (SwiftPM; iPadOS/iOS and macOS) wrapping 
 #### Scenario: Swift task cancellation
 - **WHEN** a remesh launched via the Swift async API has its enclosing Task cancelled
 - **THEN** the engine SHALL cancel cooperatively and the call SHALL throw the cancellation error
+
+#### Scenario: Explicit job cancellation and repeated awaits
+- **WHEN** a caller cancels a running `RemeshOperation` and awaits its value from more than one task
+- **THEN** the engine SHALL receive one cooperative cancellation request, execute at most once, and every awaiter SHALL observe the same cancelled terminal error
+
+#### Scenario: Packaged iOS host builds without source paths
+- **WHEN** a third-party iOS app adds the binary-backed package from a clean checkout
+- **THEN** it SHALL compile the public Swift API without configuring a path to `capi/include` or a locally built native library
 
 ### Requirement: Binding parity and release discipline
 Python and Swift bindings SHALL be version-locked to the engine release and covered in CI on every supported platform lane (Python: desktop OSes; Swift: macOS + iOS simulator). New ABI entry points SHALL fail CI until both bindings expose them or a pending registration exists.
@@ -392,3 +402,23 @@ reachable from the CLI SHALL be reachable from Python.
 - **WHEN** a Python caller supplies a closed guide in topology mode
 - **THEN** the binding SHALL forward the guide mode, and the report SHALL
   record the achieved guide adherence
+
+### Requirement: Current integration contract
+
+The project SHALL publish one current document that distinguishes supported,
+experimental, scaffolded and build-dependent integration paths, and SHALL link
+to it from the root documentation. Historical roadmaps and benchmark records
+SHALL be labelled as dated evidence rather than current guarantees.
+
+#### Scenario: Mobile consumer evaluates support
+
+- **WHEN** an iOS or Android consumer evaluates the library
+- **THEN** the documentation SHALL state whether the path has device evidence,
+  cross-compilation evidence only, or no published SDK artifact
+
+#### Scenario: ABI consumer evaluates reproducibility
+
+- **WHEN** a host integrates through the C ABI
+- **THEN** the documentation SHALL distinguish ABI compatibility from engine and
+  solver identity required for reproducible output
+

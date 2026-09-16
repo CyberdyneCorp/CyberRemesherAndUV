@@ -63,7 +63,7 @@ The **release** lane SHALL be gated too: no artifact SHALL be published from a t
 - **THEN** it SHALL execute the suite under ASan/UBSan and TSan and run the fuzz targets, and the seed corpus checked in alongside them SHALL replay as a test case on ordinary CI legs
 
 ### Requirement: Platform packages
-CI SHALL produce installable artifacts for macOS (signed/notarized DMG), Windows (zip and installer), Linux (AppImage), iPadOS/iOS (archive for TestFlight/App Store lanes), and Android (APK/AAB), with artifact names carrying the semantic version. Tagged releases SHALL publish a GitHub Release with the artifacts attached (AutoRemesher only uploaded CI artifacts).
+CI SHALL produce installable artifacts for macOS (signed/notarized DMG), Windows (zip and installer), Linux (AppImage), iPadOS/iOS (archive for TestFlight/App Store lanes and a versioned XCFramework for library consumers), and Android (APK/AAB), with artifact names carrying the semantic version. Tagged releases SHALL publish a GitHub Release with the artifacts attached (AutoRemesher only uploaded CI artifacts).
 
 Each artifact SHALL be self-sufficient on a stock target machine: a package SHALL carry the runtime libraries its build linked (excluding only those a package of that kind must inherit from the host, such as the dynamic loader and the glibc/GCC core), and the package job SHALL fail when a dependency is neither bundled nor excluded by that rule. A published Python wheel SHALL contain the native library it binds; a wheel that is pure Python is not a shippable artifact.
 
@@ -78,6 +78,10 @@ Each artifact SHALL be self-sufficient on a stock target machine: a package SHAL
 #### Scenario: The wheel carries its engine
 - **WHEN** the Python publishing lane builds a wheel
 - **THEN** the native shared library SHALL be staged into the package before the wheel is built and SHALL be present in the built wheel
+
+#### Scenario: iOS library consumer uses an XCFramework
+- **WHEN** an iOS host resolves the released Swift package on device or simulator
+- **THEN** its build SHALL link the versioned XCFramework without repository-relative native search paths
 
 ### Requirement: Package smoke tests
 Each desktop package SHALL be smoke-tested from the packaged form (mounted DMG / extracted zip / AppImage): a CLI remesh of a reference model asserting a valid output file and exit code 0, plus an app-launch screenshot. Mobile artifacts SHALL at minimum boot in a simulator/emulator in CI.
