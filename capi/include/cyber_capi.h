@@ -92,7 +92,7 @@ typedef enum CyberStatus {
  * Do not compare these numbers by hand: cyber_abi_check() applies the rule
  * above in one place, so every binding gets the same answer. */
 #define CYBER_ABI_VERSION_MAJOR 1
-#define CYBER_ABI_VERSION_MINOR 16
+#define CYBER_ABI_VERSION_MINOR 17
 
 /* The ABI this build implements. Cannot fail; either pointer may be NULL. */
 void cyber_abi_version(int* major, int* minor);
@@ -732,8 +732,8 @@ CyberStatus cyber_remesh_zremesher(const CyberMesh* in, const CyberRemeshParams*
 CyberStatus cyber_detect_symmetry(const CyberMesh* mesh, CyberSymmetryDetectionReport* report);
 CyberStatus cyber_detect_symmetry_evidence(const CyberMesh* mesh,
                                            CyberSymmetryDetectionEvidence* report);
-CyberStatus cyber_detect_symmetry_correspondence(
-    const CyberMesh* mesh, CyberSymmetryCorrespondenceEvidence* report);
+CyberStatus cyber_detect_symmetry_correspondence(const CyberMesh* mesh,
+                                                 CyberSymmetryCorrespondenceEvidence* report);
 
 /* Like cyber_remesh_zremesher, and additionally returns the per-run symbolic
  * injectability diagnostics through a separately versioned-safe POD. Either
@@ -1665,6 +1665,66 @@ CyberStatus cyber_retopo_draw_strip(CyberMesh* mesh, const float* path_xyz, size
                                     float width, const float view_dir[3], uint32_t start_a,
                                     uint32_t start_b, const CyberSnapper* snapper,
                                     size_t* out_new_faces);
+
+/* What a contour run produced. `failed_stroke` is the index of the first
+ * stroke that named no usable plane or no Target cross-section, or SIZE_MAX
+ * when every stroke produced a ring. */
+typedef struct CyberContourReport {
+    size_t ring_count;
+    size_t face_count;
+    size_t vertex_count;
+    size_t failed_stroke;
+} CyberContourReport;
+
+/* Contours: sample `target` with cross-section strokes and loft the rings into
+ * a quad tube on `mesh`.
+ *
+ * The OPPOSITE construction to cyber_retopo_draw_strip, and the distinction is
+ * the whole point of a separate entry point. There the stroke IS the ribbon's
+ * spine and rails are built around it. Here each stroke is a SAMPLING GESTURE:
+ * it names a cutting plane, and the ring comes from `target`'s intersection
+ * with that plane — which is how the far side of a limb, that the artist never
+ * drew on and cannot see, ends up in the ring. Drawing four short arcs down an
+ * arm therefore produces a closed tube, not four arcs.
+ *
+ * Strokes are supplied CSR-style, matching cyber_mesh_from_indexed: world-space
+ * x,y,z triplets in `strokes_xyz`, with `stroke_offsets[i]` the first POINT
+ * index of stroke i and `stroke_offsets[stroke_count]` the total point count.
+ * Strokes are lofted in the order given — the order the artist drew them —
+ * deliberately: sorting them along a fitted axis guesses at intent, and an
+ * artist who draws a ring out of order to close a gap would get a tube that
+ * reorders itself under them.
+ *
+ * Every ring is resampled to `spans` points, which is what a loft needs and
+ * also what makes the quads even. Ring i+1's seam is placed at the sample
+ * nearest ring i's, and reversed when its winding opposes ring i's, so the tube
+ * neither spirals nor inverts a band in the middle. Ring vertices snap to the
+ * Target when `snapper` is non-NULL. Non-zero `closed` wraps the last ring back
+ * to the first.
+ *
+ * A stroke that produces no ring STOPS the run and is named in
+ * `out_report->failed_stroke`, with `mesh` unchanged — skipping it would loft
+ * the rings either side across the gap and look deliberate.
+ *
+ * Fails with CYBER_ERR_INVALID_ARG (mesh unchanged) on null arrays, fewer than
+ * two strokes, non-monotone offsets, or an unusable stroke; with
+ * CYBER_ERR_INVALID_PARAM on spans < 3. `out_report` may be NULL. */
+CyberStatus cyber_retopo_contours(CyberMesh* mesh, const CyberMesh* target,
+                                  const float* strokes_xyz, const size_t* stroke_offsets,
+                                  size_t stroke_count, size_t spans, const CyberSnapper* snapper,
+                                  int closed, CyberContourReport* out_report);
+
+/* Bridge: a band of quads between two equal-length boundary vertex sequences.
+ * This is the operation behind CYBER_ACTION_* bridge recognition — the stroke
+ * grammar has named this gesture since the grammar existed, and until now no
+ * host could apply it.
+ *
+ * `loop_a` and `loop_b` are ordered vertex ids of the same length (>= 2).
+ * Writes the new face count to *out_new_faces (may be NULL). Fails with
+ * CYBER_ERR_INVALID_ARG (mesh unchanged) on null arrays, differing lengths, a
+ * length below 2, dead ids, or a bridge that produced no faces. */
+CyberStatus cyber_retopo_bridge_loops(CyberMesh* mesh, const uint32_t* loop_a,
+                                      const uint32_t* loop_b, size_t count, size_t* out_new_faces);
 
 /* Transform Vertices (task 4.2): applies `xf` to every vertex in
  * `vertices` in place. When `snapper` is non-NULL each transformed vertex

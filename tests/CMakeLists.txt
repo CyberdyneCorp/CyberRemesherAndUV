@@ -143,7 +143,8 @@ if(TARGET cyber_retopo)
                                         retopo/test_stroke_interpreter.cpp
                                         retopo/test_subdivision.cpp
                                         retopo/test_vertex_snap.cpp
-                                        retopo/test_loop_subdivide.cpp)
+                                        retopo/test_loop_subdivide.cpp
+                                        retopo/test_contours.cpp)
     target_link_libraries(cyber_tests PRIVATE cyber_retopo)
 endif()
 if(TARGET cyber_bakecage)

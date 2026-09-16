@@ -11,9 +11,18 @@ both sides textually and asserts that
   * every ``cyber_*`` call passes as many arguments as the prototype declares,
   * every C-struct literal is built from real field names.
 
+It ALSO runs the other way, which is the half that was missing. Checking only
+that Swift references nothing absent from the header cannot detect an entry
+point no binding reaches — and that is the drift that actually accumulated: by
+v0.9.0 Swift held the complete stroke grammar and none of the operations that
+apply a recognised gesture, 124 entry points unbound and nothing failing. So
+every declared `cyber_*` entry point must now be referenced by the Swift
+sources or listed in PENDING_REGISTRATIONS below, and an unlisted, unbound
+entry point fails.
+
 It cannot prove the package compiles. It does prove the package cannot be
-referencing a symbol that does not exist or calling one with the wrong arity,
-which is the failure mode that actually happened.
+referencing a symbol that does not exist, calling one with the wrong arity, or
+quietly leaving a capability unreachable.
 """
 
 import re
@@ -27,6 +36,124 @@ SWIFT_SOURCES = REPO / "swift" / "Sources"
 # Identifiers that belong to the C ABI namespace. Anything a Swift file spells
 # with one of these shapes must come from the header (or be declared in Swift).
 ABI_IDENT = re.compile(r"\b(?:cyber_[A-Za-z0-9_]+|CYBER_[A-Z0-9_]+|Cyber[A-Za-z0-9_]*)\b")
+
+# Entry points deliberately NOT bound in Swift, each with the reason.
+#
+# This list is the `engine-bindings` spec's "pending registration" made
+# executable: a capability the ABI exposes and a binding does not is recorded
+# here, so it is a decision someone made in a reviewable diff rather than an
+# oversight nobody could see. Adding a line is cheap; adding one without a
+# reason is what review is for.
+#
+# Removing an entry point from the ABI without removing it here is also caught,
+# so the list cannot rot into naming symbols that no longer exist.
+PENDING_REGISTRATIONS: dict[str, str] = {
+    # --- superseded by a richer variant Swift already binds ----------------
+    # Binding both would give a host two ways to do one thing that can drift
+    # apart. The bound variant is named in each reason.
+    "cyber_remesh_guided": "superseded: Swift binds cyber_remesh_guided_ex",
+    "cyber_remesh_zremesher": "superseded: cyber_remesh_zremesher_with_reports",
+    "cyber_remesh_zremesher_with_injectability_report": (
+        "superseded: cyber_remesh_zremesher_with_reports carries both reports"
+    ),
+    "cyber_remesh_zremesher_with_semantic_boundary_report": (
+        "superseded: cyber_remesh_zremesher_with_reports carries both reports"
+    ),
+    "cyber_remesh_params_default": "superseded: Swift binds cyber_default_params",
+    "cyber_retopo_subdivide": "superseded: Swift binds cyber_retopo_subdivide_ex",
+    "cyber_retopo_selection_transform": (
+        "superseded: cyber_retopo_selection_transform_pinned with an empty pin list"
+    ),
+    "cyber_detect_symmetry": (
+        "superseded: Swift binds _evidence and _correspondence, which are strict supersets"
+    ),
+    "cyber_mesh_free": "superseded: Swift binds cyber_mesh_destroy",
+
+    # --- renderer fast paths ----------------------------------------------
+    # Borrowed pointers into engine buffers, for a renderer that uploads
+    # straight to the GPU. Bound when the Metal viewport stops being a
+    # scaffold; a Swift host that only edits geometry uses the copying
+    # accessors instead, which is the safe default for a borrowed pointer.
+    "cyber_mesh_positions_ptr": "renderer fast path",
+    "cyber_mesh_normals_ptr": "renderer fast path",
+    "cyber_mesh_colors_ptr": "renderer fast path",
+    "cyber_mesh_triangle_indices_ptr": "renderer fast path",
+    "cyber_mesh_edge_indices_ptr": "renderer fast path",
+    "cyber_mesh_tagged_edge_indices_ptr": "renderer fast path",
+    "cyber_mesh_copy_render_positions": "renderer fast path",
+    "cyber_mesh_copy_colors": "renderer fast path",
+    "cyber_mesh_has_colors": "renderer fast path",
+
+    # --- the finishing pipeline: tracked as its own change -----------------
+    # UV, baking, image write and export bundles are the "asset out the door"
+    # half of a mobile retopology app. Real, and deliberately not mixed into
+    # the change that bound the drawing surface.
+    "cyber_uv_atlas": "finishing pipeline",
+    "cyber_uv_atlas_cancellable": "finishing pipeline",
+    "cyber_uv_unwrap_seams": "finishing pipeline",
+    "cyber_uv_unwrap_seams_cancellable": "finishing pipeline",
+    "cyber_uv_stitch_seams": "finishing pipeline",
+    "cyber_default_unwrap_seams_params": "finishing pipeline",
+    "cyber_bake": "finishing pipeline",
+    "cyber_bake_field": "finishing pipeline",
+    "cyber_default_bake_params": "finishing pipeline",
+    "cyber_default_atlas_params": "finishing pipeline",
+    "cyber_image_width": "finishing pipeline",
+    "cyber_image_height": "finishing pipeline",
+    "cyber_image_channels": "finishing pipeline",
+    "cyber_image_copy_pixels": "finishing pipeline",
+    "cyber_image_save_png": "finishing pipeline",
+    "cyber_image_free": "finishing pipeline",
+    "cyber_export_bundle_write": "finishing pipeline",
+    "cyber_default_bundle_params": "finishing pipeline",
+    "cyber_bundle_result_free": "finishing pipeline",
+    "cyber_bundle_result_file": "finishing pipeline",
+    "cyber_bundle_result_file_count": "finishing pipeline",
+    "cyber_bundle_result_chart_count": "finishing pipeline",
+    "cyber_bundle_result_unwrapped": "finishing pipeline",
+    "cyber_bundle_result_max_angle_distortion": "finishing pipeline",
+    "cyber_bundle_result_warning": "finishing pipeline",
+    "cyber_bundle_result_warning_count": "finishing pipeline",
+    "cyber_export_preset_builtin_count": "finishing pipeline",
+    "cyber_export_preset_builtin_name": "finishing pipeline",
+    "cyber_export_preset_free": "finishing pipeline",
+    "cyber_export_preset_info": "finishing pipeline",
+    "cyber_export_preset_map": "finishing pipeline",
+    "cyber_export_preset_map_file_name": "finishing pipeline",
+    "cyber_export_preset_resolve": "finishing pipeline",
+    "cyber_export_preset_set_resolution": "finishing pipeline",
+
+    # --- desktop-only surfaces --------------------------------------------
+    # A sandboxed mobile host reads and writes through its own document layer
+    # and security-scoped URLs, not engine-side paths.
+    "cyber_mesh_load": "desktop file path",
+    "cyber_mesh_save": "desktop file path",
+    "cyber_handoff_open": "desktop sculpt-handoff path",
+    "cyber_handoff_open_buffers": "desktop sculpt-handoff path",
+
+    # --- CPU-only on iOS --------------------------------------------------
+    # The shipped XCFramework is CPU-only by design, so a backend selector
+    # would offer a mobile host a choice it does not have.
+    "cyber_available_backends": "CPU-only on iOS",
+    "cyber_active_backend": "CPU-only on iOS",
+    "cyber_active_backend_name": "CPU-only on iOS",
+    "cyber_set_backend": "CPU-only on iOS",
+
+    # --- retopology follow-ups --------------------------------------------
+    # Genuinely wanted on mobile and not yet written. Listed rather than left
+    # invisible, which is the whole point of this file.
+    "cyber_retopo_apply_symmetry": "retopology follow-up",
+    "cyber_retopo_resymmetrize": "retopology follow-up",
+    "cyber_retopo_snap_symmetry_plane": "retopology follow-up",
+    "cyber_retopo_grow_boundary_edge": "retopology follow-up",
+    "cyber_retopo_loop_subdivide": "retopology follow-up",
+    "cyber_conform": "retopology follow-up",
+    "cyber_remesh_with_resource_limits": "retopology follow-up",
+    "cyber_remesh_zremesher_with_resource_limits": "retopology follow-up",
+    "cyber_default_remesh_limits": "retopology follow-up",
+    "cyber_default_remesh_execution_limits": "retopology follow-up",
+    "cyber_max_worker_threads": "retopology follow-up",
+}
 
 BLOCK_COMMENT = re.compile(r"/\*.*?\*/", re.DOTALL)
 LINE_COMMENT = re.compile(r"//[^\n]*")
@@ -214,6 +341,18 @@ def bad_struct_fields(
     return bad
 
 
+def unbound_entry_points(sources: dict[Path, str], header_text: str) -> tuple[list[str], list[str]]:
+    """Declared `cyber_*` functions no Swift source references, and stale
+    pending registrations naming symbols the header no longer declares."""
+    declared = set(re.findall(r"\b(cyber_[a-z0-9_]+)\s*\(", header_text))
+    referenced: set[str] = set()
+    for text in sources.values():
+        referenced.update(re.findall(r"\b(cyber_[a-z0-9_]+)\b", text))
+    unbound = sorted(declared - referenced - set(PENDING_REGISTRATIONS))
+    stale = sorted(set(PENDING_REGISTRATIONS) - declared)
+    return unbound, stale
+
+
 def main() -> int:
     if not HEADER.is_file():
         print(f"FAIL: missing header {HEADER}")
@@ -231,6 +370,7 @@ def main() -> int:
     missing = undeclared_symbol_uses(sources, known, swift_types)
     wrong_fields = bad_struct_fields(sources, structs)
     wrong_arity = wrong_arity_calls(sources, header_arities(header_text))
+    unbound, stale = unbound_entry_points(sources, header_text)
 
     for path, lineno, ident in missing:
         print(f"FAIL: {path.relative_to(REPO)}:{lineno}: '{ident}' is not declared in cyber_capi.h")
@@ -242,7 +382,17 @@ def main() -> int:
             f"argument(s), called with {passed}"
         )
 
-    if missing or wrong_fields or wrong_arity:
+    for name in unbound:
+        print(
+            f"FAIL: {name} is declared in cyber_capi.h, bound by no Swift source, "
+            f"and not listed in PENDING_REGISTRATIONS"
+        )
+    for name in stale:
+        print(
+            f"FAIL: PENDING_REGISTRATIONS lists {name}, which cyber_capi.h no longer declares"
+        )
+
+    if missing or wrong_fields or wrong_arity or unbound or stale:
         distinct = sorted({ident for _, _, ident in missing})
         print(
             f"\n{len(missing)} reference(s) to {len(distinct)} undeclared symbol(s)"
@@ -250,11 +400,17 @@ def main() -> int:
         )
         print(f"{len(wrong_fields)} bad struct field reference(s)")
         print(f"{len(wrong_arity)} call(s) with the wrong argument count")
+        print(f"{len(unbound)} unbound, unregistered entry point(s)")
+        print(f"{len(stale)} stale pending registration(s)")
         return 1
 
+    bound = len(set(re.findall(r"\b(cyber_[a-z0-9_]+)\s*\(", header_text))) - len(
+        PENDING_REGISTRATIONS
+    )
     print(
-        f"Swift/C ABI parity OK: {len(sources)} Swift file(s) reference only "
-        f"symbols declared in cyber_capi.h, with matching arities"
+        f"Swift/C ABI parity OK: {len(sources)} Swift file(s) reference only symbols "
+        f"declared in cyber_capi.h, with matching arities; {bound} entry point(s) bound, "
+        f"{len(PENDING_REGISTRATIONS)} deliberately pending"
     )
     return 0
 

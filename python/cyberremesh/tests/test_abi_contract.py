@@ -114,18 +114,27 @@ def gate_the_soname_tracks_the_abi_major():
 
 
 def gate_the_minor_bump_serves_the_previous_minor():
-    """This change bumped the ABI minor 1.0 -> 1.1 by ADDING two entry points.
+    """Every earlier 1.x minor is still served by the minor we ship today.
 
     That is the additive-only rule exercised on itself rather than asserted: a
-    host compiled against 1.0 -- before cyber_mesh_topology_generation and
-    cyber_set_max_import_vertices existed -- must still be served, because
-    nothing it knew about was taken away.
+    host compiled against any earlier minor -- before the entry points that
+    minor did not have existed -- must still be served, because nothing it knew
+    about was taken away.
+
+    The range is DERIVED from the header rather than written out, so a minor
+    bump does not need this test edited. It used to carry a literal list and a
+    docstring still describing the 1.0 -> 1.1 bump, which is how a gate quietly
+    stops meaning what it says.
     """
     major, minor = _header_abi()
-    assert (major, minor) == (1, 16), (major, minor)
-    for older in (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15):
+    assert major == 1, major
+    assert minor >= 1, "an additive-minor gate needs at least one earlier minor to check"
+    for older in range(minor):
         cyberremesh.check_abi(1, older)  # every earlier minor, still served
-    print("PASS: ABI 1.16 still serves clients compiled against every earlier 1.x minor")
+    print(
+        "PASS: ABI 1.%d still serves clients compiled against every earlier 1.x minor"
+        % minor
+    )
 
     limits = _ffi.CyberRemeshLimits()
     _ffi.get_lib().cyber_default_remesh_limits(ctypes.byref(limits))

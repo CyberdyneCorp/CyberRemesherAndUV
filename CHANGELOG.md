@@ -3,6 +3,104 @@
 > Note: releases 0.3.0, 0.4.0 and 0.5.0 were tagged without changelog entries;
 > their content is recorded in `docs/ROADMAP.md`. Entries resume here.
 
+## [Unreleased]
+
+### Added
+
+- **Contours — cross-section strokes become a quad tube.** The one interaction
+  model in RetopoFlow and the ZBrush retopology brush that this engine had no
+  answer for, and the one artists reach for on arms, legs, horns and tentacles.
+
+  It is the OPPOSITE construction to `draw_strip`, which is why it is a separate
+  entry point rather than a flag. In DrawStrip the stroke IS the ribbon's spine
+  and rails are built around it. In Contours each stroke is a SAMPLING GESTURE:
+  a least-squares plane is fitted through its samples, the Target is cut with
+  that plane, and the ring is the cross-section — which is how the far side of a
+  limb, that the artist never drew on and cannot see, ends up in the ring. Four
+  short arcs down an arm produce a closed tube, not four arcs.
+
+  A plane through a limb usually cuts the body somewhere else too, so the cut
+  returns several components and the one nearest the stroke's centroid wins.
+  Components are ranked, never merged — merging would loft a tube between an arm
+  and a thigh.
+
+  Two consistency problems remain after that, and both produce output that looks
+  plausible and is wrong. **Seam drift**: each ring's resampling has an arbitrary
+  start, so ring i+1 starts at the sample nearest ring i's and the seam runs
+  straight instead of spiralling. **Winding flip**: a plane cut comes back in
+  either orientation, so ring i+1 is reversed when its normal opposes ring i's,
+  which stops one band in the middle of a tube inverting against its neighbours.
+  Both are pinned by tests that assert a property of the OUTPUT — no spiral, one
+  orientation across every band — not the intermediate numbers.
+
+  A stroke that names no usable plane (a point, a straight line, a gesture that
+  is not planar) or whose plane misses the Target **stops the run** and is
+  reported by index, with the mesh unchanged. Skipping it would loft the rings
+  either side across the gap and look deliberate.
+
+  Rings are lofted in the order the artist drew them. Sorting by position along
+  a fitted axis was considered and rejected: it guesses at intent, and an artist
+  who draws a ring out of order to close a gap would get a tube that reorders
+  itself under them.
+
+  `cyber_retopo_contours()`, `Mesh.contours(target:strokes:spans:)` from Swift.
+
+- **`cyber_retopo_bridge_loops()` — the bridge gesture finally has an
+  operation.** `bridgeLoops` has been implemented in C++ since the build tools
+  landed, and the stroke grammar has recognised "line between two boundary loops
+  with equal vertex count" for just as long. No host could apply it, so the
+  recogniser could name an action the ABI could not perform.
+
+- **The retopology surface is reachable from Swift.** Swift held the complete
+  stroke grammar (13 of 13 `cyber_stroke_*`) and none of the verbs: a mobile
+  host could classify a gesture as `CYBER_ACTION_CREATE_QUAD` and then find no
+  `cyber_retopo_build_face` to call and no snapper to snap the result onto.
+  `SoftSelection.swift` already took a `snapper: OpaquePointer?` that Swift
+  itself had no way to construct — the gap was visible inside the binding that
+  needed it.
+
+  Added: the `Snapper` handle (create, closest point, nearest vertex, raycast);
+  the build tools (create face, build face, draw strip, contours, bridge, grid,
+  boundary grid and fan, surface cut, patch clone); the flow edits (insert loop,
+  dissolve, rotate, merge, delete, tweak, erase, move, distribute path,
+  transform vertices); the element and picking queries (edge endpoints, faces and
+  true valence, vertex position, nearest vertex and edge, edge loop, quad ring,
+  boundary loop, loop metrics, shortest path, topology generation); visibility
+  and edge tagging; guided remeshing; and the device resource ceilings, which a
+  mobile host is precisely the caller that has to set.
+
+  Guided remeshing reuses the ZRemesher path's `withGuidance` lowering rather
+  than writing a second one, so the two paths cannot drift on what a guide is.
+
+  Swift now binds **172 of 236** entry points, up from 110 of 234.
+
+### Changed
+
+- **The Swift parity gate runs in both directions.** It checked
+  Swift -> header — no phantom symbols, no wrong arity — and never
+  header -> Swift, so an entry point nobody bound was invisible to it. That is
+  not hypothetical: by v0.9.0, 124 entry points were unbound and nothing failed.
+
+  Every declared `cyber_*` entry point must now be referenced by the Swift
+  sources or listed in `PENDING_REGISTRATIONS` with a reason. The list is the
+  `engine-bindings` spec's "pending registration" made executable: a capability
+  the ABI exposes and a binding does not is a decision in a reviewable diff
+  rather than an oversight nobody can see. A registration naming a symbol the
+  header no longer declares also fails, so the list cannot rot into fiction.
+
+  71 entry points are registered today, grouped by why: superseded by a richer
+  variant Swift already binds, renderer fast paths, the finishing pipeline
+  (UV/bake/export, tracked separately), desktop-only file paths, CPU-only-on-iOS
+  backend selection, and retopology follow-ups.
+
+- **The ABI minor-bump gate derives its range from the header.** It asserted a
+  literal `(1, 16)` and iterated a written-out list of earlier minors, under a
+  docstring still describing the 1.0 -> 1.1 bump. Every minor needed the test
+  edited, and the docstring had already stopped matching what the code checked.
+
+- **ABI 1.17**, additive: two entry points and one report struct, nothing
+  removed or reshaped, soname unchanged.
+
 ## [0.9.0] - 2026-09-15
 
 ### Added

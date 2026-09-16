@@ -553,11 +553,15 @@ public final class ZRemesherOperation {
 
     /// Lowers `Guidance` to a `CyberGuidanceEx` valid only inside `body`.
     ///
+    /// Internal rather than private because the quad-cover guided path
+    /// (`Mesh.remeshGuided`) lowers the same `Guidance` — one lowering means
+    /// the two paths cannot disagree about what a guide is.
+    ///
     /// Recursive over the guides so each stroke's buffer is pinned by its own
     /// scope; the base case builds the guidance struct and calls through. A
     /// guidance-free run passes NULL, which the ABI documents as identical to
     /// the unguided path.
-    private static func withGuidance<R>(
+    static func withGuidance<R>(
         _ guidance: Guidance,
         _ body: (UnsafePointer<CyberGuidanceEx>?) -> R
     ) -> R {

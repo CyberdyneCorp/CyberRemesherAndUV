@@ -11,8 +11,9 @@ remain normative. The delivery index is [epic #46](https://github.com/CyberdyneC
 | Quad-cover remesh | Supported | C++ API, C ABI, CLI and Python. Validity and quality claims are corpus- and density-specific; do not read all-quads/manifold output as animation-ready topology. |
 | ZRemesher method | Experimental | Layout, guides, symmetry and best-of-two are exposed, but exact organic layout injection into final meshes remains unproven. It is not parity with commercial ZRemesher. |
 | UV atlas, baking, manual mesh edits | Supported engine capabilities | Exposed through the C ABI where declared in `cyber_capi.h`; consult the matching OpenSpec capability for guarantees. |
-| Swift package | Build-verified on macOS | SwiftPM and ABI-parity lanes compile/check it. A host supplies the C ABI library; this is not a shipped XCFramework. |
-| iPadOS / Android shells | Scaffold / cross-compile only | CI cross-compiles presets. It does not prove device, simulator, touch, GPU, or app-store behavior. |
+| Interactive retopology tools | Supported engine capabilities | Stroke gesture recognition, Target snapping, PolyPen-style face building, stroke-to-quad-strip, Contours (cross-section rings lofted into a tube), boundary grid/fan fill, knife cut, patch clone, loop edits, soft selection with surface glue and exact-border partial retopology. Reachable from C, Python and Swift; per-binding coverage is gated by the parity test, not assumed. |
+| Swift package | Build-verified on macOS; XCFramework shipped | SwiftPM and ABI-parity lanes compile/check it. Since v0.9.0 a versioned arm64 device+simulator XCFramework is published and was validated on a signed physical iPad. Parity is now gated in both directions: every ABI entry point is bound or listed in `PENDING_REGISTRATIONS`. |
+| iPadOS / Android shells | Scaffold / cross-compile only | CI cross-compiles presets. iOS additionally has device+simulator XCFramework validation and bounded hardware smoke evidence (v0.9.0); Android does not. Neither shell is an application — they do not prove touch, GPU, or app-store behavior. |
 | CUDA/OpenCL/Metal | Build-dependent | CPU is always available. Ask `cyber_available_backends` / `cyber_active_backend`; a configured backend is not assumed available. |
 
 ## Versions and reproducibility
