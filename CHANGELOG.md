@@ -301,6 +301,31 @@
   **Off by default** — `CYBER_ZR_HALF_LATTICE=project` opts in, and default
   ZRemesher output is unchanged.
 
+- **A first-party Rust binding.** Two crates beside `python/` and `swift/`:
+  `cyberremesh-sys` is raw FFI generated from `cyber_capi.h` — all 192 entry
+  points, complete from day one because it is generated — and `cyberremesh` is
+  the safe wrapper, with owned handles, `Result`, and no `unsafe` above it.
+
+  The safe layer covers version/ABI, errors and mesh load/save/inspect; UV,
+  baking, remeshing and conform are reachable through `Mesh::as_raw` until they
+  are wrapped. The split is the point: the generated half cannot fall behind the
+  header, and the hand-written half can grow without blocking anyone who only
+  needs FFI.
+
+  Written against ClaySpaceDesktop's existing `-sys` crate rather than blind,
+  with their agreement and with credit in the crate docs and README — the
+  alternative was two bindings that diverge by accident. Three things they had
+  already paid for are encoded here: a `-D` for an option CMake does not define
+  is silently ignored (so every option name was read out of `CMakeLists.txt`),
+  linking must use `cyber_capi_shared` rather than the static archive (whose
+  `PUBLIC` dependencies propagate through CMake's link interface only), and
+  requiring QuadCover where CI cannot supply it just breaks the build, so
+  `require-quadcover` is a Cargo feature that is off by default.
+
+  Library discovery is `CYBERREMESH_LIB_DIR` if set, otherwise an in-repo build.
+  A named-but-empty directory is a **hard error** rather than a fallback,
+  because linking something other than what you named has no legible symptom.
+
 - **A type-aware C ABI manifest, pinned and checked.** The ABI's additive-only
   rule was documented and unenforced, so a same-layout change — a pointer type
   swapped, a field moved into trailing padding — passed every test while
