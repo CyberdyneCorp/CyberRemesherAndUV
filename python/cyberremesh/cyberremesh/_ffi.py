@@ -74,6 +74,12 @@ POLICY_MIN_FACES = 2
 # CYBER_INVALID_ID — the sentinel every element-id accessor returns for "none".
 INVALID_ID = 0xFFFFFFFF
 
+# CYBER_BUILD_NEW_VERTEX — the cyber_retopo_build_face ring slot meaning "create
+# a vertex here from points_xyz" rather than "reuse this existing one". Numerically
+# equal to INVALID_ID and kept separate because they answer different questions:
+# one is an output meaning "nothing", the other an input meaning "make one".
+BUILD_NEW_VERTEX = 0xFFFFFFFF
+
 ATTRIBUTE_VERTEX, ATTRIBUTE_FACE, ATTRIBUTE_CORNER = range(3)
 ATTRIBUTE_FLOAT, ATTRIBUTE_INT32, ATTRIBUTE_FLOAT2, ATTRIBUTE_FLOAT3, ATTRIBUTE_FLOAT4 = range(5)
 
@@ -776,6 +782,44 @@ def find_library_path() -> Optional[str]:
 # ---------------------------------------------------------------------------
 
 
+class CyberLoopMetrics(Structure):
+    """What the edge loop under the cursor is made of (Loop Info).
+
+    ``snap_measured`` says whether the two snapping fields mean anything: they
+    are only filled when a snapper was supplied, so a loop nobody measured is
+    distinguishable from one measured as unsnapped.
+    """
+
+    _fields_ = [
+        ("edge_count", c_uint32),
+        ("vertex_count", c_uint32),
+        ("closed", c_int32),
+        ("length", c_float),
+        ("has_endpoints", c_int32),
+        ("endpoint_a", c_uint32),
+        ("endpoint_b", c_uint32),
+        ("boundary_edge_count", c_uint32),
+        ("snap_measured", c_int32),
+        ("snapped_vertex_count", c_uint32),
+        ("max_snap_distance", c_float),
+    ]
+
+
+class CyberContourReport(Structure):
+    """What a contour run produced.
+
+    ``failed_stroke`` is the index of the first stroke that named no usable
+    cross-section, or ``SIZE_MAX`` when every stroke produced a ring.
+    """
+
+    _fields_ = [
+        ("ring_count", c_size_t),
+        ("face_count", c_size_t),
+        ("vertex_count", c_size_t),
+        ("failed_stroke", c_size_t),
+    ]
+
+
 class CyberSoftTransformReport(Structure):
     """Mirror of ``CyberSoftTransformReport`` — weighted transform/relax report."""
 
@@ -1337,10 +1381,320 @@ def _declare(lib: ctypes.CDLL) -> None:
 
     _declare_soft_selection(lib)
     _declare_retopo_ops(lib)
+    _declare_build_tools(lib)
+    _declare_mesh_queries(lib)
+    _declare_snapper_queries(lib)
+    _declare_stroke_grammar(lib)
     _declare_document(lib)
     _declare_seam_path(lib)
     _declare_bridge(lib)
     _declare_export_presets(lib)
+
+
+
+def _declare_build_tools(lib: ctypes.CDLL) -> None:
+    """The gesture verbs: what a host calls once a stroke has been recognised.
+
+    Python held none of these until now while Swift held all of them, which is
+    the inverse of the stroke grammar below — the two bindings had drifted into
+    covering complementary halves of one workflow, and neither could run it end
+    to end.
+
+    ``snapper`` is a plain ``c_void_p``: an opaque handle where NULL means "do
+    not snap to a Target", the same convention the rest of this module uses.
+    """
+    # CyberStatus cyber_retopo_create_face(CyberMesh*, const float*, size_t,
+    #                                      const CyberSnapper*, uint32_t*)
+    lib.cyber_retopo_create_face.argtypes = [
+        c_void_p, POINTER(c_float), c_size_t, c_void_p, POINTER(c_uint32),
+    ]
+    lib.cyber_retopo_create_face.restype = c_int32
+
+    # CyberStatus cyber_retopo_build_face(CyberMesh*, size_t, const uint32_t*,
+    #                                     const float*, const CyberSnapper*,
+    #                                     uint32_t*, uint32_t*)
+    # A ring slot is either a live vertex id (the new face welds onto existing
+    # topology there) or CYBER_BUILD_NEW_VERTEX.
+    lib.cyber_retopo_build_face.argtypes = [
+        c_void_p, c_size_t, POINTER(c_uint32), POINTER(c_float), c_void_p,
+        POINTER(c_uint32), POINTER(c_uint32),
+    ]
+    lib.cyber_retopo_build_face.restype = c_int32
+
+    # CyberStatus cyber_retopo_draw_strip(CyberMesh*, const float*, size_t,
+    #                                     float, const float[3], uint32_t,
+    #                                     uint32_t, const CyberSnapper*, size_t*)
+    lib.cyber_retopo_draw_strip.argtypes = [
+        c_void_p, POINTER(c_float), c_size_t, c_float, POINTER(c_float),
+        c_uint32, c_uint32, c_void_p, POINTER(c_size_t),
+    ]
+    lib.cyber_retopo_draw_strip.restype = c_int32
+
+    # CyberStatus cyber_retopo_contours(CyberMesh*, const CyberMesh*,
+    #                                   const float*, const size_t*, size_t,
+    #                                   size_t, const CyberSnapper*, int,
+    #                                   CyberContourReport*)
+    lib.cyber_retopo_contours.argtypes = [
+        c_void_p, c_void_p, POINTER(c_float), POINTER(c_size_t), c_size_t,
+        c_size_t, c_void_p, c_int32, POINTER(CyberContourReport),
+    ]
+    lib.cyber_retopo_contours.restype = c_int32
+
+    # CyberStatus cyber_retopo_bridge_loops(CyberMesh*, const uint32_t*,
+    #                                       const uint32_t*, size_t, size_t*)
+    lib.cyber_retopo_bridge_loops.argtypes = [
+        c_void_p, POINTER(c_uint32), POINTER(c_uint32), c_size_t, POINTER(c_size_t),
+    ]
+    lib.cyber_retopo_bridge_loops.restype = c_int32
+
+    # CyberStatus cyber_retopo_create_grid(CyberMesh*, const float*, size_t,
+    #                                      size_t, const CyberSnapper*, size_t*)
+    lib.cyber_retopo_create_grid.argtypes = [
+        c_void_p, POINTER(c_float), c_size_t, c_size_t, c_void_p, POINTER(c_size_t),
+    ]
+    lib.cyber_retopo_create_grid.restype = c_int32
+
+    # CyberStatus cyber_retopo_extend_boundary_grid(CyberMesh*, const uint32_t*,
+    #                                               size_t, int, const float[3],
+    #                                               int, const CyberSnapper*,
+    #                                               uint32_t*, size_t*)
+    lib.cyber_retopo_extend_boundary_grid.argtypes = [
+        c_void_p, POINTER(c_uint32), c_size_t, c_int32, POINTER(c_float), c_int32,
+        c_void_p, POINTER(c_uint32), POINTER(c_size_t),
+    ]
+    lib.cyber_retopo_extend_boundary_grid.restype = c_int32
+
+    # CyberStatus cyber_retopo_extend_boundary_fan(CyberMesh*, const uint32_t*,
+    #                                              size_t, int, const float[3],
+    #                                              const CyberSnapper*, uint32_t*,
+    #                                              size_t*)
+    lib.cyber_retopo_extend_boundary_fan.argtypes = [
+        c_void_p, POINTER(c_uint32), c_size_t, c_int32, POINTER(c_float),
+        c_void_p, POINTER(c_uint32), POINTER(c_size_t),
+    ]
+    lib.cyber_retopo_extend_boundary_fan.restype = c_int32
+
+    # CyberStatus cyber_retopo_grow_boundary_edge(CyberMesh*, uint32_t,
+    #                                             const float[3],
+    #                                             const CyberSnapper*, uint32_t*)
+    lib.cyber_retopo_grow_boundary_edge.argtypes = [
+        c_void_p, c_uint32, POINTER(c_float), c_void_p, POINTER(c_uint32),
+    ]
+    lib.cyber_retopo_grow_boundary_edge.restype = c_int32
+
+    # CyberStatus cyber_retopo_surface_cut(CyberMesh*, const float[3],
+    #                                      const float[3], const float[3], int,
+    #                                      const CyberSnapper*, size_t*, size_t*)
+    lib.cyber_retopo_surface_cut.argtypes = [
+        c_void_p, POINTER(c_float), POINTER(c_float), POINTER(c_float), c_int32,
+        c_void_p, POINTER(c_size_t), POINTER(c_size_t),
+    ]
+    lib.cyber_retopo_surface_cut.restype = c_int32
+
+    # CyberStatus cyber_retopo_patch_clone(CyberMesh*, const uint32_t*, size_t,
+    #                                      const float[12], int,
+    #                                      const CyberSnapper*, uint32_t*, size_t*)
+    lib.cyber_retopo_patch_clone.argtypes = [
+        c_void_p, POINTER(c_uint32), c_size_t, POINTER(c_float), c_int32, c_void_p,
+        POINTER(c_uint32), POINTER(c_size_t),
+    ]
+    lib.cyber_retopo_patch_clone.restype = c_int32
+
+    # CyberStatus cyber_retopo_tweak_vertex(CyberMesh*, uint32_t,
+    #                                       const float[3], const CyberSnapper*)
+    # Tweak ignores pins by design: a pinned vertex stays movable by an
+    # explicit tweak, it is only immune to relax and move.
+    lib.cyber_retopo_tweak_vertex.argtypes = [c_void_p, c_uint32, POINTER(c_float), c_void_p]
+    lib.cyber_retopo_tweak_vertex.restype = c_int32
+
+    # CyberStatus cyber_retopo_erase(CyberMesh*, const float[3], float, float, size_t*)
+    lib.cyber_retopo_erase.argtypes = [
+        c_void_p, POINTER(c_float), c_float, c_float, POINTER(c_size_t),
+    ]
+    lib.cyber_retopo_erase.restype = c_int32
+
+    # CyberStatus cyber_retopo_move(CyberMesh*, uint32_t, const float[3], float,
+    #                               const uint32_t*, size_t, const CyberSnapper*)
+    # Seeded from a VERTEX, not a point in space, so the falloff runs over mesh
+    # connectivity: a drag on one side of a thin limb does not pull the other.
+    lib.cyber_retopo_move.argtypes = [
+        c_void_p, c_uint32, POINTER(c_float), c_float, POINTER(c_uint32), c_size_t, c_void_p,
+    ]
+    lib.cyber_retopo_move.restype = c_int32
+
+    # CyberStatus cyber_retopo_transform_vertices(CyberMesh*, const uint32_t*,
+    #                                             size_t, const float[12],
+    #                                             const CyberSnapper*, float,
+    #                                             size_t*, float*)
+    lib.cyber_retopo_transform_vertices.argtypes = [
+        c_void_p, POINTER(c_uint32), c_size_t, POINTER(c_float), c_void_p, c_float,
+        POINTER(c_size_t), POINTER(c_float),
+    ]
+    lib.cyber_retopo_transform_vertices.restype = c_int32
+
+    # CyberStatus cyber_mesh_load_obj(const char*, CyberMesh**)
+    # The format-specific pair beside the extension-sniffing cyber_mesh_load:
+    # a caller that KNOWS it has OBJ should not have the format inferred from a
+    # filename it may not control.
+    lib.cyber_mesh_load_obj.argtypes = [c_char_p, POINTER(c_void_p)]
+    lib.cyber_mesh_load_obj.restype = c_int32
+    lib.cyber_mesh_save_obj.argtypes = [c_void_p, c_char_p]
+    lib.cyber_mesh_save_obj.restype = c_int32
+
+    # const char* cyber_status_string(CyberStatus)
+    # The engine's own name for a status code. Python had its own table, which
+    # is a second source of truth for something the library already answers.
+    lib.cyber_status_string.argtypes = [c_int32]
+    lib.cyber_status_string.restype = c_char_p
+
+    # CyberStatus cyber_retopo_distribute_path(CyberMesh*, const uint32_t*,
+    #                                          size_t, const CyberSnapper*)
+    lib.cyber_retopo_distribute_path.argtypes = [
+        c_void_p, POINTER(c_uint32), c_size_t, c_void_p,
+    ]
+    lib.cyber_retopo_distribute_path.restype = c_int32
+
+
+def _declare_mesh_queries(lib: ctypes.CDLL) -> None:
+    """Element, picking and loop queries — what a host asks between gestures.
+
+    The count-first convention throughout: pass NULL/0 to learn the size, then
+    call again with a buffer. The second call returns how many it WROTE, which
+    is never more than the buffer holds, so the return value is always a safe
+    loop bound.
+    """
+    lib.cyber_mesh_live_faces.argtypes = [c_void_p, POINTER(c_uint32), c_size_t]
+    lib.cyber_mesh_live_faces.restype = c_size_t
+    lib.cyber_mesh_triangle_count.argtypes = [c_void_p]
+    lib.cyber_mesh_triangle_count.restype = c_size_t
+
+    # int cyber_mesh_edge_faces(const CyberMesh*, uint32_t, uint32_t[2], size_t[2])
+    # Reports at most 2 even on a non-manifold edge, which the engine supports
+    # and tags; cyber_mesh_edge_face_count gives the true valence.
+    lib.cyber_mesh_edge_faces.argtypes = [
+        c_void_p, c_uint32, POINTER(c_uint32), POINTER(c_size_t),
+    ]
+    lib.cyber_mesh_edge_faces.restype = c_int32
+    lib.cyber_mesh_edge_face_count.argtypes = [c_void_p, c_uint32]
+    lib.cyber_mesh_edge_face_count.restype = c_int32
+    lib.cyber_mesh_is_boundary_edge.argtypes = [c_void_p, c_uint32]
+    lib.cyber_mesh_is_boundary_edge.restype = c_int32
+
+    for name in ("cyber_mesh_nearest_vertex", "cyber_mesh_nearest_edge"):
+        fn = getattr(lib, name)
+        fn.argtypes = [
+            c_void_p, POINTER(c_float), c_float, POINTER(c_uint32), POINTER(c_float),
+        ]
+        fn.restype = c_int32
+    lib.cyber_mesh_nearest_vertex_excluding.argtypes = [
+        c_void_p, POINTER(c_float), c_float, c_uint32, POINTER(c_uint32), POINTER(c_float),
+    ]
+    lib.cyber_mesh_nearest_vertex_excluding.restype = c_int32
+
+    lib.cyber_mesh_edge_loop.argtypes = [c_void_p, c_uint32, POINTER(c_uint32), c_size_t]
+    lib.cyber_mesh_edge_loop.restype = c_size_t
+    lib.cyber_mesh_quad_ring.argtypes = [
+        c_void_p, c_uint32, POINTER(c_uint32), c_size_t, POINTER(c_int32),
+    ]
+    lib.cyber_mesh_quad_ring.restype = c_size_t
+    lib.cyber_mesh_boundary_loop.argtypes = [
+        c_void_p, c_uint32, POINTER(c_uint32), c_size_t, POINTER(c_int32),
+    ]
+    lib.cyber_mesh_boundary_loop.restype = c_size_t
+    lib.cyber_mesh_shortest_vertex_path.argtypes = [
+        c_void_p, c_uint32, c_uint32, POINTER(c_uint32), c_size_t,
+    ]
+    lib.cyber_mesh_shortest_vertex_path.restype = c_size_t
+    lib.cyber_mesh_loop_metrics.argtypes = [
+        c_void_p, c_uint32, c_void_p, POINTER(CyberLoopMetrics),
+    ]
+    lib.cyber_mesh_loop_metrics.restype = c_int32
+
+    lib.cyber_mesh_set_hidden_faces.argtypes = [c_void_p, POINTER(c_uint32), c_size_t]
+    lib.cyber_mesh_set_hidden_faces.restype = c_int32
+    lib.cyber_mesh_hidden_face_count.argtypes = [c_void_p]
+    lib.cyber_mesh_hidden_face_count.restype = c_size_t
+    lib.cyber_mesh_set_tagged_edges.argtypes = [c_void_p, POINTER(c_uint32), c_size_t]
+    lib.cyber_mesh_set_tagged_edges.restype = c_int32
+
+    for name in ("cyber_mesh_copy_normals",):
+        fn = getattr(lib, name)
+        fn.argtypes = [c_void_p, POINTER(c_float), c_size_t]
+        fn.restype = c_size_t
+    for name in ("cyber_mesh_copy_edge_indices", "cyber_mesh_copy_triangle_indices"):
+        fn = getattr(lib, name)
+        fn.argtypes = [c_void_p, POINTER(c_uint32), c_size_t]
+        fn.restype = c_size_t
+
+
+def _declare_snapper_queries(lib: ctypes.CDLL) -> None:
+    """Target-surface queries: closest point, nearest vertex, raycast.
+
+    Python could create and free a snapper and could not ask it anything, so it
+    could hand one to relax and never use it to place a vertex itself.
+    """
+    lib.cyber_snapper_snap_to_surface.argtypes = [
+        c_void_p, POINTER(c_float), POINTER(c_float), POINTER(c_uint32),
+    ]
+    lib.cyber_snapper_snap_to_surface.restype = c_int32
+    lib.cyber_snapper_snap_to_vertex.argtypes = [
+        c_void_p, POINTER(c_float), c_float, POINTER(c_float), POINTER(c_uint32),
+    ]
+    lib.cyber_snapper_snap_to_vertex.restype = c_int32
+    lib.cyber_snapper_raycast.argtypes = [
+        c_void_p, POINTER(c_float), POINTER(c_float), c_float, POINTER(c_float),
+        POINTER(c_float), POINTER(c_uint32),
+    ]
+    lib.cyber_snapper_raycast.restype = c_int32
+
+
+def _declare_stroke_grammar(lib: ctypes.CDLL) -> None:
+    """Stroke interpretation: shape class, under-stroke context, ranked actions.
+
+    Interpretation ONLY. Applying a candidate is a separate, journaled mutation
+    through the build tools above, which is why a host can offer the artist the
+    one-tap alternatives before anything changes.
+
+    Python is the full-surface desktop harness by design, and this was the one
+    part it could not exercise: the gesture path, which is both the hardest to
+    get right and the most in need of corpus regression coverage.
+    """
+    lib.cyber_stroke_interpret.argtypes = [
+        c_void_p, POINTER(c_float), POINTER(c_float), c_size_t, c_float, POINTER(c_void_p),
+    ]
+    lib.cyber_stroke_interpret.restype = c_int32
+    lib.cyber_stroke_interpretation_free.argtypes = [c_void_p]
+    lib.cyber_stroke_interpretation_free.restype = None
+
+    lib.cyber_stroke_interpretation_shape.argtypes = [c_void_p]
+    lib.cyber_stroke_interpretation_shape.restype = c_int32
+    lib.cyber_stroke_interpretation_shape_confidence.argtypes = [c_void_p]
+    lib.cyber_stroke_interpretation_shape_confidence.restype = c_float
+    lib.cyber_stroke_interpretation_context.argtypes = [c_void_p]
+    lib.cyber_stroke_interpretation_context.restype = c_int32
+
+    lib.cyber_stroke_interpretation_candidate_count.argtypes = [c_void_p]
+    lib.cyber_stroke_interpretation_candidate_count.restype = c_size_t
+    lib.cyber_stroke_interpretation_action.argtypes = [c_void_p, c_size_t]
+    lib.cyber_stroke_interpretation_action.restype = c_int32
+    lib.cyber_stroke_interpretation_confidence.argtypes = [c_void_p, c_size_t]
+    lib.cyber_stroke_interpretation_confidence.restype = c_float
+
+    lib.cyber_stroke_interpretation_element_count.argtypes = [c_void_p, c_size_t]
+    lib.cyber_stroke_interpretation_element_count.restype = c_size_t
+    lib.cyber_stroke_interpretation_element.argtypes = [
+        c_void_p, c_size_t, c_size_t, POINTER(c_int32), POINTER(c_uint32),
+    ]
+    lib.cyber_stroke_interpretation_element.restype = c_int32
+
+    lib.cyber_stroke_interpretation_corner_count.argtypes = [c_void_p]
+    lib.cyber_stroke_interpretation_corner_count.restype = c_size_t
+    lib.cyber_stroke_interpretation_corner.argtypes = [c_void_p, c_size_t, POINTER(c_float)]
+    lib.cyber_stroke_interpretation_corner.restype = c_int32
+    lib.cyber_stroke_interpretation_grid_size.argtypes = [
+        c_void_p, POINTER(c_size_t), POINTER(c_size_t),
+    ]
+    lib.cyber_stroke_interpretation_grid_size.restype = c_int32
 
 
 def _declare_document(lib: ctypes.CDLL) -> None:

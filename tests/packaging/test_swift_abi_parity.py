@@ -29,6 +29,9 @@ import re
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import binding_parity  # noqa: E402  (path set above so the shared check imports)
+
 REPO = Path(__file__).resolve().parents[2]
 HEADER = REPO / "capi" / "include" / "cyber_capi.h"
 SWIFT_SOURCES = REPO / "swift" / "Sources"
@@ -84,26 +87,20 @@ PENDING_REGISTRATIONS: dict[str, str] = {
     "cyber_mesh_copy_colors": "renderer fast path",
     "cyber_mesh_has_colors": "renderer fast path",
 
-    # --- the finishing pipeline: tracked as its own change -----------------
-    # UV, baking, image write and export bundles are the "asset out the door"
-    # half of a mobile retopology app. Real, and deliberately not mixed into
-    # the change that bound the drawing surface.
-    "cyber_uv_atlas": "finishing pipeline",
+    # --- cancellable variants of bound entry points -----------------------
+    # The blocking forms are bound. The cancellable ones need the same
+    # RemeshOperation-style job wrapper the remesh path has, which is a
+    # behaviour change rather than a binding, so it is its own piece of work.
+    "cyber_uv_atlas_cancellable": "needs the cancellable-job wrapper",
+    "cyber_uv_unwrap_seams_cancellable": "needs the cancellable-job wrapper",
+    "cyber_bake_field": "host-implemented field callback; needs a Swift trampoline",
+
+    # --- export bundles: desktop DCC hand-off ------------------------------
+    # A sandboxed mobile host writes through its own document layer and
+    # security-scoped URLs, not engine-side paths into a preset tree.
     "cyber_uv_atlas_cancellable": "finishing pipeline",
-    "cyber_uv_unwrap_seams": "finishing pipeline",
     "cyber_uv_unwrap_seams_cancellable": "finishing pipeline",
-    "cyber_uv_stitch_seams": "finishing pipeline",
-    "cyber_default_unwrap_seams_params": "finishing pipeline",
-    "cyber_bake": "finishing pipeline",
     "cyber_bake_field": "finishing pipeline",
-    "cyber_default_bake_params": "finishing pipeline",
-    "cyber_default_atlas_params": "finishing pipeline",
-    "cyber_image_width": "finishing pipeline",
-    "cyber_image_height": "finishing pipeline",
-    "cyber_image_channels": "finishing pipeline",
-    "cyber_image_copy_pixels": "finishing pipeline",
-    "cyber_image_save_png": "finishing pipeline",
-    "cyber_image_free": "finishing pipeline",
     "cyber_export_bundle_write": "finishing pipeline",
     "cyber_default_bundle_params": "finishing pipeline",
     "cyber_bundle_result_free": "finishing pipeline",
@@ -341,18 +338,6 @@ def bad_struct_fields(
     return bad
 
 
-def unbound_entry_points(sources: dict[Path, str], header_text: str) -> tuple[list[str], list[str]]:
-    """Declared `cyber_*` functions no Swift source references, and stale
-    pending registrations naming symbols the header no longer declares."""
-    declared = set(re.findall(r"\b(cyber_[a-z0-9_]+)\s*\(", header_text))
-    referenced: set[str] = set()
-    for text in sources.values():
-        referenced.update(re.findall(r"\b(cyber_[a-z0-9_]+)\b", text))
-    unbound = sorted(declared - referenced - set(PENDING_REGISTRATIONS))
-    stale = sorted(set(PENDING_REGISTRATIONS) - declared)
-    return unbound, stale
-
-
 def main() -> int:
     if not HEADER.is_file():
         print(f"FAIL: missing header {HEADER}")
@@ -370,7 +355,9 @@ def main() -> int:
     missing = undeclared_symbol_uses(sources, known, swift_types)
     wrong_fields = bad_struct_fields(sources, structs)
     wrong_arity = wrong_arity_calls(sources, header_arities(header_text))
-    unbound, stale = unbound_entry_points(sources, header_text)
+    unbound, stale, redundant = binding_parity.coverage(
+        sources, header_text, PENDING_REGISTRATIONS
+    )
 
     for path, lineno, ident in missing:
         print(f"FAIL: {path.relative_to(REPO)}:{lineno}: '{ident}' is not declared in cyber_capi.h")
@@ -382,17 +369,12 @@ def main() -> int:
             f"argument(s), called with {passed}"
         )
 
-    for name in unbound:
-        print(
-            f"FAIL: {name} is declared in cyber_capi.h, bound by no Swift source, "
-            f"and not listed in PENDING_REGISTRATIONS"
-        )
-    for name in stale:
-        print(
-            f"FAIL: PENDING_REGISTRATIONS lists {name}, which cyber_capi.h no longer declares"
-        )
+    for line in binding_parity.report(
+        "Swift", unbound, stale, redundant, PENDING_REGISTRATIONS
+    ):
+        print(line)
 
-    if missing or wrong_fields or wrong_arity or unbound or stale:
+    if missing or wrong_fields or wrong_arity or unbound or stale or redundant:
         distinct = sorted({ident for _, _, ident in missing})
         print(
             f"\n{len(missing)} reference(s) to {len(distinct)} undeclared symbol(s)"
@@ -402,16 +384,14 @@ def main() -> int:
         print(f"{len(wrong_arity)} call(s) with the wrong argument count")
         print(f"{len(unbound)} unbound, unregistered entry point(s)")
         print(f"{len(stale)} stale pending registration(s)")
+        print(f"{len(redundant)} registration(s) for entry points that ARE bound")
         return 1
 
-    bound = len(set(re.findall(r"\b(cyber_[a-z0-9_]+)\s*\(", header_text))) - len(
-        PENDING_REGISTRATIONS
-    )
     print(
-        f"Swift/C ABI parity OK: {len(sources)} Swift file(s) reference only symbols "
-        f"declared in cyber_capi.h, with matching arities; {bound} entry point(s) bound, "
-        f"{len(PENDING_REGISTRATIONS)} deliberately pending"
+        f"{len(sources)} Swift file(s) reference only symbols declared in cyber_capi.h, "
+        f"with matching arities"
     )
+    print(binding_parity.summary("Swift", header_text, PENDING_REGISTRATIONS))
     return 0
 
 

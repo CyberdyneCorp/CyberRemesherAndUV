@@ -233,6 +233,15 @@ if(Python3_FOUND)
         COMMAND ${Python3_EXECUTABLE}
                 ${CMAKE_CURRENT_SOURCE_DIR}/packaging/test_swift_abi_parity.py)
 
+    # Python package <-> C ABI coverage, the same check in the other binding.
+    # Python never had one: what stood in was a hand-written assertion listing
+    # about six functions, which stayed green while 71 entry points went
+    # unbound. Also pure text parsing — it runs on the lanes where the engine
+    # will not load, which is exactly where a coverage gap hides.
+    add_test(NAME python_abi_parity
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/packaging/test_python_abi_parity.py)
+
     add_test(NAME ipados_remesh_cancellation
         COMMAND ${Python3_EXECUTABLE}
                 ${CMAKE_CURRENT_SOURCE_DIR}/packaging/test_ipados_remesh_cancellation.py)
@@ -453,7 +462,7 @@ if(TARGET cyber_capi_shared AND Python3_FOUND)
                  test_io_formats test_subdivide test_loop_subdivide test_examples
                  test_unwrap_seams test_retopo_ops test_isotropic_remesh
                  test_reference_nan_guard test_zremesher_gates
-                 test_zremesher_bindings test_abi_contract)
+                 test_zremesher_bindings test_abi_contract test_draw_surface)
         add_test(NAME python_${_pyt}
             COMMAND ${Python3_EXECUTABLE} ${_pydir}/${_pyt}.py)
         set_tests_properties(python_${_pyt} PROPERTIES
