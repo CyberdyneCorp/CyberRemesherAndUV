@@ -74,6 +74,57 @@
 
   Swift now binds **172 of 236** entry points, up from 110 of 234.
 
+- **Auto Relax that stays where you edited.** The spec asks for "an automatic
+  local relax of surrounding topology" after every topology-modifying operation
+  — "the new and neighboring vertices". The only implementation was
+  `autoRelax()`, which relaxes the WHOLE mesh, and had no ABI presence. Exposed
+  as-is it would have moved topology the artist placed on the far side of the
+  model after every stroke, and spent the interactive frame on 100k vertices
+  nobody touched.
+
+  `cyber_retopo_relax_region` relaxes every vertex within `rings` edge hops of a
+  set of seeds — pass the vertices an edit just produced — with a smooth falloff
+  and everything outside left BIT-IDENTICAL. The region is topological, not a
+  spatial radius, because the edits it follows are the wrong shape for a sphere:
+  a strip drawn down a thin limb is long and narrow, and a sphere big enough to
+  cover it reaches through to the other side. A test pins that with two sheets
+  0.05 apart and unconnected; relaxing one never moves the other.
+
+  Deliberately not an engine-held "auto relax on" mode applied inside every
+  build op: that would make every existing entry point move more than it
+  documents, and the host already knows which vertices an edit made. It reuses
+  the existing relax kernel through its per-vertex weight hook rather than
+  adding a second one.
+
+  `Mesh.relax_region()` from Python, `relaxRegion(seeds:)` from Swift.
+
+- **Loop slide.** The gesture grammar has named "double-tap a loop to slide it"
+  since it existed, and nothing could perform it; C++ had only a single-vertex
+  slide toward a neighbour the caller names. The hard part of a loop slide is
+  not the move but choosing, for every vertex, a neighbour on the SAME side —
+  pick independently and a closed ring twists half one way and half the other.
+  Sides come from orientation: walking the loop a->b, the face traversing a->b is
+  always on the same side. `t > 0` and `t < 0` pick the side, `|t| >= 1` is
+  refused because the loop would collapse onto its neighbour, and targets are
+  computed from original positions so the seed edge does not change the result.
+
+  The loop is the one `edge_loop` reports, the same definition the tag-loop
+  gesture uses. That definition stops at valence != 4, so on an OPEN BORDER the
+  loop is a single edge and a slide moves two vertices rather than the whole
+  row. Kept for consistency — tapping an edge must not tag one set and slide
+  another — and recorded as an open decision, since Blender slides the whole
+  border.
+
+  `cyber_retopo_slide_loop`, `Mesh.slide_loop()`, `slideLoop(edge:t:)`.
+
+- **Interactive symmetry from both bindings.** `apply_symmetry`, `resymmetrize`
+  and `snap_symmetry_plane` were in the C ABI and registered as pending in both
+  bindings. Python gets `Symmetry` and the three methods; Swift gets
+  `MirrorPlane` and the same three.
+
+- **ABI 1.18**, additive: two entry points and one report struct; the manifest
+  diff against 1.17 shows nothing removed or reshaped.
+
 - **Python can draw; Swift can finish.** After the retopology surface landed in
   Swift, the two bindings covered complementary halves of one workflow and
   neither could run it end to end: 120 entry points bound in both, 43 in Python

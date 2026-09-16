@@ -92,7 +92,7 @@ typedef enum CyberStatus {
  * Do not compare these numbers by hand: cyber_abi_check() applies the rule
  * above in one place, so every binding gets the same answer. */
 #define CYBER_ABI_VERSION_MAJOR 1
-#define CYBER_ABI_VERSION_MINOR 17
+#define CYBER_ABI_VERSION_MINOR 18
 
 /* The ABI this build implements. Cannot fail; either pointer may be NULL. */
 void cyber_abi_version(int* major, int* minor);
@@ -1666,6 +1666,40 @@ CyberStatus cyber_retopo_draw_strip(CyberMesh* mesh, const float* path_xyz, size
                                     uint32_t start_b, const CyberSnapper* snapper,
                                     size_t* out_new_faces);
 
+/* What a loop slide did. `moved_count` can be less than `loop_vertex_count`:
+ * a vertex with no quad on the requested side stays put. */
+typedef struct CyberLoopSlideReport {
+    size_t loop_vertex_count;
+    size_t moved_count;
+} CyberLoopSlideReport;
+
+/* Loop slide (manual-retopology spec, "Pencil stroke grammar": double-tap an
+ * edge loop to slide it). Moves every vertex of the edge loop through `edge` a
+ * fraction `t` of the way along its rail toward the neighbouring loop.
+ *
+ * The loop is the one cyber_mesh_edge_loop reports for `edge`, deliberately the
+ * same definition the tag-loop gesture uses, so tapping an edge cannot tag one
+ * set of vertices and slide another. That definition continues only through
+ * valence-4 vertices, so the loop through an edge on an OPEN BORDER is that one
+ * edge: border vertices have valence 3.
+ *
+ * Every vertex moves toward the SAME side of the loop — the hard part, since
+ * choosing each vertex's neighbour independently twists a closed ring. `t > 0`
+ * slides toward the faces whose winding follows the loop's walk direction,
+ * `t < 0` toward the other side. Targets are computed from the original
+ * positions, so the result does not depend on which loop edge is the seed.
+ *
+ * A vertex with no quad on the requested side stays put, so a boundary edge
+ * slides inward and not outward. Moved vertices re-project onto the Target when
+ * `snapper` is non-NULL. `out_report` may be NULL. Position-only: every element
+ * id survives.
+ *
+ * Fails with CYBER_ERR_INVALID_ARG (mesh unchanged) when `edge` is dead, and
+ * CYBER_ERR_INVALID_PARAM when |t| >= 1 or t is NaN: at |t| == 1 the loop lands
+ * on its neighbour and every rail collapses to zero length. */
+CyberStatus cyber_retopo_slide_loop(CyberMesh* mesh, uint32_t edge, float t,
+                                    const CyberSnapper* snapper, CyberLoopSlideReport* out_report);
+
 /* What a contour run produced. `failed_stroke` is the index of the first
  * stroke that named no usable plane or no Target cross-section, or SIZE_MAX
  * when every stroke produced a ring. */
@@ -2149,6 +2183,42 @@ CyberStatus cyber_retopo_selection_relax(CyberMesh* mesh, float strength, int it
                                          const uint32_t* pinned, size_t pinned_count,
                                          const CyberSnapper* snapper, float resnap_epsilon,
                                          CyberSoftTransformReport* out_report);
+
+/* Region relax — Auto Relax scoped to an edit (manual-retopology spec, "Auto
+ * Relax mode": "every topology-modifying operation SHALL be followed by an
+ * automatic local relax of surrounding topology").
+ *
+ * The region is TOPOLOGICAL: every vertex within `rings` edge hops of a seed.
+ * Not a spatial brush like cyber_retopo_relax's center/radius, because the
+ * edits this follows are the wrong shape for one — a strip drawn down a thin
+ * limb is long and narrow, and a sphere big enough to cover it reaches through
+ * to the other side of the limb. It is the same reason cyber_retopo_move is
+ * seeded from a vertex rather than a point in space.
+ *
+ * The intended use is to pass the vertices an operation just created or welded
+ * as `seeds` — a build_face ring, the vertices of a contour tube — so the new
+ * topology settles into its neighbours without disturbing anything further
+ * away. Weight falls off with ring distance, full at the seeds and zero one
+ * ring past `rings`, so there is no step in quad size at the region's edge, and
+ * everything outside the region is left BIT-IDENTICAL.
+ *
+ * Deliberately NOT an engine-held "auto relax is on" mode applied inside every
+ * build op. That would make every existing entry point move more than it says
+ * it does, and the host already knows which vertices an edit produced.
+ *
+ * `rings` = 0 relaxes the seeds only. Dead seed ids are ignored. Pins and
+ * auto_pin_corners behave as in cyber_retopo_relax; moved vertices re-project
+ * onto the Target when `snapper` is non-NULL, with the same distinct-vertex
+ * report as cyber_retopo_selection_relax. `out_report` may be NULL.
+ *
+ * Fails with CYBER_ERR_INVALID_ARG on a NULL seed array with a non-zero count,
+ * and CYBER_ERR_INVALID_PARAM on rings < 0, iterations < 1, or strength outside
+ * [0,1] (NaN included) — the mesh is unchanged in each case. */
+CyberStatus cyber_retopo_relax_region(CyberMesh* mesh, const uint32_t* seeds, size_t seed_count,
+                                      int rings, float strength, int iterations,
+                                      int auto_pin_corners, const uint32_t* pinned,
+                                      size_t pinned_count, const CyberSnapper* snapper,
+                                      float resnap_epsilon, CyberSoftTransformReport* out_report);
 
 /* ---- document persistence (application-shell spec) ---------------------
  *

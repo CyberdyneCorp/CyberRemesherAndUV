@@ -123,7 +123,7 @@ def version() -> str:
 #: The C ABI this binding was written against. Mirrors CYBER_ABI_VERSION_* in
 #: cyber_capi.h; ``check_abi()`` compares it against the loaded library.
 ABI_VERSION_MAJOR = 1
-ABI_VERSION_MINOR = 17
+ABI_VERSION_MINOR = 18
 
 
 def abi_version() -> tuple:
@@ -649,6 +649,58 @@ class ContourReport:
     ring_count: int
     face_count: int
     vertex_count: int
+
+
+@dataclass(frozen=True)
+class Symmetry:
+    """A mirror plane and how to treat vertices on it.
+
+    ``weld_tolerance`` is how close a vertex must be to the plane to count as ON
+    it: center-line vertices snap onto the plane and are shared by both halves
+    rather than duplicated. ``working_side_positive`` picks the authored half —
+    the one the normal points into, or away from.
+
+    One plane per call. Mirroring on X and Y is two calls, which is exactly what
+    it means geometrically.
+    """
+
+    origin: Tuple[float, float, float] = (0.0, 0.0, 0.0)
+    normal: Tuple[float, float, float] = (1.0, 0.0, 0.0)
+    weld_tolerance: float = 1e-4
+    working_side_positive: bool = True
+
+    def _c(self) -> "_ffi.CyberSymmetry":
+        c = _ffi.CyberSymmetry()
+        for i in range(3):
+            c.origin[i] = float(self.origin[i])
+            c.normal[i] = float(self.normal[i])
+        c.weld_tolerance = float(self.weld_tolerance)
+        c.working_side_positive = 1 if self.working_side_positive else 0
+        return c
+
+
+@dataclass(frozen=True)
+class ResymmetrizeReport:
+    """What re-symmetrizing did.
+
+    ``unmatched`` counts off-side vertices with no mirror counterpart within
+    tolerance: one-sided geometry is left alone, not forced into a mirror image
+    that does not exist.
+    """
+
+    snapped: int
+    matched: int
+    unmatched: int
+    max_correction: float
+
+
+@dataclass(frozen=True)
+class LoopSlideReport:
+    """``moved`` can be less than ``loop_vertices``: a vertex with no quad on
+    the requested side stays put."""
+
+    loop_vertices: int
+    moved: int
 
 
 class Snapper:
@@ -1944,6 +1996,119 @@ class Mesh:
             )
         )
         return resnapped.value, max_distance.value
+
+    def relax_region(
+        self,
+        seeds: Sequence[int],
+        rings: int = 2,
+        strength: float = 0.5,
+        iterations: int = 4,
+        auto_pin_corners: bool = True,
+        pinned: Optional[Sequence[int]] = None,
+        snapper: Optional["Snapper"] = None,
+        resnap_epsilon: float = 0.0,
+    ) -> "SoftTransformReport":
+        """Auto Relax, scoped to an edit.
+
+        Relaxes every vertex within ``rings`` edge hops of ``seeds``. Pass the
+        vertices an edit just produced — :meth:`build_face`'s ring, a contour's
+        vertices — so new topology settles into its neighbours and nothing
+        further away moves. Vertices outside the region keep their EXACT
+        positions.
+
+        The region is topological, not a radius in space: a strip drawn down a
+        thin limb is long and narrow, and a sphere big enough to cover it would
+        reach through to the far side of the limb.
+        """
+        seed_buf, seed_count = _ids(seeds)
+        pin_buf, pin_count = _ids(pinned)
+        report = _ffi.CyberSoftTransformReport()
+        _check(
+            _ffi.get_lib().cyber_retopo_relax_region(
+                self.handle, seed_buf, seed_count, int(rings), float(strength),
+                int(iterations), 1 if auto_pin_corners else 0, pin_buf, pin_count,
+                snapper.handle if snapper else None, float(resnap_epsilon),
+                ctypes.byref(report),
+            )
+        )
+        return SoftTransformReport._from_c(report)
+
+    def slide_loop(
+        self, edge: int, t: float, snapper: Optional["Snapper"] = None
+    ) -> LoopSlideReport:
+        """Slide the edge loop through ``edge`` a fraction ``t`` along its rails.
+
+        Every vertex moves toward the SAME side — positive ``t`` one way,
+        negative the other — so a closed ring slides without twisting. ``|t|``
+        must be below 1: at 1 the loop lands on its neighbour and every rail
+        collapses.
+
+        The loop is the one :meth:`edge_loop` reports, which only continues
+        through valence-4 vertices. On an open border that is a single edge, so
+        a slide from a border edge moves two vertices, not the whole row.
+        """
+        report = _ffi.CyberLoopSlideReport()
+        _check(
+            _ffi.get_lib().cyber_retopo_slide_loop(
+                self.handle, int(edge), float(t),
+                snapper.handle if snapper else None, ctypes.byref(report),
+            )
+        )
+        return LoopSlideReport(
+            loop_vertices=report.loop_vertex_count, moved=report.moved_count
+        )
+
+    def snap_symmetry_plane(self, symmetry: Symmetry) -> int:
+        """Snap every vertex within ``weld_tolerance`` exactly onto the plane."""
+        snapped = ctypes.c_size_t(0)
+        c = symmetry._c()
+        _check(
+            _ffi.get_lib().cyber_retopo_snap_symmetry_plane(
+                self.handle, ctypes.byref(c), ctypes.byref(snapped)
+            )
+        )
+        return snapped.value
+
+    def apply_symmetry(
+        self, symmetry: Symmetry, snapper: Optional["Snapper"] = None
+    ) -> int:
+        """Bake the mirror into real geometry; returns the faces added.
+
+        Every face wholly on the working side gains a mirrored twin with
+        reversed winding. On-plane vertices are shared, so the seam stays
+        manifold.
+        """
+        added = ctypes.c_size_t(0)
+        c = symmetry._c()
+        _check(
+            _ffi.get_lib().cyber_retopo_apply_symmetry(
+                self.handle, ctypes.byref(c), snapper.handle if snapper else None,
+                ctypes.byref(added),
+            )
+        )
+        return added.value
+
+    def resymmetrize(
+        self, symmetry: Symmetry, match_tolerance: float = 0.0
+    ) -> ResymmetrizeReport:
+        """Mirror the working half onto the other half IN PLACE.
+
+        Adds and removes nothing; only the non-working half's positions move.
+        ``match_tolerance <= 0`` falls back to the symmetry's weld tolerance.
+        """
+        report = _ffi.CyberResymmetrizeReport()
+        c = symmetry._c()
+        _check(
+            _ffi.get_lib().cyber_retopo_resymmetrize(
+                self.handle, ctypes.byref(c), float(match_tolerance), ctypes.byref(report)
+            )
+        )
+        return ResymmetrizeReport(
+            snapped=report.snapped,
+            matched=report.matched,
+            unmatched=report.unmatched,
+            max_correction=report.max_correction,
+        )
 
     def distribute_path(
         self, vertices: Sequence[int], snapper: Optional["Snapper"] = None
