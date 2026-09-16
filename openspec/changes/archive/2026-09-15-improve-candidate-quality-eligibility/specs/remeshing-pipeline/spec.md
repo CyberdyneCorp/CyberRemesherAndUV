@@ -9,7 +9,9 @@ be deterministic, with a stable tie-break, and the selected candidate SHALL be
 named in the run report. A candidate with non-manifold edges, a boundary
 component count different from the input's, non-finite live-vertex positions,
 zero-length live edges, or no faces SHALL be ineligible before aesthetic terms
-are compared. Quad-corner shape SHALL use a documented upper-tail absolute
+are compared; the number of edges used to tessellate a preserved boundary
+SHALL NOT itself make an otherwise eligible candidate lose. Quad-corner shape
+SHALL use a documented upper-tail absolute
 deviation from 90 degrees; a favorable median angle alone SHALL NOT allow a
 candidate with severely distorted corners to win.
 
@@ -24,6 +26,20 @@ candidate with severely distorted corners to win.
 - **WHEN** the quality mode solves two candidates
 - **THEN** the selected candidate's score SHALL be greater than or equal to
   every other eligible candidate's score, and the report SHALL name it
+
+#### Scenario: Open boundary is preserved
+
+- **WHEN** two candidates for an open input preserve its boundary-component
+  count but use different numbers of boundary edges
+- **THEN** selection SHALL rank them by their quality score rather than raw
+  boundary-edge count
+
+#### Scenario: New boundary component is rejected
+
+- **WHEN** a candidate for an open input introduces an additional boundary
+  component
+- **THEN** it SHALL lose to an otherwise eligible candidate regardless of its
+  aesthetic score
 
 #### Scenario: Tail distortion affects selection
 

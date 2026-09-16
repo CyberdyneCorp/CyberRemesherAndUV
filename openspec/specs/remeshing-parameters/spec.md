@@ -6,9 +6,7 @@ entry point, and the documented meaning of each knob. It exists to make the
 parameters trustworthy: every entry point validates the same way and reports
 what it clamped, and no parameter is inert — one that cannot change the output
 is a bug, not a placeholder, so it is either wired through or rejected.
-
 ## Requirements
-
 ### Requirement: Canonical parameter set
 The remesher SHALL expose exactly these user-facing parameters, defined once in a single source of truth consumed by GUI, CLI, and network entry points:
 
@@ -49,15 +47,33 @@ targetQuadCount SHALL drive the derived target edge length (area-based, guarded 
 - **THEN** all vertices SHALL use the uniform base target edge length and the parameterization SHALL receive uniform scaling
 
 ### Requirement: No inert parameters
-Every parameter accepted by any entry point SHALL affect pipeline behavior. Parameters with no implemented effect SHALL NOT be exposed. This SHALL hold **per entry point**: a parameter that reaches the pipeline from one caller (the CLI) and is dropped on the way from another (the C ABI, and therefore every binding over it) is inert for that caller, whatever the shared parameter struct says. The value a caller supplies SHALL reach every stage the parameter's documented semantics name, including stages inside an extractor that carries a default of its own.
+Every parameter accepted by any entry point SHALL affect pipeline behavior.
+Parameters with no implemented effect SHALL NOT be exposed. This SHALL hold
+**per entry point**: a parameter that reaches the pipeline from one caller
+(the CLI) and is dropped on the way from another (the C ABI, and therefore
+every binding over it) is inert for that caller, whatever the shared parameter
+struct says. The value a caller supplies SHALL reach every stage the
+parameter's documented semantics name, including stages inside an extractor
+that carries a default of its own.
 
 #### Scenario: Exposed equals implemented
-- **WHEN** the set of exposed parameters is compared with the set read by the pipeline
-- **THEN** they SHALL be identical (AutoRemesher's ModelType was accepted but never read)
+- **WHEN** the set of exposed parameters is compared with the set read by the
+  pipeline
+- **THEN** they SHALL be identical (AutoRemesher's ModelType was accepted but
+  never read)
 
 #### Scenario: The same value produces the same run from every entry point
-- **WHEN** the same parameter set is run through the CLI and through the C ABI (and the Python and Swift bindings over it) on the same input
-- **THEN** each entry point SHALL produce the same result, and no entry point SHALL substitute a component's own default for a value the caller supplied — as `cyber_remesh` did for `sharpEdgeDegrees`, which reached the CLI's pipeline but not the ABI's extractor, so the documented default of 90° could never take effect and the crease-pinning behaviour it gates was unreachable from every binding
+- **WHEN** the same parameter set is run through the CLI and through the C ABI
+  (and the Python and Swift bindings over it) on the same input
+- **THEN** each entry point SHALL produce the same result, and no entry point
+  SHALL substitute a component's own default for a value the caller supplied
+  — as `cyber_remesh` did for `sharpEdgeDegrees`, which reached the CLI's
+  pipeline but not the ABI's extractor, so the documented default of 90° could
+  never take effect and the crease-pinning behaviour it gates was unreachable
+  from every binding
+- **AND** `adaptivity` SHALL reach the quad-cover and ZRemesher selector
+  extractors with its validated caller value, including the canonical default
+  of `1.0`; an explicit `0.0` SHALL retain uniform sizing
 
 ### Requirement: Guide and density parameters are validated
 The parameter surface SHALL validate per-guide strength and influence radius
@@ -89,3 +105,4 @@ each SHALL demonstrably change the output or be rejected.
 
 - **WHEN** every ZRemesher parameter is left at its default
 - **THEN** the output SHALL be byte-identical to the shipped default pipeline
+
