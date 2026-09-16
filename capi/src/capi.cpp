@@ -55,6 +55,7 @@
 #include "cyber/retopo/build_tools.hpp"
 #include "cyber/retopo/commands.hpp"
 #include "cyber/retopo/conform.hpp"
+#include "cyber/retopo/contours.hpp"
 #include "cyber/retopo/dissolve.hpp"
 #include "cyber/retopo/erase.hpp"
 #include "cyber/retopo/loop_metrics.hpp"
@@ -3646,6 +3647,98 @@ CyberStatus cyber_retopo_draw_strip(CyberMesh* mesh, const float* path_xyz, size
         }
         if (out_new_faces != nullptr) {
             *out_new_faces = strip.faces.size();
+        }
+        return CYBER_OK;
+    });
+}
+
+CyberStatus cyber_retopo_contours(CyberMesh* mesh, const CyberMesh* target,
+                                  const float* strokes_xyz, const size_t* stroke_offsets,
+                                  size_t stroke_count, size_t spans, const CyberSnapper* snapper,
+                                  int closed, CyberContourReport* out_report) {
+    return runMeshEdit(mesh, "cyber_retopo_contours", [&] {
+        if (target == nullptr || strokes_xyz == nullptr || stroke_offsets == nullptr) {
+            setError("cyber_retopo_contours: null target or stroke arrays");
+            return CYBER_ERR_INVALID_ARG;
+        }
+        if (stroke_count < 2) {
+            setError("cyber_retopo_contours: a tube needs at least two cross-section strokes");
+            return CYBER_ERR_INVALID_ARG;
+        }
+        if (spans < 3) {
+            setError("cyber_retopo_contours: spans must be at least 3");
+            return CYBER_ERR_INVALID_PARAM;
+        }
+        // Offsets must be non-decreasing; the total is the last one, so a
+        // non-monotone table would make a stroke's span wrap to a huge size_t
+        // and read past the caller's buffer.
+        for (size_t i = 0; i < stroke_count; ++i) {
+            if (stroke_offsets[i] > stroke_offsets[i + 1]) {
+                setError("cyber_retopo_contours: stroke_offsets must be non-decreasing");
+                return CYBER_ERR_INVALID_ARG;
+            }
+        }
+        std::vector<cyber::Vec3> points;
+        const size_t total = stroke_offsets[stroke_count];
+        points.reserve(total);
+        for (size_t i = 0; i < total; ++i) {
+            points.push_back(toVec3(strokes_xyz + i * 3));
+        }
+        std::vector<std::span<const cyber::Vec3>> views;
+        views.reserve(stroke_count);
+        for (size_t i = 0; i < stroke_count; ++i) {
+            const size_t begin = stroke_offsets[i];
+            const size_t end = stroke_offsets[i + 1];
+            views.emplace_back(points.data() + begin, end - begin);
+        }
+        const cyber::retopo::ContourResult result = cyber::retopo::contours(
+            mesh->mesh, target->mesh, views, spans, snapperOf(snapper), closed != 0);
+        if (out_report != nullptr) {
+            out_report->ring_count = result.ringCount;
+            out_report->face_count = result.faces.size();
+            out_report->vertex_count = result.vertices.size();
+            out_report->failed_stroke = result.failedStroke;
+        }
+        if (result.failedStroke != cyber::retopo::ContourResult::npos) {
+            setError("cyber_retopo_contours: stroke names no usable cross-section");
+            return CYBER_ERR_INVALID_ARG;
+        }
+        if (result.faces.empty()) {
+            setError("cyber_retopo_contours: produced no faces");
+            return CYBER_ERR_INVALID_ARG;
+        }
+        return CYBER_OK;
+    });
+}
+
+CyberStatus cyber_retopo_bridge_loops(CyberMesh* mesh, const uint32_t* loop_a,
+                                      const uint32_t* loop_b, size_t count, size_t* out_new_faces) {
+    return runMeshEdit(mesh, "cyber_retopo_bridge_loops", [&] {
+        if (loop_a == nullptr || loop_b == nullptr || count < 2) {
+            setError("cyber_retopo_bridge_loops: null loops or fewer than two vertices");
+            return CYBER_ERR_INVALID_ARG;
+        }
+        std::vector<cyber::VertexId> a;
+        std::vector<cyber::VertexId> b;
+        a.reserve(count);
+        b.reserve(count);
+        for (size_t i = 0; i < count; ++i) {
+            const cyber::VertexId va{loop_a[i]};
+            const cyber::VertexId vb{loop_b[i]};
+            if (!mesh->mesh.isAlive(va) || !mesh->mesh.isAlive(vb)) {
+                setError("cyber_retopo_bridge_loops: dead vertex id");
+                return CYBER_ERR_INVALID_ARG;
+            }
+            a.push_back(va);
+            b.push_back(vb);
+        }
+        const std::vector<cyber::FaceId> faces = cyber::retopo::bridgeLoops(mesh->mesh, a, b);
+        if (faces.empty()) {
+            setError("cyber_retopo_bridge_loops: bridge produced no faces");
+            return CYBER_ERR_INVALID_ARG;
+        }
+        if (out_new_faces != nullptr) {
+            *out_new_faces = faces.size();
         }
         return CYBER_OK;
     });
