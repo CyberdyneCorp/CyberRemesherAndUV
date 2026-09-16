@@ -95,20 +95,20 @@ def gate_contours_builds_a_tube():
     assert report.vertex_count == 36, report
     assert report.face_count == 24, report  # two bands of twelve
 
+    # Read through vertex_position, NOT the `positions` ndarray: that property
+    # only exists when numpy is importable, and this package supports running
+    # without it. The first version of this test used it and failed on the CI
+    # lane that has no numpy -- which is exactly the lane a binding test has
+    # to keep working on.
+    points = [edit.vertex_position(i) for i in range(edit.vertex_count)]
+
     # The far side the strokes never covered is in the ring: each ring must
     # wrap the tube, not merely span the 2.2 rad the artist drew.
-    positions = edit.positions.reshape(-1)
-    angles = [
-        math.atan2(positions[3 * i + 2], positions[3 * i])
-        for i in range(12)
-    ]
+    angles = [math.atan2(p[2], p[0]) for p in points[:12]]
     assert max(angles) - min(angles) > 4.0, (min(angles), max(angles))
 
     # Every ring vertex sits on the Target.
-    worst = max(
-        abs(math.hypot(positions[3 * i], positions[3 * i + 2]) - 1.0)
-        for i in range(edit.vertex_count)
-    )
+    worst = max(abs(math.hypot(p[0], p[2]) - 1.0) for p in points)
     assert worst < 1e-3, worst
     print("PASS: contours lofts three strokes into a 24-quad tube on the Target")
 
