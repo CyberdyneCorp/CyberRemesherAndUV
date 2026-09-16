@@ -79,6 +79,28 @@ from .api import (
     CountPolicy,
     TargetCountReport,
     write_bundle,
+    status_string,
+    Snapper,
+    SurfaceHit,
+    VertexHit,
+    RayHit,
+    LoopMetrics,
+    ContourReport,
+)
+
+# The gesture grammar. Kept in its own module because it is interpretation
+# ONLY -- nothing here mutates a mesh -- and mixing it into the mutating API
+# would blur exactly the line that lets a host preview a candidate before
+# committing to it.
+from . import strokes
+from .strokes import (
+    Candidate,
+    ElementKind,
+    Interpretation,
+    StrokeAction,
+    StrokeContext,
+    StrokeShape,
+    interpret,
 )
 
 __all__ = [
@@ -113,6 +135,21 @@ __all__ = [
     "ABI_VERSION_MINOR",
     "CountPolicy",
     "TargetCountReport",
+    "status_string",
+    "Snapper",
+    "SurfaceHit",
+    "VertexHit",
+    "RayHit",
+    "LoopMetrics",
+    "ContourReport",
+    "strokes",
+    "interpret",
+    "Interpretation",
+    "Candidate",
+    "StrokeShape",
+    "StrokeContext",
+    "StrokeAction",
+    "ElementKind",
     "HAVE_NUMPY",
     "BakeMap",
     "BakeParams",

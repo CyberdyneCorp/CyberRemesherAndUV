@@ -74,6 +74,45 @@
 
   Swift now binds **172 of 236** entry points, up from 110 of 234.
 
+- **Python can draw; Swift can finish.** After the retopology surface landed in
+  Swift, the two bindings covered complementary halves of one workflow and
+  neither could run it end to end: 120 entry points bound in both, 43 in Python
+  only, 52 in Swift only. Python could unwrap, bake and export and could not
+  draw — 0 of 13 `cyber_stroke_*`, no `build_face`, no `contours`. Swift could
+  draw and could not finish — 0 of 32 for UV, bake and image output. A
+  Cozy Blanket-class app needs both halves, and a host had to write C to get
+  them.
+
+  **Python** gains the drawing surface: the stroke grammar as
+  `cyberremesh.strokes` (`interpret()` returning an immutable `Interpretation`
+  with typed `StrokeShape`, `StrokeContext` and `StrokeAction`), `Snapper`
+  queries (`raycast`, `snap_to_surface`, `snap_to_vertex`), the build tools
+  (`create_face`, `build_face`, `draw_strip`, `contours`, `bridge_loops`,
+  `create_grid`, `extend_boundary`, `fan_boundary`, `grow_boundary_edge`,
+  `surface_cut`, `patch_clone`, `tweak_vertex`, `erase`, `move`,
+  `distribute_path`, `transform_vertices`), and the element, loop and picking
+  queries. Also `status_string()` from the engine rather than a second table,
+  and format-explicit `Mesh.load_obj` / `save_obj` for callers that should not
+  have the format inferred from a filename they may not control.
+
+  The stroke grammar is the one that mattered most. Python is the full-surface
+  desktop test harness by design, and the gesture path — hardest to get right,
+  most in need of corpus coverage — was the one part it could not reach.
+
+  **Swift** gains the finishing pipeline: `Mesh.unwrap()` for the automatic
+  atlas and `unwrap(seams:)` along an artist's seams, `stitchSeams`, and
+  `bake(from:map:parameters:)` returning an owning `Image` with `pixels()` and
+  `savePNG(to:)`. Parameter structs read their defaults through the C ABI, so a
+  fresh `AtlasParameters()` or `BakeParameters()` matches the CLI and cannot
+  drift from it.
+
+  Coverage: **Python 163 -> 214**, **Swift 172 -> 178**, of 236.
+
+  `build_face` returns the ring in the face's FINAL winding, not slot order: the
+  engine corrects winding against the neighbouring face so the normals agree,
+  which can reverse and rotate the ring. Both bindings now say to look vertices
+  up by id. The first Python test assumed slot order and was wrong about it.
+
 ### Changed
 
 - **The Swift parity gate runs in both directions.** It checked
@@ -92,6 +131,31 @@
   variant Swift already binds, renderer fast paths, the finishing pipeline
   (UV/bake/export, tracked separately), desktop-only file paths, CPU-only-on-iOS
   backend selection, and retopology follow-ups.
+
+- **One coverage gate, every binding, and it catches a lying registration
+  list.** The header -> binding check moved into
+  `tests/packaging/binding_parity.py` and runs against both Swift and Python.
+  Python never had one. What stood in was `gate_the_new_entry_points_are_reachable`,
+  whose comment claims "engine-bindings requires anything the C ABI can do to be
+  reachable from Python" and which asserts about six hand-picked functions — it
+  stayed green with 71 entry points unbound.
+
+  The new `python_abi_parity` test needs no built engine: it tokenizes the
+  package rather than regex-scanning it, because a `#` inside a string and a
+  docstring naming an entry point are exactly the cases a regex gets wrong, and
+  both would make an unbound symbol look bound.
+
+  A registration list can now be wrong three ways and the gate fails on all of
+  them: **unbound** (declared, unbound, unregistered), **stale** (registered but
+  no longer declared) and, new here, **redundant** — registered as pending while
+  the binding actually binds it. That one earned its place on first run: binding
+  the Swift finishing pipeline left 13 entries still claiming to be pending, and
+  the check named every one.
+
+- **`test_draw_surface.py` exits 77 when the engine will not load**, which CTest
+  maps to SKIPPED. Returning 0 would have reported PASSED on a lane that never
+  loaded the library — the shape of the Windows lane that once ran zero Python
+  tests and stayed green.
 
 - **The ABI minor-bump gate derives its range from the header.** It asserted a
   literal `(1, 16)` and iterated a written-out list of earlier minors, under a

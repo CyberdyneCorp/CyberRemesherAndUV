@@ -86,6 +86,19 @@ class CyberError(RuntimeError):
         )
 
 
+def status_string(status: int) -> str:
+    """The engine's own name for a status code.
+
+    Python carries its own table for offline use (the package imports without
+    a library present), but when one IS loaded the engine is the authority —
+    a second table is a second source of truth that drifts on the next code.
+    """
+    raw = _ffi.get_lib().cyber_status_string(int(status))
+    if not raw:
+        return _ffi.status_name(status)
+    return raw.decode("utf-8", "replace")
+
+
 def _last_error() -> str:
     raw = _ffi.get_lib().cyber_last_error()
     if not raw:
@@ -583,6 +596,61 @@ class SnapReport:
     max_distance: float
 
 
+@dataclass(frozen=True)
+class SurfaceHit:
+    """A point found on the Target surface."""
+
+    point: Tuple[float, float, float]
+    face: int
+
+
+@dataclass(frozen=True)
+class VertexHit:
+    """A Target vertex found near a query point."""
+
+    point: Tuple[float, float, float]
+    vertex: int
+
+
+@dataclass(frozen=True)
+class RayHit:
+    """A ray hit on the Target surface."""
+
+    point: Tuple[float, float, float]
+    distance: float
+    face: int
+
+
+@dataclass(frozen=True)
+class LoopMetrics:
+    """What the edge loop under the cursor is made of (Loop Info).
+
+    ``snap_measured`` says whether ``snapped_vertex_count`` and
+    ``max_snap_distance`` mean anything: they are filled only when a snapper
+    was supplied, so a loop nobody measured stays distinguishable from one
+    measured as unsnapped.
+    """
+
+    edge_count: int
+    vertex_count: int
+    closed: bool
+    length: float
+    endpoints: Optional[Tuple[int, int]]
+    boundary_edge_count: int
+    snap_measured: bool
+    snapped_vertex_count: int
+    max_snap_distance: float
+
+
+@dataclass(frozen=True)
+class ContourReport:
+    """What a contour run produced."""
+
+    ring_count: int
+    face_count: int
+    vertex_count: int
+
+
 class Snapper:
     """Snapshot snapper over a Target mesh (a BVH for closest-surface queries).
 
@@ -616,6 +684,56 @@ class Snapper:
             self.close()
         except Exception:
             pass
+
+    def snap_to_surface(self, query: Sequence[float]) -> Optional["SurfaceHit"]:
+        """Closest point on the Target surface, or ``None`` on an empty snapper."""
+        point = (ctypes.c_float * 3)()
+        face = ctypes.c_uint32(0)
+        found = _ffi.get_lib().cyber_snapper_snap_to_surface(
+            self.handle, _vec3(query), point, ctypes.byref(face)
+        )
+        if not found:
+            return None
+        return SurfaceHit(point=(point[0], point[1], point[2]), face=face.value)
+
+    def snap_to_vertex(self, query: Sequence[float], radius: float) -> Optional["VertexHit"]:
+        """Nearest Target VERTEX within ``radius``.
+
+        The snap-to-vertex modifier: what makes a new vertex land exactly on an
+        existing feature corner instead of near it.
+        """
+        point = (ctypes.c_float * 3)()
+        vertex = ctypes.c_uint32(0)
+        found = _ffi.get_lib().cyber_snapper_snap_to_vertex(
+            self.handle, _vec3(query), float(radius), point, ctypes.byref(vertex)
+        )
+        if not found:
+            return None
+        return VertexHit(point=(point[0], point[1], point[2]), vertex=vertex.value)
+
+    def raycast(
+        self,
+        origin: Sequence[float],
+        direction: Sequence[float],
+        max_distance: float = float("inf"),
+    ) -> Optional["RayHit"]:
+        """First Target hit along the ray; ``direction`` need not be normalized.
+
+        This is the viewport tap: unproject the touch, cast, and the returned
+        point is where the artist actually pointed on the sculpt.
+        """
+        point = (ctypes.c_float * 3)()
+        t = ctypes.c_float(0.0)
+        face = ctypes.c_uint32(0)
+        found = _ffi.get_lib().cyber_snapper_raycast(
+            self.handle, _vec3(origin), _vec3(direction), float(max_distance),
+            point, ctypes.byref(t), ctypes.byref(face),
+        )
+        if not found:
+            return None
+        return RayHit(
+            point=(point[0], point[1], point[2]), distance=t.value, face=face.value
+        )
 
     def __enter__(self) -> "Snapper":
         return self
@@ -1142,6 +1260,28 @@ class Mesh:
             raise CyberError(status, _last_error())
         return cls(handle=out.value)
 
+    @classmethod
+    def load_obj(cls, path: str) -> "Mesh":
+        """Load an OBJ, without inferring the format from the filename.
+
+        The explicit partner to :meth:`load`: a caller that KNOWS it has OBJ
+        should not have the format decided by an extension it may not control
+        (a temp file, an upload, a path from a sandboxed picker).
+        """
+        out = ctypes.c_void_p()
+        status = _ffi.get_lib().cyber_mesh_load_obj(
+            str(path).encode("utf-8"), ctypes.byref(out)
+        )
+        if status != _ffi.STATUS_OK:
+            raise CyberError(status, _last_error())
+        return cls(handle=out.value)
+
+    def save_obj(self, path: str) -> None:
+        """Write OBJ regardless of the path's extension."""
+        _check(
+            _ffi.get_lib().cyber_mesh_save_obj(self.handle, str(path).encode("utf-8"))
+        )
+
     def save(self, path: str) -> None:
         """Write this mesh, dispatching on the file extension.
 
@@ -1451,6 +1591,553 @@ class Mesh:
         )
         self._stats = None
         return dissolved.value
+
+    # ---- build tools: what a recognised gesture turns into ---------------
+
+    def create_face(
+        self, points: Sequence[Sequence[float]], snapper: Optional["Snapper"] = None
+    ) -> int:
+        """Create one face from 3 or 4 ring positions; returns the face id.
+
+        With a ``snapper`` the corners land ON the Target first, which is the
+        difference between retopology and modelling in mid-air.
+        """
+        buf = _float_buffer(points)
+        face = ctypes.c_uint32(0)
+        _check(
+            _ffi.get_lib().cyber_retopo_create_face(
+                self.handle, buf, len(buf) // 3,
+                snapper.handle if snapper else None, ctypes.byref(face),
+            )
+        )
+        return face.value
+
+    def build_face(
+        self,
+        vertices: Sequence[Optional[int]],
+        points: Sequence[Sequence[float]],
+        snapper: Optional["Snapper"] = None,
+    ) -> Tuple[int, List[int]]:
+        """Build a face over a ring mixing EXISTING vertices with new points.
+
+        This is PolyPen: ``None`` in ``vertices`` creates a vertex at the
+        matching entry of ``points``; an id reuses that vertex, which is how the
+        new face welds onto what is already there. Returns
+        ``(face_id, ring_vertex_ids)`` — the final ring, existing and new alike,
+        so the next face can chain onto it.
+
+        The returned ring is in the face's FINAL winding, which is not
+        necessarily slot order: the engine corrects winding against the
+        neighbouring face so the two normals agree, and that can reverse and
+        rotate the ring. Look vertices up by id, not by slot position.
+        """
+        count = len(vertices)
+        if count not in (3, 4) or len(points) != count:
+            raise ValueError("build_face needs 3 or 4 slots and one point per slot")
+        ids = _uint32_buffer(
+            [_ffi.BUILD_NEW_VERTEX if v is None else int(v) for v in vertices]
+        )
+        buf = _float_buffer(points)
+        face = ctypes.c_uint32(0)
+        ring = (ctypes.c_uint32 * count)()
+        _check(
+            _ffi.get_lib().cyber_retopo_build_face(
+                self.handle, count, ids, buf,
+                snapper.handle if snapper else None, ctypes.byref(face), ring,
+            )
+        )
+        return face.value, [int(r) for r in ring]
+
+    def draw_strip(
+        self,
+        path: Sequence[Sequence[float]],
+        width: float,
+        view_direction: Sequence[float],
+        start_a: int,
+        start_b: int,
+        snapper: Optional["Snapper"] = None,
+    ) -> int:
+        """PolyStrips: a quad strip welded to the boundary edge ``start_a``-``start_b``.
+
+        ``path`` is world-space stroke samples, normally resampled at quad-size
+        arc length. ``view_direction`` is the camera forward the stroke was
+        drawn with; it decides which way the strip's width runs, with sign
+        continuity so a curved stroke never flips its rails. Returns the number
+        of new faces.
+        """
+        buf = _float_buffer(path)
+        new_faces = ctypes.c_size_t(0)
+        _check(
+            _ffi.get_lib().cyber_retopo_draw_strip(
+                self.handle, buf, len(buf) // 3, float(width), _vec3(view_direction),
+                int(start_a), int(start_b),
+                snapper.handle if snapper else None, ctypes.byref(new_faces),
+            )
+        )
+        return new_faces.value
+
+    def contours(
+        self,
+        target: "Mesh",
+        strokes: Sequence[Sequence[Sequence[float]]],
+        spans: int,
+        snapper: Optional["Snapper"] = None,
+        closed: bool = False,
+    ) -> ContourReport:
+        """Sample ``target`` with cross-section strokes and loft a quad tube.
+
+        The OPPOSITE construction to :meth:`draw_strip`. There the stroke is the
+        ribbon's spine; here each stroke names a cutting plane and the ring is
+        the Target's cross-section — so four short arcs drawn down an arm give a
+        closed tube, including the far side the artist never drew on.
+
+        Strokes are lofted in the order given, deliberately: sorting them along
+        a fitted axis guesses at intent, and an artist who draws a ring out of
+        order to close a gap would get a tube that reorders itself under them.
+
+        A stroke that names no usable plane, or whose plane misses the Target,
+        raises :class:`CyberError` with the mesh unchanged and its index in the
+        message — skipping it would loft the rings either side across the gap
+        and look deliberate.
+        """
+        flat: List[float] = []
+        offsets = [0]
+        for stroke in strokes:
+            for point in stroke:
+                flat.extend((float(point[0]), float(point[1]), float(point[2])))
+            offsets.append(len(flat) // 3)
+        buf = (ctypes.c_float * len(flat))(*flat)
+        off = (ctypes.c_size_t * len(offsets))(*offsets)
+        report = _ffi.CyberContourReport()
+        _check(
+            _ffi.get_lib().cyber_retopo_contours(
+                self.handle, target.handle, buf, off, len(strokes), int(spans),
+                snapper.handle if snapper else None, 1 if closed else 0,
+                ctypes.byref(report),
+            )
+        )
+        return ContourReport(
+            ring_count=report.ring_count,
+            face_count=report.face_count,
+            vertex_count=report.vertex_count,
+        )
+
+    def bridge_loops(self, loop_a: Sequence[int], loop_b: Sequence[int]) -> int:
+        """A band of quads between two equal-length boundary vertex sequences."""
+        if len(loop_a) != len(loop_b):
+            raise ValueError("bridge_loops needs two loops of equal length")
+        new_faces = ctypes.c_size_t(0)
+        _check(
+            _ffi.get_lib().cyber_retopo_bridge_loops(
+                self.handle, _uint32_buffer(loop_a), _uint32_buffer(loop_b),
+                len(loop_a), ctypes.byref(new_faces),
+            )
+        )
+        return new_faces.value
+
+    def create_grid(
+        self,
+        points: Sequence[Sequence[float]],
+        rows: int,
+        cols: int,
+        snapper: Optional["Snapper"] = None,
+    ) -> int:
+        """A connected block of quads over a row-major ``(rows+1) x (cols+1)`` lattice."""
+        faces = ctypes.c_size_t(0)
+        _check(
+            _ffi.get_lib().cyber_retopo_create_grid(
+                self.handle, _float_buffer(points), int(rows), int(cols),
+                snapper.handle if snapper else None, ctypes.byref(faces),
+            )
+        )
+        return faces.value
+
+    def extend_boundary(
+        self,
+        chain: Sequence[int],
+        closed: bool,
+        offset: Sequence[float],
+        rings: int = 1,
+        snapper: Optional["Snapper"] = None,
+    ) -> Tuple[List[int], int]:
+        """Extrude a boundary chain into ``rings`` rows of quads.
+
+        Returns ``(outer_chain, new_face_count)``; the outer chain is what the
+        next extrusion continues from.
+        """
+        outer = (ctypes.c_uint32 * len(chain))()
+        new_faces = ctypes.c_size_t(0)
+        _check(
+            _ffi.get_lib().cyber_retopo_extend_boundary_grid(
+                self.handle, _uint32_buffer(chain), len(chain), 1 if closed else 0,
+                _vec3(offset), int(rings), snapper.handle if snapper else None,
+                outer, ctypes.byref(new_faces),
+            )
+        )
+        return [int(v) for v in outer], new_faces.value
+
+    def fan_boundary(
+        self,
+        chain: Sequence[int],
+        closed: bool,
+        apex_offset: Sequence[float],
+        snapper: Optional["Snapper"] = None,
+    ) -> Tuple[int, int]:
+        """Close a boundary chain with a triangle fan; returns ``(apex, faces)``."""
+        apex = ctypes.c_uint32(0)
+        new_faces = ctypes.c_size_t(0)
+        _check(
+            _ffi.get_lib().cyber_retopo_extend_boundary_fan(
+                self.handle, _uint32_buffer(chain), len(chain), 1 if closed else 0,
+                _vec3(apex_offset), snapper.handle if snapper else None,
+                ctypes.byref(apex), ctypes.byref(new_faces),
+            )
+        )
+        return apex.value, new_faces.value
+
+    def grow_boundary_edge(
+        self, edge: int, point: Sequence[float], snapper: Optional["Snapper"] = None
+    ) -> int:
+        """Grow the triangle on a BOUNDARY edge into a quad.
+
+        Splits ``edge`` and drops the new ring vertex at ``point`` (snapped to
+        the Target first when a snapper is given). The face keeps its id.
+        Returns the new vertex. Refused with the mesh unchanged when the edge is
+        dead or interior, or its face is not a triangle — growing a quad would
+        leave an n-gon.
+        """
+        vertex = ctypes.c_uint32(0)
+        _check(
+            _ffi.get_lib().cyber_retopo_grow_boundary_edge(
+                self.handle, int(edge), _vec3(point),
+                snapper.handle if snapper else None, ctypes.byref(vertex),
+            )
+        )
+        return vertex.value
+
+    def surface_cut(
+        self,
+        a: Sequence[float],
+        b: Sequence[float],
+        view_direction: Sequence[float],
+        triangulate_ngons: bool = False,
+        snapper: Optional["Snapper"] = None,
+    ) -> Tuple[int, int]:
+        """Knife-cut new edges across faces along ``a``-``b``.
+
+        Returns ``(split_edges, split_faces)``.
+        """
+        edges = ctypes.c_size_t(0)
+        faces = ctypes.c_size_t(0)
+        _check(
+            _ffi.get_lib().cyber_retopo_surface_cut(
+                self.handle, _vec3(a), _vec3(b), _vec3(view_direction),
+                1 if triangulate_ngons else 0, snapper.handle if snapper else None,
+                ctypes.byref(edges), ctypes.byref(faces),
+            )
+        )
+        return edges.value, faces.value
+
+    def patch_clone(
+        self,
+        faces: Sequence[int],
+        transform: Sequence[float],
+        flip: bool = False,
+        snapper: Optional["Snapper"] = None,
+    ) -> List[int]:
+        """Duplicate ``faces`` under a 12-float column-major affine.
+
+        ``flip`` reverses each cloned ring, which keeps normals coherent under a
+        mirroring transform.
+        """
+        if len(transform) != 12:
+            raise ValueError("patch_clone needs a 12-float affine")
+        out = (ctypes.c_uint32 * len(faces))()
+        count = ctypes.c_size_t(0)
+        xf = (ctypes.c_float * 12)(*[float(v) for v in transform])
+        _check(
+            _ffi.get_lib().cyber_retopo_patch_clone(
+                self.handle, _uint32_buffer(faces), len(faces), xf,
+                1 if flip else 0, snapper.handle if snapper else None,
+                out, ctypes.byref(count),
+            )
+        )
+        return [int(out[i]) for i in range(count.value)]
+
+    def tweak_vertex(
+        self, vertex: int, target: Sequence[float], snapper: Optional["Snapper"] = None
+    ) -> None:
+        """Move one vertex, snapping to the Target when a snapper is given.
+
+        Tweak ignores pins by design: a pinned vertex is immune to relax and
+        move, but stays movable by an explicit tweak.
+        """
+        _check(
+            _ffi.get_lib().cyber_retopo_tweak_vertex(
+                self.handle, int(vertex), _vec3(target),
+                snapper.handle if snapper else None,
+            )
+        )
+
+    def erase(self, center: Sequence[float], base_radius: float, pressure: float = 1.0) -> int:
+        """Remove faces whose centroid lies within the pressure-scaled radius.
+
+        The radius grows with stylus pressure in ``[0, 1]``: half the base
+        radius at 0, up to 1.5x at 1. Returns the number of faces removed.
+        """
+        removed = ctypes.c_size_t(0)
+        _check(
+            _ffi.get_lib().cyber_retopo_erase(
+                self.handle, _vec3(center), float(base_radius), float(pressure),
+                ctypes.byref(removed),
+            )
+        )
+        return removed.value
+
+    def move(
+        self,
+        seed_vertex: int,
+        displacement: Sequence[float],
+        radius: float,
+        pinned: Optional[Sequence[int]] = None,
+        snapper: Optional["Snapper"] = None,
+    ) -> None:
+        """Move vertices around ``seed_vertex``, falling off over ``radius``.
+
+        The brush is seeded from a VERTEX rather than a point in space, so the
+        falloff runs over mesh connectivity — a drag on one side of a thin limb
+        does not pull the other side with it.
+        """
+        pin_buf, pin_count = _ids(pinned)
+        _check(
+            _ffi.get_lib().cyber_retopo_move(
+                self.handle, int(seed_vertex), _vec3(displacement), float(radius),
+                pin_buf, pin_count, snapper.handle if snapper else None,
+            )
+        )
+
+    def transform_vertices(
+        self,
+        vertices: Sequence[int],
+        transform: Sequence[float],
+        snapper: Optional["Snapper"] = None,
+        resnap_epsilon: float = 0.0,
+    ) -> Tuple[int, float]:
+        """Apply a 12-float column-major affine to a vertex list.
+
+        With a ``snapper`` each transformed vertex is re-projected onto the
+        Target afterwards. Returns ``(resnapped, max_distance)``, counting the
+        vertices whose re-projection moved them by more than
+        ``resnap_epsilon`` — so ``moved - resnapped`` is how many were already
+        on-surface.
+        """
+        if len(transform) != 12:
+            raise ValueError("transform_vertices needs a 12-float affine")
+        xf = (ctypes.c_float * 12)(*[float(v) for v in transform])
+        resnapped = ctypes.c_size_t(0)
+        max_distance = ctypes.c_float(0.0)
+        _check(
+            _ffi.get_lib().cyber_retopo_transform_vertices(
+                self.handle, _uint32_buffer(vertices), len(vertices), xf,
+                snapper.handle if snapper else None, float(resnap_epsilon),
+                ctypes.byref(resnapped), ctypes.byref(max_distance),
+            )
+        )
+        return resnapped.value, max_distance.value
+
+    def distribute_path(
+        self, vertices: Sequence[int], snapper: Optional["Snapper"] = None
+    ) -> None:
+        """Even out the spacing of the vertices along a path."""
+        _check(
+            _ffi.get_lib().cyber_retopo_distribute_path(
+                self.handle, _uint32_buffer(vertices), len(vertices),
+                snapper.handle if snapper else None,
+            )
+        )
+
+    # ---- element, picking and loop queries -------------------------------
+
+    def live_faces(self) -> List[int]:
+        """Every live face id."""
+        lib = _ffi.get_lib()
+        needed = lib.cyber_mesh_live_faces(self.handle, None, 0)
+        if needed == 0:
+            return []
+        buf = (ctypes.c_uint32 * needed)()
+        written = lib.cyber_mesh_live_faces(self.handle, buf, needed)
+        return [int(buf[i]) for i in range(written)]
+
+    def triangle_count(self) -> int:
+        """Triangles the mesh would produce if triangulated for rendering."""
+        return int(_ffi.get_lib().cyber_mesh_triangle_count(self.handle))
+
+    def edge_faces(self, edge: int) -> List[Tuple[int, int]]:
+        """Faces on ``edge`` in radial order, each with its side count.
+
+        At most two are reported even on a non-manifold edge, which the engine
+        supports and tags; :meth:`edge_face_count` gives the true valence.
+        """
+        faces = (ctypes.c_uint32 * 2)()
+        sizes = (ctypes.c_size_t * 2)()
+        written = _ffi.get_lib().cyber_mesh_edge_faces(self.handle, int(edge), faces, sizes)
+        if written <= 0:
+            return []
+        return [(int(faces[i]), int(sizes[i])) for i in range(written)]
+
+    def edge_face_count(self, edge: int) -> int:
+        """True face valence of ``edge``: 0 wire, 1 boundary, 2 interior, 3+ non-manifold."""
+        return max(int(_ffi.get_lib().cyber_mesh_edge_face_count(self.handle, int(edge))), 0)
+
+    def is_boundary_edge(self, edge: int) -> bool:
+        return _ffi.get_lib().cyber_mesh_is_boundary_edge(self.handle, int(edge)) == 1
+
+    def nearest_vertex(
+        self, query: Sequence[float], max_distance: float, exclude: Optional[int] = None
+    ) -> Optional[int]:
+        """Nearest live vertex within ``max_distance``.
+
+        ``exclude`` skips one vertex, which is the "weld onto something that is
+        not myself" query a drag needs.
+        """
+        out = ctypes.c_uint32(0)
+        lib = _ffi.get_lib()
+        if exclude is None:
+            found = lib.cyber_mesh_nearest_vertex(
+                self.handle, _vec3(query), float(max_distance), ctypes.byref(out), None
+            )
+        else:
+            found = lib.cyber_mesh_nearest_vertex_excluding(
+                self.handle, _vec3(query), float(max_distance), int(exclude),
+                ctypes.byref(out), None,
+            )
+        return out.value if found else None
+
+    def nearest_edge(self, query: Sequence[float], max_distance: float) -> Optional[int]:
+        out = ctypes.c_uint32(0)
+        found = _ffi.get_lib().cyber_mesh_nearest_edge(
+            self.handle, _vec3(query), float(max_distance), ctypes.byref(out), None
+        )
+        return out.value if found else None
+
+    def edge_loop(self, edge: int) -> List[int]:
+        """The edge loop through ``edge``, as edge ids."""
+        lib = _ffi.get_lib()
+        needed = lib.cyber_mesh_edge_loop(self.handle, int(edge), None, 0)
+        if needed == 0:
+            return []
+        buf = (ctypes.c_uint32 * needed)()
+        written = lib.cyber_mesh_edge_loop(self.handle, int(edge), buf, needed)
+        return [int(buf[i]) for i in range(written)]
+
+    def quad_ring(self, edge: int) -> Tuple[List[int], bool]:
+        """The quad ring through ``edge`` — the perpendicular partner to the loop."""
+        lib = _ffi.get_lib()
+        closed = ctypes.c_int32(0)
+        needed = lib.cyber_mesh_quad_ring(self.handle, int(edge), None, 0, ctypes.byref(closed))
+        if needed == 0:
+            return [], False
+        buf = (ctypes.c_uint32 * needed)()
+        written = lib.cyber_mesh_quad_ring(
+            self.handle, int(edge), buf, needed, ctypes.byref(closed)
+        )
+        return [int(buf[i]) for i in range(written)], closed.value != 0
+
+    def boundary_loop(self, edge: int) -> Tuple[List[int], bool]:
+        """The boundary loop through ``edge``, as ordered vertex ids."""
+        lib = _ffi.get_lib()
+        closed = ctypes.c_int32(0)
+        needed = lib.cyber_mesh_boundary_loop(
+            self.handle, int(edge), None, 0, ctypes.byref(closed)
+        )
+        if needed == 0:
+            return [], False
+        buf = (ctypes.c_uint32 * needed)()
+        written = lib.cyber_mesh_boundary_loop(
+            self.handle, int(edge), buf, needed, ctypes.byref(closed)
+        )
+        return [int(buf[i]) for i in range(written)], closed.value != 0
+
+    def shortest_path(self, source: int, target: int) -> List[int]:
+        """Shortest vertex path, as ordered vertex ids — two taps into a cut line."""
+        lib = _ffi.get_lib()
+        needed = lib.cyber_mesh_shortest_vertex_path(
+            self.handle, int(source), int(target), None, 0
+        )
+        if needed == 0:
+            return []
+        buf = (ctypes.c_uint32 * needed)()
+        written = lib.cyber_mesh_shortest_vertex_path(
+            self.handle, int(source), int(target), buf, needed
+        )
+        return [int(buf[i]) for i in range(written)]
+
+    def loop_metrics(self, edge: int, snapper: Optional["Snapper"] = None) -> LoopMetrics:
+        """Loop Info: what the loop is made of, and whether it sits on the Target."""
+        m = _ffi.CyberLoopMetrics()
+        _check(
+            _ffi.get_lib().cyber_mesh_loop_metrics(
+                self.handle, int(edge), snapper.handle if snapper else None,
+                ctypes.byref(m),
+            )
+        )
+        return LoopMetrics(
+            edge_count=m.edge_count,
+            vertex_count=m.vertex_count,
+            closed=m.closed != 0,
+            length=m.length,
+            endpoints=(m.endpoint_a, m.endpoint_b) if m.has_endpoints else None,
+            boundary_edge_count=m.boundary_edge_count,
+            snap_measured=m.snap_measured != 0,
+            snapped_vertex_count=m.snapped_vertex_count,
+            max_snap_distance=m.max_snap_distance,
+        )
+
+    # ---- visibility and tagging -------------------------------------------
+
+    def set_hidden_faces(self, faces: Sequence[int]) -> None:
+        """Hide faces without deleting them; an empty list shows everything."""
+        buf, count = _ids(faces)
+        _check(_ffi.get_lib().cyber_mesh_set_hidden_faces(self.handle, buf, count))
+
+    def hidden_face_count(self) -> int:
+        return int(_ffi.get_lib().cyber_mesh_hidden_face_count(self.handle))
+
+    def set_tagged_edges(self, edges: Sequence[int]) -> None:
+        """Mark edges with a persistent tag — landmark loop colouring, and the
+        channel UV seams travel on."""
+        buf, count = _ids(edges)
+        _check(_ffi.get_lib().cyber_mesh_set_tagged_edges(self.handle, buf, count))
+
+    def copy_normals(self) -> List[float]:
+        """Per-vertex normals, flat x,y,z."""
+        lib = _ffi.get_lib()
+        needed = lib.cyber_mesh_copy_normals(self.handle, None, 0)
+        if needed == 0:
+            return []
+        buf = (ctypes.c_float * needed)()
+        written = lib.cyber_mesh_copy_normals(self.handle, buf, needed)
+        return [float(buf[i]) for i in range(written)]
+
+    def copy_edge_indices(self) -> List[int]:
+        """Edge endpoint pairs, flat."""
+        lib = _ffi.get_lib()
+        needed = lib.cyber_mesh_copy_edge_indices(self.handle, None, 0)
+        if needed == 0:
+            return []
+        buf = (ctypes.c_uint32 * needed)()
+        written = lib.cyber_mesh_copy_edge_indices(self.handle, buf, needed)
+        return [int(buf[i]) for i in range(written)]
+
+    def copy_triangle_indices(self) -> List[int]:
+        """Render triangles, flat — every face fan-triangulated."""
+        lib = _ffi.get_lib()
+        needed = lib.cyber_mesh_copy_triangle_indices(self.handle, None, 0)
+        if needed == 0:
+            return []
+        buf = (ctypes.c_uint32 * needed)()
+        written = lib.cyber_mesh_copy_triangle_indices(self.handle, buf, needed)
+        return [int(buf[i]) for i in range(written)]
 
     def insert_loop(self, edge: int, t: float = 0.5) -> int:
         """Insert a COMPLETE edge loop around the quad ring through ``edge``.
