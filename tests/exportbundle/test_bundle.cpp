@@ -6,6 +6,7 @@
 #include <fstream>
 #include <ios>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "cyber/core/mesh.hpp"
@@ -318,6 +319,35 @@ TEST_CASE("the container follows the preset's textureFormat, not the file name")
     }
     // OpenEXR's magic (0x01312f76, little-endian) — a PNG would start 0x89 P N G.
     REQUIRE(magic == std::array<unsigned char, 4>{0x76, 0x2f, 0x31, 0x01});
+    fs::remove_all(dir);
+}
+
+// The bundle used to hand the bake a null sink and report one step per map, so
+// a preset whose slowest entry is a ray-traced map looked hung for the whole of
+// it however finely the bake itself reported.
+TEST_CASE("a bundle's progress moves WITHIN a map, not only between maps") {
+    const fs::path dir = testDir("progress");
+    Mesh low = makeSurface(0.0f);
+    const Mesh high = makeSurface(0.02f);
+    io::ExportPreset preset = smallPreset("t", io::GreenChannel::PlusY);
+    // One ray-traced map, so every report between 0 and 1/1 comes from inside it.
+    preset.maps = {
+        io::PresetMapEntry{io::PresetMap::BentNormal, io::ColorSpace::Linear, "bent"},
+    };
+
+    std::vector<float> values;
+    float last = 0.0f;
+    cyber::ProgressSink sink([&](float value, std::string_view) {
+        CHECK(value >= last);
+        last = value;
+        values.push_back(value);
+    });
+    const bundle::BundleResult result =
+        bundle::writeBundle(low, high, paramsFor(preset, dir), &sink);
+    REQUIRE(result.ok);
+    CHECK(std::count_if(values.begin(), values.end(),
+                        [](float v) { return v > 0.0f && v < 1.0f; }) > 5);
+    CHECK(last == doctest::Approx(1.0f));
     fs::remove_all(dir);
 }
 

@@ -78,6 +78,14 @@ struct ExportPreset {
     // Metadata recorded in the report and applied only where the chosen mesh
     // format actually carries it (glTF fixes both; OBJ/PLY/STL carry neither).
     std::string units = "meters";
+    // `upAxis` is the one exception, since 0.8.0: it is ALSO the convention the
+    // object-space maps are baked in (writeBundle feeds it to
+    // BakeParams::upAxis), because a preset is where "what this target app
+    // expects" already lives and there is no second place to say it. A mesh
+    // format that carries no axis therefore ships y-up vertex data beside z-up
+    // object-space maps under a z-up preset -- which is what a z-up DCC wants,
+    // since it rotates the mesh on import and the maps must match what it ends
+    // up with. Recognised values: "y-up", "z-up".
     std::string upAxis = "y-up";
     std::vector<PresetMapEntry> maps;
 };

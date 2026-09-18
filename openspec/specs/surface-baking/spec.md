@@ -11,7 +11,7 @@ accelerated, cancellable and previewable rather than a blind wait.
 ### Requirement: Bakeable map types
 The bake stage SHALL bake from the Target onto the EditMesh's UV layout: tangent-space normal maps, ambient occlusion, displacement/height, color maps (from Target vertex colors, including polypaint, or from a Target texture when the Target has its own UVs — texture-to-texture baking), object-space normal maps, object-space position maps, bent normal maps and thickness maps. Output resolution SHALL be user-selectable up to at least 4096².
 
-Every map type SHALL be requestable through the same entry points, and SHALL honour the same projection cage, component links, texel ceiling, progress reporting and cooperative cancellation. Every numeric parameter a map reads SHALL have a stated default, range and meaning, and SHALL be validated identically at every entry point: a value outside its range SHALL be refused rather than substituted.
+Every map type SHALL be requestable through the same entry points, and SHALL honour the same projection cage, texel ceiling, progress reporting and cooperative cancellation. Every numeric parameter a map reads SHALL have a stated default, range and meaning, and a value outside that range SHALL be refused — the bake returns no image — rather than substituted with a default, whichever entry point the request arrives through.
 
 #### Scenario: Normal + color bake
 - **WHEN** a bake runs on an EditMesh with valid UVs against a vertex-colored Target
@@ -140,9 +140,26 @@ Both maps SHALL use the ambient-occlusion bake's sample budget, radius, bias, pe
 - **WHEN** a bent normal map is baked on a flat surface beside a tall wall
 - **THEN** the direction at a texel beside the wall SHALL lean away from it, while a texel far from the wall SHALL stay close to the surface normal
 
+#### Scenario: The bent normal is a unit direction
+- **WHEN** a bent normal map is baked in either frame
+- **THEN** every covered texel SHALL decode to a direction of unit length, not to the unnormalized sum of the open sample directions
+
+#### Scenario: The tangent frame's axes are not interchangeable
+- **WHEN** a bent normal map is baked in the default tangent frame beside an occluder that is asymmetric along the tangent axis alone
+- **THEN** the red channel SHALL move and the green channel SHALL stay neutral, and an occluder asymmetric along the bitangent axis alone SHALL do the reverse
+
 #### Scenario: Thickness reads a solid
 - **WHEN** a thickness map is baked against a solid Target
 - **THEN** covered texels SHALL hold a positive distance of the order of the material behind them, scaled by the stated factor
+
+#### Scenario: Thickness is a distance, bounded by the occlusion radius
+- **WHEN** a thickness map is baked against a slab of known depth
+- **THEN** the value SHALL be the cosine-weighted mean exit distance for that depth and occlusion radius, times the stated scale
+- **AND** an occlusion radius short enough to cut off the grazing paths SHALL reduce the value, because a ray longer than the radius contributes zero
+
+#### Scenario: The cage decides which surface the ray-traced maps sample
+- **WHEN** a bent normal or thickness map is baked against a Target the projection cage does not reach
+- **THEN** the hemisphere SHALL be anchored on the EditMesh's own surface and frame, and SHALL reach the Target only once the cage is opened far enough to project onto it
 
 #### Scenario: A thin double-sided surface reads near zero
 - **WHEN** a thickness map is baked with the cage applied against a thin double-sided Target, whose inverted-normal rays escape without meeting a back face
@@ -159,6 +176,10 @@ Both maps SHALL use the ambient-occlusion bake's sample budget, radius, bias, pe
 #### Scenario: The same rays on any backend
 - **WHEN** the ray-traced maps are baked on the CPU reference and on an available accelerated backend
 - **THEN** the results SHALL agree within the compute-acceleration layer's existing raycast parity tolerance, because they dispatch through the same primitive the ambient-occlusion bake does
+
+#### Scenario: The partition is not part of the answer
+- **WHEN** the same ray-traced bake is run with the texel loop handed out in chunks and one texel at a time
+- **THEN** the two images SHALL be identical texel for texel, so a map is a property of the rays rather than of how the compute layer split the work
 
 ### Requirement: Baked maps record their encoding basis
 Every bake SHALL report, with its output image, the basis needed to interpret the numbers in it: whether the values are raw, a direction in the texel's tangent frame, a direction in object space, a position rescaled over a bounding box, or a distance in model units; the up axis a direction or position was expressed in; the bounding box a position was rescaled over; and the factor a distance was multiplied by.

@@ -16,9 +16,10 @@
   `object-position` is the hit point rescaled so the bake's bounding box spans
   `[0,1]`. Both take a selectable up axis (`BakeParams::upAxis`, y-up by
   default; in a bundle run it comes from the preset, which is where "what this
-  target app expects" already lives) and cost the SAME single cage ray the
-  normal map casts, so they honour the cage, the component links, the texel
-  ceiling and cancellation with nothing added.
+  target app expects" already lives — so under a z-up preset an OBJ ships y-up
+  vertex data beside z-up maps, which is what a z-up DCC wants after it rotates
+  the mesh on import) and cost the SAME single cage ray the normal map casts, so
+  they honour the cage, the texel ceiling and cancellation with nothing added.
 
   `bent-normal` and `thickness` are ray-traced and share the AO baker's
   hemisphere: one `gatherHemisphere()` serves AO's occluded count, the bent
@@ -62,7 +63,10 @@
   report at the end. The texel loop is the bake's only parallel region, so the
   reports come from worker threads; `ProgressSink` merges values monotonically
   but hands the host callback straight through, so the bake serialises the call
-  behind its own mutex and reports on a 1% step. Still one `parallelFor` range.
+  behind its own mutex and reports on a 1% step. Still one `parallelFor` range. An
+  export bundle now hands each map a `ProgressSink::subrange` of its own instead
+  of a null sink, so the CLI's bar moves DURING a slow ray-traced map rather
+  than once per map.
 
 - **CLI:** `--bake` accepts `object-normal`, `object-position`, `bent-normal`
   and `thickness`; `--thickness-scale` and `--bent-normal-space` set the two new

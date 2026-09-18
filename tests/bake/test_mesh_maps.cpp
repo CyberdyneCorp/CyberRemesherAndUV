@@ -9,6 +9,7 @@
 #include <mutex>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "cyber/accel/backend.hpp"
@@ -166,6 +167,34 @@ private:
     std::shared_ptr<accel::IBackend> m_inner;
     mutable std::mutex m_mutex;
     std::vector<std::size_t> m_ranges;
+};
+
+// The compute layer's own per-primitive raycast tolerance (tests/accel:
+// "Backend parity harness"). GPU float ops reassociate, so a device is compared
+// against the CPU reference within it rather than for equality.
+constexpr float kBackendTolerance = 1e-3f;
+
+// Hands the texel loop out one index at a time instead of in chunks, and leaves
+// every primitive at the CPU reference. A bake's pixels must not depend on how
+// the compute layer partitions its work — the property the CPU/GPU parity claim
+// rests on, and the one a host-only build can actually measure.
+class SingleStepBackend final : public accel::IBackend {
+public:
+    explicit SingleStepBackend(std::shared_ptr<accel::IBackend> inner)
+        : m_inner(std::move(inner)) {}
+
+    [[nodiscard]] accel::BackendKind kind() const override { return m_inner->kind(); }
+    [[nodiscard]] std::string deviceName() const override { return m_inner->deviceName(); }
+
+    void parallelFor(std::size_t begin, std::size_t end,
+                     const std::function<void(std::size_t, std::size_t)>& fn) override {
+        for (std::size_t i = begin; i < end; ++i) {
+            fn(i, i + 1);
+        }
+    }
+
+private:
+    std::shared_ptr<accel::IBackend> m_inner;
 };
 
 class ScopedBackend {
@@ -327,6 +356,97 @@ TEST_CASE("the bent normal leans away from an occluder") {
     CHECK(std::fabs(open.x - 0.5f) < std::fabs(texel(r.image, 0.45f, 0.5f).x - 0.5f));
 }
 
+TEST_CASE("the bent normal is a unit direction, not the raw sum of open rays") {
+    // The average of the unoccluded sample directions is RENORMALIZED before it
+    // is encoded: without that, a texel with 40 open rays out of 64 encodes to
+    // channel values in the tens, and every relative "leans this way" assertion
+    // still passes while the map is unusable as a normal.
+    const Mesh low = planeWithUv(0, 0, 1, 0, 1);
+    Mesh high = plane(0, -1, 2, -1, 2);
+    {
+        const std::vector<Vec3> p = {
+            {0.5f, -1, 0}, {0.5f, 2, 0}, {0.5f, 2, 0.5f}, {0.5f, -1, 0.5f}};
+        const std::vector<std::vector<Index>> f = {{0, 1, 2, 3}};
+        append(high, Mesh::fromIndexed(p, f));
+    }
+
+    for (const bake::NormalSpace space : {bake::NormalSpace::Tangent, bake::NormalSpace::Object}) {
+        CAPTURE(static_cast<int>(space));
+        bake::BakeParams p = params64();
+        p.bentNormalSpace = space;
+        const bake::BakeResult r = bake::bake(low, high, bake::BakeMap::BentNormal, p);
+        REQUIRE_FALSE(r.image.pixels.empty());
+
+        int unit = 0;
+        for (int py = 0; py < r.image.height; ++py) {
+            for (int px = 0; px < r.image.width; ++px) {
+                const Vec3 encoded{r.image.at(px, py, 0), r.image.at(px, py, 1),
+                                   r.image.at(px, py, 2)};
+                // Object-space padding is the ZERO vector (0.5, 0.5, 0.5) —
+                // object space has no flat normal — so it is not a direction.
+                if (encoded.x == 0.5f && encoded.y == 0.5f && encoded.z == 0.5f) {
+                    continue;
+                }
+                const Vec3 n = encoded * 2.0f - Vec3{1.0f, 1.0f, 1.0f};
+                REQUIRE(std::sqrt(n.x * n.x + n.y * n.y + n.z * n.z) ==
+                        doctest::Approx(1.0f).epsilon(0.002));
+                ++unit;
+            }
+        }
+        CHECK(unit > 3000);  // the whole layout is covered; nothing was skipped
+    }
+}
+
+TEST_CASE("the tangent-space bent normal puts the tangent in red and the bitangent in green") {
+    // The shipping default frame. Its blue channel is pinned by the enclosed
+    // fallback below, but red and green are only distinguishable with an
+    // occluder that is asymmetric along ONE of them at a time: a wall across x
+    // must move red alone, and a wall across y must move green alone.
+    const Mesh low = planeWithUv(0, 0, 1, 0, 1);
+    const auto withWall = [](bool alongY) {
+        Mesh high = plane(0, -1, 2, -1, 2);
+        const std::vector<Vec3> across = {
+            {0.5f, -1, 0}, {0.5f, 2, 0}, {0.5f, 2, 0.5f}, {0.5f, -1, 0.5f}};
+        const std::vector<Vec3> along = {
+            {-1, 0.5f, 0}, {2, 0.5f, 0}, {2, 0.5f, 0.5f}, {-1, 0.5f, 0.5f}};
+        const std::vector<std::vector<Index>> f = {{0, 1, 2, 3}};
+        append(high, Mesh::fromIndexed(alongY ? along : across, f));
+        return high;
+    };
+
+    bake::BakeParams p = params64();
+    REQUIRE(p.bentNormalSpace == bake::NormalSpace::Tangent);
+
+    // A wall at x = 0.5: the texel to its right leans along +tangent, so RED
+    // rises and GREEN stays at the 0.5 an in-plane-symmetric texel encodes to.
+    const bake::BakeResult xWall = bake::bake(low, withWall(false), bake::BakeMap::BentNormal, p);
+    REQUIRE_FALSE(xWall.image.pixels.empty());
+    const Vec3 rightOfWall = texel(xWall.image, 0.55f, 0.5f);
+    CHECK(rightOfWall.x > 0.6f);
+    CHECK(rightOfWall.y == doctest::Approx(0.5f).epsilon(0.02));
+    CHECK(texel(xWall.image, 0.45f, 0.5f).x < 0.4f);
+
+    // A wall at y = 0.5, rotated a quarter turn: now GREEN moves and RED does
+    // not. A frame that swapped the two would pass one of these and fail this.
+    const bake::BakeResult yWall = bake::bake(low, withWall(true), bake::BakeMap::BentNormal, p);
+    const Vec3 aboveWall = texel(yWall.image, 0.5f, 0.55f);
+    CHECK(aboveWall.y > 0.6f);
+    CHECK(aboveWall.x == doctest::Approx(0.5f).epsilon(0.02));
+    CHECK(texel(yWall.image, 0.5f, 0.45f).y < 0.4f);
+
+    // This low-poly's tangent frame IS the identity (tangent +x, bitangent +y,
+    // normal +z), so the tangent-space map and the y-up object-space one must
+    // agree channel for channel — the sharpest statement of which axis is which.
+    p.bentNormalSpace = bake::NormalSpace::Object;
+    const bake::BakeResult object = bake::bake(low, withWall(false), bake::BakeMap::BentNormal, p);
+    for (const float u : {0.45f, 0.55f, 0.9f}) {
+        CAPTURE(u);
+        CHECK(texel(xWall.image, u, 0.5f).x == doctest::Approx(texel(object.image, u, 0.5f).x));
+        CHECK(texel(xWall.image, u, 0.5f).y == doctest::Approx(texel(object.image, u, 0.5f).y));
+        CHECK(texel(xWall.image, u, 0.5f).z == doctest::Approx(texel(object.image, u, 0.5f).z));
+    }
+}
+
 TEST_CASE("a fully enclosed texel falls back to the surface normal") {
     // A closed room: floor at z = 0 and a ceiling just above it, wide enough
     // that every one of the 64 cosine-weighted rays hits within the radius.
@@ -403,6 +523,49 @@ TEST_CASE("thickness reads a solid and tracks its depth") {
 
     CHECK(deep.encoding.basis == bake::EncodingBasis::Distance);
     CHECK(deep.encoding.scale == doctest::Approx(2.0f));
+}
+
+TEST_CASE("thickness is a distance in model units, and the occlusion radius bounds it") {
+    // A slab of known depth has a CLOSED-FORM answer, which pins the two things
+    // a ratio cannot: the absolute magnitude, and the radius bound.
+    //
+    // The hemisphere is cosine-weighted about the inverted normal, so the pdf
+    // over the polar angle is 2 cos(t) sin(t). A ray at angle t leaves a slab of
+    // depth d after d / cos(t), and a ray longer than the occlusion radius R
+    // contributes zero, which cuts the integral off at cos(t) = d / R:
+    //
+    //   E[depth] = INTEGRAL[0, acos(d/R)] (d / cos t) * 2 cos t sin t dt
+    //            = 2 d (1 - d / R)
+    //
+    // The bake then multiplies by thicknessScale. Held at 1 here so the pixel
+    // IS the distance; the scale has its own case below.
+    const float slabDepth = 0.25f;
+    const Mesh low = planeWithUv(0, 0, 1, 0, 1);
+    // Wide enough that no ray short enough to count ever reaches a side wall.
+    const Mesh slab = box(-2, 3, -2, 3, -slabDepth, 0);
+
+    const auto measure = [&](float radius) {
+        bake::BakeParams p = params64();
+        p.aoRadius = radius;
+        p.thicknessScale = 1.0f;
+        const bake::BakeResult r = bake::bake(low, slab, bake::BakeMap::Thickness, p);
+        REQUIRE_FALSE(r.image.pixels.empty());
+        // The rays start aoBias INSIDE the material, so that much of the slab is
+        // already behind them.
+        const float d = slabDepth - p.aoBias;
+        const float predicted = 2.0f * d * (1.0f - d / radius);
+        return std::pair<float, float>{texel(r.image, 0.5f, 0.5f).x, predicted};
+    };
+
+    // A radius well past the slab: the depth is the slab's own, not the radius.
+    const auto wide = measure(1.0f);
+    CHECK(wide.first == doctest::Approx(wide.second).epsilon(0.1));
+
+    // A radius barely past it: the same geometry now reads a THIRD as thick,
+    // because the grazing rays that run past R stop counting.
+    const auto tight = measure(0.3f);
+    CHECK(tight.first == doctest::Approx(tight.second).epsilon(0.1));
+    CHECK(tight.first < wide.first * 0.5f);
 }
 
 TEST_CASE("a thin double-sided surface reads near zero rather than its thickness") {
@@ -510,6 +673,28 @@ TEST_CASE("the cage decides which Target surface an object-space map speaks for"
     CHECK(texel(reached.image, 0.5f, 0.5f).z == doctest::Approx(0.0f));
 }
 
+TEST_CASE("the cage decides which Target surface the ray-traced maps speak for") {
+    // The same rule on the OTHER shading path. The hemisphere is anchored at the
+    // cage hit, so a Target the cage does not reach must not be sampled: the
+    // rays fire from the EditMesh's own surface instead, through empty space.
+    const Mesh low = planeWithUv(0, 0, 1, 0, 1);
+    const Mesh farSolid = box(0, 1, 0, 1, -1.5f, -1.0f);
+
+    bake::BakeParams p = params64();
+    p.aoRadius = 4.0f;  // long enough to reach the solid even from the EditMesh
+    const bake::BakeResult missed = bake::bake(low, farSolid, bake::BakeMap::Thickness, p);
+    REQUIRE_FALSE(missed.image.pixels.empty());
+    // Anchored on the EditMesh at z = 0, the downward rays meet the solid's TOP
+    // face — a front face, never entering material — so nothing is behind them.
+    CHECK(texel(missed.image, 0.5f, 0.5f).x == doctest::Approx(0.0f));
+
+    // Open the cage past the Target and the same bake anchors on it and reads
+    // the 0.5 units of material behind its top face.
+    p.cageDistance = 1.2f;
+    const bake::BakeResult reached = bake::bake(low, farSolid, bake::BakeMap::Thickness, p);
+    CHECK(texel(reached.image, 0.5f, 0.5f).x > 0.5f);
+}
+
 TEST_CASE("the ray-traced maps report progress as they accumulate") {
     const Mesh low = planeWithUv(0, 0, 1, 0, 1);
     const Mesh high = box(0, 1, 0, 1, -0.5f, 0);
@@ -561,6 +746,66 @@ TEST_CASE("the ray-traced maps dispatch one texel loop through the compute layer
         CHECK(std::count(ranges.begin(), ranges.end(), r.texelsCovered) == 1);
         CHECK(*std::max_element(ranges.begin(), ranges.end()) == r.texelsCovered);
     }
+}
+
+TEST_CASE("the ray-traced maps agree across backends") {
+    // The parity claim, in the two halves this host can and cannot measure.
+    const Mesh low = planeWithUv(0, 0, 1, 0, 1);
+    const Mesh high = box(0, 1, 0, 1, -0.5f, 0);
+    const std::vector<bake::BakeMap> maps = {bake::BakeMap::BentNormal, bake::BakeMap::Thickness};
+
+    // 1. Dispatch shape: the SAME backend, handed the texel loop one index at a
+    //    time, must produce the same image bit for bit. That is what makes the
+    //    result a property of the rays rather than of the partition — and it is
+    //    measurable with no GPU in the build.
+    for (const bake::BakeMap map : maps) {
+        CAPTURE(static_cast<int>(map));
+        const bake::BakeResult chunked = bake::bake(low, high, map, params64());
+        REQUIRE_FALSE(chunked.image.pixels.empty());
+        bake::BakeResult stepped;
+        {
+            const ScopedBackend installed(
+                std::make_shared<SingleStepBackend>(accel::defaultBackend()));
+            stepped = bake::bake(low, high, map, params64());
+        }
+        CHECK(stepped.image.pixels == chunked.image.pixels);
+    }
+
+    // 2. Device agreement: every backend this build compiled in, against the CPU
+    //    reference, within the compute layer's own raycast tolerance. On a
+    //    cpu-headless build the loop has one entry and the comparison is a
+    //    self-check, which the case below says out loud rather than leaving the
+    //    suite to imply a parity it never measured.
+    const auto backends = accel::availableBackends();
+    REQUIRE(!backends.empty());
+    REQUIRE(backends.back()->kind() == accel::BackendKind::Cpu);
+    for (const bake::BakeMap map : maps) {
+        CAPTURE(static_cast<int>(map));
+        const ScopedBackend cpu(backends.back());
+        const bake::BakeResult reference = bake::bake(low, high, map, params64());
+        REQUIRE_FALSE(reference.image.pixels.empty());
+        for (const auto& backend : backends) {
+            CAPTURE(backend->deviceName());
+            const ScopedBackend installed(backend);
+            const bake::BakeResult r = bake::bake(low, high, map, params64());
+            REQUIRE(r.image.pixels.size() == reference.image.pixels.size());
+            float worst = 0.0f;
+            for (std::size_t i = 0; i < r.image.pixels.size(); ++i) {
+                worst = std::max(worst, std::fabs(r.image.pixels[i] - reference.image.pixels[i]));
+            }
+            CHECK(worst <= kBackendTolerance);
+        }
+    }
+}
+
+TEST_CASE("backend parity actually compared a device when one was compiled in") {
+    const auto backends = accel::availableBackends();
+    if (backends.size() == 1) {
+        MESSAGE(
+            "SKIPPED: no GPU backend compiled in — the bake parity case above compared the CPU "
+            "reference against itself");
+    }
+    CHECK(!backends.empty());
 }
 
 TEST_CASE("every map reports an encoding basis") {

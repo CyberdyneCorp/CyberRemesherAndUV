@@ -73,6 +73,18 @@ bake::UpAxis presetUpAxis(const ExportPreset& preset, BundleResult& result) {
     return bake::UpAxis::YUp;
 }
 
+// One map's slice of the bundle's progress. The ray-traced maps report per
+// texel, so a single 4K bent-normal bake is the difference between a moving bar
+// and a host that looks hung for a minute. A sink with no callback behind it
+// (no host progress at all) reports nothing and costs nothing, so the caller
+// always has a sink to hand the bake.
+ProgressSink mapSubrange(ProgressSink* progress, float done, float total) {
+    if (progress == nullptr) {
+        return ProgressSink{};
+    }
+    return progress->subrange(done / total, (done + 1.0f) / total, "export bundle");
+}
+
 // DirectX-style normal maps point green down. The bake always produces the
 // OpenGL convention, so the flip happens once, here, on the encoded texel.
 void flipGreen(bake::Image& image) {
@@ -239,7 +251,8 @@ BundleResult writeBundle(Mesh& low, const Mesh& high, const BundleParams& params
                            "' has no bake implementation";
             return result;
         }
-        bake::BakeResult baked = bake::bake(low, high, *map, bakeParams, nullptr, cancel);
+        ProgressSink mapProgress = mapSubrange(progress, done, total);
+        bake::BakeResult baked = bake::bake(low, high, *map, bakeParams, &mapProgress, cancel);
         if (baked.cancelled) {
             result.cancelled = true;
             return result;
