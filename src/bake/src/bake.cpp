@@ -761,11 +761,20 @@ struct RasterSources {
 
 RasterSources gatherRasterSources(const Mesh& highPoly, const std::vector<Vec3>& highNormals,
                                   const BakeBounds& bounds, BakeMap map, const BakeParams& params) {
-    RasterSources sources{.highPoly = highPoly, .highNormals = highNormals, .bounds = bounds};
-    sources.colors = highPoly.vertexAttributes().find<Vec3>(io::kColorAttribute);
-    sources.highUvs = highPoly.cornerAttributes().find<Vec2>(io::kUvAttribute);
-    sources.useTexture = params.colorSource.kind == ColorSource::Texture &&
-                         params.colorSource.texture != nullptr && sources.highUvs != nullptr;
+    const std::vector<Vec3>* colors = highPoly.vertexAttributes().find<Vec3>(io::kColorAttribute);
+    const std::vector<Vec2>* highUvs = highPoly.cornerAttributes().find<Vec2>(io::kUvAttribute);
+    // Every member is named: a designated-initializer list that stops early is
+    // -Wmissing-field-initializers under GCC even where the skipped members
+    // carry default initializers, and this tree builds with -Werror.
+    RasterSources sources{.highPoly = highPoly,
+                          .highNormals = highNormals,
+                          .bounds = bounds,
+                          .colors = colors,
+                          .highUvs = highUvs,
+                          .useTexture = params.colorSource.kind == ColorSource::Texture &&
+                                        params.colorSource.texture != nullptr && highUvs != nullptr,
+                          .curvature = {},
+                          .curvatureRange = 0.0f};
     // Curvature/cavity read the Target's curvature field at the same cage hit
     // the normal bake uses, so the two maps register texel for texel.
     if (map == BakeMap::Curvature || map == BakeMap::Cavity) {
