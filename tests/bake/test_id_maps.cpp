@@ -446,7 +446,7 @@ TEST_CASE("a texel no chart covers pads with the reserved 'no id'") {
         CHECK(byteAt(result.image, 10, 40) != kNoId);
         CHECK(byteAt(result.image, 20, 50) != kNoId);
         // Outside every chart: past it in u, past it in v, and in the corner.
-        for (const std::pair<int, int> at : {std::pair<int, int>{40, 40}, {10, 10}, {63, 10}}) {
+        for (const std::pair<int, int>& at : {std::pair<int, int>{40, 40}, {10, 10}, {63, 10}}) {
             CHECK(byteAt(result.image, at.first, at.second) == kNoId);
             // Exactly zero in the float buffer too, not merely rounding to it.
             for (int c = 0; c < result.image.channels; ++c) {
