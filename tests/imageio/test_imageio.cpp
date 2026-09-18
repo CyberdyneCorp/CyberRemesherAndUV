@@ -1,15 +1,20 @@
 #include <doctest.h>
 
 #include <array>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <optional>
 #include <string>
 #include <vector>
 
+#include "cyber/bake/bake.hpp"
 #include "cyber/imageio/exr.hpp"
+#include "cyber/imageio/image.hpp"
+#include "cyber/imageio/load.hpp"
 #include "cyber/imageio/png.hpp"
 #include "cyber/imageio/zip.hpp"
 
@@ -110,6 +115,53 @@ TEST_CASE("PNG rejects invalid arguments") {
     CHECK_FALSE(cyber::imageio::writePng(path, 0, 1, 3, px.data()));
     CHECK_FALSE(cyber::imageio::writePng(path, 1, 1, 2, px.data()));
     CHECK_FALSE(cyber::imageio::writePng(path, 1, 1, 3, nullptr));
+}
+
+TEST_CASE("an id map's colours reach the file byte for byte") {
+    // The claim a colour-ID map lives or dies on (surface-baking spec,
+    // "Material ID and object ID maps"): the written file must survive an
+    // EXACT comparison at zero tolerance. This is the end-to-end form of it --
+    // bake colours in, real PNG on disk, decoded pixels out, no tolerance
+    // anywhere. Anything the writer did to smooth, quantise differently or
+    // colour-convert would show up here and nowhere else.
+    cyber::bake::Image image;
+    image.width = 8;
+    image.height = 8;
+    image.channels = 3;
+    image.pixels.assign(8 * 8 * 3, 0.0f);
+    std::vector<std::array<std::uint8_t, 3>> assigned;
+    for (int y = 0; y < 8; ++y) {
+        for (int x = 0; x < 8; ++x) {
+            const auto color = cyber::bake::idColor(y * 8 + x);
+            assigned.push_back(color);
+            for (int c = 0; c < 3; ++c) {
+                image.at(x, y, c) = static_cast<float>(color[static_cast<std::size_t>(c)]) / 255.0f;
+            }
+        }
+    }
+
+    const std::string path = tempPath("cyber_imageio_id_map.png");
+    REQUIRE(cyber::imageio::saveImage(path, image, cyber::imageio::ImageFormat::Png));
+    const std::optional<cyber::imageio::LoadedImage> loaded = cyber::imageio::loadPng(path);
+    REQUIRE(loaded.has_value());
+    REQUIRE(loaded->width == 8);
+    REQUIRE(loaded->height == 8);
+    REQUIRE(loaded->channels >= 3);
+
+    for (int y = 0; y < 8; ++y) {
+        for (int x = 0; x < 8; ++x) {
+            const std::array<std::uint8_t, 3>& want = assigned[static_cast<std::size_t>(y * 8 + x)];
+            for (int c = 0; c < 3; ++c) {
+                const std::size_t at =
+                    (static_cast<std::size_t>(y) * 8 + static_cast<std::size_t>(x)) *
+                        static_cast<std::size_t>(loaded->channels) +
+                    static_cast<std::size_t>(c);
+                const long got = std::lround(loaded->pixels[at] * 255.0f);
+                REQUIRE(got == static_cast<long>(want[static_cast<std::size_t>(c)]));
+            }
+        }
+    }
+    std::filesystem::remove(path);
 }
 
 TEST_CASE("writers report failure when the final flush cannot reach the device") {

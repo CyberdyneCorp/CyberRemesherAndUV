@@ -21,7 +21,7 @@ struct MapNaming {
     const char* name;
 };
 
-constexpr std::array<MapNaming, 11> kMapNames{{
+constexpr std::array<MapNaming, 13> kMapNames{{
     {PresetMap::Normal, "normal"},
     {PresetMap::AmbientOcclusion, "ao"},
     {PresetMap::Curvature, "curvature"},
@@ -33,6 +33,8 @@ constexpr std::array<MapNaming, 11> kMapNames{{
     {PresetMap::ObjectPosition, "object-position"},
     {PresetMap::BentNormal, "bent-normal"},
     {PresetMap::Thickness, "thickness"},
+    {PresetMap::MaterialId, "material-id"},
+    {PresetMap::ObjectId, "object-id"},
 }};
 
 PresetMapEntry entryOf(PresetMap map, ColorSpace space) {

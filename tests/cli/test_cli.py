@@ -9,6 +9,7 @@ import shlex
 import subprocess
 import sys
 import tempfile
+import zlib
 from pathlib import Path
 
 BINARY = Path(sys.argv[1]).resolve()
@@ -31,6 +32,47 @@ def check(name: str, condition: bool, detail: str = "") -> None:
     else:
         FAILURES.append(name)
         print(f"FAIL: {name} {detail}")
+
+
+def _read_png_rgb(path: Path):
+    """The distinct RGB triples in an 8-bit PNG the engine wrote.
+
+    Decoded here rather than compared as bytes because the whole point of a
+    colour-ID map is what a CONSUMER reads back out of the file: filter-0
+    scanlines, no interlace, colour type 2 or 6, which is all the engine's
+    writer emits. Returns None if the file is not in that shape, so this check
+    reports nothing rather than failing on an unrelated format change.
+    """
+    raw = path.read_bytes()
+    if raw[:8] != b"\x89PNG\r\n\x1a\n":
+        return None
+    pos, width, height, channels, idat = 8, 0, 0, 0, b""
+    while pos + 8 <= len(raw):
+        length = int.from_bytes(raw[pos:pos + 4], "big")
+        kind = raw[pos + 4:pos + 8]
+        body = raw[pos + 8:pos + 8 + length]
+        if kind == b"IHDR":
+            width = int.from_bytes(body[0:4], "big")
+            height = int.from_bytes(body[4:8], "big")
+            if body[8] != 8 or body[12] != 0:
+                return None  # not 8-bit, or interlaced
+            channels = {2: 3, 6: 4}.get(body[9], 0)
+            if channels == 0:
+                return None
+        elif kind == b"IDAT":
+            idat += body
+        pos += 12 + length
+    data = zlib.decompress(idat)
+    stride = width * channels
+    colors = set()
+    for y in range(height):
+        row = y * (stride + 1)
+        if data[row] != 0:
+            return None  # a filter this reader does not undo
+        line = data[row + 1:row + 1 + stride]
+        for x in range(width):
+            colors.add(tuple(line[x * channels:x * channels + 3]))
+    return colors
 
 
 def header_abi() -> str:
@@ -350,6 +392,48 @@ def main() -> int:
         check("thickness records its scale",
               outputs["thickness"]["encoding"] == {"basis": "distance", "scale": 3.0},
               str(outputs["thickness"].get("encoding")))
+
+    # --- the colour-ID maps ---------------------------------------------
+    id_dir = tmp / "idmaps"
+    id_dir.mkdir()
+    id_report = id_dir / "ids.json"
+    r = run("--input", str(sphere), "--output", str(id_dir / "i.obj"), "--target-quads", "300",
+            "--bake", "material-id,object-id", "--texture-size", "32",
+            "--report", str(id_report), "--quiet")
+    check("id-map bake exit 0", r.returncode == 0, r.stderr)
+    for name in ("i_material-id.png", "i_object-id.png"):
+        check(f"id-map emitted {name}", (id_dir / name).exists())
+    if id_report.exists():
+        data = json.loads(id_report.read_text())
+        outputs = {o["kind"]: o for o in data.get("outputs", [])}
+        check("id-map report lists them",
+              set(outputs) == {"mesh", "material-id", "object-id"}, str(sorted(outputs)))
+        for kind, source in (("material-id", "none"), ("object-id", "component")):
+            encoding = outputs[kind]["encoding"]
+            check(f"{kind} records the id basis", encoding["basis"] == "id-color",
+                  str(encoding))
+            check(f"{kind} names the id source it read",
+                  encoding["idSource"] == source, str(encoding))
+            # The table, not just the pixels: a consumer picks a colour out of
+            # the PNG and has to find its row here.
+            table = encoding["idColors"]
+            check(f"{kind} reports a table", len(table) >= 1, str(table))
+            ids = [row["id"] for row in table]
+            check(f"{kind} table is ascending by id", ids == sorted(ids), str(ids))
+            for row in table:
+                check(f"{kind} row carries a hex colour",
+                      row["color"] == "#%02x%02x%02x" % tuple(row["rgb"]), str(row))
+                check(f"{kind} row is never the reserved no-id black",
+                      row["rgb"] != [0, 0, 0] and min(row["rgb"]) >= 64, str(row))
+        # Every non-padding texel in the written PNG must be a colour the table
+        # names, byte for byte. This is the claim the whole map exists for.
+        png = id_dir / "i_material-id.png"
+        table_rgb = {tuple(row["rgb"]) for row in outputs["material-id"]["encoding"]["idColors"]}
+        pixels = _read_png_rgb(png)
+        if pixels is not None:
+            stray = {px for px in pixels if px != (0, 0, 0) and px not in table_rgb}
+            check("every id texel resolves through the table", not stray,
+                  str(sorted(stray)[:4]))
 
     # A bad value for either new flag is an argument error, not a silent default.
     # --texture-size is here so a REGRESSION fails fast: without it, a value that

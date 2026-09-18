@@ -7,6 +7,55 @@
 
 ### Added
 
+- **Material ID and object ID maps, with the id-to-colour mapping REPORTED.** A
+  colour-ID map is how an artist selects "the leather strap" without masking it
+  by hand, and material and object identity are known at bake time and nowhere
+  downstream. `material-id` reads the Target's face-domain `material_id`
+  column; `object-id` reads `object_id`, then `group_id`, and falls back to the
+  Target's **face-connected components** when neither exists — no loader in this
+  tree writes an id column, so without that fallback the map would be one flat
+  colour on every real asset.
+
+  The whole value of these maps is an exact comparison at zero tolerance, so the
+  two things that would silently ruin them are ruled out by construction:
+
+  *Nothing depends on traversal order.* The colour is an integer avalanche hash
+  of the id alone — the same `mixBits()` already behind the per-texel AO
+  rotation — so it is bit-identical across runs, machines, compilers and
+  standard libraries. ArmorPaint's `frac(sin(dot(id, ...)) * 43758.5453)` was
+  deliberately NOT copied: `sin` is not correctly rounded, implementations
+  differ in the last ulp, and that multiply turns a 1-ulp disagreement into a
+  different colour. A palette assigned in traversal order was rejected for the
+  same class of reason — an ordinal is state, and adding one id would repaint
+  the rest. Every channel is lifted into `[64, 255]`, which keeps `(0,0,0)`
+  unreachable and therefore free to mean **no id**: an uncovered texel, or one
+  whose cage ray reached no Target surface.
+
+  *Nothing is filtered.* The bake point-samples, a boundary texel holds one id's
+  exact colour or the other's and never a blend, every colour sits on the 8-bit
+  lattice so the PNG round trip is the identity, and an export preset that
+  declares a non-linear colour space for an id map is **reported and refused**
+  rather than honoured — `linearToSrgb` would rewrite every id's colour, the
+  same reasoning the bundle already applies to sRGB into an EXR.
+
+  The table is reported beside the map, not merely baked into pixels: every
+  distinct id on the Target, ascending, with the exact colour written for it and
+  the column it was read from. It rides `BakeEncoding` (new basis
+  `EncodingBasis::IdColor`), so it reaches a host through
+  `cyber_image_id_source` / `cyber_image_id_color_count` /
+  `cyber_image_id_color`, the three `cyber_bundle_result_file_id_*` equivalents,
+  `Image.encoding.id_colors` in Python and Swift, and the CLI report's
+  `outputs[].encoding.idColors`.
+
+- **CLI:** `--bake` accepts `material-id` and `object-id`; the report's
+  `encoding` block for an id map carries `idSource` and `idColors`, each row as
+  both a `#rrggbb` string and an `rgb` triple.
+
+- **ABI 1.20, additive.** Two `CyberBakeMap` values and one
+  `CyberEncodingBasis` value appended (the existing ones keep their numbers),
+  plus `CyberIdColor` and six accessors. The pinned manifest diff against 1.19
+  removes and reshapes nothing.
+
 - **Four mesh maps for texture authoring: object-space normal, object-space
   position, bent normal, thickness.** CyberTexel's generators and smart masks
   read mesh maps rather than pixels — that is what lets a smart material

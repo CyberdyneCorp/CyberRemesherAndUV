@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <ios>
@@ -464,4 +466,66 @@ TEST_CASE("a preset declaring an unknown up axis is reported, not guessed at") {
     plain.maps = {io::PresetMapEntry{io::PresetMap::Normal, io::ColorSpace::Linear, "normal"}};
     Mesh low2 = makeSurface(0.0f);
     CHECK(bundle::writeBundle(low2, high, paramsFor(plain, quiet)).warnings.empty());
+}
+
+TEST_CASE("a bundle writes the id maps with their table, and refuses to gamma them") {
+    const fs::path dir = testDir("id_maps");
+    io::ExportPreset preset = smallPreset("id-maps", io::GreenChannel::PlusY);
+    // sRGB on an id map is the trap: linearToSrgb rewrites every byte, so the
+    // written file would no longer match the table reported beside it.
+    preset.maps = {
+        io::PresetMapEntry{io::PresetMap::MaterialId, io::ColorSpace::Srgb, "material-id"},
+        io::PresetMapEntry{io::PresetMap::ObjectId, io::ColorSpace::Linear, "object-id"},
+    };
+
+    Mesh low = makeSurface(0.0f);
+    Mesh high = makeSurface(0.0f);
+    auto& materials = high.faceAttributes().create<std::int32_t>("material_id");
+    materials[0] = 12;
+
+    const bundle::BundleResult result = bundle::writeBundle(low, high, paramsFor(preset, dir));
+    REQUIRE(result.ok);
+    CHECK(kindsOf(result) == std::vector<std::string>{"mesh", "material-id", "object-id"});
+
+    const bundle::BundleFile& material = result.files[1];
+    CHECK(material.encoding.basis == cyber::bake::EncodingBasis::IdColor);
+    CHECK(material.encoding.idSource == "material_id");
+    REQUIRE(material.encoding.idColors.size() == 1);
+    CHECK(material.encoding.idColors[0].id == 12);
+    CHECK(material.encoding.idColors[0].color == cyber::bake::idColor(12));
+    // Written linear despite the sRGB request, and the refusal is reported.
+    CHECK(material.colorSpace == "linear");
+    REQUIRE(result.warnings.size() == 1);
+    CHECK(result.warnings[0].find("material-id") != std::string::npos);
+
+    // The bytes on disk are the table's bytes, at zero tolerance.
+    const auto loaded = cyber::imageio::loadPng(material.path);
+    REQUIRE(loaded.has_value());
+    const std::array<std::uint8_t, 3> want = cyber::bake::idColor(12);
+    const int channels = loaded->channels;
+    bool sawColor = false;
+    const std::size_t texels =
+        static_cast<std::size_t>(loaded->width) * static_cast<std::size_t>(loaded->height);
+    for (std::size_t i = 0; i < texels; ++i) {
+        std::array<int, 3> got{};
+        for (int c = 0; c < 3; ++c) {
+            got[static_cast<std::size_t>(c)] = static_cast<int>(std::lround(
+                loaded
+                    ->pixels[i * static_cast<std::size_t>(channels) + static_cast<std::size_t>(c)] *
+                255.0f));
+        }
+        if (got == std::array<int, 3>{0, 0, 0}) {
+            continue;  // the reserved "no id" padding
+        }
+        REQUIRE(got == std::array<int, 3>{want[0], want[1], want[2]});
+        sawColor = true;
+    }
+    CHECK(sawColor);
+
+    // The object map falls back to components: one surface, one id.
+    const bundle::BundleFile& object = result.files[2];
+    CHECK(object.encoding.idSource == "component");
+    REQUIRE(object.encoding.idColors.size() == 1);
+    CHECK(object.encoding.idColors[0].id == 0);
+    fs::remove_all(dir);
 }

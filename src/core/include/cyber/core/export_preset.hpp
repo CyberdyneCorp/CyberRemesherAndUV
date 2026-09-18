@@ -40,6 +40,12 @@ enum class PresetMap {
     ObjectPosition,
     BentNormal,
     Thickness,
+    // Colour-ID maps (surface-baking spec, "Material ID and object ID maps").
+    // Their texels are exact KEYS: a preset must not declare a non-linear
+    // colour space for them, and the bundle refuses one rather than applying
+    // it, because a gamma curve rewrites every id's colour.
+    MaterialId,
+    ObjectId,
 };
 
 enum class ColorSpace {

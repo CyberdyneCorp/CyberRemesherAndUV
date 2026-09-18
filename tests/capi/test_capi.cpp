@@ -691,6 +691,100 @@ void flatFieldGradient(void*, const float[3], float out[3]) {
 float flatFieldOcclusion(void*, const float[3], const float[3], float) { return 1.0f; }
 }  // namespace
 
+TEST_CASE("capi exposes the id maps and the table that resolves their colours") {
+    // The Target is the UV plane's two triangles carrying distinct materials,
+    // built through the bulk path because that is the only way a host declares
+    // a face-domain id column over the ABI.
+    const std::filesystem::path objPath = writeUvPlaneObj();
+    CyberMesh* low = nullptr;
+    REQUIRE(cyber_mesh_load_obj(objPath.string().c_str(), &low) == CYBER_OK);
+
+    const float positions[] = {0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0};
+    const size_t offsets[] = {0, 3, 6};
+    const uint32_t indices[] = {0, 1, 2, 0, 2, 3};
+    const int32_t materials[] = {4, 9};
+    const CyberAttributeColumn columns[] = {
+        {"material_id", CYBER_ATTRIBUTE_FACE, CYBER_ATTRIBUTE_INT32, materials, 2},
+    };
+    const CyberIndexedMesh source{positions, 4, offsets, 2, indices, 6, columns, 1};
+    CyberMesh* high = nullptr;
+    REQUIRE(cyber_mesh_from_indexed(&source, &high) == CYBER_OK);
+
+    CyberBakeParams params{};
+    cyber_default_bake_params(&params);
+    params.width = 16;
+    params.height = 16;
+
+    CyberImage* image = nullptr;
+    REQUIRE(cyber_bake(low, high, CYBER_BAKE_MATERIAL_ID, &params, &image) == CYBER_OK);
+    REQUIRE(image != nullptr);
+    CyberImageEncoding encoding{};
+    REQUIRE(cyber_image_encoding(image, &encoding) == CYBER_OK);
+    CHECK(encoding.basis == CYBER_ENCODING_ID_COLOR);
+    CHECK(std::string(cyber_image_id_source(image)) == "material_id");
+    REQUIRE(cyber_image_id_color_count(image) == 2u);
+
+    // Ascending by id, never the order the faces declared them in.
+    CyberIdColor first{};
+    CyberIdColor second{};
+    REQUIRE(cyber_image_id_color(image, 0, &first) == CYBER_OK);
+    REQUIRE(cyber_image_id_color(image, 1, &second) == CYBER_OK);
+    CHECK(first.id == 4);
+    CHECK(second.id == 9);
+    CHECK(cyber_image_id_color(image, 2, &first) == CYBER_ERR_INVALID_ARG);
+    CHECK(cyber_image_id_color(image, 0, nullptr) == CYBER_ERR_INVALID_ARG);
+    CHECK(cyber_image_id_color(nullptr, 0, &first) == CYBER_ERR_INVALID_ARG);
+    CHECK(cyber_image_id_source(nullptr) == nullptr);
+    CHECK(cyber_image_id_color_count(nullptr) == 0u);
+
+    // Every texel in the map is one of the two reported colours or the
+    // reserved "no id" black: the table really does resolve the pixels, which
+    // is the whole reason it is reported.
+    std::vector<float> pixels(cyber_image_copy_pixels(image, nullptr, 0));
+    REQUIRE(cyber_image_copy_pixels(image, pixels.data(), pixels.size()) == pixels.size());
+    const auto matches = [&](std::size_t at, const unsigned char rgb[3]) {
+        for (std::size_t c = 0; c < 3; ++c) {
+            if (std::lround(pixels[at + c] * 255.0f) != static_cast<long>(rgb[c])) {
+                return false;
+            }
+        }
+        return true;
+    };
+    const unsigned char black[3] = {0, 0, 0};
+    bool sawFirst = false;
+    bool sawSecond = false;
+    for (std::size_t at = 0; at + 2 < pixels.size(); at += 3) {
+        const bool a = matches(at, first.color);
+        const bool b = matches(at, second.color);
+        REQUIRE((a || b || matches(at, black)));
+        sawFirst = sawFirst || a;
+        sawSecond = sawSecond || b;
+    }
+    CHECK(sawFirst);
+    CHECK(sawSecond);
+    cyber_image_free(image);
+
+    // Object ID with no column declared falls back to components; the UV plane
+    // is one connected surface, so it reports exactly one.
+    image = nullptr;
+    REQUIRE(cyber_bake(low, high, CYBER_BAKE_OBJECT_ID, &params, &image) == CYBER_OK);
+    CHECK(std::string(cyber_image_id_source(image)) == "component");
+    CHECK(cyber_image_id_color_count(image) == 1u);
+    cyber_image_free(image);
+
+    // Every other map reports no table at all.
+    image = nullptr;
+    REQUIRE(cyber_bake(low, high, CYBER_BAKE_NORMAL, &params, &image) == CYBER_OK);
+    CHECK(std::string(cyber_image_id_source(image)).empty());
+    CHECK(cyber_image_id_color_count(image) == 0u);
+    cyber_image_free(image);
+
+    cyber_mesh_free(low);
+    cyber_mesh_free(high);
+    std::error_code ec;
+    std::filesystem::remove(objPath, ec);
+}
+
 TEST_CASE("capi refuses an out-of-range encoding parameter instead of defaulting it") {
     const std::filesystem::path objPath = writeUvPlaneObj();
     CyberMesh* low = nullptr;

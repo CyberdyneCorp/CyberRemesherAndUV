@@ -1,6 +1,8 @@
 #pragma once
 
+#include <array>
 #include <cstddef>
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -30,6 +32,9 @@ enum class BakeMap {
     ObjectPosition,  // the Position hit point rescaled over the bake bounds (RGB)
     BentNormal,      // mean unoccluded hemisphere direction, encoded n*0.5+0.5 (RGB)
     Thickness,       // material behind the surface, in model units, single channel
+    // --- appended in 0.8.0; the values above keep their numbers -----------
+    MaterialId,  // one flat colour per Target `material_id` (RGB, exact)
+    ObjectId,    // one flat colour per Target object/submesh (RGB, exact)
 };
 
 // Axis convention the OBJECT-SPACE maps are expressed in. YUp is this engine's
@@ -60,6 +65,20 @@ enum class EncodingBasis {
     ObjectNormal,   // unit direction in object space (`upAxis`), v*0.5+0.5
     ObjectBounds,   // object-space position rescaled over [boundsMin, boundsMax]
     Distance,       // a length in model units, multiplied by `scale`
+    // An EXACT key, not a measurement: every covered texel holds one of the
+    // colours in BakeEncoding::idColors verbatim. Never filter, resample or
+    // colour-convert such a map -- compare it at zero tolerance.
+    IdColor,
+};
+
+// One row of the id-to-colour table an id map reports. The colour is the exact
+// 8-bit triple written for `id`; the float in the image is `channel / 255`.
+// Reported for every distinct id on the Target, whether or not the UV layout
+// happens to show it, because a consumer resolving a picked colour needs the
+// whole key.
+struct IdColorEntry {
+    std::int32_t id = 0;
+    std::array<std::uint8_t, 3> color{};
 };
 
 // Filled by every bake, for every map. Members that do not apply to the basis
@@ -75,7 +94,24 @@ struct BakeEncoding {
     // The factor a Distance map was multiplied by (BakeParams::thicknessScale
     // for Thickness; 1 for Displacement).
     float scale = 1.0f;
+    // Which of the Target's id columns an IdColor map actually read:
+    // "material_id", "object_id", "group_id", "component" for the
+    // face-connected-component fallback, or "none" when nothing declared an id
+    // and every face reads 0. Empty for every other basis.
+    std::string idSource;
+    // The id-to-colour table, ASCENDING BY ID -- a stable ordered key, never a
+    // container's iteration order. Empty for every other basis.
+    std::vector<IdColorEntry> idColors;
 };
+
+// The colour an id map writes for `id`, as the exact 8-bit triple that reaches
+// the file. A pure function of the id computed with INTEGER arithmetic only, so
+// the same id yields the same colour across runs, machines, compilers and
+// standard libraries; see the change's design.md for why a float hash
+// (ArmorPaint's frac(sin(...))) and an ordinal palette were both rejected.
+// Every channel lands in [64, 255], which keeps (0,0,0) reserved for "no id"
+// and unreachable from here.
+[[nodiscard]] std::array<std::uint8_t, 3> idColor(std::int32_t id);
 
 struct Image {
     int width = 0;
