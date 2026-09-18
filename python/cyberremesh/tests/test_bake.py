@@ -67,11 +67,79 @@ def main() -> int:
                 assert abs(white - 1.0) < 0.02, ("flat cavity", white)
         print("PASS bake: normal map points up; curvature/cavity read neutral on a flat Target")
 
+        _gate_the_mesh_map_set(obj.name)
         _gate_a_raising_evaluator_raises(obj.name)
         _gate_the_openness_rename_shim(obj.name)
     finally:
         os.unlink(obj.name)
     return 0
+
+
+def _gate_the_mesh_map_set(obj_path):
+    """The four CyberTexel maps, and the basis that makes them interpretable.
+
+    An object-space position map is `(p - min) / (max - min)`: without `min`
+    and `max` a consumer cannot recover a single coordinate, so the binding has
+    to carry the basis, not just the pixels.
+    """
+    from cyberremesh import (BakeMap, BakeParams, BentNormalSpace, EncodingBasis, Mesh,
+                             UpAxis, bake)
+
+    with Mesh.load_obj(obj_path) as low, Mesh.load_obj(obj_path) as high:
+        params = BakeParams(width=16, height=16, ao_samples=8)
+        with bake(low, high, BakeMap.OBJECT_NORMAL, params) as img:
+            assert img.channels == 3, img.channels
+            # The Target normal is +z, which encodes to (0.5, 0.5, 1).
+            arr = img.to_numpy()
+            assert abs(float(arr[8, 8, 2]) - 1.0) < 0.05, float(arr[8, 8, 2])
+            assert img.encoding.basis == EncodingBasis.OBJECT_NORMAL, img.encoding
+            assert img.encoding.up_axis == UpAxis.Y, img.encoding
+
+        # The up axis is applied, not merely declared: z-up re-expresses
+        # (x, y, z) as (x, -z, y), so +z lands in the green channel as 0.
+        z_up = BakeParams(width=16, height=16, ao_samples=8, up_axis=UpAxis.Z)
+        with bake(low, high, BakeMap.OBJECT_NORMAL, z_up) as img:
+            assert abs(float(img.to_numpy()[8, 8, 1])) < 0.05, float(img.to_numpy()[8, 8, 1])
+            assert img.encoding.up_axis == UpAxis.Z, img.encoding
+
+        with bake(low, high, BakeMap.OBJECT_POSITION, params) as img:
+            encoding = img.encoding
+            assert encoding.basis == EncodingBasis.OBJECT_BOUNDS, encoding
+            assert encoding.bounds_min[0] == 0.0 and encoding.bounds_max[0] == 1.0, encoding
+            # Decoding with the recorded basis recovers the model coordinate.
+            arr = img.to_numpy()
+            span = encoding.bounds_max[0] - encoding.bounds_min[0]
+            x = encoding.bounds_min[0] + float(arr[8, 12, 0]) * span
+            assert abs(x - 0.78) < 0.08, x
+
+        with bake(low, high, BakeMap.BENT_NORMAL, params) as img:
+            assert img.channels == 3, img.channels
+            assert img.encoding.basis == EncodingBasis.TANGENT_NORMAL, img.encoding
+        object_bent = BakeParams(width=16, height=16, ao_samples=8,
+                                 bent_normal_space=BentNormalSpace.OBJECT)
+        with bake(low, high, BakeMap.BENT_NORMAL, object_bent) as img:
+            assert img.encoding.basis == EncodingBasis.OBJECT_NORMAL, img.encoding
+
+        thick = BakeParams(width=16, height=16, ao_samples=8, thickness_scale=3.0)
+        with bake(low, high, BakeMap.THICKNESS, thick) as img:
+            assert img.channels == 1, img.channels
+            assert img.encoding.basis == EncodingBasis.DISTANCE, img.encoding
+            assert abs(img.encoding.scale - 3.0) < 1e-6, img.encoding
+            # A single quad has no interior, so its inverted-normal rays escape.
+            assert float(img.to_numpy()[8, 8, 0]) == 0.0, float(img.to_numpy()[8, 8, 0])
+
+        # Out of range is refused at the binding's entry point, not defaulted.
+        for bad in (BakeParams(width=16, height=16, up_axis=7),
+                    BakeParams(width=16, height=16, bent_normal_space=-3),
+                    BakeParams(width=16, height=16, thickness_scale=-1.0)):
+            try:
+                bake(low, high, BakeMap.OBJECT_NORMAL, bad).close()
+            except cyberremesh.CyberError:
+                pass
+            else:
+                raise AssertionError("an out-of-range encoding parameter was accepted")
+
+    print("PASS bake: the object-space and ray-traced maps carry a decodable encoding basis")
 
 
 class _RaisingField(cyberremesh.FieldEvaluator):

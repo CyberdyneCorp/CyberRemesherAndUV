@@ -358,3 +358,80 @@ TEST_CASE("cancellation reaches the unwrap, not just the bakes") {
     REQUIRE_FALSE(fs::exists(dir / "hero.obj"));
     fs::remove_all(dir);
 }
+
+// ---- the CyberTexel mesh-map set -------------------------------------------
+
+TEST_CASE("a bundle writes the object-space and ray-traced maps with their basis") {
+    const fs::path dir = testDir("mesh_maps");
+    io::ExportPreset preset = smallPreset("mesh-maps", io::GreenChannel::PlusY);
+    preset.upAxis = "z-up";  // a preset declares what its target app expects
+    preset.maps = {
+        io::PresetMapEntry{io::PresetMap::ObjectNormal, io::ColorSpace::Linear, "object-normal"},
+        io::PresetMapEntry{io::PresetMap::ObjectPosition, io::ColorSpace::Linear,
+                           "object-position"},
+        io::PresetMapEntry{io::PresetMap::BentNormal, io::ColorSpace::Linear, "bent-normal"},
+        io::PresetMapEntry{io::PresetMap::Thickness, io::ColorSpace::Linear, "thickness"},
+    };
+
+    Mesh low = makeSurface(0.0f);
+    const Mesh high = makeSurface(0.0f);
+    bundle::BundleParams params = paramsFor(preset, dir);
+    params.thicknessScale = 3.0f;
+    const bundle::BundleResult result = bundle::writeBundle(low, high, params);
+    REQUIRE(result.ok);
+    CHECK(kindsOf(result) == std::vector<std::string>{"mesh", "object-normal", "object-position",
+                                                      "bent-normal", "thickness"});
+
+    const auto fileOf = [&](const std::string& kind) {
+        for (const bundle::BundleFile& file : result.files) {
+            if (file.kind == kind) {
+                return file;
+            }
+        }
+        FAIL("missing map " << kind);
+        return bundle::BundleFile{};
+    };
+    // The mesh carries no encoding; every map carries the one its bake reported.
+    CHECK(fileOf("mesh").encoding.basis == cyber::bake::EncodingBasis::None);
+    CHECK(fileOf("object-normal").encoding.basis == cyber::bake::EncodingBasis::ObjectNormal);
+    CHECK(fileOf("bent-normal").encoding.basis == cyber::bake::EncodingBasis::TangentNormal);
+
+    const bundle::BundleFile position = fileOf("object-position");
+    CHECK(position.encoding.basis == cyber::bake::EncodingBasis::ObjectBounds);
+    // The preset's up axis is what the object-space maps were baked in, and the
+    // recorded bounds are in that same convention.
+    CHECK(position.encoding.upAxis == cyber::bake::UpAxis::ZUp);
+    CHECK(position.encoding.boundsMax.z == doctest::Approx(1.0f));
+
+    const bundle::BundleFile thickness = fileOf("thickness");
+    CHECK(thickness.encoding.basis == cyber::bake::EncodingBasis::Distance);
+    CHECK(thickness.encoding.scale == doctest::Approx(3.0f));
+
+    for (const bundle::BundleFile& file : result.files) {
+        CHECK(fs::exists(file.path));
+    }
+}
+
+TEST_CASE("a preset declaring an unknown up axis is reported, not guessed at") {
+    const fs::path dir = testDir("unknown_up_axis");
+    io::ExportPreset preset = smallPreset("odd-axis", io::GreenChannel::PlusY);
+    preset.upAxis = "sideways";
+    preset.maps = {
+        io::PresetMapEntry{io::PresetMap::ObjectNormal, io::ColorSpace::Linear, "object-normal"},
+    };
+
+    Mesh low = makeSurface(0.0f);
+    const Mesh high = makeSurface(0.0f);
+    const bundle::BundleResult result = bundle::writeBundle(low, high, paramsFor(preset, dir));
+    REQUIRE(result.ok);
+    REQUIRE(result.warnings.size() == 1);
+    CHECK(result.warnings[0].find("sideways") != std::string::npos);
+    CHECK(result.files.back().encoding.upAxis == cyber::bake::UpAxis::YUp);
+
+    // A preset that asks for no object-space map has no axis to get wrong.
+    const fs::path quiet = testDir("unknown_up_axis_quiet");
+    io::ExportPreset plain = preset;
+    plain.maps = {io::PresetMapEntry{io::PresetMap::Normal, io::ColorSpace::Linear, "normal"}};
+    Mesh low2 = makeSurface(0.0f);
+    CHECK(bundle::writeBundle(low2, high, paramsFor(plain, quiet)).warnings.empty());
+}

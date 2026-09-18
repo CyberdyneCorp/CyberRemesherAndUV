@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 
+#include "cyber/bake/bake.hpp"
 #include "cyber/core/export_preset.hpp"
 #include "cyber/core/mesh.hpp"
 #include "cyber/core/progress.hpp"
@@ -30,6 +31,16 @@ struct BundleParams {
     float cageDistance = 0.1f;
     int aoSamples = 64;
     float aoRadius = 1.0f;
+    // Frame BakeMap::BentNormal is expressed in, and the factor
+    // BakeMap::Thickness multiplies its mean depth by -- the same defaults and
+    // the same meaning BakeParams gives them.
+    //
+    // The UP AXIS is deliberately NOT here: a preset already declares the axis
+    // its target app expects (ExportPreset::upAxis), and that is what the
+    // object-space maps are baked in. An unrecognised value is reported as a
+    // warning and treated as y-up rather than guessed at.
+    bake::NormalSpace bentNormalSpace = bake::NormalSpace::Tangent;
+    float thicknessScale = 2.0f;
 };
 
 struct BundleFile {
@@ -38,6 +49,11 @@ struct BundleFile {
     std::string colorSpace;  // "linear" | "srgb" — the encoding actually written
     int width = 0;           // 0 for the mesh
     int height = 0;
+    // What the pixels mean, as the bake reported it. The mesh entry keeps the
+    // default (EncodingBasis::None): an encoded map is not interpretable
+    // without this, so it travels with the file record rather than being
+    // re-derived from the map's name.
+    bake::BakeEncoding encoding;
 };
 
 struct BundleResult {

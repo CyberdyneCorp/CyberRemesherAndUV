@@ -318,6 +318,54 @@ def main() -> int:
               colors == {"normal": "linear", "ao": "linear", "curvature": "linear",
                          "color": "srgb"}, str(colors))
 
+    # --- the CyberTexel mesh-map set (object-space + ray-traced) ---------
+    maps_dir = tmp / "meshmaps"
+    maps_dir.mkdir()
+    maps_report = maps_dir / "maps.json"
+    r = run("--input", str(sphere), "--output", str(maps_dir / "m.obj"), "--target-quads", "300",
+            "--bake", "object-normal,object-position,bent-normal,thickness",
+            "--texture-size", "32", "--ao-samples", "4", "--thickness-scale", "3",
+            "--bent-normal-space", "object", "--report", str(maps_report), "--quiet")
+    check("mesh-map bake exit 0", r.returncode == 0, r.stderr)
+    for name in ("m_object-normal.png", "m_object-position.png", "m_bent-normal.png",
+                 "m_thickness.png"):
+        check(f"mesh-map emitted {name}", (maps_dir / name).exists())
+    if maps_report.exists():
+        data = json.loads(maps_report.read_text())
+        outputs = {o["kind"]: o for o in data.get("outputs", [])}
+        check("mesh-map report lists them",
+              set(outputs) == {"mesh", "object-normal", "object-position", "bent-normal",
+                               "thickness"}, str(sorted(outputs)))
+        # An encoded map without its basis is a picture of some numbers.
+        check("object-normal records its basis and axis",
+              outputs["object-normal"]["encoding"] == {"basis": "object-normal", "upAxis": "y-up"},
+              str(outputs["object-normal"].get("encoding")))
+        position = outputs["object-position"]["encoding"]
+        check("object-position records its bounds",
+              position["basis"] == "object-bounds" and len(position["boundsMin"]) == 3
+              and position["boundsMax"][0] > position["boundsMin"][0], str(position))
+        check("bent-normal records the frame it was baked in",
+              outputs["bent-normal"]["encoding"]["basis"] == "object-normal",
+              str(outputs["bent-normal"].get("encoding")))
+        check("thickness records its scale",
+              outputs["thickness"]["encoding"] == {"basis": "distance", "scale": 3.0},
+              str(outputs["thickness"].get("encoding")))
+
+    # A bad value for either new flag is an argument error, not a silent default.
+    # --texture-size is here so a REGRESSION fails fast: without it, a value that
+    # slipped past the check would start a full 2048-square ray-traced bake and
+    # the test would time out instead of reporting a wrong exit code. -1 is the
+    # case to watch — it is exactly the value a sentinel-in-the-value scheme
+    # reads as "flag not given".
+    for bad_flag, bad_value, map_name in (("--thickness-scale", "-1", "thickness"),
+                                          ("--bent-normal-space", "sideways", "bent-normal")):
+        r = run("--input", str(sphere), "--output", str(maps_dir / "bad.obj"),
+                "--bake", map_name, "--texture-size", "16", "--ao-samples", "4",
+                bad_flag, bad_value, "--quiet")
+        check(f"{bad_flag} {bad_value} is exit 2", r.returncode == 2, str(r.returncode))
+        check(f"{bad_flag} {bad_value} wrote nothing",
+              not (maps_dir / "bad.obj").exists(), str(bad_flag))
+
     # A user preset file behaves exactly like a built-in.
     user_preset = tmp / "mine.json"
     user_preset.write_text(json.dumps({

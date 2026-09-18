@@ -33,6 +33,13 @@ enum class PresetMap {
     Displacement,
     Color,
     Position,
+    // Added in 0.8.0 for the CyberTexel mesh-map set (surface-baking spec,
+    // "Object-space normal and position maps" / "Bent normal and thickness
+    // maps"). Position keeps its meaning: the hit point in model units.
+    ObjectNormal,
+    ObjectPosition,
+    BentNormal,
+    Thickness,
 };
 
 enum class ColorSpace {

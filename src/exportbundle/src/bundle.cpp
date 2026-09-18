@@ -34,8 +34,43 @@ std::optional<bake::BakeMap> toBakeMap(PresetMap map) {
             return bake::BakeMap::Color;
         case PresetMap::Position:
             return bake::BakeMap::Position;
+        case PresetMap::ObjectNormal:
+            return bake::BakeMap::ObjectNormal;
+        case PresetMap::ObjectPosition:
+            return bake::BakeMap::ObjectPosition;
+        case PresetMap::BentNormal:
+            return bake::BakeMap::BentNormal;
+        case PresetMap::Thickness:
+            return bake::BakeMap::Thickness;
     }
     return std::nullopt;
+}
+
+// The axis the object-space maps are baked in comes from the preset, which is
+// where "what this target app expects" already lives. An unrecognised value is
+// reported rather than guessed at: a silently wrong axis produces a map that
+// looks plausible and shades inside out.
+bool usesObjectSpace(const ExportPreset& preset) {
+    for (const PresetMapEntry& entry : preset.maps) {
+        if (entry.map == PresetMap::ObjectNormal || entry.map == PresetMap::ObjectPosition ||
+            entry.map == PresetMap::BentNormal) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bake::UpAxis presetUpAxis(const ExportPreset& preset, BundleResult& result) {
+    if (preset.upAxis == "z-up") {
+        return bake::UpAxis::ZUp;
+    }
+    if (preset.upAxis != "y-up" && usesObjectSpace(preset)) {
+        result.warnings.push_back("preset '" + preset.name + "' declares up axis '" +
+                                  preset.upAxis +
+                                  "', which is neither 'y-up' nor 'z-up'; object-space maps are "
+                                  "baked y-up");
+    }
+    return bake::UpAxis::YUp;
 }
 
 // DirectX-style normal maps point green down. The bake always produces the
@@ -101,7 +136,8 @@ bool isInsideDirectory(const std::filesystem::path& directory, const std::filesy
 
 // Applies the preset's conventions to a freshly baked map and writes it.
 bool writeMap(const ExportPreset& preset, const PresetMapEntry& entry, bake::Image image,
-              const std::filesystem::path& path, BundleResult& result) {
+              const bake::BakeEncoding& encoding, const std::filesystem::path& path,
+              BundleResult& result) {
     if (entry.map == PresetMap::Normal && preset.normalGreen == GreenChannel::MinusY) {
         flipGreen(image);
     }
@@ -140,8 +176,8 @@ bool writeMap(const ExportPreset& preset, const PresetMapEntry& entry, bake::Ima
         result.error = "cannot write map '" + path.string() + "'";
         return false;
     }
-    result.files.push_back(
-        BundleFile{path.string(), io::presetMapName(entry.map), writtenSpace, width, height});
+    result.files.push_back(BundleFile{path.string(), io::presetMapName(entry.map), writtenSpace,
+                                      width, height, encoding});
     return true;
 }
 
@@ -170,7 +206,7 @@ BundleResult writeBundle(Mesh& low, const Mesh& high, const BundleParams& params
         result.error = exported.error().message;
         return result;
     }
-    result.files.push_back(BundleFile{params.meshPath.string(), "mesh", "", 0, 0});
+    result.files.push_back(BundleFile{params.meshPath.string(), "mesh", "", 0, 0, {}});
 
     const std::string basename =
         params.basename.empty() ? params.meshPath.stem().string() : params.basename;
@@ -182,6 +218,9 @@ BundleResult writeBundle(Mesh& low, const Mesh& high, const BundleParams& params
     bakeParams.cageDistance = params.cageDistance;
     bakeParams.aoSamples = params.aoSamples;
     bakeParams.aoRadius = params.aoRadius;
+    bakeParams.bentNormalSpace = params.bentNormalSpace;
+    bakeParams.thicknessScale = params.thicknessScale;
+    bakeParams.upAxis = presetUpAxis(preset, result);
 
     const auto total = static_cast<float>(preset.maps.size());
     float done = 0.0f;
@@ -234,7 +273,7 @@ BundleResult writeBundle(Mesh& low, const Mesh& high, const BundleParams& params
                            "and suffixes must give every map its own name";
             return result;
         }
-        if (!writeMap(preset, entry, std::move(baked.image), path, result)) {
+        if (!writeMap(preset, entry, std::move(baked.image), baked.encoding, path, result)) {
             return result;
         }
         done += 1.0f;

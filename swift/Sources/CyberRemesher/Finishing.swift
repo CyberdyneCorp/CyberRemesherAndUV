@@ -154,7 +154,8 @@ public struct BakeMap: RawRepresentable, Equatable, Sendable {
     public static let ambientOcclusion = BakeMap(rawValue: CYBER_BAKE_AO.rawValue)
     /// Signed height along the low-poly normal (1 channel).
     public static let displacement = BakeMap(rawValue: CYBER_BAKE_DISPLACEMENT.rawValue)
-    /// Target hit position in world space (RGB).
+    /// Target hit position in MODEL UNITS, unencoded (RGB). See
+    /// `objectPosition` for the [0,1] encoding over a bounding box.
     public static let position = BakeMap(rawValue: CYBER_BAKE_POSITION.rawValue)
     /// Target vertex colour at the hit (RGB).
     public static let color = BakeMap(rawValue: CYBER_BAKE_COLOR.rawValue)
@@ -162,6 +163,63 @@ public struct BakeMap: RawRepresentable, Equatable, Sendable {
     public static let curvature = BakeMap(rawValue: CYBER_BAKE_CURVATURE.rawValue)
     /// Concavity only; white is flat or convex (1 channel).
     public static let cavity = BakeMap(rawValue: CYBER_BAKE_CAVITY.rawValue)
+    /// Target normal in object space, encoded `n * 0.5 + 0.5` (RGB).
+    public static let objectNormal = BakeMap(rawValue: CYBER_BAKE_OBJECT_NORMAL.rawValue)
+    /// `position`'s hit point rescaled so the bake bounds span [0,1] (RGB).
+    /// Decode it with `Image.encoding`.
+    public static let objectPosition = BakeMap(rawValue: CYBER_BAKE_OBJECT_POSITION.rawValue)
+    /// Mean unoccluded hemisphere direction, encoded `n * 0.5 + 0.5` (RGB).
+    public static let bentNormal = BakeMap(rawValue: CYBER_BAKE_BENT_NORMAL.rawValue)
+    /// Material behind the surface, in model units, times `thicknessScale`.
+    public static let thickness = BakeMap(rawValue: CYBER_BAKE_THICKNESS.rawValue)
+}
+
+/// Axis convention the object-space maps are expressed in.
+public enum UpAxis: UInt32, Sendable {
+    case y = 0
+    case z = 1
+}
+
+/// Frame a bent-normal bake is expressed in.
+public enum BentNormalSpace: UInt32, Sendable {
+    case tangent = 0
+    case object = 1
+}
+
+/// What the numbers in a baked image mean.
+public enum EncodingBasis: UInt32, Sendable {
+    /// Raw values: ambient occlusion, colour, curvature, cavity.
+    case none = 0
+    /// A direction in the texel's tangent frame, `v * 0.5 + 0.5`.
+    case tangentNormal = 1
+    /// A direction in object space (`upAxis`), `v * 0.5 + 0.5`.
+    case objectNormal = 2
+    /// A position rescaled over `[boundsMin, boundsMax]`.
+    case objectBounds = 3
+    /// A length in model units, multiplied by `scale`.
+    case distance = 4
+}
+
+/// The basis needed to interpret a baked map.
+///
+/// Decode an `.objectBounds` texel with
+/// `boundsMin + value * (boundsMax - boundsMin)`; the box is already expressed
+/// in `upAxis`, so no swizzle has to be re-derived.
+public struct ImageEncoding: Sendable {
+    public let basis: EncodingBasis
+    public let upAxis: UpAxis
+    public let boundsMin: (Float, Float, Float)
+    public let boundsMax: (Float, Float, Float)
+    /// The factor a `.distance` map was multiplied by; 1 otherwise.
+    public let scale: Float
+
+    init(_ c: CyberImageEncoding) {
+        basis = EncodingBasis(rawValue: UInt32(bitPattern: c.basis)) ?? .none
+        upAxis = UpAxis(rawValue: UInt32(bitPattern: c.upAxis)) ?? .y
+        boundsMin = (c.boundsMin.0, c.boundsMin.1, c.boundsMin.2)
+        boundsMax = (c.boundsMax.0, c.boundsMax.1, c.boundsMax.2)
+        scale = c.scale
+    }
 }
 
 /// Bake resolution and ray setup.
@@ -176,6 +234,13 @@ public struct BakeParameters: Sendable {
     /// An AO ray hit beyond this does not occlude.
     public var aoRadius: Float
     public var curvatureRange: Float
+    /// Axis convention for the object-space maps.
+    public var upAxis: UpAxis
+    /// Frame `BakeMap.bentNormal` is expressed in.
+    public var bentNormalSpace: BentNormalSpace
+    /// Factor `BakeMap.thickness` multiplies its mean back-facing depth by.
+    /// Finite and >= 0; the default matches ArmorPaint's doubling.
+    public var thicknessScale: Float
 
     public init() {
         var defaults = CyberBakeParams()
@@ -186,12 +251,19 @@ public struct BakeParameters: Sendable {
         aoSamples = defaults.aoSamples
         aoRadius = defaults.aoRadius
         curvatureRange = defaults.curvatureRange
+        upAxis = UpAxis(rawValue: UInt32(bitPattern: defaults.upAxis)) ?? .y
+        bentNormalSpace =
+            BentNormalSpace(rawValue: UInt32(bitPattern: defaults.bentNormalSpace)) ?? .tangent
+        thicknessScale = defaults.thicknessScale
     }
 
     var cValue: CyberBakeParams {
         CyberBakeParams(
             width: width, height: height, cageDistance: cageDistance,
-            aoSamples: aoSamples, aoRadius: aoRadius, curvatureRange: curvatureRange)
+            aoSamples: aoSamples, aoRadius: aoRadius, curvatureRange: curvatureRange,
+            upAxis: Int32(bitPattern: upAxis.rawValue),
+            bentNormalSpace: Int32(bitPattern: bentNormalSpace.rawValue),
+            thicknessScale: thicknessScale)
     }
 }
 
@@ -205,6 +277,15 @@ public final class Image {
     public var width: Int { Int(cyber_image_width(handle)) }
     public var height: Int { Int(cyber_image_height(handle)) }
     public var channels: Int { Int(cyber_image_channels(handle)) }
+
+    /// What the pixels mean. Every image has one.
+    public var encoding: ImageEncoding {
+        var out = CyberImageEncoding()
+        guard cyber_image_encoding(handle, &out) == CYBER_OK else {
+            return ImageEncoding(CyberImageEncoding())
+        }
+        return ImageEncoding(out)
+    }
 
     /// Pixels as floats, row-major, `channels` per texel.
     public func pixels() -> [Float] {

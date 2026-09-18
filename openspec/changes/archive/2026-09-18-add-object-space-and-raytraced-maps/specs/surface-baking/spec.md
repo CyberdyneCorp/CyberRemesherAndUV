@@ -1,13 +1,5 @@
-# surface-baking Specification
+## MODIFIED Requirements
 
-## Purpose
-Transferring detail from a high-resolution Target onto the remeshed low-poly
-result: normal, ambient occlusion, curvature and cavity maps, the editable cage
-that controls the projection, and the component links that decide what bakes
-against what. It exists because baking is where a retopology result becomes
-usable — and because it is the most expensive stage in a run, it must be
-accelerated, cancellable and previewable rather than a blind wait.
-## Requirements
 ### Requirement: Bakeable map types
 The bake stage SHALL bake from the Target onto the EditMesh's UV layout: tangent-space normal maps, ambient occlusion, displacement/height, color maps (from Target vertex colors, including polypaint, or from a Target texture when the Target has its own UVs — texture-to-texture baking), object-space normal maps, object-space position maps, bent normal maps and thickness maps. Output resolution SHALL be user-selectable up to at least 4096².
 
@@ -29,80 +21,7 @@ Every map type SHALL be requestable through the same entry points, and SHALL hon
 - **WHEN** a bake is requested with a parameter the chosen map reads set outside its documented range
 - **THEN** the bake SHALL fail and return no image, rather than substituting a default
 
-### Requirement: Editable bake cage
-The bake SHALL use a projection cage derived from the EditMesh, editable with the core actions: Tweak adjusts cage distance with brush falloff and double-tap sets per-vertex cage distance, Relax smooths the cage, Erase resets edited regions to default. Cage state SHALL persist in the document.
-
-#### Scenario: Per-vertex cage distance
-- **WHEN** the user double-taps a cage vertex and enters a distance
-- **THEN** that vertex's cage offset SHALL change independently of the brush falloff
-
-### Requirement: Component links and selective baking
-When Target and EditMesh have multiple components, the user SHALL be able to draw explicit high→low component links so each EditMesh component bakes only from its linked Target components; drawing an X over a component SHALL bake that component alone. Unlinked components SHALL use nearest-surface matching by default.
-
-#### Scenario: Linked components do not bleed
-- **WHEN** two overlapping Target components are linked to distinct EditMesh components
-- **THEN** each EditMesh component's maps SHALL contain only its linked source's detail
-
-### Requirement: Bake correctness and preview
-Because retopo, UVs, and bake share one scene, bakes SHALL be free of scale mismatches and tangent-basis inconsistencies by construction: the tangent basis used for baking SHALL be identical to the one exported with the mesh. The viewport SHALL preview bake results on the EditMesh with a repositionable preview light (Move action).
-
-#### Scenario: Exported normal map renders correctly
-- **WHEN** the exported mesh and normal map are loaded in a standard glTF viewer
-- **THEN** shading SHALL match the in-app bake preview without seams or inverted channels
-
-### Requirement: Accelerated, cancellable baking
-Bake ray casting SHALL dispatch through the compute-acceleration layer (GPU when available, CPU fallback), report progress, and honor cooperative cancellation, leaving prior bake results untouched on cancel.
-
-#### Scenario: Cancel a bake
-- **WHEN** cancellation is requested mid-bake
-- **THEN** the bake SHALL stop within 100 ms and previously baked maps SHALL remain as they were
-
-### Requirement: Curvature and cavity maps
-The bake stage SHALL bake a curvature map from the Target onto the EditMesh's
-UV layout: signed surface curvature encoded around a midpoint gray, with
-convex regions brighter and concave regions darker, normalized by a
-user-controllable curvature range. A cavity variant SHALL also be available
-that encodes concavity only (flat and convex regions map to white), suitable
-for direct use as a multiply mask.
-
-When the curvature range is left at 0 the bake SHALL derive it from the Target
-as a percentile of |curvature| weighted by the surface area each sample speaks
-for, so a region influences the range in proportion to the area it covers and
-not to the number of vertices sitting on it.
-
-Curvature baking SHALL follow the same rules as the other map types: the same
-cage projection, component links, output resolution up to at least 4096²,
-GPU dispatch with progress reporting and cancellation, and PNG/EXR output.
-
-#### Scenario: Curvature bake distinguishes edges from crevices
-- **WHEN** a curvature bake runs against a Target with both sharp convex edges and deep concave seams
-- **THEN** the convex edges SHALL read brighter than the midpoint and the concave seams darker, at the requested resolution
-
-#### Scenario: Cavity variant masks concavity only
-- **WHEN** a cavity bake runs on the same Target
-- **THEN** concave seams SHALL read dark while flat and convex regions read white
-
-#### Scenario: Auto range is not captured by a dense sliver fan
-- **WHEN** an auto-ranged curvature bake runs against a Target whose parameterization piles a large share of its vertices onto a vanishing share of its area, such as the sliver fans at a UV sphere's poles
-- **THEN** the range SHALL be set by the curvature of the bulk of the surface, leaving the interior detail legible rather than compressed toward the midpoint
-
-#### Scenario: Curvature respects the cage
-- **WHEN** the projection cage is edited and the curvature bake re-runs
-- **THEN** the sampled regions SHALL follow the edited cage exactly as a normal-map bake would
-
-### Requirement: A host can cap bake texel allocation
-
-The system SHALL allow a host to configure an optional maximum number of bake
-texels. It SHALL reject a request whose `width * height` exceeds that ceiling
-before UV rasterization or output image allocation. Zero SHALL disable the
-ceiling, and an overflowed texel product SHALL be rejected.
-
-#### Scenario: Requested bake is over budget
-
-- **GIVEN** a host sets a texel ceiling below the requested width times height
-- **WHEN** it starts a bake
-- **THEN** the operation SHALL fail with a diagnostic naming the request and ceiling
-- **AND** no output image SHALL be returned
+## ADDED Requirements
 
 ### Requirement: Object-space normal and position maps
 The bake stage SHALL bake an OBJECT-SPACE NORMAL map: the Target's surface normal at the cage hit, expressed in the mesh's own coordinate space and encoded as `n * 0.5 + 0.5`. It SHALL also bake an OBJECT-SPACE POSITION map: the same hit point the position map records in model units, rescaled so that the bake's bounding box spans `[0,1]` on every axis.
@@ -176,4 +95,3 @@ That record SHALL be reachable from every entry point that produces a map — th
 #### Scenario: The report names the basis of every written map
 - **WHEN** an export bundle writes its maps and a machine-readable report
 - **THEN** each map's entry in the report SHALL carry its encoding basis, and the object-space entries SHALL carry their up axis and bounding box
-

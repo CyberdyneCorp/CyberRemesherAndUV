@@ -43,6 +43,10 @@ __all__ = [
     "HAVE_NUMPY",
     "BakeMap",
     "BakeParams",
+    "BentNormalSpace",
+    "EncodingBasis",
+    "ImageEncoding",
+    "UpAxis",
     "Image",
     "bake",
     "Falloff",
@@ -123,7 +127,7 @@ def version() -> str:
 #: The C ABI this binding was written against. Mirrors CYBER_ABI_VERSION_* in
 #: cyber_capi.h; ``check_abi()`` compares it against the loaded library.
 ABI_VERSION_MAJOR = 1
-ABI_VERSION_MINOR = 18
+ABI_VERSION_MINOR = 19
 
 
 def abi_version() -> tuple:
@@ -3526,10 +3530,72 @@ class BakeMap:
     NORMAL = _ffi.BAKE_NORMAL
     AO = _ffi.BAKE_AO
     DISPLACEMENT = _ffi.BAKE_DISPLACEMENT
+    #: Target hit position in MODEL UNITS, unencoded. See
+    #: :attr:`OBJECT_POSITION` for the [0,1] encoding over a bounding box.
     POSITION = _ffi.BAKE_POSITION
     COLOR = _ffi.BAKE_COLOR
     CURVATURE = _ffi.BAKE_CURVATURE
     CAVITY = _ffi.BAKE_CAVITY
+    #: Target normal in object space, encoded ``n * 0.5 + 0.5``.
+    OBJECT_NORMAL = _ffi.BAKE_OBJECT_NORMAL
+    #: :attr:`POSITION`'s hit point rescaled so the bake bounds span [0,1].
+    #: Decode with :attr:`ImageEncoding.bounds_min` / ``bounds_max``.
+    OBJECT_POSITION = _ffi.BAKE_OBJECT_POSITION
+    #: Mean unoccluded hemisphere direction, encoded ``n * 0.5 + 0.5``.
+    BENT_NORMAL = _ffi.BAKE_BENT_NORMAL
+    #: Material behind the surface, in model units, times ``thickness_scale``.
+    THICKNESS = _ffi.BAKE_THICKNESS
+
+
+class UpAxis:
+    """Axis convention for the object-space maps (mirror of ``CyberUpAxis``)."""
+
+    Y = _ffi.UP_AXIS_Y
+    Z = _ffi.UP_AXIS_Z
+
+
+class BentNormalSpace:
+    """Frame a bent-normal bake is expressed in."""
+
+    TANGENT = _ffi.BENT_NORMAL_TANGENT
+    OBJECT = _ffi.BENT_NORMAL_OBJECT
+
+
+class EncodingBasis:
+    """What the numbers in a baked image mean (mirror of ``CyberEncodingBasis``)."""
+
+    NONE = _ffi.ENCODING_NONE
+    TANGENT_NORMAL = _ffi.ENCODING_TANGENT_NORMAL
+    OBJECT_NORMAL = _ffi.ENCODING_OBJECT_NORMAL
+    OBJECT_BOUNDS = _ffi.ENCODING_OBJECT_BOUNDS
+    DISTANCE = _ffi.ENCODING_DISTANCE
+
+
+@dataclass(frozen=True)
+class ImageEncoding:
+    """The basis needed to interpret a baked map.
+
+    Decode an :attr:`EncodingBasis.OBJECT_BOUNDS` texel with
+    ``bounds_min + value * (bounds_max - bounds_min)``; the box is already
+    expressed in :attr:`up_axis`, so no swizzle has to be re-derived.
+    """
+
+    basis: int
+    up_axis: int
+    bounds_min: Tuple[float, float, float]
+    bounds_max: Tuple[float, float, float]
+    #: The factor a DISTANCE map was multiplied by; 1.0 otherwise.
+    scale: float
+
+    @staticmethod
+    def _from_c(c: "_ffi.CyberImageEncoding") -> "ImageEncoding":
+        return ImageEncoding(
+            basis=int(c.basis),
+            up_axis=int(c.up_axis),
+            bounds_min=(float(c.bounds_min[0]), float(c.bounds_min[1]), float(c.bounds_min[2])),
+            bounds_max=(float(c.bounds_max[0]), float(c.bounds_max[1]), float(c.bounds_max[2])),
+            scale=float(c.scale),
+        )
 
 
 @dataclass
@@ -3544,6 +3610,13 @@ class BakeParams:
     #: Curvature magnitude (1/length) saturating CURVATURE/CAVITY to full
     #: white/black. 0 = auto (95th percentile of |curvature| on the Target).
     curvature_range: float = 0.0
+    #: A :class:`UpAxis` for the object-space maps. Anything else is refused.
+    up_axis: int = UpAxis.Y
+    #: A :class:`BentNormalSpace` for ``BakeMap.BENT_NORMAL``.
+    bent_normal_space: int = BentNormalSpace.TANGENT
+    #: Factor ``BakeMap.THICKNESS`` multiplies its mean back-facing depth by.
+    #: Finite and >= 0; the default matches ArmorPaint's doubling.
+    thickness_scale: float = 2.0
 
     def _to_c(self) -> "_ffi.CyberBakeParams":
         return _ffi.CyberBakeParams(
@@ -3553,6 +3626,9 @@ class BakeParams:
             ao_samples=int(self.ao_samples),
             ao_radius=float(self.ao_radius),
             curvature_range=float(self.curvature_range),
+            up_axis=int(self.up_axis),
+            bent_normal_space=int(self.bent_normal_space),
+            thickness_scale=float(self.thickness_scale),
         )
 
 
@@ -3585,6 +3661,13 @@ class Image:
     @property
     def channels(self) -> int:
         return int(_ffi.get_lib().cyber_image_channels(self.handle))
+
+    @property
+    def encoding(self) -> ImageEncoding:
+        """What the pixels mean. Every image has one."""
+        out = _ffi.CyberImageEncoding()
+        _check(_ffi.get_lib().cyber_image_encoding(self.handle, ctypes.byref(out)))
+        return ImageEncoding._from_c(out)
 
     def save_png(self, path: str) -> None:
         """Write the map to an 8-bit PNG (tonemapped)."""
@@ -4085,6 +4168,9 @@ class BundleFile:
     color_space: str
     width: int
     height: int
+    #: What the pixels mean, as the bake reported it. The mesh entry carries
+    #: :attr:`EncodingBasis.NONE`.
+    encoding: ImageEncoding
 
 
 @dataclass(frozen=True)
@@ -4118,6 +4204,8 @@ def write_bundle(
     cage_distance: Optional[float] = None,
     ao_samples: Optional[int] = None,
     ao_radius: Optional[float] = None,
+    bent_normal_space: Optional[int] = None,
+    thickness_scale: Optional[float] = None,
     progress: Optional[Callable[[float, str], None]] = None,
     cancel: Optional[Callable[[], bool]] = None,
 ) -> BundleResult:
@@ -4149,6 +4237,10 @@ def write_bundle(
         params.ao_samples = int(ao_samples)
     if ao_radius is not None:
         params.ao_radius = float(ao_radius)
+    if bent_normal_space is not None:
+        params.bent_normal_space = int(bent_normal_space)
+    if thickness_scale is not None:
+        params.thickness_scale = float(thickness_scale)
 
     def _progress_trampoline(fraction, stage_ptr, _user):
         if progress is None:
@@ -4189,6 +4281,8 @@ def write_bundle(
         for i in range(int(lib.cyber_bundle_result_file_count(out))):
             entry = _ffi.CyberBundleFile()
             _check(lib.cyber_bundle_result_file(out, i, ctypes.byref(entry)))
+            encoding = _ffi.CyberImageEncoding()
+            _check(lib.cyber_bundle_result_file_encoding(out, i, ctypes.byref(encoding)))
             files.append(
                 BundleFile(
                     path=ExportPreset._text(entry.path),
@@ -4196,6 +4290,7 @@ def write_bundle(
                     color_space=ExportPreset._text(entry.color_space),
                     width=int(entry.width),
                     height=int(entry.height),
+                    encoding=ImageEncoding._from_c(encoding),
                 )
             )
         messages: List[str] = []

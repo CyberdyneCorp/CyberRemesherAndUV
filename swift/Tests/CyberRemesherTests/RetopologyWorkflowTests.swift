@@ -181,6 +181,57 @@ final class RetopologyWorkflowTests: XCTestCase {
         XCTAssertEqual(a.seamEdges, b.seamEdges)
     }
 
+    func testMeshMapsCarryADecodableEncodingBasis() throws {
+        // The four CyberTexel maps through the Swift surface. An object-space
+        // position map is `(p - min) / (max - min)`: without the recorded box a
+        // consumer cannot recover a single coordinate, so the binding has to
+        // carry the basis and not only the pixels.
+        let target = try cylinder()
+        let snapper = try Snapper(target: target)
+        let low = try Mesh()
+        try low.contours(
+            target: target, strokes: [arc(-0.5), arc(0), arc(0.5)], spans: 12, snapper: snapper)
+        _ = try low.unwrap()
+
+        var params = BakeParameters()
+        params.width = 32
+        params.height = 32
+        params.aoSamples = 8
+
+        let objectNormal = try low.bake(from: target, map: .objectNormal, parameters: params)
+        XCTAssertEqual(objectNormal.channels, 3)
+        XCTAssertEqual(objectNormal.encoding.basis, .objectNormal)
+        XCTAssertEqual(objectNormal.encoding.upAxis, .y)
+
+        let position = try low.bake(from: target, map: .objectPosition, parameters: params)
+        XCTAssertEqual(position.encoding.basis, .objectBounds)
+        XCTAssertGreaterThan(position.encoding.boundsMax.0, position.encoding.boundsMin.0)
+        XCTAssertFalse(position.pixels().contains { $0 < 0 || $0 > 1 },
+                       "an object-space position must land inside its own bounds")
+
+        let bent = try low.bake(from: target, map: .bentNormal, parameters: params)
+        XCTAssertEqual(bent.encoding.basis, .tangentNormal)
+
+        // A non-default value is the only thing that proves the appended
+        // members crossed the boundary at all.
+        params.bentNormalSpace = .object
+        params.upAxis = .z
+        let bentObject = try low.bake(from: target, map: .bentNormal, parameters: params)
+        XCTAssertEqual(bentObject.encoding.basis, .objectNormal)
+        XCTAssertEqual(bentObject.encoding.upAxis, .z)
+
+        params.thicknessScale = 3
+        let thickness = try low.bake(from: target, map: .thickness, parameters: params)
+        XCTAssertEqual(thickness.channels, 1)
+        XCTAssertEqual(thickness.encoding.basis, .distance)
+        XCTAssertEqual(thickness.encoding.scale, 3, accuracy: 1e-6)
+
+        // Out of range is refused, not defaulted. `upAxis` is a Swift enum, so
+        // the C ABI's own validation is reached through the scale instead.
+        params.thicknessScale = -1
+        XCTAssertThrowsError(try low.bake(from: target, map: .thickness, parameters: params))
+    }
+
     func testDefaultsComeFromTheEngine() {
         // The Swift mirrors read their defaults through the C ABI rather than
         // repeating them, so they cannot drift from what the CLI does.
@@ -195,5 +246,9 @@ final class RetopologyWorkflowTests: XCTestCase {
         let swiftBake = BakeParameters()
         XCTAssertEqual(swiftBake.width, bake.width)
         XCTAssertEqual(swiftBake.cageDistance, bake.cageDistance)
+        XCTAssertEqual(swiftBake.thicknessScale, bake.thicknessScale)
+        XCTAssertEqual(Int32(bitPattern: swiftBake.upAxis.rawValue), bake.upAxis)
+        XCTAssertEqual(
+            Int32(bitPattern: swiftBake.bentNormalSpace.rawValue), bake.bentNormalSpace)
     }
 }

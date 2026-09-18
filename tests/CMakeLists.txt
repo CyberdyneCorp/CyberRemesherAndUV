@@ -9,6 +9,7 @@ add_executable(cyber_tests
     bake/test_tangent.cpp
     bake/test_ao_projected.cpp
     bake/test_field_bake.cpp
+    bake/test_mesh_maps.cpp
     handoff/test_handoff.cpp
     quadrangulate/test_crossfield.cpp
     quadrangulate/test_field_quadrangulator.cpp

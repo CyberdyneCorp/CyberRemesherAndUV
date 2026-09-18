@@ -612,6 +612,123 @@ TEST_CASE("capi bakes a normal map onto a UV plane") {
     std::filesystem::remove(pngPath, ec);
 }
 
+TEST_CASE("capi exposes the object-space and ray-traced maps with their basis") {
+    const std::filesystem::path objPath = writeUvPlaneObj();
+    CyberMesh* low = nullptr;
+    CyberMesh* high = nullptr;
+    REQUIRE(cyber_mesh_load_obj(objPath.string().c_str(), &low) == CYBER_OK);
+    REQUIRE(cyber_mesh_load_obj(objPath.string().c_str(), &high) == CYBER_OK);
+
+    CyberBakeParams params{};
+    cyber_default_bake_params(&params);
+    params.width = 16;
+    params.height = 16;
+    CHECK(params.upAxis == CYBER_UP_AXIS_Y);
+    CHECK(params.bentNormalSpace == CYBER_BENT_NORMAL_TANGENT);
+    CHECK(params.thicknessScale == doctest::Approx(2.0f));
+
+    // Every new map is reachable, and each reports what its numbers mean.
+    struct Expectation {
+        CyberBakeMap map;
+        int basis;
+        int channels;
+    };
+    const Expectation expectations[] = {
+        {CYBER_BAKE_OBJECT_NORMAL, CYBER_ENCODING_OBJECT_NORMAL, 3},
+        {CYBER_BAKE_OBJECT_POSITION, CYBER_ENCODING_OBJECT_BOUNDS, 3},
+        {CYBER_BAKE_BENT_NORMAL, CYBER_ENCODING_TANGENT_NORMAL, 3},
+        {CYBER_BAKE_THICKNESS, CYBER_ENCODING_DISTANCE, 1},
+    };
+    for (const Expectation& expected : expectations) {
+        CAPTURE(static_cast<int>(expected.map));
+        CyberImage* image = nullptr;
+        REQUIRE(cyber_bake(low, high, expected.map, &params, &image) == CYBER_OK);
+        REQUIRE(image != nullptr);
+        CHECK(cyber_image_channels(image) == expected.channels);
+        CyberImageEncoding encoding{};
+        REQUIRE(cyber_image_encoding(image, &encoding) == CYBER_OK);
+        CHECK(encoding.basis == expected.basis);
+        CHECK(encoding.upAxis == CYBER_UP_AXIS_Y);
+        if (expected.map == CYBER_BAKE_OBJECT_POSITION) {
+            // The plane spans [0,1]^2 at z = 0; the box is reported so a
+            // consumer can decode a texel back to a coordinate.
+            CHECK(encoding.boundsMin[0] == doctest::Approx(0.0f));
+            CHECK(encoding.boundsMax[0] == doctest::Approx(1.0f));
+        }
+        if (expected.map == CYBER_BAKE_THICKNESS) {
+            CHECK(encoding.scale == doctest::Approx(2.0f));
+        }
+        cyber_image_free(image);
+    }
+
+    // The up axis reaches the output, and it is recorded there.
+    params.upAxis = CYBER_UP_AXIS_Z;
+    CyberImage* zUp = nullptr;
+    REQUIRE(cyber_bake(low, high, CYBER_BAKE_OBJECT_NORMAL, &params, &zUp) == CYBER_OK);
+    CyberImageEncoding zEncoding{};
+    REQUIRE(cyber_image_encoding(zUp, &zEncoding) == CYBER_OK);
+    CHECK(zEncoding.upAxis == CYBER_UP_AXIS_Z);
+    cyber_image_free(zUp);
+
+    CyberImageEncoding unused{};
+    CHECK(cyber_image_encoding(nullptr, &unused) == CYBER_ERR_INVALID_ARG);
+
+    cyber_mesh_free(low);
+    cyber_mesh_free(high);
+    std::error_code ec;
+    std::filesystem::remove(objPath, ec);
+}
+
+namespace {
+// The z = 0 plane as a field, so the encoding-parameter rejection can be shown
+// on the field entry point too rather than only on the mesh one.
+float flatFieldDistance(void*, const float p[3]) { return p[2]; }
+void flatFieldGradient(void*, const float[3], float out[3]) {
+    out[0] = 0.0f;
+    out[1] = 0.0f;
+    out[2] = 1.0f;
+}
+float flatFieldOcclusion(void*, const float[3], const float[3], float) { return 1.0f; }
+}  // namespace
+
+TEST_CASE("capi refuses an out-of-range encoding parameter instead of defaulting it") {
+    const std::filesystem::path objPath = writeUvPlaneObj();
+    CyberMesh* low = nullptr;
+    CyberMesh* high = nullptr;
+    REQUIRE(cyber_mesh_load_obj(objPath.string().c_str(), &low) == CYBER_OK);
+    REQUIRE(cyber_mesh_load_obj(objPath.string().c_str(), &high) == CYBER_OK);
+
+    const auto refused = [&](void (*mutate)(CyberBakeParams&), const char* fragment) {
+        CyberBakeParams params{};
+        cyber_default_bake_params(&params);
+        params.width = 8;
+        params.height = 8;
+        mutate(params);
+        CyberImage* image = nullptr;
+        CHECK(cyber_bake(low, high, CYBER_BAKE_OBJECT_NORMAL, &params, &image) ==
+              CYBER_ERR_INVALID_ARG);
+        CHECK(image == nullptr);
+        CHECK(std::string(cyber_last_error()).find(fragment) != std::string::npos);
+        // The same rejection through the field entry point: one validation, so
+        // a parameter cannot be refused on one path and waved through on the
+        // other.
+        CyberFieldEvaluator field{flatFieldDistance, flatFieldGradient, flatFieldOcclusion,
+                                  nullptr};
+        CHECK(cyber_bake_field(low, nullptr, CYBER_BAKE_NORMAL, &params, &field, &image) ==
+              CYBER_ERR_INVALID_ARG);
+        CHECK(image == nullptr);
+        CHECK(std::string(cyber_last_error()).find(fragment) != std::string::npos);
+    };
+    refused([](CyberBakeParams& p) { p.upAxis = 7; }, "upAxis");
+    refused([](CyberBakeParams& p) { p.bentNormalSpace = -3; }, "bentNormalSpace");
+    refused([](CyberBakeParams& p) { p.thicknessScale = -1.0f; }, "thicknessScale");
+
+    cyber_mesh_free(low);
+    cyber_mesh_free(high);
+    std::error_code ec;
+    std::filesystem::remove(objPath, ec);
+}
+
 // ---- soft selection over the C ABI ----------------------------------------
 
 namespace {

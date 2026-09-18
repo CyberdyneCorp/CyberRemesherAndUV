@@ -84,6 +84,14 @@ struct CliOptions {
     float cageDistance = 0.0f;              // 0 = derive from the input's bounds
     int textureSize = 0;                    // 0 = the preset's own resolution
     int aoSamples = 0;                      // 0 = the bake default
+    // Both bake-encoding flags keep a "was given" bit rather than a sentinel
+    // value: -1 is a plausible thing to TYPE at --thickness-scale (it is the
+    // value the range check exists to refuse), so a sentinel in the value would
+    // read the rejection as "not set" and run the bake anyway.
+    float thicknessScale = 0.0f;
+    bool thicknessScaleSet = false;
+    std::string bentNormalSpace;
+    bool bentNormalSpaceSet = false;
     remesh::Parameters params;
     std::string backend;  // empty = automatic best-first choice
     bool verbose = false;
@@ -143,8 +151,10 @@ void printUsage() {
                  "                           Mutually exclusive with --input\n"
                  "  --bake <csv>             maps to bake, overriding the preset's set\n"
                  "                           (normal,ao,curvature,cavity,displacement,\n"
-                 "                           color,position). Implies --preset\n"
-                 "                           gltf-generic when no preset is named\n"
+                 "                           color,position,object-normal,\n"
+                 "                           object-position,bent-normal,thickness).\n"
+                 "                           Implies --preset gltf-generic when no\n"
+                 "                           preset is named\n"
                  "  --target-quads <int>     target quad count (default 50000)\n"
                  "  --edge-scale <float>     density scale (default 1.0)\n"
                  "  --sharp-edge <deg>       feature angle (default 90)\n"
@@ -172,7 +182,11 @@ void printUsage() {
                  "  --cage <float>           bake cage distance (default: 1%% of the\n"
                  "                           input's bounding-box diagonal)\n"
                  "  --texture-size <int>     override the preset's map resolution\n"
-                 "  --ao-samples <int>       hemisphere rays per texel (default 64)\n"
+                 "  --ao-samples <int>       hemisphere rays per texel (default 64);\n"
+                 "                           shared by ao, bent-normal and thickness\n"
+                 "  --thickness-scale <f>    factor the thickness map multiplies its\n"
+                 "                           mean depth by (default 2)\n"
+                 "  --bent-normal-space <s>  tangent (default) | object\n"
                  "  --list-presets           print built-in export presets and exit\n"
                  "  --verbose | --quiet      diagnostic detail / errors only\n"
                  "  --backend <name>         compute backend: cpu | metal | cuda |\n"
@@ -309,6 +323,18 @@ int parseArgs(int argc, char** argv, CliOptions& options, bool& exitEarly) {
             if (!numeric("--ao-samples", options.aoSamples)) {
                 return kExitArgs;
             }
+        } else if (arg == "--thickness-scale") {
+            if (!numeric("--thickness-scale", options.thicknessScale)) {
+                return kExitArgs;
+            }
+            options.thicknessScaleSet = true;
+        } else if (arg == "--bent-normal-space") {
+            const auto v = next("--bent-normal-space");
+            if (!v) {
+                return kExitArgs;
+            }
+            options.bentNormalSpace = *v;
+            options.bentNormalSpaceSet = true;
         } else if (arg == "--quality") {
             const auto v = next("--quality");
             if (!v) {
@@ -461,6 +487,17 @@ int parseArgs(int argc, char** argv, CliOptions& options, bool& exitEarly) {
     if (!options.bakeMaps.empty() && options.preset.empty()) {
         options.preset = "gltf-generic";
     }
+    // The two bake-encoding flags are range-checked here rather than at the
+    // flag, so the whole of parseArgs's dispatch chain stays one line per flag.
+    if (options.thicknessScaleSet && !(options.thicknessScale >= 0.0f)) {
+        std::fprintf(stderr, "error: --thickness-scale must be finite and >= 0\n");
+        return kExitArgs;
+    }
+    if (options.bentNormalSpaceSet && options.bentNormalSpace != "tangent" &&
+        options.bentNormalSpace != "object") {
+        std::fprintf(stderr, "error: --bent-normal-space must be tangent or object\n");
+        return kExitArgs;
+    }
     // Applied here rather than at the flag so the choice survives a repeated
     // --backend and so an argument error still wins over a device probe.
     if (!options.backend.empty() && !selectBackendByName(options.backend)) {
@@ -569,11 +606,52 @@ struct PresetOutcome {
         std::string colorSpace;
         int width = 0;
         int height = 0;
+        // What the pixels mean. An encoded map -- an object-space position over
+        // a bounding box, a thickness times a scale -- is not interpretable
+        // without this, so the report records it beside the file.
+        cyber::bake::BakeEncoding encoding;
     };
     std::vector<File> files;
     bool unwrapped = false;
     int chartCount = 0;
 };
+
+const char* encodingBasisName(cyber::bake::EncodingBasis basis) {
+    switch (basis) {
+        case cyber::bake::EncodingBasis::TangentNormal:
+            return "tangent-normal";
+        case cyber::bake::EncodingBasis::ObjectNormal:
+            return "object-normal";
+        case cyber::bake::EncodingBasis::ObjectBounds:
+            return "object-bounds";
+        case cyber::bake::EncodingBasis::Distance:
+            return "distance";
+        case cyber::bake::EncodingBasis::None:
+            break;
+    }
+    return "none";
+}
+
+// The basis a consumer needs to decode the file, written only where it says
+// something: an up axis on the object-space bases, a box on the position map, a
+// factor on the distance maps.
+nlohmann::json encodingJson(const cyber::bake::BakeEncoding& encoding) {
+    using cyber::bake::EncodingBasis;
+    nlohmann::json out = {{"basis", encodingBasisName(encoding.basis)}};
+    const bool objectSpace = encoding.basis == EncodingBasis::ObjectNormal ||
+                             encoding.basis == EncodingBasis::ObjectBounds;
+    if (objectSpace) {
+        out["upAxis"] = encoding.upAxis == cyber::bake::UpAxis::ZUp ? "z-up" : "y-up";
+    }
+    if (encoding.basis == EncodingBasis::ObjectBounds) {
+        out["boundsMin"] = {encoding.boundsMin.x, encoding.boundsMin.y, encoding.boundsMin.z};
+        out["boundsMax"] = {encoding.boundsMax.x, encoding.boundsMax.y, encoding.boundsMax.z};
+    }
+    if (encoding.basis == EncodingBasis::Distance) {
+        out["scale"] = encoding.scale;
+    }
+    return out;
+}
 
 const char* greenName(cyber::io::GreenChannel green) {
     return green == cyber::io::GreenChannel::MinusY ? "-Y" : "+Y";
@@ -611,6 +689,7 @@ void addPresetToReport(nlohmann::json& report, const PresetOutcome& outcome) {
             entry["colorSpace"] = file.colorSpace;
             entry["width"] = file.width;
             entry["height"] = file.height;
+            entry["encoding"] = encodingJson(file.encoding);
         }
         report["outputs"].push_back(entry);
     }
@@ -1349,6 +1428,12 @@ int runCli(int argc, char** argv) {
         if (options.aoSamples > 0) {
             bundleParams.aoSamples = options.aoSamples;
         }
+        if (options.thicknessScaleSet) {
+            bundleParams.thicknessScale = options.thicknessScale;
+        }
+        if (options.bentNormalSpace == "object") {
+            bundleParams.bentNormalSpace = cyber::bake::NormalSpace::Object;
+        }
         cyber::Mesh low = result.mesh;
         const cyber::exportbundle::BundleResult bundle =
             cyber::exportbundle::writeBundle(low, source.mesh, bundleParams, &sink, &cancel);
@@ -1369,7 +1454,7 @@ int runCli(int argc, char** argv) {
         presetOutcome.chartCount = bundle.chartCount;
         for (const auto& file : bundle.files) {
             presetOutcome.files.push_back(
-                {file.path, file.kind, file.colorSpace, file.width, file.height});
+                {file.path, file.kind, file.colorSpace, file.width, file.height, file.encoding});
         }
     }
 #endif

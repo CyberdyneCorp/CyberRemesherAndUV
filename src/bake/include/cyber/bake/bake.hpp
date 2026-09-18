@@ -21,10 +21,60 @@ enum class BakeMap {
     Normal,            // tangent-space normal map (RGB, encoded [0,1])
     AmbientOcclusion,  // openness in [0,1] (1 = fully lit), single channel
     Displacement,      // signed height along the low-poly normal, single channel
-    Position,          // high-poly hit position (RGB, world space)
+    Position,          // high-poly hit position in MODEL UNITS, unencoded (RGB)
     Color,             // Target vertex color sampled at the hit (RGB)
     Curvature,         // signed mean curvature around mid-gray, single channel
     Cavity,            // concavity only (white = flat or convex), single channel
+    // --- appended in 0.8.0; the values above keep their numbers -----------
+    ObjectNormal,    // Target normal in object space, encoded n*0.5+0.5 (RGB)
+    ObjectPosition,  // the Position hit point rescaled over the bake bounds (RGB)
+    BentNormal,      // mean unoccluded hemisphere direction, encoded n*0.5+0.5 (RGB)
+    Thickness,       // material behind the surface, in model units, single channel
+};
+
+// Axis convention the OBJECT-SPACE maps are expressed in. YUp is this engine's
+// own convention (and glTF's); ZUp re-expresses a vector as (x, -z, y), which is
+// what a z-up DCC reads. It applies to ObjectNormal, ObjectPosition and, when
+// BentNormal is baked in object space, to that too. Tangent space has no up
+// axis, so it is ignored there.
+enum class UpAxis {
+    YUp,
+    ZUp,
+};
+
+// Frame a bent-normal bake is expressed in. Tangent (the default) matches
+// BakeMap::Normal, so the two maps drop into the same shader slot; Object gives
+// a direction a smart mask can compare against a world direction.
+enum class NormalSpace {
+    Tangent,
+    Object,
+};
+
+// What the numbers in a baked image MEAN. An encoded map without its basis is a
+// picture of some numbers: an object-space position cannot be turned back into a
+// coordinate without the box it was rescaled over, and a thickness cannot be
+// turned back into a distance without the factor it was multiplied by.
+enum class EncodingBasis {
+    None,           // raw values (AO, color, curvature, cavity)
+    TangentNormal,  // unit direction in the texel's tangent frame, v*0.5+0.5
+    ObjectNormal,   // unit direction in object space (`upAxis`), v*0.5+0.5
+    ObjectBounds,   // object-space position rescaled over [boundsMin, boundsMax]
+    Distance,       // a length in model units, multiplied by `scale`
+};
+
+// Filled by every bake, for every map. Members that do not apply to the basis
+// keep their defaults (a None basis says nothing beyond "these are the values").
+struct BakeEncoding {
+    EncodingBasis basis = EncodingBasis::None;
+    UpAxis upAxis = UpAxis::YUp;
+    // The box an ObjectBounds map was rescaled over, already expressed in
+    // `upAxis`, so a consumer decodes with (min + value * (max - min)) without
+    // re-deriving the swizzle.
+    Vec3 boundsMin;
+    Vec3 boundsMax;
+    // The factor a Distance map was multiplied by (BakeParams::thicknessScale
+    // for Thickness; 1 for Displacement).
+    float scale = 1.0f;
 };
 
 struct Image {
@@ -86,6 +136,20 @@ struct BakeParams {
     // separate from dimensions: an image can be tall, wide or square while a
     // host's allocation budget is about their product.
     std::size_t maxPixels = 0;
+    // Axis convention for the object-space maps (ObjectNormal, ObjectPosition,
+    // and BentNormal when bentNormalSpace is Object). Default y-up: the
+    // engine's own convention. Recorded in BakeResult::encoding.
+    UpAxis upAxis = UpAxis::YUp;
+    // Frame BakeMap::BentNormal is expressed in. Default tangent, matching
+    // BakeMap::Normal. Recorded in BakeResult::encoding.
+    NormalSpace bentNormalSpace = NormalSpace::Tangent;
+    // Factor BakeMap::Thickness multiplies its mean back-facing depth by.
+    // ArmorPaint doubles the distance and the default matches it, but the
+    // doubling is a CHOICE (the mean chord of a cosine-weighted hemisphere
+    // through a slab of thickness d is 2d, so it undoes the hemisphere's own
+    // averaging for that case) and an inherited constant nobody can see is how
+    // a bake becomes unreproducible. Finite, >= 0; read only by Thickness.
+    float thicknessScale = 2.0f;
     // Optional field evaluator (pipeline-bridge spec, "Field-sampled baking").
     // When set, Normal / AmbientOcclusion / Curvature / Cavity sample the field
     // directly — the cage ray is sphere-traced through it and normals come from
@@ -98,6 +162,9 @@ struct BakeParams {
 
 struct BakeResult {
     Image image;
+    // What the pixels mean. Filled for every map, so a consumer never has to
+    // infer an encoding from the map's name.
+    BakeEncoding encoding;
     bool cancelled = false;
     std::size_t texelsCovered = 0;  // texels touched by the UV layout
     // Set when a FIELD EVALUATOR broke its contract -- a NaN distance, a

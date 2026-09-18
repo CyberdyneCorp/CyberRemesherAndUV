@@ -7,6 +7,76 @@
 
 ### Added
 
+- **Four mesh maps for texture authoring: object-space normal, object-space
+  position, bent normal, thickness.** CyberTexel's generators and smart masks
+  read mesh maps rather than pixels — that is what lets a smart material
+  re-derive itself on a new model — and these four had no counterpart here.
+
+  `object-normal` is the Target normal in object space, encoded `n * 0.5 + 0.5`;
+  `object-position` is the hit point rescaled so the bake's bounding box spans
+  `[0,1]`. Both take a selectable up axis (`BakeParams::upAxis`, y-up by
+  default; in a bundle run it comes from the preset, which is where "what this
+  target app expects" already lives) and cost the SAME single cage ray the
+  normal map casts, so they honour the cage, the component links, the texel
+  ceiling and cancellation with nothing added.
+
+  `bent-normal` and `thickness` are ray-traced and share the AO baker's
+  hemisphere: one `gatherHemisphere()` serves AO's occluded count, the bent
+  normal's unoccluded-direction sum and thickness's back-facing depth sum, so
+  the three cannot drift apart in sampling, per-texel rotation, cage, progress
+  or cancellation. AO's own pixels are bit-identical to before.
+
+  The bent normal's frame is a parameter (`bentNormalSpace`, tangent by default
+  to match the tangent-space normal map) rather than an assumption, and it is
+  recorded with the output.
+
+  Thickness casts from the INVERTED normal and records the distance to the first
+  BACK-FACING hit — where the ray leaves the solid. A ray that hits nothing, or
+  that hits a front face, contributes **zero**: it never entered material. That
+  is what makes a thin double-sided surface read near zero instead of solid
+  white, which reading a miss as "maximally thick" would have done. ArmorPaint
+  doubles the recorded distance; that doubling is `thicknessScale` (default 2.0)
+  rather than an inherited constant nobody can see, and the value is written in
+  MODEL UNITS like displacement, not normalised by the radius.
+
+  `BakeMap::Position` is NOT redefined. It means the hit point in model units,
+  it is in the pinned ABI and both bindings, and a caller reading coordinates
+  would have started getting `[0,1]` numbers with no error anywhere.
+  `ObjectPosition` is a second map over the same sample.
+
+- **Every bake reports its encoding basis.** An object-space position map is
+  `(p - min) / (max - min)`; without `min` and `max` a consumer cannot recover a
+  single coordinate, and the map is a picture of some numbers. The same is true
+  of a thickness times a scale and of any direction map whose up axis the
+  producer chose.
+
+  `BakeResult::encoding` is filled for EVERY map, not only the new ones: the
+  basis (raw, tangent direction, object direction, position-over-bounds,
+  distance), the up axis, the bounding box — expressed in that same up axis, so
+  no swizzle has to be re-derived — and the scale. It reaches a host through
+  `cyber_image_encoding` and `cyber_bundle_result_file_encoding`,
+  `Image.encoding` in Python and Swift, and the CLI report's
+  `outputs[].encoding`.
+
+- **The ray-traced pass reports progress as it accumulates**, instead of one
+  report at the end. The texel loop is the bake's only parallel region, so the
+  reports come from worker threads; `ProgressSink` merges values monotonically
+  but hands the host callback straight through, so the bake serialises the call
+  behind its own mutex and reports on a 1% step. Still one `parallelFor` range.
+
+- **CLI:** `--bake` accepts `object-normal`, `object-position`, `bent-normal`
+  and `thickness`; `--thickness-scale` and `--bent-normal-space` set the two new
+  parameters, and a bad value for either is an argument error rather than a
+  silent default.
+
+- **ABI 1.19, additive.** Four `CyberBakeMap` values appended (the existing ones
+  keep their numbers), three members appended to `CyberBakeParams` and two to
+  `CyberBundleParams` — always initialise both through their `cyber_default_*`
+  helper — plus `CyberUpAxis`, `CyberBentNormalSpace`, `CyberEncodingBasis`,
+  `CyberImageEncoding`, `cyber_image_encoding` and
+  `cyber_bundle_result_file_encoding`. The pinned manifest diff against 1.18
+  removes and reshapes nothing.
+
 - **Contours — cross-section strokes become a quad tube.** The one interaction
   model in RetopoFlow and the ZBrush retopology brush that this engine had no
   answer for, and the one artists reach for on arms, legs, horns and tentacles.
