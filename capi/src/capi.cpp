@@ -6414,9 +6414,17 @@ CyberStatus cyber_export_bundle_write([[maybe_unused]] CyberMesh* low,
         }
         auto handle = std::make_unique<CyberBundleResult>();
         for (const cyber::exportbundle::BundleFile& file : result.files) {
-            handle->files.push_back({file.path, file.kind, file.colorSpace, file.width, file.height,
-                                     toCEncoding(file.encoding), file.encoding.idSource,
-                                     file.encoding.idColors});
+            // Every member named: a positional list silently shifts when a
+            // member is inserted, and the id table was appended to this very
+            // struct one release ago.
+            handle->files.push_back({.path = file.path,
+                                     .kind = file.kind,
+                                     .colorSpace = file.colorSpace,
+                                     .width = file.width,
+                                     .height = file.height,
+                                     .encoding = toCEncoding(file.encoding),
+                                     .idSource = file.encoding.idSource,
+                                     .idColors = file.encoding.idColors});
         }
         handle->warnings = result.warnings;
         handle->unwrapped = result.unwrapped;

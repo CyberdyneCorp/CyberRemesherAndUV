@@ -7,6 +7,7 @@
 #include <set>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "cyber/bake/bake.hpp"
@@ -50,6 +51,19 @@ Mesh lowPlaneOver(float x0, float x1) {
 }
 
 Mesh lowPlane() { return lowPlaneOver(0.0f, 1.0f); }
+
+// The same quad, but with its UVs shrunk into the lower-left quarter of the
+// layout: the texels outside it are never rasterised at all, so they keep
+// whatever the pre-fill wrote. Every other case here covers the whole layout
+// and therefore never exercises that path.
+Mesh lowPlaneInQuarterLayout() {
+    Mesh mesh = lowPlane();
+    std::vector<Vec2>* uv = mesh.cornerAttributes().find<Vec2>("uv");
+    for (Vec2& coord : *uv) {
+        coord = {coord.x * 0.5f, coord.y * 0.5f};
+    }
+    return mesh;
+}
 
 // The Target: two quads at z = 0, LEFT over u < 0.5 and RIGHT over u > 0.5,
 // built from separate vertices so they share no edge and read as two
@@ -411,6 +425,35 @@ TEST_CASE("an unreached cage and an uncovered texel both take the reserved 'no i
     const bake::BakeResult reached = bake::bake(low, distant, bake::BakeMap::MaterialId, p);
     REQUIRE(!reached.image.pixels.empty());
     CHECK(distinctColors(reached.image).count(kNoId) == 0);
+}
+
+TEST_CASE("a texel no chart covers pads with the reserved 'no id'") {
+    // A missed cage ray and an unrasterised texel are two different code
+    // paths to the same required value: the first writes "no id" while
+    // shading, the second only ever holds the image's pre-fill. Both have to
+    // be the reserved black, or the file would carry a colour that resolves
+    // to no row of the reported table -- which is exactly what a consumer
+    // uses the map for.
+    const Mesh low = lowPlaneInQuarterLayout();
+    const Mesh high = targetWithColumn("material_id", {7, 42});
+    for (const bake::BakeMap map : {bake::BakeMap::MaterialId, bake::BakeMap::ObjectId}) {
+        const bake::BakeResult result = bake::bake(low, high, map, params64());
+        REQUIRE(!result.image.pixels.empty());
+        // Inside the chart -- the rasteriser flips v, so the quarter layout
+        // lands in the lower-left of UV space and the BOTTOM-left of the
+        // image. Checked first, so a layout that covered nothing at all could
+        // not pass this case vacuously.
+        CHECK(byteAt(result.image, 10, 40) != kNoId);
+        CHECK(byteAt(result.image, 20, 50) != kNoId);
+        // Outside every chart: past it in u, past it in v, and in the corner.
+        for (const std::pair<int, int> at : {std::pair<int, int>{40, 40}, {10, 10}, {63, 10}}) {
+            CHECK(byteAt(result.image, at.first, at.second) == kNoId);
+            // Exactly zero in the float buffer too, not merely rounding to it.
+            for (int c = 0; c < result.image.channels; ++c) {
+                CHECK(result.image.at(at.first, at.second, c) == 0.0f);
+            }
+        }
+    }
 }
 
 TEST_CASE("the id maps honour the texel ceiling, the UVs and cancellation") {

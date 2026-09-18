@@ -219,6 +219,14 @@ public struct IdColor: Sendable, Equatable {
     public let id: Int32
     public let color: (UInt8, UInt8, UInt8)
 
+    /// Public so host code can build the row it wants to compare a picked
+    /// colour against; the memberwise initializer of a struct with `let`
+    /// members is internal.
+    public init(id: Int32, color: (UInt8, UInt8, UInt8)) {
+        self.id = id
+        self.color = color
+    }
+
     public static func == (lhs: IdColor, rhs: IdColor) -> Bool {
         lhs.id == rhs.id && lhs.color == rhs.color
     }

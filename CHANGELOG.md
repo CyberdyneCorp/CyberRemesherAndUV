@@ -56,6 +56,14 @@
   plus `CyberIdColor` and six accessors. The pinned manifest diff against 1.19
   removes and reshapes nothing.
 
+  The stable C boundary is unchanged — `CyberImageEncoding` is still the same
+  flat POD, and the variable-length table is read through separate accessors —
+  but the C++ `cyber::bake::BakeEncoding` struct gained a `std::string` and a
+  `std::vector<IdColorEntry>`. Anything linking the C++ libraries directly
+  (rather than the C ABI) sees a larger struct and a heavier copy; nothing
+  changes for a C ABI consumer. Swift's `IdColor` has a public initializer, so
+  host code can build the row it wants to compare a picked colour against.
+
 - **Four mesh maps for texture authoring: object-space normal, object-space
   position, bent normal, thickness.** CyberTexel's generators and smart masks
   read mesh maps rather than pixels — that is what lets a smart material

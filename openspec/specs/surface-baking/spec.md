@@ -242,8 +242,15 @@ in a non-linear colour space SHALL be reported and the map written verbatim, rat
 honoured.
 
 Both maps SHALL follow the same rules as the other map types: the same cage projection,
-component links, output resolution, texel ceiling, progress reporting and cooperative
-cancellation, and SHALL be requestable through every entry point the other maps are.
+output resolution, texel ceiling, progress reporting and cooperative cancellation, and
+SHALL be requestable through every entry point the other maps are. They SHALL introduce
+no id-specific exception to that shared path — including the component-link selection of
+"Component links and selective baking", which the bake entry point applies to no map type
+today and which, once it does, SHALL reach the id maps on the same terms as the rest.
+
+#### Scenario: An id map takes the shared bake path unchanged
+- **WHEN** an id map and any other raster map are baked from the same EditMesh/Target pair with the same parameters
+- **THEN** the id map SHALL honour the cage distance, the UV layout, the texel ceiling, the progress reporting and the cancellation exactly as that other map does, taking no id-specific parameter and making no id-specific exception
 
 #### Scenario: One flat colour per material
 - **WHEN** a material ID map is baked against a Target whose faces carry two distinct material ids

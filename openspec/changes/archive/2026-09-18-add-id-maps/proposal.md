@@ -16,8 +16,9 @@ ruled out by construction, not by care.
 
 - Two new `BakeMap` values: `MaterialId` and `ObjectId`, requestable through every
   entry point the existing maps are — the C ABI, the export presets, the CLI's
-  `--bake`, Python and Swift — honouring the same cage, component links, texel
-  ceiling, progress reporting and cancellation.
+  `--bake`, Python and Swift — honouring the same cage, texel ceiling, progress
+  reporting and cancellation. Component-link selection is out of scope: the bake
+  entry point applies it to no map type, so the id maps inherit that unchanged.
 - **A stated id source per map.** `MaterialId` reads the Target's face-domain int32
   `material_id` column; `ObjectId` reads `object_id`, then `group_id`, and falls back
   to the Target's face-connected components when no column declares one. The source

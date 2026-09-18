@@ -257,6 +257,77 @@ def check_bundle_unwraps_and_warns(tmpdir: str) -> None:
           "preset/extension mismatch surfaces as a warning".format(result.chart_count))
 
 
+def check_bundle_id_table(tmpdir: str) -> None:
+    """The id table of a bundled map, read back through the binding.
+
+    write_bundle reads the table through a different C surface than a direct
+    bake does — CyberImageEncoding is a flat POD, so the bundle keeps its own
+    copy behind cyber_bundle_result_file_id_* — and that surface is what a
+    host writing an export gets. A dropped or reordered row there leaves the
+    written PNG unresolvable even though bake() itself is fine.
+    """
+    from cyberremesh import EncodingBasis, ExportPreset, Mesh, write_bundle, bake
+    from cyberremesh import BakeMap, BakeParams
+
+    low_path = write(tmpdir, "id_low.obj", _UV_PLANE)
+    # sRGB on an id map is the trap: a gamma curve rewrites every id's colour,
+    # so the bundle must refuse it and report the refusal.
+    preset_path = write(tmpdir, "id_preset.json", json.dumps({
+        "schemaVersion": 1,
+        "name": "idmaps",
+        "meshFormat": "obj",
+        "resolution": 16,
+        "maps": [{"map": "material-id", "colorSpace": "srgb"}, {"map": "object-id"}],
+    }))
+    out_dir = os.path.join(tmpdir, "bundle_ids")
+    os.makedirs(out_dir, exist_ok=True)
+
+    positions = [0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0]
+    offsets = [0, 3, 6]
+    indices = [0, 1, 2, 0, 2, 3]
+    with Mesh.load_obj(low_path) as low, Mesh.from_indexed(
+        positions, offsets, indices, {("face", "material_id"): [4, 9]}
+    ) as high:
+        with ExportPreset.resolve(preset_path) as preset:
+            result = write_bundle(low, high, preset,
+                                  os.path.join(out_dir, "plane.obj"),
+                                  ao_samples=4, cage_distance=0.2)
+        # The same pair baked directly: the bundle has to report the very
+        # same table, or a colour picked out of the written file resolves to
+        # a different id than the bake assigned it.
+        with bake(low, high, BakeMap.MATERIAL_ID,
+                  BakeParams(width=16, height=16, cage_distance=0.2)) as img:
+            direct = img.encoding
+
+    material = result.file("material-id")
+    assert material is not None, result.files
+    assert material.encoding.basis == EncodingBasis.ID_COLOR, material.encoding
+    assert material.encoding.id_source == "material_id", material.encoding
+    assert material.encoding.id_source == direct.id_source, material.encoding
+    assert [row.id for row in material.encoding.id_colors] == [4, 9], material.encoding
+    assert list(material.encoding.id_colors) == list(direct.id_colors), (
+        material.encoding.id_colors, direct.id_colors)
+    for row in material.encoding.id_colors:
+        assert row.color != (0, 0, 0) and min(row.color) >= 64, row
+    # Written linear despite the sRGB request, and the refusal is reported.
+    assert material.color_space == "linear", material
+    assert any("material-id" in w for w in result.warnings), result.warnings
+
+    # No column for the object map: it falls back to components and says so.
+    obj = result.file("object-id")
+    assert obj is not None, result.files
+    assert obj.encoding.id_source == "component", obj.encoding
+    assert len(obj.encoding.id_colors) == 1, obj.encoding
+
+    # The mesh entry is not a map: no source, no table.
+    mesh_entry = result.file("mesh")
+    assert mesh_entry is not None, result.files
+    assert mesh_entry.encoding.id_source == "", mesh_entry.encoding
+    assert mesh_entry.encoding.id_colors == (), mesh_entry.encoding
+    print("PASS bundle: the id maps carry the same table the direct bake reports, "
+          "and the sRGB request is refused")
+
+
 def main() -> int:
     if not cyberremesh.is_available():
         print("SKIP: cyber_capi shared library not loadable")
@@ -269,6 +340,7 @@ def main() -> int:
     try:
         check_bundle(tmpdir)
         check_bundle_unwraps_and_warns(tmpdir)
+        check_bundle_id_table(tmpdir)
     except cyberremesh.CyberError as exc:
         # A build without the UV module has the preset DATA but no bundle
         # writer; that is a configuration, not a failure.

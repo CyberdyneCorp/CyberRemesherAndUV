@@ -260,6 +260,13 @@ final class RetopologyWorkflowTests: XCTestCase {
             XCTAssertGreaterThanOrEqual(min(row.color.0, min(row.color.1, row.color.2)), 64)
         }
 
+        // A consumer resolves a picked colour by building the row it is
+        // looking for and comparing, so the row type has to be constructible
+        // from host code and compare by value.
+        let row = try XCTUnwrap(objectId.encoding.idColors.first)
+        XCTAssertEqual(row, IdColor(id: row.id, color: row.color))
+        XCTAssertNotEqual(row, IdColor(id: row.id &+ 1, color: row.color))
+
         let table = Set(objectId.encoding.idColors.map {
             [Int($0.color.0), Int($0.color.1), Int($0.color.2)]
         })
