@@ -92,7 +92,7 @@ typedef enum CyberStatus {
  * Do not compare these numbers by hand: cyber_abi_check() applies the rule
  * above in one place, so every binding gets the same answer. */
 #define CYBER_ABI_VERSION_MAJOR 1
-#define CYBER_ABI_VERSION_MINOR 18
+#define CYBER_ABI_VERSION_MINOR 19
 
 /* The ABI this build implements. Cannot fail; either pointer may be NULL. */
 void cyber_abi_version(int* major, int* minor);
@@ -2426,11 +2426,50 @@ typedef enum CyberBakeMap {
      * CyberFieldEvaluator::occlusion returns this same openness convention. */
     CYBER_BAKE_AO,
     CYBER_BAKE_DISPLACEMENT, /* signed height along the low-poly normal (1 ch) */
-    CYBER_BAKE_POSITION,     /* Target hit position, world space (RGB) */
-    CYBER_BAKE_COLOR,        /* Target vertex color at the hit (RGB) */
-    CYBER_BAKE_CURVATURE,    /* signed mean curvature around mid-gray (1 ch) */
-    CYBER_BAKE_CAVITY        /* concavity only, white = flat/convex (1 ch) */
+    /* Target hit position in MODEL UNITS, unencoded (RGB). This engine has one
+     * model space, so "world" and "object" name the same space here; what
+     * distinguishes this map from CYBER_BAKE_OBJECT_POSITION is the ENCODING,
+     * which is why every bake now reports one (cyber_image_encoding). */
+    CYBER_BAKE_POSITION,
+    CYBER_BAKE_COLOR,     /* Target vertex color at the hit (RGB) */
+    CYBER_BAKE_CURVATURE, /* signed mean curvature around mid-gray (1 ch) */
+    CYBER_BAKE_CAVITY,    /* concavity only, white = flat/convex (1 ch) */
+    /* --- appended in 0.8.0; the values above keep their numbers ----------- */
+    /* Target normal in object space, encoded n*0.5+0.5, in CyberBakeParams's
+     * up axis (RGB). One projection ray per texel, like the normal map. */
+    CYBER_BAKE_OBJECT_NORMAL,
+    /* The CYBER_BAKE_POSITION hit point rescaled so the bake's bounding box
+     * spans [0,1] on every axis, in the same up axis (RGB). The box is in
+     * cyber_image_encoding; without it the map cannot be decoded. */
+    CYBER_BAKE_OBJECT_POSITION,
+    /* Mean direction of the UNOCCLUDED hemisphere samples the AO bake fires,
+     * renormalized and encoded n*0.5+0.5 (RGB). Tangent space by default;
+     * CyberBakeParams::bentNormalSpace selects. */
+    CYBER_BAKE_BENT_NORMAL,
+    /* Material behind the surface, in MODEL UNITS (1 ch): the AO hemisphere
+     * cast about the INVERTED normal, averaging the distance to the first
+     * back-facing hit, times CyberBakeParams::thicknessScale. A ray that hits
+     * nothing contributes zero, so a thin double-sided Target reads near zero
+     * rather than solid. */
+    CYBER_BAKE_THICKNESS
 } CyberBakeMap;
+
+/* Axis convention the OBJECT-SPACE maps are expressed in. CYBER_UP_AXIS_Y is
+ * this engine's own convention (and glTF's); CYBER_UP_AXIS_Z re-expresses a
+ * vector as (x, -z, y), which is what a z-up DCC reads. Tangent space has no up
+ * axis, so it is ignored there. */
+typedef enum CyberUpAxis {
+    CYBER_UP_AXIS_Y = 0,
+    CYBER_UP_AXIS_Z = 1
+} CyberUpAxis;
+
+/* Frame CYBER_BAKE_BENT_NORMAL is expressed in. Tangent matches
+ * CYBER_BAKE_NORMAL, so both drop into the same shader slot; object gives a
+ * direction a mask can compare against a world direction. */
+typedef enum CyberBentNormalSpace {
+    CYBER_BENT_NORMAL_TANGENT = 0,
+    CYBER_BENT_NORMAL_OBJECT = 1
+} CyberBentNormalSpace;
 
 typedef struct CyberBakeParams {
     int width; /* output resolution */
@@ -2442,7 +2481,44 @@ typedef struct CyberBakeParams {
      * white/black. 0 = auto (95th percentile of |curvature| on the Target).
      * Appended in 0.6.0 — always initialise via cyber_default_bake_params. */
     float curvatureRange;
+    /* Appended in 0.8.0 — always initialise via cyber_default_bake_params.
+     *
+     * upAxis: a CyberUpAxis. Default CYBER_UP_AXIS_Y. Read by OBJECT_NORMAL,
+     *   OBJECT_POSITION and BENT_NORMAL in object space; anything else is
+     *   CYBER_ERR_INVALID_ARG.
+     * bentNormalSpace: a CyberBentNormalSpace. Default
+     *   CYBER_BENT_NORMAL_TANGENT. Read by BENT_NORMAL.
+     * thicknessScale: factor THICKNESS multiplies its mean back-facing depth
+     *   by. Default 2.0 (ArmorPaint's doubling, which is also the mean chord of
+     *   a cosine-weighted hemisphere through a slab). Finite and >= 0. */
+    int upAxis;
+    int bentNormalSpace;
+    float thicknessScale;
 } CyberBakeParams;
+
+/* What the numbers in a baked image MEAN. An encoded map without its basis is a
+ * picture of some numbers: an object-space position cannot be turned back into
+ * a coordinate without the box it was rescaled over. */
+typedef enum CyberEncodingBasis {
+    CYBER_ENCODING_NONE = 0,          /* raw values (AO, color, curvature, cavity) */
+    CYBER_ENCODING_TANGENT_NORMAL,    /* direction in the texel's tangent frame, v*0.5+0.5 */
+    CYBER_ENCODING_OBJECT_NORMAL,     /* direction in object space (upAxis), v*0.5+0.5 */
+    CYBER_ENCODING_OBJECT_BOUNDS,     /* position rescaled over [boundsMin, boundsMax] */
+    CYBER_ENCODING_DISTANCE           /* a length in model units, multiplied by `scale` */
+} CyberEncodingBasis;
+
+/* Filled by every bake, for every map. Members the basis does not use keep
+ * their neutral values, so a CYBER_ENCODING_NONE image says nothing beyond
+ * "these are the values". Decode a CYBER_ENCODING_OBJECT_BOUNDS texel with
+ * boundsMin + value * (boundsMax - boundsMin); the box is already expressed in
+ * `upAxis`, so no swizzle has to be re-derived. */
+typedef struct CyberImageEncoding {
+    int basis;  /* CyberEncodingBasis */
+    int upAxis; /* CyberUpAxis */
+    float boundsMin[3];
+    float boundsMax[3];
+    float scale; /* the factor a DISTANCE map was multiplied by; 1 otherwise */
+} CyberImageEncoding;
 
 /* Fills params with the engine defaults. No-op on NULL. */
 void cyber_default_bake_params(CyberBakeParams* params);
@@ -2456,6 +2532,10 @@ typedef struct CyberImage CyberImage;
  * with vt coordinates). On success *out receives a new CyberImage. */
 CyberStatus cyber_bake(const CyberMesh* low, const CyberMesh* high, CyberBakeMap map,
                        const CyberBakeParams* params, CyberImage** out);
+
+/* The basis needed to interpret `image`. Every image has one. NULL argument is
+ * CYBER_ERR_INVALID_ARG. */
+CyberStatus cyber_image_encoding(const CyberImage* image, CyberImageEncoding* out);
 
 void cyber_image_free(CyberImage* image);
 int cyber_image_width(const CyberImage* image);
@@ -2818,7 +2898,8 @@ CyberStatus cyber_export_preset_info(const CyberExportPreset* preset, CyberExpor
 /* One entry of the preset's map list. Strings point into `preset`. */
 typedef struct CyberExportPresetMap {
     const char* map;        /* canonical kind: normal|ao|curvature|cavity|
-                             * displacement|color|position */
+                             * displacement|color|position|object-normal|
+                             * object-position|bent-normal|thickness */
     const char* colorSpace; /* "linear" | "srgb" */
     /* Token substituted for {map} in the naming pattern — the map's canonical
      * name unless the preset overrode it to match an app's suffix style. */
@@ -2853,6 +2934,13 @@ typedef struct CyberBundleParams {
     float cageDistance;   /* projection cage for every bake, in model units */
     int aoSamples;
     float aoRadius;
+    /* Appended in 0.8.0 — always initialise via cyber_default_bundle_params.
+     * A CyberBentNormalSpace and the THICKNESS scale, with the same defaults
+     * and the same validation cyber_bake applies. The UP AXIS is not here: a
+     * preset already declares the axis its target app expects
+     * (CyberExportPresetInfo::upAxis), and that is what the bundle bakes in. */
+    int bentNormalSpace;
+    float thicknessScale;
 } CyberBundleParams;
 
 /* Fills params with the engine defaults (meshPath and basename left NULL).
@@ -2893,6 +2981,12 @@ typedef struct CyberBundleFile {
 size_t cyber_bundle_result_file_count(const CyberBundleResult* result);
 CyberStatus cyber_bundle_result_file(const CyberBundleResult* result, size_t index,
                                      CyberBundleFile* out);
+
+/* The encoding basis of the map at `index` — the same record cyber_image_encoding
+ * returns for a directly baked image. The mesh entry reports
+ * CYBER_ENCODING_NONE. Out-of-range index is CYBER_ERR_INVALID_ARG. */
+CyberStatus cyber_bundle_result_file_encoding(const CyberBundleResult* result, size_t index,
+                                              CyberImageEncoding* out);
 
 /* Non-fatal notes — a preset/extension mismatch, a map the source could not
  * feed. `cyber_bundle_result_warning` returns NULL for a bad index. */

@@ -5046,7 +5046,108 @@ int cyber_stroke_interpretation_grid_size(const CyberStrokeInterpretation* inter
 
 struct CyberImage {
     cyber::bake::Image image;
+    cyber::bake::BakeEncoding encoding;
 };
+
+// Shared by cyber_bake and cyber_bake_field so both entry points accept exactly
+// the same map names and reject exactly the same parameters.
+bool toBakeMap(CyberBakeMap map, cyber::bake::BakeMap& out) {
+    switch (map) {
+        case CYBER_BAKE_NORMAL:
+            out = cyber::bake::BakeMap::Normal;
+            return true;
+        case CYBER_BAKE_AO:
+            out = cyber::bake::BakeMap::AmbientOcclusion;
+            return true;
+        case CYBER_BAKE_DISPLACEMENT:
+            out = cyber::bake::BakeMap::Displacement;
+            return true;
+        case CYBER_BAKE_POSITION:
+            out = cyber::bake::BakeMap::Position;
+            return true;
+        case CYBER_BAKE_COLOR:
+            out = cyber::bake::BakeMap::Color;
+            return true;
+        case CYBER_BAKE_CURVATURE:
+            out = cyber::bake::BakeMap::Curvature;
+            return true;
+        case CYBER_BAKE_CAVITY:
+            out = cyber::bake::BakeMap::Cavity;
+            return true;
+        case CYBER_BAKE_OBJECT_NORMAL:
+            out = cyber::bake::BakeMap::ObjectNormal;
+            return true;
+        case CYBER_BAKE_OBJECT_POSITION:
+            out = cyber::bake::BakeMap::ObjectPosition;
+            return true;
+        case CYBER_BAKE_BENT_NORMAL:
+            out = cyber::bake::BakeMap::BentNormal;
+            return true;
+        case CYBER_BAKE_THICKNESS:
+            out = cyber::bake::BakeMap::Thickness;
+            return true;
+    }
+    return false;
+}
+
+CyberImageEncoding toCEncoding(const cyber::bake::BakeEncoding& encoding) {
+    CyberImageEncoding out{};
+    switch (encoding.basis) {
+        case cyber::bake::EncodingBasis::TangentNormal:
+            out.basis = CYBER_ENCODING_TANGENT_NORMAL;
+            break;
+        case cyber::bake::EncodingBasis::ObjectNormal:
+            out.basis = CYBER_ENCODING_OBJECT_NORMAL;
+            break;
+        case cyber::bake::EncodingBasis::ObjectBounds:
+            out.basis = CYBER_ENCODING_OBJECT_BOUNDS;
+            break;
+        case cyber::bake::EncodingBasis::Distance:
+            out.basis = CYBER_ENCODING_DISTANCE;
+            break;
+        case cyber::bake::EncodingBasis::None:
+            out.basis = CYBER_ENCODING_NONE;
+            break;
+    }
+    out.upAxis = encoding.upAxis == cyber::bake::UpAxis::ZUp ? CYBER_UP_AXIS_Z : CYBER_UP_AXIS_Y;
+    out.boundsMin[0] = encoding.boundsMin.x;
+    out.boundsMin[1] = encoding.boundsMin.y;
+    out.boundsMin[2] = encoding.boundsMin.z;
+    out.boundsMax[0] = encoding.boundsMax.x;
+    out.boundsMax[1] = encoding.boundsMax.y;
+    out.boundsMax[2] = encoding.boundsMax.z;
+    out.scale = encoding.scale;
+    return out;
+}
+
+// The three enum-valued/finite members added in 0.8.0. An out-of-range enum is
+// refused rather than folded to a default: a caller that meant z-up and typed 2
+// would otherwise get a y-up map with no diagnostic anywhere.
+bool applyBakeEncodingParams(const CyberBakeParams& params, cyber::bake::BakeParams& out,
+                             const char* who) {
+    if (params.upAxis != CYBER_UP_AXIS_Y && params.upAxis != CYBER_UP_AXIS_Z) {
+        setError(std::string(who) + ": upAxis must be CYBER_UP_AXIS_Y or CYBER_UP_AXIS_Z");
+        return false;
+    }
+    if (params.bentNormalSpace != CYBER_BENT_NORMAL_TANGENT &&
+        params.bentNormalSpace != CYBER_BENT_NORMAL_OBJECT) {
+        setError(std::string(who) +
+                 ": bentNormalSpace must be CYBER_BENT_NORMAL_TANGENT or "
+                 "CYBER_BENT_NORMAL_OBJECT");
+        return false;
+    }
+    if (!std::isfinite(params.thicknessScale) || params.thicknessScale < 0.0f) {
+        setError(std::string(who) + ": thicknessScale must be finite and >= 0");
+        return false;
+    }
+    out.upAxis = params.upAxis == CYBER_UP_AXIS_Z ? cyber::bake::UpAxis::ZUp
+                                                  : cyber::bake::UpAxis::YUp;
+    out.bentNormalSpace = params.bentNormalSpace == CYBER_BENT_NORMAL_OBJECT
+                              ? cyber::bake::NormalSpace::Object
+                              : cyber::bake::NormalSpace::Tangent;
+    out.thicknessScale = params.thicknessScale;
+    return true;
+}
 
 bool bakePixelBudgetExceeded(const cyber::bake::BakeParams& params) {
     if (params.maxPixels == 0 || params.width <= 0 || params.height <= 0) {
@@ -5068,6 +5169,11 @@ void cyber_default_bake_params(CyberBakeParams* params) {
     params->aoSamples = d.aoSamples;
     params->aoRadius = d.aoRadius;
     params->curvatureRange = d.curvatureRange;
+    params->upAxis = d.upAxis == cyber::bake::UpAxis::ZUp ? CYBER_UP_AXIS_Z : CYBER_UP_AXIS_Y;
+    params->bentNormalSpace = d.bentNormalSpace == cyber::bake::NormalSpace::Object
+                                  ? CYBER_BENT_NORMAL_OBJECT
+                                  : CYBER_BENT_NORMAL_TANGENT;
+    params->thicknessScale = d.thicknessScale;
 }
 
 CyberStatus cyber_bake(const CyberMesh* low, const CyberMesh* high, CyberBakeMap map,
@@ -5085,6 +5191,9 @@ CyberStatus cyber_bake(const CyberMesh* low, const CyberMesh* high, CyberBakeMap
             p.aoSamples = params->aoSamples;
             p.aoRadius = params->aoRadius;
             p.curvatureRange = params->curvatureRange;
+            if (!applyBakeEncodingParams(*params, p, "cyber_bake")) {
+                return CYBER_ERR_INVALID_ARG;
+            }
         }
         p.maxPixels = static_cast<std::size_t>(cyber_max_bake_pixels());
         if (bakePixelBudgetExceeded(p)) {
@@ -5094,31 +5203,9 @@ CyberStatus cyber_bake(const CyberMesh* low, const CyberMesh* high, CyberBakeMap
             return CYBER_ERR_RUNTIME;
         }
         cyber::bake::BakeMap m{};
-        switch (map) {
-            case CYBER_BAKE_NORMAL:
-                m = cyber::bake::BakeMap::Normal;
-                break;
-            case CYBER_BAKE_AO:
-                m = cyber::bake::BakeMap::AmbientOcclusion;
-                break;
-            case CYBER_BAKE_DISPLACEMENT:
-                m = cyber::bake::BakeMap::Displacement;
-                break;
-            case CYBER_BAKE_POSITION:
-                m = cyber::bake::BakeMap::Position;
-                break;
-            case CYBER_BAKE_COLOR:
-                m = cyber::bake::BakeMap::Color;
-                break;
-            case CYBER_BAKE_CURVATURE:
-                m = cyber::bake::BakeMap::Curvature;
-                break;
-            case CYBER_BAKE_CAVITY:
-                m = cyber::bake::BakeMap::Cavity;
-                break;
-            default:
-                setError("cyber_bake: unknown map type");
-                return CYBER_ERR_INVALID_ARG;
+        if (!toBakeMap(map, m)) {
+            setError("cyber_bake: unknown map type");
+            return CYBER_ERR_INVALID_ARG;
         }
         cyber::bake::BakeResult result = cyber::bake::bake(low->mesh, high->mesh, m, p);
         if (result.image.pixels.empty()) {
@@ -5127,6 +5214,7 @@ CyberStatus cyber_bake(const CyberMesh* low, const CyberMesh* high, CyberBakeMap
         }
         auto handle = std::make_unique<CyberImage>();
         handle->image = std::move(result.image);
+        handle->encoding = result.encoding;
         clearError();
         *out = handle.release();
         return CYBER_OK;
@@ -5137,6 +5225,16 @@ CyberStatus cyber_bake(const CyberMesh* low, const CyberMesh* high, CyberBakeMap
         setError("cyber_bake: unknown error");
         return CYBER_ERR_RUNTIME;
     }
+}
+
+CyberStatus cyber_image_encoding(const CyberImage* image, CyberImageEncoding* out) {
+    if (image == nullptr || out == nullptr) {
+        setError("cyber_image_encoding: null argument");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    *out = toCEncoding(image->encoding);
+    clearError();
+    return CYBER_OK;
 }
 
 void cyber_image_free(CyberImage* image) { delete image; }
@@ -5913,6 +6011,9 @@ CyberStatus cyber_bake_field(const CyberMesh* low, const CyberMesh* high, CyberB
             p.aoSamples = params->aoSamples;
             p.aoRadius = params->aoRadius;
             p.curvatureRange = params->curvatureRange;
+            if (!applyBakeEncodingParams(*params, p, "cyber_bake_field")) {
+                return CYBER_ERR_INVALID_ARG;
+            }
         }
         p.maxPixels = static_cast<std::size_t>(cyber_max_bake_pixels());
         if (bakePixelBudgetExceeded(p)) {
@@ -5923,31 +6024,9 @@ CyberStatus cyber_bake_field(const CyberMesh* low, const CyberMesh* high, CyberB
         }
         p.field = &adapter;
         cyber::bake::BakeMap m{};
-        switch (map) {
-            case CYBER_BAKE_NORMAL:
-                m = cyber::bake::BakeMap::Normal;
-                break;
-            case CYBER_BAKE_AO:
-                m = cyber::bake::BakeMap::AmbientOcclusion;
-                break;
-            case CYBER_BAKE_DISPLACEMENT:
-                m = cyber::bake::BakeMap::Displacement;
-                break;
-            case CYBER_BAKE_POSITION:
-                m = cyber::bake::BakeMap::Position;
-                break;
-            case CYBER_BAKE_COLOR:
-                m = cyber::bake::BakeMap::Color;
-                break;
-            case CYBER_BAKE_CURVATURE:
-                m = cyber::bake::BakeMap::Curvature;
-                break;
-            case CYBER_BAKE_CAVITY:
-                m = cyber::bake::BakeMap::Cavity;
-                break;
-            default:
-                setError("cyber_bake_field: unknown map type");
-                return CYBER_ERR_INVALID_ARG;
+        if (!toBakeMap(map, m)) {
+            setError("cyber_bake_field: unknown map type");
+            return CYBER_ERR_INVALID_ARG;
         }
         const cyber::Mesh empty;
         cyber::bake::BakeResult result =
@@ -5966,6 +6045,7 @@ CyberStatus cyber_bake_field(const CyberMesh* low, const CyberMesh* high, CyberB
         }
         auto handle = std::make_unique<CyberImage>();
         handle->image = std::move(result.image);
+        handle->encoding = result.encoding;
         clearError();
         *out = handle.release();
         return CYBER_OK;
@@ -6028,6 +6108,7 @@ struct CyberBundleResult {
         std::string colorSpace;
         int width = 0;
         int height = 0;
+        CyberImageEncoding encoding{};
     };
     std::vector<File> files;
     std::vector<std::string> warnings;
@@ -6195,10 +6276,16 @@ void cyber_default_bundle_params(CyberBundleParams* params) {
     params->cageDistance = defaults.cageDistance;
     params->aoSamples = defaults.aoSamples;
     params->aoRadius = defaults.aoRadius;
+    params->bentNormalSpace = defaults.bentNormalSpace == cyber::bake::NormalSpace::Object
+                                  ? CYBER_BENT_NORMAL_OBJECT
+                                  : CYBER_BENT_NORMAL_TANGENT;
+    params->thicknessScale = defaults.thicknessScale;
 #else
     params->cageDistance = 0.1f;
     params->aoSamples = 64;
     params->aoRadius = 1.0f;
+    params->bentNormalSpace = CYBER_BENT_NORMAL_TANGENT;
+    params->thicknessScale = 2.0f;
 #endif
 }
 
@@ -6235,6 +6322,25 @@ CyberStatus cyber_export_bundle_write([[maybe_unused]] CyberMesh* low,
         bundleParams.cageDistance = params->cageDistance;
         bundleParams.aoSamples = params->aoSamples;
         bundleParams.aoRadius = params->aoRadius;
+        // The bent-normal frame and the thickness scale take EXACTLY the
+        // validation cyber_bake applies; a bundle is a batch of bakes, and a
+        // parameter that is refused one map at a time cannot be waved through
+        // because several maps were asked for at once.
+        if (params->bentNormalSpace != CYBER_BENT_NORMAL_TANGENT &&
+            params->bentNormalSpace != CYBER_BENT_NORMAL_OBJECT) {
+            setError(
+                "cyber_export_bundle_write: bentNormalSpace must be "
+                "CYBER_BENT_NORMAL_TANGENT or CYBER_BENT_NORMAL_OBJECT");
+            return CYBER_ERR_INVALID_ARG;
+        }
+        if (!std::isfinite(params->thicknessScale) || params->thicknessScale < 0.0f) {
+            setError("cyber_export_bundle_write: thicknessScale must be finite and >= 0");
+            return CYBER_ERR_INVALID_ARG;
+        }
+        bundleParams.bentNormalSpace = params->bentNormalSpace == CYBER_BENT_NORMAL_OBJECT
+                                           ? cyber::bake::NormalSpace::Object
+                                           : cyber::bake::NormalSpace::Tangent;
+        bundleParams.thicknessScale = params->thicknessScale;
 
         const cyber::CancelToken token;
         token.setPoll([cancel, user]() { return cancel != nullptr && cancel(user) != 0; });
@@ -6251,8 +6357,8 @@ CyberStatus cyber_export_bundle_write([[maybe_unused]] CyberMesh* low,
         }
         auto handle = std::make_unique<CyberBundleResult>();
         for (const cyber::exportbundle::BundleFile& file : result.files) {
-            handle->files.push_back(
-                {file.path, file.kind, file.colorSpace, file.width, file.height});
+            handle->files.push_back({file.path, file.kind, file.colorSpace, file.width,
+                                     file.height, toCEncoding(file.encoding)});
         }
         handle->warnings = result.warnings;
         handle->unwrapped = result.unwrapped;
@@ -6286,6 +6392,21 @@ CyberStatus cyber_bundle_result_file(const CyberBundleResult* result, size_t ind
     out->colorSpace = file.colorSpace.c_str();
     out->width = file.width;
     out->height = file.height;
+    clearError();
+    return CYBER_OK;
+}
+
+CyberStatus cyber_bundle_result_file_encoding(const CyberBundleResult* result, size_t index,
+                                             CyberImageEncoding* out) {
+    if (result == nullptr || out == nullptr) {
+        setError("cyber_bundle_result_file_encoding: null argument");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    if (index >= result->files.size()) {
+        setError("cyber_bundle_result_file_encoding: index out of range");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    *out = result->files[index].encoding;
     clearError();
     return CYBER_OK;
 }

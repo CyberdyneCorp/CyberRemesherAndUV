@@ -554,6 +554,47 @@ Listing, resolving and reading a preset works in every build; only
 
 <sub>One remesh, four bundles. Only the normal map's green channel differs — unreal writes −Y (DirectX), every other preset +Y (OpenGL); AO, curvature and color are texel-identical across all four · <code>examples/19_export_presets.py</code></sub>
 
+### Mesh maps for texture authoring
+
+Beside the four maps a preset ships by default, the bake stage produces the
+**mesh-map set** a texture-painting stage reads — the maps that let a smart
+material re-derive itself on a new model instead of being a stack of pixels tied
+to one mesh:
+
+| map | what it holds |
+| --- | --- |
+| `object-normal` | the Target normal in object space, `n * 0.5 + 0.5` |
+| `object-position` | the hit point rescaled so the bake's bounds span `[0,1]` |
+| `bent-normal` | the mean direction of the unoccluded AO samples |
+| `thickness` | material behind the surface, in model units |
+
+```sh
+cyberremesh --input sculpt.obj --output out/hero.obj \
+            --bake object-normal,object-position,bent-normal,thickness \
+            --thickness-scale 2 --bent-normal-space tangent --report out/run.json
+```
+
+`bent-normal` and `thickness` are ray-traced and share the AO bake's sampling,
+radius, cage, progress and cancellation; `object-normal` and `object-position`
+cost one cage ray per texel like the normal map. `position` is unchanged — it
+still holds the hit point in **model units**; `object-position` is the encoded
+sibling, not a redefinition.
+
+**Every bake now reports its encoding basis**, because an encoded map without
+one is a picture of some numbers: `object-position` is `(p - min) / (max - min)`,
+and `min`/`max` are not recoverable from the pixels. The basis names the frame, the
+up axis (`y-up` or `z-up`, taken from the preset in a bundle run), the bounding
+box and the thickness scale. It reaches a host through `cyber_image_encoding` /
+`cyber_bundle_result_file_encoding`, `Image.encoding` in Python and Swift, and the
+JSON report's `outputs[].encoding`.
+
+Thickness casts the AO hemisphere from the **inverted** normal and records the
+distance to the first back-facing hit. A ray that escapes contributes zero — it
+never entered material — so a thin double-sided surface reads near zero instead
+of solid white. The ArmorPaint-style doubling of that distance is
+`--thickness-scale` (default 2), a stated parameter rather than an inherited
+constant, and it is recorded in the basis.
+
 **Cost:** the AO bake dominates a preset run — about 96% of it — and scales with
 texel count, so the default 2048² map set takes minutes on a desktop CPU. Use
 `--texture-size` (and `--ao-samples`) to trade resolution for time; parallelising
@@ -957,7 +998,7 @@ src/core/        mesh kernel, io, remeshing pipeline orchestration
 src/quadrangulate/  cross field, seamless UV, isoline extraction, quantization, topology layout
 src/retopo/      manual retopology: strokes, snapping, relax, subdivide, conform
 src/uv/          seams, LSCM unwrap, packing, automatic atlas
-src/bake/        normal / AO / curvature / cavity bakes
+src/bake/        normal / AO / curvature / cavity / mesh-map bakes
 src/bakecage/    cage generation for the bake
 src/exportbundle/  per-DCC export presets and bundle writing
 src/imageio/     PNG / EXR encode and decode

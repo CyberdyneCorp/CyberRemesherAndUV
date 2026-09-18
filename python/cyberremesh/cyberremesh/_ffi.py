@@ -468,6 +468,21 @@ BAKE_POSITION = 3
 BAKE_COLOR = 4
 BAKE_CURVATURE = 5
 BAKE_CAVITY = 6
+BAKE_OBJECT_NORMAL = 7
+BAKE_OBJECT_POSITION = 8
+BAKE_BENT_NORMAL = 9
+BAKE_THICKNESS = 10
+
+# CyberUpAxis / CyberBentNormalSpace / CyberEncodingBasis.
+UP_AXIS_Y = 0
+UP_AXIS_Z = 1
+BENT_NORMAL_TANGENT = 0
+BENT_NORMAL_OBJECT = 1
+ENCODING_NONE = 0
+ENCODING_TANGENT_NORMAL = 1
+ENCODING_OBJECT_NORMAL = 2
+ENCODING_OBJECT_BOUNDS = 3
+ENCODING_DISTANCE = 4
 
 
 class CyberBakeParams(Structure):
@@ -480,6 +495,21 @@ class CyberBakeParams(Structure):
         ("ao_samples", c_int32),
         ("ao_radius", c_float),
         ("curvature_range", c_float),
+        ("up_axis", c_int32),
+        ("bent_normal_space", c_int32),
+        ("thickness_scale", c_float),
+    ]
+
+
+class CyberImageEncoding(Structure):
+    """Mirror of ``CyberImageEncoding`` in capi/include/cyber_capi.h."""
+
+    _fields_ = [
+        ("basis", c_int32),
+        ("up_axis", c_int32),
+        ("bounds_min", c_float * 3),
+        ("bounds_max", c_float * 3),
+        ("scale", c_float),
     ]
 
 
@@ -567,6 +597,8 @@ class CyberBundleParams(Structure):
         ("cage_distance", c_float),
         ("ao_samples", c_int32),
         ("ao_radius", c_float),
+        ("bent_normal_space", c_int32),
+        ("thickness_scale", c_float),
     ]
 
 
@@ -1392,6 +1424,9 @@ def _declare(lib: ctypes.CDLL) -> None:
         POINTER(c_void_p),
     ]
     lib.cyber_bake.restype = c_int32
+    # CyberStatus cyber_image_encoding(const CyberImage*, CyberImageEncoding*)
+    lib.cyber_image_encoding.argtypes = [c_void_p, POINTER(CyberImageEncoding)]
+    lib.cyber_image_encoding.restype = c_int32
     lib.cyber_image_free.argtypes = [c_void_p]
     lib.cyber_image_free.restype = None
     for accessor in ("cyber_image_width", "cyber_image_height", "cyber_image_channels"):
@@ -1871,6 +1906,12 @@ def _declare_export_presets(lib: ctypes.CDLL) -> None:
     lib.cyber_bundle_result_file_count.restype = c_size_t
     lib.cyber_bundle_result_file.argtypes = [c_void_p, c_size_t, POINTER(CyberBundleFile)]
     lib.cyber_bundle_result_file.restype = c_int32
+    lib.cyber_bundle_result_file_encoding.argtypes = [
+        c_void_p,
+        c_size_t,
+        POINTER(CyberImageEncoding),
+    ]
+    lib.cyber_bundle_result_file_encoding.restype = c_int32
     lib.cyber_bundle_result_warning_count.argtypes = [c_void_p]
     lib.cyber_bundle_result_warning_count.restype = c_size_t
     lib.cyber_bundle_result_warning.argtypes = [c_void_p, c_size_t]

@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <mutex>
 #include <optional>
 #include <string>
 
@@ -327,10 +328,117 @@ int channelsFor(BakeMap map) {
         case BakeMap::Displacement:
         case BakeMap::Curvature:
         case BakeMap::Cavity:
+        case BakeMap::Thickness:
             return 1;
         default:
             return 3;
     }
+}
+
+// The three maps whose cost is a hemisphere of rays per texel, as opposed to the
+// single cage projection ray every other map casts. They share one sampling
+// pass, so they also share its parallelism, progress and cancellation.
+bool isRayTraced(BakeMap map) {
+    return map == BakeMap::AmbientOcclusion || map == BakeMap::BentNormal ||
+           map == BakeMap::Thickness;
+}
+
+// Re-expresses an engine-space (y-up) vector in the requested convention. The
+// z-up form is the standard -90 degree rotation about X: y-up's up (0,1,0)
+// becomes (0,0,1). Its own inverse is (x, z, -y).
+Vec3 toUpAxis(Vec3 v, UpAxis axis) { return axis == UpAxis::ZUp ? Vec3{v.x, -v.z, v.y} : v; }
+
+// Encodes a unit direction into [0,1] the way every normal map here does.
+Vec3 encodeDirection(Vec3 v) { return v * 0.5f + Vec3{0.5f, 0.5f, 0.5f}; }
+
+// The box an ObjectPosition bake rescales over, accumulated over the LIVE
+// vertices of both meshes and IN the requested axis convention. Both meshes,
+// because the map writes the high-poly hit where the cage ray lands and the
+// low-poly's own point where it misses, so a box around either one alone would
+// clamp real texels. `valid` is false when neither mesh has a vertex.
+struct BakeBounds {
+    Vec3 min{};
+    Vec3 max{};
+    bool valid = false;
+
+    void add(Vec3 p) {
+        if (!valid) {
+            min = p;
+            max = p;
+            valid = true;
+            return;
+        }
+        min = Vec3{std::fmin(min.x, p.x), std::fmin(min.y, p.y), std::fmin(min.z, p.z)};
+        max = Vec3{std::fmax(max.x, p.x), std::fmax(max.y, p.y), std::fmax(max.z, p.z)};
+    }
+};
+
+void accumulateBounds(const Mesh& mesh, UpAxis axis, BakeBounds& bounds) {
+    for (Index vi = 0; vi < mesh.vertexCapacity(); ++vi) {
+        const VertexId v{vi};
+        if (!mesh.isAlive(v)) {
+            continue;
+        }
+        const Vec3 p = toUpAxis(mesh.position(v), axis);
+        if (isFinite(p)) {
+            bounds.add(p);
+        }
+    }
+}
+
+// Rescales one object-space coordinate into [0,1] over `bounds`. An axis of zero
+// extent -- a flat plate, or a Target with a single vertex -- takes the midpoint
+// instead of dividing by zero, which is the only value on that axis anyway.
+//
+// The clamp is belt and braces and NO test can reach it: `bounds` is the union
+// of both meshes' live vertices, and every value written is either a point on a
+// Target triangle or a point interpolated across an EditMesh triangle, so it is
+// inside by construction. It stands against float rounding at the boundary
+// (an exact-corner texel landing at 1.0000001), not against a real out-of-box
+// coordinate -- do not read its presence as coverage of one.
+Vec3 encodePosition(Vec3 p, const BakeBounds& bounds) {
+    const auto axis = [](float value, float lo, float hi) {
+        const float extent = hi - lo;
+        return extent > 0.0f ? std::clamp((value - lo) / extent, 0.0f, 1.0f) : 0.5f;
+    };
+    return Vec3{axis(p.x, bounds.min.x, bounds.max.x), axis(p.y, bounds.min.y, bounds.max.y),
+                axis(p.z, bounds.min.z, bounds.max.z)};
+}
+
+// What the pixels of `map` mean, recorded with the image so a consumer never has
+// to infer it from the map's name (surface-baking spec, "Baked maps record their
+// encoding basis").
+BakeEncoding encodingFor(BakeMap map, const BakeParams& params, const BakeBounds& bounds) {
+    BakeEncoding encoding;
+    encoding.upAxis = params.upAxis;
+    switch (map) {
+        case BakeMap::Normal:
+            encoding.basis = EncodingBasis::TangentNormal;
+            break;
+        case BakeMap::BentNormal:
+            encoding.basis = params.bentNormalSpace == NormalSpace::Object
+                                 ? EncodingBasis::ObjectNormal
+                                 : EncodingBasis::TangentNormal;
+            break;
+        case BakeMap::ObjectNormal:
+            encoding.basis = EncodingBasis::ObjectNormal;
+            break;
+        case BakeMap::ObjectPosition:
+            encoding.basis = EncodingBasis::ObjectBounds;
+            encoding.boundsMin = bounds.min;
+            encoding.boundsMax = bounds.max;
+            break;
+        case BakeMap::Displacement:
+            encoding.basis = EncodingBasis::Distance;
+            break;
+        case BakeMap::Thickness:
+            encoding.basis = EncodingBasis::Distance;
+            encoding.scale = params.thicknessScale;
+            break;
+        default:
+            break;  // AmbientOcclusion, Position, Color, Curvature, Cavity: raw
+    }
+    return encoding;
 }
 
 // Grayscale encoding of a signed curvature value. Curvature is centred on
@@ -359,18 +467,57 @@ float encodeCurvature(float curvature, float range, bool cavityOnly) {
 // shipped two different paddings depending on the target app. Each value is
 // what a missed cage ray already writes for that map, which is what makes the
 // padding continuous with the covered texels at a chart border.
-std::array<float, 3> neutralPadding(BakeMap map) {
+std::array<float, 3> neutralPadding(BakeMap map, const BakeParams& params) {
     switch (map) {
         case BakeMap::Normal:
             return {0.5f, 0.5f, 1.0f};  // flat tangent normal, invariant under the green flip
+        case BakeMap::BentNormal:
+            // A bent normal is a normal, so it pads the way its own frame's flat
+            // normal encodes: (0,0,1) in tangent space, and the zero vector in
+            // object space, where no direction is neutral.
+            return params.bentNormalSpace == NormalSpace::Object
+                       ? std::array<float, 3>{0.5f, 0.5f, 0.5f}
+                       : std::array<float, 3>{0.5f, 0.5f, 1.0f};
+        case BakeMap::ObjectNormal:
+            return {0.5f, 0.5f, 0.5f};  // the zero vector: object space has no flat normal
+        case BakeMap::ObjectPosition:
+            return {0.5f, 0.5f, 0.5f};  // the centre of the bake bounds, not a corner
         case BakeMap::Curvature:
             return {0.5f, 0.0f, 0.0f};   // encodeCurvature(0, range, false), range-independent
         case BakeMap::Cavity:            // no concavity
         case BakeMap::AmbientOcclusion:  // fully open
             return {1.0f, 0.0f, 0.0f};
         default:
-            return {};  // Displacement, Position, Color: zero already IS the neutral value
+            // Displacement, Position, Color, Thickness: zero already IS the
+            // neutral value (no height, no material behind an uncovered texel).
+            return {};
     }
+}
+
+// A finite, non-negative distance or factor: the shape every length-like bake
+// parameter has to have before it seeds a ray or scales a texel.
+bool usableDistance(float value) { return std::isfinite(value) && value >= 0.0f; }
+
+// The image the bake would allocate: positive, and inside both the arithmetic
+// limit and the host's texel ceiling.
+bool imageUsable(const BakeParams& params) {
+    if (params.width <= 0 || params.height <= 0) {
+        return false;
+    }
+    const std::size_t width = static_cast<std::size_t>(params.width);
+    const std::size_t height = static_cast<std::size_t>(params.height);
+    return width <= std::numeric_limits<std::size_t>::max() / height &&
+           (params.maxPixels == 0 || width <= params.maxPixels / height);
+}
+
+// The hemisphere budget the ray-traced maps spend. Bent normal and thickness
+// fire the SAME hemisphere AO does, so they read the same budget, radius and
+// bias and take the same rejection. Only the raycast path spends a ray budget;
+// the field path asks the evaluator for occlusion directly and never divides
+// by it.
+bool hemisphereUsable(const BakeParams& params, bool useField) {
+    return usableDistance(params.aoRadius) && std::isfinite(params.aoBias) &&
+           (useField || params.aoSamples > 0);
 }
 
 // Every numeric parameter the requested bake actually reads must be in range
@@ -385,28 +532,17 @@ std::array<float, 3> neutralPadding(BakeMap map) {
 // width/height checks already take. Parameters the requested map never reads
 // stay unchecked: a bake that worked before still works.
 bool paramsUsable(BakeMap map, const BakeParams& params, bool useField) {
-    if (params.width <= 0 || params.height <= 0) {
+    if (!imageUsable(params) || !usableDistance(params.cageDistance)) {
         return false;
     }
-    const std::size_t width = static_cast<std::size_t>(params.width);
-    const std::size_t height = static_cast<std::size_t>(params.height);
-    if (width > std::numeric_limits<std::size_t>::max() / height ||
-        (params.maxPixels > 0 && width > params.maxPixels / height)) {
+    if (isRayTraced(map) && !hemisphereUsable(params, useField)) {
         return false;
     }
-    if (!std::isfinite(params.cageDistance) || params.cageDistance < 0.0f) {
+    // A non-finite scale turns every covered texel into NaN, which the PNG
+    // writer's clamp flattens to solid black with no diagnostic anywhere -- the
+    // same failure the aoSamples check above exists for.
+    if (map == BakeMap::Thickness && !usableDistance(params.thicknessScale)) {
         return false;
-    }
-    if (map == BakeMap::AmbientOcclusion) {
-        if (!std::isfinite(params.aoRadius) || params.aoRadius < 0.0f ||
-            !std::isfinite(params.aoBias)) {
-            return false;
-        }
-        // Only the raycast path spends a ray budget; the field path asks the
-        // evaluator for occlusion directly and never divides by it.
-        if (!useField && params.aoSamples <= 0) {
-            return false;
-        }
     }
     const bool curvatureMap = map == BakeMap::Curvature || map == BakeMap::Cavity;
     return !curvatureMap || std::isfinite(params.curvatureRange);
@@ -428,60 +564,151 @@ bool fieldSupports(BakeMap map) {
     }
 }
 
-// AO at one texel on the raycast path: project onto the high-poly with the same
-// cage ray normal/displacement use, then fire the hemisphere from the HIGH-poly
-// hit so occlusion captures the high-poly's crevices, not the low-poly's smooth
-// surface. Falls back to the low-poly frame when the projection misses the cage.
-float aoOpennessFromMesh(const Bvh& bvh, const FlatBvh& flat, const Mesh& highPoly,
-                         const std::vector<Vec3>& highNormals, const Texel& tx,
-                         const BakeParams& params, accel::IBackend& backend) {
-    const Vec3 projOrigin = tx.position + tx.normal * params.cageDistance;
-    const std::optional<Bvh::RayHit> proj = bvh.raycast(projOrigin, tx.normal * -1.0f);
-    const bool projValid = proj.has_value() && proj->t <= 2.0f * params.cageDistance;
-    const Vec3 aoNormal = projValid ? hitNormal(highPoly, *proj, highNormals) : tx.normal;
-    const Vec3 aoPosition = projValid ? proj->point : tx.position;
-    const Vec3 aoTangent = anyTangent(aoNormal);
-    const Vec3 aoBitangent = cross(aoNormal, aoTangent);
+// Where a hemisphere bake anchors its rays: the cage projection onto the
+// high-poly, the same cage ray normal/displacement use, so occlusion captures
+// the high-poly's crevices rather than the low-poly's smooth surface. Falls back
+// to the low-poly frame when the projection misses the cage.
+struct Anchor {
+    Vec3 position;
+    Vec3 normal;
+};
 
+Anchor projectToTarget(const Bvh& bvh, const Mesh& highPoly, const std::vector<Vec3>& highNormals,
+                       const Texel& tx, const BakeParams& params) {
+    const Vec3 origin = tx.position + tx.normal * params.cageDistance;
+    const std::optional<Bvh::RayHit> proj = bvh.raycast(origin, tx.normal * -1.0f);
+    const bool valid = proj.has_value() && proj->t <= 2.0f * params.cageDistance;
+    return {valid ? proj->point : tx.position,
+            valid ? hitNormal(highPoly, *proj, highNormals) : tx.normal};
+}
+
+// Distance from a hemisphere ray's origin to where it LEAVES the solid: the
+// first BACK-FACING hit within the radius. A ray that hits nothing, or that hits
+// a FRONT face, never was inside material and contributes 0 -- which is what
+// makes a thin double-sided Target read near zero instead of solid white
+// (surface-baking spec, "A thin double-sided surface reads near zero"). Reading
+// a miss as "maximally thick" would paint every open sheet solid.
+float backFacingDepth(const Mesh& mesh, const std::optional<Bvh::RayHit>& hit, Vec3 dir,
+                      float radius) {
+    if (!hit.has_value() || hit->t > radius) {
+        return 0.0f;
+    }
+    return dot(dir, mesh.faceNormal(hit->face)) > 0.0f ? hit->t : 0.0f;
+}
+
+// What one texel's hemisphere of cosine-weighted rays saw. AO reads `occluded`,
+// the bent normal reads `openSum` and thickness reads `depthSum`: one sampling
+// pass, so the three maps cannot drift apart in sampling, rotation or cage.
+struct Hemisphere {
+    int occluded = 0;       // hits within aoRadius
+    Vec3 openSum;           // sum of the directions that hit nothing
+    float depthSum = 0.0f;  // sum of backFacingDepth over the batch
+};
+
+Hemisphere gatherHemisphere(const FlatBvh& flat, const Mesh& highPoly, const Anchor& anchor,
+                            Vec3 axis, bool wantDepth, const Texel& tx, const BakeParams& params,
+                            accel::IBackend& backend) {
+    const Vec3 tangent = anyTangent(axis);
+    const Vec3 bitangent = cross(axis, tangent);
     const Vec2 rot = texelRotation(tx.px, tx.py);
+    const auto count = static_cast<std::size_t>(params.aoSamples);
 
-    accel::Buffer<Vec3> origins(static_cast<std::size_t>(params.aoSamples));
-    accel::Buffer<Vec3> dirs(static_cast<std::size_t>(params.aoSamples));
-    for (int k = 0; k < params.aoSamples; ++k) {
-        origins[static_cast<std::size_t>(k)] = aoPosition + aoNormal * params.aoBias;
-        dirs[static_cast<std::size_t>(k)] =
-            hemisphereDir(static_cast<std::size_t>(k), static_cast<std::size_t>(params.aoSamples),
-                          rot, aoTangent, aoBitangent, aoNormal);
+    accel::Buffer<Vec3> origins(count);
+    accel::Buffer<Vec3> dirs(count);
+    for (std::size_t k = 0; k < count; ++k) {
+        origins[k] = anchor.position + axis * params.aoBias;
+        dirs[k] = hemisphereDir(k, count, rot, tangent, bitangent, axis);
     }
     accel::Buffer<std::optional<Bvh::RayHit>> hits;
     accel::raycast(backend, flat, origins, dirs, hits);
-    int occluded = 0;
+
+    Hemisphere gathered;
     for (std::size_t k = 0; k < hits.size(); ++k) {
         if (hits[k].has_value() && hits[k]->t <= params.aoRadius) {
-            ++occluded;
+            ++gathered.occluded;
+        } else {
+            gathered.openSum += dirs[k];
+        }
+        if (wantDepth) {
+            gathered.depthSum += backFacingDepth(highPoly, hits[k], dirs[k], params.aoRadius);
         }
     }
-    return 1.0f - static_cast<float>(occluded) / static_cast<float>(params.aoSamples);
+    return gathered;
 }
 
-// The AO shading pass. Openness is the only per-texel work in the bake heavy
-// enough to be worth threads, so the parallelism lives HERE, over texels: a
-// texel's own ray batch is a few dozen items, far too short to pay for a
-// fan-out of its own (it used to spawn and join one set of workers per texel).
-// Results go to a scratch vector and reach the image afterwards in texel order,
-// so overlapping texels keep last-write-wins and the map is bit-identical to a
-// serial bake.
-void shadeAmbientOcclusion(BakeResult& result, const std::vector<Texel>& texels,
-                           const Mesh& highPoly, const Bvh& bvh,
-                           const std::vector<Vec3>& highNormals, const BakeParams& params,
-                           const CancelToken* cancel) {
+// One texel's value on the ray-traced path. AO and thickness put their scalar in
+// channel 0; the bent normal fills all three.
+Vec3 shadeRayTracedTexel(const Hemisphere& gathered, const Anchor& anchor, const Texel& tx,
+                         BakeMap map, const BakeParams& params) {
+    const auto budget = static_cast<float>(params.aoSamples);
+    if (map == BakeMap::AmbientOcclusion) {
+        return Vec3{1.0f - static_cast<float>(gathered.occluded) / budget, 0.0f, 0.0f};
+    }
+    if (map == BakeMap::Thickness) {
+        return Vec3{gathered.depthSum / budget * params.thicknessScale, 0.0f, 0.0f};
+    }
+    // Bent normal. A texel with no unoccluded direction at all is fully
+    // enclosed; the surface normal is the honest answer there, not a zero vector
+    // normalized into whatever the float arithmetic happens to produce.
+    const Vec3 bent =
+        length(gathered.openSum) > 0.0f ? normalized(gathered.openSum) : anchor.normal;
+    if (params.bentNormalSpace == NormalSpace::Object) {
+        return encodeDirection(toUpAxis(bent, params.upAxis));
+    }
+    return encodeDirection(
+        Vec3{dot(bent, tx.tangent), dot(bent, tx.bitangent), dot(bent, tx.normal)});
+}
+
+// Serialises progress out of the texel loop. ProgressSink merges values
+// monotonically, but it hands the HOST callback straight through and a host
+// callback carries no thread-safety contract of its own; the texel loop runs on
+// every worker. Reported on a 1% step so a 4096-square bake does not spend its
+// time in the host's callback.
+class TexelProgress {
+public:
+    TexelProgress(ProgressSink* sink, std::size_t total)
+        : m_sink(sink), m_total(total), m_stride(std::max<std::size_t>(1, total / 100)) {}
+
+    void step() {
+        if (m_sink == nullptr || m_total == 0) {
+            return;
+        }
+        const std::size_t done = m_done.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (done % m_stride != 0 && done != m_total) {
+            return;
+        }
+        const std::lock_guard<std::mutex> lock(m_mutex);
+        m_sink->report(static_cast<float>(done) / static_cast<float>(m_total), "bake");
+    }
+
+private:
+    ProgressSink* m_sink;
+    std::size_t m_total;
+    std::size_t m_stride;
+    std::atomic<std::size_t> m_done{0};
+    std::mutex m_mutex;
+};
+
+// The ray-traced shading pass (AO, bent normal, thickness). A hemisphere per
+// texel is the only per-texel work in the bake heavy enough to be worth threads,
+// so the parallelism lives HERE, over texels: a texel's own ray batch is a few
+// dozen items, far too short to pay for a fan-out of its own (it used to spawn
+// and join one set of workers per texel). Results go to a scratch vector and
+// reach the image afterwards in texel order, so overlapping texels keep
+// last-write-wins and the map is bit-identical to a serial bake.
+void shadeRayTraced(BakeResult& result, const std::vector<Texel>& texels, const Mesh& highPoly,
+                    const Bvh& bvh, const std::vector<Vec3>& highNormals, BakeMap map,
+                    const BakeParams& params, ProgressSink* progress, const CancelToken* cancel) {
     // Flattened once for the whole pass: FlatBvh is a full copy of every node
     // and triangle, so rebuilding it per texel made the bake cost linear in the
     // Target's triangle count — the one axis a bake should be flat in.
     const FlatBvh flat = bvh.flatten();
     auto& backend = *accel::defaultBackend();
-    std::vector<float> openness(texels.size(), 0.0f);
+    const bool wantDepth = map == BakeMap::Thickness;
+    const bool rgb = channelsFor(map) == 3;
+    std::vector<Vec3> shaded(texels.size(), Vec3{});
     std::atomic<bool> cancelled{false};
+    TexelProgress reporter(progress, texels.size());
     backend.parallelFor(0, texels.size(), [&](std::size_t lo, std::size_t hi) {
         for (std::size_t i = lo; i < hi; ++i) {
             // Offset by `lo` so every chunk polls its first texel: a chunk can
@@ -490,8 +717,13 @@ void shadeAmbientOcclusion(BakeResult& result, const std::vector<Texel>& texels,
                 cancelled.store(true, std::memory_order_relaxed);
                 return;
             }
-            openness[i] =
-                aoOpennessFromMesh(bvh, flat, highPoly, highNormals, texels[i], params, backend);
+            const Anchor anchor = projectToTarget(bvh, highPoly, highNormals, texels[i], params);
+            // Thickness looks the other way: INTO the material, not away from it.
+            const Vec3 axis = wantDepth ? anchor.normal * -1.0f : anchor.normal;
+            const Hemisphere gathered = gatherHemisphere(flat, highPoly, anchor, axis, wantDepth,
+                                                         texels[i], params, backend);
+            shaded[i] = shadeRayTracedTexel(gathered, anchor, texels[i], map, params);
+            reporter.step();
         }
     });
     if (cancelled.load(std::memory_order_relaxed)) {
@@ -499,7 +731,11 @@ void shadeAmbientOcclusion(BakeResult& result, const std::vector<Texel>& texels,
         return;
     }
     for (std::size_t i = 0; i < texels.size(); ++i) {
-        result.image.at(texels[i].px, texels[i].py, 0) = openness[i];
+        result.image.at(texels[i].px, texels[i].py, 0) = shaded[i].x;
+        if (rgb) {
+            result.image.at(texels[i].px, texels[i].py, 1) = shaded[i].y;
+            result.image.at(texels[i].px, texels[i].py, 2) = shaded[i].z;
+        }
     }
 }
 
@@ -507,34 +743,125 @@ void shadeAmbientOcclusion(BakeResult& result, const std::vector<Texel>& texels,
 // field-evaluator work: `params.field == nullptr` must reproduce the pre-bridge
 // pixels bit for bit (pipeline-bridge spec, "No evaluator, no behavior change"),
 // which tests/bake/test_field_bake.cpp pins against captured checksums.
-void shadeFromMesh(BakeResult& result, const std::vector<Texel>& texels, const Mesh& highPoly,
-                   BakeMap map, const BakeParams& params, const CancelToken* cancel) {
-    const Bvh bvh(highPoly);
-    const std::vector<Vec3> highNormals = vertexNormals(highPoly);
-    if (map == BakeMap::AmbientOcclusion) {
-        shadeAmbientOcclusion(result, texels, highPoly, bvh, highNormals, params, cancel);
-        return;
-    }
-    const auto* colors = highPoly.vertexAttributes().find<Vec3>(io::kColorAttribute);
-    const auto* highUvs = highPoly.cornerAttributes().find<Vec2>(io::kUvAttribute);
-    // Texture color source is only usable when a texture and Target UVs both
-    // exist; otherwise the Color bake falls back to Target vertex colors.
-    const bool useTexture = params.colorSource.kind == ColorSource::Texture &&
-                            params.colorSource.texture != nullptr && highUvs != nullptr;
+// Everything the rasterized maps read besides the texel and its own cage hit.
+// Gathered once, outside the texel loop: a Target's curvature field and color
+// source do not change from texel to texel.
+struct RasterSources {
+    const Mesh& highPoly;
+    const std::vector<Vec3>& highNormals;
+    const BakeBounds& bounds;
+    const std::vector<Vec3>* colors = nullptr;
+    const std::vector<Vec2>* highUvs = nullptr;
+    // Usable only when a texture and Target UVs both exist; otherwise the Color
+    // bake falls back to Target vertex colors.
+    bool useTexture = false;
+    std::vector<float> curvature;
+    float curvatureRange = 0.0f;
+};
 
+RasterSources gatherRasterSources(const Mesh& highPoly, const std::vector<Vec3>& highNormals,
+                                  const BakeBounds& bounds, BakeMap map, const BakeParams& params) {
+    const std::vector<Vec3>* colors = highPoly.vertexAttributes().find<Vec3>(io::kColorAttribute);
+    const std::vector<Vec2>* highUvs = highPoly.cornerAttributes().find<Vec2>(io::kUvAttribute);
+    // Every member is named: a designated-initializer list that stops early is
+    // -Wmissing-field-initializers under GCC even where the skipped members
+    // carry default initializers, and this tree builds with -Werror.
+    RasterSources sources{.highPoly = highPoly,
+                          .highNormals = highNormals,
+                          .bounds = bounds,
+                          .colors = colors,
+                          .highUvs = highUvs,
+                          .useTexture = params.colorSource.kind == ColorSource::Texture &&
+                                        params.colorSource.texture != nullptr && highUvs != nullptr,
+                          .curvature = {},
+                          .curvatureRange = 0.0f};
     // Curvature/cavity read the Target's curvature field at the same cage hit
     // the normal bake uses, so the two maps register texel for texel.
-    std::vector<float> highCurvature;
-    float curvatureRange = 0.0f;
     if (map == BakeMap::Curvature || map == BakeMap::Cavity) {
         // The auto range is a percentile over SURFACE, not over vertices: a
         // dense sliver fan (a UV sphere's poles) must not set the range for the
         // whole model just because it owns a lot of vertices.
         std::vector<float> highAreas;
-        highCurvature = vertexMeanCurvature(highPoly, &highAreas);
-        curvatureRange = params.curvatureRange > 0.0f ? params.curvatureRange
-                                                      : curvatureScale(highCurvature, highAreas);
+        sources.curvature = vertexMeanCurvature(highPoly, &highAreas);
+        sources.curvatureRange = params.curvatureRange > 0.0f
+                                     ? params.curvatureRange
+                                     : curvatureScale(sources.curvature, highAreas);
     }
+    return sources;
+}
+
+// The Target's color at a cage hit, from the Target texture when one is usable
+// and from Target vertex colors otherwise.
+Vec3 targetColor(const RasterSources& src, const Bvh::RayHit& hit, const BakeParams& params) {
+    if (src.useTexture) {
+        return hitTextureColor(src.highPoly, hit, *src.highUvs, *params.colorSource.texture);
+    }
+    return hitColor(src.highPoly, hit, src.colors);
+}
+
+// One texel's value on the rasterized path, the counterpart of
+// shadeRayTracedTexel(): the single-channel maps put their scalar in channel 0
+// and the rest fill all three. `hit` is the primary cage projection and `valid`
+// says whether it landed inside the cage; every map's MISS value lives here too,
+// beside the value it misses.
+Vec3 shadeRasterTexel(const RasterSources& src, const Texel& tx,
+                      const std::optional<Bvh::RayHit>& hit, bool valid, BakeMap map,
+                      const BakeParams& params) {
+    // The hit point is two floats' worth of work; the SMOOTH normal is a
+    // barycentric blend, so the two maps that read it pay for it and the rest
+    // do not.
+    const Vec3 point = valid ? hit->point : tx.position;
+    switch (map) {
+        case BakeMap::Normal: {
+            if (!valid) {
+                return Vec3{0.5f, 0.5f, 1.0f};
+            }
+            const Vec3 hn = hitNormal(src.highPoly, *hit, src.highNormals);
+            return encodeDirection(
+                Vec3{dot(hn, tx.tangent), dot(hn, tx.bitangent), dot(hn, tx.normal)});
+        }
+        case BakeMap::Displacement:
+            // Height of the hit above the low-poly surface along its normal.
+            return Vec3{valid ? params.cageDistance - hit->t : 0.0f, 0.0f, 0.0f};
+        case BakeMap::Position:
+            return point;
+        case BakeMap::ObjectPosition:
+            // The SAME sample BakeMap::Position writes in model units, only
+            // re-expressed and rescaled. Position keeps its meaning; this is a
+            // second map, not a redefinition.
+            return encodePosition(toUpAxis(point, params.upAxis), src.bounds);
+        case BakeMap::ObjectNormal: {
+            const Vec3 n = valid ? hitNormal(src.highPoly, *hit, src.highNormals) : tx.normal;
+            return encodeDirection(toUpAxis(n, params.upAxis));
+        }
+        case BakeMap::Color:
+            return valid ? targetColor(src, *hit, params) : Vec3{1, 1, 1};
+        case BakeMap::Curvature:
+        case BakeMap::Cavity: {
+            // A missed cage ray contributes 0 curvature, which encodes to the
+            // neutral value for both variants (mid-gray / white).
+            const float h = valid ? hitScalar(src.highPoly, *hit, src.curvature) : 0.0f;
+            return Vec3{encodeCurvature(h, src.curvatureRange, map == BakeMap::Cavity), 0.0f, 0.0f};
+        }
+        case BakeMap::AmbientOcclusion:
+        case BakeMap::BentNormal:
+        case BakeMap::Thickness:
+            break;  // handled on the ray-traced path
+    }
+    return Vec3{};
+}
+
+void shadeFromMesh(BakeResult& result, const std::vector<Texel>& texels, const Mesh& highPoly,
+                   BakeMap map, const BakeParams& params, const BakeBounds& bounds,
+                   ProgressSink* progress, const CancelToken* cancel) {
+    const Bvh bvh(highPoly);
+    const std::vector<Vec3> highNormals = vertexNormals(highPoly);
+    if (isRayTraced(map)) {
+        shadeRayTraced(result, texels, highPoly, bvh, highNormals, map, params, progress, cancel);
+        return;
+    }
+    const RasterSources sources = gatherRasterSources(highPoly, highNormals, bounds, map, params);
+    const bool rgb = channelsFor(map) == 3;
 
     for (std::size_t i = 0; i < texels.size(); ++i) {
         if (cancel != nullptr && i % kCancelStride == 0 && cancel->isCancelled()) {
@@ -549,54 +876,11 @@ void shadeFromMesh(BakeResult& result, const std::vector<Texel>& texels, const M
         const std::optional<Bvh::RayHit> hit = bvh.raycast(origin, dir);
         const bool valid = hit.has_value() && hit->t <= 2.0f * params.cageDistance;
 
-        switch (map) {
-            case BakeMap::Normal: {
-                Vec3 encoded{0.5f, 0.5f, 1.0f};
-                if (valid) {
-                    const Vec3 hn = hitNormal(highPoly, *hit, highNormals);
-                    const Vec3 tn{dot(hn, tx.tangent), dot(hn, tx.bitangent), dot(hn, tx.normal)};
-                    encoded = tn * 0.5f + Vec3{0.5f, 0.5f, 0.5f};
-                }
-                result.image.at(tx.px, tx.py, 0) = encoded.x;
-                result.image.at(tx.px, tx.py, 1) = encoded.y;
-                result.image.at(tx.px, tx.py, 2) = encoded.z;
-                break;
-            }
-            case BakeMap::Displacement: {
-                // Height of the hit above the low-poly surface along its normal.
-                result.image.at(tx.px, tx.py, 0) = valid ? params.cageDistance - hit->t : 0.0f;
-                break;
-            }
-            case BakeMap::Position: {
-                const Vec3 p = valid ? hit->point : tx.position;
-                result.image.at(tx.px, tx.py, 0) = p.x;
-                result.image.at(tx.px, tx.py, 1) = p.y;
-                result.image.at(tx.px, tx.py, 2) = p.z;
-                break;
-            }
-            case BakeMap::Color: {
-                Vec3 c{1, 1, 1};
-                if (valid) {
-                    c = useTexture
-                            ? hitTextureColor(highPoly, *hit, *highUvs, *params.colorSource.texture)
-                            : hitColor(highPoly, *hit, colors);
-                }
-                result.image.at(tx.px, tx.py, 0) = c.x;
-                result.image.at(tx.px, tx.py, 1) = c.y;
-                result.image.at(tx.px, tx.py, 2) = c.z;
-                break;
-            }
-            case BakeMap::Curvature:
-            case BakeMap::Cavity: {
-                // A missed cage ray contributes 0 curvature, which encodes to
-                // the neutral value for both variants (mid-gray / white).
-                const float h = valid ? hitScalar(highPoly, *hit, highCurvature) : 0.0f;
-                result.image.at(tx.px, tx.py, 0) =
-                    encodeCurvature(h, curvatureRange, map == BakeMap::Cavity);
-                break;
-            }
-            case BakeMap::AmbientOcclusion:
-                break;  // handled above
+        const Vec3 shaded = shadeRasterTexel(sources, tx, hit, valid, map, params);
+        result.image.at(tx.px, tx.py, 0) = shaded.x;
+        if (rgb) {
+            result.image.at(tx.px, tx.py, 1) = shaded.y;
+            result.image.at(tx.px, tx.py, 2) = shaded.z;
         }
     }
 }
@@ -845,12 +1129,22 @@ BakeResult bake(const Mesh& lowPoly, const Mesh& highPoly, BakeMap map, const Ba
         return result;  // empty image: nothing to bake
     }
 
+    // The box ObjectPosition rescales over, and the basis every map records.
+    // Both meshes, because the map writes the high-poly hit where the cage ray
+    // lands and the low-poly's own point where it misses.
+    BakeBounds bounds;
+    if (map == BakeMap::ObjectPosition) {
+        accumulateBounds(lowPoly, params.upAxis, bounds);
+        accumulateBounds(highPoly, params.upAxis, bounds);
+    }
+    result.encoding = encodingFor(map, params, bounds);
+
     const std::vector<Vec3> lowNormals = vertexNormals(lowPoly);
     const std::vector<Texel> texels =
         rasterize(lowPoly, lowNormals, *uvs, params.width, params.height);
     result.texelsCovered = texels.size();
     result.image = makeImage(params.width, params.height, channelsFor(map));
-    const std::array<float, 3> padding = neutralPadding(map);
+    const std::array<float, 3> padding = neutralPadding(map, params);
     for (int y = 0; y < result.image.height; ++y) {
         for (int x = 0; x < result.image.width; ++x) {
             for (int c = 0; c < result.image.channels; ++c) {
@@ -862,7 +1156,7 @@ BakeResult bake(const Mesh& lowPoly, const Mesh& highPoly, BakeMap map, const Ba
     if (useField) {
         shadeFromField(result, texels, *params.field, map, params, cancel);
     } else {
-        shadeFromMesh(result, texels, highPoly, map, params, cancel);
+        shadeFromMesh(result, texels, highPoly, map, params, bounds, progress, cancel);
     }
     if (result.cancelled) {
         return result;
