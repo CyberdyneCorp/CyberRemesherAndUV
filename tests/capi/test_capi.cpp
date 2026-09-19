@@ -691,6 +691,100 @@ void flatFieldGradient(void*, const float[3], float out[3]) {
 float flatFieldOcclusion(void*, const float[3], const float[3], float) { return 1.0f; }
 }  // namespace
 
+TEST_CASE("capi exposes the id maps and the table that resolves their colours") {
+    // The Target is the UV plane's two triangles carrying distinct materials,
+    // built through the bulk path because that is the only way a host declares
+    // a face-domain id column over the ABI.
+    const std::filesystem::path objPath = writeUvPlaneObj();
+    CyberMesh* low = nullptr;
+    REQUIRE(cyber_mesh_load_obj(objPath.string().c_str(), &low) == CYBER_OK);
+
+    const float positions[] = {0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0};
+    const size_t offsets[] = {0, 3, 6};
+    const uint32_t indices[] = {0, 1, 2, 0, 2, 3};
+    const int32_t materials[] = {4, 9};
+    const CyberAttributeColumn columns[] = {
+        {"material_id", CYBER_ATTRIBUTE_FACE, CYBER_ATTRIBUTE_INT32, materials, 2},
+    };
+    const CyberIndexedMesh source{positions, 4, offsets, 2, indices, 6, columns, 1};
+    CyberMesh* high = nullptr;
+    REQUIRE(cyber_mesh_from_indexed(&source, &high) == CYBER_OK);
+
+    CyberBakeParams params{};
+    cyber_default_bake_params(&params);
+    params.width = 16;
+    params.height = 16;
+
+    CyberImage* image = nullptr;
+    REQUIRE(cyber_bake(low, high, CYBER_BAKE_MATERIAL_ID, &params, &image) == CYBER_OK);
+    REQUIRE(image != nullptr);
+    CyberImageEncoding encoding{};
+    REQUIRE(cyber_image_encoding(image, &encoding) == CYBER_OK);
+    CHECK(encoding.basis == CYBER_ENCODING_ID_COLOR);
+    CHECK(std::string(cyber_image_id_source(image)) == "material_id");
+    REQUIRE(cyber_image_id_color_count(image) == 2u);
+
+    // Ascending by id, never the order the faces declared them in.
+    CyberIdColor first{};
+    CyberIdColor second{};
+    REQUIRE(cyber_image_id_color(image, 0, &first) == CYBER_OK);
+    REQUIRE(cyber_image_id_color(image, 1, &second) == CYBER_OK);
+    CHECK(first.id == 4);
+    CHECK(second.id == 9);
+    CHECK(cyber_image_id_color(image, 2, &first) == CYBER_ERR_INVALID_ARG);
+    CHECK(cyber_image_id_color(image, 0, nullptr) == CYBER_ERR_INVALID_ARG);
+    CHECK(cyber_image_id_color(nullptr, 0, &first) == CYBER_ERR_INVALID_ARG);
+    CHECK(cyber_image_id_source(nullptr) == nullptr);
+    CHECK(cyber_image_id_color_count(nullptr) == 0u);
+
+    // Every texel in the map is one of the two reported colours or the
+    // reserved "no id" black: the table really does resolve the pixels, which
+    // is the whole reason it is reported.
+    std::vector<float> pixels(cyber_image_copy_pixels(image, nullptr, 0));
+    REQUIRE(cyber_image_copy_pixels(image, pixels.data(), pixels.size()) == pixels.size());
+    const auto matches = [&](std::size_t at, const unsigned char rgb[3]) {
+        for (std::size_t c = 0; c < 3; ++c) {
+            if (std::lround(pixels[at + c] * 255.0f) != static_cast<long>(rgb[c])) {
+                return false;
+            }
+        }
+        return true;
+    };
+    const unsigned char black[3] = {0, 0, 0};
+    bool sawFirst = false;
+    bool sawSecond = false;
+    for (std::size_t at = 0; at + 2 < pixels.size(); at += 3) {
+        const bool a = matches(at, first.color);
+        const bool b = matches(at, second.color);
+        REQUIRE((a || b || matches(at, black)));
+        sawFirst = sawFirst || a;
+        sawSecond = sawSecond || b;
+    }
+    CHECK(sawFirst);
+    CHECK(sawSecond);
+    cyber_image_free(image);
+
+    // Object ID with no column declared falls back to components; the UV plane
+    // is one connected surface, so it reports exactly one.
+    image = nullptr;
+    REQUIRE(cyber_bake(low, high, CYBER_BAKE_OBJECT_ID, &params, &image) == CYBER_OK);
+    CHECK(std::string(cyber_image_id_source(image)) == "component");
+    CHECK(cyber_image_id_color_count(image) == 1u);
+    cyber_image_free(image);
+
+    // Every other map reports no table at all.
+    image = nullptr;
+    REQUIRE(cyber_bake(low, high, CYBER_BAKE_NORMAL, &params, &image) == CYBER_OK);
+    CHECK(std::string(cyber_image_id_source(image)).empty());
+    CHECK(cyber_image_id_color_count(image) == 0u);
+    cyber_image_free(image);
+
+    cyber_mesh_free(low);
+    cyber_mesh_free(high);
+    std::error_code ec;
+    std::filesystem::remove(objPath, ec);
+}
+
 TEST_CASE("capi refuses an out-of-range encoding parameter instead of defaulting it") {
     const std::filesystem::path objPath = writeUvPlaneObj();
     CyberMesh* low = nullptr;
@@ -2390,6 +2484,165 @@ TEST_CASE("capi export bundle unwraps a low-poly that carries no UVs") {
     cyber_export_preset_free(preset);
     cyber_mesh_free(mesh);
     std::filesystem::remove(lowPath, ec);
+    std::filesystem::remove_all(outDir, ec);
+}
+TEST_CASE("capi reports the bundle's id table beside every id map it wrote") {
+    // The bundle-level table is a SEPARATE C surface from the per-image one:
+    // CyberImageEncoding is a flat POD and cannot carry a variable-length
+    // table, so the bundle result keeps its own copy and hands it out through
+    // cyber_bundle_result_file_id_*. This drives the path a host actually
+    // takes -- write a bundle asking for both id maps, then resolve each
+    // file's table -- and pins it against the table a direct bake of the same
+    // pair reports, since a colour picked out of the written file is only
+    // resolvable if the two agree row for row.
+    const std::filesystem::path lowPath = writeUvPlaneObj();
+    const std::filesystem::path presetPath =
+        std::filesystem::temp_directory_path() / "cyber_capi_idmaps_preset.json";
+    {
+        std::ofstream out(presetPath);
+        // sRGB on an id map is the trap: a gamma curve rewrites every id's
+        // colour, so the bundle must refuse it and say so over the ABI.
+        out << R"({"schemaVersion": 1, "name": "idmaps", "maps": [)"
+               R"({"map": "material-id", "colorSpace": "srgb"}, {"map": "object-id"}]})";
+    }
+    const std::filesystem::path outDir =
+        std::filesystem::temp_directory_path() / "cyber_capi_idmaps_out";
+    std::error_code ec;
+    std::filesystem::remove_all(outDir, ec);
+    std::filesystem::create_directories(outDir, ec);
+
+    CyberMesh* low = nullptr;
+    REQUIRE(cyber_mesh_load_obj(lowPath.string().c_str(), &low) == CYBER_OK);
+
+    // The Target carries two materials; the bulk path is the only way a host
+    // declares a face-domain id column over the ABI.
+    const float positions[] = {0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0};
+    const size_t offsets[] = {0, 3, 6};
+    const uint32_t indices[] = {0, 1, 2, 0, 2, 3};
+    const int32_t materials[] = {4, 9};
+    const CyberAttributeColumn columns[] = {
+        {"material_id", CYBER_ATTRIBUTE_FACE, CYBER_ATTRIBUTE_INT32, materials, 2},
+    };
+    const CyberIndexedMesh source{positions, 4, offsets, 2, indices, 6, columns, 1};
+    CyberMesh* high = nullptr;
+    REQUIRE(cyber_mesh_from_indexed(&source, &high) == CYBER_OK);
+
+    CyberExportPreset* preset = nullptr;
+    REQUIRE(cyber_export_preset_resolve(presetPath.string().c_str(), &preset) == CYBER_OK);
+    REQUIRE(cyber_export_preset_set_resolution(preset, 16) == CYBER_OK);
+
+    CyberBundleParams params{};
+    cyber_default_bundle_params(&params);
+    const std::string meshOut = (outDir / "plane.obj").string();
+    params.meshPath = meshOut.c_str();
+    params.aoSamples = 4;
+    params.cageDistance = 0.2f;
+
+    CyberBundleResult* result = nullptr;
+    REQUIRE(cyber_export_bundle_write(low, high, preset, &params, nullptr, nullptr, nullptr,
+                                      &result) == CYBER_OK);
+    REQUIRE(result != nullptr);
+
+    const size_t fileCount = cyber_bundle_result_file_count(result);
+    size_t materialAt = fileCount;
+    size_t objectAt = fileCount;
+    size_t meshAt = fileCount;
+    for (size_t i = 0; i < fileCount; ++i) {
+        CyberBundleFile file{};
+        REQUIRE(cyber_bundle_result_file(result, i, &file) == CYBER_OK);
+        const std::string kind(file.kind);
+        if (kind == "material-id") {
+            materialAt = i;
+            // Written linear despite the preset's sRGB request.
+            CHECK(std::string(file.colorSpace) == "linear");
+        } else if (kind == "object-id") {
+            objectAt = i;
+        } else if (kind == "mesh") {
+            meshAt = i;
+        }
+    }
+    REQUIRE(materialAt != fileCount);
+    REQUIRE(objectAt != fileCount);
+    REQUIRE(meshAt != fileCount);
+
+    // The refusal is reported, not silent.
+    bool sawRefusal = false;
+    for (size_t i = 0; i < cyber_bundle_result_warning_count(result); ++i) {
+        const char* warning = cyber_bundle_result_warning(result, i);
+        REQUIRE(warning != nullptr);
+        sawRefusal = sawRefusal || std::string(warning).find("material-id") != std::string::npos;
+    }
+    CHECK(sawRefusal);
+
+    CyberBakeParams bakeParams{};
+    cyber_default_bake_params(&bakeParams);
+    bakeParams.width = 16;
+    bakeParams.height = 16;
+    bakeParams.cageDistance = 0.2f;
+    CyberImage* image = nullptr;
+    REQUIRE(cyber_bake(low, high, CYBER_BAKE_MATERIAL_ID, &bakeParams, &image) == CYBER_OK);
+
+    const char* bundleSource = cyber_bundle_result_file_id_source(result, materialAt);
+    REQUIRE(bundleSource != nullptr);
+    CHECK(std::string(bundleSource) == "material_id");
+    CHECK(std::string(bundleSource) == std::string(cyber_image_id_source(image)));
+
+    const size_t rows = cyber_bundle_result_file_id_color_count(result, materialAt);
+    REQUIRE(rows == 2u);
+    REQUIRE(rows == cyber_image_id_color_count(image));
+    for (size_t row = 0; row < rows; ++row) {
+        CyberIdColor fromBundle{};
+        CyberIdColor fromBake{};
+        REQUIRE(cyber_bundle_result_file_id_color(result, materialAt, row, &fromBundle) ==
+                CYBER_OK);
+        REQUIRE(cyber_image_id_color(image, row, &fromBake) == CYBER_OK);
+        CHECK(fromBundle.id == fromBake.id);
+        for (size_t c = 0; c < 3; ++c) {
+            CHECK(fromBundle.color[c] == fromBake.color[c]);
+        }
+        // No assigned colour is the reserved "no id" black.
+        CHECK((fromBundle.color[0] != 0 || fromBundle.color[1] != 0 || fromBundle.color[2] != 0));
+    }
+    // Ascending by id, never the order the faces declared them in.
+    CyberIdColor first{};
+    CyberIdColor second{};
+    REQUIRE(cyber_bundle_result_file_id_color(result, materialAt, 0, &first) == CYBER_OK);
+    REQUIRE(cyber_bundle_result_file_id_color(result, materialAt, 1, &second) == CYBER_OK);
+    CHECK(first.id == 4);
+    CHECK(second.id == 9);
+    cyber_image_free(image);
+
+    // The object map declares no column, so it falls back to the Target's
+    // face-connected components -- one surface, one id -- and says so.
+    REQUIRE(cyber_bundle_result_file_id_source(result, objectAt) != nullptr);
+    CHECK(std::string(cyber_bundle_result_file_id_source(result, objectAt)) == "component");
+    CHECK(cyber_bundle_result_file_id_color_count(result, objectAt) == 1u);
+
+    // The mesh entry is not a map: an empty source and no table, never NULL.
+    REQUIRE(cyber_bundle_result_file_id_source(result, meshAt) != nullptr);
+    CHECK(std::string(cyber_bundle_result_file_id_source(result, meshAt)).empty());
+    CHECK(cyber_bundle_result_file_id_color_count(result, meshAt) == 0u);
+
+    // Out-of-range and null arguments, on both the file index and the row.
+    CyberIdColor scratch{};
+    CHECK(cyber_bundle_result_file_id_color(result, materialAt, rows, &scratch) ==
+          CYBER_ERR_INVALID_ARG);
+    CHECK(cyber_bundle_result_file_id_color(result, fileCount, 0, &scratch) ==
+          CYBER_ERR_INVALID_ARG);
+    CHECK(cyber_bundle_result_file_id_color(result, materialAt, 0, nullptr) ==
+          CYBER_ERR_INVALID_ARG);
+    CHECK(cyber_bundle_result_file_id_color(nullptr, 0, 0, &scratch) == CYBER_ERR_INVALID_ARG);
+    CHECK(cyber_bundle_result_file_id_source(result, fileCount) == nullptr);
+    CHECK(cyber_bundle_result_file_id_source(nullptr, 0) == nullptr);
+    CHECK(cyber_bundle_result_file_id_color_count(result, fileCount) == 0u);
+    CHECK(cyber_bundle_result_file_id_color_count(nullptr, 0) == 0u);
+
+    cyber_bundle_result_free(result);
+    cyber_export_preset_free(preset);
+    cyber_mesh_free(low);
+    cyber_mesh_free(high);
+    std::filesystem::remove(lowPath, ec);
+    std::filesystem::remove(presetPath, ec);
     std::filesystem::remove_all(outDir, ec);
 }
 #endif  // CYBER_TESTS_HAVE_EXPORTBUNDLE

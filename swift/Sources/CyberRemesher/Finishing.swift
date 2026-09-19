@@ -172,6 +172,13 @@ public struct BakeMap: RawRepresentable, Equatable, Sendable {
     public static let bentNormal = BakeMap(rawValue: CYBER_BAKE_BENT_NORMAL.rawValue)
     /// Material behind the surface, in model units, times `thicknessScale`.
     public static let thickness = BakeMap(rawValue: CYBER_BAKE_THICKNESS.rawValue)
+    /// One flat colour per Target `material_id` (RGB). The texels are EXACT
+    /// KEYS: compare them at zero tolerance and never filter, resample or
+    /// colour-convert the map. Resolve one with `ImageEncoding.idColors`.
+    public static let materialId = BakeMap(rawValue: CYBER_BAKE_MATERIAL_ID.rawValue)
+    /// One flat colour per Target object or submesh (RGB), from `object_id`,
+    /// then `group_id`, then the Target's face-connected components.
+    public static let objectId = BakeMap(rawValue: CYBER_BAKE_OBJECT_ID.rawValue)
 }
 
 /// Axis convention the object-space maps are expressed in.
@@ -198,6 +205,31 @@ public enum EncodingBasis: UInt32, Sendable {
     case objectBounds = 3
     /// A length in model units, multiplied by `scale`.
     case distance = 4
+    /// An EXACT key, not a measurement. Never filter, resample or
+    /// colour-convert such a map; compare its texels at zero tolerance.
+    case idColor = 5
+}
+
+/// One row of an id map's id-to-colour table.
+///
+/// `color` is the exact 8-bit triple written for `id`; the float in the image
+/// is `channel / 255`. No assigned colour is `(0, 0, 0)` — that is reserved
+/// for "no id" and is what an uncovered texel holds.
+public struct IdColor: Sendable, Equatable {
+    public let id: Int32
+    public let color: (UInt8, UInt8, UInt8)
+
+    /// Public so host code can build the row it wants to compare a picked
+    /// colour against; the memberwise initializer of a struct with `let`
+    /// members is internal.
+    public init(id: Int32, color: (UInt8, UInt8, UInt8)) {
+        self.id = id
+        self.color = color
+    }
+
+    public static func == (lhs: IdColor, rhs: IdColor) -> Bool {
+        lhs.id == rhs.id && lhs.color == rhs.color
+    }
 }
 
 /// The basis needed to interpret a baked map.
@@ -212,13 +244,22 @@ public struct ImageEncoding: Sendable {
     public let boundsMax: (Float, Float, Float)
     /// The factor a `.distance` map was multiplied by; 1 otherwise.
     public let scale: Float
+    /// Which Target column an `.idColor` map read: `"material_id"`,
+    /// `"object_id"`, `"group_id"`, `"component"` for the
+    /// face-connected-component fallback, or `"none"`. Empty otherwise.
+    public let idSource: String
+    /// Every distinct Target id and its colour, ascending by id. Empty for
+    /// every basis but `.idColor`.
+    public let idColors: [IdColor]
 
-    init(_ c: CyberImageEncoding) {
+    init(_ c: CyberImageEncoding, idSource: String = "", idColors: [IdColor] = []) {
         basis = EncodingBasis(rawValue: UInt32(bitPattern: c.basis)) ?? .none
         upAxis = UpAxis(rawValue: UInt32(bitPattern: c.upAxis)) ?? .y
         boundsMin = (c.boundsMin.0, c.boundsMin.1, c.boundsMin.2)
         boundsMax = (c.boundsMax.0, c.boundsMax.1, c.boundsMax.2)
         scale = c.scale
+        self.idSource = idSource
+        self.idColors = idColors
     }
 }
 
@@ -284,7 +325,15 @@ public final class Image {
         guard cyber_image_encoding(handle, &out) == CYBER_OK else {
             return ImageEncoding(CyberImageEncoding())
         }
-        return ImageEncoding(out)
+        let source = cyber_image_id_source(handle).map { String(cString: $0) } ?? ""
+        var colors: [IdColor] = []
+        for index in 0..<cyber_image_id_color_count(handle) {
+            var entry = CyberIdColor()
+            guard cyber_image_id_color(handle, index, &entry) == CYBER_OK else { continue }
+            colors.append(IdColor(id: entry.id, color: (entry.color.0, entry.color.1,
+                                                        entry.color.2)))
+        }
+        return ImageEncoding(out, idSource: source, idColors: colors)
     }
 
     /// Pixels as floats, row-major, `channels` per texel.

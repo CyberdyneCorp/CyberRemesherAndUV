@@ -42,9 +42,19 @@ std::optional<bake::BakeMap> toBakeMap(PresetMap map) {
             return bake::BakeMap::BentNormal;
         case PresetMap::Thickness:
             return bake::BakeMap::Thickness;
+        case PresetMap::MaterialId:
+            return bake::BakeMap::MaterialId;
+        case PresetMap::ObjectId:
+            return bake::BakeMap::ObjectId;
     }
     return std::nullopt;
 }
+
+// An id map's texels are exact keys. linearToSrgb() is a non-linear remap, so
+// applying it rewrites every id's colour and the file stops matching the table
+// the bake reported — the whole point of the map. Refused with a warning, the
+// way the bundle already refuses sRGB into an EXR.
+bool isIdMap(PresetMap map) { return map == PresetMap::MaterialId || map == PresetMap::ObjectId; }
 
 // The axis the object-space maps are baked in comes from the preset, which is
 // where "what this target app expects" already lives. An unrecognised value is
@@ -158,7 +168,12 @@ bool writeMap(const ExportPreset& preset, const PresetMapEntry& entry, bake::Ima
     // silently in either direction.
     std::string writtenSpace = "linear";
     if (entry.colorSpace == ColorSpace::Srgb) {
-        if (preset.textureFormat == "exr") {
+        if (isIdMap(entry.map)) {
+            result.warnings.push_back(std::string("map '") + io::presetMapName(entry.map) +
+                                      "' is an id map, whose texels are exact keys; the "
+                                      "declared sRGB encoding would change every id's colour "
+                                      "and is not applied");
+        } else if (preset.textureFormat == "exr") {
             result.warnings.push_back(std::string("map '") + io::presetMapName(entry.map) +
                                       "' declares sRGB but the preset writes EXR; "
                                       "written as linear float");

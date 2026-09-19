@@ -4,9 +4,11 @@
 //   0 success | 2 argument error | 3 input load failure | 4 pipeline failure
 //   or empty result | 5 partial success (failed islands) | 6 output/report
 //   write failure | 130 cancelled (SIGINT).
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <csignal>
+#include <cstdint>
 #include <cstdio>
 #include <fstream>
 #include <iostream>
@@ -152,7 +154,8 @@ void printUsage() {
                  "  --bake <csv>             maps to bake, overriding the preset's set\n"
                  "                           (normal,ao,curvature,cavity,displacement,\n"
                  "                           color,position,object-normal,\n"
-                 "                           object-position,bent-normal,thickness).\n"
+                 "                           object-position,bent-normal,thickness,\n"
+                 "                           material-id,object-id).\n"
                  "                           Implies --preset gltf-generic when no\n"
                  "                           preset is named\n"
                  "  --target-quads <int>     target quad count (default 50000)\n"
@@ -626,10 +629,25 @@ const char* encodingBasisName(cyber::bake::EncodingBasis basis) {
             return "object-bounds";
         case cyber::bake::EncodingBasis::Distance:
             return "distance";
+        case cyber::bake::EncodingBasis::IdColor:
+            return "id-color";
         case cyber::bake::EncodingBasis::None:
             break;
     }
     return "none";
+}
+
+// An id map's texels are keys, and a key that cannot be resolved is a picture
+// of some colours. The table goes into the report as "#rrggbb" strings, which
+// is the spelling a consumer already has for a colour it picked out of the PNG.
+std::string hexColor(const std::array<std::uint8_t, 3>& color) {
+    static const char* kDigits = "0123456789abcdef";
+    std::string out = "#";
+    for (const std::uint8_t channel : color) {
+        out += kDigits[channel >> 4];
+        out += kDigits[channel & 0x0fu];
+    }
+    return out;
 }
 
 // The basis a consumer needs to decode the file, written only where it says
@@ -649,6 +667,16 @@ nlohmann::json encodingJson(const cyber::bake::BakeEncoding& encoding) {
     }
     if (encoding.basis == EncodingBasis::Distance) {
         out["scale"] = encoding.scale;
+    }
+    if (encoding.basis == EncodingBasis::IdColor) {
+        out["idSource"] = encoding.idSource;
+        nlohmann::json colors = nlohmann::json::array();
+        for (const cyber::bake::IdColorEntry& entry : encoding.idColors) {
+            colors.push_back({{"id", entry.id},
+                              {"color", hexColor(entry.color)},
+                              {"rgb", {entry.color[0], entry.color[1], entry.color[2]}}});
+        }
+        out["idColors"] = colors;
     }
     return out;
 }

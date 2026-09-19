@@ -343,6 +343,9 @@ bool isRayTraced(BakeMap map) {
            map == BakeMap::Thickness;
 }
 
+// The two maps whose texels are exact KEYS rather than measurements.
+bool isIdMap(BakeMap map) { return map == BakeMap::MaterialId || map == BakeMap::ObjectId; }
+
 // Re-expresses an engine-space (y-up) vector in the requested convention. The
 // z-up form is the standard -90 degree rotation about X: y-up's up (0,1,0)
 // becomes (0,0,1). Its own inverse is (x, z, -y).
@@ -405,10 +408,108 @@ Vec3 encodePosition(Vec3 p, const BakeBounds& bounds) {
                 axis(p.z, bounds.min.z, bounds.max.z)};
 }
 
+// The Target's per-face id column for an id map, what it was read from, and the
+// table the bake reports. Empty for every other map.
+struct IdField {
+    std::string source;
+    std::vector<std::int32_t> byFace;  // indexed by FaceId::value
+    std::vector<IdColorEntry> table;   // ascending by id
+};
+
+// Face-connected components as ids. Deterministic by construction: islands()
+// seeds in ascending face order, sorts each island and touches no unordered
+// container, so the numbering cannot differ between standard libraries the way
+// a hash-ordered traversal would.
+std::vector<std::int32_t> componentIds(const Mesh& mesh) {
+    std::vector<std::int32_t> ids(mesh.faceCapacity(), 0);
+    const std::vector<std::vector<FaceId>> islands = mesh.islands();
+    for (std::size_t i = 0; i < islands.size(); ++i) {
+        for (const FaceId f : islands[i]) {
+            ids[f.value] = static_cast<std::int32_t>(i);
+        }
+    }
+    return ids;
+}
+
+// Every distinct id on the Target's LIVE faces, ascending, with the colour each
+// one is written as. Every id, not only the ones the UV layout happens to show:
+// which ids reach a texel is a property of the layout, and a consumer resolving
+// a picked colour needs the whole key. Sorted with std::sort rather than
+// gathered from a set, so the order is the ids' own and not a container's.
+std::vector<IdColorEntry> idTable(const Mesh& mesh, const std::vector<std::int32_t>& byFace) {
+    std::vector<std::int32_t> ids;
+    for (Index fi = 0; fi < mesh.faceCapacity(); ++fi) {
+        if (mesh.isAlive(FaceId{fi})) {
+            ids.push_back(byFace[fi]);
+        }
+    }
+    std::sort(ids.begin(), ids.end());
+    ids.erase(std::unique(ids.begin(), ids.end()), ids.end());
+    std::vector<IdColorEntry> table;
+    table.reserve(ids.size());
+    for (const std::int32_t id : ids) {
+        table.push_back(IdColorEntry{id, idColor(id)});
+    }
+    return table;
+}
+
+// The documented resolution order: `material_id` for the material map, then
+// `object_id` and `group_id` for the object map. `group_id` is kept because it
+// is the name the rest of this tree already reads; `object_id` comes first
+// because it is the one a host reaches for.
+std::array<const char*, 2> idColumnNames(BakeMap map) {
+    if (map == BakeMap::MaterialId) {
+        return {"material_id", nullptr};
+    }
+    return {"object_id", "group_id"};
+}
+
+IdField gatherIdField(const Mesh& highPoly, BakeMap map) {
+    IdField field;
+    if (!isIdMap(map)) {
+        return field;
+    }
+    for (const char* name : idColumnNames(map)) {
+        const auto* values =
+            name == nullptr ? nullptr : highPoly.faceAttributes().find<std::int32_t>(name);
+        if (values != nullptr) {
+            field.source = name;
+            field.byFace = *values;
+            break;
+        }
+    }
+    if (field.source.empty()) {
+        // Nothing declares an id. An object map still has an answer: a
+        // multi-part asset merged into one mesh carries its parts as
+        // disconnected components and nowhere else, and no loader in this tree
+        // writes an id column, so without this the map would be one flat colour
+        // on every real asset. A MATERIAL map has no such fallback -- a
+        // component is an object, not a material -- so every face reads 0 and
+        // the report says so.
+        const bool component = map == BakeMap::ObjectId;
+        field.source = component ? "component" : "none";
+        field.byFace = component ? componentIds(highPoly)
+                                 : std::vector<std::int32_t>(highPoly.faceCapacity(), 0);
+    }
+    field.byFace.resize(highPoly.faceCapacity(), 0);
+    field.table = idTable(highPoly, field.byFace);
+    return field;
+}
+
+// An id's colour as the float triple the image holds. Exactly `byte / 255`, so
+// the 8-bit writer's round trip is the identity and an exact comparison at zero
+// tolerance survives the file.
+Vec3 idColorValue(std::int32_t id) {
+    const std::array<std::uint8_t, 3> c = idColor(id);
+    return Vec3{static_cast<float>(c[0]) / 255.0f, static_cast<float>(c[1]) / 255.0f,
+                static_cast<float>(c[2]) / 255.0f};
+}
+
 // What the pixels of `map` mean, recorded with the image so a consumer never has
 // to infer it from the map's name (surface-baking spec, "Baked maps record their
 // encoding basis").
-BakeEncoding encodingFor(BakeMap map, const BakeParams& params, const BakeBounds& bounds) {
+BakeEncoding encodingFor(BakeMap map, const BakeParams& params, const BakeBounds& bounds,
+                         const IdField& ids) {
     BakeEncoding encoding;
     encoding.upAxis = params.upAxis;
     switch (map) {
@@ -434,6 +535,12 @@ BakeEncoding encodingFor(BakeMap map, const BakeParams& params, const BakeBounds
         case BakeMap::Thickness:
             encoding.basis = EncodingBasis::Distance;
             encoding.scale = params.thicknessScale;
+            break;
+        case BakeMap::MaterialId:
+        case BakeMap::ObjectId:
+            encoding.basis = EncodingBasis::IdColor;
+            encoding.idSource = ids.source;
+            encoding.idColors = ids.table;
             break;
         default:
             break;  // AmbientOcclusion, Position, Color, Curvature, Cavity: raw
@@ -487,6 +594,12 @@ std::array<float, 3> neutralPadding(BakeMap map, const BakeParams& params) {
         case BakeMap::Cavity:            // no concavity
         case BakeMap::AmbientOcclusion:  // fully open
             return {1.0f, 0.0f, 0.0f};
+        case BakeMap::MaterialId:
+        case BakeMap::ObjectId:
+            // The reserved "no id". idColor() lifts every channel into
+            // [64,255], so black is a value no assigned id can take and it is
+            // safe to mean "nothing here".
+            return {};
         default:
             // Displacement, Position, Color, Thickness: zero already IS the
             // neutral value (no height, no material behind an uncovered texel).
@@ -750,6 +863,9 @@ struct RasterSources {
     const Mesh& highPoly;
     const std::vector<Vec3>& highNormals;
     const BakeBounds& bounds;
+    // The Target's per-face ids for an id map; `byFace` is empty for every
+    // other map, which never reads it.
+    const IdField& ids;
     const std::vector<Vec3>* colors = nullptr;
     const std::vector<Vec2>* highUvs = nullptr;
     // Usable only when a texture and Target UVs both exist; otherwise the Color
@@ -760,7 +876,8 @@ struct RasterSources {
 };
 
 RasterSources gatherRasterSources(const Mesh& highPoly, const std::vector<Vec3>& highNormals,
-                                  const BakeBounds& bounds, BakeMap map, const BakeParams& params) {
+                                  const BakeBounds& bounds, const IdField& ids, BakeMap map,
+                                  const BakeParams& params) {
     const std::vector<Vec3>* colors = highPoly.vertexAttributes().find<Vec3>(io::kColorAttribute);
     const std::vector<Vec2>* highUvs = highPoly.cornerAttributes().find<Vec2>(io::kUvAttribute);
     // Every member is named: a designated-initializer list that stops early is
@@ -769,6 +886,7 @@ RasterSources gatherRasterSources(const Mesh& highPoly, const std::vector<Vec3>&
     RasterSources sources{.highPoly = highPoly,
                           .highNormals = highNormals,
                           .bounds = bounds,
+                          .ids = ids,
                           .colors = colors,
                           .highUvs = highUvs,
                           .useTexture = params.colorSource.kind == ColorSource::Texture &&
@@ -836,6 +954,14 @@ Vec3 shadeRasterTexel(const RasterSources& src, const Texel& tx,
         }
         case BakeMap::Color:
             return valid ? targetColor(src, *hit, params) : Vec3{1, 1, 1};
+        case BakeMap::MaterialId:
+        case BakeMap::ObjectId:
+            // The hit FACE's id, flat: no barycentric blend, no anti-aliasing.
+            // A blended key is a colour that belongs to neither surface, and it
+            // is exactly what makes an exact selection fail on every boundary
+            // texel. A missed cage ray writes the reserved "no id" rather than
+            // inventing one from the EditMesh, which carries no id column.
+            return valid ? idColorValue(src.ids.byFace[hit->face.value]) : Vec3{};
         case BakeMap::Curvature:
         case BakeMap::Cavity: {
             // A missed cage ray contributes 0 curvature, which encodes to the
@@ -853,14 +979,15 @@ Vec3 shadeRasterTexel(const RasterSources& src, const Texel& tx,
 
 void shadeFromMesh(BakeResult& result, const std::vector<Texel>& texels, const Mesh& highPoly,
                    BakeMap map, const BakeParams& params, const BakeBounds& bounds,
-                   ProgressSink* progress, const CancelToken* cancel) {
+                   const IdField& ids, ProgressSink* progress, const CancelToken* cancel) {
     const Bvh bvh(highPoly);
     const std::vector<Vec3> highNormals = vertexNormals(highPoly);
     if (isRayTraced(map)) {
         shadeRayTraced(result, texels, highPoly, bvh, highNormals, map, params, progress, cancel);
         return;
     }
-    const RasterSources sources = gatherRasterSources(highPoly, highNormals, bounds, map, params);
+    const RasterSources sources =
+        gatherRasterSources(highPoly, highNormals, bounds, ids, map, params);
     const bool rgb = channelsFor(map) == 3;
 
     for (std::size_t i = 0; i < texels.size(); ++i) {
@@ -1117,6 +1244,30 @@ void shadeFromField(BakeResult& result, const std::vector<Texel>& texels,
 
 }  // namespace
 
+std::array<std::uint8_t, 3> idColor(std::int32_t id) {
+    // INTEGER arithmetic end to end. ArmorPaint derives its id colours from
+    // frac(sin(dot(id, ...)) * 43758.5453); sin is not correctly rounded and
+    // implementations disagree in the last ulp, which that multiply amplifies
+    // into a different colour -- exactly the wrong tool for a value that has to
+    // be bit-identical on every machine. mixBits() is the Wang-style avalanche
+    // already used for the per-texel AO rotation: defined bit for bit by C++'s
+    // unsigned arithmetic, and it scatters consecutive ids (0, 1, 2, ...) into
+    // unrelated colours because half the output bits flip per input bit.
+    //
+    // The salt keeps id 0 off the avalanche's fixed point (mixBits(0) == 0).
+    const std::uint32_t h = mixBits(static_cast<std::uint32_t>(id) ^ 0x9e3779b9u);
+    std::array<std::uint8_t, 3> color{};
+    for (std::size_t c = 0; c < 3; ++c) {
+        const std::uint32_t byte = (h >> (c * 8u)) & 0xffu;
+        // Lifted into [64, 255]: every assigned colour stays legible against a
+        // dark background, and (0,0,0) becomes unreachable, which is what makes
+        // it safe to reserve for "no id". A sentinel the generator can still
+        // emit is a bug that shows up only for particular ids.
+        color[c] = static_cast<std::uint8_t>(64u + (byte * 3u) / 4u);
+    }
+    return color;
+}
+
 BakeResult bake(const Mesh& lowPoly, const Mesh& highPoly, BakeMap map, const BakeParams& params,
                 ProgressSink* progress, const CancelToken* cancel) {
     BakeResult result;
@@ -1137,7 +1288,10 @@ BakeResult bake(const Mesh& lowPoly, const Mesh& highPoly, BakeMap map, const Ba
         accumulateBounds(lowPoly, params.upAxis, bounds);
         accumulateBounds(highPoly, params.upAxis, bounds);
     }
-    result.encoding = encodingFor(map, params, bounds);
+    // The Target's id column and the table an id map reports. Empty, and free,
+    // for every other map.
+    const IdField ids = gatherIdField(highPoly, map);
+    result.encoding = encodingFor(map, params, bounds, ids);
 
     const std::vector<Vec3> lowNormals = vertexNormals(lowPoly);
     const std::vector<Texel> texels =
@@ -1156,7 +1310,7 @@ BakeResult bake(const Mesh& lowPoly, const Mesh& highPoly, BakeMap map, const Ba
     if (useField) {
         shadeFromField(result, texels, *params.field, map, params, cancel);
     } else {
-        shadeFromMesh(result, texels, highPoly, map, params, bounds, progress, cancel);
+        shadeFromMesh(result, texels, highPoly, map, params, bounds, ids, progress, cancel);
     }
     if (result.cancelled) {
         return result;

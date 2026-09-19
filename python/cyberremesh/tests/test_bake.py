@@ -68,6 +68,7 @@ def main() -> int:
         print("PASS bake: normal map points up; curvature/cavity read neutral on a flat Target")
 
         _gate_the_mesh_map_set(obj.name)
+        _gate_the_id_maps(obj.name)
         _gate_a_raising_evaluator_raises(obj.name)
         _gate_the_openness_rename_shim(obj.name)
     finally:
@@ -140,6 +141,55 @@ def _gate_the_mesh_map_set(obj_path):
                 raise AssertionError("an out-of-range encoding parameter was accepted")
 
     print("PASS bake: the object-space and ray-traced maps carry a decodable encoding basis")
+
+
+def _gate_the_id_maps(obj_path):
+    """A colour-ID map is only usable with the table that resolves its colours.
+
+    So this checks the two together: every non-padding texel in the image must
+    be a colour the reported table names, byte for byte. Anything the binding
+    dropped, reordered or rounded would break that join, and a picked colour
+    would resolve to nothing.
+    """
+    from cyberremesh import BakeMap, BakeParams, EncodingBasis, Mesh, bake
+
+    positions = [0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0]
+    offsets = [0, 3, 6]
+    indices = [0, 1, 2, 0, 2, 3]
+    params = BakeParams(width=16, height=16)
+    with Mesh.load_obj(obj_path) as low, Mesh.from_indexed(
+        positions, offsets, indices, {("face", "material_id"): [4, 9]}
+    ) as high:
+        with bake(low, high, BakeMap.MATERIAL_ID, params) as img:
+            encoding = img.encoding
+            assert encoding.basis == EncodingBasis.ID_COLOR, encoding
+            assert encoding.id_source == "material_id", encoding
+            # Ascending by id, not the order the faces declared them in.
+            assert [row.id for row in encoding.id_colors] == [4, 9], encoding.id_colors
+            for row in encoding.id_colors:
+                assert row.color != (0, 0, 0) and min(row.color) >= 64, row
+
+            arr = img.to_numpy()
+            table = {row.color for row in encoding.id_colors}
+            seen = set()
+            for y in range(arr.shape[0]):
+                for x in range(arr.shape[1]):
+                    px = tuple(int(round(float(arr[y, x, c]) * 255.0)) for c in range(3))
+                    assert px == (0, 0, 0) or px in table, (x, y, px)
+                    seen.add(px)
+            assert table <= seen, (sorted(table), sorted(seen))
+
+        # No declared column: the object map falls back to components and says so.
+        with bake(low, high, BakeMap.OBJECT_ID, params) as img:
+            assert img.encoding.id_source == "component", img.encoding
+            assert len(img.encoding.id_colors) == 1, img.encoding
+
+        # Every other map reports no table at all.
+        with bake(low, high, BakeMap.NORMAL, params) as img:
+            assert img.encoding.id_source == "", img.encoding
+            assert img.encoding.id_colors == (), img.encoding
+
+    print("PASS bake: the id maps carry a table that resolves every texel they wrote")
 
 
 class _RaisingField(cyberremesh.FieldEvaluator):

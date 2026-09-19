@@ -92,7 +92,7 @@ typedef enum CyberStatus {
  * Do not compare these numbers by hand: cyber_abi_check() applies the rule
  * above in one place, so every binding gets the same answer. */
 #define CYBER_ABI_VERSION_MAJOR 1
-#define CYBER_ABI_VERSION_MINOR 19
+#define CYBER_ABI_VERSION_MINOR 20
 
 /* The ABI this build implements. Cannot fail; either pointer may be NULL. */
 void cyber_abi_version(int* major, int* minor);
@@ -2451,7 +2451,18 @@ typedef enum CyberBakeMap {
      * back-facing hit, times CyberBakeParams::thicknessScale. A ray that hits
      * nothing contributes zero, so a thin double-sided Target reads near zero
      * rather than solid. */
-    CYBER_BAKE_THICKNESS
+    CYBER_BAKE_THICKNESS,
+    /* One flat colour per Target `material_id` (RGB). The texels are EXACT
+     * KEYS, not measurements: compare them at zero tolerance and never filter,
+     * resample or colour-convert the map. cyber_image_id_color resolves a
+     * colour back to its id. */
+    CYBER_BAKE_MATERIAL_ID,
+    /* One flat colour per Target object or submesh (RGB), read from
+     * `object_id`, then `group_id`, and falling back to the Target's
+     * face-connected components when neither exists —
+     * cyber_image_id_source names which answered. Same exactness rules as
+     * CYBER_BAKE_MATERIAL_ID. */
+    CYBER_BAKE_OBJECT_ID
 } CyberBakeMap;
 
 /* Axis convention the OBJECT-SPACE maps are expressed in. CYBER_UP_AXIS_Y is
@@ -2504,7 +2515,11 @@ typedef enum CyberEncodingBasis {
     CYBER_ENCODING_TANGENT_NORMAL,    /* direction in the texel's tangent frame, v*0.5+0.5 */
     CYBER_ENCODING_OBJECT_NORMAL,     /* direction in object space (upAxis), v*0.5+0.5 */
     CYBER_ENCODING_OBJECT_BOUNDS,     /* position rescaled over [boundsMin, boundsMax] */
-    CYBER_ENCODING_DISTANCE           /* a length in model units, multiplied by `scale` */
+    CYBER_ENCODING_DISTANCE,          /* a length in model units, multiplied by `scale` */
+    /* An EXACT key, not a measurement: every covered texel holds one of the
+     * colours cyber_image_id_color reports, verbatim. Never filter, resample
+     * or colour-convert such a map; compare it at zero tolerance. */
+    CYBER_ENCODING_ID_COLOR
 } CyberEncodingBasis;
 
 /* Filled by every bake, for every map. Members the basis does not use keep
@@ -2536,6 +2551,37 @@ CyberStatus cyber_bake(const CyberMesh* low, const CyberMesh* high, CyberBakeMap
 /* The basis needed to interpret `image`. Every image has one. NULL argument is
  * CYBER_ERR_INVALID_ARG. */
 CyberStatus cyber_image_encoding(const CyberImage* image, CyberImageEncoding* out);
+
+/* ---- id-to-colour table (CYBER_ENCODING_ID_COLOR maps) ----------------
+ *
+ * An id map's pixels are useless on their own: a consumer picks a colour and
+ * has to resolve it back to a material or object. This table is that mapping,
+ * reported with the map rather than baked only into pixels. It lists EVERY
+ * distinct id on the Target, ascending, whether or not the UV layout shows it,
+ * because the whole key is what a resolver needs.
+ *
+ * `color` is the exact 8-bit triple written for `id`; the float in the image is
+ * channel / 255, which round-trips through the 8-bit writer unchanged. No
+ * assigned colour is (0, 0, 0) — that value is reserved for "no id" and is what
+ * an uncovered texel, or one whose cage ray reached no Target surface, holds.
+ *
+ * The table is empty for every map that is not an id map. */
+typedef struct CyberIdColor {
+    int32_t id;
+    unsigned char color[3];
+} CyberIdColor;
+
+/* Which of the Target's id columns the map read: "material_id", "object_id",
+ * "group_id", "component" for the face-connected-component fallback, or "none"
+ * when nothing declared an id and every face reads 0. Empty string for a map
+ * that is not an id map; NULL only for a NULL image. The pointer is owned by
+ * the image. */
+const char* cyber_image_id_source(const CyberImage* image);
+
+size_t cyber_image_id_color_count(const CyberImage* image);
+
+/* The table entry at `index`. Out-of-range index is CYBER_ERR_INVALID_ARG. */
+CyberStatus cyber_image_id_color(const CyberImage* image, size_t index, CyberIdColor* out);
 
 void cyber_image_free(CyberImage* image);
 int cyber_image_width(const CyberImage* image);
@@ -2987,6 +3033,16 @@ CyberStatus cyber_bundle_result_file(const CyberBundleResult* result, size_t ind
  * CYBER_ENCODING_NONE. Out-of-range index is CYBER_ERR_INVALID_ARG. */
 CyberStatus cyber_bundle_result_file_encoding(const CyberBundleResult* result, size_t index,
                                               CyberImageEncoding* out);
+
+/* The id-to-colour table of the map at `index` — the same record
+ * cyber_image_id_source / cyber_image_id_color return for a directly baked
+ * image, and empty for any file that is not an id map. `color` is the index
+ * within that file's table. NULL for a bad file index; out-of-range indices
+ * are CYBER_ERR_INVALID_ARG. */
+const char* cyber_bundle_result_file_id_source(const CyberBundleResult* result, size_t index);
+size_t cyber_bundle_result_file_id_color_count(const CyberBundleResult* result, size_t index);
+CyberStatus cyber_bundle_result_file_id_color(const CyberBundleResult* result, size_t index,
+                                              size_t color, CyberIdColor* out);
 
 /* Non-fatal notes — a preset/extension mismatch, a map the source could not
  * feed. `cyber_bundle_result_warning` returns NULL for a bad index. */

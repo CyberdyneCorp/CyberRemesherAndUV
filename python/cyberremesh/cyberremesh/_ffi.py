@@ -472,6 +472,8 @@ BAKE_OBJECT_NORMAL = 7
 BAKE_OBJECT_POSITION = 8
 BAKE_BENT_NORMAL = 9
 BAKE_THICKNESS = 10
+BAKE_MATERIAL_ID = 11
+BAKE_OBJECT_ID = 12
 
 # CyberUpAxis / CyberBentNormalSpace / CyberEncodingBasis.
 UP_AXIS_Y = 0
@@ -483,6 +485,16 @@ ENCODING_TANGENT_NORMAL = 1
 ENCODING_OBJECT_NORMAL = 2
 ENCODING_OBJECT_BOUNDS = 3
 ENCODING_DISTANCE = 4
+ENCODING_ID_COLOR = 5
+
+
+class CyberIdColor(Structure):
+    """Mirror of ``CyberIdColor`` in capi/include/cyber_capi.h."""
+
+    _fields_ = [
+        ("id", c_int32),
+        ("color", c_uint8 * 3),
+    ]
 
 
 class CyberBakeParams(Structure):
@@ -1427,6 +1439,13 @@ def _declare(lib: ctypes.CDLL) -> None:
     # CyberStatus cyber_image_encoding(const CyberImage*, CyberImageEncoding*)
     lib.cyber_image_encoding.argtypes = [c_void_p, POINTER(CyberImageEncoding)]
     lib.cyber_image_encoding.restype = c_int32
+    # The id-to-colour table of a CYBER_ENCODING_ID_COLOR map.
+    lib.cyber_image_id_source.argtypes = [c_void_p]
+    lib.cyber_image_id_source.restype = c_char_p
+    lib.cyber_image_id_color_count.argtypes = [c_void_p]
+    lib.cyber_image_id_color_count.restype = c_size_t
+    lib.cyber_image_id_color.argtypes = [c_void_p, c_size_t, POINTER(CyberIdColor)]
+    lib.cyber_image_id_color.restype = c_int32
     lib.cyber_image_free.argtypes = [c_void_p]
     lib.cyber_image_free.restype = None
     for accessor in ("cyber_image_width", "cyber_image_height", "cyber_image_channels"):
@@ -1912,6 +1931,17 @@ def _declare_export_presets(lib: ctypes.CDLL) -> None:
         POINTER(CyberImageEncoding),
     ]
     lib.cyber_bundle_result_file_encoding.restype = c_int32
+    lib.cyber_bundle_result_file_id_source.argtypes = [c_void_p, c_size_t]
+    lib.cyber_bundle_result_file_id_source.restype = c_char_p
+    lib.cyber_bundle_result_file_id_color_count.argtypes = [c_void_p, c_size_t]
+    lib.cyber_bundle_result_file_id_color_count.restype = c_size_t
+    lib.cyber_bundle_result_file_id_color.argtypes = [
+        c_void_p,
+        c_size_t,
+        c_size_t,
+        POINTER(CyberIdColor),
+    ]
+    lib.cyber_bundle_result_file_id_color.restype = c_int32
     lib.cyber_bundle_result_warning_count.argtypes = [c_void_p]
     lib.cyber_bundle_result_warning_count.restype = c_size_t
     lib.cyber_bundle_result_warning.argtypes = [c_void_p, c_size_t]

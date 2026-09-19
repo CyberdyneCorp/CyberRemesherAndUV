@@ -232,6 +232,57 @@ final class RetopologyWorkflowTests: XCTestCase {
         XCTAssertThrowsError(try low.bake(from: target, map: .thickness, parameters: params))
     }
 
+    func testIdMapsCarryATableThatResolvesTheirColours() throws {
+        // A colour-ID map is useless without the mapping that turns a picked
+        // colour back into a material or object, so the two are checked
+        // together: every non-padding texel must be a colour the reported
+        // table names, at zero tolerance.
+        let target = try cylinder()
+        let snapper = try Snapper(target: target)
+        let low = try Mesh()
+        try low.contours(
+            target: target, strokes: [arc(-0.5), arc(0), arc(0.5)], spans: 12, snapper: snapper)
+        _ = try low.unwrap()
+
+        var params = BakeParameters()
+        params.width = 32
+        params.height = 32
+
+        let objectId = try low.bake(from: target, map: .objectId, parameters: params)
+        XCTAssertEqual(objectId.channels, 3)
+        XCTAssertEqual(objectId.encoding.basis, .idColor)
+        // No id column is declared on a contoured Target, so the object map
+        // falls back to face-connected components and reports that.
+        XCTAssertEqual(objectId.encoding.idSource, "component")
+        XCTAssertFalse(objectId.encoding.idColors.isEmpty)
+        for row in objectId.encoding.idColors {
+            XCTAssertFalse(row.color == (0, 0, 0), "black is reserved for 'no id'")
+            XCTAssertGreaterThanOrEqual(min(row.color.0, min(row.color.1, row.color.2)), 64)
+        }
+
+        // A consumer resolves a picked colour by building the row it is
+        // looking for and comparing, so the row type has to be constructible
+        // from host code and compare by value.
+        let row = try XCTUnwrap(objectId.encoding.idColors.first)
+        XCTAssertEqual(row, IdColor(id: row.id, color: row.color))
+        XCTAssertNotEqual(row, IdColor(id: row.id &+ 1, color: row.color))
+
+        let table = Set(objectId.encoding.idColors.map {
+            [Int($0.color.0), Int($0.color.1), Int($0.color.2)]
+        })
+        let pixels = objectId.pixels()
+        for texel in stride(from: 0, to: pixels.count - 2, by: 3) {
+            let rgb = (0..<3).map { Int((pixels[texel + $0] * 255).rounded()) }
+            XCTAssertTrue(rgb == [0, 0, 0] || table.contains(rgb),
+                          "texel \(rgb) resolves to no row in the reported table")
+        }
+
+        // Every other map reports no table at all.
+        let normal = try low.bake(from: target, map: .normal, parameters: params)
+        XCTAssertEqual(normal.encoding.idSource, "")
+        XCTAssertTrue(normal.encoding.idColors.isEmpty)
+    }
+
     func testDefaultsComeFromTheEngine() {
         // The Swift mirrors read their defaults through the C ABI rather than
         // repeating them, so they cannot drift from what the CLI does.

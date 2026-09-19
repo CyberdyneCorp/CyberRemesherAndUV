@@ -567,6 +567,8 @@ to one mesh:
 | `object-position` | the hit point rescaled so the bake's bounds span `[0,1]` |
 | `bent-normal` | the mean direction of the unoccluded AO samples |
 | `thickness` | material behind the surface, in model units |
+| `material-id` | one flat colour per Target `material_id` |
+| `object-id` | one flat colour per Target object or submesh |
 
 ```sh
 cyberremesh --input sculpt.obj --output out/hero.obj \
@@ -587,6 +589,42 @@ up axis (`y-up` or `z-up`, taken from the preset in a bundle run), the bounding
 box and the thickness scale. It reaches a host through `cyber_image_encoding` /
 `cyber_bundle_result_file_encoding`, `Image.encoding` in Python and Swift, and the
 JSON report's `outputs[].encoding`.
+
+#### Colour-ID maps
+
+`material-id` and `object-id` are the maps a texture-painting stage reads to let
+an artist select "the leather strap" without masking it by hand, so their value
+is an **exact colour comparison at zero tolerance**. Two things would destroy
+that silently, and both are ruled out by construction rather than by care:
+
+- **Nothing is filtered.** The bake point-samples, a boundary texel takes one
+  id's colour or the other and never a blend, the PNG writer is lossless, and a
+  preset that declares a non-linear colour space for an id map is *reported and
+  refused* rather than honoured — a gamma curve rewrites every id's colour.
+- **Nothing depends on traversal order.** The colour is an integer avalanche
+  hash of the id alone, so the same id gives the same bytes on every machine,
+  compiler and standard library. (ArmorPaint's `frac(sin(...))` hash is not
+  reproducible across platforms: `sin` is not correctly rounded. A palette
+  assigned "in order" is worse — it would repaint every id when one is added.)
+  Every channel lands in `[64, 255]`, which reserves `(0,0,0)` for **no id** —
+  an uncovered texel, or one whose cage ray reached no Target surface.
+
+The ids come from the Target's face-domain `material_id` column, and for objects
+from `object_id`, then `group_id`, then the Target's **face-connected
+components** when nothing declares one — a multi-part asset merged into a single
+mesh carries its parts nowhere else.
+
+**The id-to-colour mapping is reported beside the map**, not just baked into
+pixels: a consumer picks a colour and has to resolve it back to a material. The
+table lists every id on the Target, ascending, with the exact 8-bit colour
+written for it, and names which column answered. It reaches a host through
+`cyber_image_id_source` / `cyber_image_id_color`, the bundle equivalents,
+`Image.encoding.id_colors` in Python and Swift, and the JSON report:
+
+```json
+"encoding": { "basis": "id-color", "idSource": "material_id",
+              "idColors": [ { "id": 4, "color": "#c8a45a", "rgb": [200, 164, 90] } ] }
+```
 
 Thickness casts the AO hemisphere from the **inverted** normal and records the
 distance to the first back-facing hit. A ray that escapes contributes zero — it

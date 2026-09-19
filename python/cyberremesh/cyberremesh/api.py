@@ -45,6 +45,7 @@ __all__ = [
     "BakeParams",
     "BentNormalSpace",
     "EncodingBasis",
+    "IdColor",
     "ImageEncoding",
     "UpAxis",
     "Image",
@@ -127,7 +128,7 @@ def version() -> str:
 #: The C ABI this binding was written against. Mirrors CYBER_ABI_VERSION_* in
 #: cyber_capi.h; ``check_abi()`` compares it against the loaded library.
 ABI_VERSION_MAJOR = 1
-ABI_VERSION_MINOR = 19
+ABI_VERSION_MINOR = 20
 
 
 def abi_version() -> tuple:
@@ -3545,6 +3546,13 @@ class BakeMap:
     BENT_NORMAL = _ffi.BAKE_BENT_NORMAL
     #: Material behind the surface, in model units, times ``thickness_scale``.
     THICKNESS = _ffi.BAKE_THICKNESS
+    #: One flat colour per Target ``material_id``. The texels are EXACT KEYS:
+    #: compare at zero tolerance, never filter or colour-convert the map.
+    #: Resolve a colour with :attr:`ImageEncoding.id_colors`.
+    MATERIAL_ID = _ffi.BAKE_MATERIAL_ID
+    #: One flat colour per Target object or submesh, from ``object_id``, then
+    #: ``group_id``, then the Target's face-connected components.
+    OBJECT_ID = _ffi.BAKE_OBJECT_ID
 
 
 class UpAxis:
@@ -3569,6 +3577,22 @@ class EncodingBasis:
     OBJECT_NORMAL = _ffi.ENCODING_OBJECT_NORMAL
     OBJECT_BOUNDS = _ffi.ENCODING_OBJECT_BOUNDS
     DISTANCE = _ffi.ENCODING_DISTANCE
+    #: An EXACT key, not a measurement. Never filter, resample or
+    #: colour-convert such a map; compare its texels at zero tolerance.
+    ID_COLOR = _ffi.ENCODING_ID_COLOR
+
+
+@dataclass(frozen=True)
+class IdColor:
+    """One row of an id map's id-to-colour table.
+
+    ``color`` is the exact 8-bit triple written for ``id``; the float in the
+    image is ``channel / 255``. No assigned colour is ``(0, 0, 0)`` -- that is
+    reserved for "no id" and is what an uncovered texel holds.
+    """
+
+    id: int
+    color: Tuple[int, int, int]
 
 
 @dataclass(frozen=True)
@@ -3578,6 +3602,9 @@ class ImageEncoding:
     Decode an :attr:`EncodingBasis.OBJECT_BOUNDS` texel with
     ``bounds_min + value * (bounds_max - bounds_min)``; the box is already
     expressed in :attr:`up_axis`, so no swizzle has to be re-derived.
+
+    An :attr:`EncodingBasis.ID_COLOR` map carries :attr:`id_source` and
+    :attr:`id_colors`, which resolve a picked colour back to its id.
     """
 
     basis: int
@@ -3586,15 +3613,25 @@ class ImageEncoding:
     bounds_max: Tuple[float, float, float]
     #: The factor a DISTANCE map was multiplied by; 1.0 otherwise.
     scale: float
+    #: Which Target column an ID_COLOR map read: ``"material_id"``,
+    #: ``"object_id"``, ``"group_id"``, ``"component"`` for the
+    #: face-connected-component fallback, or ``"none"``. Empty otherwise.
+    id_source: str = ""
+    #: Every distinct Target id and its colour, ascending by id. Empty for
+    #: every basis but ID_COLOR.
+    id_colors: Tuple[IdColor, ...] = ()
 
     @staticmethod
-    def _from_c(c: "_ffi.CyberImageEncoding") -> "ImageEncoding":
+    def _from_c(c: "_ffi.CyberImageEncoding", id_source: str = "",
+                id_colors: Tuple[IdColor, ...] = ()) -> "ImageEncoding":
         return ImageEncoding(
             basis=int(c.basis),
             up_axis=int(c.up_axis),
             bounds_min=(float(c.bounds_min[0]), float(c.bounds_min[1]), float(c.bounds_min[2])),
             bounds_max=(float(c.bounds_max[0]), float(c.bounds_max[1]), float(c.bounds_max[2])),
             scale=float(c.scale),
+            id_source=id_source,
+            id_colors=id_colors,
         )
 
 
@@ -3665,9 +3702,18 @@ class Image:
     @property
     def encoding(self) -> ImageEncoding:
         """What the pixels mean. Every image has one."""
+        lib = _ffi.get_lib()
         out = _ffi.CyberImageEncoding()
-        _check(_ffi.get_lib().cyber_image_encoding(self.handle, ctypes.byref(out)))
-        return ImageEncoding._from_c(out)
+        _check(lib.cyber_image_encoding(self.handle, ctypes.byref(out)))
+        source = lib.cyber_image_id_source(self.handle) or b""
+        colors = []
+        for i in range(int(lib.cyber_image_id_color_count(self.handle))):
+            entry = _ffi.CyberIdColor()
+            _check(lib.cyber_image_id_color(self.handle, i, ctypes.byref(entry)))
+            colors.append(IdColor(id=int(entry.id),
+                                  color=(int(entry.color[0]), int(entry.color[1]),
+                                         int(entry.color[2]))))
+        return ImageEncoding._from_c(out, source.decode("utf-8"), tuple(colors))
 
     def save_png(self, path: str) -> None:
         """Write the map to an 8-bit PNG (tonemapped)."""
@@ -4283,6 +4329,18 @@ def write_bundle(
             _check(lib.cyber_bundle_result_file(out, i, ctypes.byref(entry)))
             encoding = _ffi.CyberImageEncoding()
             _check(lib.cyber_bundle_result_file_encoding(out, i, ctypes.byref(encoding)))
+            source = lib.cyber_bundle_result_file_id_source(out, i) or b""
+            colors = []
+            for c in range(int(lib.cyber_bundle_result_file_id_color_count(out, i))):
+                id_color = _ffi.CyberIdColor()
+                _check(lib.cyber_bundle_result_file_id_color(out, i, c, ctypes.byref(id_color)))
+                colors.append(
+                    IdColor(
+                        id=int(id_color.id),
+                        color=(int(id_color.color[0]), int(id_color.color[1]),
+                               int(id_color.color[2])),
+                    )
+                )
             files.append(
                 BundleFile(
                     path=ExportPreset._text(entry.path),
@@ -4290,7 +4348,8 @@ def write_bundle(
                     color_space=ExportPreset._text(entry.color_space),
                     width=int(entry.width),
                     height=int(entry.height),
-                    encoding=ImageEncoding._from_c(encoding),
+                    encoding=ImageEncoding._from_c(encoding, source.decode("utf-8"),
+                                                   tuple(colors)),
                 )
             )
         messages: List[str] = []

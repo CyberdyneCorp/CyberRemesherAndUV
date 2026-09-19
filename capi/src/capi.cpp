@@ -5086,8 +5086,41 @@ bool toBakeMap(CyberBakeMap map, cyber::bake::BakeMap& out) {
         case CYBER_BAKE_THICKNESS:
             out = cyber::bake::BakeMap::Thickness;
             return true;
+        case CYBER_BAKE_MATERIAL_ID:
+            out = cyber::bake::BakeMap::MaterialId;
+            return true;
+        case CYBER_BAKE_OBJECT_ID:
+            out = cyber::bake::BakeMap::ObjectId;
+            return true;
     }
     return false;
+}
+
+// One row of an id map's table, in the C shape. Shared by the image and bundle
+// readers so both hand back exactly the same record.
+CyberIdColor toCIdColor(const cyber::bake::IdColorEntry& entry) {
+    CyberIdColor out{};
+    out.id = entry.id;
+    out.color[0] = entry.color[0];
+    out.color[1] = entry.color[1];
+    out.color[2] = entry.color[2];
+    return out;
+}
+
+// Bounds-checked read of an id table, shared by the image and bundle readers.
+CyberStatus readIdColor(const std::vector<cyber::bake::IdColorEntry>& table, size_t index,
+                        CyberIdColor* out, const char* who) {
+    if (out == nullptr) {
+        setError(std::string(who) + ": null argument");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    if (index >= table.size()) {
+        setError(std::string(who) + ": index out of range");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    *out = toCIdColor(table[index]);
+    clearError();
+    return CYBER_OK;
 }
 
 CyberImageEncoding toCEncoding(const cyber::bake::BakeEncoding& encoding) {
@@ -5104,6 +5137,9 @@ CyberImageEncoding toCEncoding(const cyber::bake::BakeEncoding& encoding) {
             break;
         case cyber::bake::EncodingBasis::Distance:
             out.basis = CYBER_ENCODING_DISTANCE;
+            break;
+        case cyber::bake::EncodingBasis::IdColor:
+            out.basis = CYBER_ENCODING_ID_COLOR;
             break;
         case cyber::bake::EncodingBasis::None:
             out.basis = CYBER_ENCODING_NONE;
@@ -5140,8 +5176,8 @@ bool applyBakeEncodingParams(const CyberBakeParams& params, cyber::bake::BakePar
         setError(std::string(who) + ": thicknessScale must be finite and >= 0");
         return false;
     }
-    out.upAxis = params.upAxis == CYBER_UP_AXIS_Z ? cyber::bake::UpAxis::ZUp
-                                                  : cyber::bake::UpAxis::YUp;
+    out.upAxis =
+        params.upAxis == CYBER_UP_AXIS_Z ? cyber::bake::UpAxis::ZUp : cyber::bake::UpAxis::YUp;
     out.bentNormalSpace = params.bentNormalSpace == CYBER_BENT_NORMAL_OBJECT
                               ? cyber::bake::NormalSpace::Object
                               : cyber::bake::NormalSpace::Tangent;
@@ -5235,6 +5271,22 @@ CyberStatus cyber_image_encoding(const CyberImage* image, CyberImageEncoding* ou
     *out = toCEncoding(image->encoding);
     clearError();
     return CYBER_OK;
+}
+
+const char* cyber_image_id_source(const CyberImage* image) {
+    return image == nullptr ? nullptr : image->encoding.idSource.c_str();
+}
+
+size_t cyber_image_id_color_count(const CyberImage* image) {
+    return image == nullptr ? 0 : image->encoding.idColors.size();
+}
+
+CyberStatus cyber_image_id_color(const CyberImage* image, size_t index, CyberIdColor* out) {
+    if (image == nullptr) {
+        setError("cyber_image_id_color: null argument");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    return readIdColor(image->encoding.idColors, index, out, "cyber_image_id_color");
 }
 
 void cyber_image_free(CyberImage* image) { delete image; }
@@ -6109,6 +6161,11 @@ struct CyberBundleResult {
         int width = 0;
         int height = 0;
         CyberImageEncoding encoding{};
+        // The id-to-colour record, which CyberImageEncoding cannot carry: it is
+        // a flat POD and the table is variable length. Kept in the C++ shape
+        // and read through cyber_bundle_result_file_id_*.
+        std::string idSource;
+        std::vector<cyber::bake::IdColorEntry> idColors;
     };
     std::vector<File> files;
     std::vector<std::string> warnings;
@@ -6357,8 +6414,17 @@ CyberStatus cyber_export_bundle_write([[maybe_unused]] CyberMesh* low,
         }
         auto handle = std::make_unique<CyberBundleResult>();
         for (const cyber::exportbundle::BundleFile& file : result.files) {
-            handle->files.push_back({file.path, file.kind, file.colorSpace, file.width,
-                                     file.height, toCEncoding(file.encoding)});
+            // Every member named: a positional list silently shifts when a
+            // member is inserted, and the id table was appended to this very
+            // struct one release ago.
+            handle->files.push_back({.path = file.path,
+                                     .kind = file.kind,
+                                     .colorSpace = file.colorSpace,
+                                     .width = file.width,
+                                     .height = file.height,
+                                     .encoding = toCEncoding(file.encoding),
+                                     .idSource = file.encoding.idSource,
+                                     .idColors = file.encoding.idColors});
         }
         handle->warnings = result.warnings;
         handle->unwrapped = result.unwrapped;
@@ -6397,7 +6463,7 @@ CyberStatus cyber_bundle_result_file(const CyberBundleResult* result, size_t ind
 }
 
 CyberStatus cyber_bundle_result_file_encoding(const CyberBundleResult* result, size_t index,
-                                             CyberImageEncoding* out) {
+                                              CyberImageEncoding* out) {
     if (result == nullptr || out == nullptr) {
         setError("cyber_bundle_result_file_encoding: null argument");
         return CYBER_ERR_INVALID_ARG;
@@ -6409,6 +6475,34 @@ CyberStatus cyber_bundle_result_file_encoding(const CyberBundleResult* result, s
     *out = result->files[index].encoding;
     clearError();
     return CYBER_OK;
+}
+
+const char* cyber_bundle_result_file_id_source(const CyberBundleResult* result, size_t index) {
+    if (result == nullptr || index >= result->files.size()) {
+        return nullptr;
+    }
+    return result->files[index].idSource.c_str();
+}
+
+size_t cyber_bundle_result_file_id_color_count(const CyberBundleResult* result, size_t index) {
+    if (result == nullptr || index >= result->files.size()) {
+        return 0;
+    }
+    return result->files[index].idColors.size();
+}
+
+CyberStatus cyber_bundle_result_file_id_color(const CyberBundleResult* result, size_t index,
+                                              size_t color, CyberIdColor* out) {
+    if (result == nullptr) {
+        setError("cyber_bundle_result_file_id_color: null argument");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    if (index >= result->files.size()) {
+        setError("cyber_bundle_result_file_id_color: index out of range");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    return readIdColor(result->files[index].idColors, color, out,
+                       "cyber_bundle_result_file_id_color");
 }
 
 size_t cyber_bundle_result_warning_count(const CyberBundleResult* result) {
