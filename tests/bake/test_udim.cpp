@@ -144,9 +144,25 @@ TEST_CASE("a layout stopping exactly at a tile border does not occupy the next t
     CHECK(tileNumbers(bake::udimTiles(mesh)) == std::vector<int>{1001});
 }
 
-TEST_CASE("a packed unit-square layout is the single tile 1001") {
-    // The uv-editing spec's "A packed layout is the single tile 1001": the
-    // packer targets the 0-1 square and allocates no tiles of its own.
+TEST_CASE("a triangle touching a tile only at its corner does not occupy it") {
+    // The strictness of the overlap test, on the one geometry that reaches it:
+    // this triangle's hypotenuse lies exactly on u + v = 2, so it meets tile
+    // 1012 (which begins at (1, 1)) in the single point (1, 1) and covers no
+    // texel of it. Every tile reported is an image allocated, so a touch of
+    // zero area must not allocate one. A non-strict separation reports four
+    // tiles here; the previous case cannot tell the difference, because its
+    // triangle stops short of the border and the candidate span already
+    // excludes the tile.
+    Mesh mesh = emptyWithUv();
+    addFace(mesh, {Vec3{0, 0, 0}, Vec3{1, 0, 0}, Vec3{0, 0, 1}},
+            {Vec2{0.5f, 0.5f}, Vec2{1.5f, 0.5f}, Vec2{0.5f, 1.5f}});
+
+    CHECK(tileNumbers(bake::udimTiles(mesh)) == std::vector<int>{1001, 1002, 1011});
+}
+
+TEST_CASE("a hand-placed layout inside the unit square is the single tile 1001") {
+    // The packer's own output is pinned in tests/uv (it needs the uv module);
+    // this is the same statement about a layout authored directly.
     Mesh mesh = emptyWithUv();
     addPlate(mesh, 0.0f, 0, 1, 0, 1, 0.05f, 0.45f, 0.05f, 0.95f);
     addPlate(mesh, 0.0f, 2, 3, 0, 1, 0.55f, 0.95f, 0.05f, 0.95f);
@@ -269,6 +285,28 @@ TEST_CASE("the tile written is unchanged by which tile its occluder is packed in
 
     REQUIRE(baked.tiles.size() == 2);
     CHECK(baked.tiles[0].result.image.pixels == plain.image.pixels);
+}
+
+TEST_CASE("a face spanning a tile seam is rasterized into both tiles, whole") {
+    // One face whose UVs run from u = 0 to u = 2 covers tiles 1001 and 1002
+    // entirely. Texel centres are at (px + 0.5) / w, so the last centre of tile
+    // 1001 is (w - 0.5) / w < 1 and the first of tile 1002 is 0.5 / w > 0:
+    // across the seam no texel is written twice and none is missed. A tile
+    // origin that shifted the raster, or a clip that dropped the half of the
+    // face outside the tile being written, shows up here as a short count.
+    Mesh mesh = emptyWithUv();
+    addPlate(mesh, 0.0f, 0, 2, 0, 1, 0.0f, 2.0f, 0.0f, 1.0f);
+    bake::BakeParams params = smallParams(16);
+    params.paddingRadius = 0;  // so the count is the RASTERIZED texels only
+
+    const bake::UdimBakeResult baked = bake::bakeUdim(mesh, mesh, bake::BakeMap::Normal, params);
+    REQUIRE(baked.refusal == bake::UdimRefusal::None);
+    REQUIRE(baked.tiles.size() == 2);
+    CHECK(baked.tiles[0].tile.number == 1001);
+    CHECK(baked.tiles[1].tile.number == 1002);
+    for (const bake::UdimTileBake& tile : baked.tiles) {
+        CHECK(tile.result.texelsCovered == 16 * 16);
+    }
 }
 
 // ---- the two ceilings ----------------------------------------------------

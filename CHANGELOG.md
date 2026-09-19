@@ -36,12 +36,20 @@
     object-space bounds and its id column are built **once for the whole set**,
     and only the set of texels written varies. A scenario asserts it: an occluder
     whose UVs are in tile 1002 still darkens tile 1001, and the result matches
-    the single-tile arrangement texel for texel.
+    what the ordinary, non-UDIM bake of the same mesh produces texel for texel —
+    the ordinary bake already casts against the whole Target, so it is the
+    reference tile 1001 has to match.
   - **The texel ceiling applies per tile AND in aggregate, and a refusal names
     which.** "This tile is too big" and "this many tiles of this size are too
     many" are different problems with different fixes, so they are two
     diagnostics (`CYBER_UDIM_PER_TILE_CEILING` / `CYBER_UDIM_AGGREGATE_CEILING`),
-    never one. A refusal returns no image for any tile.
+    never one. A refusal returns no image for any tile. Both ceilings bind the
+    **export bundle** as well (`BundleParams::maxPixels`, taken from
+    `cyber_max_bake_pixels()` by `cyber_export_bundle_write` and therefore by
+    `cyberremesh.write_bundle`), decided before the bundle writes its first file
+    so a refusal leaves no partial bundle behind: a UDIM bundle multiplies a
+    host's exposure by the occupied-tile count, so a ceiling that stops a single
+    map has to stop the set.
   - **Encoding metadata describes the whole set, not one tile.** The
     object-space bounds an `object-position` map is rescaled over are the whole
     mesh's and identical in every tile, so one decode works across the set; the
@@ -64,13 +72,17 @@
     refused, naming the pattern, before anything is written — every tile would
     otherwise land on one path, each overwriting the last, while the report
     listed them all.
-  - **Reachable from every entry point the existing maps are**: the C ABI
-    (**ABI 1.24**: `cyber_udim_tiles`, `cyber_bake_udim`, the `CyberUdimBake`
+  - **Reachable from every entry point that supplies its own low-poly**: the C
+    ABI (**ABI 1.24**: `cyber_udim_tiles`, `cyber_bake_udim`, the `CyberUdimBake`
     handle, `CyberBundleParams::udim` and
-    `cyber_bundle_result_file_udim_tile`), the export bundle, the CLI
-    (`--udim`, the tile list printed before the file rows and `udimTiles` /
-    `udimTile` in the JSON report), and the Python and Swift bindings, each
-    validating the new parameters identically. Progress covers the whole set and
+    `cyber_bundle_result_file_udim_tile`), the export bundle, and the Python and
+    Swift bindings, each validating the new parameters identically. The **CLI
+    takes no `--udim` flag**: its low-poly is the mesh the remesher just
+    produced, which carries no UVs, so the bundle unwraps it and the automatic
+    atlas packs into the 0–1 square — a CLI run is always the tile-1001 case, and
+    a flag there could not reach a second tile. What the CLI gained is the
+    reporting: the occupied tiles printed before the file rows, and `udimTiles` /
+    `udimUnaddressableFaces` / a per-file `udimTile` in the JSON report. Progress covers the whole set and
     cancellation is polled between tiles as well as inside one, abandoning the
     whole set rather than returning some tiles and not others.
   - **An ordinary bake is the tile-1001 case of a UDIM one.** `bake()` is

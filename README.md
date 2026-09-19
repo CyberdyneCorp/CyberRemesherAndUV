@@ -745,17 +745,23 @@ the tile-1001 case of a UDIM one rather than a different kind of thing.
 
 Ask what a layout occupies before allocating anything:
 
-```sh
-cyberremesh --input sculpt.obj --output out/hero.obj \
-            --preset mine.json --udim --report out/run.json
-```
-
 ```python
 layout = cyberremesh.udim_tiles(mesh)      # (1001, 1002, 1011), ascending
 layout.unaddressable_faces                 # faces no tile number can address
 for entry in cyberremesh.bake_udim(low, high, cyberremesh.BakeMap.AO, params):
     entry.image.save_png(f"ao.{entry.tile}.png")
+
+result = cyberremesh.write_bundle(low, high, preset, "out/hero.obj", udim=True)
 ```
+
+A multi-tile layout is **authored or imported**, never produced by this engine's
+packer, so a UDIM bake is asked for where the caller supplies the low-poly: the
+C++ library, the C ABI, Python and Swift. The **CLI has no `--udim` flag** — its
+low-poly is the mesh the remesher just produced, which carries no UVs, so the
+bundle unwraps it and the automatic atlas packs into the 0–1 square. A CLI run
+is therefore always the tile-1001 case, and it says so: the tiles the layout
+occupies are printed before the file rows and recorded as `udimTiles` /
+`udimTile` in the JSON report.
 
 Occupancy is an **exact triangle-vs-tile overlap test**, not a bounding box, and
 allocation is for occupied tiles **only**: a mesh occupying three tiles of a
@@ -782,7 +788,11 @@ from nothing else, so no neighbour bleeds across a seam.
 
 The texel ceiling applies **per tile and in aggregate**, and a refusal names
 which of the two it hit: "this tile is too big" and "this many tiles of this size
-are too many" have different fixes.
+are too many" have different fixes. It binds the **export bundle** too, and is
+decided before the bundle writes its first file, so a refusal leaves nothing
+half-written; the C ABI and the bindings take it from
+`cyber_set_max_bake_pixels()`, and a build with no ceiling configured bakes
+whatever it was asked for.
 
 Naming: put **`{udim}`** in the preset's `namingPattern`.
 

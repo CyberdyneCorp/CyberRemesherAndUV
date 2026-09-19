@@ -308,6 +308,60 @@ std::filesystem::path resolveMapPath(const ExportPreset& preset, const PresetMap
     return path;
 }
 
+// The bake parameters every map of this bundle is baked with. The UP AXIS comes
+// from the preset (and may warn); everything else is the caller's, including the
+// texel ceiling, which is the embedder's policy rather than the preset's.
+bake::BakeParams bakeParamsFor(const ExportPreset& preset, const BundleParams& params,
+                               BundleResult& result) {
+    bake::BakeParams bakeParams;
+    bakeParams.width = preset.resolution;
+    bakeParams.height = preset.resolution;
+    bakeParams.cageDistance = params.cageDistance;
+    bakeParams.aoSamples = params.aoSamples;
+    bakeParams.aoRadius = params.aoRadius;
+    bakeParams.bentNormalSpace = params.bentNormalSpace;
+    bakeParams.thicknessScale = params.thicknessScale;
+    bakeParams.paddingRadius = params.paddingRadius;
+    bakeParams.placement = params.placement;
+    bakeParams.densityNormalization = params.densityNormalization;
+    bakeParams.maxPixels = params.maxPixels;
+    bakeParams.upAxis = presetUpAxis(preset, result);
+    return bakeParams;
+}
+
+// The refusals that are knowable BEFORE anything is written -- from the preset,
+// the caller's parameters and the layout detected above -- gathered here because
+// they share that property and it is the whole point of them: a bundle that
+// refuses must leave no half-written set behind, not even the mesh.
+//
+// Returns true with `result.error` set.
+bool refusedBeforeWriting(const ExportPreset& preset, const BundleParams& params,
+                          const bake::UdimLayout& layout, const bake::BakeParams& bakeParams,
+                          BundleResult& result) {
+    // A UDIM set through a pattern that names no tile would write every tile to
+    // one path, each overwriting the last, while the report listed them all.
+    if (params.udim && layout.tiles.size() > 1 && !io::presetNamesTiles(preset)) {
+        result.error = "the UV layout occupies " + std::to_string(layout.tiles.size()) +
+                       " UDIM tiles but preset '" + preset.name +
+                       "' names its files with the pattern '" + preset.namingPattern +
+                       "', which carries no " + std::string(io::kUdimToken) +
+                       " token; every tile would be written to one path, each overwriting "
+                       "the last";
+        return true;
+    }
+    // Both texel ceilings, asked of the bake itself so the sentence a host reads
+    // is the one bakeUdim would have produced -- and asked for ONE tile when the
+    // bundle is not UDIM-aware, because a single map is the tile-1001 case of a
+    // set.
+    const std::size_t bakedTiles = params.udim ? layout.tiles.size() : 1;
+    const bake::UdimCeiling ceiling = bake::udimCeiling(bakeParams, bakedTiles);
+    if (ceiling.refusal != bake::UdimRefusal::None) {
+        result.error = "preset '" + preset.name + "' was refused: " + ceiling.message;
+        return true;
+    }
+    return false;
+}
+
 }  // namespace
 
 bool presetReadsPlacement(const io::ExportPreset& preset) {
@@ -348,19 +402,9 @@ BundleResult writeBundle(Mesh& low, const Mesh& high, const BundleParams& params
     }
     result.udimUnaddressableFaces = layout.unaddressableFaces;
 
-    // Before the mesh is written, because this refusal is about the PATTERN and
-    // is knowable without baking anything: a bundle that would put every tile on
-    // one path must leave no half-written set behind.
-    if (params.udim && !io::presetNamesTiles(preset)) {
-        if (layout.tiles.size() > 1) {
-            result.error = "the UV layout occupies " + std::to_string(layout.tiles.size()) +
-                           " UDIM tiles but preset '" + preset.name +
-                           "' names its files with the pattern '" + preset.namingPattern +
-                           "', which carries no " + std::string(io::kUdimToken) +
-                           " token; every tile would be written to one path, each overwriting "
-                           "the last";
-            return result;
-        }
+    const bake::BakeParams bakeParams = bakeParamsFor(preset, params, result);
+    if (refusedBeforeWriting(preset, params, layout, bakeParams, result)) {
+        return result;
     }
 
     const io::Status exported = io::exportMesh(low, params.meshPath);
@@ -374,19 +418,6 @@ BundleResult writeBundle(Mesh& low, const Mesh& high, const BundleParams& params
     const std::string basename =
         params.basename.empty() ? params.meshPath.stem().string() : params.basename;
     const std::filesystem::path directory = params.meshPath.parent_path();
-
-    bake::BakeParams bakeParams;
-    bakeParams.width = preset.resolution;
-    bakeParams.height = preset.resolution;
-    bakeParams.cageDistance = params.cageDistance;
-    bakeParams.aoSamples = params.aoSamples;
-    bakeParams.aoRadius = params.aoRadius;
-    bakeParams.bentNormalSpace = params.bentNormalSpace;
-    bakeParams.thicknessScale = params.thicknessScale;
-    bakeParams.paddingRadius = params.paddingRadius;
-    bakeParams.placement = params.placement;
-    bakeParams.densityNormalization = params.densityNormalization;
-    bakeParams.upAxis = presetUpAxis(preset, result);
 
     const auto total = static_cast<float>(preset.maps.size());
     float done = 0.0f;

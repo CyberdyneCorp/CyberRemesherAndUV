@@ -47,9 +47,12 @@ boundary.
   filename pattern; a non-UDIM export expands it to `1001`, which is what the unit square
   is. A UDIM export whose pattern omits the token is REFUSED, because every tile would
   overwrite the previous one.
-- **Every entry point.** The C ABI (`cyber_udim_tiles`, `cyber_bake_udim` and the result
-  handle), the CLI (`--udim`, the tile list in the JSON report), the export bundle and the
-  Python and Swift bindings, each validating the new parameters identically.
+- **Every entry point that supplies its own low-poly.** The C ABI (`cyber_udim_tiles`,
+  `cyber_bake_udim` and the result handle), the export bundle and the Python and Swift
+  bindings, each validating the new parameters identically. The CLI reports the tile list
+  and the per-file tile but takes no `--udim` flag: it always bakes onto a freshly remeshed,
+  freshly unwrapped low-poly, which the packer puts in the unit square, so it is the
+  tile-1001 case by construction.
 - **A note in `uv-editing`** stating how packing interacts with tiles: the packer targets
   the unit square, which is tile 1001, and a multi-tile layout is authored or imported
   rather than produced by it.
@@ -81,7 +84,6 @@ _None._
 - `src/core/export_preset.*`: the `{udim}` token.
 - `src/exportbundle/`: `BundleParams::udim`, one file per tile per map, the tile in the
   report row.
-- `apps/cli/`: `--udim`, the detected-tile list and the per-file tile number in the JSON
-  report.
+- `apps/cli/`: the detected-tile list and the per-file tile number in the JSON report.
 - `python/`, `swift/`: the same surface.
 - Docs: `CHANGELOG.md`, `README.md`.

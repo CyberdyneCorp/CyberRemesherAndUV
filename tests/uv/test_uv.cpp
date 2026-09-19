@@ -7,6 +7,7 @@
 #include <string_view>
 #include <vector>
 
+#include "cyber/bake/bake.hpp"
 #include "cyber/core/math.hpp"
 #include "cyber/core/mesh.hpp"
 #include "cyber/uv/atlas.hpp"
@@ -363,6 +364,23 @@ TEST_CASE("unwrapAtlas produces a low-distortion, in-bounds cube atlas") {
         REQUIRE(p.x <= 1.0f + 1e-5f);
         REQUIRE(p.y <= 1.0f + 1e-5f);
     }
+}
+
+TEST_CASE("a layout packed by the automatic packer is the single tile 1001") {
+    // uv-editing, "A packed layout is the single tile 1001". The packer targets
+    // the 0-1 UV square and allocates no tiles of its own, so a mesh it packed
+    // bakes as one map however many charts it holds -- asserted on the PACKER'S
+    // OWN OUTPUT rather than on a layout a case placed by hand, because the
+    // claim is about what packing produces.
+    Mesh mesh = makeCube();
+    const uv::AtlasResult atlas = uv::unwrapAtlas(mesh);
+    REQUIRE(atlas.ok);
+    REQUIRE(atlas.chartCount > 1);
+
+    const cyber::bake::UdimLayout layout = cyber::bake::udimTiles(mesh);
+    REQUIRE(layout.tiles.size() == 1);
+    CHECK(layout.tiles[0].number == 1001);
+    CHECK(layout.unaddressableFaces == 0);
 }
 
 TEST_CASE("chart merge recombines fragmented coplanar-compatible charts") {

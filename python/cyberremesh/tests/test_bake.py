@@ -119,6 +119,9 @@ def _gate_udim(unit_square_obj):
 
             with cyberremesh.Mesh.load_obj(handle.name) as high:
                 params = cyberremesh.BakeParams(width=16, height=16)
+                # The ceiling is PROCESS-GLOBAL: restored at the end of the gate
+                # so a gate added after this one does not silently run with none.
+                previous_ceiling = cyberremesh.max_bake_pixels()
                 cyberremesh.set_max_bake_pixels(0)
                 tiles = cyberremesh.bake_udim(low, high, cyberremesh.BakeMap.NORMAL, params)
                 try:
@@ -139,7 +142,7 @@ def _gate_udim(unit_square_obj):
                         raise AssertionError(f"ceiling {ceiling} was not refused")
                     except cyberremesh.CyberError as error:
                         assert word in str(error), (ceiling, str(error))
-                cyberremesh.set_max_bake_pixels(0)
+                cyberremesh.set_max_bake_pixels(previous_ceiling)
     finally:
         os.unlink(handle.name)
     print("PASS bake_udim: the tile list, the per-tile set and both ceiling refusals bind")

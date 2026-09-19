@@ -66,6 +66,17 @@ struct BundleParams {
     // written to one path, each overwriting the last, while the report listed
     // them all.
     bool udim = false;
+    // The host's texel ceiling, in pixels, applied to every map this bundle
+    // bakes -- PER TILE and, for a UDIM bundle, IN AGGREGATE over the occupied
+    // tiles, with the same rule and the same words bake::bakeUdim() uses. 0
+    // means no ceiling, which is what a caller with no host policy (the CLI)
+    // passes.
+    //
+    // It lives here rather than being read from a global because the ceiling is
+    // the EMBEDDER's policy: the C ABI sets it from cyber_max_bake_pixels(), and
+    // a UDIM bundle multiplies the exposure by the occupied-tile count, so a
+    // ceiling that stopped a single 8K map has to stop ten of them too.
+    std::size_t maxPixels = 0;
 };
 
 struct BundleFile {

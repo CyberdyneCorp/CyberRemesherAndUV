@@ -106,11 +106,6 @@ struct CliOptions {
     cyber::bake::PlacementMatrix placement = cyber::bake::identityPlacement();
     bool placementSet = false;
     std::string densityNormalization;
-    // Bake one map file per OCCUPIED UDIM TILE of the low-poly's UV layout
-    // instead of one per map. Off by default: a layout in the unit square is
-    // tile 1001 and produces the same file either way, but a multi-file map set
-    // is something a caller asks for.
-    bool udim = false;
     remesh::Parameters params;
     std::string backend;  // empty = automatic best-first choice
     bool verbose = false;
@@ -217,10 +212,6 @@ void printUsage() {
                  "  --density <a|r>          uv-density normalization: absolute (default,\n"
                  "                           texels per square model unit) | relative (to\n"
                  "                           the map's own mean)\n"
-                 "  --udim                   bake one file per occupied UDIM tile of the\n"
-                 "                           UV layout instead of one per map; the\n"
-                 "                           preset's naming pattern needs a {udim} token\n"
-                 "                           once the layout occupies more than one tile\n"
                  "  --list-presets           print built-in export presets and exit\n"
                  "  --list-bake-maps         print the bakeable map names, one per\n"
                  "                           line, and exit -- the same set the C ABI\n"
@@ -444,8 +435,6 @@ int parseArgs(int argc, char** argv, CliOptions& options, bool& exitEarly) {
                 return kExitArgs;
             }
             options.paddingRadiusSet = true;
-        } else if (arg == "--udim") {
-            options.udim = true;
         } else if (arg == "--placement") {
             const auto v = next("--placement");
             if (!v) {
@@ -1659,7 +1648,15 @@ int runCli(int argc, char** argv) {
         if (options.densityNormalization == "relative") {
             bundleParams.densityNormalization = cyber::bake::DensityNormalization::Relative;
         }
-        bundleParams.udim = options.udim;
+        // Deliberately NOT UDIM-aware, and there is no flag for it: this
+        // pipeline's low-poly is the mesh the remesher just produced, which
+        // carries no UV layout, so writeBundle unwraps it -- and the automatic
+        // atlas packs into the 0-1 square, which IS tile 1001. A --udim here
+        // could therefore never write a second tile; it would be a flag that
+        // promised a multi-file map set the CLI cannot reach. A multi-tile
+        // layout is authored or imported, so a UDIM bundle is asked for through
+        // the library, the C ABI, Python or Swift, where the caller supplies the
+        // low-poly. The tiles the layout occupies are reported below either way.
         cyber::Mesh low = result.mesh;
         const cyber::exportbundle::BundleResult bundle =
             cyber::exportbundle::writeBundle(low, source.mesh, bundleParams, &sink, &cancel);

@@ -711,6 +711,13 @@ too big" and "this many tiles of this size are too many" are different problems 
 different fixes, and one message covering both tells a host neither. A refusal SHALL produce
 no output image for any tile.
 
+**The same two ceilings SHALL bind an entry point that bakes a SET of maps** — the export
+bundle — and SHALL be decided BEFORE that entry point writes its first file, so a refusal
+leaves no partial bundle behind. A host's ceiling exists to bound what one request may
+allocate; a UDIM bundle multiplies that by the occupied-tile count, so a ceiling that stops a
+single map must stop the set. An entry point with NO ceiling configured (the value zero)
+bakes whatever it was asked for, which is what a caller with no host policy passes.
+
 **Encoding metadata SHALL describe the WHOLE SET, not one tile.** Where a map's encoding is
 derived from the mesh rather than from a texel:
 
@@ -753,8 +760,10 @@ the whole set rather than return some tiles and not others.
   surface being shaded
 - **WHEN** an ambient-occlusion map is baked for the tile holding the shaded surface
 - **THEN** the occlusion from that geometry SHALL be present in the result
-- **AND** the map SHALL equal the one baked with both parts in a single tile, to within the
-  tolerance of the shared sampling
+- **AND** that tile SHALL equal, texel for texel, the map an ORDINARY (non-UDIM) bake of the
+  same mesh and parameters produces: the ordinary bake already casts against the whole Target
+  and clips the layout to the unit square, so it is the reference for tile 1001, and the two
+  part exactly when the UDIM path narrows what the rays can see
 
 #### Scenario: A per-tile overflow and an aggregate overflow are distinct refusals
 - **GIVEN** a host sets a texel ceiling
@@ -764,6 +773,14 @@ the whole set rather than return some tiles and not others.
   with it does not
 - **THEN** the refusal SHALL name the AGGREGATE ceiling, SHALL state the tile count, and no
   image SHALL be returned
+
+#### Scenario: A bundle of maps is refused by the ceiling before it writes anything
+- **GIVEN** a host sets a texel ceiling that one map of the preset's resolution fits under
+- **WHEN** a UDIM export of a layout occupying more tiles than that ceiling allows is written
+- **THEN** the export SHALL be refused naming the AGGREGATE ceiling, and no mesh and no map
+  file SHALL have been written
+- **WHEN** the same export runs with no ceiling configured
+- **THEN** it SHALL write every tile
 
 #### Scenario: The tile number reaches the output file name
 - **WHEN** a UDIM export runs with a preset whose naming pattern carries the tile token

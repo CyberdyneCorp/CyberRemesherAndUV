@@ -1658,14 +1658,22 @@ bool bakeInputsUsable(const Mesh& highPoly, const std::vector<Vec2>* uvs, BakeMa
 // Whether the triangle overlaps the unit square whose lower-left corner is the
 // ORIGIN -- the caller translates the triangle into tile space first.
 //
-// The separating-axis test over five axes: the two box axes and the three edge
-// normals. Exact on purpose. A bounding-box test would report a tile that a
-// triangle merely reaches around, and every tile reported here is an image
+// PRECONDITION, and the reason this is not the whole separating-axis test: the
+// caller has ALREADY established that the triangle's UV bounding box overlaps
+// this square, because markTriangleTiles only proposes the tiles inside
+// tileSpan's [floor(min), ceil(max) - 1] range. That range is exactly the
+// separating-axis test on the two BOX axes -- a proposed tile index `u`
+// satisfies floor(minU) <= u <= ceil(maxU) - 1, which is minU < u + 1 and
+// maxU > u, so neither box axis can separate here. Only the three EDGE NORMALS
+// remain, and running the box axes again would be a branch no input can reach.
+//
+// What remains is exact on purpose. A bounding-box test would report a tile that
+// a triangle merely reaches around, and every tile reported here is an image
 // allocated, so over-reporting would break the cost guarantee ("three tiles of a
 // possible hundred cost three") rather than merely waste a little work.
 //
-// Separation is STRICT: a triangle whose UVs stop exactly at u = 1 touches the
-// next tile with zero area and does not occupy it.
+// Separation is STRICT: a triangle touching a tile along an edge or at a single
+// corner overlaps it with zero area and does not occupy it.
 bool triangleOverlapsUnitSquare(const std::array<Vec2, 3>& uv) {
     const auto span = [&uv](Vec2 axis) {
         std::array<float, 3> projected{};
@@ -1675,17 +1683,6 @@ bool triangleOverlapsUnitSquare(const std::array<Vec2, 3>& uv) {
         return std::pair<float, float>{std::min({projected[0], projected[1], projected[2]}),
                                        std::max({projected[0], projected[1], projected[2]})};
     };
-    // The box axes. The square projects onto [0, 1] on both. Written out rather
-    // than looped over a braced list: a range-for whose loop variable copies
-    // from an initializer_list element is what -Wrange-loop-construct fires on
-    // under CI's GCC and the NDK's Clang, silently under this host's Clang.
-    const std::array<Vec2, 2> boxAxes{Vec2{1.0f, 0.0f}, Vec2{0.0f, 1.0f}};
-    for (const Vec2& axis : boxAxes) {
-        const auto [lo, hi] = span(axis);
-        if (hi <= 0.0f || lo >= 1.0f) {
-            return false;
-        }
-    }
     // The edge normals. The square's own projection is the interval spanned by
     // its four corners, which for an axis (x, y) is [min(0,x)+min(0,y),
     // max(0,x)+max(0,y)].
@@ -1737,6 +1734,11 @@ std::size_t tileSlot(int u, int v) {
 
 // Marks every addressable tile one UV triangle overlaps. Returns true when the
 // triangle reached outside the addressable grid.
+//
+// The candidate range comes from the triangle's UV bounding box, so every tile
+// this proposes is one the bounding box overlaps -- which is the precondition
+// triangleOverlapsUnitSquare relies on to skip the two box axes. A change to
+// this span has to keep that true or restore those axes there.
 bool markTriangleTiles(const std::array<Vec2, 3>& uv, std::vector<bool>& occupied) {
     float minU = uv[0].x, maxU = uv[0].x, minV = uv[0].y, maxV = uv[0].y;
     for (const Vec2& t : uv) {
@@ -1902,6 +1904,19 @@ bool shadeAllTiles(const BakeContext& ctx, UdimBakeResult& out,
 
 }  // namespace
 
+// The one place the two ceilings are decided, for bakeUdim and for every caller
+// that has to refuse a SET of bakes before it writes anything (the export
+// bundle). A second copy of this rule would drift from this one, and the drift
+// would be a host told the wrong thing about why its bake was refused.
+UdimCeiling udimCeiling(const BakeParams& params, std::size_t tiles) {
+    UdimCeiling out;
+    out.refusal = ceilingRefusal(params, tiles);
+    if (out.refusal != UdimRefusal::None) {
+        out.message = ceilingMessage(out.refusal, params, tiles);
+    }
+    return out;
+}
+
 // Every element finite and the linear part invertible. A singular linear part
 // carries no direction anywhere, so there is nothing to substitute a default
 // for -- the bake is refused, the way every other out-of-range parameter is.
@@ -2000,10 +2015,10 @@ UdimBakeResult bakeUdim(const Mesh& lowPoly, const Mesh& highPoly, BakeMap map,
 
     // Before paramsUsable, which would fold a per-tile overflow into its silent
     // rejection and lose the one thing #91 asks a refusal to say.
-    const UdimRefusal ceiling = ceilingRefusal(params, out.layout.tiles.size());
-    if (ceiling != UdimRefusal::None) {
-        out.refusal = ceiling;
-        out.refusalMessage = ceilingMessage(ceiling, params, out.layout.tiles.size());
+    const UdimCeiling ceiling = udimCeiling(params, out.layout.tiles.size());
+    if (ceiling.refusal != UdimRefusal::None) {
+        out.refusal = ceiling.refusal;
+        out.refusalMessage = ceiling.message;
         return out;
     }
     if (!bakeInputsUsable(highPoly, uvs, map, params, useField)) {

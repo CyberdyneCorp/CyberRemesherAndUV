@@ -378,7 +378,39 @@ def check_bundle_udim(tmpdir: str) -> None:
             except cyberremesh.CyberError as error:
                 assert "{udim}" in str(error), str(error)
     assert not os.path.exists(os.path.join(refused_dir, "hero.obj")), os.listdir(refused_dir)
-    print("PASS bundle: one file per occupied tile, and a pattern naming no tile is refused")
+
+    # The HOST's texel ceiling reaches this path too. A UDIM bundle multiplies
+    # the exposure by the occupied-tile count, so a ceiling that bounds one map
+    # has to bound the set -- and the refusal has to say which of the two it hit.
+    ceiling_dir = os.path.join(tmpdir, "bundle_udim_ceiling")
+    os.makedirs(ceiling_dir, exist_ok=True)
+    previous = cyberremesh.max_bake_pixels()
+    try:
+        # 16x16 is 256 texels: one tile fits under 257, two do not.
+        cyberremesh.set_max_bake_pixels(257)
+        with Mesh.load_obj(low_path) as low, Mesh.load_obj(low_path) as high:
+            with ExportPreset.resolve(preset_path) as preset:
+                try:
+                    write_bundle(low, high, preset, os.path.join(ceiling_dir, "hero.obj"),
+                                 cage_distance=0.2, udim=True)
+                    raise AssertionError("the aggregate ceiling was not applied to the bundle")
+                except cyberremesh.CyberError as error:
+                    assert "AGGREGATE" in str(error), str(error)
+        assert not os.path.exists(os.path.join(ceiling_dir, "hero.obj")), os.listdir(ceiling_dir)
+
+        cyberremesh.set_max_bake_pixels(255)  # below ONE tile: the other diagnosis
+        with Mesh.load_obj(low_path) as low, Mesh.load_obj(low_path) as high:
+            with ExportPreset.resolve(preset_path) as preset:
+                try:
+                    write_bundle(low, high, preset, os.path.join(ceiling_dir, "hero.obj"),
+                                 cage_distance=0.2, udim=True)
+                    raise AssertionError("the per-tile ceiling was not applied to the bundle")
+                except cyberremesh.CyberError as error:
+                    assert "PER-TILE" in str(error), str(error)
+    finally:
+        cyberremesh.set_max_bake_pixels(previous)
+    print("PASS bundle: one file per occupied tile, a pattern naming no tile is refused, "
+          "and both texel ceilings bind")
 
 
 def main() -> int:

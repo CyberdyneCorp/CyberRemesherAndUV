@@ -714,3 +714,74 @@ TEST_CASE("a single-tile UDIM bundle needs no tile token") {
     CHECK(fs::exists(dir / "hero_normal.png"));
     fs::remove_all(dir);
 }
+
+// ---- the texel ceiling on the bundle path --------------------------------
+//
+// The ceiling is the EMBEDDER's policy (the C ABI sets it from
+// cyber_max_bake_pixels()), and a UDIM bundle multiplies the exposure by the
+// occupied-tile count -- up to the whole addressable grid times resolution^2 --
+// so it has to bind here and not only in bake::bakeUdim().
+
+TEST_CASE("a bundle whose preset is over the per-tile ceiling is refused, writing nothing") {
+    const fs::path dir = testDir("udim_per_tile_ceiling");
+    Mesh low = makeSurface(0.0f);
+    const Mesh high = makeSurface(0.02f);
+
+    bundle::BundleParams params = paramsFor(smallPreset("t", io::GreenChannel::PlusY), dir);
+    params.maxPixels = 32 * 32 - 1;  // below the preset's own 32x32
+
+    const bundle::BundleResult result = bundle::writeBundle(low, high, params);
+    CHECK_FALSE(result.ok);
+    CHECK(result.error.find("PER-TILE") != std::string::npos);
+    CHECK(result.error.find(params.preset.name) != std::string::npos);
+    // Refused before anything was written: not even the mesh.
+    CHECK(result.files.empty());
+    CHECK_FALSE(fs::exists(dir / "hero.obj"));
+    fs::remove_all(dir);
+}
+
+TEST_CASE("a two-tile UDIM bundle is refused by the aggregate ceiling one map would pass") {
+    const fs::path dir = testDir("udim_aggregate_ceiling");
+    Mesh low = twoTileSurface(0.0f);
+    const Mesh high = twoTileSurface(0.02f);
+
+    io::ExportPreset preset = smallPreset("t", io::GreenChannel::PlusY);
+    preset.namingPattern = "{basename}_{map}.{udim}.{ext}";
+    bundle::BundleParams params = paramsFor(preset, dir);
+    params.udim = true;
+    params.maxPixels = 32 * 32 + 1;  // one tile fits, two do not
+
+    const bundle::BundleResult result = bundle::writeBundle(low, high, params);
+    CHECK_FALSE(result.ok);
+    CHECK(result.error.find("AGGREGATE") != std::string::npos);
+    CHECK(result.error.find('2') != std::string::npos);  // the tile count it was asked for
+    CHECK(result.files.empty());
+    CHECK_FALSE(fs::exists(dir / "hero.obj"));
+
+    // The same layout and the same ceiling WITHOUT --udim is one image, and one
+    // image fits: the aggregate ceiling counts the tiles actually baked.
+    const fs::path plain = testDir("udim_aggregate_ceiling_plain");
+    bundle::BundleParams single = paramsFor(preset, plain);
+    single.maxPixels = params.maxPixels;
+    Mesh lowAgain = twoTileSurface(0.0f);
+    const bundle::BundleResult ok = bundle::writeBundle(lowAgain, high, single);
+    CHECK(ok.ok);
+    fs::remove_all(plain);
+    fs::remove_all(dir);
+}
+
+TEST_CASE("a bundle with no ceiling bakes whatever the preset asks for") {
+    const fs::path dir = testDir("udim_no_ceiling");
+    Mesh low = twoTileSurface(0.0f);
+    const Mesh high = twoTileSurface(0.02f);
+
+    io::ExportPreset preset = smallPreset("t", io::GreenChannel::PlusY);
+    preset.namingPattern = "{basename}_{map}.{udim}.{ext}";
+    bundle::BundleParams params = paramsFor(preset, dir);
+    params.udim = true;  // maxPixels stays 0: no ceiling, the CLI's case
+
+    const bundle::BundleResult result = bundle::writeBundle(low, high, params);
+    CHECK(result.ok);
+    CHECK(result.files.size() == 5);
+    fs::remove_all(dir);
+}

@@ -6770,6 +6770,11 @@ CyberStatus cyber_export_bundle_write([[maybe_unused]] CyberMesh* low,
                                            : cyber::bake::NormalSpace::Tangent;
         bundleParams.thicknessScale = params->thicknessScale;
         bundleParams.udim = params->udim != 0;
+        // The host's texel ceiling, exactly as cyber_bake, cyber_bake_field and
+        // cyber_bake_udim apply it. A bundle is a batch of bakes and a UDIM
+        // bundle multiplies the exposure by the occupied-tile count, so the
+        // ceiling an embedder set to bound ONE map has to bound this too.
+        bundleParams.maxPixels = static_cast<std::size_t>(cyber_max_bake_pixels());
 
         const cyber::CancelToken token;
         token.setPoll([cancel, user]() { return cancel != nullptr && cancel(user) != 0; });

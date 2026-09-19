@@ -424,6 +424,22 @@ enum class UdimRefusal {
     FieldContract,
 };
 
+// Which texel ceiling, if either, baking `tiles` tiles at these parameters
+// trips, and the sentence that says so. `tiles` is 1 for an ordinary,
+// single-image bake, which is why this answers for both.
+//
+// Public because the ceiling is not only bakeUdim's business: a caller that
+// bakes a SET of maps -- the export bundle -- has to refuse BEFORE it writes
+// the first file, and it must refuse with the same rule and the same words
+// rather than a second, drifting copy of them. `maxPixels == 0` (no ceiling) or
+// a degenerate size answers None.
+struct UdimCeiling {
+    UdimRefusal refusal = UdimRefusal::None;
+    std::string message;  // empty when `refusal` is None
+};
+
+[[nodiscard]] UdimCeiling udimCeiling(const BakeParams& params, std::size_t tiles);
+
 struct UdimTileBake {
     UdimTile tile;
     BakeResult result;
