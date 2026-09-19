@@ -106,6 +106,7 @@ PENDING_REGISTRATIONS: dict[str, str] = {
     "cyber_bundle_result_free": "finishing pipeline",
     "cyber_bundle_result_file": "finishing pipeline",
     "cyber_bundle_result_file_encoding": "finishing pipeline",
+    "cyber_bundle_result_file_padding": "finishing pipeline",
     "cyber_bundle_result_file_id_source": "finishing pipeline",
     "cyber_bundle_result_file_id_color": "finishing pipeline",
     "cyber_bundle_result_file_id_color_count": "finishing pipeline",

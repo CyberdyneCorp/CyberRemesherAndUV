@@ -5047,6 +5047,7 @@ int cyber_stroke_interpretation_grid_size(const CyberStrokeInterpretation* inter
 struct CyberImage {
     cyber::bake::Image image;
     cyber::bake::BakeEncoding encoding;
+    cyber::bake::BakePadding padding;
 };
 
 // Shared by cyber_bake and cyber_bake_field so both entry points accept exactly
@@ -5156,6 +5157,27 @@ CyberImageEncoding toCEncoding(const cyber::bake::BakeEncoding& encoding) {
     return out;
 }
 
+CyberImagePadding toCPadding(const cyber::bake::BakePadding& padding) {
+    CyberImagePadding out{};
+    out.radius = padding.radius;
+    switch (padding.mode) {
+        case cyber::bake::PaddingMode::Nearest:
+            out.mode = CYBER_PADDING_NEAREST;
+            break;
+        case cyber::bake::PaddingMode::Extrapolate:
+            out.mode = CYBER_PADDING_EXTRAPOLATE;
+            break;
+        case cyber::bake::PaddingMode::ExtrapolateUnit:
+            out.mode = CYBER_PADDING_EXTRAPOLATE_UNIT;
+            break;
+        case cyber::bake::PaddingMode::None:
+            out.mode = CYBER_PADDING_NONE;
+            break;
+    }
+    out.texelsFilled = static_cast<uint64_t>(padding.texelsFilled);
+    return out;
+}
+
 // The three enum-valued/finite members added in 0.8.0. An out-of-range enum is
 // refused rather than folded to a default: a caller that meant z-up and typed 2
 // would otherwise get a y-up map with no diagnostic anywhere.
@@ -5176,6 +5198,14 @@ bool applyBakeEncodingParams(const CyberBakeParams& params, cyber::bake::BakePar
         setError(std::string(who) + ": thicknessScale must be finite and >= 0");
         return false;
     }
+    // Zero is the documented way to turn padding off, so only a NEGATIVE
+    // radius is refused -- and refused rather than folded to the default, for
+    // the same reason a mistyped up axis is.
+    if (params.paddingRadius < 0) {
+        setError(std::string(who) + ": paddingRadius must be >= 0 (0 disables padding)");
+        return false;
+    }
+    out.paddingRadius = params.paddingRadius;
     out.upAxis =
         params.upAxis == CYBER_UP_AXIS_Z ? cyber::bake::UpAxis::ZUp : cyber::bake::UpAxis::YUp;
     out.bentNormalSpace = params.bentNormalSpace == CYBER_BENT_NORMAL_OBJECT
@@ -5210,6 +5240,7 @@ void cyber_default_bake_params(CyberBakeParams* params) {
                                   ? CYBER_BENT_NORMAL_OBJECT
                                   : CYBER_BENT_NORMAL_TANGENT;
     params->thicknessScale = d.thicknessScale;
+    params->paddingRadius = d.paddingRadius;
 }
 
 CyberStatus cyber_bake(const CyberMesh* low, const CyberMesh* high, CyberBakeMap map,
@@ -5251,6 +5282,7 @@ CyberStatus cyber_bake(const CyberMesh* low, const CyberMesh* high, CyberBakeMap
         auto handle = std::make_unique<CyberImage>();
         handle->image = std::move(result.image);
         handle->encoding = result.encoding;
+        handle->padding = result.padding;
         clearError();
         *out = handle.release();
         return CYBER_OK;
@@ -5269,6 +5301,16 @@ CyberStatus cyber_image_encoding(const CyberImage* image, CyberImageEncoding* ou
         return CYBER_ERR_INVALID_ARG;
     }
     *out = toCEncoding(image->encoding);
+    clearError();
+    return CYBER_OK;
+}
+
+CyberStatus cyber_image_padding(const CyberImage* image, CyberImagePadding* out) {
+    if (image == nullptr || out == nullptr) {
+        setError("cyber_image_padding: null argument");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    *out = toCPadding(image->padding);
     clearError();
     return CYBER_OK;
 }
@@ -6098,6 +6140,7 @@ CyberStatus cyber_bake_field(const CyberMesh* low, const CyberMesh* high, CyberB
         auto handle = std::make_unique<CyberImage>();
         handle->image = std::move(result.image);
         handle->encoding = result.encoding;
+        handle->padding = result.padding;
         clearError();
         *out = handle.release();
         return CYBER_OK;
@@ -6161,6 +6204,7 @@ struct CyberBundleResult {
         int width = 0;
         int height = 0;
         CyberImageEncoding encoding{};
+        CyberImagePadding padding{};
         // The id-to-colour record, which CyberImageEncoding cannot carry: it is
         // a flat POD and the table is variable length. Kept in the C++ shape
         // and read through cyber_bundle_result_file_id_*.
@@ -6337,12 +6381,14 @@ void cyber_default_bundle_params(CyberBundleParams* params) {
                                   ? CYBER_BENT_NORMAL_OBJECT
                                   : CYBER_BENT_NORMAL_TANGENT;
     params->thicknessScale = defaults.thicknessScale;
+    params->paddingRadius = defaults.paddingRadius;
 #else
     params->cageDistance = 0.1f;
     params->aoSamples = 64;
     params->aoRadius = 1.0f;
     params->bentNormalSpace = CYBER_BENT_NORMAL_TANGENT;
     params->thicknessScale = 2.0f;
+    params->paddingRadius = 8;
 #endif
 }
 
@@ -6394,6 +6440,13 @@ CyberStatus cyber_export_bundle_write([[maybe_unused]] CyberMesh* low,
             setError("cyber_export_bundle_write: thicknessScale must be finite and >= 0");
             return CYBER_ERR_INVALID_ARG;
         }
+        if (params->paddingRadius < 0) {
+            setError(
+                "cyber_export_bundle_write: paddingRadius must be >= 0 (0 disables "
+                "padding)");
+            return CYBER_ERR_INVALID_ARG;
+        }
+        bundleParams.paddingRadius = params->paddingRadius;
         bundleParams.bentNormalSpace = params->bentNormalSpace == CYBER_BENT_NORMAL_OBJECT
                                            ? cyber::bake::NormalSpace::Object
                                            : cyber::bake::NormalSpace::Tangent;
@@ -6423,6 +6476,7 @@ CyberStatus cyber_export_bundle_write([[maybe_unused]] CyberMesh* low,
                                      .width = file.width,
                                      .height = file.height,
                                      .encoding = toCEncoding(file.encoding),
+                                     .padding = toCPadding(file.padding),
                                      .idSource = file.encoding.idSource,
                                      .idColors = file.encoding.idColors});
         }
@@ -6473,6 +6527,21 @@ CyberStatus cyber_bundle_result_file_encoding(const CyberBundleResult* result, s
         return CYBER_ERR_INVALID_ARG;
     }
     *out = result->files[index].encoding;
+    clearError();
+    return CYBER_OK;
+}
+
+CyberStatus cyber_bundle_result_file_padding(const CyberBundleResult* result, size_t index,
+                                             CyberImagePadding* out) {
+    if (result == nullptr || out == nullptr) {
+        setError("cyber_bundle_result_file_padding: null argument");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    if (index >= result->files.size()) {
+        setError("cyber_bundle_result_file_padding: index out of range");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    *out = result->files[index].padding;
     clearError();
     return CYBER_OK;
 }

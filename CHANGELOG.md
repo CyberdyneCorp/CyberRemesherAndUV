@@ -7,6 +7,60 @@
 
 ### Added
 
+- **Baked maps are PADDED across their UV island borders, by extrapolation.** A
+  baked map used to stop at the edge of each island, and everything downstream
+  reaches past that edge: a bilinear tap at the border, mip generation, block
+  compression. They read the background and the model shows a rim on every
+  seam. Every baked map is now padded before `bake()` returns.
+
+  The band **continues the gradient** running off the island rather than
+  repeating its edge value. That distinction is the whole point: a repeated
+  edge is a flat plateau whose boundary is a step, and a mip chain averages
+  that step into the visible hard ring the cheap copy-outward dilation most
+  bakers ship is known for. The band grows one ring at a time; each new texel
+  takes the covered texels among its eight compass neighbours, continues the
+  linear gradient each of them defines, and averages the results
+  (ArmorPaint's `dilate_pass.kong:64-112` is the reference for the idea; the
+  iteration replaces its long ray march, which leaves holes wherever a texel
+  lies on none of the eight rays). Because each ring reads the one before it,
+  the value is bounded to the covered range widened by that range's own width —
+  enough room for a real continuation, and a hard stop on a noisy map
+  compounding.
+
+  **The fill rule follows the map's channel semantics**, read off its recorded
+  `EncodingBasis` rather than its name, so a map type added later gets the right
+  rule as long as it records an honest basis:
+
+  * a tangent- or object-space **normal** is renormalized to unit length after
+    extrapolation — a band of shortened normals darkens in every shader that
+    does not renormalize;
+  * an **id map** is padded by **nearest neighbour, copied verbatim, never
+    interpolated**. An interpolated id colour is a colour that resolves to no
+    id, which would break the zero-tolerance comparison the id maps exist for
+    on the whole band;
+  * a **scalar or position** map is not renormalized: there is no unit length
+    to restore and imposing one would replace its values with directions.
+
+  The radius is configurable in texels and defaults to **8** — three mip levels
+  and two 4x4 compression blocks. **Zero disables** padding and returns the map
+  exactly as it was baked; a negative radius is refused with no image, like
+  every other out-of-range bake parameter. The bake reports the radius applied,
+  the fill rule used and the number of texels the band wrote, through
+  `cyber_image_padding`, `cyber_bundle_result_file_padding`, `Image.padding` in
+  Python and Swift, and the CLI report's `outputs[].padding`.
+
+- **CLI:** `--padding <int>` sets the border-padding radius in texels for a
+  `--preset` run (default 8; 0 disables). A negative value is an argument error.
+
+- **ABI 1.21, additive.** `CyberBakeParams::paddingRadius` and
+  `CyberBundleParams::paddingRadius` appended, plus `CyberPaddingMode`,
+  `CyberImagePadding`, `cyber_image_padding` and
+  `cyber_bundle_result_file_padding`. The pinned manifest diff against 1.20
+  removes and reshapes nothing. Both params structs grew a trailing member, so
+  a client that fills one by hand rather than through
+  `cyber_default_bake_params` / `cyber_default_bundle_params` must be
+  recompiled — the same rule the 0.8.0 appends already carry.
+
 - **Material ID and object ID maps, with the id-to-colour mapping REPORTED.** A
   colour-ID map is how an artist selects "the leather strap" without masking it
   by hand, and material and object identity are known at bake time and nowhere
@@ -296,6 +350,11 @@
   up by id. The first Python test assumed slot order and was wrong about it.
 
 ### Changed
+
+- **Every baked map's output now includes a padded band by default.** A host
+  that relied on the background being untouched just outside an island sets
+  `paddingRadius = 0` (`--padding 0`), which reproduces the previous output
+  texel for texel.
 
 - **The Swift parity gate runs in both directions.** It checked
   Swift -> header — no phantom symbols, no wrong arity — and never

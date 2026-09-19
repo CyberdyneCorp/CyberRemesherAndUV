@@ -439,6 +439,16 @@ TEST_CASE("a bundle writes the object-space and ray-traced maps with their basis
     CHECK(thickness.encoding.basis == cyber::bake::EncodingBasis::Distance);
     CHECK(thickness.encoding.scale == doctest::Approx(3.0f));
 
+    // The padding record travels with the file too. The mesh entry has none;
+    // every map carries the radius the bundle baked at.
+    CHECK(fileOf("mesh").padding.radius == 0);
+    // `const char*`, not `const std::string&`: binding a string reference to a
+    // string-literal element constructs a temporary per iteration, which GCC
+    // and the NDK's Clang reject under -Wrange-loop-construct.
+    for (const char* kind : {"object-normal", "object-position", "bent-normal", "thickness"}) {
+        CHECK(fileOf(kind).padding.radius == params.paddingRadius);
+    }
+
     for (const bundle::BundleFile& file : result.files) {
         CHECK(fs::exists(file.path));
     }
@@ -528,4 +538,65 @@ TEST_CASE("a bundle writes the id maps with their table, and refuses to gamma th
     REQUIRE(object.encoding.idColors.size() == 1);
     CHECK(object.encoding.idColors[0].id == 0);
     fs::remove_all(dir);
+}
+
+TEST_CASE("a bundle pads each map by the rule its channel semantics ask for") {
+    // The maps above are baked from an UNWRAPPED low-poly whose chart fills the
+    // layout, so nothing is outside an island to fill. Here the low-poly brings
+    // its own UVs, shrunk into a quarter of the layout, so the band is real and
+    // the per-basis fill rule is observable.
+    const fs::path dir = testDir("padrule");
+    io::ExportPreset preset = smallPreset("padrule", io::GreenChannel::PlusY);
+    preset.maps = {
+        io::PresetMapEntry{io::PresetMap::Normal, io::ColorSpace::Linear, "normal"},
+        io::PresetMapEntry{io::PresetMap::Curvature, io::ColorSpace::Linear, "curvature"},
+        io::PresetMapEntry{io::PresetMap::MaterialId, io::ColorSpace::Linear, "material-id"},
+    };
+
+    Mesh low = makeSurface(0.0f);
+    auto& uv = low.cornerAttributes().create<cyber::Vec2>("uv");
+    for (Index fi = 0; fi < low.faceCapacity(); ++fi) {
+        if (!low.isAlive(cyber::FaceId{fi})) {
+            continue;
+        }
+        for (const cyber::LoopId l : low.faceLoops(cyber::FaceId{fi})) {
+            const Vec3 pos = low.position(low.loopVertex(l));
+            uv[l.value] = {pos.x * 0.5f, pos.y * 0.5f};
+        }
+    }
+    const Mesh high = makeSurface(0.0f);
+    const bundle::BundleParams params = paramsFor(preset, dir);
+    const bundle::BundleResult result = bundle::writeBundle(low, high, params);
+    REQUIRE(result.ok);
+
+    const auto fileOf = [&](const std::string& kind) {
+        for (const bundle::BundleFile& file : result.files) {
+            if (file.kind == kind) {
+                return file;
+            }
+        }
+        FAIL("missing map " << kind);
+        return bundle::BundleFile{};
+    };
+    CHECK(fileOf("normal").padding.mode == cyber::bake::PaddingMode::ExtrapolateUnit);
+    CHECK(fileOf("curvature").padding.mode == cyber::bake::PaddingMode::Extrapolate);
+    // The one rule that cannot be got wrong: an interpolated id colour resolves
+    // to no id.
+    CHECK(fileOf("material-id").padding.mode == cyber::bake::PaddingMode::Nearest);
+    for (const char* kind : {"normal", "curvature", "material-id"}) {
+        CHECK(fileOf(kind).padding.texelsFilled > 0);
+    }
+
+    // A zero radius turns the stage off for the whole bundle.
+    bundle::BundleParams off = params;
+    off.paddingRadius = 0;
+    off.meshPath = dir / "off.obj";
+    Mesh lowAgain = low;
+    const bundle::BundleResult unpadded = bundle::writeBundle(lowAgain, high, off);
+    REQUIRE(unpadded.ok);
+    for (const bundle::BundleFile& file : unpadded.files) {
+        CHECK(file.padding.radius == 0);
+        CHECK(file.padding.texelsFilled == 0);
+        CHECK(file.padding.mode == cyber::bake::PaddingMode::None);
+    }
 }

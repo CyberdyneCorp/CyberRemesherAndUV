@@ -94,6 +94,10 @@ struct CliOptions {
     bool thicknessScaleSet = false;
     std::string bentNormalSpace;
     bool bentNormalSpaceSet = false;
+    // Same "was given" bit, for the same reason: 0 is a MEANINGFUL value here
+    // (it disables padding), so it cannot double as "not set".
+    int paddingRadius = 0;
+    bool paddingRadiusSet = false;
     remesh::Parameters params;
     std::string backend;  // empty = automatic best-first choice
     bool verbose = false;
@@ -190,6 +194,8 @@ void printUsage() {
                  "  --thickness-scale <f>    factor the thickness map multiplies its\n"
                  "                           mean depth by (default 2)\n"
                  "  --bent-normal-space <s>  tangent (default) | object\n"
+                 "  --padding <int>          texels of border padding grown outward\n"
+                 "                           from every UV island (default 8; 0 off)\n"
                  "  --list-presets           print built-in export presets and exit\n"
                  "  --verbose | --quiet      diagnostic detail / errors only\n"
                  "  --backend <name>         compute backend: cpu | metal | cuda |\n"
@@ -338,6 +344,11 @@ int parseArgs(int argc, char** argv, CliOptions& options, bool& exitEarly) {
             }
             options.bentNormalSpace = *v;
             options.bentNormalSpaceSet = true;
+        } else if (arg == "--padding") {
+            if (!numeric("--padding", options.paddingRadius)) {
+                return kExitArgs;
+            }
+            options.paddingRadiusSet = true;
         } else if (arg == "--quality") {
             const auto v = next("--quality");
             if (!v) {
@@ -501,6 +512,10 @@ int parseArgs(int argc, char** argv, CliOptions& options, bool& exitEarly) {
         std::fprintf(stderr, "error: --bent-normal-space must be tangent or object\n");
         return kExitArgs;
     }
+    if (options.paddingRadiusSet && options.paddingRadius < 0) {
+        std::fprintf(stderr, "error: --padding must be >= 0 (0 disables padding)\n");
+        return kExitArgs;
+    }
     // Applied here rather than at the flag so the choice survives a repeated
     // --backend and so an argument error still wins over a device probe.
     if (!options.backend.empty() && !selectBackendByName(options.backend)) {
@@ -613,6 +628,10 @@ struct PresetOutcome {
         // a bounding box, a thickness times a scale -- is not interpretable
         // without this, so the report records it beside the file.
         cyber::bake::BakeEncoding encoding;
+        // Which texels the bake WROTE, and how the band outside the islands
+        // was filled -- a consumer of an id map reads "nearest" here as the
+        // statement that its band was copied and not interpolated.
+        cyber::bake::BakePadding padding;
     };
     std::vector<File> files;
     bool unwrapped = false;
@@ -681,6 +700,26 @@ nlohmann::json encodingJson(const cyber::bake::BakeEncoding& encoding) {
     return out;
 }
 
+const char* paddingModeName(cyber::bake::PaddingMode mode) {
+    switch (mode) {
+        case cyber::bake::PaddingMode::Nearest:
+            return "nearest";
+        case cyber::bake::PaddingMode::Extrapolate:
+            return "extrapolate";
+        case cyber::bake::PaddingMode::ExtrapolateUnit:
+            return "extrapolate-unit";
+        case cyber::bake::PaddingMode::None:
+            break;
+    }
+    return "none";
+}
+
+nlohmann::json paddingJson(const cyber::bake::BakePadding& padding) {
+    return nlohmann::json{{"radius", padding.radius},
+                          {"mode", paddingModeName(padding.mode)},
+                          {"texelsFilled", padding.texelsFilled}};
+}
+
 const char* greenName(cyber::io::GreenChannel green) {
     return green == cyber::io::GreenChannel::MinusY ? "-Y" : "+Y";
 }
@@ -718,6 +757,7 @@ void addPresetToReport(nlohmann::json& report, const PresetOutcome& outcome) {
             entry["width"] = file.width;
             entry["height"] = file.height;
             entry["encoding"] = encodingJson(file.encoding);
+            entry["padding"] = paddingJson(file.padding);
         }
         report["outputs"].push_back(entry);
     }
@@ -1462,6 +1502,9 @@ int runCli(int argc, char** argv) {
         if (options.bentNormalSpace == "object") {
             bundleParams.bentNormalSpace = cyber::bake::NormalSpace::Object;
         }
+        if (options.paddingRadiusSet) {
+            bundleParams.paddingRadius = options.paddingRadius;
+        }
         cyber::Mesh low = result.mesh;
         const cyber::exportbundle::BundleResult bundle =
             cyber::exportbundle::writeBundle(low, source.mesh, bundleParams, &sink, &cancel);
@@ -1481,8 +1524,8 @@ int runCli(int argc, char** argv) {
         presetOutcome.unwrapped = bundle.unwrapped;
         presetOutcome.chartCount = bundle.chartCount;
         for (const auto& file : bundle.files) {
-            presetOutcome.files.push_back(
-                {file.path, file.kind, file.colorSpace, file.width, file.height, file.encoding});
+            presetOutcome.files.push_back({file.path, file.kind, file.colorSpace, file.width,
+                                           file.height, file.encoding, file.padding});
         }
     }
 #endif

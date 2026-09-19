@@ -16,6 +16,14 @@ _UV_PLANE = (
     "f 1/1 2/2 3/3\nf 1/1 3/3 4/4\n"
 )
 
+# The same plane with its UVs in the lower-left QUARTER of the layout, so three
+# quarters of the image is background for a padded band to grow into.
+_QUARTER_UV_PLANE = (
+    "v 0 0 0\nv 1 0 0\nv 1 1 0\nv 0 1 0\n"
+    "vt 0 0\nvt 0.5 0\nvt 0.5 0.5\nvt 0 0.5\n"
+    "f 1/1 2/2 3/3\nf 1/1 3/3 4/4\n"
+)
+
 
 def main() -> int:
     if not cyberremesh.is_available():
@@ -69,6 +77,7 @@ def main() -> int:
 
         _gate_the_mesh_map_set(obj.name)
         _gate_the_id_maps(obj.name)
+        _gate_border_padding(obj.name)
         _gate_a_raising_evaluator_raises(obj.name)
         _gate_the_openness_rename_shim(obj.name)
     finally:
@@ -132,7 +141,8 @@ def _gate_the_mesh_map_set(obj_path):
         # Out of range is refused at the binding's entry point, not defaulted.
         for bad in (BakeParams(width=16, height=16, up_axis=7),
                     BakeParams(width=16, height=16, bent_normal_space=-3),
-                    BakeParams(width=16, height=16, thickness_scale=-1.0)):
+                    BakeParams(width=16, height=16, thickness_scale=-1.0),
+                    BakeParams(width=16, height=16, padding_radius=-1)):
             try:
                 bake(low, high, BakeMap.OBJECT_NORMAL, bad).close()
             except cyberremesh.CyberError:
@@ -141,6 +151,49 @@ def _gate_the_mesh_map_set(obj_path):
                 raise AssertionError("an out-of-range encoding parameter was accepted")
 
     print("PASS bake: the object-space and ray-traced maps carry a decodable encoding basis")
+
+
+def _gate_border_padding(obj_path):
+    """The padding record reaches the binding, and the radius reaches the bake.
+
+    The low-poly's UVs are shrunk into a quarter of the layout, so there IS a
+    band; without that the map covers the image and the honest answer is "no
+    padding", which would let a broken binding pass.
+    """
+    from cyberremesh import (BakeMap, BakeParams, Mesh, PaddingMode, bake)
+
+    assert BakeParams().padding_radius == 8, BakeParams().padding_radius
+    quarter = tempfile.NamedTemporaryFile(suffix=".obj", delete=False, mode="w")
+    quarter.write(_QUARTER_UV_PLANE)
+    quarter.close()
+    try:
+        _padding_checks(quarter.name, obj_path)
+    finally:
+        os.unlink(quarter.name)
+
+    print("PASS bake: the padding record reaches the binding and the radius reaches the bake")
+
+
+def _padding_checks(low_path, obj_path):
+    from cyberremesh import (BakeMap, BakeParams, Mesh, PaddingMode, bake)
+
+    with Mesh.load_obj(low_path) as low, Mesh.load_obj(obj_path) as high:
+        padded = BakeParams(width=32, height=32, padding_radius=6)
+        with bake(low, high, BakeMap.NORMAL, padded) as img:
+            record = img.padding
+            assert record.radius == 6, record
+            assert record.mode == PaddingMode.EXTRAPOLATE_UNIT, record
+            assert record.texels_filled > 0, record
+        with bake(low, high, BakeMap.MATERIAL_ID, padded) as img:
+            # An id map is copied, never interpolated -- the binding has to
+            # show that, because it is the difference between a usable key map
+            # and an unusable one.
+            assert img.padding.mode == PaddingMode.NEAREST, img.padding
+        off = BakeParams(width=32, height=32, padding_radius=0)
+        with bake(low, high, BakeMap.NORMAL, off) as img:
+            assert img.padding.radius == 0, img.padding
+            assert img.padding.mode == PaddingMode.NONE, img.padding
+            assert img.padding.texels_filled == 0, img.padding
 
 
 def _gate_the_id_maps(obj_path):

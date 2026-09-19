@@ -392,6 +392,34 @@ def main() -> int:
         check("thickness records its scale",
               outputs["thickness"]["encoding"] == {"basis": "distance", "scale": 3.0},
               str(outputs["thickness"].get("encoding")))
+        # Padding is reported beside every written map, with the fill rule the
+        # map's channel semantics chose.
+        for kind, mode in (("object-normal", "extrapolate-unit"),
+                           ("object-position", "extrapolate"),
+                           ("bent-normal", "extrapolate-unit"),
+                           ("thickness", "extrapolate")):
+            pad = outputs[kind].get("padding")
+            check(f"{kind} reports its padding", pad is not None, str(outputs[kind]))
+            check(f"{kind} padding radius is the default", pad["radius"] == 8, str(pad))
+            check(f"{kind} padding mode follows its basis", pad["mode"] == mode, str(pad))
+            check(f"{kind} padding filled texels", pad["texelsFilled"] > 0, str(pad))
+        check("the mesh entry carries no padding block", "padding" not in outputs["mesh"],
+              str(outputs["mesh"]))
+
+    # --padding reaches the bundle: 0 turns the stage off and the report says so.
+    nopad_dir = tmp / "nopad"
+    nopad_dir.mkdir()
+    nopad_report = nopad_dir / "n.json"
+    r = run("--input", str(sphere), "--output", str(nopad_dir / "n.obj"), "--target-quads", "300",
+            "--bake", "object-normal", "--texture-size", "32", "--padding", "0",
+            "--report", str(nopad_report), "--quiet")
+    check("--padding 0 exit 0", r.returncode == 0, r.stderr)
+    if nopad_report.exists():
+        data = json.loads(nopad_report.read_text())
+        outputs = {o["kind"]: o for o in data.get("outputs", [])}
+        pad = outputs["object-normal"]["padding"]
+        check("--padding 0 disables the stage",
+              pad == {"radius": 0, "mode": "none", "texelsFilled": 0}, str(pad))
 
     # --- the colour-ID maps ---------------------------------------------
     id_dir = tmp / "idmaps"
@@ -442,7 +470,8 @@ def main() -> int:
     # case to watch — it is exactly the value a sentinel-in-the-value scheme
     # reads as "flag not given".
     for bad_flag, bad_value, map_name in (("--thickness-scale", "-1", "thickness"),
-                                          ("--bent-normal-space", "sideways", "bent-normal")):
+                                          ("--bent-normal-space", "sideways", "bent-normal"),
+                                          ("--padding", "-1", "normal")):
         r = run("--input", str(sphere), "--output", str(maps_dir / "bad.obj"),
                 "--bake", map_name, "--texture-size", "16", "--ao-samples", "4",
                 bad_flag, bad_value, "--quiet")

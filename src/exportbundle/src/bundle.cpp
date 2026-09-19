@@ -158,8 +158,8 @@ bool isInsideDirectory(const std::filesystem::path& directory, const std::filesy
 
 // Applies the preset's conventions to a freshly baked map and writes it.
 bool writeMap(const ExportPreset& preset, const PresetMapEntry& entry, bake::Image image,
-              const bake::BakeEncoding& encoding, const std::filesystem::path& path,
-              BundleResult& result) {
+              const bake::BakeEncoding& encoding, const bake::BakePadding& padding,
+              const std::filesystem::path& path, BundleResult& result) {
     if (entry.map == PresetMap::Normal && preset.normalGreen == GreenChannel::MinusY) {
         flipGreen(image);
     }
@@ -204,7 +204,7 @@ bool writeMap(const ExportPreset& preset, const PresetMapEntry& entry, bake::Ima
         return false;
     }
     result.files.push_back(BundleFile{path.string(), io::presetMapName(entry.map), writtenSpace,
-                                      width, height, encoding});
+                                      width, height, encoding, padding});
     return true;
 }
 
@@ -233,7 +233,7 @@ BundleResult writeBundle(Mesh& low, const Mesh& high, const BundleParams& params
         result.error = exported.error().message;
         return result;
     }
-    result.files.push_back(BundleFile{params.meshPath.string(), "mesh", "", 0, 0, {}});
+    result.files.push_back(BundleFile{params.meshPath.string(), "mesh", "", 0, 0, {}, {}});
 
     const std::string basename =
         params.basename.empty() ? params.meshPath.stem().string() : params.basename;
@@ -247,6 +247,7 @@ BundleResult writeBundle(Mesh& low, const Mesh& high, const BundleParams& params
     bakeParams.aoRadius = params.aoRadius;
     bakeParams.bentNormalSpace = params.bentNormalSpace;
     bakeParams.thicknessScale = params.thicknessScale;
+    bakeParams.paddingRadius = params.paddingRadius;
     bakeParams.upAxis = presetUpAxis(preset, result);
 
     const auto total = static_cast<float>(preset.maps.size());
@@ -301,7 +302,8 @@ BundleResult writeBundle(Mesh& low, const Mesh& high, const BundleParams& params
                            "and suffixes must give every map its own name";
             return result;
         }
-        if (!writeMap(preset, entry, std::move(baked.image), baked.encoding, path, result)) {
+        if (!writeMap(preset, entry, std::move(baked.image), baked.encoding, baked.padding, path,
+                      result)) {
             return result;
         }
         done += 1.0f;

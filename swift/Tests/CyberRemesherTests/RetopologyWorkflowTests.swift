@@ -232,6 +232,44 @@ final class RetopologyWorkflowTests: XCTestCase {
         XCTAssertThrowsError(try low.bake(from: target, map: .thickness, parameters: params))
     }
 
+    func testBorderPaddingIsReportedAndConfigurable() throws {
+        let target = try cylinder()
+        let snapper = try Snapper(target: target)
+        let low = try Mesh()
+        try low.contours(
+            target: target, strokes: [arc(-0.5), arc(0), arc(0.5)], spans: 12, snapper: snapper)
+        _ = try low.unwrap()
+
+        var params = BakeParameters()
+        params.width = 32
+        params.height = 32
+        XCTAssertEqual(params.paddingRadius, 8)  // the documented default
+
+        params.paddingRadius = 5
+        let normal = try low.bake(from: target, map: .normal, parameters: params)
+        XCTAssertEqual(normal.padding.radius, 5)
+        // A direction map is renormalized after the band is extrapolated; an id
+        // map is copied verbatim, because an interpolated id colour resolves to
+        // no id at all.
+        if normal.padding.texelsFilled > 0 {
+            XCTAssertEqual(normal.padding.mode, .extrapolateUnit)
+        }
+        let ids = try low.bake(from: target, map: .objectId, parameters: params)
+        if ids.padding.texelsFilled > 0 {
+            XCTAssertEqual(ids.padding.mode, .nearest)
+        }
+
+        params.paddingRadius = 0
+        let unpadded = try low.bake(from: target, map: .normal, parameters: params)
+        XCTAssertEqual(unpadded.padding.radius, 0)
+        XCTAssertEqual(unpadded.padding.mode, .none)
+        XCTAssertEqual(unpadded.padding.texelsFilled, 0)
+
+        // A negative radius is refused, not folded to the default.
+        params.paddingRadius = -1
+        XCTAssertThrowsError(try low.bake(from: target, map: .normal, parameters: params))
+    }
+
     func testIdMapsCarryATableThatResolvesTheirColours() throws {
         // A colour-ID map is useless without the mapping that turns a picked
         // colour back into a material or object, so the two are checked
@@ -298,6 +336,7 @@ final class RetopologyWorkflowTests: XCTestCase {
         XCTAssertEqual(swiftBake.width, bake.width)
         XCTAssertEqual(swiftBake.cageDistance, bake.cageDistance)
         XCTAssertEqual(swiftBake.thicknessScale, bake.thicknessScale)
+        XCTAssertEqual(swiftBake.paddingRadius, bake.paddingRadius)
         XCTAssertEqual(Int32(bitPattern: swiftBake.upAxis.rawValue), bake.upAxis)
         XCTAssertEqual(
             Int32(bitPattern: swiftBake.bentNormalSpace.rawValue), bake.bentNormalSpace)

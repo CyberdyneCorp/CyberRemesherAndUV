@@ -47,6 +47,8 @@ __all__ = [
     "EncodingBasis",
     "IdColor",
     "ImageEncoding",
+    "ImagePadding",
+    "PaddingMode",
     "UpAxis",
     "Image",
     "bake",
@@ -128,7 +130,7 @@ def version() -> str:
 #: The C ABI this binding was written against. Mirrors CYBER_ABI_VERSION_* in
 #: cyber_capi.h; ``check_abi()`` compares it against the loaded library.
 ABI_VERSION_MAJOR = 1
-ABI_VERSION_MINOR = 20
+ABI_VERSION_MINOR = 21
 
 
 def abi_version() -> tuple:
@@ -3582,6 +3584,36 @@ class EncodingBasis:
     ID_COLOR = _ffi.ENCODING_ID_COLOR
 
 
+class PaddingMode:
+    """How a map's padded band was filled (mirror of ``CyberPaddingMode``)."""
+
+    NONE = _ffi.PADDING_NONE
+    #: The nearest covered texel, copied VERBATIM. What an id map gets: an
+    #: interpolated id colour resolves to no id.
+    NEAREST = _ffi.PADDING_NEAREST
+    #: The gradient running off the island, continued outward.
+    EXTRAPOLATE = _ffi.PADDING_EXTRAPOLATE
+    #: Continued, then renormalized to unit length (direction maps).
+    EXTRAPOLATE_UNIT = _ffi.PADDING_EXTRAPOLATE_UNIT
+
+
+@dataclass(frozen=True)
+class ImagePadding:
+    """What the border-padding stage did to a baked map."""
+
+    #: The radius applied, in texels; 0 means padding was disabled.
+    radius: int
+    #: A :class:`PaddingMode`.
+    mode: int
+    #: Texels the padded band wrote.
+    texels_filled: int
+
+    @staticmethod
+    def _from_c(c: "_ffi.CyberImagePadding") -> "ImagePadding":
+        return ImagePadding(radius=int(c.radius), mode=int(c.mode),
+                            texels_filled=int(c.texels_filled))
+
+
 @dataclass(frozen=True)
 class IdColor:
     """One row of an id map's id-to-colour table.
@@ -3654,6 +3686,9 @@ class BakeParams:
     #: Factor ``BakeMap.THICKNESS`` multiplies its mean back-facing depth by.
     #: Finite and >= 0; the default matches ArmorPaint's doubling.
     thickness_scale: float = 2.0
+    #: Texels of border padding grown outward from every UV island before the
+    #: map is returned. 0 disables padding; a negative value is refused.
+    padding_radius: int = 8
 
     def _to_c(self) -> "_ffi.CyberBakeParams":
         return _ffi.CyberBakeParams(
@@ -3666,6 +3701,7 @@ class BakeParams:
             up_axis=int(self.up_axis),
             bent_normal_space=int(self.bent_normal_space),
             thickness_scale=float(self.thickness_scale),
+            padding_radius=int(self.padding_radius),
         )
 
 
@@ -3714,6 +3750,13 @@ class Image:
                                   color=(int(entry.color[0]), int(entry.color[1]),
                                          int(entry.color[2]))))
         return ImageEncoding._from_c(out, source.decode("utf-8"), tuple(colors))
+
+    @property
+    def padding(self) -> ImagePadding:
+        """What the border-padding stage did. Every image has a record."""
+        out = _ffi.CyberImagePadding()
+        _check(_ffi.get_lib().cyber_image_padding(self.handle, ctypes.byref(out)))
+        return ImagePadding._from_c(out)
 
     def save_png(self, path: str) -> None:
         """Write the map to an 8-bit PNG (tonemapped)."""
@@ -4217,6 +4260,9 @@ class BundleFile:
     #: What the pixels mean, as the bake reported it. The mesh entry carries
     #: :attr:`EncodingBasis.NONE`.
     encoding: ImageEncoding
+    #: What the border-padding stage did. The mesh entry carries
+    #: :attr:`PaddingMode.NONE` with a zero radius.
+    padding: ImagePadding = ImagePadding(radius=0, mode=_ffi.PADDING_NONE, texels_filled=0)
 
 
 @dataclass(frozen=True)
@@ -4252,6 +4298,7 @@ def write_bundle(
     ao_radius: Optional[float] = None,
     bent_normal_space: Optional[int] = None,
     thickness_scale: Optional[float] = None,
+    padding_radius: Optional[int] = None,
     progress: Optional[Callable[[float, str], None]] = None,
     cancel: Optional[Callable[[], bool]] = None,
 ) -> BundleResult:
@@ -4287,6 +4334,8 @@ def write_bundle(
         params.bent_normal_space = int(bent_normal_space)
     if thickness_scale is not None:
         params.thickness_scale = float(thickness_scale)
+    if padding_radius is not None:
+        params.padding_radius = int(padding_radius)
 
     def _progress_trampoline(fraction, stage_ptr, _user):
         if progress is None:
@@ -4329,6 +4378,8 @@ def write_bundle(
             _check(lib.cyber_bundle_result_file(out, i, ctypes.byref(entry)))
             encoding = _ffi.CyberImageEncoding()
             _check(lib.cyber_bundle_result_file_encoding(out, i, ctypes.byref(encoding)))
+            padding = _ffi.CyberImagePadding()
+            _check(lib.cyber_bundle_result_file_padding(out, i, ctypes.byref(padding)))
             source = lib.cyber_bundle_result_file_id_source(out, i) or b""
             colors = []
             for c in range(int(lib.cyber_bundle_result_file_id_color_count(out, i))):
@@ -4350,6 +4401,7 @@ def write_bundle(
                     height=int(entry.height),
                     encoding=ImageEncoding._from_c(encoding, source.decode("utf-8"),
                                                    tuple(colors)),
+                    padding=ImagePadding._from_c(padding),
                 )
             )
         messages: List[str] = []

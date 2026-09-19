@@ -210,6 +210,37 @@ public enum EncodingBasis: UInt32, Sendable {
     case idColor = 5
 }
 
+/// How a map's padded band was filled.
+///
+/// The rule follows the map's channel semantics, taken from its encoding
+/// basis: a direction map is renormalized after extrapolation, an id map is
+/// copied verbatim and never interpolated, anything else is extrapolated.
+public enum PaddingMode: UInt32, Sendable {
+    /// Radius 0, or no covered texel to pad from.
+    case none = 0
+    /// The nearest covered texel, copied VERBATIM.
+    case nearest = 1
+    /// The gradient running off the island, continued outward.
+    case extrapolate = 2
+    /// Continued, then renormalized to unit length.
+    case extrapolateUnit = 3
+}
+
+/// What the border-padding stage did to a baked map.
+public struct ImagePadding: Sendable, Equatable {
+    /// The radius applied, in texels; 0 means padding was disabled.
+    public let radius: Int32
+    public let mode: PaddingMode
+    /// Texels the padded band wrote.
+    public let texelsFilled: UInt64
+
+    init(_ c: CyberImagePadding) {
+        radius = c.radius
+        mode = PaddingMode(rawValue: UInt32(bitPattern: c.mode)) ?? .none
+        texelsFilled = c.texelsFilled
+    }
+}
+
 /// One row of an id map's id-to-colour table.
 ///
 /// `color` is the exact 8-bit triple written for `id`; the float in the image
@@ -282,6 +313,9 @@ public struct BakeParameters: Sendable {
     /// Factor `BakeMap.thickness` multiplies its mean back-facing depth by.
     /// Finite and >= 0; the default matches ArmorPaint's doubling.
     public var thicknessScale: Float
+    /// Texels of border padding grown outward from every UV island before the
+    /// map is returned. 0 disables padding; a negative value is refused.
+    public var paddingRadius: Int32
 
     public init() {
         var defaults = CyberBakeParams()
@@ -296,6 +330,7 @@ public struct BakeParameters: Sendable {
         bentNormalSpace =
             BentNormalSpace(rawValue: UInt32(bitPattern: defaults.bentNormalSpace)) ?? .tangent
         thicknessScale = defaults.thicknessScale
+        paddingRadius = defaults.paddingRadius
     }
 
     var cValue: CyberBakeParams {
@@ -304,7 +339,8 @@ public struct BakeParameters: Sendable {
             aoSamples: aoSamples, aoRadius: aoRadius, curvatureRange: curvatureRange,
             upAxis: Int32(bitPattern: upAxis.rawValue),
             bentNormalSpace: Int32(bitPattern: bentNormalSpace.rawValue),
-            thicknessScale: thicknessScale)
+            thicknessScale: thicknessScale,
+            paddingRadius: paddingRadius)
     }
 }
 
@@ -334,6 +370,15 @@ public final class Image {
                                                         entry.color.2)))
         }
         return ImageEncoding(out, idSource: source, idColors: colors)
+    }
+
+    /// What the border-padding stage did. Every image has a record.
+    public var padding: ImagePadding {
+        var out = CyberImagePadding()
+        guard cyber_image_padding(handle, &out) == CYBER_OK else {
+            return ImagePadding(CyberImagePadding())
+        }
+        return ImagePadding(out)
     }
 
     /// Pixels as floats, row-major, `channels` per texel.

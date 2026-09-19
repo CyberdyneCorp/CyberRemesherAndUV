@@ -487,6 +487,12 @@ ENCODING_OBJECT_BOUNDS = 3
 ENCODING_DISTANCE = 4
 ENCODING_ID_COLOR = 5
 
+# CyberPaddingMode.
+PADDING_NONE = 0
+PADDING_NEAREST = 1
+PADDING_EXTRAPOLATE = 2
+PADDING_EXTRAPOLATE_UNIT = 3
+
 
 class CyberIdColor(Structure):
     """Mirror of ``CyberIdColor`` in capi/include/cyber_capi.h."""
@@ -510,6 +516,7 @@ class CyberBakeParams(Structure):
         ("up_axis", c_int32),
         ("bent_normal_space", c_int32),
         ("thickness_scale", c_float),
+        ("padding_radius", c_int32),
     ]
 
 
@@ -522,6 +529,16 @@ class CyberImageEncoding(Structure):
         ("bounds_min", c_float * 3),
         ("bounds_max", c_float * 3),
         ("scale", c_float),
+    ]
+
+
+class CyberImagePadding(Structure):
+    """Mirror of ``CyberImagePadding`` in capi/include/cyber_capi.h."""
+
+    _fields_ = [
+        ("radius", c_int32),
+        ("mode", c_int32),
+        ("texels_filled", c_uint64),
     ]
 
 
@@ -611,6 +628,7 @@ class CyberBundleParams(Structure):
         ("ao_radius", c_float),
         ("bent_normal_space", c_int32),
         ("thickness_scale", c_float),
+        ("padding_radius", c_int32),
     ]
 
 
@@ -1439,6 +1457,9 @@ def _declare(lib: ctypes.CDLL) -> None:
     # CyberStatus cyber_image_encoding(const CyberImage*, CyberImageEncoding*)
     lib.cyber_image_encoding.argtypes = [c_void_p, POINTER(CyberImageEncoding)]
     lib.cyber_image_encoding.restype = c_int32
+    # CyberStatus cyber_image_padding(const CyberImage*, CyberImagePadding*)
+    lib.cyber_image_padding.argtypes = [c_void_p, POINTER(CyberImagePadding)]
+    lib.cyber_image_padding.restype = c_int32
     # The id-to-colour table of a CYBER_ENCODING_ID_COLOR map.
     lib.cyber_image_id_source.argtypes = [c_void_p]
     lib.cyber_image_id_source.restype = c_char_p
@@ -1931,6 +1952,12 @@ def _declare_export_presets(lib: ctypes.CDLL) -> None:
         POINTER(CyberImageEncoding),
     ]
     lib.cyber_bundle_result_file_encoding.restype = c_int32
+    lib.cyber_bundle_result_file_padding.argtypes = [
+        c_void_p,
+        c_size_t,
+        POINTER(CyberImagePadding),
+    ]
+    lib.cyber_bundle_result_file_padding.restype = c_int32
     lib.cyber_bundle_result_file_id_source.argtypes = [c_void_p, c_size_t]
     lib.cyber_bundle_result_file_id_source.restype = c_char_p
     lib.cyber_bundle_result_file_id_color_count.argtypes = [c_void_p, c_size_t]
