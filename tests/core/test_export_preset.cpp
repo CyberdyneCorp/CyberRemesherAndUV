@@ -303,6 +303,41 @@ TEST_CASE("the naming pattern expands every token") {
     REQUIRE(io::presetMapFileName(preset, preset.maps[0], "hero") == "blender/hero_normal.png");
 }
 
+TEST_CASE("the tile token expands to the tile being written") {
+    // mesh-io spec, "Named export presets": the naming pattern carries the UDIM
+    // tile number, and an export that is NOT UDIM-aware expands it to 1001,
+    // because the unit square IS tile 1001. The token therefore means the same
+    // thing in both, and a preset does not have to be rewritten to be used for
+    // either.
+    io::ExportPreset preset = *io::builtinPreset("blender");
+    preset.namingPattern = "{basename}_{map}.{udim}.{ext}";
+    CHECK(io::presetNamesTiles(preset));
+    CHECK(io::presetMapFileName(preset, preset.maps[0], "hero", 1002) == "hero_normal.1002.png");
+    CHECK(io::presetMapFileName(preset, preset.maps[0], "hero", 1011) == "hero_normal.1011.png");
+    // The default tile is the unit square's.
+    CHECK(io::presetMapFileName(preset, preset.maps[0], "hero") == "hero_normal.1001.png");
+
+    // A pattern without the token names no tile, and expanding it is unaffected
+    // by which tile is being written -- which is exactly why a multi-tile export
+    // through such a pattern is refused upstream rather than here.
+    preset.namingPattern = "{basename}_{map}.{ext}";
+    CHECK_FALSE(io::presetNamesTiles(preset));
+    CHECK(io::presetMapFileName(preset, preset.maps[0], "hero", 1002) == "hero_normal.png");
+}
+
+TEST_CASE("no built-in preset names its tiles, and every one of them expands the token") {
+    for (const std::string& name : io::builtinPresetNames()) {
+        io::ExportPreset preset = *io::builtinPreset(name);
+        // The built-ins predate UDIM and target one texture set each; a host
+        // that wants tiles supplies its own pattern.
+        CHECK_FALSE(io::presetNamesTiles(preset));
+        preset.namingPattern = "{basename}_{map}_{udim}.{ext}";
+        const std::string expanded = io::presetMapFileName(preset, preset.maps[0], "m", 1024);
+        CHECK(expanded.find("1024") != std::string::npos);
+        CHECK(expanded.find("{udim}") == std::string::npos);
+    }
+}
+
 TEST_CASE("a map suffix overrides the canonical name in the pattern") {
     io::ExportPreset preset = *io::builtinPreset("blender");
     io::PresetMapEntry entry = preset.maps[0];

@@ -7,6 +7,77 @@
 
 ### Added
 
+- **UDIM-aware baking** (#91): one map per occupied tile, with the rays cast
+  against the **whole** mesh.
+
+  - **Tile detection, answerable without baking.** `cyber::bake::udimTiles()`
+    (`cyber_udim_tiles`, `cyberremesh.udim_tiles`, `Mesh.udimTiles()` in Swift)
+    reports the occupied tiles of an EditMesh's UV layout under the standard
+    `1001 + u + 10*v` numbering, **ascending by tile number**, together with a
+    count of the faces carrying UVs no tile number can address (`u` outside
+    `[0, 9]`, or a negative `v`). Those faces are **counted, never dropped**: a
+    layout authored in a convention this numbering cannot express is visible
+    rather than quietly missing from the output. Occupancy is an **exact
+    triangle-vs-tile overlap test**, not a bounding box — every tile reported is
+    an image allocated, so a conservative test would break the cost guarantee
+    rather than merely waste a little work.
+  - **One output per occupied tile, and only per occupied tile.**
+    `cyber::bake::bakeUdim()` (`cyber_bake_udim`, `cyberremesh.bake_udim`,
+    `Mesh.bakeUdim(from:map:)`) returns one image per tile, in the layout's
+    order. A mesh occupying three tiles of a possible hundred costs three
+    images, three rasterizations and three shading passes.
+  - **The rays see the whole mesh.** This is the requirement the feature turns
+    on, and it is the one a naive implementation gets wrong: a per-tile loop that
+    rebuilds the acceleration structure from the faces whose UVs lie in the tile
+    being written produces occlusion that is entirely plausible and entirely
+    false — an arm stops shadowing a torso the moment the two are packed into
+    different tiles — and no inspection of the output reveals it. The BVH, its
+    flattened image, the Target's vertex normals, its curvature field, its
+    object-space bounds and its id column are built **once for the whole set**,
+    and only the set of texels written varies. A scenario asserts it: an occluder
+    whose UVs are in tile 1002 still darkens tile 1001, and the result matches
+    the single-tile arrangement texel for texel.
+  - **The texel ceiling applies per tile AND in aggregate, and a refusal names
+    which.** "This tile is too big" and "this many tiles of this size are too
+    many" are different problems with different fixes, so they are two
+    diagnostics (`CYBER_UDIM_PER_TILE_CEILING` / `CYBER_UDIM_AGGREGATE_CEILING`),
+    never one. A refusal returns no image for any tile.
+  - **Encoding metadata describes the whole set, not one tile.** The
+    object-space bounds an `object-position` map is rescaled over are the whole
+    mesh's and identical in every tile, so one decode works across the set; the
+    id-to-colour table is the whole Target's, so a material takes the **same
+    colour in tile 1001 and tile 1002** and a host's saved selection survives
+    crossing a tile; and a `relative` UV-density map divides by the mean of the
+    **whole set's** defined texels — the forward constraint #89 wrote into the
+    spec — because a per-tile mean reports every tile as average and hides
+    exactly the unevenness that mode exists to show. `BakeParams::placement`
+    stays global to the bake and is neither re-applied nor dropped per tile.
+  - **Padding is per tile and stops at the tile border.** Each tile's band grows
+    from the texels that tile's own UV content covered and from nothing else, so
+    a neighbouring tile's content cannot bleed across a seam and a seam is never
+    extrapolated across as though it were island interior. The radius, fill rule
+    and texel count are reported per tile.
+  - **`{udim}` in the export-preset naming pattern.** The tile number reaches
+    `mesh-io`'s filename pattern; an export that is **not** UDIM-aware expands
+    the token to `1001`, because the unit square IS that tile, so one preset
+    serves both. A multi-tile export through a pattern **without** the token is
+    refused, naming the pattern, before anything is written — every tile would
+    otherwise land on one path, each overwriting the last, while the report
+    listed them all.
+  - **Reachable from every entry point the existing maps are**: the C ABI
+    (**ABI 1.24**: `cyber_udim_tiles`, `cyber_bake_udim`, the `CyberUdimBake`
+    handle, `CyberBundleParams::udim` and
+    `cyber_bundle_result_file_udim_tile`), the export bundle, the CLI
+    (`--udim`, the tile list printed before the file rows and `udimTiles` /
+    `udimTile` in the JSON report), and the Python and Swift bindings, each
+    validating the new parameters identically. Progress covers the whole set and
+    cancellation is polled between tiles as well as inside one, abandoning the
+    whole set rather than returning some tiles and not others.
+  - **An ordinary bake is the tile-1001 case of a UDIM one.** `bake()` is
+    reimplemented on the shared pipeline with a tile origin of `(0, 0)`, which is
+    bit-identical to what it produced before, and a single-tile layout through
+    the UDIM path equals the ordinary bake texel for texel.
+
 - **World-space direction and UV density maps** (#89), the last two inputs
   CyberTexel's generators need from this repository.
 

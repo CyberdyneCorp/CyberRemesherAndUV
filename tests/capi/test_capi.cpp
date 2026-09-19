@@ -565,6 +565,140 @@ std::filesystem::path writeUvPlaneObj() {
 }
 }  // namespace
 
+namespace {
+// Two unit planes whose UVs sit in tiles 1001 and 1002 — the smallest layout
+// that tells a per-tile loop apart from a UDIM-aware bake.
+std::filesystem::path writeTwoTileObj() {
+    const std::filesystem::path path =
+        std::filesystem::temp_directory_path() / "cyber_capi_twotile.obj";
+    std::ofstream out(path);
+    out << "v 0 0 0\nv 1 0 0\nv 1 1 0\nv 0 1 0\n"
+           "v 3 0 0\nv 4 0 0\nv 4 1 0\nv 3 1 0\n"
+           "vt 0.1 0.1\nvt 0.9 0.1\nvt 0.9 0.9\nvt 0.1 0.9\n"
+           "vt 1.1 0.1\nvt 1.9 0.1\nvt 1.9 0.9\nvt 1.1 0.9\n"
+           "f 1/1 2/2 3/3 4/4\nf 5/5 6/6 7/7 8/8\n";
+    return path;
+}
+}  // namespace
+
+TEST_CASE("capi reports the occupied UDIM tiles without baking") {
+    const std::filesystem::path objPath = writeTwoTileObj();
+    CyberMesh* mesh = nullptr;
+    REQUIRE(cyber_mesh_load_obj(objPath.string().c_str(), &mesh) == CYBER_OK);
+
+    size_t count = 0;
+    uint64_t unaddressable = 1;
+    REQUIRE(cyber_udim_tiles(mesh, nullptr, 0, &count, &unaddressable) == CYBER_OK);
+    CHECK(count == 2u);
+    CHECK(unaddressable == 0u);
+
+    std::vector<int> tiles(count);
+    REQUIRE(cyber_udim_tiles(mesh, tiles.data(), tiles.size(), &count, nullptr) == CYBER_OK);
+    CHECK(tiles == std::vector<int>{1001, 1002});
+
+    // A capacity below the count fills what fits and still reports the total,
+    // so the usual size-then-fill pair of calls works.
+    std::vector<int> one(1);
+    REQUIRE(cyber_udim_tiles(mesh, one.data(), 1, &count, nullptr) == CYBER_OK);
+    CHECK(count == 2u);
+    CHECK(one[0] == 1001);
+
+    CHECK(cyber_udim_tiles(nullptr, nullptr, 0, &count, nullptr) == CYBER_ERR_INVALID_ARG);
+    CHECK(cyber_udim_tiles(mesh, nullptr, 4, &count, nullptr) == CYBER_ERR_INVALID_ARG);
+    cyber_mesh_destroy(mesh);
+    std::error_code ec;
+    std::filesystem::remove(objPath, ec);
+}
+
+TEST_CASE("capi bakes one image per occupied UDIM tile") {
+    const std::filesystem::path objPath = writeTwoTileObj();
+    CyberMesh* low = nullptr;
+    CyberMesh* high = nullptr;
+    REQUIRE(cyber_mesh_load_obj(objPath.string().c_str(), &low) == CYBER_OK);
+    REQUIRE(cyber_mesh_load_obj(objPath.string().c_str(), &high) == CYBER_OK);
+
+    CyberBakeParams params{};
+    cyber_default_bake_params(&params);
+    params.width = 16;
+    params.height = 16;
+
+    REQUIRE(cyber_set_max_bake_pixels(0) == CYBER_OK);
+    int refusal = -1;
+    CyberUdimBake* set = nullptr;
+    REQUIRE(cyber_bake_udim(low, high, CYBER_BAKE_NORMAL, &params, &refusal, &set) == CYBER_OK);
+    REQUIRE(set != nullptr);
+    CHECK(refusal == CYBER_UDIM_OK);
+    REQUIRE(cyber_udim_bake_count(set) == 2u);
+
+    int tile = 0;
+    REQUIRE(cyber_udim_bake_tile(set, 0, &tile) == CYBER_OK);
+    CHECK(tile == 1001);
+    REQUIRE(cyber_udim_bake_tile(set, 1, &tile) == CYBER_OK);
+    CHECK(tile == 1002);
+    CHECK(cyber_udim_bake_tile(set, 2, &tile) == CYBER_ERR_INVALID_ARG);
+
+    // The image outlives the set: a host pulls one tile, writes it, frees it.
+    CyberImage* image = nullptr;
+    REQUIRE(cyber_udim_bake_image(set, 1, &image) == CYBER_OK);
+    REQUIRE(image != nullptr);
+    cyber_udim_bake_free(set);
+    CHECK(cyber_image_width(image) == 16);
+    CHECK(cyber_image_height(image) == 16);
+    CHECK(cyber_image_channels(image) == 3);
+    cyber_image_free(image);
+
+    cyber_mesh_destroy(low);
+    cyber_mesh_destroy(high);
+    std::error_code ec;
+    std::filesystem::remove(objPath, ec);
+}
+
+TEST_CASE("capi names which texel ceiling a UDIM bake hit") {
+    const std::filesystem::path objPath = writeTwoTileObj();
+    CyberMesh* low = nullptr;
+    CyberMesh* high = nullptr;
+    REQUIRE(cyber_mesh_load_obj(objPath.string().c_str(), &low) == CYBER_OK);
+    REQUIRE(cyber_mesh_load_obj(objPath.string().c_str(), &high) == CYBER_OK);
+
+    CyberBakeParams params{};
+    cyber_default_bake_params(&params);
+    params.width = 16;
+    params.height = 16;
+
+    // One tile of 16x16 is 256 texels. A ceiling of 255 refuses the TILE.
+    REQUIRE(cyber_set_max_bake_pixels(255) == CYBER_OK);
+    int refusal = CYBER_UDIM_OK;
+    CyberUdimBake* set = nullptr;
+    CHECK(cyber_bake_udim(low, high, CYBER_BAKE_NORMAL, &params, &refusal, &set) ==
+          CYBER_ERR_RUNTIME);
+    CHECK(set == nullptr);
+    CHECK(refusal == CYBER_UDIM_PER_TILE_CEILING);
+    CHECK(std::string(cyber_last_error()).find("PER-TILE") != std::string::npos);
+
+    // A ceiling of 300 fits one tile and not two: a DIFFERENT refusal, because
+    // "this tile is too big" and "this many tiles are too many" have different
+    // fixes.
+    REQUIRE(cyber_set_max_bake_pixels(300) == CYBER_OK);
+    CHECK(cyber_bake_udim(low, high, CYBER_BAKE_NORMAL, &params, &refusal, &set) ==
+          CYBER_ERR_RUNTIME);
+    CHECK(set == nullptr);
+    CHECK(refusal == CYBER_UDIM_AGGREGATE_CEILING);
+    CHECK(std::string(cyber_last_error()).find("AGGREGATE") != std::string::npos);
+
+    // The same parameter validation cyber_bake applies, reported as the
+    // parameter refusal rather than as a ceiling.
+    REQUIRE(cyber_set_max_bake_pixels(0) == CYBER_OK);
+    params.paddingRadius = -1;
+    CHECK(cyber_bake_udim(low, high, CYBER_BAKE_NORMAL, &params, &refusal, &set) ==
+          CYBER_ERR_INVALID_ARG);
+    CHECK(set == nullptr);
+
+    cyber_mesh_destroy(low);
+    cyber_mesh_destroy(high);
+    std::error_code ec;
+    std::filesystem::remove(objPath, ec);
+}
+
 TEST_CASE("capi bakes a normal map onto a UV plane") {
     const std::filesystem::path objPath = writeUvPlaneObj();
     CyberMesh* low = nullptr;

@@ -106,6 +106,11 @@ struct CliOptions {
     cyber::bake::PlacementMatrix placement = cyber::bake::identityPlacement();
     bool placementSet = false;
     std::string densityNormalization;
+    // Bake one map file per OCCUPIED UDIM TILE of the low-poly's UV layout
+    // instead of one per map. Off by default: a layout in the unit square is
+    // tile 1001 and produces the same file either way, but a multi-file map set
+    // is something a caller asks for.
+    bool udim = false;
     remesh::Parameters params;
     std::string backend;  // empty = automatic best-first choice
     bool verbose = false;
@@ -212,6 +217,10 @@ void printUsage() {
                  "  --density <a|r>          uv-density normalization: absolute (default,\n"
                  "                           texels per square model unit) | relative (to\n"
                  "                           the map's own mean)\n"
+                 "  --udim                   bake one file per occupied UDIM tile of the\n"
+                 "                           UV layout instead of one per map; the\n"
+                 "                           preset's naming pattern needs a {udim} token\n"
+                 "                           once the layout occupies more than one tile\n"
                  "  --list-presets           print built-in export presets and exit\n"
                  "  --list-bake-maps         print the bakeable map names, one per\n"
                  "                           line, and exit -- the same set the C ABI\n"
@@ -435,6 +444,8 @@ int parseArgs(int argc, char** argv, CliOptions& options, bool& exitEarly) {
                 return kExitArgs;
             }
             options.paddingRadiusSet = true;
+        } else if (arg == "--udim") {
+            options.udim = true;
         } else if (arg == "--placement") {
             const auto v = next("--placement");
             if (!v) {
@@ -724,8 +735,15 @@ struct PresetOutcome {
         // was filled -- a consumer of an id map reads "nearest" here as the
         // statement that its band was copied and not interpolated.
         cyber::bake::BakePadding padding;
+        // The UDIM tile this file holds, under the 1001 + u + 10*v numbering.
+        // 1001 for the mesh row and for a bake over the unit square, because
+        // the unit square IS tile 1001.
+        int udimTile = 1001;
     };
     std::vector<File> files;
+    // The tiles the layout was found to occupy, reported BEFORE baking started.
+    std::vector<int> udimTiles;
+    std::size_t udimUnaddressableFaces = 0;
     bool unwrapped = false;
     int chartCount = 0;
 };
@@ -862,6 +880,8 @@ void addPresetToReport(nlohmann::json& report, const PresetOutcome& outcome) {
         {"maps", maps},
         {"unwrapped", outcome.unwrapped},
         {"chartCount", outcome.chartCount},
+        {"udimTiles", outcome.udimTiles},
+        {"udimUnaddressableFaces", outcome.udimUnaddressableFaces},
     };
     report["outputs"] = nlohmann::json::array();
     for (const PresetOutcome::File& file : outcome.files) {
@@ -872,6 +892,7 @@ void addPresetToReport(nlohmann::json& report, const PresetOutcome& outcome) {
             entry["height"] = file.height;
             entry["encoding"] = encodingJson(file.encoding);
             entry["padding"] = paddingJson(file.padding);
+            entry["udimTile"] = file.udimTile;
         }
         report["outputs"].push_back(entry);
     }
@@ -1638,6 +1659,7 @@ int runCli(int argc, char** argv) {
         if (options.densityNormalization == "relative") {
             bundleParams.densityNormalization = cyber::bake::DensityNormalization::Relative;
         }
+        bundleParams.udim = options.udim;
         cyber::Mesh low = result.mesh;
         const cyber::exportbundle::BundleResult bundle =
             cyber::exportbundle::writeBundle(low, source.mesh, bundleParams, &sink, &cancel);
@@ -1656,9 +1678,12 @@ int runCli(int argc, char** argv) {
         }
         presetOutcome.unwrapped = bundle.unwrapped;
         presetOutcome.chartCount = bundle.chartCount;
+        presetOutcome.udimTiles = bundle.udimTiles;
+        presetOutcome.udimUnaddressableFaces = bundle.udimUnaddressableFaces;
         for (const auto& file : bundle.files) {
             presetOutcome.files.push_back({file.path, file.kind, file.colorSpace, file.width,
-                                           file.height, file.encoding, file.padding});
+                                           file.height, file.encoding, file.padding,
+                                           file.udimTile});
         }
     }
 #endif
@@ -1698,8 +1723,18 @@ int runCli(int argc, char** argv) {
         if (presetOutcome.active) {
             std::printf("preset:    %s (schema %d)\n", presetOutcome.preset.name.c_str(),
                         presetOutcome.preset.schemaVersion);
+            std::printf("udim:      %zu occupied tile(s)", presetOutcome.udimTiles.size());
+            for (const int tile : presetOutcome.udimTiles) {
+                std::printf(" %d", tile);
+            }
+            if (presetOutcome.udimUnaddressableFaces > 0) {
+                std::printf(" (+%zu face(s) outside the addressable grid)",
+                            presetOutcome.udimUnaddressableFaces);
+            }
+            std::printf("\n");
             for (const PresetOutcome::File& file : presetOutcome.files) {
-                std::printf("  %-12s %s\n", file.kind.c_str(), file.path.c_str());
+                std::printf("  %-12s %-6d %s\n", file.kind.c_str(), file.udimTile,
+                            file.path.c_str());
             }
         }
         std::printf("time:      %.2fs\n", elapsed);

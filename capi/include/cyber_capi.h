@@ -101,7 +101,7 @@ typedef enum CyberStatus {
  * Do not compare these numbers by hand: cyber_abi_check() applies the rule
  * above in one place, so every binding gets the same answer. */
 #define CYBER_ABI_VERSION_MAJOR 1
-#define CYBER_ABI_VERSION_MINOR 23
+#define CYBER_ABI_VERSION_MINOR 24
 
 /* The ABI this build implements. Cannot fail; either pointer may be NULL. */
 void cyber_abi_version(int* major, int* minor);
@@ -2660,6 +2660,72 @@ typedef struct CyberImage CyberImage;
 CyberStatus cyber_bake(const CyberMesh* low, const CyberMesh* high, CyberBakeMap map,
                        const CyberBakeParams* params, CyberImage** out);
 
+/* ---- UDIM-aware baking (surface-baking, "UDIM-aware baking") ---------- */
+
+/* The occupied UDIM tiles of `mesh`'s UV layout, under the standard
+ * `1001 + u + 10*v` numbering, ASCENDING BY TILE NUMBER. Answerable WITHOUT
+ * baking: a host has to be able to show what it is about to allocate, and a
+ * refusal has to be able to name what it was asked for.
+ *
+ * Writes at most `capacity` tile numbers into `out_tiles` (which may be NULL
+ * when `capacity` is 0) and reports the TOTAL count in *out_count, so the usual
+ * size-then-fill pair of calls works. *out_unaddressable_faces, when not NULL,
+ * receives the number of faces carrying a UV coordinate that NO tile number can
+ * address (`u` outside [0, 9], or a negative `v`); such faces are COUNTED rather
+ * than silently dropped, so a layout authored in a convention this numbering
+ * cannot express is visible instead of missing from the output.
+ *
+ * `mesh` and `out_count` are required. A mesh with no UV layout reports zero
+ * tiles, not an error. */
+CyberStatus cyber_udim_tiles(const CyberMesh* mesh, int* out_tiles, size_t capacity,
+                             size_t* out_count, uint64_t* out_unaddressable_faces);
+
+/* Why a UDIM bake produced no images. The two CEILING values are deliberately
+ * distinct: "this tile is too big" and "this many tiles of this size are too
+ * many" are different problems with different fixes, and one value covering
+ * both would tell a host neither. */
+typedef enum CyberUdimRefusal {
+    CYBER_UDIM_OK = 0,
+    CYBER_UDIM_PARAMETERS,          /* the rejection cyber_bake makes: no UVs, a
+                                     * parameter out of range, no Target */
+    CYBER_UDIM_NO_OCCUPIED_TILES,   /* the layout addresses no tile at all */
+    CYBER_UDIM_PER_TILE_CEILING,    /* width * height alone is over the ceiling */
+    CYBER_UDIM_AGGREGATE_CEILING,   /* one tile fits; this many do not */
+    CYBER_UDIM_FIELD_CONTRACT       /* a field evaluator broke its contract */
+} CyberUdimRefusal;
+
+/* A whole UDIM bake: one image per occupied tile, in ascending tile order.
+ * Release with cyber_udim_bake_free. */
+typedef struct CyberUdimBake CyberUdimBake;
+
+/* Bakes `map` once per occupied tile of `low`'s UV layout. The acceleration
+ * structure over `high` is built ONCE and shared by every tile, so the rays cast
+ * for ambient occlusion, bent normal and thickness see the WHOLE mesh whatever
+ * tile is being written -- geometry whose UVs lie in another tile still occludes.
+ *
+ * Every parameter cyber_bake validates is validated here IDENTICALLY, and this
+ * host's texel ceiling (cyber_max_bake_pixels) applies PER TILE and IN
+ * AGGREGATE. On a refusal *out is left NULL, *out_refusal (when not NULL) names
+ * which refusal it was, and cyber_last_error() carries the message. `out_refusal`
+ * may be NULL; the two ceilings remain distinguishable through the message. */
+CyberStatus cyber_bake_udim(const CyberMesh* low, const CyberMesh* high, CyberBakeMap map,
+                            const CyberBakeParams* params, int* out_refusal, CyberUdimBake** out);
+
+/* How many tiles the set holds. 0 on NULL. */
+size_t cyber_udim_bake_count(const CyberUdimBake* bake);
+
+/* The tile NUMBER at `index`, under the 1001 + u + 10*v numbering. Out-of-range
+ * index is CYBER_ERR_INVALID_ARG. */
+CyberStatus cyber_udim_bake_tile(const CyberUdimBake* bake, size_t index, int* out_tile);
+
+/* The image at `index`, as a NEW CyberImage the caller owns and releases with
+ * cyber_image_free -- so one tile can outlive the set, and so every
+ * cyber_image_* accessor works on it unchanged. Out-of-range index is
+ * CYBER_ERR_INVALID_ARG. */
+CyberStatus cyber_udim_bake_image(const CyberUdimBake* bake, size_t index, CyberImage** out);
+
+void cyber_udim_bake_free(CyberUdimBake* bake);
+
 /* The basis needed to interpret `image`. Every image has one. NULL argument is
  * CYBER_ERR_INVALID_ARG. */
 CyberStatus cyber_image_encoding(const CyberImage* image, CyberImageEncoding* out);
@@ -3131,6 +3197,18 @@ typedef struct CyberBundleParams {
      * asset sits in a scene, not what a target app expects. */
     float placement[16];
     int densityNormalization;
+    /* Appended in 0.9.0 (ABI 1.24) -- always initialise via
+     * cyber_default_bundle_params. Non-zero bakes ONE FILE PER OCCUPIED UDIM
+     * TILE of the low-poly's UV layout instead of one file per map, with the
+     * tile number reaching the preset's `{udim}` naming token. Zero (the
+     * default) writes the unit square, which IS tile 1001, so the two agree
+     * file for file on a single-tile layout.
+     *
+     * A UDIM bundle whose layout occupies MORE THAN ONE tile through a preset
+     * whose namingPattern carries no `{udim}` token is REFUSED: every tile would
+     * be written to one path, each overwriting the last, while the report listed
+     * them all. */
+    int udim;
 } CyberBundleParams;
 
 /* Fills params with the engine defaults (meshPath and basename left NULL).
@@ -3184,6 +3262,16 @@ CyberStatus cyber_bundle_result_file_encoding(const CyberBundleResult* result, s
  * CYBER_ERR_INVALID_ARG. */
 CyberStatus cyber_bundle_result_file_padding(const CyberBundleResult* result, size_t index,
                                              CyberImagePadding* out);
+
+/* The UDIM TILE the file at `index` holds, under the `1001 + u + 10*v`
+ * numbering. 1001 for the mesh entry and for every map of a bundle that was not
+ * UDIM-aware, because the unit square IS tile 1001 -- a report row therefore
+ * names a tile either way. A separate accessor rather than a member on
+ * CyberBundleFile: that struct has no structSize and callers pass it to be
+ * WRITTEN into, so growing it would overrun an older caller's buffer.
+ * Out-of-range index is CYBER_ERR_INVALID_ARG. */
+CyberStatus cyber_bundle_result_file_udim_tile(const CyberBundleResult* result, size_t index,
+                                               int* out_tile);
 
 /* The id-to-colour table of the map at `index` — the same record
  * cyber_image_id_source / cyber_image_id_color return for a directly baked

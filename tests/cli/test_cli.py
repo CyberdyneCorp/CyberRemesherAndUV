@@ -581,6 +581,43 @@ def main() -> int:
     check("user preset exit 0", r.returncode == 0, r.stderr)
     check("user preset naming honored", (user_dir / "u.curvature.png").exists())
 
+    # ---- UDIM (surface-baking, "UDIM-aware baking") ---------------------
+    # The remeshed sphere is packed into the unit square, which IS tile 1001, so
+    # --udim over it produces the same single file per map that a non-UDIM run
+    # does -- and the report says which tile every file holds either way.
+    udim_preset = tmp / "udim.json"
+    udim_preset.write_text(json.dumps({
+        "schemaVersion": 1, "name": "udim", "resolution": 32,
+        "namingPattern": "{basename}.{map}.{udim}.{ext}", "maps": ["curvature"],
+    }))
+    udim_dir = tmp / "udim"
+    udim_dir.mkdir()
+    udim_report = udim_dir / "udim.json"
+    r = run("--input", str(sphere), "--output", str(udim_dir / "u.obj"), "--target-quads", "300",
+            "--preset", str(udim_preset), "--udim", "--report", str(udim_report))
+    check("udim run exit 0", r.returncode == 0, r.stderr)
+    check("udim names the tile in the file", (udim_dir / "u.curvature.1001.png").exists(),
+          str(sorted(p.name for p in udim_dir.iterdir())))
+    check("udim tile list printed before the rows", "udim:" in r.stdout, r.stdout)
+    if udim_report.exists():
+        data = json.loads(udim_report.read_text())
+        check("report lists the occupied tiles", data["preset"]["udimTiles"] == [1001],
+              str(data["preset"].get("udimTiles")))
+        check("report counts unaddressable faces",
+              data["preset"]["udimUnaddressableFaces"] == 0,
+              str(data["preset"].get("udimUnaddressableFaces")))
+        tiles = [o.get("udimTile") for o in data["outputs"] if o.get("width", 0) > 0]
+        check("every map row names its tile", tiles == [1001], str(tiles))
+
+    # A non-UDIM export expands the token too, to the tile the unit square IS.
+    plain_dir = tmp / "udim_plain"
+    plain_dir.mkdir()
+    r = run("--input", str(sphere), "--output", str(plain_dir / "p.obj"), "--target-quads", "300",
+            "--preset", str(udim_preset), "--quiet")
+    check("non-udim run exit 0", r.returncode == 0, r.stderr)
+    check("non-udim expands the token to 1001", (plain_dir / "p.curvature.1001.png").exists(),
+          str(sorted(p.name for p in plain_dir.iterdir())))
+
     # An incompatible schema version fails loudly and produces nothing.
     bad_preset = tmp / "future.json"
     bad_preset.write_text(json.dumps({

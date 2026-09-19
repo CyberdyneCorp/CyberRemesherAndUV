@@ -538,6 +538,79 @@ extension Mesh {
     }
 }
 
+// MARK: - UDIM-aware baking
+
+/// One tile of a UDIM bake.
+public struct UdimTileBake {
+    /// The tile number, under the standard `1001 + u + 10*v` numbering.
+    public let tile: Int
+    public let image: Image
+}
+
+/// What a UV layout occupies, answerable WITHOUT baking — a host has to be able
+/// to show what it is about to allocate.
+public struct UdimLayout: Sendable, Equatable {
+    /// Occupied tile numbers, ASCENDING, under the `1001 + u + 10*v` numbering.
+    public let tiles: [Int]
+    /// Faces carrying a UV coordinate no tile number can address (`u` outside
+    /// `[0, 9]`, or a negative `v`). Counted rather than dropped, so a layout in
+    /// a convention this numbering cannot express is visible instead of missing.
+    public let unaddressableFaces: Int
+}
+
+extension Mesh {
+    /// The occupied UDIM tiles of this mesh's UV layout, without baking.
+    ///
+    /// A mesh with no UV layout reports no tiles rather than throwing.
+    public func udimTiles() throws -> UdimLayout {
+        var count = 0
+        var unaddressable: UInt64 = 0
+        try CyberError.check(cyber_udim_tiles(handle, nil, 0, &count, &unaddressable))
+        guard count > 0 else { return UdimLayout(tiles: [], unaddressableFaces: 0) }
+        var numbers = [Int32](repeating: 0, count: count)
+        try numbers.withUnsafeMutableBufferPointer {
+            try CyberError.check(
+                cyber_udim_tiles(handle, $0.baseAddress, count, &count, &unaddressable))
+        }
+        return UdimLayout(tiles: numbers.map(Int.init),
+                          unaddressableFaces: Int(unaddressable))
+    }
+
+    /// Bake `map` from `high` once per occupied UDIM tile of this mesh's layout.
+    ///
+    /// The acceleration structure over `high` is built ONCE and shared by every
+    /// tile, so the rays cast for ambient occlusion, bent normal and thickness
+    /// see the WHOLE mesh whatever tile is being written — geometry whose UVs
+    /// lie in another tile still occludes.
+    ///
+    /// Every parameter `bake(from:map:parameters:)` validates is validated here
+    /// identically, and the host's texel ceiling applies PER TILE and IN
+    /// AGGREGATE; a refusal throws, and `CyberError`'s message names which of
+    /// the two ceilings it hit.
+    public func bakeUdim(
+        from high: Mesh, map: BakeMap, parameters: BakeParameters = BakeParameters()
+    ) throws -> [UdimTileBake] {
+        var params = parameters.cValue
+        var refusal: Int32 = 0
+        var set: OpaquePointer?
+        try CyberError.check(
+            cyber_bake_udim(handle, high.handle, CyberBakeMap(rawValue: map.rawValue), &params,
+                            &refusal, &set))
+        guard let set else { throw CyberError.outOfMemory }
+        defer { cyber_udim_bake_free(set) }
+        var tiles: [UdimTileBake] = []
+        for index in 0..<cyber_udim_bake_count(set) {
+            var number: Int32 = 0
+            try CyberError.check(cyber_udim_bake_tile(set, index, &number))
+            var image: OpaquePointer?
+            try CyberError.check(cyber_udim_bake_image(set, index, &image))
+            guard let image else { throw CyberError.outOfMemory }
+            tiles.append(UdimTileBake(tile: Int(number), image: Image(owning: image)))
+        }
+        return tiles
+    }
+}
+
 // MARK: - Bake provider
 
 /// One map this build produces, as the capability query reports it.

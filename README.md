@@ -736,6 +736,71 @@ through `cyber_image_padding` / `cyber_bundle_result_file_padding`,
 "padding": { "radius": 8, "mode": "extrapolate-unit", "texelsFilled": 625 }
 ```
 
+#### UDIM: one map per occupied tile
+
+A production asset with more than one texture set's worth of detail is laid out
+across **UDIM tiles**: the tile whose UV origin is `(u, v)` is tile
+`1001 + u + 10*v`, so the unit square is tile **1001** — and an ordinary bake is
+the tile-1001 case of a UDIM one rather than a different kind of thing.
+
+Ask what a layout occupies before allocating anything:
+
+```sh
+cyberremesh --input sculpt.obj --output out/hero.obj \
+            --preset mine.json --udim --report out/run.json
+```
+
+```python
+layout = cyberremesh.udim_tiles(mesh)      # (1001, 1002, 1011), ascending
+layout.unaddressable_faces                 # faces no tile number can address
+for entry in cyberremesh.bake_udim(low, high, cyberremesh.BakeMap.AO, params):
+    entry.image.save_png(f"ao.{entry.tile}.png")
+```
+
+Occupancy is an **exact triangle-vs-tile overlap test**, not a bounding box, and
+allocation is for occupied tiles **only**: a mesh occupying three tiles of a
+possible hundred costs three. UVs outside the addressable grid (`u` beyond
+`[0, 9]`, or a negative `v`) are **counted and reported**, never silently
+dropped.
+
+**The rays see the whole mesh.** This is what the feature turns on. A per-tile
+loop that rebuilds the acceleration structure from the faces whose UVs lie in
+the tile being written produces occlusion that is entirely plausible and
+entirely false — an arm stops shadowing a torso the moment the two are packed
+into different tiles — and nothing about the output reveals it. The BVH, the
+Target's normals, its curvature field, its object-space bounds and its id column
+are built **once for the whole set**; only the set of texels written varies.
+
+Everything derived from the mesh rather than from a texel therefore describes
+the **whole set**: one object-space box, so an `object-position` map decodes the
+same in every tile; one id-to-colour table, so a material is the same colour in
+tile 1001 and tile 1002 and a host's saved selection survives crossing a tile;
+and a `relative` UV-density map divides by the mean of the whole set, because a
+per-tile mean would report every tile as average. Padding runs **per tile and
+stops at the tile border** — a band grows from its own tile's covered texels and
+from nothing else, so no neighbour bleeds across a seam.
+
+The texel ceiling applies **per tile and in aggregate**, and a refusal names
+which of the two it hit: "this tile is too big" and "this many tiles of this size
+are too many" have different fixes.
+
+Naming: put **`{udim}`** in the preset's `namingPattern`.
+
+```json
+{ "schemaVersion": 1, "name": "mine", "namingPattern": "{basename}.{map}.{udim}.{ext}",
+  "maps": ["normal", "ao"] }
+```
+
+The token expands to the tile being written, and to **`1001`** for an export
+that is not UDIM-aware — so one preset serves both. A multi-tile export through
+a pattern **without** the token is refused before anything is written: every tile
+would otherwise land on one path, each overwriting the last, while the report
+listed them all.
+
+The UV packer targets the unit square, which is tile 1001; a multi-tile layout is
+authored or arrives with an imported mesh, and baking reads whatever tiles the
+layout occupies with no packing step in between.
+
 #### The bake provider: asking this engine for a map
 
 `cyber_bake` is a bake *call*. A texture-painting stage such as

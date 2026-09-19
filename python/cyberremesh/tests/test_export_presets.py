@@ -328,6 +328,59 @@ def check_bundle_id_table(tmpdir: str) -> None:
           "and the sRGB request is refused")
 
 
+def check_bundle_udim(tmpdir: str) -> None:
+    """One file per occupied tile, and the refusal when the pattern names none.
+
+    The preset the bundle is given here has an explicit `{udim}` token; the
+    default patterns carry none, which is exactly the case the second half
+    checks, because every tile would otherwise be written to one path.
+    """
+    from cyberremesh import ExportPreset, Mesh, udim_tiles, write_bundle
+
+    two_tiles = (
+        "v 0 0 0\nv 1 0 0\nv 1 1 0\nv 0 1 0\n"
+        "v 3 0 0\nv 4 0 0\nv 4 1 0\nv 3 1 0\n"
+        "vt 0.1 0.1\nvt 0.9 0.1\nvt 0.9 0.9\nvt 0.1 0.9\n"
+        "vt 1.1 0.1\nvt 1.9 0.1\nvt 1.9 0.9\nvt 1.1 0.9\n"
+        "f 1/1 2/2 3/3 4/4\nf 5/5 6/6 7/7 8/8\n"
+    )
+    low_path = write(tmpdir, "udim_low.obj", two_tiles)
+    out_dir = os.path.join(tmpdir, "bundle_udim")
+    os.makedirs(out_dir, exist_ok=True)
+    preset_path = write(tmpdir, "udim_preset.json", json.dumps({
+        "schemaVersion": 1, "name": "udim", "resolution": 16,
+        "namingPattern": "{basename}.{map}.{udim}.{ext}", "maps": ["curvature"],
+    }))
+
+    with Mesh.load_obj(low_path) as low, Mesh.load_obj(low_path) as high:
+        assert udim_tiles(low).tiles == (1001, 1002), udim_tiles(low).tiles
+        with ExportPreset.resolve(preset_path) as preset:
+            result = write_bundle(low, high, preset, os.path.join(out_dir, "hero.obj"),
+                                  cage_distance=0.2, udim=True)
+    # The layout query is `udim_tiles` above -- the bundle result does not
+    # duplicate it; what it adds is which tile each FILE holds.
+    tiles = sorted(entry.udim_tile for entry in result.files if entry.width > 0)
+    assert tiles == [1001, 1002], tiles
+    assert os.path.exists(os.path.join(out_dir, "hero.curvature.1001.png")), os.listdir(out_dir)
+    assert os.path.exists(os.path.join(out_dir, "hero.curvature.1002.png")), os.listdir(out_dir)
+
+    # The same layout through a pattern that names no tile: refused, not
+    # silently collapsed onto one path.
+    refused_dir = os.path.join(tmpdir, "bundle_udim_refused")
+    os.makedirs(refused_dir, exist_ok=True)
+    with Mesh.load_obj(low_path) as low, Mesh.load_obj(low_path) as high:
+        with ExportPreset.resolve("blender") as preset:
+            preset.resolution = 16
+            try:
+                write_bundle(low, high, preset, os.path.join(refused_dir, "hero.obj"),
+                             cage_distance=0.2, udim=True)
+                raise AssertionError("a multi-tile bundle without {udim} was not refused")
+            except cyberremesh.CyberError as error:
+                assert "{udim}" in str(error), str(error)
+    assert not os.path.exists(os.path.join(refused_dir, "hero.obj")), os.listdir(refused_dir)
+    print("PASS bundle: one file per occupied tile, and a pattern naming no tile is refused")
+
+
 def main() -> int:
     if not cyberremesh.is_available():
         print("SKIP: cyber_capi shared library not loadable")
@@ -341,6 +394,7 @@ def main() -> int:
         check_bundle(tmpdir)
         check_bundle_unwraps_and_warns(tmpdir)
         check_bundle_id_table(tmpdir)
+        check_bundle_udim(tmpdir)
     except cyberremesh.CyberError as exc:
         # A build without the UV module has the preset DATA but no bundle
         # writer; that is a configuration, not a failure.

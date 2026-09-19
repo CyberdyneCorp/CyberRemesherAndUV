@@ -3916,6 +3916,106 @@ def bake(low: "Mesh", high: "Mesh", bake_map: int = BakeMap.NORMAL,
 
 
 # ---------------------------------------------------------------------------
+# UDIM-aware baking (surface-baking, "UDIM-aware baking")
+# ---------------------------------------------------------------------------
+
+
+class UdimRefusal:
+    """Why a UDIM bake produced no images (mirror of ``CyberUdimRefusal``).
+
+    The two ceilings are deliberately distinct: "this tile is too big" and
+    "this many tiles of this size are too many" are different problems with
+    different fixes, and one value covering both would tell a host neither.
+    """
+
+    OK = 0
+    PARAMETERS = 1
+    NO_OCCUPIED_TILES = 2
+    PER_TILE_CEILING = 3
+    AGGREGATE_CEILING = 4
+    FIELD_CONTRACT = 5
+
+
+@dataclass(frozen=True)
+class UdimLayout:
+    """What a UV layout occupies, answerable WITHOUT baking."""
+
+    #: Occupied tile numbers, ASCENDING, under the ``1001 + u + 10*v`` numbering.
+    tiles: Tuple[int, ...]
+    #: Faces carrying a UV coordinate no tile number can address (``u`` outside
+    #: ``[0, 9]``, or a negative ``v``). Counted rather than dropped, so a layout
+    #: in a convention this numbering cannot express is visible.
+    unaddressable_faces: int
+
+
+def udim_tiles(mesh: "Mesh") -> UdimLayout:
+    """The occupied UDIM tiles of ``mesh``'s UV layout, without baking anything.
+
+    A host has to be able to show what it is about to allocate. A mesh with no
+    UV layout reports no tiles rather than raising.
+    """
+    lib = _ffi.get_lib()
+    count = ctypes.c_size_t()
+    unaddressable = ctypes.c_uint64()
+    _check(lib.cyber_udim_tiles(mesh.handle, None, 0, ctypes.byref(count),
+                                ctypes.byref(unaddressable)))
+    n = int(count.value)
+    buf = (ctypes.c_int32 * n)() if n > 0 else None
+    if n > 0:
+        _check(lib.cyber_udim_tiles(mesh.handle, buf, n, ctypes.byref(count),
+                                    ctypes.byref(unaddressable)))
+    return UdimLayout(tiles=tuple(int(buf[i]) for i in range(n)) if n else (),
+                      unaddressable_faces=int(unaddressable.value))
+
+
+@dataclass(frozen=True)
+class UdimTileBake:
+    """One tile of a UDIM bake."""
+
+    #: The tile number, under the ``1001 + u + 10*v`` numbering.
+    tile: int
+    image: Image
+
+
+def bake_udim(low: "Mesh", high: "Mesh", bake_map: int = BakeMap.NORMAL,
+              params: Optional[BakeParams] = None) -> List[UdimTileBake]:
+    """Bake ``bake_map`` once per occupied UDIM tile of ``low``'s UV layout.
+
+    The acceleration structure over ``high`` is built ONCE and shared by every
+    tile, so the rays cast for ambient occlusion, bent normal and thickness see
+    the WHOLE mesh whatever tile is being written -- geometry whose UVs lie in
+    another tile still occludes.
+
+    Every parameter :func:`bake` validates is validated here identically, and
+    the host's texel ceiling applies PER TILE and IN AGGREGATE. A refusal raises
+    :class:`CyberError` whose message names which of the two it hit.
+    """
+    if params is None:
+        params = BakeParams()
+    lib = _ffi.get_lib()
+    c_params = params._to_c()
+    refusal = ctypes.c_int32()
+    out = ctypes.c_void_p()
+    status = lib.cyber_bake_udim(low.handle, high.handle, int(bake_map),
+                                 ctypes.byref(c_params), ctypes.byref(refusal),
+                                 ctypes.byref(out))
+    _check(status)
+    if not out.value:
+        raise CyberError(_ffi.STATUS_ERROR, _last_error() or "UDIM bake produced no image")
+    try:
+        tiles: List[UdimTileBake] = []
+        for i in range(int(lib.cyber_udim_bake_count(out))):
+            number = ctypes.c_int32()
+            _check(lib.cyber_udim_bake_tile(out, i, ctypes.byref(number)))
+            image = ctypes.c_void_p()
+            _check(lib.cyber_udim_bake_image(out, i, ctypes.byref(image)))
+            tiles.append(UdimTileBake(tile=int(number.value), image=Image(image.value)))
+        return tiles
+    finally:
+        lib.cyber_udim_bake_free(out)
+
+
+# ---------------------------------------------------------------------------
 # Bake provider (engine-bindings, pipeline-bridge)
 # ---------------------------------------------------------------------------
 
@@ -4592,6 +4692,10 @@ class BundleFile:
     #: What the border-padding stage did. The mesh entry carries
     #: :attr:`PaddingMode.NONE` with a zero radius.
     padding: ImagePadding = ImagePadding(radius=0, mode=_ffi.PADDING_NONE, texels_filled=0)
+    #: The UDIM tile this file holds, under the ``1001 + u + 10*v`` numbering.
+    #: 1001 for the mesh row and for any map baked over the unit square, because
+    #: the unit square IS tile 1001.
+    udim_tile: int = 1001
 
 
 @dataclass(frozen=True)
@@ -4630,6 +4734,7 @@ def write_bundle(
     padding_radius: Optional[int] = None,
     placement: Optional[Sequence[float]] = None,
     density_normalization: Optional[int] = None,
+    udim: bool = False,
     progress: Optional[Callable[[float, str], None]] = None,
     cancel: Optional[Callable[[], bool]] = None,
 ) -> BundleResult:
@@ -4671,6 +4776,7 @@ def write_bundle(
         params.placement = _placement_to_c(placement)
     if density_normalization is not None:
         params.density_normalization = int(density_normalization)
+    params.udim = 1 if udim else 0
 
     def _progress_trampoline(fraction, stage_ptr, _user):
         if progress is None:
@@ -4715,6 +4821,8 @@ def write_bundle(
             _check(lib.cyber_bundle_result_file_encoding(out, i, ctypes.byref(encoding)))
             padding = _ffi.CyberImagePadding()
             _check(lib.cyber_bundle_result_file_padding(out, i, ctypes.byref(padding)))
+            tile = ctypes.c_int32()
+            _check(lib.cyber_bundle_result_file_udim_tile(out, i, ctypes.byref(tile)))
             source = lib.cyber_bundle_result_file_id_source(out, i) or b""
             colors = []
             for c in range(int(lib.cyber_bundle_result_file_id_color_count(out, i))):
@@ -4737,6 +4845,7 @@ def write_bundle(
                     encoding=ImageEncoding._from_c(encoding, source.decode("utf-8"),
                                                    tuple(colors)),
                     padding=ImagePadding._from_c(padding),
+                    udim_tile=int(tile.value),
                 )
             )
         messages: List[str] = []
