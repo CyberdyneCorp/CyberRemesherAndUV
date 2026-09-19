@@ -365,4 +365,105 @@ struct BakeResult {
                               const BakeParams& params, ProgressSink* progress = nullptr,
                               const CancelToken* cancel = nullptr);
 
+// ---- UDIM (surface-baking spec, "UDIM-aware baking") ---------------------
+//
+// One tile of the standard UDIM grid: the tile whose UV origin is (u, v), so it
+// covers [u, u+1) x [v, v+1). `number` is 1001 + u + 10*v, which makes the unit
+// square tile 1001 -- and therefore makes an ordinary bake the tile-1001 case of
+// a UDIM one rather than a different kind of thing.
+struct UdimTile {
+    int u = 0;
+    int v = 0;
+    int number = 1001;
+};
+
+// The grid that numbering can address. `u` is base-10 in the formula, so only
+// [0, 9] has a tile number, and a negative `v` has none either. The upper bound
+// on `v` is a CHOICE -- the numbering itself is unbounded -- and 999 reaches
+// tile 10990, past every convention in use, while stopping a layout that holds
+// v = 1000000 from being read as a request for a million images.
+inline constexpr int kUdimMaxU = 9;
+inline constexpr int kUdimMaxV = 999;
+
+[[nodiscard]] constexpr int udimTileNumber(int u, int v) { return 1001 + u + 10 * v; }
+
+// What a UV layout occupies, answerable WITHOUT baking: a host has to be able to
+// show what it is about to allocate, and a refusal has to be able to name what
+// it was asked for.
+struct UdimLayout {
+    // Occupied tiles, ASCENDING BY NUMBER -- a stable ordered key, never a
+    // container's iteration order. A tile counts as occupied when a triangle of
+    // the layout OVERLAPS it, not when a triangle's UV bounding box touches it:
+    // every tile reported here is an image allocated, so an over-reporting test
+    // would break the cost guarantee ("three tiles of a possible hundred cost
+    // three") rather than merely waste a little work.
+    std::vector<UdimTile> tiles;
+    // Faces carrying a UV corner no 1001 + u + 10*v tile can address. Counted
+    // rather than dropped: a layout authored in a convention this numbering
+    // cannot express would otherwise bake with a quietly missing region.
+    std::size_t unaddressableFaces = 0;
+};
+
+[[nodiscard]] UdimLayout udimTiles(const Mesh& mesh);
+
+// Why a UDIM bake produced no images. `Parameters` is the same rejection bake()
+// makes silently (missing UVs, a parameter out of range, no Target); the two
+// ceilings are deliberately DISTINCT, because "this tile is too big" and "this
+// many tiles of this size are too many" are different problems with different
+// fixes and one message covering both tells a host neither.
+enum class UdimRefusal {
+    None,
+    Parameters,
+    NoOccupiedTiles,
+    PerTileCeiling,
+    AggregateCeiling,
+    // A field evaluator broke its contract while a tile was being shaded. The
+    // whole set is abandoned, as a broken contract abandons a single bake:
+    // a host's broken callback must not come back as a plausible map, and it
+    // must not come back as a plausible map for SOME of the tiles either.
+    FieldContract,
+};
+
+// Which texel ceiling, if either, baking `tiles` tiles at these parameters
+// trips, and the sentence that says so. `tiles` is 1 for an ordinary,
+// single-image bake, which is why this answers for both.
+//
+// Public because the ceiling is not only bakeUdim's business: a caller that
+// bakes a SET of maps -- the export bundle -- has to refuse BEFORE it writes
+// the first file, and it must refuse with the same rule and the same words
+// rather than a second, drifting copy of them. `maxPixels == 0` (no ceiling) or
+// a degenerate size answers None.
+struct UdimCeiling {
+    UdimRefusal refusal = UdimRefusal::None;
+    std::string message;  // empty when `refusal` is None
+};
+
+[[nodiscard]] UdimCeiling udimCeiling(const BakeParams& params, std::size_t tiles);
+
+struct UdimTileBake {
+    UdimTile tile;
+    BakeResult result;
+};
+
+struct UdimBakeResult {
+    // Filled even when the bake is refused: detection runs before baking starts.
+    UdimLayout layout;
+    // One entry per occupied tile, in the layout's order. Empty on a refusal or
+    // a cancellation -- a partial set is never returned as though it succeeded.
+    std::vector<UdimTileBake> tiles;
+    UdimRefusal refusal = UdimRefusal::None;
+    std::string refusalMessage;
+    bool cancelled = false;
+};
+
+// Bakes `map` once per occupied tile of `lowPoly`'s UV layout. The acceleration
+// structure over `highPoly` is built ONCE and shared by every tile, so the rays
+// cast for ambient occlusion, bent normal and thickness see the WHOLE mesh
+// whatever tile is being written -- geometry whose UVs lie in another tile still
+// occludes. Progress covers the whole set and cancellation is polled between
+// tiles as well as inside one.
+[[nodiscard]] UdimBakeResult bakeUdim(const Mesh& lowPoly, const Mesh& highPoly, BakeMap map,
+                                      const BakeParams& params, ProgressSink* progress = nullptr,
+                                      const CancelToken* cancel = nullptr);
+
 }  // namespace cyber::bake

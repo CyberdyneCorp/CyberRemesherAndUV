@@ -5373,6 +5373,189 @@ CyberStatus cyber_bake(const CyberMesh* low, const CyberMesh* high, CyberBakeMap
     }
 }
 
+// ---- UDIM-aware baking ---------------------------------------------------
+
+struct CyberUdimBake {
+    cyber::bake::UdimBakeResult result;
+};
+
+namespace {
+
+// The C refusal code for an engine refusal. One switch, so the header's enum and
+// the engine's stay in step instead of drifting through an int cast.
+int toCUdimRefusal(cyber::bake::UdimRefusal refusal) {
+    switch (refusal) {
+        case cyber::bake::UdimRefusal::None:
+            return CYBER_UDIM_OK;
+        case cyber::bake::UdimRefusal::Parameters:
+            return CYBER_UDIM_PARAMETERS;
+        case cyber::bake::UdimRefusal::NoOccupiedTiles:
+            return CYBER_UDIM_NO_OCCUPIED_TILES;
+        case cyber::bake::UdimRefusal::PerTileCeiling:
+            return CYBER_UDIM_PER_TILE_CEILING;
+        case cyber::bake::UdimRefusal::AggregateCeiling:
+            return CYBER_UDIM_AGGREGATE_CEILING;
+        case cyber::bake::UdimRefusal::FieldContract:
+            return CYBER_UDIM_FIELD_CONTRACT;
+    }
+    return CYBER_UDIM_PARAMETERS;
+}
+
+// The status a refusal comes back as. A parameter out of range is the caller's
+// argument; a ceiling is this host's policy and a layout that addresses no tile
+// is an empty result, which is what cyber_bake already reports for a bake that
+// produced nothing.
+CyberStatus udimStatus(cyber::bake::UdimRefusal refusal) {
+    switch (refusal) {
+        case cyber::bake::UdimRefusal::Parameters:
+            return CYBER_ERR_INVALID_ARG;
+        case cyber::bake::UdimRefusal::NoOccupiedTiles:
+            return CYBER_ERR_EMPTY;
+        case cyber::bake::UdimRefusal::None:
+        case cyber::bake::UdimRefusal::PerTileCeiling:
+        case cyber::bake::UdimRefusal::AggregateCeiling:
+        case cyber::bake::UdimRefusal::FieldContract:
+            break;
+    }
+    return CYBER_ERR_RUNTIME;
+}
+
+}  // namespace
+
+CyberStatus cyber_udim_tiles(const CyberMesh* mesh, int* out_tiles, size_t capacity,
+                             size_t* out_count, uint64_t* out_unaddressable_faces) {
+    if (mesh == nullptr || out_count == nullptr) {
+        setError("cyber_udim_tiles: null argument");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    if (out_tiles == nullptr && capacity != 0) {
+        setError("cyber_udim_tiles: null out_tiles with a non-zero capacity");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    try {
+        const cyber::bake::UdimLayout layout = cyber::bake::udimTiles(mesh->mesh);
+        *out_count = layout.tiles.size();
+        if (out_unaddressable_faces != nullptr) {
+            *out_unaddressable_faces = static_cast<uint64_t>(layout.unaddressableFaces);
+        }
+        const size_t copied = std::min(capacity, layout.tiles.size());
+        for (size_t i = 0; i < copied; ++i) {
+            out_tiles[i] = layout.tiles[i].number;
+        }
+        clearError();
+        return CYBER_OK;
+    } catch (const std::exception& e) {
+        setError(std::string("cyber_udim_tiles: ") + e.what());
+        return CYBER_ERR_RUNTIME;
+    } catch (...) {
+        setError("cyber_udim_tiles: unknown error");
+        return CYBER_ERR_RUNTIME;
+    }
+}
+
+CyberStatus cyber_bake_udim(const CyberMesh* low, const CyberMesh* high, CyberBakeMap map,
+                            const CyberBakeParams* params, int* out_refusal, CyberUdimBake** out) {
+    if (out_refusal != nullptr) {
+        *out_refusal = CYBER_UDIM_OK;
+    }
+    if (low == nullptr || high == nullptr || out == nullptr) {
+        setError("cyber_bake_udim: null argument");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    try {
+        // Resolved BEFORE the parameters, because which parameters are read --
+        // and therefore which are validated -- depends on the map. The same
+        // order, and the same validation, cyber_bake applies.
+        cyber::bake::BakeMap m{};
+        if (!toBakeMap(map, m)) {
+            setError("cyber_bake_udim: unknown map type");
+            return CYBER_ERR_INVALID_ARG;
+        }
+        cyber::bake::BakeParams p;
+        if (!applyBakeParams(params, p, m, "cyber_bake_udim")) {
+            return CYBER_ERR_INVALID_ARG;
+        }
+        // The ceiling is handed to the engine rather than pre-checked here: it
+        // is the engine that knows the tile count, and it is the engine that
+        // says WHICH of the two ceilings a request tripped.
+        p.maxPixels = static_cast<std::size_t>(cyber_max_bake_pixels());
+        cyber::bake::UdimBakeResult result =
+            cyber::bake::bakeUdim(low->mesh, high->mesh, m, p);
+        if (result.cancelled) {
+            setError("cyber_bake_udim: cancelled");
+            return CYBER_ERR_CANCELLED;
+        }
+        if (result.refusal != cyber::bake::UdimRefusal::None) {
+            if (out_refusal != nullptr) {
+                *out_refusal = toCUdimRefusal(result.refusal);
+            }
+            setError("cyber_bake_udim: " + result.refusalMessage);
+            return udimStatus(result.refusal);
+        }
+        auto handle = std::make_unique<CyberUdimBake>();
+        handle->result = std::move(result);
+        clearError();
+        *out = handle.release();
+        return CYBER_OK;
+    } catch (const std::exception& e) {
+        setError(std::string("cyber_bake_udim: ") + e.what());
+        return CYBER_ERR_RUNTIME;
+    } catch (...) {
+        setError("cyber_bake_udim: unknown error");
+        return CYBER_ERR_RUNTIME;
+    }
+}
+
+size_t cyber_udim_bake_count(const CyberUdimBake* bake) {
+    return bake == nullptr ? 0 : bake->result.tiles.size();
+}
+
+CyberStatus cyber_udim_bake_tile(const CyberUdimBake* bake, size_t index, int* out_tile) {
+    if (bake == nullptr || out_tile == nullptr) {
+        setError("cyber_udim_bake_tile: null argument");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    if (index >= bake->result.tiles.size()) {
+        setError("cyber_udim_bake_tile: index out of range");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    *out_tile = bake->result.tiles[index].tile.number;
+    clearError();
+    return CYBER_OK;
+}
+
+CyberStatus cyber_udim_bake_image(const CyberUdimBake* bake, size_t index, CyberImage** out) {
+    if (bake == nullptr || out == nullptr) {
+        setError("cyber_udim_bake_image: null argument");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    if (index >= bake->result.tiles.size()) {
+        setError("cyber_udim_bake_image: index out of range");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    try {
+        const cyber::bake::BakeResult& tile = bake->result.tiles[index].result;
+        auto handle = std::make_unique<CyberImage>();
+        // COPIED, not moved: the set stays valid and re-readable after a tile
+        // has been handed out, which is what lets a host pull one tile, write
+        // it, free it and come back for the next.
+        handle->image = tile.image;
+        handle->encoding = tile.encoding;
+        handle->padding = tile.padding;
+        clearError();
+        *out = handle.release();
+        return CYBER_OK;
+    } catch (const std::exception& e) {
+        setError(std::string("cyber_udim_bake_image: ") + e.what());
+        return CYBER_ERR_RUNTIME;
+    } catch (...) {
+        setError("cyber_udim_bake_image: unknown error");
+        return CYBER_ERR_RUNTIME;
+    }
+}
+
+void cyber_udim_bake_free(CyberUdimBake* bake) { delete bake; }
+
 CyberStatus cyber_image_encoding(const CyberImage* image, CyberImageEncoding* out) {
     if (image == nullptr || out == nullptr) {
         setError("cyber_image_encoding: null argument");
@@ -6309,6 +6492,9 @@ struct CyberBundleResult {
         // and read through cyber_bundle_result_file_id_*.
         std::string idSource;
         std::vector<cyber::bake::IdColorEntry> idColors;
+        // The UDIM tile this file holds. 1001 for the mesh entry and for every
+        // map of a non-UDIM bundle, because the unit square IS tile 1001.
+        int udimTile = 1001;
     };
     std::vector<File> files;
     std::vector<std::string> warnings;
@@ -6486,6 +6672,7 @@ void cyber_default_bundle_params(CyberBundleParams* params) {
         defaults.densityNormalization == cyber::bake::DensityNormalization::Relative
             ? CYBER_DENSITY_RELATIVE
             : CYBER_DENSITY_ABSOLUTE;
+    params->udim = defaults.udim ? 1 : 0;
 #else
     params->cageDistance = 0.1f;
     params->aoSamples = 64;
@@ -6495,6 +6682,7 @@ void cyber_default_bundle_params(CyberBundleParams* params) {
     params->paddingRadius = 8;
     copyPlacement(cyber::bake::identityPlacement(), params->placement);
     params->densityNormalization = CYBER_DENSITY_ABSOLUTE;
+    params->udim = 0;
 #endif
 }
 
@@ -6581,6 +6769,12 @@ CyberStatus cyber_export_bundle_write([[maybe_unused]] CyberMesh* low,
                                            ? cyber::bake::NormalSpace::Object
                                            : cyber::bake::NormalSpace::Tangent;
         bundleParams.thicknessScale = params->thicknessScale;
+        bundleParams.udim = params->udim != 0;
+        // The host's texel ceiling, exactly as cyber_bake, cyber_bake_field and
+        // cyber_bake_udim apply it. A bundle is a batch of bakes and a UDIM
+        // bundle multiplies the exposure by the occupied-tile count, so the
+        // ceiling an embedder set to bound ONE map has to bound this too.
+        bundleParams.maxPixels = static_cast<std::size_t>(cyber_max_bake_pixels());
 
         const cyber::CancelToken token;
         token.setPoll([cancel, user]() { return cancel != nullptr && cancel(user) != 0; });
@@ -6608,7 +6802,8 @@ CyberStatus cyber_export_bundle_write([[maybe_unused]] CyberMesh* low,
                                      .encoding = toCEncoding(file.encoding),
                                      .padding = toCPadding(file.padding),
                                      .idSource = file.encoding.idSource,
-                                     .idColors = file.encoding.idColors});
+                                     .idColors = file.encoding.idColors,
+                                     .udimTile = file.udimTile});
         }
         handle->warnings = result.warnings;
         handle->unwrapped = result.unwrapped;
@@ -6672,6 +6867,21 @@ CyberStatus cyber_bundle_result_file_padding(const CyberBundleResult* result, si
         return CYBER_ERR_INVALID_ARG;
     }
     *out = result->files[index].padding;
+    clearError();
+    return CYBER_OK;
+}
+
+CyberStatus cyber_bundle_result_file_udim_tile(const CyberBundleResult* result, size_t index,
+                                               int* out_tile) {
+    if (result == nullptr || out_tile == nullptr) {
+        setError("cyber_bundle_result_file_udim_tile: null argument");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    if (index >= result->files.size()) {
+        setError("cyber_bundle_result_file_udim_tile: index out of range");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    *out_tile = result->files[index].udimTile;
     clearError();
     return CYBER_OK;
 }

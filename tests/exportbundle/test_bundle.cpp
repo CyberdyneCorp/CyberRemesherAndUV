@@ -600,3 +600,188 @@ TEST_CASE("a bundle pads each map by the rule its channel semantics ask for") {
         CHECK(file.padding.mode == cyber::bake::PaddingMode::None);
     }
 }
+
+// ---- UDIM (surface-baking, "UDIM-aware baking"; mesh-io, "{udim}") --------
+
+namespace {
+
+// Two coplanar quads whose UVs sit in tiles 1001 and 1002. Explicit UVs, so the
+// bundle takes the layout as authored instead of unwrapping it into one tile.
+Mesh twoTileSurface(float z) {
+    const std::vector<Vec3> p = {{0, 0, z}, {1, 0, z}, {1, 1, z}, {0, 1, z},
+                                 {2, 0, z}, {3, 0, z}, {3, 1, z}, {2, 1, z}};
+    const std::vector<std::vector<Index>> faces = {{0, 1, 2, 3}, {4, 5, 6, 7}};
+    Mesh mesh = Mesh::fromIndexed(p, faces);
+    auto& uv = mesh.cornerAttributes().create<cyber::Vec2>(io::kUvAttribute);
+    const std::array<cyber::Vec2, 4> corners{cyber::Vec2{0.1f, 0.1f}, cyber::Vec2{0.9f, 0.1f},
+                                             cyber::Vec2{0.9f, 0.9f}, cyber::Vec2{0.1f, 0.9f}};
+    for (Index fi = 0; fi < mesh.faceCapacity(); ++fi) {
+        const cyber::FaceId face{fi};
+        if (!mesh.isAlive(face)) {
+            continue;
+        }
+        const float shift = fi == 0 ? 0.0f : 1.0f;  // face 1 goes to tile 1002
+        std::size_t corner = 0;
+        for (const cyber::LoopId l : mesh.faceLoops(face)) {
+            uv[l.value] = corners[corner] + cyber::Vec2{shift, 0.0f};
+            ++corner;
+        }
+    }
+    return mesh;
+}
+
+}  // namespace
+
+TEST_CASE("a bundle reports the occupied tiles even when it is not UDIM-aware") {
+    const fs::path dir = testDir("udim_report");
+    Mesh low = twoTileSurface(0.0f);
+    const Mesh high = twoTileSurface(0.02f);
+
+    const bundle::BundleResult result =
+        bundle::writeBundle(low, high, paramsFor(smallPreset("t", io::GreenChannel::PlusY), dir));
+    REQUIRE(result.ok);
+    CHECK(result.udimTiles == std::vector<int>{1001, 1002});
+    CHECK(result.udimUnaddressableFaces == 0);
+    // Not UDIM-aware: still one file per map, and the row names tile 1001,
+    // because the unit square IS that tile.
+    CHECK(kindsOf(result) == std::vector<std::string>{"mesh", "normal", "curvature"});
+    for (const bundle::BundleFile& file : result.files) {
+        CHECK(file.udimTile == 1001);
+    }
+    fs::remove_all(dir);
+}
+
+TEST_CASE("a UDIM bundle writes one file per tile, named by the tile token") {
+    const fs::path dir = testDir("udim_write");
+    Mesh low = twoTileSurface(0.0f);
+    const Mesh high = twoTileSurface(0.02f);
+
+    io::ExportPreset preset = smallPreset("t", io::GreenChannel::PlusY);
+    preset.namingPattern = "{basename}_{map}.{udim}.{ext}";
+    bundle::BundleParams params = paramsFor(preset, dir);
+    params.udim = true;
+
+    const bundle::BundleResult result = bundle::writeBundle(low, high, params);
+    REQUIRE(result.ok);
+    CHECK(result.udimTiles == std::vector<int>{1001, 1002});
+    REQUIRE(result.files.size() == 5);  // the mesh plus two maps in two tiles
+    CHECK(fs::exists(dir / "hero_normal.1001.png"));
+    CHECK(fs::exists(dir / "hero_normal.1002.png"));
+    CHECK(fs::exists(dir / "hero_curvature.1001.png"));
+    CHECK(fs::exists(dir / "hero_curvature.1002.png"));
+
+    std::vector<int> tiles;
+    for (const bundle::BundleFile& file : result.files) {
+        if (file.kind == "normal") {
+            tiles.push_back(file.udimTile);
+        }
+    }
+    CHECK(tiles == std::vector<int>{1001, 1002});
+    fs::remove_all(dir);
+}
+
+TEST_CASE("a multi-tile bundle through a pattern without the tile token is refused") {
+    const fs::path dir = testDir("udim_no_token");
+    Mesh low = twoTileSurface(0.0f);
+    const Mesh high = twoTileSurface(0.02f);
+
+    // The default pattern carries no {udim}: both tiles would land on one path.
+    bundle::BundleParams params = paramsFor(smallPreset("t", io::GreenChannel::PlusY), dir);
+    params.udim = true;
+
+    const bundle::BundleResult result = bundle::writeBundle(low, high, params);
+    CHECK_FALSE(result.ok);
+    CHECK(result.error.find("{udim}") != std::string::npos);
+    CHECK(result.error.find(params.preset.namingPattern) != std::string::npos);
+    // Refused BEFORE anything was written, so no half-set is left behind.
+    CHECK_FALSE(fs::exists(dir / "hero.obj"));
+    CHECK(result.files.empty());
+    fs::remove_all(dir);
+}
+
+TEST_CASE("a single-tile UDIM bundle needs no tile token") {
+    const fs::path dir = testDir("udim_single");
+    Mesh low = makeSurface(0.0f);
+    const Mesh high = makeSurface(0.02f);
+
+    bundle::BundleParams params = paramsFor(smallPreset("t", io::GreenChannel::PlusY), dir);
+    params.udim = true;
+
+    const bundle::BundleResult result = bundle::writeBundle(low, high, params);
+    REQUIRE(result.ok);
+    CHECK(result.udimTiles == std::vector<int>{1001});
+    CHECK(kindsOf(result) == std::vector<std::string>{"mesh", "normal", "curvature"});
+    CHECK(fs::exists(dir / "hero_normal.png"));
+    fs::remove_all(dir);
+}
+
+// ---- the texel ceiling on the bundle path --------------------------------
+//
+// The ceiling is the EMBEDDER's policy (the C ABI sets it from
+// cyber_max_bake_pixels()), and a UDIM bundle multiplies the exposure by the
+// occupied-tile count -- up to the whole addressable grid times resolution^2 --
+// so it has to bind here and not only in bake::bakeUdim().
+
+TEST_CASE("a bundle whose preset is over the per-tile ceiling is refused, writing nothing") {
+    const fs::path dir = testDir("udim_per_tile_ceiling");
+    Mesh low = makeSurface(0.0f);
+    const Mesh high = makeSurface(0.02f);
+
+    bundle::BundleParams params = paramsFor(smallPreset("t", io::GreenChannel::PlusY), dir);
+    params.maxPixels = 32 * 32 - 1;  // below the preset's own 32x32
+
+    const bundle::BundleResult result = bundle::writeBundle(low, high, params);
+    CHECK_FALSE(result.ok);
+    CHECK(result.error.find("PER-TILE") != std::string::npos);
+    CHECK(result.error.find(params.preset.name) != std::string::npos);
+    // Refused before anything was written: not even the mesh.
+    CHECK(result.files.empty());
+    CHECK_FALSE(fs::exists(dir / "hero.obj"));
+    fs::remove_all(dir);
+}
+
+TEST_CASE("a two-tile UDIM bundle is refused by the aggregate ceiling one map would pass") {
+    const fs::path dir = testDir("udim_aggregate_ceiling");
+    Mesh low = twoTileSurface(0.0f);
+    const Mesh high = twoTileSurface(0.02f);
+
+    io::ExportPreset preset = smallPreset("t", io::GreenChannel::PlusY);
+    preset.namingPattern = "{basename}_{map}.{udim}.{ext}";
+    bundle::BundleParams params = paramsFor(preset, dir);
+    params.udim = true;
+    params.maxPixels = 32 * 32 + 1;  // one tile fits, two do not
+
+    const bundle::BundleResult result = bundle::writeBundle(low, high, params);
+    CHECK_FALSE(result.ok);
+    CHECK(result.error.find("AGGREGATE") != std::string::npos);
+    CHECK(result.error.find('2') != std::string::npos);  // the tile count it was asked for
+    CHECK(result.files.empty());
+    CHECK_FALSE(fs::exists(dir / "hero.obj"));
+
+    // The same layout and the same ceiling WITHOUT --udim is one image, and one
+    // image fits: the aggregate ceiling counts the tiles actually baked.
+    const fs::path plain = testDir("udim_aggregate_ceiling_plain");
+    bundle::BundleParams single = paramsFor(preset, plain);
+    single.maxPixels = params.maxPixels;
+    Mesh lowAgain = twoTileSurface(0.0f);
+    const bundle::BundleResult ok = bundle::writeBundle(lowAgain, high, single);
+    CHECK(ok.ok);
+    fs::remove_all(plain);
+    fs::remove_all(dir);
+}
+
+TEST_CASE("a bundle with no ceiling bakes whatever the preset asks for") {
+    const fs::path dir = testDir("udim_no_ceiling");
+    Mesh low = twoTileSurface(0.0f);
+    const Mesh high = twoTileSurface(0.02f);
+
+    io::ExportPreset preset = smallPreset("t", io::GreenChannel::PlusY);
+    preset.namingPattern = "{basename}_{map}.{udim}.{ext}";
+    bundle::BundleParams params = paramsFor(preset, dir);
+    params.udim = true;  // maxPixels stays 0: no ceiling, the CLI's case
+
+    const bundle::BundleResult result = bundle::writeBundle(low, high, params);
+    CHECK(result.ok);
+    CHECK(result.files.size() == 5);
+    fs::remove_all(dir);
+}

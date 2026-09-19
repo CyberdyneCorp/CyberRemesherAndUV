@@ -84,7 +84,7 @@ struct ExportPreset {
     std::string meshFormat = "obj";
     // Texture container extension without the dot: png | exr.
     std::string textureFormat = "png";
-    // Tokens: {basename}, {map}, {preset}, {ext}.
+    // Tokens: {basename}, {map}, {preset}, {ext}, {udim}.
     std::string namingPattern = "{basename}_{map}.{ext}";
     GreenChannel normalGreen = GreenChannel::PlusY;
     int resolution = 2048;
@@ -127,13 +127,29 @@ struct ExportPreset {
 // error listing the built-ins.
 [[nodiscard]] Result<ExportPreset> resolvePreset(const std::string& nameOrPath);
 
+// The token a naming pattern carries the UDIM tile number in (surface-baking
+// spec, "UDIM-aware baking"). Written down once, here, because three entry
+// points have to agree on what "the pattern names its tiles" means.
+inline constexpr std::string_view kUdimToken = "{udim}";
+
+// Whether `preset`'s naming pattern carries the tile token. A UDIM export
+// writing more than one tile through a pattern that does not is REFUSED, by
+// every entry point, rather than writing every tile to one path where each
+// overwrites the last while the report lists them all.
+[[nodiscard]] bool presetNamesTiles(const ExportPreset& preset);
+
 // Expands `preset.namingPattern` for one map entry. The result is always a
 // relative name inside the caller's output directory: an expansion that would
 // escape it -- an absolute or ".."-climbing value arriving through ANY token,
 // including a caller-supplied `basename` -- yields an empty string, which
 // callers must treat as a refusal rather than as a file name.
+//
+// `udimTile` is the tile number {udim} expands to. It defaults to 1001 because
+// the unit square IS tile 1001: an export that is not UDIM-aware therefore
+// expands the token to the tile it actually wrote, and a preset does not have to
+// be rewritten to be used for either kind of export.
 [[nodiscard]] std::string presetMapFileName(const ExportPreset& preset, const PresetMapEntry& entry,
-                                            std::string_view basename);
+                                            std::string_view basename, int udimTile = 1001);
 
 // Canonical spelling of a map kind, as it appears in preset JSON and reports.
 [[nodiscard]] const char* presetMapName(PresetMap map);

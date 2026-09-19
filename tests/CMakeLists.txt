@@ -15,6 +15,7 @@ add_executable(cyber_tests
     bake/test_world_density_maps.cpp
     bake/test_border_padding.cpp
     bake/test_map_catalog.cpp
+    bake/test_udim.cpp
     handoff/test_handoff.cpp
     quadrangulate/test_crossfield.cpp
     quadrangulate/test_field_quadrangulator.cpp

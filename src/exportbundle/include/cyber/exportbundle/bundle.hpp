@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <filesystem>
 #include <string>
 #include <vector>
@@ -54,6 +55,28 @@ struct BundleParams {
     // density map is answering, and neither is a target app's convention.
     bake::PlacementMatrix placement = bake::identityPlacement();
     bake::DensityNormalization densityNormalization = bake::DensityNormalization::Absolute;
+    // Bake one file per OCCUPIED UDIM TILE of the low-poly's UV layout instead
+    // of one file per map (surface-baking spec, "UDIM-aware baking"). Off by
+    // default: a layout inside the unit square is tile 1001 and produces exactly
+    // the same file either way, but a host has to ASK for a multi-file map set
+    // before it gets one.
+    //
+    // A UDIM bundle whose layout occupies more than one tile REQUIRES the
+    // preset's naming pattern to carry `{udim}`; without it every tile would be
+    // written to one path, each overwriting the last, while the report listed
+    // them all.
+    bool udim = false;
+    // The host's texel ceiling, in pixels, applied to every map this bundle
+    // bakes -- PER TILE and, for a UDIM bundle, IN AGGREGATE over the occupied
+    // tiles, with the same rule and the same words bake::bakeUdim() uses. 0
+    // means no ceiling, which is what a caller with no host policy (the CLI)
+    // passes.
+    //
+    // It lives here rather than being read from a global because the ceiling is
+    // the EMBEDDER's policy: the C ABI sets it from cyber_max_bake_pixels(), and
+    // a UDIM bundle multiplies the exposure by the occupied-tile count, so a
+    // ceiling that stopped a single 8K map has to stop ten of them too.
+    std::size_t maxPixels = 0;
 };
 
 struct BundleFile {
@@ -70,6 +93,11 @@ struct BundleFile {
     // What the border-padding stage did. The mesh entry keeps the default
     // (PaddingMode::None, radius 0).
     bake::BakePadding padding;
+    // The UDIM tile this map holds, under the `1001 + u + 10*v` numbering. 1001
+    // for a map baked over the unit square and for the mesh entry, because the
+    // unit square IS tile 1001 -- a report row therefore names a tile whether or
+    // not the bundle was UDIM-aware.
+    int udimTile = 1001;
 };
 
 struct BundleResult {
@@ -78,6 +106,14 @@ struct BundleResult {
     std::string error;
     std::vector<BundleFile> files;
     std::vector<std::string> warnings;
+    // The occupied UDIM tiles of the low-poly's layout, ascending by number, and
+    // the faces whose UVs no tile number can address. Detected BEFORE any bake
+    // runs and reported whether or not `BundleParams::udim` was set, so a host
+    // can see a multi-tile layout it did not ask to bake as one -- and so a
+    // refusal names what it was asked for. Empty only when the low-poly carries
+    // no UV layout at all.
+    std::vector<int> udimTiles;
+    std::size_t udimUnaddressableFaces = 0;
     // Set when the low-poly carried no UVs and the bundle unwrapped it.
     bool unwrapped = false;
     int chartCount = 0;

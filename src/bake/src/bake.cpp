@@ -9,6 +9,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <utility>
 
 #include "border_padding.hpp"
 #include "cyber/accel/backend.hpp"
@@ -204,8 +205,16 @@ float uvAreaRatio(const std::array<Vec3, 3>& pos, const std::array<Vec2, 3>& uv)
 
 // Rasterizes the low-poly UV layout into covered texels carrying their
 // interpolated 3D frame. Faces are fan-triangulated on the corners.
+//
+// `tileOrigin` is the UDIM tile's UV origin, subtracted from every corner so the
+// tile's own square becomes the unit square this rasteriser has always worked
+// in; UVs belonging to any other tile then fall outside the pixel bounds and are
+// clipped, which is what confines a tile's output to its own content. An origin
+// of (0, 0) is the ORDINARY bake and is bit-identical to one: subtracting 0.0f
+// is the identity in IEEE 754.
 std::vector<Texel> rasterize(const Mesh& mesh, const std::vector<Vec3>& vnormals,
-                             const std::vector<Vec2>& uvByLoop, int width, int height) {
+                             const std::vector<Vec2>& uvByLoop, int width, int height,
+                             Vec2 tileOrigin) {
     std::vector<Texel> texels;
     const auto sampleUv = [width, height](int px, int py) {
         return Vec2{(static_cast<float>(px) + 0.5f) / static_cast<float>(width),
@@ -227,7 +236,8 @@ std::vector<Texel> rasterize(const Mesh& mesh, const std::vector<Vec3>& vnormals
                 const VertexId v = mesh.loopVertex(tri[static_cast<std::size_t>(k)]);
                 pos[static_cast<std::size_t>(k)] = mesh.position(v);
                 nrm[static_cast<std::size_t>(k)] = vnormals[v.value];
-                uv[static_cast<std::size_t>(k)] = uvByLoop[tri[static_cast<std::size_t>(k)].value];
+                uv[static_cast<std::size_t>(k)] =
+                    uvByLoop[tri[static_cast<std::size_t>(k)].value] - tileOrigin;
             }
             // A non-finite corner (a glTF TEXCOORD_0 accessor holding NaN, say)
             // poisons the whole sub-triangle: fmin/fmax silently ignore NaN, so
@@ -984,13 +994,14 @@ private:
 // and join one set of workers per texel). Results go to a scratch vector and
 // reach the image afterwards in texel order, so overlapping texels keep
 // last-write-wins and the map is bit-identical to a serial bake.
+//
+// `flat` is the flattened hierarchy, handed in rather than produced here:
+// FlatBvh is a full copy of every node and triangle, so it is built once for the
+// whole Target (and therefore once for a whole UDIM set) rather than per pass.
 void shadeRayTraced(BakeResult& result, const std::vector<Texel>& texels, const Mesh& highPoly,
-                    const Bvh& bvh, const std::vector<Vec3>& highNormals, BakeMap map,
-                    const BakeParams& params, ProgressSink* progress, const CancelToken* cancel) {
-    // Flattened once for the whole pass: FlatBvh is a full copy of every node
-    // and triangle, so rebuilding it per texel made the bake cost linear in the
-    // Target's triangle count — the one axis a bake should be flat in.
-    const FlatBvh flat = bvh.flatten();
+                    const Bvh& bvh, const FlatBvh& flat, const std::vector<Vec3>& highNormals,
+                    BakeMap map, const BakeParams& params, ProgressSink* progress,
+                    const CancelToken* cancel) {
     auto& backend = *accel::defaultBackend();
     const bool wantDepth = map == BakeMap::Thickness;
     const bool rgb = channelsFor(map) == 3;
@@ -1176,17 +1187,36 @@ Vec3 shadeRasterTexel(const RasterSources& src, const Texel& tx,
     return Vec3{};
 }
 
+// Everything a bake derives from the TARGET that CANNOT change from one UDIM
+// tile to the next, gathered once and shared by every tile of a set.
+//
+// The acceleration structure above all. Rebuilding it per tile from the faces
+// whose UVs lie in THAT tile is the mistake the surface-baking spec's cross-tile
+// scenario exists to catch: the occlusion it produces is entirely plausible and
+// entirely false -- an arm stops shadowing a torso the moment the two are packed
+// into different tiles -- and no inspection of the output reveals it. Rebuilding
+// it per tile over the whole mesh would be correct, but would make an N-tile
+// bake cost N builds and N flattens of a structure that cannot change between
+// tiles. The rest is here for the same reason one step down: the Target's
+// curvature auto-range is a percentile over the whole Target, and a per-tile one
+// would saturate the same crease differently in each tile.
+struct TargetData {
+    Bvh bvh;
+    FlatBvh flat;               // ray-traced maps only; empty otherwise
+    std::vector<Vec3> normals;  // the Target's vertex normals
+    BakeBounds bounds;          // the WHOLE mesh's, never one tile's
+    IdField ids;                // the WHOLE Target's, so every tile reports one table
+};
+
 void shadeFromMesh(BakeResult& result, const std::vector<Texel>& texels, const Mesh& highPoly,
-                   BakeMap map, const BakeParams& params, const BakeBounds& bounds,
-                   const IdField& ids, ProgressSink* progress, const CancelToken* cancel) {
-    const Bvh bvh(highPoly);
-    const std::vector<Vec3> highNormals = vertexNormals(highPoly);
+                   const TargetData& target, const RasterSources* sources, BakeMap map,
+                   const BakeParams& params, ProgressSink* progress, const CancelToken* cancel) {
     if (isRayTraced(map)) {
-        shadeRayTraced(result, texels, highPoly, bvh, highNormals, map, params, progress, cancel);
+        shadeRayTraced(result, texels, highPoly, target.bvh, target.flat, target.normals, map,
+                       params, progress, cancel);
         return;
     }
-    const RasterSources sources =
-        gatherRasterSources(highPoly, highNormals, bounds, ids, map, params);
+    const Bvh& bvh = target.bvh;
     const bool rgb = channelsFor(map) == 3;
 
     for (std::size_t i = 0; i < texels.size(); ++i) {
@@ -1202,7 +1232,7 @@ void shadeFromMesh(BakeResult& result, const std::vector<Texel>& texels, const M
         const std::optional<Bvh::RayHit> hit = bvh.raycast(origin, dir);
         const bool valid = hit.has_value() && hit->t <= 2.0f * params.cageDistance;
 
-        const Vec3 shaded = shadeRasterTexel(sources, tx, hit, valid, map, params);
+        const Vec3 shaded = shadeRasterTexel(*sources, tx, hit, valid, map, params);
         result.image.at(tx.px, tx.py, 0) = shaded.x;
         if (rgb) {
             result.image.at(tx.px, tx.py, 1) = shaded.y;
@@ -1211,39 +1241,51 @@ void shadeFromMesh(BakeResult& result, const std::vector<Texel>& texels, const M
     }
 }
 
-// The mean absolute density a UvDensity map's DEFINED texels hold, and, in
-// Relative mode, the division by it. Returned so the encoding can record it in
-// BOTH modes: it converts a relative map back to an absolute one, and it tells
-// a host what an absolute map's own average is.
+// The running mean of a UvDensity map's DEFINED texels. Kept as a sum and a
+// count rather than as a finished mean so that a UDIM set can accumulate it
+// ACROSS TILES: the surface-baking spec requires the relative mean to be taken
+// over the WHOLE SET, because a per-tile mean reports every tile as average and
+// hides exactly the unevenness the relative mode exists to show.
+struct DensityMean {
+    double sum = 0.0;
+    std::size_t defined = 0;
+
+    // Zero when nothing was defined: no mean, and nothing to divide.
+    [[nodiscard]] float value() const {
+        return defined == 0 ? 0.0f : static_cast<float>(sum / static_cast<double>(defined));
+    }
+};
+
+// Accumulates one finished image into the running mean.
 //
-// The mean is taken from the FINISHED image in raster order, which is what
-// makes it right and reproducible. Uncovered texels hold the background, which
-// is the same zero the undefined sentinel uses, so they fall out with no
+// The values are taken from the FINISHED image in raster order, which is what
+// makes the mean right and reproducible. Uncovered texels hold the background,
+// which is the same zero the undefined sentinel uses, so they fall out with no
 // coverage set to consult; a texel two faces both wrote is counted once,
 // because the image holds the winner rather than every writer; and a
 // std::vector<float> walked in order touches no unordered container, so libc++
 // and libstdc++ agree.
-float normalizeDensity(Image& image, DensityNormalization mode) {
-    double sum = 0.0;
-    std::size_t defined = 0;
+void accumulateDensity(const Image& image, DensityMean& mean) {
     for (const float value : image.pixels) {
         if (value > 0.0f) {
-            sum += static_cast<double>(value);
-            ++defined;
+            mean.sum += static_cast<double>(value);
+            ++mean.defined;
         }
     }
-    if (defined == 0) {
-        return 0.0f;  // nothing defined: no mean, and nothing to divide
+}
+
+// The division by the mean, in Relative mode only. The mean itself is recorded
+// in BOTH modes: it converts a relative map back to an absolute one, and it
+// tells a host what an absolute map's own average is.
+void applyDensity(Image& image, float mean, DensityNormalization mode) {
+    if (mode != DensityNormalization::Relative || !(mean > 0.0f)) {
+        return;
     }
-    const auto mean = static_cast<float>(sum / static_cast<double>(defined));
-    if (mode == DensityNormalization::Relative && mean > 0.0f) {
-        for (float& value : image.pixels) {
-            if (value > 0.0f) {
-                value /= mean;  // the sentinel stays the sentinel
-            }
+    for (float& value : image.pixels) {
+        if (value > 0.0f) {
+            value /= mean;  // the sentinel stays the sentinel
         }
     }
-    return mean;
 }
 
 // One sphere-traced hit of the cage ray against the field. `t` is the distance
@@ -1476,7 +1518,404 @@ void shadeFromField(BakeResult& result, const std::vector<Texel>& texels,
     result.fieldUndefinedSamples = field.undefinedSamples();
 }
 
+// ---- the shared per-tile pipeline ----------------------------------------
+//
+// bake() and bakeUdim() are the SAME pipeline over a different set of tiles: an
+// ordinary bake is the tile-1001 case of a UDIM one. Splitting it out is what
+// lets a UDIM set share one TargetData, and what lets the density
+// normalization -- whose mean the spec takes over the WHOLE SET -- run between
+// the shading of the last tile and the padding of the first.
+//
+// Built as a local of the caller and never moved: `raster` holds references
+// into `target`.
+struct BakeContext {
+    BakeContext(const Mesh& low, const Mesh& high, const std::vector<Vec2>& uvLayer, BakeMap kind,
+                const BakeParams& bakeParams, bool field)
+        : lowPoly(low),
+          highPoly(high),
+          uvs(uvLayer),
+          map(kind),
+          params(bakeParams),
+          useField(field) {}
+
+    const Mesh& lowPoly;
+    const Mesh& highPoly;
+    const std::vector<Vec2>& uvs;
+    BakeMap map;
+    const BakeParams& params;
+    bool useField = false;
+    std::vector<Vec3> lowNormals;
+    TargetData target;
+    // Gathered for the raster path only; the ray-traced maps read none of it.
+    std::optional<RasterSources> raster;
+    // One encoding for the whole set. The members derived from the MESH rather
+    // than from a texel -- the object-space bounds, the id table -- are
+    // therefore the whole mesh's and identical in every tile, which is what
+    // makes an object-position map decode with one box across the set and a
+    // material take one colour across it.
+    BakeEncoding encoding;
+};
+
+void prepareContext(BakeContext& ctx) {
+    // The box ObjectPosition rescales over, from BOTH meshes: the map writes the
+    // high-poly hit where the cage ray lands and the low-poly's own point where
+    // it misses. Computed over the whole mesh, never over one tile's faces.
+    if (ctx.map == BakeMap::ObjectPosition) {
+        accumulateBounds(ctx.lowPoly, ctx.params.upAxis, ctx.target.bounds);
+        accumulateBounds(ctx.highPoly, ctx.params.upAxis, ctx.target.bounds);
+    }
+    // The Target's id column and the table an id map reports. Empty, and free,
+    // for every other map.
+    ctx.target.ids = gatherIdField(ctx.highPoly, ctx.map);
+    ctx.encoding = encodingFor(ctx.map, ctx.params, ctx.target.bounds, ctx.target.ids);
+    ctx.lowNormals = vertexNormals(ctx.lowPoly);
+    if (ctx.useField) {
+        return;  // no Target to accelerate
+    }
+    ctx.target.bvh = Bvh(ctx.highPoly);
+    ctx.target.normals = vertexNormals(ctx.highPoly);
+    if (isRayTraced(ctx.map)) {
+        ctx.target.flat = ctx.target.bvh.flatten();
+    } else {
+        ctx.raster.emplace(gatherRasterSources(ctx.highPoly, ctx.target.normals, ctx.target.bounds,
+                                               ctx.target.ids, ctx.map, ctx.params));
+    }
+}
+
+// One tile's rasterization and shading. `tileOrigin` is the tile's UV origin, so
+// (0, 0) is the ordinary bake.
+//
+// `covered` receives the texel COORDINATES rather than the texels themselves,
+// because that is all the padding stage wants and because a whole set's worth of
+// Texels would not fit where a set's worth of coordinates does: a Texel carries a
+// frame (some sixty bytes), a coordinate carries two ints.
+void shadeTile(const BakeContext& ctx, Vec2 tileOrigin, BakeResult& result,
+               std::vector<detail::PadCoord>& covered, ProgressSink* progress,
+               const CancelToken* cancel) {
+    result.encoding = ctx.encoding;
+    const std::vector<Texel> texels = rasterize(ctx.lowPoly, ctx.lowNormals, ctx.uvs,
+                                                ctx.params.width, ctx.params.height, tileOrigin);
+    result.texelsCovered = texels.size();
+    result.image = makeImage(ctx.params.width, ctx.params.height, channelsFor(ctx.map));
+    const std::array<float, 3> padding = neutralPadding(ctx.map, ctx.params);
+    for (int y = 0; y < result.image.height; ++y) {
+        for (int x = 0; x < result.image.width; ++x) {
+            for (int c = 0; c < result.image.channels; ++c) {
+                result.image.at(x, y, c) = padding[static_cast<std::size_t>(c)];
+            }
+        }
+    }
+
+    if (ctx.useField) {
+        shadeFromField(result, texels, *ctx.params.field, ctx.map, ctx.params, cancel);
+    } else {
+        shadeFromMesh(result, texels, ctx.highPoly, ctx.target,
+                      ctx.raster.has_value() ? &ctx.raster.value() : nullptr, ctx.map, ctx.params,
+                      progress, cancel);
+    }
+    if (result.cancelled) {
+        return;
+    }
+    covered.clear();
+    covered.reserve(texels.size());
+    for (const Texel& tx : texels) {
+        covered.push_back(detail::PadCoord{tx.px, tx.py});
+    }
+}
+
+// The stages a UDIM set defers until every tile has been shaded: the density
+// normalization, whose mean is the whole set's, and the padding, which runs LAST
+// so the band continues the values that were finally written. Returns false when
+// the padding stage was cancelled.
+bool finishTile(const BakeContext& ctx, float densityMean, BakeResult& result,
+                const std::vector<detail::PadCoord>& covered, const CancelToken* cancel) {
+    if (ctx.map == BakeMap::UvDensity) {
+        applyDensity(result.image, densityMean, ctx.params.densityNormalization);
+        result.encoding.densityMean = densityMean;
+    }
+    // An abandoned bake (a violated field contract) has an empty image and
+    // padBorders() leaves it alone.
+    const detail::PadOutcome padded = detail::padBorders(result.image, covered, result.encoding,
+                                                         ctx.params.paddingRadius, cancel);
+    result.padding = padded.padding;
+    if (padded.cancelled) {
+        result.cancelled = true;
+        return false;
+    }
+    return true;
+}
+
+// The rejection bake() makes silently: no UV layout, no Target where one is
+// required, or a parameter outside its documented range.
+bool bakeInputsUsable(const Mesh& highPoly, const std::vector<Vec2>* uvs, BakeMap map,
+                      const BakeParams& params, bool useField) {
+    return uvs != nullptr && paramsUsable(map, params, useField) &&
+           (highPoly.faceCount() > 0 || useField);
+}
+
+// ---- UDIM tile detection -------------------------------------------------
+
+// Whether the triangle overlaps the unit square whose lower-left corner is the
+// ORIGIN -- the caller translates the triangle into tile space first.
+//
+// PRECONDITION, and the reason this is not the whole separating-axis test: the
+// caller has ALREADY established that the triangle's UV bounding box overlaps
+// this square, because markTriangleTiles only proposes the tiles inside
+// tileSpan's [floor(min), ceil(max) - 1] range. That range is exactly the
+// separating-axis test on the two BOX axes -- a proposed tile index `u`
+// satisfies floor(minU) <= u <= ceil(maxU) - 1, which is minU < u + 1 and
+// maxU > u, so neither box axis can separate here. Only the three EDGE NORMALS
+// remain, and running the box axes again would be a branch no input can reach.
+//
+// What remains is exact on purpose. A bounding-box test would report a tile that
+// a triangle merely reaches around, and every tile reported here is an image
+// allocated, so over-reporting would break the cost guarantee ("three tiles of a
+// possible hundred cost three") rather than merely waste a little work.
+//
+// Separation is STRICT: a triangle touching a tile along an edge or at a single
+// corner overlaps it with zero area and does not occupy it.
+bool triangleOverlapsUnitSquare(const std::array<Vec2, 3>& uv) {
+    const auto span = [&uv](Vec2 axis) {
+        std::array<float, 3> projected{};
+        for (std::size_t i = 0; i < 3; ++i) {
+            projected[i] = uv[i].x * axis.x + uv[i].y * axis.y;
+        }
+        return std::pair<float, float>{std::min({projected[0], projected[1], projected[2]}),
+                                       std::max({projected[0], projected[1], projected[2]})};
+    };
+    // The edge normals. The square's own projection is the interval spanned by
+    // its four corners, which for an axis (x, y) is [min(0,x)+min(0,y),
+    // max(0,x)+max(0,y)].
+    for (std::size_t i = 0; i < 3; ++i) {
+        const Vec2 edge = uv[(i + 1) % 3] - uv[i];
+        const Vec2 axis{-edge.y, edge.x};
+        const auto [lo, hi] = span(axis);
+        const float boxLo = std::fmin(0.0f, axis.x) + std::fmin(0.0f, axis.y);
+        const float boxHi = std::fmax(0.0f, axis.x) + std::fmax(0.0f, axis.y);
+        if (hi <= boxLo || lo >= boxHi) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// The inclusive tile-index range a UV span covers, clamped to the addressable
+// grid. `hi < lo` means the span addresses nothing; `outside` means it reached
+// beyond the grid, which is counted rather than silently dropped.
+//
+// The clamping happens in DOUBLE before the cast: a UV of 1e30 would make
+// `static_cast<int>` undefined, and a file is entitled to hold one.
+struct TileSpan {
+    int lo = 0;
+    int hi = -1;
+    bool outside = false;
+};
+
+TileSpan tileSpan(float low, float high, int maxIndex) {
+    TileSpan span;
+    const double bound = static_cast<double>(maxIndex);
+    const double first = std::floor(static_cast<double>(low));
+    const double last = std::ceil(static_cast<double>(high)) - 1.0;
+    span.outside = first < 0.0 || last > bound;
+    if (last < 0.0 || first > bound) {
+        return span;  // entirely outside the grid
+    }
+    span.lo = static_cast<int>(std::clamp(first, 0.0, bound));
+    span.hi = static_cast<int>(std::clamp(last, 0.0, bound));
+    return span;
+}
+
+// Index into the occupancy grid. Ascending in this index is ascending in tile
+// NUMBER, because the number is 1001 + u + 10*v.
+std::size_t tileSlot(int u, int v) {
+    return static_cast<std::size_t>(v) * static_cast<std::size_t>(kUdimMaxU + 1) +
+           static_cast<std::size_t>(u);
+}
+
+// Marks every addressable tile one UV triangle overlaps. Returns true when the
+// triangle reached outside the addressable grid.
+//
+// The candidate range comes from the triangle's UV bounding box, so every tile
+// this proposes is one the bounding box overlaps -- which is the precondition
+// triangleOverlapsUnitSquare relies on to skip the two box axes. A change to
+// this span has to keep that true or restore those axes there.
+bool markTriangleTiles(const std::array<Vec2, 3>& uv, std::vector<bool>& occupied) {
+    float minU = uv[0].x, maxU = uv[0].x, minV = uv[0].y, maxV = uv[0].y;
+    for (const Vec2& t : uv) {
+        minU = std::fmin(minU, t.x);
+        maxU = std::fmax(maxU, t.x);
+        minV = std::fmin(minV, t.y);
+        maxV = std::fmax(maxV, t.y);
+    }
+    const TileSpan uSpan = tileSpan(minU, maxU, kUdimMaxU);
+    const TileSpan vSpan = tileSpan(minV, maxV, kUdimMaxV);
+    for (int v = vSpan.lo; v <= vSpan.hi; ++v) {
+        for (int u = uSpan.lo; u <= uSpan.hi; ++u) {
+            const Vec2 origin{static_cast<float>(u), static_cast<float>(v)};
+            const std::array<Vec2, 3> local{uv[0] - origin, uv[1] - origin, uv[2] - origin};
+            if (triangleOverlapsUnitSquare(local)) {
+                occupied[tileSlot(u, v)] = true;
+            }
+        }
+    }
+    return uSpan.outside || vSpan.outside;
+}
+
+// Whether a UV sub-triangle can occupy a tile at all. A non-finite corner is
+// dropped because the rasteriser drops it too, and a zero-area one overlaps
+// nothing and covers no texel -- a tile holding only such triangles is not
+// occupied, and allocating an image that would be written nothing is exactly
+// what the cost guarantee rules out.
+bool uvTriangleCanOccupy(const std::array<Vec2, 3>& uv) {
+    if (!isFinite(uv[0]) || !isFinite(uv[1]) || !isFinite(uv[2])) {
+        return false;
+    }
+    return uvTriangleArea(uv[0], uv[1], uv[2]) > 0.0f;
+}
+
+// Marks every tile one FACE occupies, fan-triangulated on its corners exactly
+// as the rasteriser triangulates it. Returns true when some sub-triangle
+// reached outside the addressable grid, which makes this one face unaddressable
+// however many of its triangles did so.
+bool markFaceTiles(const Mesh& mesh, const std::vector<Vec2>& uvs, FaceId face,
+                   std::vector<bool>& occupied) {
+    const std::vector<LoopId> loops = mesh.faceLoops(face);
+    bool outside = false;
+    for (std::size_t i = 2; i < loops.size(); ++i) {
+        const std::array<Vec2, 3> uv{uvs[loops[0].value], uvs[loops[i - 1].value],
+                                     uvs[loops[i].value]};
+        if (uvTriangleCanOccupy(uv)) {
+            outside = markTriangleTiles(uv, occupied) || outside;
+        }
+    }
+    return outside;
+}
+
 }  // namespace
+
+UdimLayout udimTiles(const Mesh& mesh) {
+    UdimLayout layout;
+    const auto* uvs = mesh.cornerAttributes().find<Vec2>(io::kUvAttribute);
+    if (uvs == nullptr) {
+        return layout;
+    }
+    // A flat grid of flags rather than a set: the addressable grid is ten by a
+    // thousand, and a vector walked in ascending order cannot disagree between
+    // standard libraries the way a hash container's iteration order can (this
+    // tree has been bitten by exactly that).
+    std::vector<bool> occupied(
+        static_cast<std::size_t>(kUdimMaxU + 1) * static_cast<std::size_t>(kUdimMaxV + 1), false);
+    for (Index fi = 0; fi < mesh.faceCapacity(); ++fi) {
+        const FaceId face{fi};
+        if (mesh.isAlive(face) && markFaceTiles(mesh, *uvs, face, occupied)) {
+            ++layout.unaddressableFaces;
+        }
+    }
+    for (int v = 0; v <= kUdimMaxV; ++v) {
+        for (int u = 0; u <= kUdimMaxU; ++u) {
+            if (occupied[tileSlot(u, v)]) {
+                layout.tiles.push_back(UdimTile{u, v, udimTileNumber(u, v)});
+            }
+        }
+    }
+    return layout;
+}
+
+namespace {
+
+// Which ceiling, if either, a UDIM request trips. Separated from paramsUsable's
+// silent rejection because a UDIM refusal has to NAME which of the two it hit:
+// "this tile is too big" and "this many tiles of this size are too many" are
+// different problems with different fixes, and one message covering both tells a
+// host neither. The per-tile check runs first and wins when both trip, because
+// it is the more specific statement.
+UdimRefusal ceilingRefusal(const BakeParams& params, std::size_t tiles) {
+    if (params.width <= 0 || params.height <= 0 || params.maxPixels == 0) {
+        return UdimRefusal::None;  // a degenerate size is paramsUsable's rejection
+    }
+    const auto width = static_cast<std::size_t>(params.width);
+    const auto height = static_cast<std::size_t>(params.height);
+    if (width > std::numeric_limits<std::size_t>::max() / height) {
+        return UdimRefusal::PerTileCeiling;  // the product does not even exist
+    }
+    const std::size_t perTile = width * height;
+    if (perTile > params.maxPixels) {
+        return UdimRefusal::PerTileCeiling;
+    }
+    // Overflow-guarded: width * height * tiles is exactly the product that wraps.
+    if (tiles > params.maxPixels / perTile) {
+        return UdimRefusal::AggregateCeiling;
+    }
+    return UdimRefusal::None;
+}
+
+std::string ceilingMessage(UdimRefusal refusal, const BakeParams& params, std::size_t tiles) {
+    const std::string size = std::to_string(params.width) + "x" + std::to_string(params.height);
+    const std::string ceiling = std::to_string(params.maxPixels);
+    if (refusal == UdimRefusal::PerTileCeiling) {
+        return "one tile of " + size + " is over the PER-TILE bake texel ceiling of " + ceiling +
+               "; lower the resolution";
+    }
+    return std::to_string(tiles) + " occupied tiles of " + size +
+           " are over the AGGREGATE bake texel ceiling of " + ceiling +
+           " (a single tile fits); lower the resolution, use fewer tiles, or raise the ceiling";
+}
+
+// One tile's slice of the whole set's progress, so a host sees a bar that moves
+// across the set rather than one that restarts per tile.
+ProgressSink tileSubrange(ProgressSink* progress, std::size_t done, std::size_t total) {
+    if (progress == nullptr || total == 0) {
+        return ProgressSink{};
+    }
+    return progress->subrange(static_cast<float>(done) / static_cast<float>(total),
+                              static_cast<float>(done + 1) / static_cast<float>(total), "bake");
+}
+
+// Shades every tile against the shared context and accumulates the density mean
+// over the WHOLE set. Returns false when the set was abandoned.
+bool shadeAllTiles(const BakeContext& ctx, UdimBakeResult& out,
+                   std::vector<std::vector<detail::PadCoord>>& covered, DensityMean& mean,
+                   ProgressSink* progress, const CancelToken* cancel) {
+    for (std::size_t i = 0; i < out.tiles.size(); ++i) {
+        if (cancel != nullptr && cancel->isCancelled()) {
+            out.cancelled = true;
+            return false;
+        }
+        const UdimTile& tile = out.tiles[i].tile;
+        ProgressSink tileProgress = tileSubrange(progress, i, out.tiles.size());
+        shadeTile(ctx, Vec2{static_cast<float>(tile.u), static_cast<float>(tile.v)},
+                  out.tiles[i].result, covered[i], &tileProgress, cancel);
+        const BakeResult& shaded = out.tiles[i].result;
+        if (shaded.cancelled) {
+            out.cancelled = true;
+            return false;
+        }
+        if (shaded.fieldContractViolated) {
+            out.refusal = UdimRefusal::FieldContract;
+            out.refusalMessage = shaded.fieldContractMessage;
+            return false;
+        }
+        if (ctx.map == BakeMap::UvDensity) {
+            accumulateDensity(shaded.image, mean);
+        }
+    }
+    return true;
+}
+
+}  // namespace
+
+// The one place the two ceilings are decided, for bakeUdim and for every caller
+// that has to refuse a SET of bakes before it writes anything (the export
+// bundle). A second copy of this rule would drift from this one, and the drift
+// would be a host told the wrong thing about why its bake was refused.
+UdimCeiling udimCeiling(const BakeParams& params, std::size_t tiles) {
+    UdimCeiling out;
+    out.refusal = ceilingRefusal(params, tiles);
+    if (out.refusal != UdimRefusal::None) {
+        out.message = ceilingMessage(out.refusal, params, tiles);
+    }
+    return out;
+}
 
 // Every element finite and the linear part invertible. A singular linear part
 // carries no direction anywhere, so there is nothing to substitute a default
@@ -1524,66 +1963,27 @@ BakeResult bake(const Mesh& lowPoly, const Mesh& highPoly, BakeMap map, const Ba
     // An evaluator makes the Target mesh optional, but only for the maps the
     // field can actually answer.
     const bool useField = params.field != nullptr && fieldSupports(map);
-    if (uvs == nullptr || !paramsUsable(map, params, useField) ||
-        (highPoly.faceCount() == 0 && !useField)) {
+    if (!bakeInputsUsable(highPoly, uvs, map, params, useField)) {
         return result;  // empty image: nothing to bake
     }
 
-    // The box ObjectPosition rescales over, and the basis every map records.
-    // Both meshes, because the map writes the high-poly hit where the cage ray
-    // lands and the low-poly's own point where it misses.
-    BakeBounds bounds;
-    if (map == BakeMap::ObjectPosition) {
-        accumulateBounds(lowPoly, params.upAxis, bounds);
-        accumulateBounds(highPoly, params.upAxis, bounds);
-    }
-    // The Target's id column and the table an id map reports. Empty, and free,
-    // for every other map.
-    const IdField ids = gatherIdField(highPoly, map);
-    result.encoding = encodingFor(map, params, bounds, ids);
-
-    const std::vector<Vec3> lowNormals = vertexNormals(lowPoly);
-    const std::vector<Texel> texels =
-        rasterize(lowPoly, lowNormals, *uvs, params.width, params.height);
-    result.texelsCovered = texels.size();
-    result.image = makeImage(params.width, params.height, channelsFor(map));
-    const std::array<float, 3> padding = neutralPadding(map, params);
-    for (int y = 0; y < result.image.height; ++y) {
-        for (int x = 0; x < result.image.width; ++x) {
-            for (int c = 0; c < result.image.channels; ++c) {
-                result.image.at(x, y, c) = padding[static_cast<std::size_t>(c)];
-            }
-        }
-    }
-
-    if (useField) {
-        shadeFromField(result, texels, *params.field, map, params, cancel);
-    } else {
-        shadeFromMesh(result, texels, highPoly, map, params, bounds, ids, progress, cancel);
-    }
+    // The unit square IS tile 1001, so an ordinary bake is the one-tile case of
+    // the UDIM pipeline with a tile origin of (0, 0) -- and subtracting 0.0f
+    // from a UV is the identity in IEEE 754, so the output is bit-identical to
+    // what it was before the pipeline was shared.
+    BakeContext context(lowPoly, highPoly, *uvs, map, params, useField);
+    prepareContext(context);
+    std::vector<detail::PadCoord> covered;
+    shadeTile(context, Vec2{0.0f, 0.0f}, result, covered, progress, cancel);
     if (result.cancelled) {
         return result;
     }
 
-    // Before padding, so the band continues the values that were finally
-    // written rather than pre-normalization ones.
+    DensityMean mean;
     if (map == BakeMap::UvDensity) {
-        result.encoding.densityMean = normalizeDensity(result.image, params.densityNormalization);
+        accumulateDensity(result.image, mean);
     }
-
-    // Padding runs LAST, on the finished texels of either path, so both get the
-    // same band from the same code. An abandoned bake (a violated field
-    // contract) has an empty image and padBorders() leaves it alone.
-    std::vector<detail::PadCoord> covered;
-    covered.reserve(texels.size());
-    for (const Texel& tx : texels) {
-        covered.push_back(detail::PadCoord{tx.px, tx.py});
-    }
-    const detail::PadOutcome padded =
-        detail::padBorders(result.image, covered, result.encoding, params.paddingRadius, cancel);
-    result.padding = padded.padding;
-    if (padded.cancelled) {
-        result.cancelled = true;
+    if (!finishTile(context, mean.value(), result, covered, cancel)) {
         return result;
     }
 
@@ -1591,6 +1991,77 @@ BakeResult bake(const Mesh& lowPoly, const Mesh& highPoly, BakeMap map, const Ba
         progress->report(1.0f, "bake");
     }
     return result;
+}
+
+UdimBakeResult bakeUdim(const Mesh& lowPoly, const Mesh& highPoly, BakeMap map,
+                        const BakeParams& params, ProgressSink* progress,
+                        const CancelToken* cancel) {
+    UdimBakeResult out;
+    const auto* uvs = lowPoly.cornerAttributes().find<Vec2>(io::kUvAttribute);
+    const bool useField = params.field != nullptr && fieldSupports(map);
+
+    // Detection runs FIRST and unconditionally, so the tile list is reported
+    // before baking starts and a refusal can name what it was asked to allocate.
+    out.layout = udimTiles(lowPoly);
+    if (out.layout.tiles.empty()) {
+        out.refusal = UdimRefusal::NoOccupiedTiles;
+        out.refusalMessage =
+            uvs == nullptr
+                ? "the EditMesh carries no UV layout, so it occupies no UDIM tile"
+                : "the EditMesh's UV layout occupies no addressable UDIM tile (u must be 0..9 "
+                  "and v 0..999 for the 1001 + u + 10*v numbering)";
+        return out;
+    }
+
+    // Before paramsUsable, which would fold a per-tile overflow into its silent
+    // rejection and lose the one thing #91 asks a refusal to say.
+    const UdimCeiling ceiling = udimCeiling(params, out.layout.tiles.size());
+    if (ceiling.refusal != UdimRefusal::None) {
+        out.refusal = ceiling.refusal;
+        out.refusalMessage = ceiling.message;
+        return out;
+    }
+    if (!bakeInputsUsable(highPoly, uvs, map, params, useField)) {
+        out.refusal = UdimRefusal::Parameters;
+        out.refusalMessage =
+            "the bake was refused: a parameter is outside its documented range, or the Target "
+            "carries no faces and no field evaluator can answer this map";
+        return out;
+    }
+
+    // ONE context for the whole set: one BVH, one flattened hierarchy, one set
+    // of Target normals, one curvature field, one object-space box and one id
+    // table. The rays a tile casts therefore see the WHOLE mesh, which is the
+    // requirement that makes the naive per-tile loop wrong.
+    BakeContext context(lowPoly, highPoly, *uvs, map, params, useField);
+    prepareContext(context);
+
+    out.tiles.resize(out.layout.tiles.size());
+    for (std::size_t i = 0; i < out.tiles.size(); ++i) {
+        out.tiles[i].tile = out.layout.tiles[i];
+    }
+    std::vector<std::vector<detail::PadCoord>> covered(out.tiles.size());
+    DensityMean mean;
+    if (!shadeAllTiles(context, out, covered, mean, progress, cancel)) {
+        out.tiles.clear();  // never a partial set dressed as a whole one
+        return out;
+    }
+
+    // Padding runs only once every tile has been shaded, because the density
+    // normalization between the two phases divides by the mean of the WHOLE set
+    // and the band has to continue the values finally written.
+    for (std::size_t i = 0; i < out.tiles.size(); ++i) {
+        if (!finishTile(context, mean.value(), out.tiles[i].result, covered[i], cancel)) {
+            out.cancelled = true;
+            out.tiles.clear();
+            return out;
+        }
+    }
+
+    if (progress != nullptr) {
+        progress->report(1.0f, "bake");
+    }
+    return out;
 }
 
 }  // namespace cyber::bake

@@ -724,8 +724,15 @@ struct PresetOutcome {
         // was filled -- a consumer of an id map reads "nearest" here as the
         // statement that its band was copied and not interpolated.
         cyber::bake::BakePadding padding;
+        // The UDIM tile this file holds, under the 1001 + u + 10*v numbering.
+        // 1001 for the mesh row and for a bake over the unit square, because
+        // the unit square IS tile 1001.
+        int udimTile = 1001;
     };
     std::vector<File> files;
+    // The tiles the layout was found to occupy, reported BEFORE baking started.
+    std::vector<int> udimTiles;
+    std::size_t udimUnaddressableFaces = 0;
     bool unwrapped = false;
     int chartCount = 0;
 };
@@ -862,6 +869,8 @@ void addPresetToReport(nlohmann::json& report, const PresetOutcome& outcome) {
         {"maps", maps},
         {"unwrapped", outcome.unwrapped},
         {"chartCount", outcome.chartCount},
+        {"udimTiles", outcome.udimTiles},
+        {"udimUnaddressableFaces", outcome.udimUnaddressableFaces},
     };
     report["outputs"] = nlohmann::json::array();
     for (const PresetOutcome::File& file : outcome.files) {
@@ -872,6 +881,7 @@ void addPresetToReport(nlohmann::json& report, const PresetOutcome& outcome) {
             entry["height"] = file.height;
             entry["encoding"] = encodingJson(file.encoding);
             entry["padding"] = paddingJson(file.padding);
+            entry["udimTile"] = file.udimTile;
         }
         report["outputs"].push_back(entry);
     }
@@ -1638,6 +1648,15 @@ int runCli(int argc, char** argv) {
         if (options.densityNormalization == "relative") {
             bundleParams.densityNormalization = cyber::bake::DensityNormalization::Relative;
         }
+        // Deliberately NOT UDIM-aware, and there is no flag for it: this
+        // pipeline's low-poly is the mesh the remesher just produced, which
+        // carries no UV layout, so writeBundle unwraps it -- and the automatic
+        // atlas packs into the 0-1 square, which IS tile 1001. A --udim here
+        // could therefore never write a second tile; it would be a flag that
+        // promised a multi-file map set the CLI cannot reach. A multi-tile
+        // layout is authored or imported, so a UDIM bundle is asked for through
+        // the library, the C ABI, Python or Swift, where the caller supplies the
+        // low-poly. The tiles the layout occupies are reported below either way.
         cyber::Mesh low = result.mesh;
         const cyber::exportbundle::BundleResult bundle =
             cyber::exportbundle::writeBundle(low, source.mesh, bundleParams, &sink, &cancel);
@@ -1656,9 +1675,12 @@ int runCli(int argc, char** argv) {
         }
         presetOutcome.unwrapped = bundle.unwrapped;
         presetOutcome.chartCount = bundle.chartCount;
+        presetOutcome.udimTiles = bundle.udimTiles;
+        presetOutcome.udimUnaddressableFaces = bundle.udimUnaddressableFaces;
         for (const auto& file : bundle.files) {
             presetOutcome.files.push_back({file.path, file.kind, file.colorSpace, file.width,
-                                           file.height, file.encoding, file.padding});
+                                           file.height, file.encoding, file.padding,
+                                           file.udimTile});
         }
     }
 #endif
@@ -1698,8 +1720,18 @@ int runCli(int argc, char** argv) {
         if (presetOutcome.active) {
             std::printf("preset:    %s (schema %d)\n", presetOutcome.preset.name.c_str(),
                         presetOutcome.preset.schemaVersion);
+            std::printf("udim:      %zu occupied tile(s)", presetOutcome.udimTiles.size());
+            for (const int tile : presetOutcome.udimTiles) {
+                std::printf(" %d", tile);
+            }
+            if (presetOutcome.udimUnaddressableFaces > 0) {
+                std::printf(" (+%zu face(s) outside the addressable grid)",
+                            presetOutcome.udimUnaddressableFaces);
+            }
+            std::printf("\n");
             for (const PresetOutcome::File& file : presetOutcome.files) {
-                std::printf("  %-12s %s\n", file.kind.c_str(), file.path.c_str());
+                std::printf("  %-12s %-6d %s\n", file.kind.c_str(), file.udimTile,
+                            file.path.c_str());
             }
         }
         std::printf("time:      %.2fs\n", elapsed);

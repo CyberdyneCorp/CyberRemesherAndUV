@@ -500,14 +500,19 @@ Result<ExportPreset> resolvePreset(const std::string& nameOrPath) {
                                                    "; or pass a path to a preset file)"};
 }
 
+bool presetNamesTiles(const ExportPreset& preset) {
+    return preset.namingPattern.find(kUdimToken) != std::string::npos;
+}
+
 std::string presetMapFileName(const ExportPreset& preset, const PresetMapEntry& entry,
-                              std::string_view basename) {
+                              std::string_view basename, int udimTile) {
     std::string name = preset.namingPattern;
     const std::string suffix = entry.suffix.empty() ? presetMapName(entry.map) : entry.suffix;
     replaceAll(name, "{basename}", basename);
     replaceAll(name, "{map}", suffix);
     replaceAll(name, "{preset}", preset.name);
     replaceAll(name, "{ext}", preset.textureFormat);
+    replaceAll(name, kUdimToken, std::to_string(udimTile));
     // Containment is decided on the EXPANDED name, not per token: every token
     // ({basename}, {map}, {preset}, {ext}) substitutes text from a preset file
     // or a caller, so gating them one by one leaves the next token added here

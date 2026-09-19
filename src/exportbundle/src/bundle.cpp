@@ -169,7 +169,7 @@ bool isInsideDirectory(const std::filesystem::path& directory, const std::filesy
 
 // Applies the preset's conventions to a freshly baked map and writes it.
 bool writeMap(const ExportPreset& preset, const PresetMapEntry& entry, bake::Image image,
-              const bake::BakeEncoding& encoding, const bake::BakePadding& padding,
+              const bake::BakeEncoding& encoding, const bake::BakePadding& padding, int udimTile,
               const std::filesystem::path& path, BundleResult& result) {
     if (entry.map == PresetMap::Normal && preset.normalGreen == GreenChannel::MinusY) {
         flipGreen(image);
@@ -215,8 +215,151 @@ bool writeMap(const ExportPreset& preset, const PresetMapEntry& entry, bake::Ima
         return false;
     }
     result.files.push_back(BundleFile{path.string(), io::presetMapName(entry.map), writtenSpace,
-                                      width, height, encoding, padding});
+                                      width, height, encoding, padding, udimTile});
     return true;
+}
+
+}  // namespace
+
+// ---- the UDIM set ---------------------------------------------------------
+
+namespace {
+
+// One map's bakes, as ONE ENTRY PER OUTPUT FILE. An ordinary bundle produces a
+// single entry carrying tile 1001, because the unit square IS that tile, so
+// everything downstream -- the name expansion, the containment check, the
+// overwrite guard, the report row -- has one shape rather than two.
+using MapBakes = std::vector<bake::UdimTileBake>;
+
+// Turns a UDIM refusal into the bundle's own error text. The two ceilings stay
+// DISTINCT here for the reason they are distinct in the bake: "this tile is too
+// big" and "this many tiles of this size are too many" have different fixes.
+std::string udimError(const bake::UdimBakeResult& baked, PresetMap map) {
+    return std::string("UDIM bake of map '") + io::presetMapName(map) +
+           "' was refused: " + baked.refusalMessage;
+}
+
+// Bakes one preset entry, UDIM-aware or not. Returns false with `result` already
+// carrying the error or the cancellation.
+bool bakeMapSet(const Mesh& low, const Mesh& high, const PresetMapEntry& entry, bake::BakeMap map,
+                const bake::BakeParams& bakeParams, bool udim, MapBakes& out, BundleResult& result,
+                ProgressSink* progress, const CancelToken* cancel) {
+    out.clear();
+    if (udim) {
+        bake::UdimBakeResult baked = bake::bakeUdim(low, high, map, bakeParams, progress, cancel);
+        if (baked.cancelled) {
+            result.cancelled = true;
+            return false;
+        }
+        if (baked.refusal != bake::UdimRefusal::None) {
+            result.error = udimError(baked, entry.map);
+            return false;
+        }
+        out = std::move(baked.tiles);
+        return true;
+    }
+    bake::BakeResult baked = bake::bake(low, high, map, bakeParams, progress, cancel);
+    if (baked.cancelled) {
+        result.cancelled = true;
+        return false;
+    }
+    if (baked.image.pixels.empty()) {
+        result.error =
+            std::string("bake produced no image for map '") + io::presetMapName(entry.map) + "'";
+        return false;
+    }
+    out.push_back(bake::UdimTileBake{bake::UdimTile{}, std::move(baked)});
+    return true;
+}
+
+// The path one tile of one map is written to, or an empty path with `result`
+// carrying the refusal. Every check the single-map path already made, applied
+// per tile: an expansion that leaves the output directory, a resolved path that
+// does, and a path an earlier map or an earlier tile already wrote.
+std::filesystem::path resolveMapPath(const ExportPreset& preset, const PresetMapEntry& entry,
+                                     const std::string& basename, int tile,
+                                     const std::filesystem::path& directory,
+                                     std::unordered_set<std::string>& written,
+                                     BundleResult& result) {
+    // An empty expansion is presetMapFileName refusing a name that would leave
+    // the output directory; joining it would write the directory itself, so it
+    // is an error here and not a path.
+    const std::string fileName = io::presetMapFileName(preset, entry, basename, tile);
+    if (fileName.empty()) {
+        result.error = std::string("map '") + io::presetMapName(entry.map) +
+                       "' names a file outside the output directory; check the preset's "
+                       "namingPattern, name and suffixes, and the basename";
+        return {};
+    }
+    const std::filesystem::path path = directory / fileName;
+    if (!isInsideDirectory(directory, path)) {
+        result.error = "map '" + path.string() +
+                       "' resolves outside the output directory; check the preset's "
+                       "namingPattern and the basename";
+        return {};
+    }
+    if (!written.insert(path.string()).second) {
+        result.error = std::string("map '") + io::presetMapName(entry.map) + "' would overwrite '" +
+                       path.string() +
+                       "', already written by an earlier map; the preset's namingPattern "
+                       "and suffixes must give every map its own name";
+        return {};
+    }
+    return path;
+}
+
+// The bake parameters every map of this bundle is baked with. The UP AXIS comes
+// from the preset (and may warn); everything else is the caller's, including the
+// texel ceiling, which is the embedder's policy rather than the preset's.
+bake::BakeParams bakeParamsFor(const ExportPreset& preset, const BundleParams& params,
+                               BundleResult& result) {
+    bake::BakeParams bakeParams;
+    bakeParams.width = preset.resolution;
+    bakeParams.height = preset.resolution;
+    bakeParams.cageDistance = params.cageDistance;
+    bakeParams.aoSamples = params.aoSamples;
+    bakeParams.aoRadius = params.aoRadius;
+    bakeParams.bentNormalSpace = params.bentNormalSpace;
+    bakeParams.thicknessScale = params.thicknessScale;
+    bakeParams.paddingRadius = params.paddingRadius;
+    bakeParams.placement = params.placement;
+    bakeParams.densityNormalization = params.densityNormalization;
+    bakeParams.maxPixels = params.maxPixels;
+    bakeParams.upAxis = presetUpAxis(preset, result);
+    return bakeParams;
+}
+
+// The refusals that are knowable BEFORE anything is written -- from the preset,
+// the caller's parameters and the layout detected above -- gathered here because
+// they share that property and it is the whole point of them: a bundle that
+// refuses must leave no half-written set behind, not even the mesh.
+//
+// Returns true with `result.error` set.
+bool refusedBeforeWriting(const ExportPreset& preset, const BundleParams& params,
+                          const bake::UdimLayout& layout, const bake::BakeParams& bakeParams,
+                          BundleResult& result) {
+    // A UDIM set through a pattern that names no tile would write every tile to
+    // one path, each overwriting the last, while the report listed them all.
+    if (params.udim && layout.tiles.size() > 1 && !io::presetNamesTiles(preset)) {
+        result.error = "the UV layout occupies " + std::to_string(layout.tiles.size()) +
+                       " UDIM tiles but preset '" + preset.name +
+                       "' names its files with the pattern '" + preset.namingPattern +
+                       "', which carries no " + std::string(io::kUdimToken) +
+                       " token; every tile would be written to one path, each overwriting "
+                       "the last";
+        return true;
+    }
+    // Both texel ceilings, asked of the bake itself so the sentence a host reads
+    // is the one bakeUdim would have produced -- and asked for ONE tile when the
+    // bundle is not UDIM-aware, because a single map is the tile-1001 case of a
+    // set.
+    const std::size_t bakedTiles = params.udim ? layout.tiles.size() : 1;
+    const bake::UdimCeiling ceiling = bake::udimCeiling(bakeParams, bakedTiles);
+    if (ceiling.refusal != bake::UdimRefusal::None) {
+        result.error = "preset '" + preset.name + "' was refused: " + ceiling.message;
+        return true;
+    }
+    return false;
 }
 
 }  // namespace
@@ -249,29 +392,32 @@ BundleResult writeBundle(Mesh& low, const Mesh& high, const BundleParams& params
         return result;
     }
 
+    // Detected BEFORE anything is baked or written, and reported whether or not
+    // this bundle is UDIM-aware: a host has to be able to see that the layout it
+    // just handed over occupies more tiles than the one file it is getting.
+    const bake::UdimLayout layout = bake::udimTiles(low);
+    result.udimTiles.reserve(layout.tiles.size());
+    for (const bake::UdimTile& tile : layout.tiles) {
+        result.udimTiles.push_back(tile.number);
+    }
+    result.udimUnaddressableFaces = layout.unaddressableFaces;
+
+    const bake::BakeParams bakeParams = bakeParamsFor(preset, params, result);
+    if (refusedBeforeWriting(preset, params, layout, bakeParams, result)) {
+        return result;
+    }
+
     const io::Status exported = io::exportMesh(low, params.meshPath);
     if (!exported.ok()) {
         result.error = exported.error().message;
         return result;
     }
-    result.files.push_back(BundleFile{params.meshPath.string(), "mesh", "", 0, 0, {}, {}});
+    result.files.push_back(
+        BundleFile{params.meshPath.string(), "mesh", "", 0, 0, {}, {}, bake::udimTileNumber(0, 0)});
 
     const std::string basename =
         params.basename.empty() ? params.meshPath.stem().string() : params.basename;
     const std::filesystem::path directory = params.meshPath.parent_path();
-
-    bake::BakeParams bakeParams;
-    bakeParams.width = preset.resolution;
-    bakeParams.height = preset.resolution;
-    bakeParams.cageDistance = params.cageDistance;
-    bakeParams.aoSamples = params.aoSamples;
-    bakeParams.aoRadius = params.aoRadius;
-    bakeParams.bentNormalSpace = params.bentNormalSpace;
-    bakeParams.thicknessScale = params.thicknessScale;
-    bakeParams.paddingRadius = params.paddingRadius;
-    bakeParams.placement = params.placement;
-    bakeParams.densityNormalization = params.densityNormalization;
-    bakeParams.upAxis = presetUpAxis(preset, result);
 
     const auto total = static_cast<float>(preset.maps.size());
     float done = 0.0f;
@@ -279,6 +425,7 @@ BundleResult writeBundle(Mesh& low, const Mesh& high, const BundleParams& params
     // in code reaches here unchecked, and the damage is silent -- one file
     // holding the last bake, two report rows claiming it under different kinds.
     std::unordered_set<std::string> written;
+    MapBakes bakes;
     for (const PresetMapEntry& entry : preset.maps) {
         if (cancel != nullptr && cancel->isCancelled()) {
             result.cancelled = true;
@@ -291,43 +438,20 @@ BundleResult writeBundle(Mesh& low, const Mesh& high, const BundleParams& params
             return result;
         }
         ProgressSink mapProgress = mapSubrange(progress, done, total);
-        bake::BakeResult baked = bake::bake(low, high, *map, bakeParams, &mapProgress, cancel);
-        if (baked.cancelled) {
-            result.cancelled = true;
+        if (!bakeMapSet(low, high, entry, *map, bakeParams, params.udim, bakes, result,
+                        &mapProgress, cancel)) {
             return result;
         }
-        if (baked.image.pixels.empty()) {
-            result.error = std::string("bake produced no image for map '") +
-                           io::presetMapName(entry.map) + "'";
-            return result;
-        }
-        // An empty expansion is presetMapFileName refusing a name that would
-        // leave the output directory; joining it would write the directory
-        // itself, so it is an error here and not a path.
-        const std::string fileName = io::presetMapFileName(preset, entry, basename);
-        if (fileName.empty()) {
-            result.error = std::string("map '") + io::presetMapName(entry.map) +
-                           "' names a file outside the output directory; check the preset's "
-                           "namingPattern, name and suffixes, and the basename";
-            return result;
-        }
-        const std::filesystem::path path = directory / fileName;
-        if (!isInsideDirectory(directory, path)) {
-            result.error = "map '" + path.string() +
-                           "' resolves outside the output directory; check the preset's "
-                           "namingPattern and the basename";
-            return result;
-        }
-        if (!written.insert(path.string()).second) {
-            result.error = std::string("map '") + io::presetMapName(entry.map) +
-                           "' would overwrite '" + path.string() +
-                           "', already written by an earlier map; the preset's namingPattern "
-                           "and suffixes must give every map its own name";
-            return result;
-        }
-        if (!writeMap(preset, entry, std::move(baked.image), baked.encoding, baked.padding, path,
-                      result)) {
-            return result;
+        for (bake::UdimTileBake& tile : bakes) {
+            const std::filesystem::path path = resolveMapPath(
+                preset, entry, basename, tile.tile.number, directory, written, result);
+            if (path.empty()) {
+                return result;
+            }
+            if (!writeMap(preset, entry, std::move(tile.result.image), tile.result.encoding,
+                          tile.result.padding, tile.tile.number, path, result)) {
+                return result;
+            }
         }
         done += 1.0f;
         if (progress != nullptr) {

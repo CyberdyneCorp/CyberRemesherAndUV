@@ -581,6 +581,45 @@ def main() -> int:
     check("user preset exit 0", r.returncode == 0, r.stderr)
     check("user preset naming honored", (user_dir / "u.curvature.png").exists())
 
+    # ---- UDIM (surface-baking, "UDIM-aware baking") ---------------------
+    # This pipeline's low-poly is the mesh the remesher just produced, which
+    # carries no UVs, so the bundle unwraps it -- and the automatic atlas packs
+    # into the 0-1 square, which IS tile 1001. The CLI is therefore always the
+    # tile-1001 case of a UDIM bake and offers no --udim flag; what it owes a
+    # caller is the tile the layout occupies and the tile each file holds.
+    udim_preset = tmp / "udim.json"
+    udim_preset.write_text(json.dumps({
+        "schemaVersion": 1, "name": "udim", "resolution": 32,
+        "namingPattern": "{basename}.{map}.{udim}.{ext}", "maps": ["curvature"],
+    }))
+    udim_dir = tmp / "udim"
+    udim_dir.mkdir()
+    udim_report = udim_dir / "udim.json"
+    r = run("--input", str(sphere), "--output", str(udim_dir / "u.obj"), "--target-quads", "300",
+            "--preset", str(udim_preset), "--report", str(udim_report))
+    check("udim run exit 0", r.returncode == 0, r.stderr)
+    check("the token expands to the tile the unit square is",
+          (udim_dir / "u.curvature.1001.png").exists(),
+          str(sorted(p.name for p in udim_dir.iterdir())))
+    check("udim tile list printed before the rows", "udim:" in r.stdout, r.stdout)
+    if udim_report.exists():
+        data = json.loads(udim_report.read_text())
+        check("report lists the occupied tiles", data["preset"]["udimTiles"] == [1001],
+              str(data["preset"].get("udimTiles")))
+        check("report counts unaddressable faces",
+              data["preset"]["udimUnaddressableFaces"] == 0,
+              str(data["preset"].get("udimUnaddressableFaces")))
+        tiles = [o.get("udimTile") for o in data["outputs"] if o.get("width", 0) > 0]
+        check("every map row names its tile", tiles == [1001], str(tiles))
+
+    # A flag the CLI cannot honour is refused rather than accepted and ignored:
+    # a caller scripting --udim must not be told the run was UDIM-aware.
+    r = run("--input", str(sphere), "--output", str(tmp / "udim_flag.obj"),
+            "--target-quads", "300", "--preset", str(udim_preset), "--udim")
+    check("--udim is not an option the CLI accepts", r.returncode != 0, r.stdout)
+    check("--udim is refused by name", "--udim" in r.stderr, r.stderr)
+    check("--udim is not documented", "--udim" not in run("--help").stderr)
+
     # An incompatible schema version fails loudly and produces nothing.
     bad_preset = tmp / "future.json"
     bad_preset.write_text(json.dumps({

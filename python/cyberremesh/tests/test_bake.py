@@ -81,9 +81,71 @@ def main() -> int:
         _gate_border_padding(obj.name)
         _gate_a_raising_evaluator_raises(obj.name)
         _gate_the_openness_rename_shim(obj.name)
+        _gate_udim(obj.name)
     finally:
         os.unlink(obj.name)
     return 0
+
+
+def _gate_udim(unit_square_obj):
+    """UDIM tile detection and the per-tile bake, through the binding.
+
+    The case that matters is the one the C++ suite pins: an occluder whose UVs
+    lie in ANOTHER tile still occludes. Here the binding is what is under test,
+    so this asserts the surface reaches Python intact -- the tile list without a
+    bake, one image per tile in ascending order, and the ceiling refusals naming
+    which of the two they hit.
+    """
+    import tempfile as _t
+
+    two_tiles = (
+        "v 0 0 0\nv 1 0 0\nv 1 1 0\nv 0 1 0\n"
+        "v 3 0 0\nv 4 0 0\nv 4 1 0\nv 3 1 0\n"
+        "vt 0.1 0.1\nvt 0.9 0.1\nvt 0.9 0.9\nvt 0.1 0.9\n"
+        "vt 1.1 0.1\nvt 1.9 0.1\nvt 1.9 0.9\nvt 1.1 0.9\n"
+        "f 1/1 2/2 3/3 4/4\nf 5/5 6/6 7/7 8/8\n"
+    )
+    handle = _t.NamedTemporaryFile(suffix=".obj", delete=False, mode="w")
+    handle.write(two_tiles)
+    handle.close()
+    try:
+        with cyberremesh.Mesh.load_obj(handle.name) as low:
+            layout = cyberremesh.udim_tiles(low)
+            assert layout.tiles == (1001, 1002), layout.tiles
+            assert layout.unaddressable_faces == 0, layout.unaddressable_faces
+
+            with cyberremesh.Mesh.load_obj(unit_square_obj) as square:
+                assert cyberremesh.udim_tiles(square).tiles == (1001,)
+
+            with cyberremesh.Mesh.load_obj(handle.name) as high:
+                params = cyberremesh.BakeParams(width=16, height=16)
+                # The ceiling is PROCESS-GLOBAL: restored at the end of the gate
+                # so a gate added after this one does not silently run with none.
+                previous_ceiling = cyberremesh.max_bake_pixels()
+                cyberremesh.set_max_bake_pixels(0)
+                tiles = cyberremesh.bake_udim(low, high, cyberremesh.BakeMap.NORMAL, params)
+                try:
+                    assert [t.tile for t in tiles] == [1001, 1002], [t.tile for t in tiles]
+                    for entry in tiles:
+                        assert entry.image.width == 16, entry.image.width
+                        assert entry.image.channels == 3, entry.image.channels
+                finally:
+                    for entry in tiles:
+                        entry.image.close()
+
+                # One tile of 16x16 is 256 texels: 255 refuses the TILE, 300
+                # fits one tile and not two. Two problems, two messages.
+                for ceiling, word in ((255, "PER-TILE"), (300, "AGGREGATE")):
+                    cyberremesh.set_max_bake_pixels(ceiling)
+                    try:
+                        cyberremesh.bake_udim(low, high, cyberremesh.BakeMap.NORMAL, params)
+                        raise AssertionError(f"ceiling {ceiling} was not refused")
+                    except cyberremesh.CyberError as error:
+                        assert word in str(error), (ceiling, str(error))
+                cyberremesh.set_max_bake_pixels(previous_ceiling)
+    finally:
+        os.unlink(handle.name)
+    print("PASS bake_udim: the tile list, the per-tile set and both ceiling refusals bind")
 
 
 def _gate_the_world_and_density_maps(obj_path):

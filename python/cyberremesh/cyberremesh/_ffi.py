@@ -650,6 +650,7 @@ class CyberBundleParams(Structure):
         ("padding_radius", c_int32),
         ("placement", c_float * 16),
         ("density_normalization", c_int32),
+        ("udim", c_int32),
     ]
 
 
@@ -1571,6 +1572,28 @@ def _declare(lib: ctypes.CDLL) -> None:
     lib.cyber_image_save_png.argtypes = [c_void_p, c_char_p]
     lib.cyber_image_save_png.restype = c_int32
 
+    # -- UDIM-aware baking ---------------------------------------------------
+    # CyberStatus cyber_udim_tiles(const CyberMesh*, int* out_tiles, size_t capacity,
+    #                              size_t* out_count, uint64_t* out_unaddressable_faces)
+    lib.cyber_udim_tiles.argtypes = [
+        c_void_p, POINTER(c_int32), c_size_t, POINTER(c_size_t), POINTER(c_uint64),
+    ]
+    lib.cyber_udim_tiles.restype = c_int32
+    # CyberStatus cyber_bake_udim(const CyberMesh* low, const CyberMesh* high, CyberBakeMap,
+    #                             const CyberBakeParams*, int* out_refusal, CyberUdimBake** out)
+    lib.cyber_bake_udim.argtypes = [
+        c_void_p, c_void_p, c_int32, POINTER(CyberBakeParams), POINTER(c_int32), POINTER(c_void_p),
+    ]
+    lib.cyber_bake_udim.restype = c_int32
+    lib.cyber_udim_bake_count.argtypes = [c_void_p]
+    lib.cyber_udim_bake_count.restype = c_size_t
+    lib.cyber_udim_bake_tile.argtypes = [c_void_p, c_size_t, POINTER(c_int32)]
+    lib.cyber_udim_bake_tile.restype = c_int32
+    lib.cyber_udim_bake_image.argtypes = [c_void_p, c_size_t, POINTER(c_void_p)]
+    lib.cyber_udim_bake_image.restype = c_int32
+    lib.cyber_udim_bake_free.argtypes = [c_void_p]
+    lib.cyber_udim_bake_free.restype = None
+
     # -- bake provider -------------------------------------------------------
     lib.cyber_bake_provider_map_count.argtypes = []
     lib.cyber_bake_provider_map_count.restype = c_size_t
@@ -2067,6 +2090,8 @@ def _declare_export_presets(lib: ctypes.CDLL) -> None:
         POINTER(CyberImagePadding),
     ]
     lib.cyber_bundle_result_file_padding.restype = c_int32
+    lib.cyber_bundle_result_file_udim_tile.argtypes = [c_void_p, c_size_t, POINTER(c_int32)]
+    lib.cyber_bundle_result_file_udim_tile.restype = c_int32
     lib.cyber_bundle_result_file_id_source.argtypes = [c_void_p, c_size_t]
     lib.cyber_bundle_result_file_id_source.restype = c_char_p
     lib.cyber_bundle_result_file_id_color_count.argtypes = [c_void_p, c_size_t]
