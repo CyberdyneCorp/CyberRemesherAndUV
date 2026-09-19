@@ -327,6 +327,19 @@ more than the width of that range. Bounding it to the covered range ALONE would 
 wrong, because a map that ramps across its island reaches its own extreme AT the
 border and every continuation would flatten back into the repeated edge value.
 
+The continuation SHALL ALSO stay inside the value range the map's OWN encoding
+guarantees, which each map SHALL declare alongside its encoding basis. An object-space
+position is `(p - min) / (max - min)` and never leaves `[0,1]`; an ambient occlusion is
+a fraction of a hemisphere; a thickness is a distance and is never negative. The
+compounding bound above is a bound on RUNAWAY and is deliberately wider than any of
+these — for a map spanning `[0,1]` it permits `[-1,2]` — so it cannot serve as this one.
+A padded texel outside its map's own range is not a continuation of the map, it is a
+value the map's contract says cannot occur: a consumer decoding an object-space position
+as `min + v * (max - min)` would be handed a point outside the box the bake recorded.
+A map whose encoding guarantees no range — a position in model units, a signed
+displacement, a colour copied verbatim off the Target — SHALL be bounded by the
+compounding limit alone.
+
 **Channel semantics decide the fill rule**, and SHALL be taken from the map's recorded
 encoding basis rather than from its name:
 
@@ -343,7 +356,8 @@ encoding basis rather than from its name:
   restore, and imposing one would replace the map's values with directions.
 
 **What is reported.** The bake SHALL report, alongside the image, the padding radius
-applied, the fill rule actually used, and the number of texels the padded band wrote.
+applied, the fill rule actually used — none where the band wrote no texel, because no
+rule was applied — and the number of texels the padded band wrote.
 That record SHALL be reachable from every entry point that produces a map — the C ABI,
 the export-bundle result, the language bindings — and SHALL appear in the run's
 machine-readable report beside the file it describes.
@@ -351,7 +365,13 @@ machine-readable report beside the file it describes.
 **Determinism.** The padded band SHALL depend only on the baked texels and the radius:
 the same bake SHALL pad identically across runs, machines, compilers and standard
 libraries, and SHALL NOT depend on the order in which texels are visited or on the
-iteration order of any container.
+iteration order of any container. In particular a texel filled by a ring SHALL NOT be a
+source for another texel of that SAME ring: each ring SHALL read only the coverage that
+existed before it began.
+
+**Cancellation.** The padding stage SHALL poll the cancellation token as it grows the
+band, not only before it starts, and SHALL stop between rings and report the bake
+cancelled — a radius of 8 on a large map is work a host can be waiting on.
 
 #### Scenario: A padded texel continues a gradient instead of repeating the edge
 - **WHEN** a map whose values run as a gradient across an island is baked with a
@@ -385,6 +405,28 @@ iteration order of any container.
 - **WHEN** a bake is requested with a negative padding radius through any entry point
 - **THEN** the bake SHALL fail and return no image, rather than substituting the
   default
+
+#### Scenario: A padded band stays inside the range its map's encoding guarantees
+- **WHEN** a map whose encoding guarantees a value range is baked with a padding radius
+  over an island whose values ramp into the limits of that range
+- **THEN** no texel of the padded band SHALL leave that range: an object-space position's
+  band SHALL stay inside the box the map records, an ambient occlusion's band SHALL not
+  exceed a whole hemisphere, and a thickness's band SHALL not go negative
+- **AND** a map whose encoding guarantees no range SHALL still be free to continue past
+  the values its island holds
+
+#### Scenario: The band does not depend on the order texels are visited in
+- **WHEN** the same image and coverage are padded twice, the second time with the covered
+  texels listed in a different order
+- **THEN** the two bands SHALL be identical texel for texel
+- **AND** the value of a texel in a ring SHALL be the one its sources from BEFORE that
+  ring give it, whichever of its siblings in the same ring were filled first
+
+#### Scenario: Cancellation during the padding stage
+- **WHEN** cancellation is requested after the shade has finished but while the padded
+  band is still growing
+- **THEN** the bake SHALL stop between rings and report itself cancelled
+- **AND** the texels the remaining rings would have filled SHALL be left as they were
 
 #### Scenario: A continuation cannot compound without bound
 - **WHEN** a map is baked with a padding radius over an island whose values are not

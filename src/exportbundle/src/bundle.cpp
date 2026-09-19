@@ -109,6 +109,13 @@ void flipGreen(bake::Image& image) {
 }
 
 void encodeSrgb(bake::Image& image) {
+    // Runs AFTER border padding, and io::linearToSrgb clamps into [0,1]. On a
+    // colour map whose padded band continued past 1 that flattens the band into
+    // exactly the plateau padding exists to avoid -- but only for the values
+    // that left [0,1] in the first place, and only on the sRGB path. A colour
+    // map declares no value range of its own (the Target's colours are taken
+    // verbatim), so this is the one place a band can still be flattened.
+    //
     // Alpha, where present, stays linear by convention.
     const int colorChannels = image.channels == 4 ? 3 : image.channels;
     for (int y = 0; y < image.height; ++y) {

@@ -3,6 +3,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -94,6 +95,21 @@ struct BakeEncoding {
     // The factor a Distance map was multiplied by (BakeParams::thicknessScale
     // for Thickness; 1 for Displacement).
     float scale = 1.0f;
+    // The range this map's OWN encoding guarantees, on every channel of every
+    // texel it writes: an object-space position is (p - min)/(max - min) and
+    // never leaves [0,1]; an occlusion is a fraction of a hemisphere; a
+    // thickness is a distance and is never negative. A map whose encoding
+    // guarantees nothing -- a position in model units, a signed displacement,
+    // a colour taken verbatim from the Target -- leaves these infinite.
+    //
+    // Border padding is confined to this range (see the surface-baking spec,
+    // "Bake output padding across UV island borders"): a padded texel outside it
+    // is not a continuation of the map, it is a value the map's own contract
+    // says cannot occur, and every consumer that decodes the map -- `min + v *
+    // (max - min)` for an object-space position -- is entitled to assume it
+    // cannot.
+    float valueMin = -std::numeric_limits<float>::infinity();
+    float valueMax = std::numeric_limits<float>::infinity();
     // Which of the Target's id columns an IdColor map actually read:
     // "material_id", "object_id", "group_id", "component" for the
     // face-connected-component fallback, or "none" when nothing declared an id
