@@ -720,6 +720,141 @@ TEST_CASE("capi reports what the padding stage did, and honours a zero radius") 
     std::filesystem::remove(objPath, ec2);
 }
 
+TEST_CASE("capi produces the world-direction and uv-density maps with their metadata") {
+    const std::filesystem::path objPath = writeUvPlaneObj();
+    CyberMesh* low = nullptr;
+    CyberMesh* high = nullptr;
+    REQUIRE(cyber_mesh_load_obj(objPath.string().c_str(), &low) == CYBER_OK);
+    REQUIRE(cyber_mesh_load_obj(objPath.string().c_str(), &high) == CYBER_OK);
+
+    CyberBakeParams params{};
+    cyber_default_bake_params(&params);
+    params.width = 16;
+    params.height = 16;
+    CHECK(params.densityNormalization == CYBER_DENSITY_ABSOLUTE);
+    // The default placement is the identity, which is what makes the world map
+    // the object map until a host says otherwise.
+    for (int i = 0; i < 16; ++i) {
+        CHECK(params.placement[i] == ((i % 5 == 0) ? 1.0f : 0.0f));
+    }
+
+    // An identity placement reproduces the object-space normal map exactly.
+    CyberImage* world = nullptr;
+    CyberImage* object = nullptr;
+    REQUIRE(cyber_bake(low, high, CYBER_BAKE_WORLD_DIRECTION, &params, &world) == CYBER_OK);
+    REQUIRE(cyber_bake(low, high, CYBER_BAKE_OBJECT_NORMAL, &params, &object) == CYBER_OK);
+    std::vector<float> worldPixels(static_cast<std::size_t>(16 * 16 * 3), 0.0f);
+    std::vector<float> objectPixels(worldPixels.size(), 0.0f);
+    REQUIRE(cyber_image_copy_pixels(world, worldPixels.data(), worldPixels.size()) ==
+            worldPixels.size());
+    REQUIRE(cyber_image_copy_pixels(object, objectPixels.data(), objectPixels.size()) ==
+            objectPixels.size());
+    CHECK(worldPixels == objectPixels);
+
+    CyberImageEncoding encoding{};
+    REQUIRE(cyber_image_encoding(world, &encoding) == CYBER_OK);
+    CHECK(encoding.basis == CYBER_ENCODING_WORLD_DIRECTION);
+    float placement[16] = {0};
+    REQUIRE(cyber_image_placement(world, placement) == CYBER_OK);
+    for (int i = 0; i < 16; ++i) {
+        CHECK(placement[i] == params.placement[i]);
+    }
+    cyber_image_free(world);
+    cyber_image_free(object);
+
+    // A quarter turn about X actually changes the map.
+    CyberBakeParams rotated = params;
+    rotated.placement[5] = 0.0f;
+    rotated.placement[6] = -1.0f;
+    rotated.placement[9] = 1.0f;
+    rotated.placement[10] = 0.0f;
+    CyberImage* turned = nullptr;
+    REQUIRE(cyber_bake(low, high, CYBER_BAKE_WORLD_DIRECTION, &rotated, &turned) == CYBER_OK);
+    std::vector<float> turnedPixels(worldPixels.size(), 0.0f);
+    REQUIRE(cyber_image_copy_pixels(turned, turnedPixels.data(), turnedPixels.size()) ==
+            turnedPixels.size());
+    CHECK(turnedPixels != worldPixels);
+    cyber_image_free(turned);
+
+    // The density map reports its normalization and the mean it measured, in
+    // both modes, so a relative map converts back to an absolute one.
+    CyberImage* absolute = nullptr;
+    REQUIRE(cyber_bake(low, high, CYBER_BAKE_UV_DENSITY, &params, &absolute) == CYBER_OK);
+    CHECK(cyber_image_channels(absolute) == 1);
+    CyberImageDensity density{};
+    REQUIRE(cyber_image_density(absolute, &density) == CYBER_OK);
+    CHECK(density.normalization == CYBER_DENSITY_ABSOLUTE);
+    CHECK(density.mean > 0.0f);
+    REQUIRE(cyber_image_encoding(absolute, &encoding) == CYBER_OK);
+    CHECK(encoding.basis == CYBER_ENCODING_UV_DENSITY);
+
+    CyberBakeParams relative = params;
+    relative.densityNormalization = CYBER_DENSITY_RELATIVE;
+    CyberImage* scaled = nullptr;
+    REQUIRE(cyber_bake(low, high, CYBER_BAKE_UV_DENSITY, &relative, &scaled) == CYBER_OK);
+    CyberImageDensity scaledDensity{};
+    REQUIRE(cyber_image_density(scaled, &scaledDensity) == CYBER_OK);
+    CHECK(scaledDensity.normalization == CYBER_DENSITY_RELATIVE);
+    CHECK(scaledDensity.mean == doctest::Approx(density.mean));
+    cyber_image_free(absolute);
+    cyber_image_free(scaled);
+
+    // A map that is not a density map still answers, neutrally, rather than
+    // leaving a consumer to guess whether the record applies.
+    CyberImage* normal = nullptr;
+    REQUIRE(cyber_bake(low, high, CYBER_BAKE_NORMAL, &params, &normal) == CYBER_OK);
+    CyberImageDensity neutral{};
+    REQUIRE(cyber_image_density(normal, &neutral) == CYBER_OK);
+    CHECK(neutral.normalization == CYBER_DENSITY_ABSOLUTE);
+    CHECK(neutral.mean == 0.0f);
+    cyber_image_free(normal);
+
+    CyberImageDensity unusedDensity{};
+    CHECK(cyber_image_density(nullptr, &unusedDensity) == CYBER_ERR_INVALID_ARG);
+    CHECK(cyber_image_placement(nullptr, placement) == CYBER_ERR_INVALID_ARG);
+
+    cyber_mesh_free(low);
+    cyber_mesh_free(high);
+    std::error_code ec;
+    std::filesystem::remove(objPath, ec);
+}
+
+TEST_CASE("capi refuses a singular placement and an unknown density mode") {
+    const std::filesystem::path objPath = writeUvPlaneObj();
+    CyberMesh* low = nullptr;
+    CyberMesh* high = nullptr;
+    REQUIRE(cyber_mesh_load_obj(objPath.string().c_str(), &low) == CYBER_OK);
+    REQUIRE(cyber_mesh_load_obj(objPath.string().c_str(), &high) == CYBER_OK);
+
+    CyberBakeParams params{};
+    cyber_default_bake_params(&params);
+    params.width = 8;
+    params.height = 8;
+
+    // Refused, and refused as an ARGUMENT error rather than as an empty image:
+    // an identity placement is a meaningful request, so substituting it would
+    // silently answer a different question.
+    CyberBakeParams singular = params;
+    singular.placement[5] = 0.0f;  // flattens Y
+    CyberImage* image = nullptr;
+    CHECK(cyber_bake(low, high, CYBER_BAKE_WORLD_DIRECTION, &singular, &image) ==
+          CYBER_ERR_INVALID_ARG);
+    CHECK(image == nullptr);
+
+    CyberBakeParams notFinite = params;
+    notFinite.placement[0] = std::numeric_limits<float>::infinity();
+    CHECK(cyber_bake(low, high, CYBER_BAKE_NORMAL, &notFinite, &image) == CYBER_ERR_INVALID_ARG);
+
+    CyberBakeParams badMode = params;
+    badMode.densityNormalization = 7;
+    CHECK(cyber_bake(low, high, CYBER_BAKE_UV_DENSITY, &badMode, &image) == CYBER_ERR_INVALID_ARG);
+
+    cyber_mesh_free(low);
+    cyber_mesh_free(high);
+    std::error_code ec;
+    std::filesystem::remove(objPath, ec);
+}
+
 namespace {
 // The z = 0 plane as a field, so the encoding-parameter rejection can be shown
 // on the field entry point too rather than only on the mesh one.

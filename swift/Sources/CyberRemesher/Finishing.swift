@@ -179,6 +179,15 @@ public struct BakeMap: RawRepresentable, Equatable, Sendable {
     /// One flat colour per Target object or submesh (RGB), from `object_id`,
     /// then `group_id`, then the Target's face-connected components.
     public static let objectId = BakeMap(rawValue: CYBER_BAKE_OBJECT_ID.rawValue)
+    /// The Target normal carried into WORLD space by `BakeParameters.placement`
+    /// (by its inverse transpose), encoded `n * 0.5 + 0.5` (RGB). With an
+    /// identity placement this is bit-identical to `objectNormal`: this engine
+    /// has one model space, and the placement is what separates them.
+    public static let worldDirection = BakeMap(rawValue: CYBER_BAKE_WORLD_DIRECTION.rawValue)
+    /// Texels per SQUARE model unit given by this mesh's UV layout at the
+    /// requested resolution, as a single channel. Zero is the sentinel for "no
+    /// density here"; no defined density can take it.
+    public static let uvDensity = BakeMap(rawValue: CYBER_BAKE_UV_DENSITY.rawValue)
 }
 
 /// Axis convention the object-space maps are expressed in.
@@ -208,6 +217,66 @@ public enum EncodingBasis: UInt32, Sendable {
     /// An EXACT key, not a measurement. Never filter, resample or
     /// colour-convert such a map; compare its texels at zero tolerance.
     case idColor = 5
+    /// A unit direction in WORLD space: the object-space direction carried
+    /// through `ImageEncoding.placement`, then the up axis, then `v * 0.5 + 0.5`.
+    case worldDirection = 6
+    /// Texels per square model unit. The range this encoding guarantees is
+    /// `[0, +infinity)` — deliberately NOT `[0,1]`, in either mode.
+    case uvDensity = 7
+}
+
+/// How a `BakeMap.uvDensity` bake normalizes its values.
+public enum DensityNormalization: UInt32, Sendable {
+    /// Texels per square model unit as measured — what a scale-locked material
+    /// needs.
+    case absolute = 0
+    /// Each defined texel over the map's own mean — what shows an artist that
+    /// one island is packed differently from the rest.
+    case relative = 1
+}
+
+/// How a `BakeMap.uvDensity` map was normalized, and the mean it measured.
+///
+/// `mean` is the MEAN ABSOLUTE density of the map's defined texels, in texels
+/// per square model unit, and is reported in both modes: it converts a relative
+/// map back to an absolute one. Zero when the map defined no texel. Neutral
+/// (absolute, mean 0) for every map that is not a density map.
+public struct ImageDensity: Sendable, Equatable {
+    public let normalization: DensityNormalization
+    public let mean: Float
+
+    init(_ c: CyberImageDensity) {
+        normalization = DensityNormalization(rawValue: UInt32(bitPattern: c.normalization))
+            ?? .absolute
+        mean = c.mean
+    }
+}
+
+/// The 4x4 row-major identity, the default placement.
+public let identityPlacement: [Float] = [
+    1, 0, 0, 0,
+    0, 1, 0, 0,
+    0, 0, 1, 0,
+    0, 0, 0, 1,
+]
+
+/// Reads a C `float[16]` tuple out as a Swift array, and writes one back. The
+/// C fixed array imports as a 16-element tuple, which no literal should have to
+/// spell out at a call site.
+func placementArray<T>(_ tuple: T) -> [Float] {
+    withUnsafeBytes(of: tuple) { raw in
+        Array(raw.bindMemory(to: Float.self).prefix(16))
+    }
+}
+
+func writePlacement<T>(_ values: [Float], into tuple: inout T) {
+    var padded = values
+    padded.append(contentsOf: repeatElement(0, count: max(0, 16 - padded.count)))
+    withUnsafeMutableBytes(of: &tuple) { raw in
+        padded.withUnsafeBytes { source in
+            raw.copyMemory(from: UnsafeRawBufferPointer(rebasing: source.prefix(raw.count)))
+        }
+    }
 }
 
 /// How a map's padded band was filled.
@@ -316,6 +385,13 @@ public struct BakeParameters: Sendable {
     /// Texels of border padding grown outward from every UV island before the
     /// map is returned. 0 disables padding; a negative value is refused.
     public var paddingRadius: Int32
+    /// The 4x4 ROW-MAJOR object->world matrix `BakeMap.worldDirection` carries
+    /// its normals through, by its inverse transpose. 16 finite floats whose
+    /// upper-left 3x3 is invertible; anything else is refused rather than folded
+    /// to the identity. Read by no other map.
+    public var placement: [Float]
+    /// How `BakeMap.uvDensity` normalizes its values.
+    public var densityNormalization: DensityNormalization
 
     public init() {
         var defaults = CyberBakeParams()
@@ -331,16 +407,32 @@ public struct BakeParameters: Sendable {
             BentNormalSpace(rawValue: UInt32(bitPattern: defaults.bentNormalSpace)) ?? .tangent
         thicknessScale = defaults.thicknessScale
         paddingRadius = defaults.paddingRadius
+        placement = placementArray(defaults.placement)
+        densityNormalization =
+            DensityNormalization(rawValue: UInt32(bitPattern: defaults.densityNormalization))
+            ?? .absolute
     }
 
+    /// Built member by member from the engine's own defaults rather than with
+    /// the memberwise initializer: `CyberBakeParams` has been appended to in
+    /// three releases now, and a positional initializer stops compiling on each
+    /// one while this does not.
     var cValue: CyberBakeParams {
-        CyberBakeParams(
-            width: width, height: height, cageDistance: cageDistance,
-            aoSamples: aoSamples, aoRadius: aoRadius, curvatureRange: curvatureRange,
-            upAxis: Int32(bitPattern: upAxis.rawValue),
-            bentNormalSpace: Int32(bitPattern: bentNormalSpace.rawValue),
-            thicknessScale: thicknessScale,
-            paddingRadius: paddingRadius)
+        var out = CyberBakeParams()
+        cyber_default_bake_params(&out)
+        out.width = width
+        out.height = height
+        out.cageDistance = cageDistance
+        out.aoSamples = aoSamples
+        out.aoRadius = aoRadius
+        out.curvatureRange = curvatureRange
+        out.upAxis = Int32(bitPattern: upAxis.rawValue)
+        out.bentNormalSpace = Int32(bitPattern: bentNormalSpace.rawValue)
+        out.thicknessScale = thicknessScale
+        out.paddingRadius = paddingRadius
+        writePlacement(placement, into: &out.placement)
+        out.densityNormalization = Int32(bitPattern: densityNormalization.rawValue)
+        return out
     }
 }
 
@@ -379,6 +471,28 @@ public final class Image {
             return ImagePadding(CyberImagePadding())
         }
         return ImagePadding(out)
+    }
+
+    /// How a `BakeMap.uvDensity` map was normalized, and the mean it measured.
+    /// Every image has a record; a map that is not a density map reports
+    /// `.absolute` with a mean of 0.
+    public var density: ImageDensity {
+        var out = CyberImageDensity()
+        guard cyber_image_density(handle, &out) == CYBER_OK else {
+            return ImageDensity(CyberImageDensity())
+        }
+        return ImageDensity(out)
+    }
+
+    /// The 4x4 row-major placement this map was baked with — the identity for
+    /// every map that does not read one, so a host can always carry a world
+    /// direction back into object space with it.
+    public var placement: [Float] {
+        var out = [Float](repeating: 0, count: 16)
+        let status = out.withUnsafeMutableBufferPointer {
+            cyber_image_placement(handle, $0.baseAddress)
+        }
+        return status == CYBER_OK ? out : identityPlacement
     }
 
     /// Pixels as floats, row-major, `channels` per texel.
@@ -463,6 +577,12 @@ public struct BakeProviderOutput: Sendable {
     /// 1 = +Y (OpenGL). This engine bakes +Y; reported so a host never has to
     /// assume it or read it off a preset it may not have.
     public let normalGreenPlusY: Int32
+    /// How a `BakeMap.uvDensity` map was normalized, and the mean it measured.
+    /// Neutral for every other map.
+    public let density: ImageDensity
+    /// The 4x4 row-major placement the request was given; identity for every
+    /// map that does not read one.
+    public let placement: [Float]
 }
 
 /// Progress and cancellation handed to one provider request. Passed to C as an
@@ -591,7 +711,9 @@ extension Mesh {
                 encoding: ImageEncoding(result.encoding, idSource: source, idColors: rows),
                 padding: ImagePadding(result.padding),
                 texelsCovered: Int(result.texelsCovered),
-                normalGreenPlusY: result.normalGreenPlusY)
+                normalGreenPlusY: result.normalGreenPlusY,
+                density: ImageDensity(result.density),
+                placement: placementArray(result.placement))
         }
         // `callbacks` is reachable only through an UNMANAGED opaque pointer for
         // the whole call, so ARC sees its last use at `passUnretained` above and

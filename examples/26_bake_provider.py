@@ -40,6 +40,8 @@ _BASIS_NAMES = {
     EncodingBasis.OBJECT_BOUNDS: "position rescaled over the bake bounds",
     EncodingBasis.DISTANCE: "a length in model units",
     EncodingBasis.ID_COLOR: "an EXACT id key",
+    EncodingBasis.WORLD_DIRECTION: "direction, world space",
+    EncodingBasis.UV_DENSITY: "texels per square model unit",
 }
 
 # One map per encoding basis, so the metadata printed below is not the same
@@ -50,6 +52,7 @@ _REQUESTED = [
     ("object-space position", BakeMap.OBJECT_POSITION),
     ("thickness", BakeMap.THICKNESS),
     ("object id", BakeMap.OBJECT_ID),
+    ("uv density", BakeMap.UV_DENSITY),
 ]
 
 

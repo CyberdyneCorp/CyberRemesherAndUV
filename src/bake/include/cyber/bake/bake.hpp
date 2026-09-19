@@ -36,7 +36,52 @@ enum class BakeMap {
     // --- appended in 0.8.0; the values above keep their numbers -----------
     MaterialId,  // one flat colour per Target `material_id` (RGB, exact)
     ObjectId,    // one flat colour per Target object/submesh (RGB, exact)
+    // --- appended in 0.9.0; the values above keep their numbers -----------
+    // The Target normal carried into WORLD space by BakeParams::placement,
+    // encoded n*0.5+0.5 (RGB). This engine has one model space, so with an
+    // IDENTITY placement this map is bit-identical to ObjectNormal on purpose:
+    // the two differ by the placement transform and by nothing else.
+    WorldDirection,
+    // Texels per unit of SURFACE AREA that the EditMesh's UV layout gives the
+    // surface under each texel, at the requested resolution (1 channel). A
+    // property of the UV layout and the resolution alone -- it does not read
+    // the Target. Zero is the documented sentinel for "no density here".
+    UvDensity,
 };
+
+// How a UvDensity bake normalizes its values. Absolute is what a scale-locked
+// material needs (a real-world texel scale it can hold across islands);
+// Relative is what shows an artist that one island is packed differently from
+// the rest. Recorded in BakeResult::encoding either way, together with the mean
+// that was measured, so a relative map converts back to an absolute one.
+enum class DensityNormalization {
+    Absolute,
+    Relative,
+};
+
+// The affine object->world placement a host has applied to put the asset in its
+// scene: a 4x4 ROW-MAJOR matrix, m[row * 4 + column], identity by default. A
+// 4x4 because that is the shape every DCC and scene graph already hands out, so
+// nothing has to be decomposed on the way in.
+//
+// Only the upper-left 3x3 is read today, because the only map that reads a
+// placement is a DIRECTION map and a direction is unaffected by translation.
+// The translation is accepted and recorded so that a world-space POSITION map,
+// if one is ever added, needs no second parameter of a different shape.
+using PlacementMatrix = std::array<float, 16>;
+
+[[nodiscard]] constexpr PlacementMatrix identityPlacement() {
+    return PlacementMatrix{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+}
+
+// Whether `placement` is a placement at all: every element finite, and the
+// upper-left 3x3 invertible. A singular linear part collapses every direction
+// onto a plane or a point and has no inverse transpose to carry a normal by.
+//
+// Public because the spec requires every entry point that validates parameters
+// to validate this one IDENTICALLY, and three copies of a determinant are three
+// chances to disagree about what "singular" means.
+[[nodiscard]] bool placementUsable(const PlacementMatrix& placement);
 
 // Axis convention the OBJECT-SPACE maps are expressed in. YUp is this engine's
 // own convention (and glTF's); ZUp re-expresses a vector as (x, -z, y), which is
@@ -70,6 +115,20 @@ enum class EncodingBasis {
     // colours in BakeEncoding::idColors verbatim. Never filter, resample or
     // colour-convert such a map -- compare it at zero tolerance.
     IdColor,
+    // --- appended in 0.9.0; the values above keep their numbers, because the
+    // C ABI's CyberEncodingBasis mirrors this enum one for one -------------
+    // Unit direction in WORLD space: the object-space direction carried through
+    // BakeEncoding::placement, then expressed in `upAxis`, then v*0.5+0.5.
+    // Distinct from ObjectNormal because the placement is what separates the
+    // two spaces in an engine that otherwise has only one.
+    WorldDirection,
+    // Texels per SQUARE model unit, in BakeEncoding::densityNormalization. The
+    // linear "texels per unit of length" convention is its square root. Zero
+    // means the density is UNDEFINED there (a face with no UV area or no
+    // surface area, or a texel the bake wrote nothing to), never "zero
+    // density": a defined density is a positive UV area over a positive surface
+    // area and is strictly positive.
+    UvDensity,
 };
 
 // One row of the id-to-colour table an id map reports. The colour is the exact
@@ -118,6 +177,17 @@ struct BakeEncoding {
     // The id-to-colour table, ASCENDING BY ID -- a stable ordered key, never a
     // container's iteration order. Empty for every other basis.
     std::vector<IdColorEntry> idColors;
+    // The placement a WorldDirection map's normals were carried through (by its
+    // inverse transpose), so a consumer can recover the object-space direction.
+    // Identity for every map that does not read one, which is every other map.
+    PlacementMatrix placement = identityPlacement();
+    // How a UvDensity map was normalized, and the MEAN absolute density its
+    // defined texels held. The mean is reported in BOTH modes: it converts a
+    // relative map back to an absolute one, and it tells a host what an
+    // absolute map's own average is. Zero when the map defined no texel.
+    // Meaningless, and left at these defaults, for every other basis.
+    DensityNormalization densityNormalization = DensityNormalization::Absolute;
+    float densityMean = 0.0f;
 };
 
 // How a map's PADDED BAND -- the texels just outside each UV island -- was
@@ -232,6 +302,21 @@ struct BakeParams {
     // map exactly as it was baked; NEGATIVE is refused, like every other
     // out-of-range parameter here.
     int paddingRadius = 8;
+    // The object->world placement BakeMap::WorldDirection carries its normals
+    // through, by its INVERSE TRANSPOSE -- a plain multiply is correct only for
+    // a rotation and shears a normal off the surface under non-uniform scale.
+    // Identity by default, which makes WorldDirection bit-identical to
+    // ObjectNormal: this engine has one model space, and the placement is what
+    // separates them.
+    //
+    // Every element must be finite and the upper-left 3x3 must be INVERTIBLE (a
+    // singular linear part carries no direction anywhere); a placement that is
+    // not is refused -- the bake returns no image -- rather than substituted
+    // with the identity. Read ONLY by WorldDirection, so a bake of any other
+    // map is unaffected by whatever is here.
+    PlacementMatrix placement = identityPlacement();
+    // How BakeMap::UvDensity normalizes its values. Read only by that map.
+    DensityNormalization densityNormalization = DensityNormalization::Absolute;
     // Optional field evaluator (pipeline-bridge spec, "Field-sampled baking").
     // When set, Normal / AmbientOcclusion / Curvature / Cavity sample the field
     // directly — the cage ray is sphere-traced through it and normals come from

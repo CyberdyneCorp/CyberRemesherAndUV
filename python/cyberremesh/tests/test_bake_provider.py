@@ -44,7 +44,7 @@ def main() -> int:
         return 77
 
     from cyberremesh import (
-        BakeMap, BakeParams, CyberError, EncodingBasis, Mesh,
+        BakeMap, BakeParams, CyberError, DensityNormalization, EncodingBasis, Mesh,
         bake, bake_provider_bake, bake_provider_map_list, bake_provider_maps,
         bake_provider_size, find_bake_provider_map,
     )
@@ -110,6 +110,31 @@ def main() -> int:
                 assert result.encoding.bounds_min == image.encoding.bounds_min
                 assert result.encoding.bounds_max == image.encoding.bounds_max
             assert result.encoding.basis == EncodingBasis.OBJECT_BOUNDS, result
+
+            # --- the 1.23 metadata: density and placement -------------------
+            # Appended to CyberBakeProviderResult, so this is also the check
+            # that the descriptor-size mechanism carried them across.
+            pixels, result = bake_provider_bake(low, BakeMap.UV_DENSITY, params, high=high)
+            assert result.encoding.basis == EncodingBasis.UV_DENSITY, result
+            assert result.density.mean > 0.0, result.density
+            assert result.density.normalization == DensityNormalization.ABSOLUTE, result.density
+            with bake(low, high, BakeMap.UV_DENSITY, params) as image:
+                assert (pixels == image.to_numpy()).all(), "provider and bake() disagree"
+                assert result.density.mean == image.density.mean
+
+            placed = BakeParams(width=8, height=8, placement=(
+                1, 0, 0, 0,
+                0, 0, -1, 0,
+                0, 1, 0, 0,
+                0, 0, 0, 1,
+            ))
+            _, result = bake_provider_bake(low, BakeMap.WORLD_DIRECTION, placed, high=high)
+            assert result.encoding.basis == EncodingBasis.WORLD_DIRECTION, result
+            assert result.placement == placed.placement, result.placement
+            # A map that reads no placement still reports the identity, so a
+            # consumer never has to know which maps read one.
+            _, result = bake_provider_bake(low, BakeMap.NORMAL, placed, high=high)
+            assert result.placement == cyberremesh.IDENTITY_PLACEMENT, result.placement
 
             # --- progress ----------------------------------------------------
             seen = []

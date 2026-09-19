@@ -12,7 +12,7 @@ namespace {
 // `basis` is the basis under DEFAULT parameters (see MapInfo). BentNormal's row
 // says Tangent because BakeParams::bentNormalSpace defaults to Tangent; a bake in
 // object space reports ObjectNormal, and BakeResult::encoding is what says so.
-constexpr std::array<MapInfo, 13> kCatalog{{
+constexpr std::array<MapInfo, 15> kCatalog{{
     {BakeMap::Normal, "normal", 3, EncodingBasis::TangentNormal, false, true},
     {BakeMap::AmbientOcclusion, "ao", 1, EncodingBasis::None, false, true},
     {BakeMap::Displacement, "displacement", 1, EncodingBasis::Distance, false, false},
@@ -26,12 +26,14 @@ constexpr std::array<MapInfo, 13> kCatalog{{
     {BakeMap::Thickness, "thickness", 1, EncodingBasis::Distance, false, false},
     {BakeMap::MaterialId, "material-id", 3, EncodingBasis::IdColor, false, false},
     {BakeMap::ObjectId, "object-id", 3, EncodingBasis::IdColor, false, false},
+    {BakeMap::WorldDirection, "world-direction", 3, EncodingBasis::WorldDirection, false, false},
+    {BakeMap::UvDensity, "uv-density", 1, EncodingBasis::UvDensity, false, false},
 }};
 
 // The last enumerator plus one. A map appended to BakeMap without a catalogue row
 // would otherwise be advertised as absent by every entry point that reads the
 // table -- silently, which is the failure this whole file exists to prevent.
-static_assert(kCatalog.size() == static_cast<std::size_t>(BakeMap::ObjectId) + 1,
+static_assert(kCatalog.size() == static_cast<std::size_t>(BakeMap::UvDensity) + 1,
               "every BakeMap enumerator needs a catalogue row, in enumerator order");
 
 }  // namespace

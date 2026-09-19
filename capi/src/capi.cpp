@@ -11,6 +11,7 @@
 #include <array>
 #include <atomic>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -5094,6 +5095,12 @@ bool toBakeMap(CyberBakeMap map, cyber::bake::BakeMap& out) {
         case CYBER_BAKE_OBJECT_ID:
             out = cyber::bake::BakeMap::ObjectId;
             return true;
+        case CYBER_BAKE_WORLD_DIRECTION:
+            out = cyber::bake::BakeMap::WorldDirection;
+            return true;
+        case CYBER_BAKE_UV_DENSITY:
+            out = cyber::bake::BakeMap::UvDensity;
+            return true;
     }
     return false;
 }
@@ -5143,6 +5150,12 @@ CyberImageEncoding toCEncoding(const cyber::bake::BakeEncoding& encoding) {
         case cyber::bake::EncodingBasis::IdColor:
             out.basis = CYBER_ENCODING_ID_COLOR;
             break;
+        case cyber::bake::EncodingBasis::WorldDirection:
+            out.basis = CYBER_ENCODING_WORLD_DIRECTION;
+            break;
+        case cyber::bake::EncodingBasis::UvDensity:
+            out.basis = CYBER_ENCODING_UV_DENSITY;
+            break;
         case cyber::bake::EncodingBasis::None:
             out.basis = CYBER_ENCODING_NONE;
             break;
@@ -5156,6 +5169,21 @@ CyberImageEncoding toCEncoding(const cyber::bake::BakeEncoding& encoding) {
     out.boundsMax[2] = encoding.boundsMax.z;
     out.scale = encoding.scale;
     return out;
+}
+
+CyberImageDensity toCDensity(const cyber::bake::BakeEncoding& encoding) {
+    CyberImageDensity out{};
+    out.normalization = encoding.densityNormalization == cyber::bake::DensityNormalization::Relative
+                            ? CYBER_DENSITY_RELATIVE
+                            : CYBER_DENSITY_ABSOLUTE;
+    out.mean = encoding.densityMean;
+    return out;
+}
+
+void copyPlacement(const cyber::bake::PlacementMatrix& placement, float out[16]) {
+    for (std::size_t i = 0; i < placement.size(); ++i) {
+        out[i] = placement[i];
+    }
 }
 
 CyberImagePadding toCPadding(const cyber::bake::BakePadding& padding) {
@@ -5206,6 +5234,29 @@ bool applyBakeEncodingParams(const CyberBakeParams& params, cyber::bake::BakePar
         setError(std::string(who) + ": paddingRadius must be >= 0 (0 disables padding)");
         return false;
     }
+    if (params.densityNormalization != CYBER_DENSITY_ABSOLUTE &&
+        params.densityNormalization != CYBER_DENSITY_RELATIVE) {
+        setError(std::string(who) +
+                 ": densityNormalization must be CYBER_DENSITY_ABSOLUTE or "
+                 "CYBER_DENSITY_RELATIVE");
+        return false;
+    }
+    // A placement that is not finite, or whose linear part cannot be inverted,
+    // carries no direction anywhere. Refused rather than folded to the
+    // identity, for the same reason a mistyped up axis is: an identity
+    // placement is a MEANINGFUL request (it says "this asset is unplaced"), so
+    // substituting it would silently answer a different question.
+    for (std::size_t i = 0; i < out.placement.size(); ++i) {
+        out.placement[i] = params.placement[i];
+    }
+    if (!cyber::bake::placementUsable(out.placement)) {
+        setError(std::string(who) +
+                 ": placement must hold 16 finite floats whose upper-left 3x3 is invertible");
+        return false;
+    }
+    out.densityNormalization = params.densityNormalization == CYBER_DENSITY_RELATIVE
+                                   ? cyber::bake::DensityNormalization::Relative
+                                   : cyber::bake::DensityNormalization::Absolute;
     out.paddingRadius = params.paddingRadius;
     out.upAxis =
         params.upAxis == CYBER_UP_AXIS_Z ? cyber::bake::UpAxis::ZUp : cyber::bake::UpAxis::YUp;
@@ -5260,6 +5311,11 @@ void cyber_default_bake_params(CyberBakeParams* params) {
                                   : CYBER_BENT_NORMAL_TANGENT;
     params->thicknessScale = d.thicknessScale;
     params->paddingRadius = d.paddingRadius;
+    copyPlacement(d.placement, params->placement);
+    params->densityNormalization =
+        d.densityNormalization == cyber::bake::DensityNormalization::Relative
+            ? CYBER_DENSITY_RELATIVE
+            : CYBER_DENSITY_ABSOLUTE;
 }
 
 CyberStatus cyber_bake(const CyberMesh* low, const CyberMesh* high, CyberBakeMap map,
@@ -5312,6 +5368,26 @@ CyberStatus cyber_image_encoding(const CyberImage* image, CyberImageEncoding* ou
         return CYBER_ERR_INVALID_ARG;
     }
     *out = toCEncoding(image->encoding);
+    clearError();
+    return CYBER_OK;
+}
+
+CyberStatus cyber_image_density(const CyberImage* image, CyberImageDensity* out) {
+    if (image == nullptr || out == nullptr) {
+        setError("cyber_image_density: null argument");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    *out = toCDensity(image->encoding);
+    clearError();
+    return CYBER_OK;
+}
+
+CyberStatus cyber_image_placement(const CyberImage* image, float out_matrix[16]) {
+    if (image == nullptr || out_matrix == nullptr) {
+        setError("cyber_image_placement: null argument");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    copyPlacement(image->encoding.placement, out_matrix);
     clearError();
     return CYBER_OK;
 }
@@ -6393,6 +6469,11 @@ void cyber_default_bundle_params(CyberBundleParams* params) {
                                   : CYBER_BENT_NORMAL_TANGENT;
     params->thicknessScale = defaults.thicknessScale;
     params->paddingRadius = defaults.paddingRadius;
+    copyPlacement(defaults.placement, params->placement);
+    params->densityNormalization =
+        defaults.densityNormalization == cyber::bake::DensityNormalization::Relative
+            ? CYBER_DENSITY_RELATIVE
+            : CYBER_DENSITY_ABSOLUTE;
 #else
     params->cageDistance = 0.1f;
     params->aoSamples = 64;
@@ -6400,6 +6481,8 @@ void cyber_default_bundle_params(CyberBundleParams* params) {
     params->bentNormalSpace = CYBER_BENT_NORMAL_TANGENT;
     params->thicknessScale = 2.0f;
     params->paddingRadius = 8;
+    copyPlacement(cyber::bake::identityPlacement(), params->placement);
+    params->densityNormalization = CYBER_DENSITY_ABSOLUTE;
 #endif
 }
 
@@ -6457,6 +6540,25 @@ CyberStatus cyber_export_bundle_write([[maybe_unused]] CyberMesh* low,
                 "padding)");
             return CYBER_ERR_INVALID_ARG;
         }
+        if (params->densityNormalization != CYBER_DENSITY_ABSOLUTE &&
+            params->densityNormalization != CYBER_DENSITY_RELATIVE) {
+            setError(
+                "cyber_export_bundle_write: densityNormalization must be "
+                "CYBER_DENSITY_ABSOLUTE or CYBER_DENSITY_RELATIVE");
+            return CYBER_ERR_INVALID_ARG;
+        }
+        for (std::size_t i = 0; i < bundleParams.placement.size(); ++i) {
+            bundleParams.placement[i] = params->placement[i];
+        }
+        if (!cyber::bake::placementUsable(bundleParams.placement)) {
+            setError(
+                "cyber_export_bundle_write: placement must hold 16 finite floats whose "
+                "upper-left 3x3 is invertible");
+            return CYBER_ERR_INVALID_ARG;
+        }
+        bundleParams.densityNormalization = params->densityNormalization == CYBER_DENSITY_RELATIVE
+                                                ? cyber::bake::DensityNormalization::Relative
+                                                : cyber::bake::DensityNormalization::Absolute;
         bundleParams.paddingRadius = params->paddingRadius;
         bundleParams.bentNormalSpace = params->bentNormalSpace == CYBER_BENT_NORMAL_OBJECT
                                            ? cyber::bake::NormalSpace::Object
@@ -6624,7 +6726,15 @@ namespace {
 // mechanism is that a caller compiled against 1.22 keeps working unchanged.
 constexpr std::size_t kProviderMapFloor = sizeof(CyberBakeProviderMap);
 constexpr std::size_t kProviderRequestFloor = sizeof(CyberBakeProviderRequest);
-constexpr std::size_t kProviderResultFloor = sizeof(CyberBakeProviderResult);
+// FROZEN at the 1.22 layout, which ended at `idSource`: ABI 1.23 appended
+// `density` and `placement`, and taking sizeof() here would refuse the very
+// 1.22 callers the mechanism exists to serve. Expressed as "the end of the last
+// 1.22 member" rather than as a literal byte count so it stays right on every
+// platform's pointer size and alignment; it can only come out at or below a
+// 1.22 caller's own sizeof (which includes that layout's trailing padding), and
+// the descriptor copies are bounded by std::min either way.
+constexpr std::size_t kProviderResultFloor =
+    offsetof(CyberBakeProviderResult, idSource) + sizeof(const char*);
 
 CyberStatus providerFloorCheck(std::size_t stated, std::size_t minimum, const char* who,
                                const char* what) {
@@ -6767,6 +6877,9 @@ CyberBakeProviderResult providerGeometry(const ProviderPlan& plan) {
     // never has to assume it or read it off a preset it may not have.
     out.normalGreenPlusY = 1;
     out.idSource = "";
+    // Neutral on the SIZING path, like `encoding` and `padding`: no bake has
+    // measured a density mean or applied a placement yet.
+    out.density.normalization = CYBER_DENSITY_ABSOLUTE;
     return out;
 }
 
@@ -6827,6 +6940,8 @@ CyberStatus runProviderBake(const CyberBakeProviderRequest& req, const ProviderP
     std::copy(baked.image.pixels.begin(), baked.image.pixels.end(), req.pixels);
     result.encoding = toCEncoding(baked.encoding);
     result.padding = toCPadding(baked.padding);
+    result.density = toCDensity(baked.encoding);
+    copyPlacement(baked.encoding.placement, result.placement);
     result.texelsCovered = baked.texelsCovered;
     result.idColorCount = baked.encoding.idColors.size();
     providerIdSourceSlot() = baked.encoding.idSource;

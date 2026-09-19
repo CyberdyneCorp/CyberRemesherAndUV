@@ -474,6 +474,8 @@ BAKE_BENT_NORMAL = 9
 BAKE_THICKNESS = 10
 BAKE_MATERIAL_ID = 11
 BAKE_OBJECT_ID = 12
+BAKE_WORLD_DIRECTION = 13
+BAKE_UV_DENSITY = 14
 
 # CyberUpAxis / CyberBentNormalSpace / CyberEncodingBasis.
 UP_AXIS_Y = 0
@@ -486,6 +488,12 @@ ENCODING_OBJECT_NORMAL = 2
 ENCODING_OBJECT_BOUNDS = 3
 ENCODING_DISTANCE = 4
 ENCODING_ID_COLOR = 5
+ENCODING_WORLD_DIRECTION = 6
+ENCODING_UV_DENSITY = 7
+
+# CyberDensityNormalization.
+DENSITY_ABSOLUTE = 0
+DENSITY_RELATIVE = 1
 
 # CyberPaddingMode.
 PADDING_NONE = 0
@@ -517,6 +525,8 @@ class CyberBakeParams(Structure):
         ("bent_normal_space", c_int32),
         ("thickness_scale", c_float),
         ("padding_radius", c_int32),
+        ("placement", c_float * 16),
+        ("density_normalization", c_int32),
     ]
 
 
@@ -539,6 +549,15 @@ class CyberImagePadding(Structure):
         ("radius", c_int32),
         ("mode", c_int32),
         ("texels_filled", c_uint64),
+    ]
+
+
+class CyberImageDensity(Structure):
+    """Mirror of ``CyberImageDensity`` in capi/include/cyber_capi.h."""
+
+    _fields_ = [
+        ("normalization", c_int32),
+        ("mean", c_float),
     ]
 
 
@@ -629,6 +648,8 @@ class CyberBundleParams(Structure):
         ("bent_normal_space", c_int32),
         ("thickness_scale", c_float),
         ("padding_radius", c_int32),
+        ("placement", c_float * 16),
+        ("density_normalization", c_int32),
     ]
 
 
@@ -744,6 +765,11 @@ class CyberBakeProviderResult(Structure):
         ("padding", CyberImagePadding),
         ("normal_green_plus_y", c_int32),
         ("id_source", c_char_p),
+        # Appended in ABI 1.23. struct_size is what the library reads and
+        # writes, so a build predating these leaves them at their zero
+        # defaults rather than writing past the end of this allocation.
+        ("density", CyberImageDensity),
+        ("placement", c_float * 16),
     ]
 
 
@@ -1522,6 +1548,12 @@ def _declare(lib: ctypes.CDLL) -> None:
     # CyberStatus cyber_image_padding(const CyberImage*, CyberImagePadding*)
     lib.cyber_image_padding.argtypes = [c_void_p, POINTER(CyberImagePadding)]
     lib.cyber_image_padding.restype = c_int32
+    # CyberStatus cyber_image_density(const CyberImage*, CyberImageDensity*)
+    lib.cyber_image_density.argtypes = [c_void_p, POINTER(CyberImageDensity)]
+    lib.cyber_image_density.restype = c_int32
+    # CyberStatus cyber_image_placement(const CyberImage*, float[16])
+    lib.cyber_image_placement.argtypes = [c_void_p, POINTER(c_float)]
+    lib.cyber_image_placement.restype = c_int32
     # The id-to-colour table of a CYBER_ENCODING_ID_COLOR map.
     lib.cyber_image_id_source.argtypes = [c_void_p]
     lib.cyber_image_id_source.restype = c_char_p

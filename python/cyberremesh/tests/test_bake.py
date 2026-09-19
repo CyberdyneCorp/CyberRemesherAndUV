@@ -76,6 +76,7 @@ def main() -> int:
         print("PASS bake: normal map points up; curvature/cavity read neutral on a flat Target")
 
         _gate_the_mesh_map_set(obj.name)
+        _gate_the_world_and_density_maps(obj.name)
         _gate_the_id_maps(obj.name)
         _gate_border_padding(obj.name)
         _gate_a_raising_evaluator_raises(obj.name)
@@ -83,6 +84,101 @@ def main() -> int:
     finally:
         os.unlink(obj.name)
     return 0
+
+
+def _gate_the_world_and_density_maps(obj_path):
+    """The world-space direction and UV density maps through the binding.
+
+    The world map's identity case is the interesting one: this engine has ONE
+    model space, so with an identity placement it must reproduce the
+    object-space normal map EXACTLY. Anything else would mean the binding is
+    quietly applying something.
+    """
+    import numpy as np
+
+    from cyberremesh import (BakeMap, BakeParams, DensityNormalization, EncodingBasis,
+                             IDENTITY_PLACEMENT, Mesh, PaddingMode, bake)
+
+    params = BakeParams(width=16, height=16, padding_radius=0)
+    assert params.placement == IDENTITY_PLACEMENT, params.placement
+    assert params.density_normalization == DensityNormalization.ABSOLUTE
+
+    with Mesh.load_obj(obj_path) as low, Mesh.load_obj(obj_path) as high:
+        with bake(low, high, BakeMap.WORLD_DIRECTION, params) as world, \
+                bake(low, high, BakeMap.OBJECT_NORMAL, params) as obj:
+            assert world.encoding.basis == EncodingBasis.WORLD_DIRECTION, world.encoding.basis
+            assert np.array_equal(world.to_numpy(), obj.to_numpy()), "identity must be exact"
+            assert world.placement == IDENTITY_PLACEMENT, world.placement
+
+        # A quarter turn about X (row-major): y -> z, z -> -y. The plane's
+        # normal is +z, so the world direction becomes -y.
+        turned = BakeParams(width=16, height=16, padding_radius=0, placement=(
+            1, 0, 0, 0,
+            0, 0, -1, 0,
+            0, 1, 0, 0,
+            0, 0, 0, 1,
+        ))
+        with bake(low, high, BakeMap.WORLD_DIRECTION, turned) as rotated:
+            decoded = rotated.to_numpy()[8, 8] * 2.0 - 1.0
+            assert abs(decoded[0]) < 1e-3, decoded
+            assert abs(decoded[1] + 1.0) < 1e-3, decoded
+            assert abs(decoded[2]) < 1e-3, decoded
+            assert rotated.placement == turned.placement, rotated.placement
+
+        # A placement that cannot carry a direction is refused, not defaulted.
+        singular = BakeParams(width=8, height=8, placement=(
+            1, 0, 0, 0,
+            0, 0, 0, 0,
+            0, 0, 1, 0,
+            0, 0, 0, 1,
+        ))
+        try:
+            bake(low, high, BakeMap.WORLD_DIRECTION, singular).close()
+            raise AssertionError("a singular placement must be refused")
+        except cyberremesh.CyberError:
+            pass
+
+        # A placement list of the wrong length is refused by the binding itself,
+        # rather than padded into a different matrix.
+        try:
+            BakeParams(placement=(1, 0, 0))._to_c()
+            raise AssertionError("a short placement must be refused")
+        except ValueError:
+            pass
+
+        # The density map: one channel, texels per square model unit. This plane
+        # is 1 unit square over the whole layout, so an absolute density at
+        # 16x16 is 256.
+        with bake(low, high, BakeMap.UV_DENSITY, params) as density:
+            assert density.channels == 1, density.channels
+            assert density.encoding.basis == EncodingBasis.UV_DENSITY
+            assert density.density.normalization == DensityNormalization.ABSOLUTE
+            value = float(density.to_numpy()[8, 8, 0])
+            assert abs(value - 256.0) < 1.0, value
+            assert abs(density.density.mean - 256.0) < 1.0, density.density.mean
+
+        relative = BakeParams(width=16, height=16, padding_radius=0,
+                              density_normalization=DensityNormalization.RELATIVE)
+        with bake(low, high, BakeMap.UV_DENSITY, relative) as scaled:
+            assert scaled.density.normalization == DensityNormalization.RELATIVE
+            # Uniformly packed, so every defined texel is exactly its own mean.
+            assert abs(float(scaled.to_numpy()[8, 8, 0]) - 1.0) < 1e-3
+            # The ABSOLUTE mean travels with the relative map, which is what
+            # makes it convertible back.
+            assert abs(scaled.density.mean - 256.0) < 1.0, scaled.density.mean
+
+        # The padding record reaches both maps. This plane covers the whole
+        # layout, so no band is grown and the rule is NONE -- what is asserted
+        # here is that the radius travelled and the density map was not handed a
+        # direction map's rule.
+        padded = BakeParams(width=16, height=16, padding_radius=4)
+        with bake(low, high, BakeMap.WORLD_DIRECTION, padded) as world_padded:
+            assert world_padded.padding.radius == 4, world_padded.padding.radius
+        with bake(low, high, BakeMap.UV_DENSITY, padded) as density_padded:
+            assert density_padded.padding.mode in (
+                PaddingMode.NONE, PaddingMode.EXTRAPOLATE), density_padded.padding.mode
+
+    print("PASS bake: world direction follows the placement; uv density reports its mode")
 
 
 def _gate_the_mesh_map_set(obj_path):

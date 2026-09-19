@@ -169,7 +169,38 @@ struct Texel {
     Vec3 normal;
     Vec3 tangent;
     Vec3 bitangent;
+    // UV area over surface area of the sub-triangle this texel was rasterized
+    // from, in UV-units-squared per model-unit-squared. Resolution-independent
+    // on purpose: BakeMap::UvDensity multiplies it by width * height, so the
+    // rasteriser never has to know what the map is for. ZERO means the ratio is
+    // UNDEFINED -- no UV area, no surface area, or a non-finite result -- which
+    // is the sentinel the density map writes.
+    float uvAreaRatio = 0.0f;
 };
+
+// Twice the area of a UV triangle (the 2D cross product's magnitude). Halving
+// both this and the surface area would cancel in the ratio below; it is left in
+// so each quantity reads as the area it is.
+float uvTriangleArea(Vec2 a, Vec2 b, Vec2 c) {
+    const Vec2 u = b - a;
+    const Vec2 v = c - a;
+    return 0.5f * std::fabs(u.x * v.y - u.y * v.x);
+}
+
+// Texels per unit of surface area, minus the resolution: the sub-triangle's UV
+// area over its surface area. Undefined -- and therefore the density map's zero
+// sentinel -- when either area vanishes, when the ratio is not finite, or when
+// it underflows to zero, because a defined density is strictly positive and a
+// sentinel a measurement can also produce is no sentinel at all.
+float uvAreaRatio(const std::array<Vec3, 3>& pos, const std::array<Vec2, 3>& uv) {
+    const float surface = 0.5f * length(cross(pos[1] - pos[0], pos[2] - pos[0]));
+    const float area = uvTriangleArea(uv[0], uv[1], uv[2]);
+    if (!(surface > 0.0f) || !(area > 0.0f)) {
+        return 0.0f;
+    }
+    const float ratio = area / surface;
+    return std::isfinite(ratio) && ratio > 0.0f ? ratio : 0.0f;
+}
 
 // Rasterizes the low-poly UV layout into covered texels carrying their
 // interpolated 3D frame. Faces are fan-triangulated on the corners.
@@ -210,6 +241,9 @@ std::vector<Texel> rasterize(const Mesh& mesh, const std::vector<Vec3>& vnormals
 
             const Vec3 tangent = faceTangent(pos[0], pos[1], pos[2], uv[0], uv[1], uv[2],
                                              normalized(nrm[0] + nrm[1] + nrm[2]));
+            // Measured once per sub-triangle rather than per texel: it is a
+            // property of the triangle, and every texel it covers shares it.
+            const float ratio = uvAreaRatio(pos, uv);
 
             // Pixel bounding box from the triangle's UVs (V flipped).
             float minU = 1e30f, maxU = -1e30f, minV = 1e30f, maxV = -1e30f;
@@ -247,6 +281,7 @@ std::vector<Texel> rasterize(const Mesh& mesh, const std::vector<Vec3>& vnormals
                     texel.normal = normalized(nrm[0] * bc[0] + nrm[1] * bc[1] + nrm[2] * bc[2]);
                     texel.tangent = normalized(tangent - texel.normal * dot(texel.normal, tangent));
                     texel.bitangent = cross(texel.normal, texel.tangent);
+                    texel.uvAreaRatio = ratio;
                     texels.push_back(texel);
                 }
             }
@@ -351,6 +386,91 @@ Vec3 toUpAxis(Vec3 v, UpAxis axis) { return axis == UpAxis::ZUp ? Vec3{v.x, -v.z
 
 // Encodes a unit direction into [0,1] the way every normal map here does.
 Vec3 encodeDirection(Vec3 v) { return v * 0.5f + Vec3{0.5f, 0.5f, 0.5f}; }
+
+// ---- the placement transform ---------------------------------------------
+//
+// BakeMap::WorldDirection is the only map that reads one, and what it needs is
+// not the placement but the matrix a NORMAL is carried by: the INVERSE
+// TRANSPOSE of the placement's linear part. A plain multiply is correct only
+// for a rotation; under non-uniform scale it shears the normal off the surface,
+// which is the classic bug and would be wrong exactly on the assets a placement
+// exists for.
+//
+// The inverse transpose of a 3x3 is its COFACTOR matrix divided by its
+// determinant, which is why both are gathered together here.
+
+// The upper-left 3x3 of the row-major 4x4, as `linear[row * 3 + column]`.
+std::array<float, 9> linearPart(const PlacementMatrix& m) {
+    return {m[0], m[1], m[2], m[4], m[5], m[6], m[8], m[9], m[10]};
+}
+
+// `cofactor[row * 3 + column]` is the cofactor of the linear part's (row,
+// column) element, so the cofactor matrix divided by `determinant` IS the
+// inverse transpose.
+struct LinearPartAdjugate {
+    std::array<float, 9> cofactor{};
+    float determinant = 0.0f;
+};
+
+LinearPartAdjugate adjugate(const PlacementMatrix& m) {
+    const std::array<float, 9> l = linearPart(m);
+    LinearPartAdjugate out;
+    out.cofactor = {
+        l[4] * l[8] - l[5] * l[7], l[5] * l[6] - l[3] * l[8], l[3] * l[7] - l[4] * l[6],
+        l[2] * l[7] - l[1] * l[8], l[0] * l[8] - l[2] * l[6], l[1] * l[6] - l[0] * l[7],
+        l[1] * l[5] - l[2] * l[4], l[2] * l[3] - l[0] * l[5], l[0] * l[4] - l[1] * l[3]};
+    out.determinant = l[0] * out.cofactor[0] + l[1] * out.cofactor[1] + l[2] * out.cofactor[2];
+    return out;
+}
+
+// True only for the EXACT identity linear part. The world-direction map skips
+// the transform entirely then, so its identity case equals the object-space
+// normal map BIT FOR BIT rather than within float slack: normalized() of an
+// already-unit vector is not the identity in float arithmetic (length() can
+// come back as 0.99999994), and "these two maps differ by the placement and by
+// nothing else" is worth being literally true.
+bool isIdentityPlacement(const PlacementMatrix& m) {
+    return linearPart(m) == std::array<float, 9>{1, 0, 0, 0, 1, 0, 0, 0, 1};
+}
+
+// The matrix BakeMap::WorldDirection carries its normals by, `matrix[row * 3 +
+// column]`. `identity` short-circuits the whole transform; the matrix is then
+// unused.
+struct PlacementNormals {
+    bool identity = true;
+    std::array<float, 9> matrix{1, 0, 0, 0, 1, 0, 0, 0, 1};
+};
+
+PlacementNormals placementNormals(const PlacementMatrix& m) {
+    PlacementNormals out;
+    out.identity = isIdentityPlacement(m);
+    if (out.identity) {
+        return out;
+    }
+    const LinearPartAdjugate adj = adjugate(m);
+    // placementUsable() has already refused a zero determinant before any of
+    // this runs; the guard is belt and braces against a caller reaching the
+    // helper directly.
+    const float inverse = adj.determinant != 0.0f ? 1.0f / adj.determinant : 0.0f;
+    for (std::size_t i = 0; i < out.matrix.size(); ++i) {
+        out.matrix[i] = adj.cofactor[i] * inverse;
+    }
+    return out;
+}
+
+// `n` carried into world space and renormalized. An identity placement returns
+// `n` untouched, which is what makes the identity case exact.
+Vec3 toWorldDirection(Vec3 n, const PlacementNormals& normals) {
+    if (normals.identity) {
+        return n;
+    }
+    const std::array<float, 9>& m = normals.matrix;
+    const Vec3 carried{m[0] * n.x + m[1] * n.y + m[2] * n.z, m[3] * n.x + m[4] * n.y + m[5] * n.z,
+                       m[6] * n.x + m[7] * n.y + m[8] * n.z};
+    // A normal carried through a scale is no longer unit length, and a direction
+    // map's contract is that it decodes to one.
+    return length(carried) > 0.0f ? normalized(carried) : n;
+}
 
 // The box an ObjectPosition bake rescales over, accumulated over the LIVE
 // vertices of both meshes and IN the requested axis convention. Both meshes,
@@ -536,6 +656,26 @@ BakeEncoding encodingFor(BakeMap map, const BakeParams& params, const BakeBounds
             encoding.basis = EncodingBasis::ObjectNormal;
             unitRange();
             break;
+        case BakeMap::WorldDirection:
+            encoding.basis = EncodingBasis::WorldDirection;
+            // Recorded so a consumer can carry a world direction back into
+            // object space; identity says "this map is the object-space normal
+            // map", which is the honest reading of an unplaced asset.
+            encoding.placement = params.placement;
+            unitRange();  // n * 0.5 + 0.5 of a unit direction
+            break;
+        case BakeMap::UvDensity:
+            encoding.basis = EncodingBasis::UvDensity;
+            encoding.densityNormalization = params.densityNormalization;
+            // densityMean is measured from the finished image, so bake() fills
+            // it after the shade; it stays 0 until then.
+            //
+            // A density is never negative, and the ratio of texels to surface
+            // area has NO upper bound -- in either normalization mode. Stating
+            // [0,1] here would confine the padded band to a range the map's
+            // own values routinely leave.
+            encoding.valueMin = 0.0f;
+            break;
         case BakeMap::ObjectPosition:
             encoding.basis = EncodingBasis::ObjectBounds;
             encoding.boundsMin = bounds.min;
@@ -614,7 +754,8 @@ std::array<float, 3> neutralPadding(BakeMap map, const BakeParams& params) {
                        ? std::array<float, 3>{0.5f, 0.5f, 0.5f}
                        : std::array<float, 3>{0.5f, 0.5f, 1.0f};
         case BakeMap::ObjectNormal:
-            return {0.5f, 0.5f, 0.5f};  // the zero vector: object space has no flat normal
+        case BakeMap::WorldDirection:
+            return {0.5f, 0.5f, 0.5f};  // the zero vector: neither space has a flat normal
         case BakeMap::ObjectPosition:
             return {0.5f, 0.5f, 0.5f};  // the centre of the bake bounds, not a corner
         case BakeMap::Curvature:
@@ -631,6 +772,8 @@ std::array<float, 3> neutralPadding(BakeMap map, const BakeParams& params) {
         default:
             // Displacement, Position, Color, Thickness: zero already IS the
             // neutral value (no height, no material behind an uncovered texel).
+            // UvDensity too, where zero is the documented "no density here"
+            // sentinel, so an uncovered texel and an undefined one read alike.
             return {};
     }
 }
@@ -689,6 +832,11 @@ bool paramsUsable(BakeMap map, const BakeParams& params, bool useField) {
     // default: substituting one would hide it exactly as a substituted
     // aoSamples would. Zero is the documented way to turn padding off.
     if (params.paddingRadius < 0) {
+        return false;
+    }
+    // Checked only for the map that READS a placement, matching the policy
+    // above: a bake that worked before still works whatever is in this field.
+    if (map == BakeMap::WorldDirection && !placementUsable(params.placement)) {
         return false;
     }
     const bool curvatureMap = map == BakeMap::Curvature || map == BakeMap::Cavity;
@@ -900,6 +1048,9 @@ struct RasterSources {
     bool useTexture = false;
     std::vector<float> curvature;
     float curvatureRange = 0.0f;
+    // The matrix BakeMap::WorldDirection carries a normal by, derived once from
+    // BakeParams::placement. Identity for every other map, which never reads it.
+    PlacementNormals placement;
 };
 
 RasterSources gatherRasterSources(const Mesh& highPoly, const std::vector<Vec3>& highNormals,
@@ -919,7 +1070,8 @@ RasterSources gatherRasterSources(const Mesh& highPoly, const std::vector<Vec3>&
                           .useTexture = params.colorSource.kind == ColorSource::Texture &&
                                         params.colorSource.texture != nullptr && highUvs != nullptr,
                           .curvature = {},
-                          .curvatureRange = 0.0f};
+                          .curvatureRange = 0.0f,
+                          .placement = placementNormals(params.placement)};
     // Curvature/cavity read the Target's curvature field at the same cage hit
     // the normal bake uses, so the two maps register texel for texel.
     if (map == BakeMap::Curvature || map == BakeMap::Cavity) {
@@ -979,6 +1131,26 @@ Vec3 shadeRasterTexel(const RasterSources& src, const Texel& tx,
             const Vec3 n = valid ? hitNormal(src.highPoly, *hit, src.highNormals) : tx.normal;
             return encodeDirection(toUpAxis(n, params.upAxis));
         }
+        case BakeMap::WorldDirection: {
+            // The SAME normal ObjectNormal writes, carried through the
+            // placement before the up axis is applied: the placement is
+            // expressed in the engine's own space, and the up axis is a
+            // re-expression of the OUTPUT. With an identity placement
+            // toWorldDirection() returns its argument untouched, so this map is
+            // then the object-space normal map bit for bit.
+            const Vec3 n = valid ? hitNormal(src.highPoly, *hit, src.highNormals) : tx.normal;
+            return encodeDirection(toUpAxis(toWorldDirection(n, src.placement), params.upAxis));
+        }
+        case BakeMap::UvDensity:
+            // Texels per unit of surface area: the sub-triangle's UV area over
+            // its surface area, times the texels the unit UV square holds. The
+            // cage hit is not read -- density is a property of the EditMesh's
+            // UV layout, and a map that changed when the Target changed would
+            // be measuring the wrong thing. A zero ratio is the documented
+            // sentinel and stays zero.
+            return Vec3{tx.uvAreaRatio * static_cast<float>(params.width) *
+                            static_cast<float>(params.height),
+                        0.0f, 0.0f};
         case BakeMap::Color:
             return valid ? targetColor(src, *hit, params) : Vec3{1, 1, 1};
         case BakeMap::MaterialId:
@@ -1037,6 +1209,41 @@ void shadeFromMesh(BakeResult& result, const std::vector<Texel>& texels, const M
             result.image.at(tx.px, tx.py, 2) = shaded.z;
         }
     }
+}
+
+// The mean absolute density a UvDensity map's DEFINED texels hold, and, in
+// Relative mode, the division by it. Returned so the encoding can record it in
+// BOTH modes: it converts a relative map back to an absolute one, and it tells
+// a host what an absolute map's own average is.
+//
+// The mean is taken from the FINISHED image in raster order, which is what
+// makes it right and reproducible. Uncovered texels hold the background, which
+// is the same zero the undefined sentinel uses, so they fall out with no
+// coverage set to consult; a texel two faces both wrote is counted once,
+// because the image holds the winner rather than every writer; and a
+// std::vector<float> walked in order touches no unordered container, so libc++
+// and libstdc++ agree.
+float normalizeDensity(Image& image, DensityNormalization mode) {
+    double sum = 0.0;
+    std::size_t defined = 0;
+    for (const float value : image.pixels) {
+        if (value > 0.0f) {
+            sum += static_cast<double>(value);
+            ++defined;
+        }
+    }
+    if (defined == 0) {
+        return 0.0f;  // nothing defined: no mean, and nothing to divide
+    }
+    const auto mean = static_cast<float>(sum / static_cast<double>(defined));
+    if (mode == DensityNormalization::Relative && mean > 0.0f) {
+        for (float& value : image.pixels) {
+            if (value > 0.0f) {
+                value /= mean;  // the sentinel stays the sentinel
+            }
+        }
+    }
+    return mean;
 }
 
 // One sphere-traced hit of the cage ray against the field. `t` is the distance
@@ -1271,6 +1478,19 @@ void shadeFromField(BakeResult& result, const std::vector<Texel>& texels,
 
 }  // namespace
 
+// Every element finite and the linear part invertible. A singular linear part
+// carries no direction anywhere, so there is nothing to substitute a default
+// for -- the bake is refused, the way every other out-of-range parameter is.
+bool placementUsable(const PlacementMatrix& placement) {
+    for (const float value : placement) {
+        if (!std::isfinite(value)) {
+            return false;
+        }
+    }
+    const float determinant = adjugate(placement).determinant;
+    return std::isfinite(determinant) && determinant != 0.0f;
+}
+
 std::array<std::uint8_t, 3> idColor(std::int32_t id) {
     // INTEGER arithmetic end to end. ArmorPaint derives its id colours from
     // frac(sin(dot(id, ...)) * 43758.5453); sin is not correctly rounded and
@@ -1341,6 +1561,12 @@ BakeResult bake(const Mesh& lowPoly, const Mesh& highPoly, BakeMap map, const Ba
     }
     if (result.cancelled) {
         return result;
+    }
+
+    // Before padding, so the band continues the values that were finally
+    // written rather than pre-normalization ones.
+    if (map == BakeMap::UvDensity) {
+        result.encoding.densityMean = normalizeDensity(result.image, params.densityNormalization);
     }
 
     // Padding runs LAST, on the finished texels of either path, so both get the

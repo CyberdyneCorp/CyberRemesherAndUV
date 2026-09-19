@@ -102,6 +102,9 @@ TEST_CASE("the advertised catalogue is pinned, row by row") {
         {BakeMap::Thickness, "thickness", 1, EncodingBasis::Distance, false, false},
         {BakeMap::MaterialId, "material-id", 3, EncodingBasis::IdColor, false, false},
         {BakeMap::ObjectId, "object-id", 3, EncodingBasis::IdColor, false, false},
+        {BakeMap::WorldDirection, "world-direction", 3, EncodingBasis::WorldDirection, false,
+         false},
+        {BakeMap::UvDensity, "uv-density", 1, EncodingBasis::UvDensity, false, false},
     };
 
     const std::span<const MapInfo> catalog = mapCatalog();

@@ -46,6 +46,13 @@ enum class PresetMap {
     // it, because a gamma curve rewrites every id's colour.
     MaterialId,
     ObjectId,
+    // Added in 0.9.0 (surface-baking spec, "World-space direction map and the
+    // placement transform" / "UV density maps"). WorldDirection is the
+    // object-space normal carried through the bake's placement transform;
+    // UvDensity is texels per unit of surface area, a property of THIS mesh's
+    // UV layout rather than of the Target.
+    WorldDirection,
+    UvDensity,
 };
 
 enum class ColorSpace {
