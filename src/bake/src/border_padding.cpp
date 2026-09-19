@@ -294,10 +294,19 @@ PaddingMode paddingModeFor(EncodingBasis basis) {
             return PaddingMode::Nearest;
         case EncodingBasis::TangentNormal:
         case EncodingBasis::ObjectNormal:
+        case EncodingBasis::WorldDirection:
+            // A world direction is a direction: its band has to decode to unit
+            // vectors for the same reason a tangent- or object-space normal's
+            // does, and it is the BASIS that says so rather than the map's name.
             return PaddingMode::ExtrapolateUnit;
         case EncodingBasis::None:
         case EncodingBasis::ObjectBounds:
         case EncodingBasis::Distance:
+        case EncodingBasis::UvDensity:
+            // A density is a SCALAR. There is no unit length to restore, and
+            // imposing one would replace the map's values with directions. Its
+            // declared range ([0, +inf)) keeps the band non-negative; it has no
+            // upper bound to be confined by, only the compounding limit.
             break;
     }
     // Everything else continues its gradient, bounded by the map's own declared

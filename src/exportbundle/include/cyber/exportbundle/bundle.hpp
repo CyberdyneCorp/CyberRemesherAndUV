@@ -46,6 +46,14 @@ struct BundleParams {
     // declare one: padding repairs an artefact of the UV layout, not of the
     // target app's conventions, and every app wants it.
     int paddingRadius = 8;
+    // The object->world placement BakeMap::WorldDirection carries its normals
+    // through, and the normalization BakeMap::UvDensity uses -- the same
+    // defaults and the same meaning BakeParams gives them. Neither belongs on a
+    // PRESET, for the same reason the padding radius does not: a placement says
+    // where the asset sits in a scene and a normalization says what question the
+    // density map is answering, and neither is a target app's convention.
+    bake::PlacementMatrix placement = bake::identityPlacement();
+    bake::DensityNormalization densityNormalization = bake::DensityNormalization::Absolute;
 };
 
 struct BundleFile {
@@ -75,6 +83,13 @@ struct BundleResult {
     int chartCount = 0;
     float maxAngleDistortion = 0.0f;
 };
+
+// Whether any map `preset` writes READS BundleParams::placement, and therefore
+// whether an unusable placement refuses this bundle. Public so that the entry
+// points which validate parameters BEFORE calling writeBundle -- the C ABI and
+// the CLI -- apply the engine's own "checked only for a map that reads it" rule
+// to a whole preset instead of guessing at the map set.
+[[nodiscard]] bool presetReadsPlacement(const io::ExportPreset& preset);
 
 // Writes the bundle. `low` is modified in place when it needs UVs: baking is
 // impossible without them, and requiring the caller to pre-unwrap would make

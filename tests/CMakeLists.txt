@@ -12,6 +12,7 @@ add_executable(cyber_tests
     bake/test_mesh_maps.cpp
     bake/test_id_maps.cpp
     bake/test_padding.cpp
+    bake/test_world_density_maps.cpp
     bake/test_border_padding.cpp
     bake/test_map_catalog.cpp
     handoff/test_handoff.cpp

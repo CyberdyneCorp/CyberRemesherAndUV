@@ -7,6 +7,75 @@
 
 ### Added
 
+- **World-space direction and UV density maps** (#89), the last two inputs
+  CyberTexel's generators need from this repository.
+
+  - **`world-direction`, and the placement transform that makes it real.** This
+    engine has ONE model space — "world" and "object" name the same space here —
+    so a world-space direction map with nothing else would emit pixels
+    *bit-identical* to `object-normal` and ship a duplicate under a second name.
+    `BakeParams::placement` (a 4x4 ROW-MAJOR object->world matrix, `--placement`
+    on the CLI, identity by default) is what separates them: the Target normal
+    is carried into world space by the placement's **inverse transpose** — a
+    plain multiply is correct only for a rotation and shears a normal off the
+    surface under non-uniform scale — then renormalized, expressed in the up
+    axis and encoded `n * 0.5 + 0.5`. Under an identity placement the map equals
+    `object-normal` **texel for texel at zero tolerance**, by an explicit
+    skip rather than by luck, which is the statement that the two maps differ by
+    the transform and by nothing else. A placement whose linear part is singular,
+    or that holds a non-finite element, is **refused** rather than folded to the
+    identity: an identity placement is a meaningful request ("this asset is
+    unplaced"), so substituting it would silently answer a different question.
+    The check applies ONLY to a request that produces a map reading the
+    placement — at every entry point, from `cyber::bake::mapReadsPlacement` —
+    so a caller that leaves this appended field zeroed keeps every map it
+    always had. The placement is recorded with the map, so a world direction
+    can be carried back into object space.
+  - **`uv-density`**: texels per SQUARE model unit that the EditMesh's UV layout
+    gives the surface under each texel, at the requested resolution. (The linear
+    "texels per unit of length" convention is its square root; the map says
+    which it holds.) A property of the UV layout and the resolution alone — it
+    does not read the Target, because a density that changed when the Target
+    changed would be measuring the wrong thing.
+  - **Both normalizations, behind a flag.** `absolute` (the default) is what a
+    scale-locked material needs; `relative` divides every defined texel by the
+    map's own mean and is what shows an artist that one island is packed
+    differently from the rest. The **absolute mean is reported in both modes**,
+    so a relative map converts back to an absolute one.
+  - **A degenerate face takes a documented sentinel, not an infinity.** A face
+    with no UV area or no surface area has no density; such a texel holds
+    exactly `0` and is excluded from the mean. Zero is safe as the sentinel for
+    the same reason `(0,0,0)` is safe for an id map: a defined density is a
+    positive UV area over a positive surface area and is therefore strictly
+    positive, so no measurement can produce it. An infinity would poison the
+    mean the relative mode divides by and would survive into the written file as
+    a plausible-looking number.
+  - **Padding does the right thing without being told**, because it reads the
+    encoding basis: the new `world-direction` basis takes the direction rule and
+    its band is renormalized to unit length, and the new `uv-density` basis takes
+    the scalar rule and is not. A density map's declared value range is
+    **`[0, +inf)`**, deliberately not `[0,1]` — a band confined to a fraction's
+    range would be flattened on a map whose values are a ratio.
+  - **Reachable from every entry point the existing maps are**: `cyber_bake`,
+    `cyber_bake_field`, `cyber_bake_provider_bake` and the capability query,
+    export presets and the export bundle, the CLI's `--bake` list with
+    `--placement` and `--density`, and the Python and Swift bindings — each
+    validating the two new parameters identically.
+  - **C ABI 1.23 (additive)**: `CYBER_BAKE_WORLD_DIRECTION` / `_UV_DENSITY`,
+    `CYBER_ENCODING_WORLD_DIRECTION` / `_UV_DENSITY`,
+    `CyberDensityNormalization`, `CyberBakeParams::placement` /
+    `::densityNormalization`, `CyberBundleParams` likewise, the new
+    `CyberImageDensity` with `cyber_image_density` and `cyber_image_placement`,
+    and `density` / `placement` appended to `CyberBakeProviderResult` under the
+    descriptor-size rule — whose accepted floor stays frozen at the 1.22 layout,
+    so a 1.22 caller is still served. `CyberImageEncoding` is deliberately
+    UNCHANGED: it has no `structSize`, callers pass it to be written into, and it
+    is embedded mid-struct in the provider result.
+  - **UDIM is stated, not claimed.** #91 has not landed; the spec records the
+    forward constraint a UDIM-aware bake must satisfy (a face's density is
+    computed against its own tile's resolution, and the relative mean is taken
+    over the whole set) rather than asserting behaviour that does not exist.
+
 - **A bake PROVIDER surface, so an external map consumer can ask this engine
   for maps.** `cyber_bake` is a bake *call*; what a texture-painting stage such
   as CyberTexel needs is something it can interrogate, drive with its own

@@ -271,6 +271,13 @@ TEST_CASE("the sizing call validates the request and writes no pixel") {
     // No bake ran, so nothing that only a bake can fill is filled.
     CHECK(result.texelsCovered == 0u);
     CHECK(result.padding.radius == 0);
+    // The placement is NOT one of those: it came in with the request, and
+    // cyber_capi.h promises it is the identity for a map that reads none with no
+    // exception for the sizing call. A consumer reading it here must not get the
+    // all-zero matrix a value-initialised result starts with.
+    for (int i = 0; i < 16; ++i) {
+        CHECK(result.placement[i] == ((i % 5 == 0) ? 1.0f : 0.0f));
+    }
 
     // And an invalid request is refused by the sizing call too, so a consumer
     // learns it cannot have the map before it allocates for it.
@@ -543,6 +550,96 @@ TEST_CASE("a newer caller's extra descriptor bytes are left alone") {
     for (const unsigned char byte : extended.appended) {
         CHECK(byte == 0xcd);
     }
+}
+
+TEST_CASE("a caller compiled against the ABI 1.22 layout is still served") {
+    // ABI 1.23 appended `density` and `placement` to CyberBakeProviderResult.
+    // The accepted FLOOR must not have moved with them: a caller whose struct
+    // stops at `idSource` is exactly the caller the descriptor-size mechanism
+    // exists for, and refusing it would make "appending to these three is
+    // additive" false the first time it was used.
+    const PlanePair pair;
+    const CyberBakeParams params = smallParams();
+
+    CyberBakeProviderResult result{};
+    std::memset(&result, 0xcd, sizeof(result));
+    // The end of the last 1.22 member, which is at or below what a 1.22 caller
+    // would state (its own sizeof includes that layout's trailing padding).
+    result.structSize = offsetof(CyberBakeProviderResult, density);
+
+    std::vector<float> pixels(8u * 8u * 3u, 0.0f);
+    CyberBakeProviderRequest request = baseRequest(pair, CYBER_BAKE_UV_DENSITY, &params);
+    request.pixels = pixels.data();
+    request.pixelCapacity = 8u * 8u;  // one channel
+    REQUIRE(cyber_bake_provider_bake(&request, &result) == CYBER_OK);
+    CHECK(result.width == 8);
+    CHECK(result.channels == 1);
+
+    // Nothing was written into the members that caller does not have, even for
+    // the very map whose metadata lives in them.
+    const auto* bytes = reinterpret_cast<const unsigned char*>(&result);
+    for (std::size_t i = offsetof(CyberBakeProviderResult, density); i < sizeof(result); ++i) {
+        CHECK(bytes[i] == 0xcd);
+    }
+}
+
+TEST_CASE("the provider reports the 1.23 density and placement metadata") {
+    const PlanePair pair;
+    CyberBakeParams params = smallParams();
+
+    std::vector<float> density(8u * 8u, 0.0f);
+    CyberBakeProviderRequest request = baseRequest(pair, CYBER_BAKE_UV_DENSITY, &params);
+    request.pixels = density.data();
+    request.pixelCapacity = density.size();
+    CyberBakeProviderResult result = emptyResult();
+    REQUIRE(cyber_bake_provider_bake(&request, &result) == CYBER_OK);
+    CHECK(result.encoding.basis == CYBER_ENCODING_UV_DENSITY);
+    CHECK(result.density.normalization == CYBER_DENSITY_ABSOLUTE);
+    CHECK(result.density.mean > 0.0f);
+
+    // A map that reads no placement still reports the identity, so a consumer
+    // never has to know which maps read one.
+    for (int i = 0; i < 16; ++i) {
+        CHECK(result.placement[i] == ((i % 5 == 0) ? 1.0f : 0.0f));
+    }
+
+    // The placement a world-direction request was given comes back with it.
+    params.placement[5] = 0.0f;
+    params.placement[6] = -1.0f;
+    params.placement[9] = 1.0f;
+    params.placement[10] = 0.0f;
+    std::vector<float> direction(8u * 8u * 3u, 0.0f);
+    CyberBakeProviderRequest placed = baseRequest(pair, CYBER_BAKE_WORLD_DIRECTION, &params);
+    placed.pixels = direction.data();
+    placed.pixelCapacity = direction.size();
+    CyberBakeProviderResult placedResult = emptyResult();
+    REQUIRE(cyber_bake_provider_bake(&placed, &placedResult) == CYBER_OK);
+    CHECK(placedResult.encoding.basis == CYBER_ENCODING_WORLD_DIRECTION);
+    for (int i = 0; i < 16; ++i) {
+        CHECK(placedResult.placement[i] == params.placement[i]);
+    }
+
+    // The SIZING call reports it too, before a ray is cast: the placement is an
+    // input, not a measurement.
+    CyberBakeProviderRequest sizing = baseRequest(pair, CYBER_BAKE_WORLD_DIRECTION, &params);
+    CyberBakeProviderResult sizingResult = emptyResult();
+    REQUIRE(cyber_bake_provider_bake(&sizing, &sizingResult) == CYBER_OK);
+    CHECK(sizingResult.texelsCovered == 0u);
+    for (int i = 0; i < 16; ++i) {
+        CHECK(sizingResult.placement[i] == params.placement[i]);
+    }
+
+    // And the same refusal cyber_bake applies: a singular placement is not
+    // folded to the identity here either.
+    params.placement[5] = 0.0f;
+    params.placement[6] = 0.0f;
+    params.placement[9] = 0.0f;
+    params.placement[10] = 0.0f;
+    CyberBakeProviderRequest singular = baseRequest(pair, CYBER_BAKE_WORLD_DIRECTION, &params);
+    singular.pixels = direction.data();
+    singular.pixelCapacity = direction.size();
+    CyberBakeProviderResult refused = emptyResult();
+    CHECK(cyber_bake_provider_bake(&singular, &refused) == CYBER_ERR_INVALID_ARG);
 }
 
 TEST_CASE("the provider honours the host's bake texel ceiling") {

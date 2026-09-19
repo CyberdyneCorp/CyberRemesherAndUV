@@ -44,8 +44,11 @@ __all__ = [
     "BakeMap",
     "BakeParams",
     "BentNormalSpace",
+    "DensityNormalization",
     "EncodingBasis",
     "IdColor",
+    "IDENTITY_PLACEMENT",
+    "ImageDensity",
     "ImageEncoding",
     "ImagePadding",
     "PaddingMode",
@@ -130,7 +133,7 @@ def version() -> str:
 #: The C ABI this binding was written against. Mirrors CYBER_ABI_VERSION_* in
 #: cyber_capi.h; ``check_abi()`` compares it against the loaded library.
 ABI_VERSION_MAJOR = 1
-ABI_VERSION_MINOR = 22
+ABI_VERSION_MINOR = 23
 
 
 def abi_version() -> tuple:
@@ -3555,6 +3558,17 @@ class BakeMap:
     #: One flat colour per Target object or submesh, from ``object_id``, then
     #: ``group_id``, then the Target's face-connected components.
     OBJECT_ID = _ffi.BAKE_OBJECT_ID
+    #: The Target normal carried into WORLD space by
+    #: :attr:`BakeParams.placement` (by its inverse transpose), encoded
+    #: ``n * 0.5 + 0.5``. With an identity placement this is bit-identical to
+    #: :attr:`OBJECT_NORMAL`: this engine has one model space, and the
+    #: placement is what separates them.
+    WORLD_DIRECTION = _ffi.BAKE_WORLD_DIRECTION
+    #: Texels per SQUARE model unit given by this mesh's UV layout at the
+    #: requested resolution (the linear convention is its square root).
+    #: :attr:`BakeParams.density_normalization` selects absolute or relative.
+    #: ZERO is the sentinel for "no density here"; no defined density is zero.
+    UV_DENSITY = _ffi.BAKE_UV_DENSITY
 
 
 class UpAxis:
@@ -3582,6 +3596,25 @@ class EncodingBasis:
     #: An EXACT key, not a measurement. Never filter, resample or
     #: colour-convert such a map; compare its texels at zero tolerance.
     ID_COLOR = _ffi.ENCODING_ID_COLOR
+    #: A unit direction in WORLD space: the object-space direction carried
+    #: through :attr:`ImageEncoding.placement`, then the up axis, then
+    #: ``v * 0.5 + 0.5``.
+    WORLD_DIRECTION = _ffi.ENCODING_WORLD_DIRECTION
+    #: Texels per square model unit. The range this encoding guarantees is
+    #: ``[0, +inf)`` -- deliberately NOT ``[0, 1]``, in either mode.
+    UV_DENSITY = _ffi.ENCODING_UV_DENSITY
+
+
+class DensityNormalization:
+    """How ``BakeMap.UV_DENSITY`` normalizes (mirror of
+    ``CyberDensityNormalization``)."""
+
+    #: Texels per square model unit as measured -- what a scale-locked material
+    #: needs.
+    ABSOLUTE = _ffi.DENSITY_ABSOLUTE
+    #: Each defined texel over the map's own mean -- what shows an artist that
+    #: one island is packed differently from the rest.
+    RELATIVE = _ffi.DENSITY_RELATIVE
 
 
 class PaddingMode:
@@ -3625,6 +3658,48 @@ class IdColor:
 
     id: int
     color: Tuple[int, int, int]
+
+
+@dataclass(frozen=True)
+class ImageDensity:
+    """How a ``BakeMap.UV_DENSITY`` map was normalized, and the mean it measured.
+
+    ``mean`` is the MEAN ABSOLUTE density of the map's defined texels, in texels
+    per square model unit, and is reported in both modes: it converts a relative
+    map back to an absolute one. Zero when the map defined no texel. Neutral
+    (absolute, mean 0) for every map that is not a density map.
+    """
+
+    #: A :class:`DensityNormalization`.
+    normalization: int
+    mean: float
+
+    @staticmethod
+    def _from_c(c: "_ffi.CyberImageDensity") -> "ImageDensity":
+        return ImageDensity(normalization=int(c.normalization), mean=float(c.mean))
+
+
+#: The 4x4 row-major identity, the default placement.
+IDENTITY_PLACEMENT: Tuple[float, ...] = (
+    1.0, 0.0, 0.0, 0.0,
+    0.0, 1.0, 0.0, 0.0,
+    0.0, 0.0, 1.0, 0.0,
+    0.0, 0.0, 0.0, 1.0,
+)
+
+
+def _placement_to_c(placement: Sequence[float]) -> "ctypes.Array":
+    """A 16-float row-major placement as the C array ``CyberBakeParams`` holds.
+
+    A wrong length is refused here rather than silently padded with the
+    identity's rows: a 12-element list is a caller that dropped the last row,
+    and baking it as something else would be a silently different placement.
+    """
+    values = tuple(float(value) for value in placement)
+    if len(values) != 16:
+        raise ValueError(
+            "placement must hold 16 floats (a row-major 4x4), got {0}".format(len(values)))
+    return (ctypes.c_float * 16)(*values)
 
 
 @dataclass(frozen=True)
@@ -3689,6 +3764,14 @@ class BakeParams:
     #: Texels of border padding grown outward from every UV island before the
     #: map is returned. 0 disables padding; a negative value is refused.
     padding_radius: int = 8
+    #: The 4x4 ROW-MAJOR object->world matrix ``BakeMap.WORLD_DIRECTION``
+    #: carries its normals through, by its inverse transpose. 16 finite floats
+    #: whose upper-left 3x3 is invertible; anything else is refused rather than
+    #: folded to the identity. Read by no other map, and CHECKED only for a map
+    #: that reads it -- a bake of any other map is unaffected by what is here.
+    placement: Tuple[float, ...] = IDENTITY_PLACEMENT
+    #: A :class:`DensityNormalization` for ``BakeMap.UV_DENSITY``.
+    density_normalization: int = DensityNormalization.ABSOLUTE
 
     def _to_c(self) -> "_ffi.CyberBakeParams":
         return _ffi.CyberBakeParams(
@@ -3702,6 +3785,8 @@ class BakeParams:
             bent_normal_space=int(self.bent_normal_space),
             thickness_scale=float(self.thickness_scale),
             padding_radius=int(self.padding_radius),
+            placement=_placement_to_c(self.placement),
+            density_normalization=int(self.density_normalization),
         )
 
 
@@ -3757,6 +3842,24 @@ class Image:
         out = _ffi.CyberImagePadding()
         _check(_ffi.get_lib().cyber_image_padding(self.handle, ctypes.byref(out)))
         return ImagePadding._from_c(out)
+
+    @property
+    def density(self) -> ImageDensity:
+        """The density normalization and mean. Every image has a record."""
+        out = _ffi.CyberImageDensity()
+        _check(_ffi.get_lib().cyber_image_density(self.handle, ctypes.byref(out)))
+        return ImageDensity._from_c(out)
+
+    @property
+    def placement(self) -> Tuple[float, ...]:
+        """The 4x4 row-major placement this map was baked with.
+
+        The identity for every map that does not read one, so a consumer can
+        always carry a world direction back into object space with it.
+        """
+        out = (ctypes.c_float * 16)()
+        _check(_ffi.get_lib().cyber_image_placement(self.handle, out))
+        return tuple(float(value) for value in out)
 
     def save_png(self, path: str) -> None:
         """Write the map to an 8-bit PNG (tonemapped)."""
@@ -3873,6 +3976,12 @@ class BakeProviderResult:
     #: 1 = +Y (OpenGL). This engine bakes +Y; reported so a consumer never has
     #: to assume it.
     normal_green_plus_y: int
+    #: How a ``BakeMap.UV_DENSITY`` map was normalized, and the mean it
+    #: measured. Neutral for every other map.
+    density: ImageDensity
+    #: The 4x4 row-major placement the bake was given; identity for every map
+    #: that does not read one.
+    placement: Tuple[float, ...]
 
 
 def bake_provider_maps() -> Tuple[BakeProviderMap, ...]:
@@ -4027,6 +4136,8 @@ def _bake_provider_result(lib, c_result, id_colors: Tuple[IdColor, ...]) -> Bake
         encoding=ImageEncoding._from_c(c_result.encoding, source, id_colors),
         padding=ImagePadding._from_c(c_result.padding),
         normal_green_plus_y=int(c_result.normal_green_plus_y),
+        density=ImageDensity._from_c(c_result.density),
+        placement=tuple(float(value) for value in c_result.placement),
     )
 
 
@@ -4517,6 +4628,8 @@ def write_bundle(
     bent_normal_space: Optional[int] = None,
     thickness_scale: Optional[float] = None,
     padding_radius: Optional[int] = None,
+    placement: Optional[Sequence[float]] = None,
+    density_normalization: Optional[int] = None,
     progress: Optional[Callable[[float, str], None]] = None,
     cancel: Optional[Callable[[], bool]] = None,
 ) -> BundleResult:
@@ -4554,6 +4667,10 @@ def write_bundle(
         params.thickness_scale = float(thickness_scale)
     if padding_radius is not None:
         params.padding_radius = int(padding_radius)
+    if placement is not None:
+        params.placement = _placement_to_c(placement)
+    if density_normalization is not None:
+        params.density_normalization = int(density_normalization)
 
     def _progress_trampoline(fraction, stage_ptr, _user):
         if progress is None:

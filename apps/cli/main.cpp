@@ -99,6 +99,13 @@ struct CliOptions {
     // (it disables padding), so it cannot double as "not set".
     int paddingRadius = 0;
     bool paddingRadiusSet = false;
+    // The object->world placement the world-direction map is baked with, and
+    // the normalization the uv-density map uses. The placement keeps a "was
+    // given" bit too: the identity IS a meaningful value here (it says the
+    // asset is unplaced), so it cannot double as "not set".
+    cyber::bake::PlacementMatrix placement = cyber::bake::identityPlacement();
+    bool placementSet = false;
+    std::string densityNormalization;
     remesh::Parameters params;
     std::string backend;  // empty = automatic best-first choice
     bool verbose = false;
@@ -160,7 +167,8 @@ void printUsage() {
                  "                           (normal,ao,curvature,cavity,displacement,\n"
                  "                           color,position,object-normal,\n"
                  "                           object-position,bent-normal,thickness,\n"
-                 "                           material-id,object-id).\n"
+                 "                           material-id,object-id,world-direction,\n"
+                 "                           uv-density).\n"
                  "                           Implies --preset gltf-generic when no\n"
                  "                           preset is named\n"
                  "  --target-quads <int>     target quad count (default 50000)\n"
@@ -197,6 +205,13 @@ void printUsage() {
                  "  --bent-normal-space <s>  tangent (default) | object\n"
                  "  --padding <int>          texels of border padding grown outward\n"
                  "                           from every UV island (default 8; 0 off)\n"
+                 "  --placement <16 floats>  comma-separated ROW-MAJOR 4x4 object->world\n"
+                 "                           matrix the world-direction map carries its\n"
+                 "                           normals through (default: identity, which\n"
+                 "                           makes that map equal object-normal)\n"
+                 "  --density <a|r>          uv-density normalization: absolute (default,\n"
+                 "                           texels per square model unit) | relative (to\n"
+                 "                           the map's own mean)\n"
                  "  --list-presets           print built-in export presets and exit\n"
                  "  --list-bake-maps         print the bakeable map names, one per\n"
                  "                           line, and exit -- the same set the C ABI\n"
@@ -210,6 +225,62 @@ void printUsage() {
 }
 
 using cyber::cli::parseNumber;
+
+// --placement <16 comma-separated floats> -> a row-major 4x4. Exactly 16 is
+// required: a shorter list is a typo, and padding it with the identity's rows
+// would silently bake a different placement from the one that was typed.
+bool parsePlacement(const std::string& csv, cyber::bake::PlacementMatrix& out) {
+    std::vector<float> values;
+    std::size_t start = 0;
+    while (start <= csv.size() && values.size() <= out.size()) {
+        const std::size_t comma = csv.find(',', start);
+        const std::size_t end = comma == std::string::npos ? csv.size() : comma;
+        const auto value = parseNumber<float>(csv.substr(start, end - start));
+        if (!value) {
+            return false;
+        }
+        values.push_back(*value);
+        if (comma == std::string::npos) {
+            break;
+        }
+        start = end + 1;
+    }
+    if (values.size() != out.size()) {
+        return false;
+    }
+    std::copy(values.begin(), values.end(), out.begin());
+    return true;
+}
+
+// The bake-encoding flags are range-checked HERE rather than at each flag, so
+// parseArgs's dispatch chain stays one line per flag -- and in one function of
+// their own rather than inline in it, because that chain is already the longest
+// thing in this file. Every refusal matches the one the C ABI applies to the
+// same parameter: a value the library would reject must not reach it.
+int validateBakeFlags(const CliOptions& options) {
+    if (options.thicknessScaleSet && !(options.thicknessScale >= 0.0f)) {
+        std::fprintf(stderr, "error: --thickness-scale must be finite and >= 0\n");
+        return kExitArgs;
+    }
+    if (options.bentNormalSpaceSet && options.bentNormalSpace != "tangent" &&
+        options.bentNormalSpace != "object") {
+        std::fprintf(stderr, "error: --bent-normal-space must be tangent or object\n");
+        return kExitArgs;
+    }
+    if (options.paddingRadiusSet && options.paddingRadius < 0) {
+        std::fprintf(stderr, "error: --padding must be >= 0 (0 disables padding)\n");
+        return kExitArgs;
+    }
+    // --placement is NOT checked here: a placement is refused only for a map
+    // that reads one, and which maps the run writes is not known until the
+    // preset has been resolved. See the check beside that resolution.
+    if (!options.densityNormalization.empty() && options.densityNormalization != "absolute" &&
+        options.densityNormalization != "relative") {
+        std::fprintf(stderr, "error: --density must be absolute or relative\n");
+        return kExitArgs;
+    }
+    return kExitOk;
+}
 
 // Returns exit code (kExitOk to continue) and fills options.
 int parseArgs(int argc, char** argv, CliOptions& options, bool& exitEarly) {
@@ -364,6 +435,24 @@ int parseArgs(int argc, char** argv, CliOptions& options, bool& exitEarly) {
                 return kExitArgs;
             }
             options.paddingRadiusSet = true;
+        } else if (arg == "--placement") {
+            const auto v = next("--placement");
+            if (!v) {
+                return kExitArgs;
+            }
+            if (!parsePlacement(*v, options.placement)) {
+                std::fprintf(stderr,
+                             "error: --placement expects 16 comma-separated numbers "
+                             "(a row-major 4x4)\n");
+                return kExitArgs;
+            }
+            options.placementSet = true;
+        } else if (arg == "--density") {
+            const auto v = next("--density");
+            if (!v) {
+                return kExitArgs;
+            }
+            options.densityNormalization = *v;
         } else if (arg == "--quality") {
             const auto v = next("--quality");
             if (!v) {
@@ -516,19 +605,7 @@ int parseArgs(int argc, char** argv, CliOptions& options, bool& exitEarly) {
     if (!options.bakeMaps.empty() && options.preset.empty()) {
         options.preset = "gltf-generic";
     }
-    // The two bake-encoding flags are range-checked here rather than at the
-    // flag, so the whole of parseArgs's dispatch chain stays one line per flag.
-    if (options.thicknessScaleSet && !(options.thicknessScale >= 0.0f)) {
-        std::fprintf(stderr, "error: --thickness-scale must be finite and >= 0\n");
-        return kExitArgs;
-    }
-    if (options.bentNormalSpaceSet && options.bentNormalSpace != "tangent" &&
-        options.bentNormalSpace != "object") {
-        std::fprintf(stderr, "error: --bent-normal-space must be tangent or object\n");
-        return kExitArgs;
-    }
-    if (options.paddingRadiusSet && options.paddingRadius < 0) {
-        std::fprintf(stderr, "error: --padding must be >= 0 (0 disables padding)\n");
+    if (validateBakeFlags(options) != kExitOk) {
         return kExitArgs;
     }
     // Applied here rather than at the flag so the choice survives a repeated
@@ -665,10 +742,18 @@ const char* encodingBasisName(cyber::bake::EncodingBasis basis) {
             return "distance";
         case cyber::bake::EncodingBasis::IdColor:
             return "id-color";
+        case cyber::bake::EncodingBasis::WorldDirection:
+            return "world-direction";
+        case cyber::bake::EncodingBasis::UvDensity:
+            return "uv-density";
         case cyber::bake::EncodingBasis::None:
             break;
     }
     return "none";
+}
+
+const char* densityNormalizationName(cyber::bake::DensityNormalization mode) {
+    return mode == cyber::bake::DensityNormalization::Relative ? "relative" : "absolute";
 }
 
 // An id map's texels are keys, and a key that cannot be resolved is a picture
@@ -691,9 +776,23 @@ nlohmann::json encodingJson(const cyber::bake::BakeEncoding& encoding) {
     using cyber::bake::EncodingBasis;
     nlohmann::json out = {{"basis", encodingBasisName(encoding.basis)}};
     const bool objectSpace = encoding.basis == EncodingBasis::ObjectNormal ||
-                             encoding.basis == EncodingBasis::ObjectBounds;
+                             encoding.basis == EncodingBasis::ObjectBounds ||
+                             encoding.basis == EncodingBasis::WorldDirection;
     if (objectSpace) {
         out["upAxis"] = encoding.upAxis == cyber::bake::UpAxis::ZUp ? "z-up" : "y-up";
+    }
+    if (encoding.basis == EncodingBasis::WorldDirection) {
+        // Row-major, the shape it was given in, so a consumer can carry a world
+        // direction back into object space without re-deriving a convention.
+        out["placement"] = encoding.placement;
+    }
+    if (encoding.basis == EncodingBasis::UvDensity) {
+        // The mean is written in BOTH modes: it converts a relative map back to
+        // an absolute one, and it tells a host what an absolute map's own
+        // average is. Its unit is texels per SQUARE model unit.
+        out["densityNormalization"] = densityNormalizationName(encoding.densityNormalization);
+        out["densityMean"] = encoding.densityMean;
+        out["densityUnit"] = "texels-per-square-unit";
     }
     if (encoding.basis == EncodingBasis::ObjectBounds) {
         out["boundsMin"] = {encoding.boundsMin.x, encoding.boundsMin.y, encoding.boundsMin.z};
@@ -1249,6 +1348,19 @@ int runCli(int argc, char** argv) {
                 return kExitArgs;
             }
         }
+        // The placement, from the engine's OWN predicate rather than a second
+        // copy of the determinant, and only once the map set is known: a
+        // singular linear part carries no direction anywhere, but it is refused
+        // only for a run that writes a map reading it -- the rule cyber_bake and
+        // the C ABI follow. Still before the mesh is loaded, so a bad matrix
+        // costs the user nothing.
+        if (cyber::exportbundle::presetReadsPlacement(presetOutcome.preset) &&
+            !cyber::bake::placementUsable(options.placement)) {
+            std::fprintf(stderr,
+                         "error: --placement must be 16 finite numbers whose upper-left 3x3 "
+                         "is invertible\n");
+            return kExitArgs;
+        }
 #endif
     }
 
@@ -1519,6 +1631,12 @@ int runCli(int argc, char** argv) {
         }
         if (options.paddingRadiusSet) {
             bundleParams.paddingRadius = options.paddingRadius;
+        }
+        if (options.placementSet) {
+            bundleParams.placement = options.placement;
+        }
+        if (options.densityNormalization == "relative") {
+            bundleParams.densityNormalization = cyber::bake::DensityNormalization::Relative;
         }
         cyber::Mesh low = result.mesh;
         const cyber::exportbundle::BundleResult bundle =

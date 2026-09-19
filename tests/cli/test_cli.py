@@ -482,6 +482,74 @@ def main() -> int:
             check("every id texel resolves through the table", not stray,
                   str(sorted(stray)[:4]))
 
+    # --- the world-direction and UV density maps -------------------------
+    wd_dir = tmp / "worldmaps"
+    wd_dir.mkdir()
+    wd_report = wd_dir / "world.json"
+    # A quarter turn about X, row-major. Without a placement the world map is
+    # the object map under a second name, so a test that left it at the identity
+    # would prove nothing about the flag.
+    rotation = "1,0,0,0,0,0,-1,0,0,1,0,0,0,0,0,1"
+    r = run("--input", str(sphere), "--output", str(wd_dir / "w.obj"), "--target-quads", "300",
+            "--bake", "world-direction,uv-density", "--texture-size", "32",
+            "--placement", rotation, "--density", "relative",
+            "--report", str(wd_report), "--quiet")
+    check("world/density bake exit 0", r.returncode == 0, r.stderr)
+    for name in ("w_world-direction.png", "w_uv-density.png"):
+        check(f"world/density emitted {name}", (wd_dir / name).exists())
+    if wd_report.exists():
+        data = json.loads(wd_report.read_text())
+        outputs = {o["kind"]: o for o in data.get("outputs", [])}
+        check("world/density report lists them",
+              set(outputs) == {"mesh", "world-direction", "uv-density"}, str(sorted(outputs)))
+        world = outputs["world-direction"]["encoding"]
+        check("world-direction records its basis", world["basis"] == "world-direction",
+              str(world))
+        check("world-direction records its up axis", world["upAxis"] == "y-up", str(world))
+        check("world-direction records the placement it was given",
+              world["placement"] == [1, 0, 0, 0, 0, 0, -1, 0, 0, 1, 0, 0, 0, 0, 0, 1],
+              str(world.get("placement")))
+        density = outputs["uv-density"]["encoding"]
+        check("uv-density records its basis", density["basis"] == "uv-density", str(density))
+        check("uv-density records the normalization asked for",
+              density["densityNormalization"] == "relative", str(density))
+        check("uv-density reports the ABSOLUTE mean it measured",
+              density["densityMean"] > 0.0, str(density))
+        check("uv-density states its unit",
+              density["densityUnit"] == "texels-per-square-unit", str(density))
+        # The fill rule follows the basis: a direction is renormalized, a
+        # density scalar is not.
+        check("world-direction pads as a direction",
+              outputs["world-direction"]["padding"]["mode"] == "extrapolate-unit",
+              str(outputs["world-direction"].get("padding")))
+        check("uv-density pads as a scalar",
+              outputs["uv-density"]["padding"]["mode"] == "extrapolate",
+              str(outputs["uv-density"].get("padding")))
+
+    # A placement that is not a placement -- 15 numbers, or a singular linear
+    # part -- is an argument error rather than a silently substituted identity.
+    for bad_placement in ("1,0,0,0,0,1,0,0,0,0,1,0,0,0,0",
+                          "1,0,0,0,0,0,0,0,0,0,1,0,0,0,0,1",
+                          "one,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1"):
+        r = run("--input", str(sphere), "--output", str(wd_dir / "bad.obj"),
+                "--bake", "world-direction", "--texture-size", "16",
+                "--placement", bad_placement, "--quiet")
+        check(f"--placement {bad_placement[:12]}... is exit 2", r.returncode == 2,
+              str(r.returncode))
+        check("a refused placement wrote nothing", not (wd_dir / "bad.obj").exists())
+
+    # ...but only for a run that writes a map READING the placement. The same
+    # singular matrix, with a map set that never looks at it, is not an error:
+    # the rule is the engine's ("checked only for a map that reads it"), and the
+    # C ABI depends on it so that a caller which leaves the appended placement
+    # field zeroed keeps every map it always had.
+    r = run("--input", str(sphere), "--output", str(wd_dir / "unread.obj"), "--target-quads", "300",
+            "--bake", "ao", "--texture-size", "16", "--ao-samples", "4",
+            "--placement", "1,0,0,0,0,0,0,0,0,0,1,0,0,0,0,1", "--quiet")
+    check("a singular placement is ignored by a map that does not read it",
+          r.returncode == 0, r.stderr)
+    check("and that run still wrote its map", (wd_dir / "unread_ao.png").exists())
+
     # A bad value for either new flag is an argument error, not a silent default.
     # --texture-size is here so a REGRESSION fails fast: without it, a value that
     # slipped past the check would start a full 2048-square ray-traced bake and
@@ -490,7 +558,8 @@ def main() -> int:
     # reads as "flag not given".
     for bad_flag, bad_value, map_name in (("--thickness-scale", "-1", "thickness"),
                                           ("--bent-normal-space", "sideways", "bent-normal"),
-                                          ("--padding", "-1", "normal")):
+                                          ("--padding", "-1", "normal"),
+                                          ("--density", "sideways", "uv-density")):
         r = run("--input", str(sphere), "--output", str(maps_dir / "bad.obj"),
                 "--bake", map_name, "--texture-size", "16", "--ao-samples", "4",
                 bad_flag, bad_value, "--quiet")

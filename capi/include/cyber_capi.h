@@ -101,7 +101,7 @@ typedef enum CyberStatus {
  * Do not compare these numbers by hand: cyber_abi_check() applies the rule
  * above in one place, so every binding gets the same answer. */
 #define CYBER_ABI_VERSION_MAJOR 1
-#define CYBER_ABI_VERSION_MINOR 22
+#define CYBER_ABI_VERSION_MINOR 23
 
 /* The ABI this build implements. Cannot fail; either pointer may be NULL. */
 void cyber_abi_version(int* major, int* minor);
@@ -2471,8 +2471,36 @@ typedef enum CyberBakeMap {
      * face-connected components when neither exists —
      * cyber_image_id_source names which answered. Same exactness rules as
      * CYBER_BAKE_MATERIAL_ID. */
-    CYBER_BAKE_OBJECT_ID
+    CYBER_BAKE_OBJECT_ID,
+    /* --- appended in 0.9.0; the values above keep their numbers ----------- */
+    /* The Target normal carried into WORLD space by CyberBakeParams::placement
+     * (by its INVERSE TRANSPOSE), renormalized, expressed in the up axis and
+     * encoded n*0.5+0.5 (RGB). This engine has one model space, so with an
+     * IDENTITY placement this map is BIT-IDENTICAL to CYBER_BAKE_OBJECT_NORMAL
+     * on purpose -- the two differ by the placement and by nothing else. A
+     * singular or non-finite placement is CYBER_ERR_INVALID_ARG. */
+    CYBER_BAKE_WORLD_DIRECTION,
+    /* Texels per SQUARE model unit that the EditMesh's UV layout gives the
+     * surface under each texel, at the requested resolution (1 channel). The
+     * linear "texels per unit of length" convention is its square root.
+     * CyberBakeParams::densityNormalization selects absolute or relative.
+     *
+     * A property of the UV LAYOUT and the resolution alone: it does not read
+     * the Target. ZERO is the documented sentinel for "no density here" -- a
+     * face with no UV area or no surface area, or a texel the bake wrote
+     * nothing to -- and no defined density can take it, because a defined
+     * density is a positive UV area over a positive surface area. */
+    CYBER_BAKE_UV_DENSITY
 } CyberBakeMap;
+
+/* How CYBER_BAKE_UV_DENSITY normalizes its values. Absolute is what a
+ * scale-locked material needs; relative is what shows an artist that one island
+ * is packed differently from the rest. Both are reported with the map, together
+ * with the mean that was measured, so a relative map converts back. */
+typedef enum CyberDensityNormalization {
+    CYBER_DENSITY_ABSOLUTE = 0,
+    CYBER_DENSITY_RELATIVE = 1
+} CyberDensityNormalization;
 
 /* Axis convention the OBJECT-SPACE maps are expressed in. CYBER_UP_AXIS_Y is
  * this engine's own convention (and glTF's); CYBER_UP_AXIS_Z re-expresses a
@@ -2522,6 +2550,28 @@ typedef struct CyberBakeParams {
      *   background. Default 8 (three mip levels, two 4x4 blocks). 0 disables
      *   padding; NEGATIVE is CYBER_ERR_INVALID_ARG. Read by every map. */
     int paddingRadius;
+    /* Appended in 0.9.0 — always initialise via cyber_default_bake_params.
+     *
+     * placement: the affine object->world matrix a host has applied to put the
+     *   asset in its scene, 4x4 ROW-MAJOR (m[row * 4 + column]). Default the
+     *   IDENTITY. Read ONLY by CYBER_BAKE_WORLD_DIRECTION, which carries its
+     *   normals by the INVERSE TRANSPOSE of the upper-left 3x3 -- a plain
+     *   multiply is correct only for a rotation and shears a normal off the
+     *   surface under non-uniform scale. Every element must be finite and the
+     *   linear part invertible; anything else is CYBER_ERR_INVALID_ARG rather
+     *   than a substituted identity -- but ONLY for a map that reads a
+     *   placement, so a bake of any other map is unaffected by whatever is
+     *   here. That matters because these 16 floats were APPENDED in ABI 1.23: a
+     *   caller that zero-fills this struct and assigns the members it knows
+     *   supplies an all-zero (singular) matrix, and checking it unconditionally
+     *   would break every map that predates the placement. The translation is
+     *   accepted and recorded but read by no map today: a direction is
+     *   unaffected by it.
+     * densityNormalization: a CyberDensityNormalization. Default
+     *   CYBER_DENSITY_ABSOLUTE. Read by CYBER_BAKE_UV_DENSITY; anything else is
+     *   CYBER_ERR_INVALID_ARG. */
+    float placement[16];
+    int densityNormalization;
 } CyberBakeParams;
 
 /* What the numbers in a baked image MEAN. An encoded map without its basis is a
@@ -2536,7 +2586,17 @@ typedef enum CyberEncodingBasis {
     /* An EXACT key, not a measurement: every covered texel holds one of the
      * colours cyber_image_id_color reports, verbatim. Never filter, resample
      * or colour-convert such a map; compare it at zero tolerance. */
-    CYBER_ENCODING_ID_COLOR
+    CYBER_ENCODING_ID_COLOR,
+    /* --- appended in 0.9.0; the values above keep their numbers ----------- */
+    /* A unit direction in WORLD space: the object-space direction carried
+     * through the placement cyber_image_placement reports, then expressed in
+     * `upAxis`, then v*0.5+0.5. */
+    CYBER_ENCODING_WORLD_DIRECTION,
+    /* Texels per SQUARE model unit, in the mode cyber_image_density reports.
+     * Zero means the density is UNDEFINED there, never "zero density". The
+     * range this encoding guarantees is [0, +infinity) -- deliberately NOT
+     * [0,1], in either normalization mode. */
+    CYBER_ENCODING_UV_DENSITY
 } CyberEncodingBasis;
 
 /* Filled by every bake, for every map. Members the basis does not use keep
@@ -2572,6 +2632,21 @@ typedef struct CyberImagePadding {
     uint64_t texelsFilled;
 } CyberImagePadding;
 
+/* How a CYBER_ENCODING_UV_DENSITY map was normalized, and the MEAN ABSOLUTE
+ * density its defined texels held. The mean is reported in BOTH modes: it
+ * converts a relative map back to an absolute one, and it tells a host what an
+ * absolute map's own average is. Zero when the map defined no texel.
+ *
+ * Neutral (absolute, mean 0) for every map that is not a density map. This is a
+ * separate struct rather than three more members on CyberImageEncoding
+ * deliberately: that struct has no structSize, callers pass it to be WRITTEN
+ * into, and it is embedded inside CyberBakeProviderResult -- growing it would
+ * overrun an older caller's buffer and shift every member after it. */
+typedef struct CyberImageDensity {
+    int normalization; /* a CyberDensityNormalization */
+    float mean;        /* texels per square model unit; 0 when nothing was defined */
+} CyberImageDensity;
+
 /* Fills params with the engine defaults. No-op on NULL. */
 void cyber_default_bake_params(CyberBakeParams* params);
 
@@ -2592,6 +2667,19 @@ CyberStatus cyber_image_encoding(const CyberImage* image, CyberImageEncoding* ou
 /* What the padding stage did to `image`. Every image has a record. NULL
  * argument is CYBER_ERR_INVALID_ARG. */
 CyberStatus cyber_image_padding(const CyberImage* image, CyberImagePadding* out);
+
+/* The normalization a CYBER_ENCODING_UV_DENSITY map used and the mean it
+ * measured. Every image has a record; a map that is not a density map reports
+ * CYBER_DENSITY_ABSOLUTE and a mean of 0. NULL argument is
+ * CYBER_ERR_INVALID_ARG. */
+CyberStatus cyber_image_density(const CyberImage* image, CyberImageDensity* out);
+
+/* The 4x4 ROW-MAJOR placement `image` was baked with, written into `out_matrix`
+ * (16 floats). The IDENTITY for every map that does not read one, which is every
+ * map but CYBER_BAKE_WORLD_DIRECTION -- so a consumer can always carry a world
+ * direction back into object space with what it reads here. NULL argument is
+ * CYBER_ERR_INVALID_ARG. */
+CyberStatus cyber_image_placement(const CyberImage* image, float out_matrix[16]);
 
 /* ---- id-to-colour table (CYBER_ENCODING_ID_COLOR maps) ----------------
  *
@@ -2986,7 +3074,8 @@ CyberStatus cyber_export_preset_info(const CyberExportPreset* preset, CyberExpor
 typedef struct CyberExportPresetMap {
     const char* map;        /* canonical kind: normal|ao|curvature|cavity|
                              * displacement|color|position|object-normal|
-                             * object-position|bent-normal|thickness */
+                             * object-position|bent-normal|thickness|
+                             * world-direction|uv-density */
     const char* colorSpace; /* "linear" | "srgb" */
     /* Token substituted for {map} in the naming pattern — the map's canonical
      * name unless the preset overrode it to match an app's suffix style. */
@@ -3033,6 +3122,15 @@ typedef struct CyberBundleParams {
      * bakes, with the same default and the same validation cyber_bake
      * applies. */
     int paddingRadius;
+    /* Appended in 0.9.0 (ABI 1.23) — always initialise via
+     * cyber_default_bundle_params. The object->world PLACEMENT the bundle's
+     * world-direction map is baked with and the NORMALIZATION its UV density
+     * map uses, with the same defaults and the same validation cyber_bake
+     * applies -- the placement checked only when the preset writes a map that
+     * reads one, which is the same rule cyber_bake applies one map at a time. Neither is a preset's business: a placement describes where the
+     * asset sits in a scene, not what a target app expects. */
+    float placement[16];
+    int densityNormalization;
 } CyberBundleParams;
 
 /* Fills params with the engine defaults (meshPath and basename left NULL).
@@ -3137,7 +3235,8 @@ float cyber_bundle_result_max_angle_distortion(const CyberBundleResult* result);
  * NEVER AS AN ARRAY, so nothing strides them by sizeof. Do not put one of these
  * in an array, and do not give any other struct in this header a structSize
  * unless the same is true of it. A stated size below the size of the layout
- * published in ABI 1.22 is refused, naming both numbers. */
+ * published in ABI 1.22 is refused, naming both numbers -- that floor does NOT
+ * move when a member is appended later, which is the whole point of it. */
 
 /* Revision of the provider CONTRACT -- the meaning of the descriptors and the
  * rules above -- as distinct from CYBER_ABI_VERSION_MINOR, which moves whenever
@@ -3267,6 +3366,16 @@ typedef struct CyberBakeProviderResult {
      * the same contract CyberHandoffInfo::producer has, so copy it if you keep
      * it. */
     const char* idSource;
+    /* Appended in ABI 1.23, which the DESCRIPTOR SIZES rule above makes
+     * additive: a caller whose structSize stops before these is simply not
+     * written them. The accepted floor stays the 1.22 layout.
+     *
+     * density: the normalization and measured mean of a CYBER_BAKE_UV_DENSITY
+     *   map; neutral for every other map.
+     * placement: the 4x4 row-major placement the bake was given, identity for
+     *   every map that does not read one. */
+    CyberImageDensity density;
+    float placement[16];
 } CyberBakeProviderResult;
 
 /* Produces `request->map` into `request->pixels`, or reports the sizes when

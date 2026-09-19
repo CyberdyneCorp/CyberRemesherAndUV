@@ -569,6 +569,8 @@ to one mesh:
 | `thickness` | material behind the surface, in model units |
 | `material-id` | one flat colour per Target `material_id` |
 | `object-id` | one flat colour per Target object or submesh |
+| `world-direction` | the Target normal carried into **world** space by `--placement` |
+| `uv-density` | texels per square model unit given by this mesh's UV layout |
 
 ```sh
 cyberremesh --input sculpt.obj --output out/hero.obj \
@@ -582,11 +584,69 @@ cost one cage ray per texel like the normal map. `position` is unchanged — it
 still holds the hit point in **model units**; `object-position` is the encoded
 sibling, not a redefinition.
 
+#### World-space direction, and why it needs a placement
+
+This engine has **one model space**: "world" and "object" name the same space
+here, so a world-space direction map with nothing else would emit pixels
+*bit-identical* to `object-normal` and ship a duplicate under a second name.
+What makes the map real is the transform a host has already applied to put the
+asset in its scene, and `--placement` (16 comma-separated floats, a **row-major
+4x4**) is that transform:
+
+```sh
+cyberremesh --input sculpt.obj --output out/hero.obj \
+            --bake world-direction \
+            --placement 1,0,0,0,0,0,-1,0,0,1,0,0,0,0,0,1 --report out/run.json
+```
+
+The normal is carried by the placement's **inverse transpose**, not by the
+placement — under non-uniform scale a plain multiply shears the normal off the
+surface, which is wrong exactly on the assets a placement exists for. With the
+default identity placement the map equals `object-normal` **texel for texel at
+zero tolerance**, which is the statement that the two differ by the transform
+and by nothing else. A placement whose linear part is singular is *refused*, not
+folded to the identity: an identity placement is a meaningful request ("this
+asset is unplaced"), so substituting it would answer a different question. That
+refusal applies only to a run that writes a map *reading* the placement, so a
+bake of any other map is unaffected by whatever the field holds. The placement is
+recorded with the map, so a consumer can carry a world direction back into object
+space.
+
+#### UV density
+
+`uv-density` is **texels per square model unit** — how much texture the UV
+layout spends on each patch of surface at the requested resolution. (The linear
+"texels per metre" convention is its square root.) It is what lets a material
+hold a constant real-world scale across islands packed at different densities,
+and it is the map that shows an artist an uneven layout before they discover it
+by painting. It is a property of the EditMesh's UV layout and the resolution
+alone: it does not read the Target.
+
+`--density absolute` (the default) is the measured value; `--density relative`
+divides every defined texel by the map's own mean, which is what makes
+unevenness visible at a glance. The **absolute mean is reported in both modes**,
+so a relative map converts back. A face with no UV area or no surface area has
+no density at all, and holds the documented sentinel **`0`** — never an infinity
+that would poison the mean the relative mode divides by. Zero is safe as that
+sentinel because a defined density is a positive UV area over a positive surface
+area and is therefore strictly positive.
+
+A density map's declared value range is `[0, +inf)`, deliberately **not**
+`[0,1]`: border padding confines a padded band to a map's own range, and
+declaring a fraction's range here would flatten a real map's band.
+
+Once UDIM baking lands (#91), a face's density will be computed against the
+resolution of the **tile** it lands in, and the relative mean will be taken over
+the whole set of tiles rather than per tile — a per-tile mean would call every
+tile average and hide exactly the unevenness the mode exists to show.
+
 **Every bake now reports its encoding basis**, because an encoded map without
 one is a picture of some numbers: `object-position` is `(p - min) / (max - min)`,
 and `min`/`max` are not recoverable from the pixels. The basis names the frame, the
 up axis (`y-up` or `z-up`, taken from the preset in a bundle run), the bounding
-box and the thickness scale. It reaches a host through `cyber_image_encoding` /
+box, the thickness scale, the placement a world direction was carried through and
+the normalization and mean of a density map. It reaches a host through
+`cyber_image_encoding`, `cyber_image_density`, `cyber_image_placement` /
 `cyber_bundle_result_file_encoding`, `Image.encoding` in Python and Swift, and the
 JSON report's `outputs[].encoding`.
 

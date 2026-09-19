@@ -46,6 +46,10 @@ std::optional<bake::BakeMap> toBakeMap(PresetMap map) {
             return bake::BakeMap::MaterialId;
         case PresetMap::ObjectId:
             return bake::BakeMap::ObjectId;
+        case PresetMap::WorldDirection:
+            return bake::BakeMap::WorldDirection;
+        case PresetMap::UvDensity:
+            return bake::BakeMap::UvDensity;
     }
     return std::nullopt;
 }
@@ -63,7 +67,7 @@ bool isIdMap(PresetMap map) { return map == PresetMap::MaterialId || map == Pres
 bool usesObjectSpace(const ExportPreset& preset) {
     for (const PresetMapEntry& entry : preset.maps) {
         if (entry.map == PresetMap::ObjectNormal || entry.map == PresetMap::ObjectPosition ||
-            entry.map == PresetMap::BentNormal) {
+            entry.map == PresetMap::BentNormal || entry.map == PresetMap::WorldDirection) {
             return true;
         }
     }
@@ -217,6 +221,16 @@ bool writeMap(const ExportPreset& preset, const PresetMapEntry& entry, bake::Ima
 
 }  // namespace
 
+bool presetReadsPlacement(const io::ExportPreset& preset) {
+    for (const PresetMapEntry& entry : preset.maps) {
+        const std::optional<bake::BakeMap> map = toBakeMap(entry.map);
+        if (map.has_value() && bake::mapReadsPlacement(*map)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 BundleResult writeBundle(Mesh& low, const Mesh& high, const BundleParams& params,
                          ProgressSink* progress, const CancelToken* cancel) {
     BundleResult result;
@@ -255,6 +269,8 @@ BundleResult writeBundle(Mesh& low, const Mesh& high, const BundleParams& params
     bakeParams.bentNormalSpace = params.bentNormalSpace;
     bakeParams.thicknessScale = params.thicknessScale;
     bakeParams.paddingRadius = params.paddingRadius;
+    bakeParams.placement = params.placement;
+    bakeParams.densityNormalization = params.densityNormalization;
     bakeParams.upAxis = presetUpAxis(preset, result);
 
     const auto total = static_cast<float>(preset.maps.size());
