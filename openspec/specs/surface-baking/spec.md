@@ -11,7 +11,7 @@ accelerated, cancellable and previewable rather than a blind wait.
 ### Requirement: Bakeable map types
 The bake stage SHALL bake from the Target onto the EditMesh's UV layout: tangent-space normal maps, ambient occlusion, displacement/height, color maps (from Target vertex colors, including polypaint, or from a Target texture when the Target has its own UVs — texture-to-texture baking), object-space normal maps, object-space position maps, world-space direction maps, bent normal maps, thickness maps, UV density maps, material ID maps and object ID maps. Output resolution SHALL be user-selectable up to at least 4096².
 
-Every map type SHALL be requestable through the same entry points, and SHALL honour the same projection cage, texel ceiling, progress reporting and cooperative cancellation. Every numeric parameter a map reads SHALL have a stated default, range and meaning, and a value outside that range SHALL be refused — the bake returns no image — rather than substituted with a default, whichever entry point the request arrives through.
+Every map type SHALL be requestable through the same entry points, and SHALL honour the same projection cage, texel ceiling, progress reporting and cooperative cancellation. The one map that reads nothing from where the cage ray lands — the UV density map, a property of the EditMesh's own UV layout — SHALL still accept the cage and SHALL be unchanged by it; see "UV density maps". Every numeric parameter a map reads SHALL have a stated default, range and meaning, and a value outside that range SHALL be refused — the bake returns no image — rather than substituted with a default, whichever entry point the request arrives through.
 
 #### Scenario: Normal + color bake
 - **WHEN** a bake runs on an EditMesh with valid UVs against a vertex-colored Target
@@ -482,8 +482,20 @@ differ.
 **What is refused.** A placement with a non-finite element, or whose linear part is
 singular and therefore carries no direction anywhere, SHALL be refused — the bake returns
 no image — rather than substituted with the identity, whichever entry point the request
-arrives through. The placement SHALL be checked only for a map that reads it, so a bake
-that worked before still works.
+arrives through.
+
+The placement SHALL be checked ONLY for a request that produces a map reading it, and a
+request that produces no such map SHALL NOT be refused for whatever the placement field
+holds — so a bake that worked before still works. This is not a courtesy: the placement
+was APPENDED to the parameter block of a published ABI, so a host that zero-fills that
+block and assigns the members it knows about — the documented way to write against the
+previous version — supplies an all-zero and therefore singular matrix. Checking it
+unconditionally would make every map that predates the placement fail on upgrade.
+
+The set of maps that read a placement SHALL be published by the engine and consulted by
+every entry point that validates one, rather than restated at each; a request that batches
+several maps (an export bundle) SHALL apply the check when ANY map it writes reads a
+placement.
 
 **What is recorded.** The placement actually applied SHALL be reported alongside the
 image, together with the up axis, so that a consumer can recover the object-space
@@ -519,6 +531,14 @@ encoding SHALL guarantee the range `[0,1]` on every channel.
 #### Scenario: The placement reaches only the map that reads it
 - **WHEN** any map other than the world-space direction map is baked with a non-identity placement
 - **THEN** that map SHALL be produced exactly as it is with an identity placement
+
+#### Scenario: A map that reads no placement is not refused by an unusable one
+- **WHEN** a map that reads no placement is requested, through any entry point, with a placement that is singular or non-finite — including the all-zero matrix a caller written against the previous ABI leaves behind
+- **THEN** the map SHALL be produced normally, and its recorded placement SHALL be the identity
+
+#### Scenario: The placement and the up axis compose in one order
+- **WHEN** a world-space direction map is baked with BOTH a placement carrying a non-uniform scale and a non-default up axis
+- **THEN** the normal SHALL be carried into world space FIRST and the up axis SHALL re-express that world-space result, rather than the placement being applied to an already re-expressed direction
 
 #### Scenario: A world-space direction map can be decoded back to object space
 - **WHEN** a consumer reads a world-space direction map together with its recorded basis
@@ -565,6 +585,13 @@ and is strictly positive. A value that underflows to zero SHALL be classified as
 too, so the sentinel keeps its meaning. It SHALL also be the value of a texel the bake
 wrote nothing to, so "no density here" reads the same either way.
 
+The two degenerate faces reach that zero by DIFFERENT routes, and the map is required to
+be indistinguishable between them. A face with surface area and no UV AREA covers no texel
+at all — it rasterizes to nothing — so its region of the map holds the uncovered
+background; a face with UV area and no SURFACE area does cover texels, and each of them is
+written the sentinel explicitly. Both read as exactly zero, both are excluded from the
+mean, and neither yields an infinity or a NaN anywhere in the image.
+
 **The value range a UV density map's encoding guarantees SHALL be `[0, +infinity)`** — a
 density is never negative, and the ratio of texels to surface area has no upper bound. It
 is explicitly NOT `[0,1]` in either normalization mode. Its padded band SHALL therefore be
@@ -580,9 +607,17 @@ and the relative mean SHALL be taken over the WHOLE SET of tiles rather than per
 because a per-tile mean would report every tile as average and hide exactly the unevenness
 the relative mode exists to show.
 
-UV density SHALL follow the same rules as every other map type: the same projection cage,
-output resolution, texel ceiling, progress reporting, cooperative cancellation and border
-padding, and SHALL be requestable through every entry point the other maps are.
+UV density SHALL follow the same rules as every other map type: the same output resolution,
+texel ceiling, progress reporting, cooperative cancellation and border padding, and SHALL
+be requestable through every entry point the other maps are.
+
+It is the ONE exception to "every map type honours the same projection cage", and the
+exception is forced by the paragraph above: a map that reads nothing from where the cage
+ray lands cannot be changed by how far that ray travels. Accordingly the projection cage
+SHALL be accepted on a UV density request and SHALL NOT change a single texel of the
+result. Every other map type, including the world-space direction map, honours the cage in
+the ordinary sense — it reads the Target at the hit and falls back to the EditMesh's own
+surface where the ray misses.
 
 #### Scenario: A uniformly unwrapped surface reads one density
 - **WHEN** a UV density map is baked in absolute mode on an EditMesh whose UV layout gives every face the same texels-per-area
@@ -600,9 +635,17 @@ padding, and SHALL be requestable through every entry point the other maps are.
 - **WHEN** a UV density map is baked in relative mode
 - **THEN** every defined texel SHALL hold its absolute density divided by the mean of the map's defined texels, and the mean reported with the map SHALL be that absolute mean
 
-#### Scenario: A zero-area UV face takes the sentinel and does not poison the mean
-- **WHEN** a UV density map is baked in relative mode over a layout containing a face with zero UV area or zero surface area
-- **THEN** every texel of that face SHALL hold exactly zero, no texel of the map SHALL hold an infinity or a NaN, and the reported mean SHALL be the mean of the DEFINED texels alone — the same mean the map would report without that face
+#### Scenario: A face with no surface area takes the sentinel and does not poison the mean
+- **WHEN** a UV density map is baked in relative mode over a layout containing a face with UV area and no surface area
+- **THEN** every texel that face covers SHALL hold exactly zero, no texel of the map SHALL hold an infinity or a NaN, and the reported mean SHALL be the mean of the DEFINED texels alone — the same mean the map would report without that face
+
+#### Scenario: A face with no UV area covers nothing and changes nothing
+- **WHEN** a UV density map is baked over a layout containing a face with surface area whose UV corners are degenerate, so its UV area is zero
+- **THEN** that face SHALL write no texel, its region of the map SHALL read the same zero the uncovered background holds, and the reported mean SHALL be the one the map reports without that face
+
+#### Scenario: The mean counts the defined texels, not the image
+- **WHEN** a UV density map is baked over a layout that leaves part of the UV square uncovered
+- **THEN** the reported mean SHALL be the mean of the covered, defined texels alone, unchanged by how much background surrounds them — and in relative mode a uniformly packed island SHALL therefore read exactly 1 however much background there is
 
 #### Scenario: The normalization mode is recorded
 - **WHEN** a UV density map is baked in either mode through any entry point that produces a map
@@ -616,4 +659,9 @@ padding, and SHALL be requestable through every entry point the other maps are.
 #### Scenario: The density map does not read the Target
 - **WHEN** a UV density map is baked twice from the same EditMesh against two different Targets with the same parameters
 - **THEN** the two images SHALL be identical texel for texel
+
+#### Scenario: The projection cage moves the world map and not the density map
+- **WHEN** the same EditMesh and Target are baked twice with a cage too short to reach the Target and once with a cage that reaches it
+- **THEN** the world-space direction map SHALL fall back to the EditMesh's own surface normal in the first and hold the Target's normal in the second
+- **AND** the UV density map SHALL be identical texel for texel between the two
 

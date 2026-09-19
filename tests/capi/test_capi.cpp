@@ -843,7 +843,44 @@ TEST_CASE("capi refuses a singular placement and an unknown density mode") {
 
     CyberBakeParams notFinite = params;
     notFinite.placement[0] = std::numeric_limits<float>::infinity();
-    CHECK(cyber_bake(low, high, CYBER_BAKE_NORMAL, &notFinite, &image) == CYBER_ERR_INVALID_ARG);
+    CHECK(cyber_bake(low, high, CYBER_BAKE_WORLD_DIRECTION, &notFinite, &image) ==
+          CYBER_ERR_INVALID_ARG);
+    CHECK(image == nullptr);
+
+    // But ONLY for a map that reads the placement, which is the rule the engine
+    // itself applies and the reason a 1.23 library still serves a 1.22 caller.
+    // These 16 floats were APPENDED to CyberBakeParams: a host that zero-fills
+    // the struct and assigns the members it knows -- the documented way to write
+    // against 1.22 -- hands in an all-zero, and therefore singular, matrix. If
+    // that refused every bake, every map that predates the placement would stop
+    // working on upgrade.
+    CyberBakeParams zeroed{};
+    zeroed.width = 8;
+    zeroed.height = 8;
+    zeroed.cageDistance = params.cageDistance;
+    zeroed.aoSamples = params.aoSamples;
+    zeroed.aoRadius = params.aoRadius;
+    zeroed.curvatureRange = params.curvatureRange;
+    zeroed.thicknessScale = params.thicknessScale;
+    zeroed.paddingRadius = params.paddingRadius;
+    for (const CyberBakeMap unplaced :
+         {CYBER_BAKE_NORMAL, CYBER_BAKE_OBJECT_NORMAL, CYBER_BAKE_UV_DENSITY}) {
+        CyberImage* survivor = nullptr;
+        CHECK(cyber_bake(low, high, unplaced, &zeroed, &survivor) == CYBER_OK);
+        // And the record still reports the identity for them, so a consumer can
+        // decode without knowing which maps read a placement.
+        float unread[16] = {0};
+        REQUIRE(cyber_image_placement(survivor, unread) == CYBER_OK);
+        for (int i = 0; i < 16; ++i) {
+            CHECK(unread[i] == ((i % 5 == 0) ? 1.0f : 0.0f));
+        }
+        cyber_image_free(survivor);
+    }
+    // The same zero-filled struct is still refused for the map that DOES read
+    // it, rather than quietly baked against a matrix that carries nothing.
+    CHECK(cyber_bake(low, high, CYBER_BAKE_WORLD_DIRECTION, &zeroed, &image) ==
+          CYBER_ERR_INVALID_ARG);
+    CHECK(image == nullptr);
 
     CyberBakeParams badMode = params;
     badMode.densityNormalization = 7;

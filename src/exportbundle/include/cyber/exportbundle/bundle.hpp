@@ -84,6 +84,13 @@ struct BundleResult {
     float maxAngleDistortion = 0.0f;
 };
 
+// Whether any map `preset` writes READS BundleParams::placement, and therefore
+// whether an unusable placement refuses this bundle. Public so that the entry
+// points which validate parameters BEFORE calling writeBundle -- the C ABI and
+// the CLI -- apply the engine's own "checked only for a map that reads it" rule
+// to a whole preset instead of guessing at the map set.
+[[nodiscard]] bool presetReadsPlacement(const io::ExportPreset& preset);
+
 // Writes the bundle. `low` is modified in place when it needs UVs: baking is
 // impossible without them, and requiring the caller to pre-unwrap would make
 // `--preset` useless on a freshly remeshed mesh. `cancel` covers that unwrap as

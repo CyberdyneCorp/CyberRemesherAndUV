@@ -178,9 +178,9 @@ struct Texel {
     float uvAreaRatio = 0.0f;
 };
 
-// Twice the area of a UV triangle (the 2D cross product's magnitude). Halving
-// both this and the surface area would cancel in the ratio below; it is left in
-// so each quantity reads as the area it is.
+// The area of a UV triangle: half the magnitude of the 2D cross product. The
+// halving cancels against the surface area's in the ratio below and could be
+// dropped from both; it is kept so each quantity reads as the area it is.
 float uvTriangleArea(Vec2 a, Vec2 b, Vec2 c) {
     const Vec2 u = b - a;
     const Vec2 v = c - a;
@@ -836,7 +836,7 @@ bool paramsUsable(BakeMap map, const BakeParams& params, bool useField) {
     }
     // Checked only for the map that READS a placement, matching the policy
     // above: a bake that worked before still works whatever is in this field.
-    if (map == BakeMap::WorldDirection && !placementUsable(params.placement)) {
+    if (mapReadsPlacement(map) && !placementUsable(params.placement)) {
         return false;
     }
     const bool curvatureMap = map == BakeMap::Curvature || map == BakeMap::Cavity;
@@ -1490,6 +1490,8 @@ bool placementUsable(const PlacementMatrix& placement) {
     const float determinant = adjugate(placement).determinant;
     return std::isfinite(determinant) && determinant != 0.0f;
 }
+
+bool mapReadsPlacement(BakeMap map) { return map == BakeMap::WorldDirection; }
 
 std::array<std::uint8_t, 3> idColor(std::int32_t id) {
     // INTEGER arithmetic end to end. ArmorPaint derives its id colours from

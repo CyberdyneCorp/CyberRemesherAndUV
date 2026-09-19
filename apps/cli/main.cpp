@@ -271,15 +271,9 @@ int validateBakeFlags(const CliOptions& options) {
         std::fprintf(stderr, "error: --padding must be >= 0 (0 disables padding)\n");
         return kExitArgs;
     }
-    // From the engine's OWN predicate, not a second copy of the determinant: a
-    // singular linear part carries no direction anywhere, and substituting the
-    // identity would silently answer "the asset is unplaced" instead.
-    if (options.placementSet && !cyber::bake::placementUsable(options.placement)) {
-        std::fprintf(stderr,
-                     "error: --placement must be 16 finite numbers whose upper-left 3x3 "
-                     "is invertible\n");
-        return kExitArgs;
-    }
+    // --placement is NOT checked here: a placement is refused only for a map
+    // that reads one, and which maps the run writes is not known until the
+    // preset has been resolved. See the check beside that resolution.
     if (!options.densityNormalization.empty() && options.densityNormalization != "absolute" &&
         options.densityNormalization != "relative") {
         std::fprintf(stderr, "error: --density must be absolute or relative\n");
@@ -1353,6 +1347,19 @@ int runCli(int argc, char** argv) {
                 std::fprintf(stderr, "error: %s\n", bakeError.c_str());
                 return kExitArgs;
             }
+        }
+        // The placement, from the engine's OWN predicate rather than a second
+        // copy of the determinant, and only once the map set is known: a
+        // singular linear part carries no direction anywhere, but it is refused
+        // only for a run that writes a map reading it -- the rule cyber_bake and
+        // the C ABI follow. Still before the mesh is loaded, so a bad matrix
+        // costs the user nothing.
+        if (cyber::exportbundle::presetReadsPlacement(presetOutcome.preset) &&
+            !cyber::bake::placementUsable(options.placement)) {
+            std::fprintf(stderr,
+                         "error: --placement must be 16 finite numbers whose upper-left 3x3 "
+                         "is invertible\n");
+            return kExitArgs;
         }
 #endif
     }

@@ -100,11 +100,42 @@ Mesh islandBesideDegenerateFace() {
     return mesh;
 }
 
+// The left island again, beside a face whose four UV corners are COLLINEAR: it
+// has surface area and no UV AREA, which is the other half of the degenerate
+// case -- and, unlike the collinear-in-3D face above, it rasterizes to no texel
+// at all, so the sentinel it takes is the uncovered background's.
+Mesh islandBesideZeroUvAreaFace() {
+    Mesh mesh = emptyWithUv();
+    addQuad(mesh, {Vec3{0, 0, 0}, Vec3{1, 0, 0}, Vec3{1, 1, 0}, Vec3{0, 1, 0}}, 0.0f, 0.5f);
+    // u0 == u1: the whole face collapses onto one UV line.
+    addQuad(mesh, {Vec3{3, 0, 0}, Vec3{4, 0, 0}, Vec3{4, 1, 0}, Vec3{3, 1, 0}}, 0.75f, 0.75f);
+    return mesh;
+}
+
 // The left island alone, so a degenerate face's effect on the reported mean can
-// be measured against the map that does not have one.
+// be measured against the map that does not have one. It covers the LEFT HALF
+// of the layout and nothing else, which is what makes it the mesh to measure
+// the mean's treatment of BACKGROUND texels on: half the map is uncovered.
 Mesh leftIslandOnly() {
     Mesh mesh = emptyWithUv();
     addQuad(mesh, {Vec3{0, 0, 0}, Vec3{1, 0, 0}, Vec3{1, 1, 0}, Vec3{0, 1, 0}}, 0.0f, 0.5f);
+    return mesh;
+}
+
+// A flat quad over the whole layout, normal +z. The EditMesh of the cage case.
+Mesh flatQuad() {
+    Mesh mesh = emptyWithUv();
+    addQuad(mesh, {Vec3{0, 0, 0}, Vec3{1, 0, 0}, Vec3{1, 1, 0}, Vec3{0, 1, 0}}, 0.0f, 1.0f);
+    return mesh;
+}
+
+// A Target floating just above that quad and tilted, so its normal is
+// (0, -0.2, 1) normalized rather than +z: a cage long enough to reach it bakes
+// ITS normal, and a cage that is not falls back to the EditMesh's own.
+Mesh floatingTarget() {
+    Mesh mesh = emptyWithUv();
+    addQuad(mesh, {Vec3{0, 0, 0.2f}, Vec3{1, 0, 0.2f}, Vec3{1, 1, 0.4f}, Vec3{0, 1, 0.4f}}, 0.0f,
+            1.0f);
     return mesh;
 }
 
@@ -218,6 +249,37 @@ TEST_CASE("a non-uniform scale carries the normal by the inverse transpose") {
     CHECK(cyber::length(got) == doctest::Approx(1.0f).epsilon(1e-4));
 }
 
+TEST_CASE("the placement is applied in object space and the up axis re-expresses the result") {
+    // The ORDER of the two transforms, which is invisible under an identity
+    // placement and invisible under a pure rotation as well -- a rotation about
+    // X and the z-up swizzle commute. It takes a NON-UNIFORM SCALE plus z-up to
+    // separate them, and this is the only case in the suite that combines the
+    // two. Getting the order wrong reaches real output silently: the export
+    // bundle selects z-up automatically for a z-up preset.
+    const Mesh mesh = tilted();
+    bake::BakeParams p = params64();
+    p.upAxis = bake::UpAxis::ZUp;
+    p.placement = linear({1, 0, 0, 0, 2, 0, 0, 0, 1});  // doubling Y
+    const bake::BakeResult world = bake::bake(mesh, mesh, bake::BakeMap::WorldDirection, p);
+    REQUIRE(!world.image.pixels.empty());
+
+    // Placement FIRST: the object normal (0, -1, 1)/sqrt2 carried by the inverse
+    // transpose diag(1, 0.5, 1) is (0, -1, 2)/sqrt5, and z-up re-expresses that
+    // as (x, -z, y) = (0, -2, -1)/sqrt5.
+    const Vec3 want = cyber::normalized(Vec3{0.0f, -2.0f, -1.0f});
+    // Up axis FIRST would swizzle the object normal to (0, -1, -1)/sqrt2 and
+    // then scale it into (0, -1, -2)/sqrt5 -- the same two components, swapped,
+    // which is why this comparison cannot pass by accident.
+    const Vec3 axisFirst = cyber::normalized(Vec3{0.0f, -1.0f, -2.0f});
+    const Vec3 got = decode(world.image, world.image.width / 2, world.image.height / 2);
+    CHECK(std::fabs(got.x - want.x) < 1e-4f);
+    CHECK(std::fabs(got.y - want.y) < 1e-4f);
+    CHECK(std::fabs(got.z - want.z) < 1e-4f);
+    CHECK(std::fabs(got.y - axisFirst.y) > 0.1f);
+    CHECK(std::fabs(got.z - axisFirst.z) > 0.1f);
+    CHECK(world.encoding.upAxis == bake::UpAxis::ZUp);
+}
+
 TEST_CASE("a singular or non-finite placement is refused, not defaulted") {
     const Mesh mesh = tent();
     bake::BakeParams p = params64();
@@ -235,9 +297,20 @@ TEST_CASE("a singular or non-finite placement is refused, not defaulted") {
     SUBCASE("but only for the map that reads it") {
         // A map that never looks at the placement is not refused because of one:
         // "parameters the requested map never reads stay unchecked" is the rule
-        // every other bake parameter already follows.
+        // every other bake parameter already follows, and here it is also what
+        // keeps a caller that leaves this appended field alone -- an all-zero,
+        // and therefore singular, matrix -- baking every map it always could.
         p.placement = linear({1, 0, 0, 0, 0, 0, 0, 0, 1});
-        CHECK(!bake::bake(mesh, mesh, bake::BakeMap::ObjectNormal, p).image.pixels.empty());
+        for (const bake::BakeMap map :
+             {bake::BakeMap::ObjectNormal, bake::BakeMap::Normal, bake::BakeMap::UvDensity}) {
+            CHECK(!bake::mapReadsPlacement(map));
+            const bake::BakeResult result = bake::bake(mesh, mesh, map, p);
+            CHECK(!result.image.pixels.empty());
+            // And it is the IDENTITY they record, not the unusable matrix they
+            // were handed: a consumer decodes with what it reads here.
+            CHECK(result.encoding.placement == bake::identityPlacement());
+        }
+        CHECK(bake::mapReadsPlacement(bake::BakeMap::WorldDirection));
     }
 }
 
@@ -276,6 +349,75 @@ TEST_CASE("absolute UV density is texels per unit of surface area") {
     p.height = 128;
     const bake::BakeResult finer = bake::bake(mesh, mesh, bake::BakeMap::UvDensity, p);
     CHECK(sample(finer.image, 0.5f, 0.5f) == doctest::Approx(want * 4.0f));
+}
+
+TEST_CASE("the density mean is taken from the DEFINED texels, not the whole image") {
+    // Half the layout is covered and half is background. Every other density
+    // case here fills the whole UV square, where a mean over all 4096 texels and
+    // a mean over the defined ones agree -- so this is the case that says the
+    // background is excluded, and it is worth stating as an exact number rather
+    // than as a comparison against another map that would carry the same bias.
+    const Mesh mesh = leftIslandOnly();  // UV area 0.5 over surface area 1
+    bake::BakeParams p = params64();
+    const bake::BakeResult absolute = bake::bake(mesh, mesh, bake::BakeMap::UvDensity, p);
+    REQUIRE(!absolute.image.pixels.empty());
+
+    const float want = 0.5f * 64.0f * 64.0f;  // 2048 texels per square model unit
+    CHECK(sample(absolute.image, 0.25f, 0.5f) == doctest::Approx(want));
+    CHECK(sample(absolute.image, 0.75f, 0.5f) == 0.0f);  // uncovered: the sentinel
+
+    std::size_t background = 0;
+    for (const float value : absolute.image.pixels) {
+        if (value == 0.0f) {
+            ++background;
+        }
+    }
+    // Roughly half the image, and the point is only that there IS background
+    // for a mean over the whole image to be dragged down by.
+    CHECK(background > absolute.image.pixels.size() / 4);
+    // The mean of the DEFINED texels, which is `want` itself -- NOT the mean
+    // over the image, which the background would halve.
+    CHECK(absolute.encoding.densityMean == doctest::Approx(want));
+    CHECK(absolute.encoding.densityMean > 0.9f * want);
+
+    // And the relative map divides by that same defined-texel mean, so a
+    // uniformly packed island reads exactly 1 however much background surrounds
+    // it. A mean diluted by the background would put it at 2.
+    p.densityNormalization = bake::DensityNormalization::Relative;
+    const bake::BakeResult relative = bake::bake(mesh, mesh, bake::BakeMap::UvDensity, p);
+    REQUIRE(!relative.image.pixels.empty());
+    CHECK(relative.encoding.densityMean == doctest::Approx(want));
+    CHECK(sample(relative.image, 0.25f, 0.5f) == doctest::Approx(1.0f));
+    CHECK(sample(relative.image, 0.75f, 0.5f) == 0.0f);
+}
+
+TEST_CASE("a face with zero UV AREA writes no texel and leaves the mean alone") {
+    // The other degenerate face: real surface area, no UV area. It rasterizes to
+    // NOTHING -- a triangle of zero UV area covers no texel centre -- so its
+    // region of the map reads the uncovered background, which is the same zero
+    // the sentinel uses. That is what makes "no density here" read alike either
+    // way, and it is why the map is still finite everywhere.
+    const Mesh mesh = islandBesideZeroUvAreaFace();
+    bake::BakeParams p = params64();
+    p.densityNormalization = bake::DensityNormalization::Relative;
+    const bake::BakeResult result = bake::bake(mesh, mesh, bake::BakeMap::UvDensity, p);
+    REQUIRE(!result.image.pixels.empty());
+
+    for (const float value : result.image.pixels) {
+        CHECK(std::isfinite(value));
+        CHECK(value >= 0.0f);
+    }
+    // Nothing anywhere in the collapsed face's column of the layout.
+    for (int py = 0; py < result.image.height; ++py) {
+        CHECK(result.image.at(result.image.width * 3 / 4, py, 0) == 0.0f);
+    }
+
+    // The reported mean is the left island's own, unchanged by the face that
+    // wrote nothing.
+    const Mesh alone = leftIslandOnly();
+    const bake::BakeResult reference = bake::bake(alone, alone, bake::BakeMap::UvDensity, p);
+    CHECK(result.encoding.densityMean == doctest::Approx(0.5f * 64.0f * 64.0f));
+    CHECK(result.encoding.densityMean == doctest::Approx(reference.encoding.densityMean));
 }
 
 TEST_CASE("UV density shows an unevenly packed layout") {
@@ -386,6 +528,45 @@ TEST_CASE("the padded band follows each new map's channel semantics") {
         const float band = sample(result.image, 0.52f, 0.5f);
         CHECK(band > 1.0f);
     }
+}
+
+TEST_CASE("the world map reads the projection cage and the density map does not") {
+    // "Honours the same projection cage" is an acceptance claim for the world
+    // map, and the density map's whole contract is the opposite: it is a
+    // property of the UV layout, so the cage must not move it at all. Both
+    // halves are asserted here, on the same pair of meshes, because either one
+    // alone would leave the other free to be wrong.
+    const Mesh mesh = flatQuad();
+    const Mesh target = floatingTarget();
+    bake::BakeParams shortCage = params64();
+    shortCage.cageDistance = 0.05f;  // stops short of the Target
+    bake::BakeParams longCage = params64();
+    longCage.cageDistance = 0.5f;  // reaches it
+
+    const bake::BakeResult missed =
+        bake::bake(mesh, target, bake::BakeMap::WorldDirection, shortCage);
+    const bake::BakeResult hit = bake::bake(mesh, target, bake::BakeMap::WorldDirection, longCage);
+    REQUIRE(!missed.image.pixels.empty());
+    REQUIRE(!hit.image.pixels.empty());
+
+    // Missed: the EditMesh's own +z, which is the documented fallback.
+    const Vec3 fallback = decode(missed.image, 32, 32);
+    CHECK(std::fabs(fallback.y) < 1e-3f);
+    CHECK(fallback.z == doctest::Approx(1.0f).epsilon(1e-3));
+    // Hit: the TARGET's normal, which the short cage never saw.
+    const Vec3 want = cyber::normalized(Vec3{0.0f, -0.2f, 1.0f});
+    const Vec3 got = decode(hit.image, 32, 32);
+    CHECK(std::fabs(got.y - want.y) < 1e-3f);
+    CHECK(std::fabs(got.z - want.z) < 1e-3f);
+    CHECK(hit.image.pixels != missed.image.pixels);
+
+    // The density map is untouched by the same change: it casts the cage ray on
+    // the shared path but reads nothing from where it lands.
+    const bake::BakeResult near = bake::bake(mesh, target, bake::BakeMap::UvDensity, shortCage);
+    const bake::BakeResult far = bake::bake(mesh, target, bake::BakeMap::UvDensity, longCage);
+    REQUIRE(!near.image.pixels.empty());
+    CHECK(far.image.pixels == near.image.pixels);
+    CHECK(near.encoding.densityMean == doctest::Approx(64.0f * 64.0f));
 }
 
 TEST_CASE("both new maps take the shared bake path") {

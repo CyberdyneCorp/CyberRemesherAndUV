@@ -606,9 +606,11 @@ default identity placement the map equals `object-normal` **texel for texel at
 zero tolerance**, which is the statement that the two differ by the transform
 and by nothing else. A placement whose linear part is singular is *refused*, not
 folded to the identity: an identity placement is a meaningful request ("this
-asset is unplaced"), so substituting it would answer a different question. The
-placement is recorded with the map, so a consumer can carry a world direction
-back into object space.
+asset is unplaced"), so substituting it would answer a different question. That
+refusal applies only to a run that writes a map *reading* the placement, so a
+bake of any other map is unaffected by whatever the field holds. The placement is
+recorded with the map, so a consumer can carry a world direction back into object
+space.
 
 #### UV density
 

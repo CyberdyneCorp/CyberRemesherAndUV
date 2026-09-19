@@ -26,8 +26,11 @@
     or that holds a non-finite element, is **refused** rather than folded to the
     identity: an identity placement is a meaningful request ("this asset is
     unplaced"), so substituting it would silently answer a different question.
-    The placement is recorded with the map, so a world direction can be carried
-    back into object space.
+    The check applies ONLY to a request that produces a map reading the
+    placement — at every entry point, from `cyber::bake::mapReadsPlacement` —
+    so a caller that leaves this appended field zeroed keeps every map it
+    always had. The placement is recorded with the map, so a world direction
+    can be carried back into object space.
   - **`uv-density`**: texels per SQUARE model unit that the EditMesh's UV layout
     gives the surface under each texel, at the requested resolution. (The linear
     "texels per unit of length" convention is its square root; the map says

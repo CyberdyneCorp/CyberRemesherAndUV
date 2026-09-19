@@ -269,11 +269,19 @@ func placementArray<T>(_ tuple: T) -> [Float] {
     }
 }
 
+/// Writes a 16-float row-major placement into the C `float[16]` tuple.
+///
+/// A list of any other length is written as the ZERO matrix, which the engine
+/// refuses as singular, rather than being padded or truncated into a plausible
+/// one. `placement` documents that anything but 16 finite floats whose linear
+/// part is invertible is refused rather than folded to the identity, and a
+/// caller who dropped the last row must get that refusal -- not a bake against
+/// a matrix they never wrote. This is the same outcome the Python binding
+/// reaches by raising on the length.
 func writePlacement<T>(_ values: [Float], into tuple: inout T) {
-    var padded = values
-    padded.append(contentsOf: repeatElement(0, count: max(0, 16 - padded.count)))
+    let exact = values.count == 16 ? values : [Float](repeating: 0, count: 16)
     withUnsafeMutableBytes(of: &tuple) { raw in
-        padded.withUnsafeBytes { source in
+        exact.withUnsafeBytes { source in
             raw.copyMemory(from: UnsafeRawBufferPointer(rebasing: source.prefix(raw.count)))
         }
     }
@@ -388,7 +396,8 @@ public struct BakeParameters: Sendable {
     /// The 4x4 ROW-MAJOR object->world matrix `BakeMap.worldDirection` carries
     /// its normals through, by its inverse transpose. 16 finite floats whose
     /// upper-left 3x3 is invertible; anything else is refused rather than folded
-    /// to the identity. Read by no other map.
+    /// to the identity. Read by no other map, and checked only for a map that
+    /// reads it -- a bake of any other map is unaffected by what is here.
     public var placement: [Float]
     /// How `BakeMap.uvDensity` normalizes its values.
     public var densityNormalization: DensityNormalization

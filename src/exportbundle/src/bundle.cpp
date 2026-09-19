@@ -221,6 +221,16 @@ bool writeMap(const ExportPreset& preset, const PresetMapEntry& entry, bake::Ima
 
 }  // namespace
 
+bool presetReadsPlacement(const io::ExportPreset& preset) {
+    for (const PresetMapEntry& entry : preset.maps) {
+        const std::optional<bake::BakeMap> map = toBakeMap(entry.map);
+        if (map.has_value() && bake::mapReadsPlacement(*map)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 BundleResult writeBundle(Mesh& low, const Mesh& high, const BundleParams& params,
                          ProgressSink* progress, const CancelToken* cancel) {
     BundleResult result;

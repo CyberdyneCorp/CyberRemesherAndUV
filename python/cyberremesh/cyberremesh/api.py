@@ -3767,7 +3767,8 @@ class BakeParams:
     #: The 4x4 ROW-MAJOR object->world matrix ``BakeMap.WORLD_DIRECTION``
     #: carries its normals through, by its inverse transpose. 16 finite floats
     #: whose upper-left 3x3 is invertible; anything else is refused rather than
-    #: folded to the identity. Read by no other map.
+    #: folded to the identity. Read by no other map, and CHECKED only for a map
+    #: that reads it -- a bake of any other map is unaffected by what is here.
     placement: Tuple[float, ...] = IDENTITY_PLACEMENT
     #: A :class:`DensityNormalization` for ``BakeMap.UV_DENSITY``.
     density_normalization: int = DensityNormalization.ABSOLUTE

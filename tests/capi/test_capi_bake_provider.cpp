@@ -271,6 +271,13 @@ TEST_CASE("the sizing call validates the request and writes no pixel") {
     // No bake ran, so nothing that only a bake can fill is filled.
     CHECK(result.texelsCovered == 0u);
     CHECK(result.padding.radius == 0);
+    // The placement is NOT one of those: it came in with the request, and
+    // cyber_capi.h promises it is the identity for a map that reads none with no
+    // exception for the sizing call. A consumer reading it here must not get the
+    // all-zero matrix a value-initialised result starts with.
+    for (int i = 0; i < 16; ++i) {
+        CHECK(result.placement[i] == ((i % 5 == 0) ? 1.0f : 0.0f));
+    }
 
     // And an invalid request is refused by the sizing call too, so a consumer
     // learns it cannot have the map before it allocates for it.
@@ -610,6 +617,16 @@ TEST_CASE("the provider reports the 1.23 density and placement metadata") {
     CHECK(placedResult.encoding.basis == CYBER_ENCODING_WORLD_DIRECTION);
     for (int i = 0; i < 16; ++i) {
         CHECK(placedResult.placement[i] == params.placement[i]);
+    }
+
+    // The SIZING call reports it too, before a ray is cast: the placement is an
+    // input, not a measurement.
+    CyberBakeProviderRequest sizing = baseRequest(pair, CYBER_BAKE_WORLD_DIRECTION, &params);
+    CyberBakeProviderResult sizingResult = emptyResult();
+    REQUIRE(cyber_bake_provider_bake(&sizing, &sizingResult) == CYBER_OK);
+    CHECK(sizingResult.texelsCovered == 0u);
+    for (int i = 0; i < 16; ++i) {
+        CHECK(sizingResult.placement[i] == params.placement[i]);
     }
 
     // And the same refusal cyber_bake applies: a singular placement is not

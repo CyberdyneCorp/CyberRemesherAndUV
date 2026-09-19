@@ -538,6 +538,18 @@ def main() -> int:
               str(r.returncode))
         check("a refused placement wrote nothing", not (wd_dir / "bad.obj").exists())
 
+    # ...but only for a run that writes a map READING the placement. The same
+    # singular matrix, with a map set that never looks at it, is not an error:
+    # the rule is the engine's ("checked only for a map that reads it"), and the
+    # C ABI depends on it so that a caller which leaves the appended placement
+    # field zeroed keeps every map it always had.
+    r = run("--input", str(sphere), "--output", str(wd_dir / "unread.obj"), "--target-quads", "300",
+            "--bake", "ao", "--texture-size", "16", "--ao-samples", "4",
+            "--placement", "1,0,0,0,0,0,0,0,0,0,1,0,0,0,0,1", "--quiet")
+    check("a singular placement is ignored by a map that does not read it",
+          r.returncode == 0, r.stderr)
+    check("and that run still wrote its map", (wd_dir / "unread_ao.png").exists())
+
     # A bad value for either new flag is an argument error, not a silent default.
     # --texture-size is here so a REGRESSION fails fast: without it, a value that
     # slipped past the check would start a full 2048-square ray-traced bake and

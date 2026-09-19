@@ -83,6 +83,14 @@ using PlacementMatrix = std::array<float, 16>;
 // chances to disagree about what "singular" means.
 [[nodiscard]] bool placementUsable(const PlacementMatrix& placement);
 
+// Whether `map` READS BakeParams::placement. Public, and the only place the set
+// is written down, because the spec checks a placement only for a map that
+// reads one -- a bake that reads no placement is not refused because of what an
+// untouched field happens to hold -- and that rule has to be the SAME rule at
+// the C ABI, the export bundle and the CLI. An entry point that kept its own
+// copy of the set would drift the day a second map starts reading a placement.
+[[nodiscard]] bool mapReadsPlacement(BakeMap map);
+
 // Axis convention the OBJECT-SPACE maps are expressed in. YUp is this engine's
 // own convention (and glTF's); ZUp re-expresses a vector as (x, -z, y), which is
 // what a z-up DCC reads. It applies to ObjectNormal, ObjectPosition and, when

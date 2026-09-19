@@ -2559,8 +2559,14 @@ typedef struct CyberBakeParams {
      *   multiply is correct only for a rotation and shears a normal off the
      *   surface under non-uniform scale. Every element must be finite and the
      *   linear part invertible; anything else is CYBER_ERR_INVALID_ARG rather
-     *   than a substituted identity. The translation is accepted and recorded
-     *   but read by no map today: a direction is unaffected by it.
+     *   than a substituted identity -- but ONLY for a map that reads a
+     *   placement, so a bake of any other map is unaffected by whatever is
+     *   here. That matters because these 16 floats were APPENDED in ABI 1.23: a
+     *   caller that zero-fills this struct and assigns the members it knows
+     *   supplies an all-zero (singular) matrix, and checking it unconditionally
+     *   would break every map that predates the placement. The translation is
+     *   accepted and recorded but read by no map today: a direction is
+     *   unaffected by it.
      * densityNormalization: a CyberDensityNormalization. Default
      *   CYBER_DENSITY_ABSOLUTE. Read by CYBER_BAKE_UV_DENSITY; anything else is
      *   CYBER_ERR_INVALID_ARG. */
@@ -3120,7 +3126,8 @@ typedef struct CyberBundleParams {
      * cyber_default_bundle_params. The object->world PLACEMENT the bundle's
      * world-direction map is baked with and the NORMALIZATION its UV density
      * map uses, with the same defaults and the same validation cyber_bake
-     * applies. Neither is a preset's business: a placement describes where the
+     * applies -- the placement checked only when the preset writes a map that
+     * reads one, which is the same rule cyber_bake applies one map at a time. Neither is a preset's business: a placement describes where the
      * asset sits in a scene, not what a target app expects. */
     float placement[16];
     int densityNormalization;
