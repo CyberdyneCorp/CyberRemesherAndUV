@@ -252,6 +252,42 @@ bool parsePlacement(const std::string& csv, cyber::bake::PlacementMatrix& out) {
     return true;
 }
 
+// The bake-encoding flags are range-checked HERE rather than at each flag, so
+// parseArgs's dispatch chain stays one line per flag -- and in one function of
+// their own rather than inline in it, because that chain is already the longest
+// thing in this file. Every refusal matches the one the C ABI applies to the
+// same parameter: a value the library would reject must not reach it.
+int validateBakeFlags(const CliOptions& options) {
+    if (options.thicknessScaleSet && !(options.thicknessScale >= 0.0f)) {
+        std::fprintf(stderr, "error: --thickness-scale must be finite and >= 0\n");
+        return kExitArgs;
+    }
+    if (options.bentNormalSpaceSet && options.bentNormalSpace != "tangent" &&
+        options.bentNormalSpace != "object") {
+        std::fprintf(stderr, "error: --bent-normal-space must be tangent or object\n");
+        return kExitArgs;
+    }
+    if (options.paddingRadiusSet && options.paddingRadius < 0) {
+        std::fprintf(stderr, "error: --padding must be >= 0 (0 disables padding)\n");
+        return kExitArgs;
+    }
+    // From the engine's OWN predicate, not a second copy of the determinant: a
+    // singular linear part carries no direction anywhere, and substituting the
+    // identity would silently answer "the asset is unplaced" instead.
+    if (options.placementSet && !cyber::bake::placementUsable(options.placement)) {
+        std::fprintf(stderr,
+                     "error: --placement must be 16 finite numbers whose upper-left 3x3 "
+                     "is invertible\n");
+        return kExitArgs;
+    }
+    if (!options.densityNormalization.empty() && options.densityNormalization != "absolute" &&
+        options.densityNormalization != "relative") {
+        std::fprintf(stderr, "error: --density must be absolute or relative\n");
+        return kExitArgs;
+    }
+    return kExitOk;
+}
+
 // Returns exit code (kExitOk to continue) and fills options.
 int parseArgs(int argc, char** argv, CliOptions& options, bool& exitEarly) {
     exitEarly = false;
@@ -575,33 +611,7 @@ int parseArgs(int argc, char** argv, CliOptions& options, bool& exitEarly) {
     if (!options.bakeMaps.empty() && options.preset.empty()) {
         options.preset = "gltf-generic";
     }
-    // The two bake-encoding flags are range-checked here rather than at the
-    // flag, so the whole of parseArgs's dispatch chain stays one line per flag.
-    if (options.thicknessScaleSet && !(options.thicknessScale >= 0.0f)) {
-        std::fprintf(stderr, "error: --thickness-scale must be finite and >= 0\n");
-        return kExitArgs;
-    }
-    if (options.bentNormalSpaceSet && options.bentNormalSpace != "tangent" &&
-        options.bentNormalSpace != "object") {
-        std::fprintf(stderr, "error: --bent-normal-space must be tangent or object\n");
-        return kExitArgs;
-    }
-    if (options.paddingRadiusSet && options.paddingRadius < 0) {
-        std::fprintf(stderr, "error: --padding must be >= 0 (0 disables padding)\n");
-        return kExitArgs;
-    }
-    // The same refusal the C ABI applies, from the same engine predicate: a
-    // singular linear part carries no direction anywhere, and substituting the
-    // identity would silently answer "the asset is unplaced" instead.
-    if (options.placementSet && !cyber::bake::placementUsable(options.placement)) {
-        std::fprintf(stderr,
-                     "error: --placement must be 16 finite numbers whose upper-left 3x3 "
-                     "is invertible\n");
-        return kExitArgs;
-    }
-    if (!options.densityNormalization.empty() && options.densityNormalization != "absolute" &&
-        options.densityNormalization != "relative") {
-        std::fprintf(stderr, "error: --density must be absolute or relative\n");
+    if (validateBakeFlags(options) != kExitOk) {
         return kExitArgs;
     }
     // Applied here rather than at the flag so the choice survives a repeated
