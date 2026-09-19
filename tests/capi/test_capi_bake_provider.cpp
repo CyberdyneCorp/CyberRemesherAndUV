@@ -36,6 +36,39 @@ std::filesystem::path writeProviderPlaneObj() {
     return path;
 }
 
+// The same plane pushed DOWN by `depth`, so a cage ray from the low-poly has to
+// travel `cageDistance + depth` to reach it. The projection is accepted only
+// while that is within 2 * cageDistance, which is what makes the cage visible in
+// the output rather than merely marshalled.
+std::filesystem::path writeSunkPlaneObj(float depth) {
+    const std::filesystem::path path =
+        std::filesystem::temp_directory_path() / "cyber_provider_sunk_plane.obj";
+    std::ofstream out(path);
+    out << "v 0 0 " << -depth << "\nv 1 0 " << -depth << "\nv 1 1 " << -depth << "\nv 0 1 "
+        << -depth
+        << "\n"
+           "vt 0 0\nvt 1 0\nvt 1 1\nvt 0 1\n"
+           "f 1/1 2/2 3/3\nf 1/1 3/3 4/4\n";
+    return path;
+}
+
+// Two faces carrying distinct material ids, through the bulk path -- the only
+// way a host declares a face-domain id column over the ABI. Ids 4 and 9, so the
+// table has two rows and a short buffer has something to truncate.
+CyberMesh* twoMaterialPlane() {
+    static const float positions[] = {0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0};
+    static const size_t offsets[] = {0, 3, 6};
+    static const uint32_t indices[] = {0, 1, 2, 0, 2, 3};
+    static const int32_t materials[] = {4, 9};
+    const CyberAttributeColumn columns[] = {
+        {"material_id", CYBER_ATTRIBUTE_FACE, CYBER_ATTRIBUTE_INT32, materials, 2},
+    };
+    const CyberIndexedMesh source{positions, 4, offsets, 2, indices, 6, columns, 1};
+    CyberMesh* mesh = nullptr;
+    REQUIRE(cyber_mesh_from_indexed(&source, &mesh) == CYBER_OK);
+    return mesh;
+}
+
 // The pair every case starts from, freed by the caller.
 struct PlanePair {
     std::filesystem::path path;
@@ -389,18 +422,7 @@ TEST_CASE("an id map's table arrives with its pixels and resolves at zero tolera
     CyberMesh* low = nullptr;
     REQUIRE(cyber_mesh_load_obj(objPath.string().c_str(), &low) == CYBER_OK);
 
-    // Two faces carrying distinct materials, through the bulk path — the only
-    // way a host declares a face-domain id column over the ABI.
-    const float positions[] = {0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0};
-    const size_t offsets[] = {0, 3, 6};
-    const uint32_t indices[] = {0, 1, 2, 0, 2, 3};
-    const int32_t materials[] = {4, 9};
-    const CyberAttributeColumn columns[] = {
-        {"material_id", CYBER_ATTRIBUTE_FACE, CYBER_ATTRIBUTE_INT32, materials, 2},
-    };
-    const CyberIndexedMesh source{positions, 4, offsets, 2, indices, 6, columns, 1};
-    CyberMesh* high = nullptr;
-    REQUIRE(cyber_mesh_from_indexed(&source, &high) == CYBER_OK);
+    CyberMesh* high = twoMaterialPlane();
 
     const CyberBakeParams params = smallParams(16);
     std::vector<float> pixels(16u * 16u * 3u, 0.0f);
@@ -596,4 +618,170 @@ TEST_CASE("a low-poly without UVs is empty, not a blank map") {
     cyber_mesh_free(mesh);
     std::error_code ec;
     std::filesystem::remove(path, ec);
+}
+
+TEST_CASE("a short id table is filled to its stated capacity and never past it") {
+    // The one asymmetry in this surface: a short PIXEL buffer is refused (the
+    // consumer could have computed the exact count from the capability query
+    // before it called), while a short ID buffer follows the two-call
+    // convention, because the number of ids is not knowable until the bake has
+    // read the Target. Filling what fits is therefore correct here -- and the
+    // whole contract rests on one clamp, so the check that matters is the one
+    // on the rows BEYOND the stated capacity: writing there is an out-of-bounds
+    // write into a consumer's heap, silent in every other gate.
+    const std::filesystem::path objPath = writeProviderPlaneObj();
+    CyberMesh* low = nullptr;
+    REQUIRE(cyber_mesh_load_obj(objPath.string().c_str(), &low) == CYBER_OK);
+    CyberMesh* high = twoMaterialPlane();
+
+    const CyberBakeParams params = smallParams(16);
+    std::vector<float> pixels(16u * 16u * 3u, 0.0f);
+
+    // Four rows allocated and poisoned; ONE row declared. Rows 1..3 exist so an
+    // overrun lands in memory this case owns and can inspect, instead of in
+    // whatever the allocator put next.
+    constexpr int32_t kPoisonId = -424242;
+    constexpr unsigned char kPoisonByte = 0x7e;
+    std::vector<CyberIdColor> ids(4);
+    for (CyberIdColor& row : ids) {
+        row.id = kPoisonId;
+        row.color[0] = kPoisonByte;
+        row.color[1] = kPoisonByte;
+        row.color[2] = kPoisonByte;
+    }
+
+    CyberBakeProviderRequest request{};
+    request.structSize = sizeof(CyberBakeProviderRequest);
+    request.low = low;
+    request.high = high;
+    request.map = CYBER_BAKE_MATERIAL_ID;
+    request.params = &params;
+    request.pixels = pixels.data();
+    request.pixelCapacity = pixels.size();
+    request.idColors = ids.data();
+    request.idColorCapacity = 1;
+    CyberBakeProviderResult result = emptyResult();
+    REQUIRE(cyber_bake_provider_bake(&request, &result) == CYBER_OK);
+
+    // The TOTAL, not what fit: that number is how the consumer learns it must
+    // allocate again, and reporting the truncated count would make the second
+    // call as short as the first.
+    CHECK(result.idColorCount == 2u);
+    // The row that fit is the first row of the table, not an arbitrary one.
+    CHECK(ids[0].id == 4);
+    for (size_t row = 1; row < ids.size(); ++row) {
+        CAPTURE(row);
+        CHECK(ids[row].id == kPoisonId);
+        CHECK(ids[row].color[0] == kPoisonByte);
+        CHECK(ids[row].color[1] == kPoisonByte);
+        CHECK(ids[row].color[2] == kPoisonByte);
+    }
+
+    // Capacity 0 with a non-NULL buffer is the same contract with nothing to
+    // fill, and must not write row 0 either.
+    for (CyberIdColor& row : ids) {
+        row.id = kPoisonId;
+        row.color[0] = kPoisonByte;
+    }
+    request.idColorCapacity = 0;
+    CyberBakeProviderResult zeroed = emptyResult();
+    REQUIRE(cyber_bake_provider_bake(&request, &zeroed) == CYBER_OK);
+    CHECK(zeroed.idColorCount == 2u);
+    CHECK(ids[0].id == kPoisonId);
+
+    // And asking again with the reported capacity gets the whole table, which
+    // is what makes the truncation a two-call convention rather than a loss.
+    std::vector<CyberIdColor> full(result.idColorCount);
+    request.idColors = full.data();
+    request.idColorCapacity = full.size();
+    CyberBakeProviderResult second = emptyResult();
+    REQUIRE(cyber_bake_provider_bake(&request, &second) == CYBER_OK);
+    REQUIRE(second.idColorCount == full.size());
+    CHECK(full[0].id == 4);
+    CHECK(full[1].id == 9);
+
+    cyber_mesh_free(low);
+    cyber_mesh_free(high);
+    std::error_code ec;
+    std::filesystem::remove(objPath, ec);
+}
+
+TEST_CASE("every advertised map states a colour space, and only colour is sRGB") {
+    // A consumer reads this to decide whether to put a transfer curve on the
+    // texels. "Linear" on colour ships a washed-out base map; "srgb" on any
+    // other map gamma-encodes DATA -- a normal, a distance, an id key -- which
+    // is wrong in every target app. Checking only that the string is non-empty
+    // would let either drift through.
+    bool sawSrgb = false;
+    for (size_t index = 0; index < cyber_bake_provider_map_count(); ++index) {
+        CyberBakeProviderMap info{};
+        info.structSize = sizeof(CyberBakeProviderMap);
+        REQUIRE(cyber_bake_provider_map_at(index, &info) == CYBER_OK);
+        REQUIRE(info.colorSpace != nullptr);
+        const std::string space = info.colorSpace;
+        CAPTURE(std::string(info.name));
+        CHECK((space == "linear" || space == "srgb"));
+        CHECK(space == (std::string(info.name) == "color" ? "srgb" : "linear"));
+        sawSrgb = sawSrgb || space == "srgb";
+    }
+    // The rule has a positive half too: if every map went linear the case above
+    // would still pass on a build that had simply dropped the colour map.
+    CHECK(sawSrgb);
+}
+
+TEST_CASE("the projection cage reaches the bake through the provider") {
+    // cageDistance is marshalled by the same helper cyber_bake and
+    // cyber_bake_field use, and nothing anywhere asserted that it arrives. It is
+    // not a cosmetic parameter: rays start at surface + normal * cageDistance
+    // and a projection is accepted only within 2 * cageDistance, so the cage
+    // decides which Target a texel sees at all.
+    //
+    // Target sunk 0.3 below the EditMesh. A 0.1 cage searches 0.2 and misses it;
+    // a 0.5 cage searches 1.0 and finds it. CYBER_BAKE_POSITION writes the hit
+    // point on a hit and the EditMesh's own point on a miss, so the two cages
+    // are a plain difference in the Z channel rather than a shade.
+    constexpr float kDepth = 0.3f;
+    const std::filesystem::path lowPath = writeProviderPlaneObj();
+    const std::filesystem::path highPath = writeSunkPlaneObj(kDepth);
+    CyberMesh* low = nullptr;
+    CyberMesh* high = nullptr;
+    REQUIRE(cyber_mesh_load_obj(lowPath.string().c_str(), &low) == CYBER_OK);
+    REQUIRE(cyber_mesh_load_obj(highPath.string().c_str(), &high) == CYBER_OK);
+
+    const auto bakeWithCage = [&](float cage) {
+        CyberBakeParams params = smallParams(16);
+        params.cageDistance = cage;
+        std::vector<float> pixels(16u * 16u * 3u, 0.0f);
+        CyberBakeProviderRequest request{};
+        request.structSize = sizeof(CyberBakeProviderRequest);
+        request.low = low;
+        request.high = high;
+        request.map = CYBER_BAKE_POSITION;
+        request.params = &params;
+        request.pixels = pixels.data();
+        request.pixelCapacity = pixels.size();
+        CyberBakeProviderResult result = emptyResult();
+        REQUIRE(cyber_bake_provider_bake(&request, &result) == CYBER_OK);
+        return pixels;
+    };
+
+    const std::vector<float> tooShort = bakeWithCage(0.1f);
+    const std::vector<float> longEnough = bakeWithCage(0.5f);
+
+    // Centre texel, Z channel.
+    const size_t centre = (8u * 16u + 8u) * 3u + 2u;
+    CHECK(tooShort[centre] == doctest::Approx(0.0f).epsilon(1e-3));
+    CHECK(longEnough[centre] == doctest::Approx(-kDepth).epsilon(1e-3));
+
+    // A cage that cannot reach must not reach: no covered texel may report the
+    // Target's depth under the short cage.
+    for (size_t texel = 0; texel < 16u * 16u; ++texel) {
+        CHECK(tooShort[texel * 3u + 2u] > -kDepth * 0.5f);
+    }
+
+    cyber_mesh_free(low);
+    cyber_mesh_free(high);
+    std::error_code ec;
+    std::filesystem::remove(lowPath, ec);
+    std::filesystem::remove(highPath, ec);
 }

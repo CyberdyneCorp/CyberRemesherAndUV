@@ -4,8 +4,20 @@
 // Before it existed the same facts lived in four switches. The risk a catalogue
 // introduces is the opposite one: a table that says something the bake does not
 // do. A consumer that sizes its buffer from an advertised channel count the bake
-// disagrees with writes off the end of it, so the cases below check the
-// catalogue against actual bakes rather than against itself.
+// disagrees with writes off the end of it.
+//
+// Which is why the FIRST case below restates the whole table by hand. bake()
+// now takes its channel count and its field support FROM the catalogue, so a
+// case that bakes a map and compares the result against the same table the bake
+// read asserts nothing -- both sides move together, and a mistyped row would be
+// advertised to a consumer AND baked, consistently and wrongly. The
+// hand-written copy is the only independent statement of what this build
+// promises, so editing the table means editing that case too, deliberately.
+//
+// The cases after it check what the table does not decide by itself: the
+// encoding basis a bake reports (encodingFor() still owns that), the colour
+// space preset parsing defaults a map to, the export-preset name vocabulary,
+// and that each row does describe a map that really bakes.
 #include <doctest.h>
 
 #include <cstddef>
@@ -62,6 +74,53 @@ Mesh uvPlane() {
 
 }  // namespace
 
+TEST_CASE("the advertised catalogue is pinned, row by row") {
+    // Restated by hand, from the requirement rather than from the table -- see
+    // the file header for why a bake cannot check these two columns any more.
+    // A row changed here without a reason is a consumer told the wrong channel
+    // count (it sizes its buffer from it) or the wrong colour space (it applies
+    // a transfer curve from it).
+    struct Advertised {
+        BakeMap map;
+        std::string_view name;
+        int channels;
+        EncodingBasis basis;
+        bool srgb;
+        bool fieldCapable;
+    };
+    const std::vector<Advertised> expected = {
+        {BakeMap::Normal, "normal", 3, EncodingBasis::TangentNormal, false, true},
+        {BakeMap::AmbientOcclusion, "ao", 1, EncodingBasis::None, false, true},
+        {BakeMap::Displacement, "displacement", 1, EncodingBasis::Distance, false, false},
+        {BakeMap::Position, "position", 3, EncodingBasis::None, false, false},
+        {BakeMap::Color, "color", 3, EncodingBasis::None, true, false},
+        {BakeMap::Curvature, "curvature", 1, EncodingBasis::None, false, true},
+        {BakeMap::Cavity, "cavity", 1, EncodingBasis::None, false, true},
+        {BakeMap::ObjectNormal, "object-normal", 3, EncodingBasis::ObjectNormal, false, false},
+        {BakeMap::ObjectPosition, "object-position", 3, EncodingBasis::ObjectBounds, false, false},
+        {BakeMap::BentNormal, "bent-normal", 3, EncodingBasis::TangentNormal, false, false},
+        {BakeMap::Thickness, "thickness", 1, EncodingBasis::Distance, false, false},
+        {BakeMap::MaterialId, "material-id", 3, EncodingBasis::IdColor, false, false},
+        {BakeMap::ObjectId, "object-id", 3, EncodingBasis::IdColor, false, false},
+    };
+
+    const std::span<const MapInfo> catalog = mapCatalog();
+    // Not just the count the static_assert already pins: the ORDER too, because
+    // findMap(BakeMap) indexes the table by enumerator.
+    REQUIRE(catalog.size() == expected.size());
+    for (std::size_t row = 0; row < expected.size(); ++row) {
+        const Advertised& want = expected[row];
+        const MapInfo& got = catalog[row];
+        CAPTURE(std::string(want.name));
+        CHECK(got.map == want.map);
+        CHECK(got.name == want.name);
+        CHECK(got.channels == want.channels);
+        CHECK(got.basis == want.basis);
+        CHECK(got.srgb == want.srgb);
+        CHECK(got.fieldCapable == want.fieldCapable);
+    }
+}
+
 TEST_CASE("the catalogue advertises every map exactly once, with unique names") {
     const std::span<const MapInfo> catalog = mapCatalog();
     REQUIRE(!catalog.empty());
@@ -90,7 +149,11 @@ TEST_CASE("the catalogue advertises every map exactly once, with unique names") 
     CHECK(findMap(std::string_view("not-a-map")) == nullptr);
 }
 
-TEST_CASE("every advertised map bakes, with the advertised channel count") {
+TEST_CASE("every advertised row describes a map that really bakes, at the size it states") {
+    // What the pinned table cannot say: that the row belongs to a map this
+    // build can actually produce, and that the buffer length a consumer
+    // computes from width * height * channels is the length the bake fills.
+    // The channel count itself is pinned above; bake() reads it from here.
     const Mesh low = uvPlane();
     const Mesh high = uvPlane();
     BakeParams params;
@@ -129,10 +192,12 @@ TEST_CASE("the advertised encoding basis is what a default-parameter bake report
     CHECK(findMap(BakeMap::BentNormal)->basis == EncodingBasis::TangentNormal);
 }
 
-TEST_CASE("fieldCapable names exactly the maps a field evaluator can answer alone") {
+TEST_CASE("fieldCapable is the narrowing bake() actually applies without a Target") {
     // The narrowing a consumer holding a field and no Target has to see BEFORE
-    // it asks. Checked against the behaviour rather than restated: a map marked
-    // capable must bake from an empty Target, and one marked incapable must not.
+    // it asks. fieldSupports() reads this same column, so what this case pins is
+    // the WIRING -- that the column reaches the refusal at all, and reaches it
+    // for every map rather than for the four the old switch happened to list.
+    // Which maps belong in the column is pinned by hand at the top of the file.
     const Mesh low = uvPlane();
     const Mesh empty;
     BakeParams params;
@@ -174,4 +239,25 @@ TEST_CASE("the name list is a diagnostic a caller can read") {
         CHECK((fieldOnly.find(std::string(info.name)) != std::string::npos) == info.fieldCapable);
     }
     CHECK(fieldOnly.size() < all.size());
+}
+
+TEST_CASE("the advertised colour space is the one preset parsing defaults that map to") {
+    // "Colour is appearance, every other map is data" is stated in four places:
+    // the built-in presets, the CLI's --bake override, preset parsing's default
+    // for an under-specified map, and MapInfo::srgb. The consumer that joins a
+    // preset's map list to the advertised set reads two of them, and a drift
+    // between those two either gamma-encodes data or ships appearance flat.
+    // This is the only cross-check available for the column, since the bake
+    // itself never looks at it.
+    for (const MapInfo& info : mapCatalog()) {
+        CAPTURE(std::string(info.name));
+        const std::string json = R"({"schemaVersion":)" +
+                                 std::to_string(cyber::io::kPresetSchemaVersion) +
+                                 R"(,"name":"t","maps":[")" + std::string(info.name) + R"("]})";
+        const auto parsed = cyber::io::parsePreset(json);
+        REQUIRE(parsed.ok());
+        REQUIRE(parsed.value().maps.size() == 1u);
+        const bool presetSrgb = parsed.value().maps[0].colorSpace == cyber::io::ColorSpace::Srgb;
+        CHECK(presetSrgb == info.srgb);
+    }
 }

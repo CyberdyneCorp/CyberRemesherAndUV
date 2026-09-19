@@ -718,8 +718,16 @@ pixels, result = cyberremesh.bake_provider_bake(
 # distance scale, padding record and id table — nothing is documented out of band.
 ```
 
-Three rules are worth stating outright, because each is a decision:
+Four rules are worth stating outright, because each is a decision:
 
+- **The buffers are yours, and the two short-buffer rules differ on purpose.** A
+  short *pixel* buffer is refused, naming both capacities — you could have
+  computed that count exactly from the capability query before calling, so a
+  short one is a bug worth surfacing. A short (or absent) *id table* is not: the
+  number of ids depends on the Target and is only knowable once the bake has
+  read it. That call succeeds, fills exactly the rows your stated capacity holds
+  and writes nothing past them, and reports the **total** in `id_color_count`,
+  so you allocate that many and ask again.
 - **A map this build cannot produce is refused BY NAME**, listing the advertised
   set, and is never substituted with a neutral image. A smart material silently
   reading flat grey for curvature looks subtly wrong on a new model instead of

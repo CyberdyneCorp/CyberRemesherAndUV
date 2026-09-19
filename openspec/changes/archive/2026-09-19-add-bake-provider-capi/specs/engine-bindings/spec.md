@@ -21,17 +21,24 @@ translate between two spellings.
 **The request.** A request SHALL name the EditMesh/Target pair, the map, the bake
 parameters, and MAY carry a progress callback, a cancellation callback and one opaque
 user pointer shared by both. Every parameter the existing bake entry points validate SHALL
-be validated identically here, and the request SHALL honour the same projection cage,
-texel ceiling, border padding, progress reporting and cooperative cancellation every
-existing map already honours — it SHALL introduce no provider-specific exception to that
-shared path.
+be validated here, and the request SHALL honour the same projection cage, texel ceiling,
+border padding, progress reporting and cooperative cancellation every existing map already
+honours — it SHALL introduce no provider-specific exception to that shared path. This
+surface MAY refuse a parameter the existing entry points accept, or refuse it with a more
+precise result code; it SHALL NOT accept one they refuse.
 
 **Caller-owned buffers with two-call sizing.** The pixels SHALL be written into a buffer
 the CALLER owns, and so SHALL the id-to-colour table of an id map. A request that supplies
 no pixel buffer SHALL validate the whole request and report the sizes WITHOUT baking, so
 a consumer can size its allocation, and learn that a request would be refused, without
-paying for a bake. A buffer too small for the result SHALL be refused, naming the capacity
-supplied and the capacity required, rather than filled partway.
+paying for a bake. A PIXEL buffer too small for the result SHALL be refused, naming the
+capacity supplied and the capacity required, rather than filled partway — a consumer can
+compute that count exactly from the capability query before it calls, so a short one is a
+consumer-side bug. The ID TABLE SHALL instead follow the two-call convention, because the
+number of ids is not knowable until the bake has read the Target: a short or absent id
+buffer SHALL NOT fail the request, SHALL be filled to exactly the capacity the caller
+stated and to no byte beyond it, and the result SHALL report the TOTAL id count so the
+consumer can allocate that many and ask again.
 
 **Result metadata travels with the pixels.** The result SHALL carry the image's width,
 height and channel count, the encoding basis, the up axis, the normal green-channel
@@ -117,3 +124,32 @@ grown padding band and no partial id table SHALL ever be handed back.
 - **WHEN** the advertised map names are compared with the map names an export preset
   declares and the headless CLI accepts
 - **THEN** the three lists SHALL name the same maps with the same spellings
+
+#### Scenario: A short id table is filled to its capacity and reports the total
+
+- **WHEN** a consumer requests an id map with an id-table capacity smaller than the number
+  of ids the Target carries
+- **THEN** the call SHALL succeed, SHALL write exactly that many rows and no byte past
+  them, and SHALL report the TOTAL id count, so that asking again with that capacity
+  returns the whole table
+
+#### Scenario: Only an appearance map is advertised as sRGB
+
+- **WHEN** a consumer reads the colour space of every advertised map
+- **THEN** each SHALL be stated as either linear or sRGB, and only the colour map SHALL be
+  sRGB, so a consumer never puts a transfer curve on a normal, a distance or an id key,
+  and never ships an appearance map flat
+
+#### Scenario: The projection cage reaches the bake
+
+- **WHEN** one EditMesh/Target pair is requested twice through the provider, once with a
+  projection cage too short to reach the Target and once with one long enough
+- **THEN** the two results SHALL differ, and only the longer cage SHALL report the
+  Target's surface — the cage SHALL NOT be a parameter that is merely carried
+
+#### Scenario: The Python and Swift bindings drive the same surface
+
+- **WHEN** the provider is driven from the Python binding and from the Swift binding
+- **THEN** each SHALL enumerate the same advertised set, produce for a given map the same
+  pixels the C entry point produces, receive repeated progress reports and observe a
+  cancellation, with no host-side C required

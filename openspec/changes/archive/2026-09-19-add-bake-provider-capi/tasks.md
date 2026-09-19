@@ -14,9 +14,11 @@
 - [x] 2.1 `CyberBakeProviderMap` with `structSize`, and the queries
       `cyber_bake_provider_map_count`, `cyber_bake_provider_map_at`,
       `cyber_bake_provider_find_map`, `cyber_bake_provider_map_list`.
-- [x] 2.2 `CyberBakeProviderRequest` and `CyberBakeProviderResult`, both with `structSize`,
-      and the `cyber_bake_provider_field_map_list` helper backing the field refusal.
-- [x] 2.3 `cyber_bake_provider_bake`: parameter validation identical to `cyber_bake`, the
+- [x] 2.2 `CyberBakeProviderRequest` and `CyberBakeProviderResult`, both with `structSize`.
+      The field refusal quotes the narrowed set from `cyber_bake_provider_map_list(1)`
+      rather than from a second entry point of its own.
+- [x] 2.3 `cyber_bake_provider_bake`: the same parameter validation `cyber_bake` applies
+      (stricter on a non-positive width or height, never laxer), the
       texel ceiling, the optional `CyberFieldEvaluator`, the progress/cancel adapters, the
       caller-owned pixel and id buffers, and the result record.
 - [x] 2.4 The sizing path (`pixels == NULL`): validate everything, report sizes, cast no ray.
@@ -49,9 +51,13 @@
 
 ## 5. Tests
 
-- [x] 5.1 Catalogue: every `BakeMap` advertised exactly once; the advertised channel count
-      matches what a bake of that map actually returns; the names match `mesh-io`'s preset
-      vocabulary and the CLI's accepted set.
+- [x] 5.1 Catalogue: every `BakeMap` advertised exactly once, and every row PINNED by hand
+      — channel count, basis, colour space, field capability. `bake()` now reads the
+      catalogue for its channel count and its field support, so comparing a bake against
+      the table proves nothing; the hand-written copy is the independent statement. The
+      cases that remain behavioural check what the table does not decide: the basis a bake
+      reports, the colour space preset parsing defaults a map to, and that every row does
+      name a map that really bakes at the size it states.
 - [x] 5.2 Enumerate-and-request: every advertised map baked through the provider, each
       filling the caller's buffer with the advertised channel count and reporting a basis.
 - [x] 5.3 The sizing call reports the right size, writes no pixel, and refuses an invalid
@@ -75,6 +81,20 @@
 - [x] 5.12 CLI: `--list-bake-maps` prints the advertised set, without duplicates, and every
       printed name is one `--bake` documents.
 - [x] 5.13 Python binding test over the provider surface, registered with CTest.
+- [x] 5.14 A short id table: the rows that fit are filled, the total is still reported, and
+      no byte past the stated capacity is touched (poisoned rows beyond it are checked).
+      Capacity 0 with a non-NULL buffer writes nothing, and asking again with the reported
+      total returns the whole table.
+- [x] 5.15 Every advertised map states a colour space, and only the colour map is sRGB —
+      asserted at the C ABI, and tied in the catalogue tests to the colour space preset
+      parsing defaults that same map to, so the two statements of the rule cannot drift.
+- [x] 5.16 The projection cage reaches the bake: a Target sunk below the EditMesh is found
+      by a cage long enough to reach it and missed by one that is not, through the provider
+      and again through the Swift binding.
+- [x] 5.17 Swift runtime test over the provider surface (`BakeProviderTests`): the
+      advertised set, the provider's pixels against `Mesh.bake`'s texel for texel, the
+      cage, repeated progress, an observed cancellation, an id table, and a refusal naming
+      an unproducible map. Compiling the package never proved the marshalling.
 
 ## 6. Documentation
 

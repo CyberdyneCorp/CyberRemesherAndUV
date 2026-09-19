@@ -466,8 +466,8 @@ public struct BakeProviderOutput: Sendable {
 }
 
 /// Progress and cancellation handed to one provider request. Passed to C as an
-/// opaque `user` pointer, so it has to outlive the call — it is held on the
-/// stack of `bakeThroughProvider` for exactly that long.
+/// opaque `user` pointer, which ARC cannot see, so `bakeThroughProvider` keeps
+/// it alive across the call with an explicit `withExtendedLifetime`.
 private final class BakeProviderCallbacks {
     let progress: ((Float, String) -> Void)?
     let cancel: (() -> Bool)?
@@ -555,7 +555,7 @@ extension Mesh {
         request.progress = bakeProviderProgress
         request.cancel = bakeProviderCancel
 
-        return try withUnsafeMutablePointer(to: &params) { paramsPtr in
+        let output = try withUnsafeMutablePointer(to: &params) { paramsPtr in
             request.params = UnsafePointer(paramsPtr)
 
             // Size first, then allocate exactly what the engine asked for. The
@@ -593,5 +593,12 @@ extension Mesh {
                 texelsCovered: Int(result.texelsCovered),
                 normalGreenPlusY: result.normalGreenPlusY)
         }
+        // `callbacks` is reachable only through an UNMANAGED opaque pointer for
+        // the whole call, so ARC sees its last use at `passUnretained` above and
+        // may release it while the engine is still calling the trampolines --
+        // which would then resolve a freed object. Same guard, and the same
+        // reason, as ZRemesher.swift and Remesh.swift.
+        withExtendedLifetime(callbacks) {}
+        return output
     }
 }

@@ -33,7 +33,12 @@
     with a null pixel buffer validates everything and reports the sizes
     **without casting a ray**, so a consumer learns both what it must allocate
     and whether the request would be accepted at all. A short pixel buffer is
-    refused naming both capacities, never filled partway.
+    refused naming both capacities, never filled partway — the consumer could
+    have computed that count exactly from the query. The **id table** is the
+    deliberate exception, because the number of ids is only knowable once the
+    bake has read the Target: a short (or absent) id buffer succeeds, is filled
+    to exactly the capacity stated and to no byte beyond it, and the result
+    reports the *total* so the consumer can allocate that many and ask again.
   - **Metadata travels with the pixels**: the encoding basis, up axis, normal
     green-channel convention, object-space bounding box, distance scale,
     padding radius/rule/texels, id source and id table, and the covered-texel

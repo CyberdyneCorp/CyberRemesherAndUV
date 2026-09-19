@@ -3191,8 +3191,11 @@ const char* cyber_bake_provider_map_list(int field_only);
  * meshes, the map and the buffers is a complete request.
  *
  * `params` MAY be NULL, which means cyber_default_bake_params. Every parameter
- * cyber_bake validates is validated here identically, and the host's texel
- * ceiling (cyber_set_max_bake_pixels) applies the same way.
+ * cyber_bake validates is validated here, and the host's texel ceiling
+ * (cyber_set_max_bake_pixels) applies the same way. The STATUS CODES are not
+ * promised to be identical: this entry point is stricter in one place, and
+ * reports a non-positive width or height as CYBER_ERR_INVALID_ARG where
+ * cyber_bake reports the empty image it would have produced.
  *
  * `field` MAY be NULL. When it is set, `high` may be NULL, and then only the
  * maps cyber_bake_provider_map_list(1) advertises are producible -- a request
@@ -3206,8 +3209,15 @@ const char* cyber_bake_provider_map_list(int field_only);
  * Otherwise `pixelCapacity` must be at least the reported pixelCount, or the
  * request is refused naming both -- a short buffer is never filled partway.
  *
- * `idColors` MAY be NULL even for an id map; the result still reports the total
- * so the consumer can allocate and ask again. */
+ * `idColors` follows the TWO-CALL convention rather than the pixel buffer's
+ * refusal, and the asymmetry is deliberate: a consumer can compute the exact
+ * pixel count from the capability query BEFORE it calls, so a short pixel
+ * buffer is a bug in the consumer, while the number of ids depends on the
+ * Target and is only knowable once the bake has read it. So `idColors` MAY be
+ * NULL even for an id map, `idColorCapacity` MAY be short, and in both cases
+ * the call SUCCEEDS, fills exactly the rows the stated capacity holds, writes
+ * NOTHING past it, and reports the TOTAL in idColorCount so the consumer can
+ * allocate that many and ask again. */
 typedef struct CyberBakeProviderRequest {
     size_t structSize;                /* set to sizeof(CyberBakeProviderRequest) before the call */
     const CyberMesh* low;             /* the EditMesh; MUST carry UVs */
@@ -3221,7 +3231,7 @@ typedef struct CyberBakeProviderRequest {
     float* pixels;                    /* caller-owned; NULL = sizing call */
     size_t pixelCapacity;             /* floats `pixels` can hold */
     CyberIdColor* idColors;           /* caller-owned; optional */
-    size_t idColorCapacity;           /* rows `idColors` can hold */
+    size_t idColorCapacity;           /* rows `idColors` can hold; short is legal, see above */
 } CyberBakeProviderRequest;
 
 /* What the request produced. On a successful bake every member is filled. On

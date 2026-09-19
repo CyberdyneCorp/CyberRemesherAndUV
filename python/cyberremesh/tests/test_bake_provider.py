@@ -20,6 +20,17 @@ _UV_PLANE = (
     "f 1/1 2/2 3/3\nf 1/1 3/3 4/4\n"
 )
 
+# Two DISJOINT quads, so the object-id map's face-connected-component fallback
+# finds two ids and a one-row id table has something to truncate.
+_TWO_ISLAND_PLANE = (
+    "v 0 0 0\nv 0.45 0 0\nv 0.45 1 0\nv 0 1 0\n"
+    "v 0.55 0 0\nv 1 0 0\nv 1 1 0\nv 0.55 1 0\n"
+    "vt 0 0\nvt 0.45 0\nvt 0.45 1\nvt 0 1\n"
+    "vt 0.55 0\nvt 1 0\nvt 1 1\nvt 0.55 1\n"
+    "f 1/1 2/2 3/3\nf 1/1 3/3 4/4\n"
+    "f 5/5 6/6 7/7\nf 5/5 7/7 8/8\n"
+)
+
 
 def main() -> int:
     if not cyberremesh.is_available():
@@ -51,6 +62,11 @@ def main() -> int:
             for entry in maps:
                 assert entry.channels in (1, 3), entry
                 assert entry.color_space in ("linear", "srgb"), entry
+                # A host reads this to decide whether to put a transfer curve
+                # on the texels. "srgb" on a normal, a distance or an id key
+                # gamma-encodes DATA; "linear" on colour ships it washed out.
+                assert entry.color_space == (
+                    "srgb" if entry.name == "color" else "linear"), entry
                 assert find_bake_provider_map(entry.name).map == entry.map
                 assert entry.name in bake_provider_map_list(), entry.name
 
@@ -109,6 +125,34 @@ def main() -> int:
             except CyberError as exc:
                 assert "4242" in str(exc), exc
                 assert bake_provider_map_list() in str(exc), exc
+
+            # --- a short id table is a two-call sizing, not a refusal --------
+            # The one asymmetry in this surface: a short PIXEL buffer is
+            # refused, because the consumer could have computed that count from
+            # the capability query first, while the id count is only knowable
+            # once the bake has read the Target. So a short id table succeeds,
+            # fills what fits, and still reports the TOTAL.
+            island_obj = tempfile.NamedTemporaryFile(
+                suffix=".obj", delete=False, mode="w")
+            island_obj.write(_TWO_ISLAND_PLANE)
+            island_obj.close()
+            try:
+                with Mesh.load_obj(island_obj.name) as islands:
+                    _, whole = bake_provider_bake(
+                        islands, BakeMap.OBJECT_ID, params, high=islands)
+                    assert whole.id_color_count == 2, whole
+                    assert len(whole.encoding.id_colors) == 2, whole
+
+                    _, short = bake_provider_bake(
+                        islands, BakeMap.OBJECT_ID, params, high=islands,
+                        max_id_colors=1)
+                    # The TOTAL, so a host learns how much to allocate; and
+                    # exactly one row, because that is all it asked room for.
+                    assert short.id_color_count == 2, short
+                    assert len(short.encoding.id_colors) == 1, short
+                    assert short.encoding.id_colors[0] == whole.encoding.id_colors[0]
+            finally:
+                os.unlink(island_obj.name)
 
             # --- cancellation -------------------------------------------------
             try:
