@@ -10,6 +10,7 @@
 #include <optional>
 #include <string>
 
+#include "border_padding.hpp"
 #include "cyber/accel/backend.hpp"
 #include "cyber/accel/primitives.hpp"
 #include "cyber/bake/curvature.hpp"
@@ -512,38 +513,68 @@ BakeEncoding encodingFor(BakeMap map, const BakeParams& params, const BakeBounds
                          const IdField& ids) {
     BakeEncoding encoding;
     encoding.upAxis = params.upAxis;
+    // The range the map's own encoding guarantees. Declared here, beside the
+    // basis, so a map's channel semantics travel with it -- border padding
+    // reads this record rather than switching on the map's name, and a map type
+    // added later is bounded correctly as long as it declares honestly. The
+    // default (infinite) means "this encoding guarantees no range", which is the
+    // truth for a position in model units, a signed displacement and a colour
+    // copied verbatim off the Target.
+    const auto unitRange = [&encoding]() {
+        encoding.valueMin = 0.0f;
+        encoding.valueMax = 1.0f;
+    };
     switch (map) {
         case BakeMap::Normal:
             encoding.basis = EncodingBasis::TangentNormal;
+            unitRange();  // n * 0.5 + 0.5 of a unit direction
             break;
         case BakeMap::BentNormal:
             encoding.basis = params.bentNormalSpace == NormalSpace::Object
                                  ? EncodingBasis::ObjectNormal
                                  : EncodingBasis::TangentNormal;
+            unitRange();
             break;
         case BakeMap::ObjectNormal:
             encoding.basis = EncodingBasis::ObjectNormal;
+            unitRange();
             break;
         case BakeMap::ObjectPosition:
             encoding.basis = EncodingBasis::ObjectBounds;
             encoding.boundsMin = bounds.min;
             encoding.boundsMax = bounds.max;
+            // (p - min) / (max - min): the contract of the map is that every
+            // texel is inside the box it records.
+            unitRange();
             break;
         case BakeMap::Displacement:
             encoding.basis = EncodingBasis::Distance;
-            break;
+            break;  // signed, in model units: no range to guarantee
         case BakeMap::Thickness:
             encoding.basis = EncodingBasis::Distance;
             encoding.scale = params.thicknessScale;
+            // A ray that hits nothing, or that hits a front face, contributes
+            // zero -- it never entered material. A negative thickness is not a
+            // thinner solid, it is a distance that ran backwards.
+            encoding.valueMin = 0.0f;
             break;
         case BakeMap::MaterialId:
         case BakeMap::ObjectId:
             encoding.basis = EncodingBasis::IdColor;
             encoding.idSource = ids.source;
             encoding.idColors = ids.table;
+            unitRange();  // channel / 255
             break;
-        default:
-            break;  // AmbientOcclusion, Position, Color, Curvature, Cavity: raw
+        case BakeMap::AmbientOcclusion:
+            unitRange();  // a fraction of the hemisphere that is open
+            break;
+        case BakeMap::Curvature:
+        case BakeMap::Cavity:
+            unitRange();  // encodeCurvature() clamps into [0,1]
+            break;
+        case BakeMap::Position:
+        case BakeMap::Color:
+            break;  // model units / the Target's own colour: unbounded
     }
     return encoding;
 }
@@ -655,6 +686,12 @@ bool paramsUsable(BakeMap map, const BakeParams& params, bool useField) {
     // writer's clamp flattens to solid black with no diagnostic anywhere -- the
     // same failure the aoSamples check above exists for.
     if (map == BakeMap::Thickness && !usableDistance(params.thicknessScale)) {
+        return false;
+    }
+    // A negative padding radius is a caller bug, not a request for the
+    // default: substituting one would hide it exactly as a substituted
+    // aoSamples would. Zero is the documented way to turn padding off.
+    if (params.paddingRadius < 0) {
         return false;
     }
     const bool curvatureMap = map == BakeMap::Curvature || map == BakeMap::Cavity;
@@ -1313,6 +1350,22 @@ BakeResult bake(const Mesh& lowPoly, const Mesh& highPoly, BakeMap map, const Ba
         shadeFromMesh(result, texels, highPoly, map, params, bounds, ids, progress, cancel);
     }
     if (result.cancelled) {
+        return result;
+    }
+
+    // Padding runs LAST, on the finished texels of either path, so both get the
+    // same band from the same code. An abandoned bake (a violated field
+    // contract) has an empty image and padBorders() leaves it alone.
+    std::vector<detail::PadCoord> covered;
+    covered.reserve(texels.size());
+    for (const Texel& tx : texels) {
+        covered.push_back(detail::PadCoord{tx.px, tx.py});
+    }
+    const detail::PadOutcome padded =
+        detail::padBorders(result.image, covered, result.encoding, params.paddingRadius, cancel);
+    result.padding = padded.padding;
+    if (padded.cancelled) {
+        result.cancelled = true;
         return result;
     }
 

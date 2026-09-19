@@ -633,6 +633,49 @@ of solid white. The ArmorPaint-style doubling of that distance is
 `--thickness-scale` (default 2), a stated parameter rather than an inherited
 constant, and it is recorded in the basis.
 
+#### Border padding
+
+A baked map stops at the edge of each UV island, and everything downstream
+reaches past that edge — a bilinear tap at the border, mip generation, block
+compression — so an unpadded map shows a rim on every seam. **Every baked map is
+padded before it is returned.**
+
+The band **continues the gradient** running off the island rather than repeating
+its edge value. That distinction is the whole point of doing it here: a repeated
+edge is a flat plateau whose boundary is a step, and a mip chain averages that
+step into exactly the hard ring the cheap copy-outward dilation is known for.
+The band grows one ring at a time, each new texel continuing the linear gradient
+its covered compass neighbours define and averaging the results.
+
+The fill rule follows the map's **channel semantics**, taken from its recorded
+encoding basis and not from its name:
+
+| basis | rule |
+| --- | --- |
+| tangent / object normal | extrapolate, then **renormalize** to unit length |
+| id colour | **nearest neighbour, copied verbatim** — never interpolated |
+| anything else | extrapolate, no renormalization |
+
+An interpolated id colour is a colour that resolves to no id, which is why an id
+map is copied rather than continued; a scalar map has no unit length to restore,
+which is why it is not renormalized.
+
+```sh
+cyberremesh --input sculpt.obj --output out/hero.obj \
+            --bake normal,material-id --padding 12 --report out/run.json
+```
+
+`--padding` is a radius **in texels** (default **8** — three mip levels and two
+4x4 compression blocks). **`0` disables it** and returns the map exactly as it
+was baked; a negative value is an argument error, not a silent default. The
+radius applied, the fill rule used and the number of padded texels are reported
+through `cyber_image_padding` / `cyber_bundle_result_file_padding`,
+`Image.padding` in Python and Swift, and the JSON report:
+
+```json
+"padding": { "radius": 8, "mode": "extrapolate-unit", "texelsFilled": 625 }
+```
+
 **Cost:** the AO bake dominates a preset run — about 96% of it — and scales with
 texel count, so the default 2048² map set takes minutes on a desktop CPU. Use
 `--texture-size` (and `--ao-samples`) to trade resolution for time; parallelising

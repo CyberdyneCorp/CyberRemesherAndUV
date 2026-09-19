@@ -679,6 +679,47 @@ TEST_CASE("capi exposes the object-space and ray-traced maps with their basis") 
     std::filesystem::remove(objPath, ec);
 }
 
+TEST_CASE("capi reports what the padding stage did, and honours a zero radius") {
+    const std::filesystem::path objPath = writeUvPlaneObj();
+    CyberMesh* low = nullptr;
+    CyberMesh* high = nullptr;
+    REQUIRE(cyber_mesh_load_obj(objPath.string().c_str(), &low) == CYBER_OK);
+    REQUIRE(cyber_mesh_load_obj(objPath.string().c_str(), &high) == CYBER_OK);
+
+    CyberBakeParams params{};
+    cyber_default_bake_params(&params);
+    CHECK(params.paddingRadius == 8);  // the documented default
+    params.width = 16;
+    params.height = 16;
+
+    // This plane's UVs cover the whole layout, so there is nothing outside an
+    // island to fill -- the record still travels, and says so.
+    CyberImage* full = nullptr;
+    REQUIRE(cyber_bake(low, high, CYBER_BAKE_NORMAL, &params, &full) == CYBER_OK);
+    CyberImagePadding padding{};
+    REQUIRE(cyber_image_padding(full, &padding) == CYBER_OK);
+    CHECK(padding.radius == 8);
+    CHECK(padding.texelsFilled == 0u);
+    CHECK(padding.mode == CYBER_PADDING_NONE);
+    cyber_image_free(full);
+
+    params.paddingRadius = 0;
+    CyberImage* off = nullptr;
+    REQUIRE(cyber_bake(low, high, CYBER_BAKE_NORMAL, &params, &off) == CYBER_OK);
+    REQUIRE(cyber_image_padding(off, &padding) == CYBER_OK);
+    CHECK(padding.radius == 0);
+    CHECK(padding.mode == CYBER_PADDING_NONE);
+    cyber_image_free(off);
+
+    CyberImagePadding unusedPadding{};
+    CHECK(cyber_image_padding(nullptr, &unusedPadding) == CYBER_ERR_INVALID_ARG);
+
+    cyber_mesh_free(low);
+    cyber_mesh_free(high);
+    std::error_code ec2;
+    std::filesystem::remove(objPath, ec2);
+}
+
 namespace {
 // The z = 0 plane as a field, so the encoding-parameter rejection can be shown
 // on the field entry point too rather than only on the mesh one.
@@ -816,6 +857,7 @@ TEST_CASE("capi refuses an out-of-range encoding parameter instead of defaulting
     refused([](CyberBakeParams& p) { p.upAxis = 7; }, "upAxis");
     refused([](CyberBakeParams& p) { p.bentNormalSpace = -3; }, "bentNormalSpace");
     refused([](CyberBakeParams& p) { p.thicknessScale = -1.0f; }, "thicknessScale");
+    refused([](CyberBakeParams& p) { p.paddingRadius = -1; }, "paddingRadius");
 
     cyber_mesh_free(low);
     cyber_mesh_free(high);
@@ -2408,6 +2450,24 @@ TEST_CASE("capi writes an export bundle for a mesh pair") {
           nullptr);
 
     cyber_bundle_result_free(result);
+
+    // A negative padding radius is refused by the BUNDLE entry point itself,
+    // with its own diagnostic, before a single map is baked -- not waved through
+    // to fail somewhere downstream with a different status and a message that
+    // names a different function. The diagnostic is asserted, not just the
+    // status, because "the request failed" is true of the downstream failure
+    // too and cannot tell the two apart.
+    {
+        CyberBundleParams negative = params;
+        negative.paddingRadius = -1;
+        CyberBundleResult* refused = reinterpret_cast<CyberBundleResult*>(0x1);
+        CHECK(cyber_export_bundle_write(low, high, preset, &negative, nullptr, nullptr, nullptr,
+                                        &refused) == CYBER_ERR_INVALID_ARG);
+        CHECK(refused == nullptr);
+        const std::string message = cyber_last_error();
+        CHECK(message.find("paddingRadius") != std::string::npos);
+        CHECK(message.find("cyber_export_bundle_write") != std::string::npos);
+    }
 
     // Null-argument contract: the output pointer is always cleared first.
     result = reinterpret_cast<CyberBundleResult*>(0x1);

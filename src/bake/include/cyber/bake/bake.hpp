@@ -3,6 +3,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -94,6 +95,21 @@ struct BakeEncoding {
     // The factor a Distance map was multiplied by (BakeParams::thicknessScale
     // for Thickness; 1 for Displacement).
     float scale = 1.0f;
+    // The range this map's OWN encoding guarantees, on every channel of every
+    // texel it writes: an object-space position is (p - min)/(max - min) and
+    // never leaves [0,1]; an occlusion is a fraction of a hemisphere; a
+    // thickness is a distance and is never negative. A map whose encoding
+    // guarantees nothing -- a position in model units, a signed displacement,
+    // a colour taken verbatim from the Target -- leaves these infinite.
+    //
+    // Border padding is confined to this range (see the surface-baking spec,
+    // "Bake output padding across UV island borders"): a padded texel outside it
+    // is not a continuation of the map, it is a value the map's own contract
+    // says cannot occur, and every consumer that decodes the map -- `min + v *
+    // (max - min)` for an object-space position -- is entitled to assume it
+    // cannot.
+    float valueMin = -std::numeric_limits<float>::infinity();
+    float valueMax = std::numeric_limits<float>::infinity();
     // Which of the Target's id columns an IdColor map actually read:
     // "material_id", "object_id", "group_id", "component" for the
     // face-connected-component fallback, or "none" when nothing declared an id
@@ -102,6 +118,27 @@ struct BakeEncoding {
     // The id-to-colour table, ASCENDING BY ID -- a stable ordered key, never a
     // container's iteration order. Empty for every other basis.
     std::vector<IdColorEntry> idColors;
+};
+
+// How a map's PADDED BAND -- the texels just outside each UV island -- was
+// filled. The rule is decided by the map's EncodingBasis rather than by its
+// name, so a map type added later gets the right one as long as it records an
+// honest basis.
+enum class PaddingMode {
+    None,         // radius 0, or no covered texel to pad from
+    Nearest,      // the nearest covered texel's value, copied VERBATIM
+    Extrapolate,  // the gradient running off the island, continued outward
+    // Continued, then renormalized to unit length: a direction map's padded
+    // band has to decode to directions, not to shortened vectors.
+    ExtrapolateUnit,
+};
+
+// What the padding stage did, reported with every map. A consumer reading an
+// id map wants to see here that its band was copied and not interpolated.
+struct BakePadding {
+    int radius = 0;  // the radius applied, in texels; 0 = padding disabled
+    PaddingMode mode = PaddingMode::None;
+    std::size_t texelsFilled = 0;  // texels the band wrote
 };
 
 // The colour an id map writes for `id`, as the exact 8-bit triple that reaches
@@ -186,6 +223,15 @@ struct BakeParams {
     // averaging for that case) and an inherited constant nobody can see is how
     // a bake becomes unreproducible. Finite, >= 0; read only by Thickness.
     float thicknessScale = 2.0f;
+    // Width of the padded band grown outward from every UV island, in TEXELS,
+    // applied to every map before bake() returns. What the band has to cover is
+    // measured in texels -- a bilinear tap needs 1, mip level k reaches 2^k, a
+    // BC block is 4 -- so the radius is too, and a host that wants it to scale
+    // with resolution scales it itself. The default of 8 covers the first three
+    // mip levels and two compression blocks. 0 disables padding and returns the
+    // map exactly as it was baked; NEGATIVE is refused, like every other
+    // out-of-range parameter here.
+    int paddingRadius = 8;
     // Optional field evaluator (pipeline-bridge spec, "Field-sampled baking").
     // When set, Normal / AmbientOcclusion / Curvature / Cavity sample the field
     // directly — the cage ray is sphere-traced through it and normals come from
@@ -201,6 +247,8 @@ struct BakeResult {
     // What the pixels mean. Filled for every map, so a consumer never has to
     // infer an encoding from the map's name.
     BakeEncoding encoding;
+    // What the border-padding stage did. Filled for every map.
+    BakePadding padding;
     bool cancelled = false;
     std::size_t texelsCovered = 0;  // texels touched by the UV layout
     // Set when a FIELD EVALUATOR broke its contract -- a NaN distance, a

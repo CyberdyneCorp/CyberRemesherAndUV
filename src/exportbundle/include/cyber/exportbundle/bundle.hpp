@@ -41,6 +41,11 @@ struct BundleParams {
     // warning and treated as y-up rather than guessed at.
     bake::NormalSpace bentNormalSpace = bake::NormalSpace::Tangent;
     float thicknessScale = 2.0f;
+    // Border-padding radius in texels for every map the bundle bakes -- the
+    // same default and the same meaning BakeParams gives it. A preset does NOT
+    // declare one: padding repairs an artefact of the UV layout, not of the
+    // target app's conventions, and every app wants it.
+    int paddingRadius = 8;
 };
 
 struct BundleFile {
@@ -54,6 +59,9 @@ struct BundleFile {
     // without this, so it travels with the file record rather than being
     // re-derived from the map's name.
     bake::BakeEncoding encoding;
+    // What the border-padding stage did. The mesh entry keeps the default
+    // (PaddingMode::None, radius 0).
+    bake::BakePadding padding;
 };
 
 struct BundleResult {

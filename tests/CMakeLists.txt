@@ -11,6 +11,8 @@ add_executable(cyber_tests
     bake/test_field_bake.cpp
     bake/test_mesh_maps.cpp
     bake/test_id_maps.cpp
+    bake/test_padding.cpp
+    bake/test_border_padding.cpp
     handoff/test_handoff.cpp
     quadrangulate/test_crossfield.cpp
     quadrangulate/test_field_quadrangulator.cpp
@@ -62,6 +64,13 @@ target_link_libraries(cyber_tests PRIVATE cyber_accel cyber_bake cyber_handoff
 target_include_directories(cyber_tests PRIVATE ${PROJECT_SOURCE_DIR}/apps/cli)
 # tests/support/: header-only helpers shared across the suite (portable setenv).
 target_include_directories(cyber_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests)
+# bake/test_border_padding.cpp drives the UV border padding stage directly, on
+# images the case authors, so the stage's guarantees (a band inside the map's
+# own value range, independent of any visit order, cancellable) are asserted on
+# values nobody had to infer. border_padding.hpp is internal to cyber_bake and
+# is reached through its source directory, the same way the CLI's header-only
+# number parser is above.
+target_include_directories(cyber_tests PRIVATE ${PROJECT_SOURCE_DIR}/src/bake/src)
 # Committed binary fixtures the suite cannot author itself (FBX has no
 # permissively licensed writer) — see tests/data/generate_fbx_fixtures.py.
 target_compile_definitions(cyber_tests PRIVATE

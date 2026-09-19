@@ -92,7 +92,7 @@ typedef enum CyberStatus {
  * Do not compare these numbers by hand: cyber_abi_check() applies the rule
  * above in one place, so every binding gets the same answer. */
 #define CYBER_ABI_VERSION_MAJOR 1
-#define CYBER_ABI_VERSION_MINOR 20
+#define CYBER_ABI_VERSION_MINOR 21
 
 /* The ABI this build implements. Cannot fail; either pointer may be NULL. */
 void cyber_abi_version(int* major, int* minor);
@@ -2505,6 +2505,14 @@ typedef struct CyberBakeParams {
     int upAxis;
     int bentNormalSpace;
     float thicknessScale;
+    /* Appended in 0.9.0 — always initialise via cyber_default_bake_params.
+     *
+     * paddingRadius: width in TEXELS of the band grown outward from every UV
+     *   island before the map is returned, so a bilinear tap, a mip level or a
+     *   compression block at the border reads baked values instead of the
+     *   background. Default 8 (three mip levels, two 4x4 blocks). 0 disables
+     *   padding; NEGATIVE is CYBER_ERR_INVALID_ARG. Read by every map. */
+    int paddingRadius;
 } CyberBakeParams;
 
 /* What the numbers in a baked image MEAN. An encoded map without its basis is a
@@ -2535,6 +2543,26 @@ typedef struct CyberImageEncoding {
     float scale; /* the factor a DISTANCE map was multiplied by; 1 otherwise */
 } CyberImageEncoding;
 
+/* How a map's PADDED BAND was filled. The rule follows the map's channel
+ * semantics, taken from its encoding basis: a direction map is renormalized
+ * after extrapolation, an id map is copied verbatim and never interpolated,
+ * anything else is extrapolated as-is. */
+typedef enum CyberPaddingMode {
+    CYBER_PADDING_NONE = 0,  /* radius 0, or no covered texel to pad from */
+    CYBER_PADDING_NEAREST,   /* the nearest covered texel, copied VERBATIM */
+    CYBER_PADDING_EXTRAPOLATE,      /* the gradient off the island, continued */
+    CYBER_PADDING_EXTRAPOLATE_UNIT  /* continued, then renormalized to unit length */
+} CyberPaddingMode;
+
+/* What the padding stage did, reported with every map. A consumer of an id map
+ * wants to read CYBER_PADDING_NEAREST here: it is the statement that the band
+ * holds exact keys and not interpolated colours. */
+typedef struct CyberImagePadding {
+    int radius; /* the radius applied, in texels; 0 = padding disabled */
+    int mode;   /* a CyberPaddingMode */
+    uint64_t texelsFilled;
+} CyberImagePadding;
+
 /* Fills params with the engine defaults. No-op on NULL. */
 void cyber_default_bake_params(CyberBakeParams* params);
 
@@ -2551,6 +2579,10 @@ CyberStatus cyber_bake(const CyberMesh* low, const CyberMesh* high, CyberBakeMap
 /* The basis needed to interpret `image`. Every image has one. NULL argument is
  * CYBER_ERR_INVALID_ARG. */
 CyberStatus cyber_image_encoding(const CyberImage* image, CyberImageEncoding* out);
+
+/* What the padding stage did to `image`. Every image has a record. NULL
+ * argument is CYBER_ERR_INVALID_ARG. */
+CyberStatus cyber_image_padding(const CyberImage* image, CyberImagePadding* out);
 
 /* ---- id-to-colour table (CYBER_ENCODING_ID_COLOR maps) ----------------
  *
@@ -2987,6 +3019,11 @@ typedef struct CyberBundleParams {
      * (CyberExportPresetInfo::upAxis), and that is what the bundle bakes in. */
     int bentNormalSpace;
     float thicknessScale;
+    /* Appended in 0.9.0 — always initialise via cyber_default_bundle_params.
+     * The border-padding radius in texels applied to every map the bundle
+     * bakes, with the same default and the same validation cyber_bake
+     * applies. */
+    int paddingRadius;
 } CyberBundleParams;
 
 /* Fills params with the engine defaults (meshPath and basename left NULL).
@@ -3033,6 +3070,13 @@ CyberStatus cyber_bundle_result_file(const CyberBundleResult* result, size_t ind
  * CYBER_ENCODING_NONE. Out-of-range index is CYBER_ERR_INVALID_ARG. */
 CyberStatus cyber_bundle_result_file_encoding(const CyberBundleResult* result, size_t index,
                                               CyberImageEncoding* out);
+
+/* What the padding stage did to the map at `index` — the same record
+ * cyber_image_padding returns for a directly baked image. The mesh entry
+ * reports CYBER_PADDING_NONE with a zero radius. Out-of-range index is
+ * CYBER_ERR_INVALID_ARG. */
+CyberStatus cyber_bundle_result_file_padding(const CyberBundleResult* result, size_t index,
+                                             CyberImagePadding* out);
 
 /* The id-to-colour table of the map at `index` — the same record
  * cyber_image_id_source / cyber_image_id_color return for a directly baked
