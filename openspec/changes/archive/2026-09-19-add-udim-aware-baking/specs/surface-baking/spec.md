@@ -117,6 +117,16 @@ the whole set rather than return some tiles and not others.
 - **THEN** every tile SHALL report the same object-space bounds, and a point on the surface
   SHALL decode to the same coordinate whichever tile its texel lies in
 
+#### Scenario: A UV density map reads the tile's resolution and the whole set's mean
+- **GIVEN** a multi-tile layout whose islands are packed at different densities
+- **WHEN** a UV density map is baked over it
+- **THEN** each face's density SHALL be computed against the resolution of the TILE it lands
+  in, so the same face reads the same whichever tile it is packed into and the same as a
+  single map at that resolution
+- **AND** in relative normalization every tile SHALL be divided by the mean of the WHOLE
+  SET's defined texels, and SHALL report that one mean, so an island packed more densely
+  than the rest reads above 1 and a sparser one below it rather than both reading as average
+
 #### Scenario: A tile's padded band does not read the neighbouring tile
 - **GIVEN** two islands holding clearly different values, one ending at a tile seam and the
   other beginning across it

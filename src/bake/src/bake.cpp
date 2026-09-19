@@ -1675,8 +1675,12 @@ bool triangleOverlapsUnitSquare(const std::array<Vec2, 3>& uv) {
         return std::pair<float, float>{std::min({projected[0], projected[1], projected[2]}),
                                        std::max({projected[0], projected[1], projected[2]})};
     };
-    // The box axes. The square projects onto [0, 1] on both.
-    for (const Vec2 axis : {Vec2{1.0f, 0.0f}, Vec2{0.0f, 1.0f}}) {
+    // The box axes. The square projects onto [0, 1] on both. Written out rather
+    // than looped over a braced list: a range-for whose loop variable copies
+    // from an initializer_list element is what -Wrange-loop-construct fires on
+    // under CI's GCC and the NDK's Clang, silently under this host's Clang.
+    const std::array<Vec2, 2> boxAxes{Vec2{1.0f, 0.0f}, Vec2{0.0f, 1.0f}};
+    for (const Vec2& axis : boxAxes) {
         const auto [lo, hi] = span(axis);
         if (hi <= 0.0f || lo >= 1.0f) {
             return false;

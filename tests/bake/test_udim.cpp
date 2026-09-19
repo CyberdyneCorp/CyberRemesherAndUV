@@ -399,6 +399,34 @@ TEST_CASE("an object-position map reports one box across the set") {
     CHECK(a.boundsMax.x == doctest::Approx(7.0f));
 }
 
+TEST_CASE("a face's density is computed against the resolution of the tile it lands in") {
+    // surface-baking, "UV density maps": a set of tiles baked at one resolution
+    // reports the same density as a single map at that resolution. So the SAME
+    // face, filling the unit square of tile 1001 in one layout and the unit
+    // square of tile 1002 in another, reads identically -- the tile's own square
+    // is what the resolution is spread over, not the layout's whole UV span.
+    Mesh inFirst = emptyWithUv();
+    addPlate(inFirst, 0.0f, 0, 1, 0, 1, 0.0f, 1.0f, 0.0f, 1.0f);
+    Mesh inSecond = emptyWithUv();
+    addPlate(inSecond, 0.0f, 0, 1, 0, 1, 1.0f, 2.0f, 0.0f, 1.0f);
+
+    bake::BakeParams params = smallParams(16);
+    params.paddingRadius = 0;
+
+    const bake::UdimBakeResult first =
+        bake::bakeUdim(inFirst, inFirst, bake::BakeMap::UvDensity, params);
+    const bake::UdimBakeResult second =
+        bake::bakeUdim(inSecond, inSecond, bake::BakeMap::UvDensity, params);
+    REQUIRE(first.tiles.size() == 1);
+    REQUIRE(second.tiles.size() == 1);
+    CHECK(first.tiles[0].tile.number == 1001);
+    CHECK(second.tiles[0].tile.number == 1002);
+    CHECK(first.tiles[0].result.image.pixels == second.tiles[0].result.image.pixels);
+    // And it is the density a single non-UDIM map at this resolution reports.
+    const bake::BakeResult plain = bake::bake(inFirst, inFirst, bake::BakeMap::UvDensity, params);
+    CHECK(plain.image.pixels == second.tiles[0].result.image.pixels);
+}
+
 TEST_CASE("a relative density map divides by the whole set's mean") {
     // Two islands of equal UV area over surfaces of area 1 and 4, in separate
     // tiles: their absolute densities differ by four, so a PER-TILE mean would
