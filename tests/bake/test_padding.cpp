@@ -4,6 +4,7 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <set>
 #include <utility>
 #include <vector>
@@ -391,6 +392,89 @@ TEST_CASE("a continuation cannot compound past one range's width") {
     }
 }
 
+TEST_CASE("every map's padded band stays inside the range its encoding declares") {
+    // The compounding bound is a bound on RUNAWAY -- the covered range widened
+    // by its own width -- not a statement about what a map means. For a map
+    // whose encoding guarantees a range of its own it is far too loose: an
+    // object-space position spans [0,1] by construction, so the compounding
+    // bound alone permits [-1,2], and a consumer decoding `min + v*(max-min)`
+    // would be handed a point outside the box the bake recorded. An occlusion
+    // above 1 is more than a whole hemisphere; a thickness below 0 is a distance
+    // that ran backwards. Every map declares its own range beside its basis and
+    // the band is confined to it.
+    //
+    // Asserted over the WHOLE image, not merely the band: the background a
+    // missed texel carries has to be inside the range too, or the map's own
+    // contract is broken before padding ever runs.
+    const Mesh low = quarterChart();
+    const Mesh high = curvedTarget(24, 0.05f);
+    for (const bake::BakeMap map :
+         {bake::BakeMap::Normal, bake::BakeMap::AmbientOcclusion, bake::BakeMap::Displacement,
+          bake::BakeMap::Position, bake::BakeMap::Color, bake::BakeMap::Curvature,
+          bake::BakeMap::Cavity, bake::BakeMap::ObjectNormal, bake::BakeMap::ObjectPosition,
+          bake::BakeMap::BentNormal, bake::BakeMap::Thickness, bake::BakeMap::MaterialId}) {
+        bake::BakeParams p = params(8);
+        p.aoSamples = 16;
+        const bake::BakeResult r = bake::bake(low, high, map, p);
+        REQUIRE(!r.image.pixels.empty());
+        float worstLow = std::numeric_limits<float>::infinity();
+        float worstHigh = -std::numeric_limits<float>::infinity();
+        for (const float v : r.image.pixels) {
+            worstLow = std::fmin(worstLow, v);
+            worstHigh = std::fmax(worstHigh, v);
+        }
+        CHECK(worstLow >= r.encoding.valueMin);
+        CHECK(worstHigh <= r.encoding.valueMax);
+    }
+}
+
+TEST_CASE("an object-space position's band stays inside the box the map records") {
+    // The case above, made non-vacuous on the map that is worst off: the ramp
+    // running across this chart reaches its extreme AT the border, so
+    // continuing it off the island leaves [0,1] within a texel or two. What
+    // keeps the band inside is the clamp, and the evidence for that is that the
+    // band REACHES exactly 1 while the baked island never does.
+    const Mesh low = quarterChart();
+    const Mesh high = flatTarget();
+    const bake::BakeResult padded = bake::bake(low, high, bake::BakeMap::ObjectPosition, params(8));
+    const bake::BakeResult plain = bake::bake(low, high, bake::BakeMap::ObjectPosition, params(0));
+    REQUIRE(!padded.image.pixels.empty());
+    REQUIRE(padded.encoding.basis == bake::EncodingBasis::ObjectBounds);
+    REQUIRE(padded.encoding.valueMin == 0.0f);
+    REQUIRE(padded.encoding.valueMax == 1.0f);
+
+    float coveredHigh = -std::numeric_limits<float>::infinity();
+    for (int y = kChartMinY; y < kSize; ++y) {
+        for (int x = 0; x <= kChartMaxX; ++x) {
+            for (int c = 0; c < 3; ++c) {
+                coveredHigh = std::fmax(coveredHigh, plain.image.at(x, y, c));
+            }
+        }
+    }
+    REQUIRE(coveredHigh < 1.0f);  // the island itself never reaches the ceiling
+
+    float bandHigh = -std::numeric_limits<float>::infinity();
+    float bandLow = std::numeric_limits<float>::infinity();
+    const std::vector<std::pair<int, int>> band = paddedTexels(plain.image, padded.image);
+    REQUIRE(band.size() > 100);
+    for (const std::pair<int, int>& at : band) {
+        for (int c = 0; c < 3; ++c) {
+            const float v = padded.image.at(at.first, at.second, c);
+            bandHigh = std::fmax(bandHigh, v);
+            bandLow = std::fmin(bandLow, v);
+        }
+    }
+    // Every padded texel is a point of the recorded box -- this is the exact
+    // assertion the Swift package makes about an object-space position, and the
+    // one the C++ suite had no counterpart for.
+    CHECK(bandLow >= 0.0f);
+    CHECK(bandHigh <= 1.0f);
+    // The continuation ran up INTO the ceiling rather than stopping short of it,
+    // so the clamp is what bounded the band.
+    CHECK(bandHigh == 1.0f);
+    CHECK(bandHigh > coveredHigh);
+}
+
 TEST_CASE("padding is deterministic") {
     const Mesh low = quarterChart();
     const Mesh high = curvedTarget(24, 0.05f);
@@ -404,16 +488,53 @@ TEST_CASE("padding is deterministic") {
     }
 }
 
-TEST_CASE("padding is cancellable and leaves an abandoned bake alone") {
+TEST_CASE("a bake cancelled DURING the padding stage reports itself cancelled") {
+    // The shade has its own cancellation check, and a token that is already
+    // cancelled when bake() starts trips THAT one -- the bake returns before
+    // padding is ever reached, so such a case says nothing about this stage.
+    // The token here is therefore armed only once the shade has finished.
+    //
+    // The number of polls the shade makes is a property of the shade, not
+    // something to guess: it is MEASURED by running the identical bake with
+    // padding switched off, which is the same code up to the point padding
+    // begins. Cancelling one poll later lands inside the ring loop.
     const Mesh low = quarterChart();
     const Mesh high = flatTarget();
-    // Cancelled before the first ring: the bake reports itself cancelled and
-    // the caller keeps its previous maps, exactly as a cancelled shade does.
+
+    int shadePolls = 0;
+    const cyber::CancelToken counter;
+    counter.setPoll([&shadePolls]() {
+        ++shadePolls;
+        return false;
+    });
+    const bake::BakeResult unpadded =
+        bake::bake(low, high, bake::BakeMap::Position, params(0), nullptr, &counter);
+    REQUIRE(!unpadded.cancelled);
+    REQUIRE(!unpadded.image.pixels.empty());
+
+    int polls = 0;
+    const cyber::CancelToken cancel;
+    cancel.setPoll([&polls, shadePolls]() { return polls++ >= shadePolls; });
+    const bake::BakeResult cancelled =
+        bake::bake(low, high, bake::BakeMap::Position, params(8), nullptr, &cancel);
+    // The poll fired inside the ring loop, not during the shade.
+    CHECK(polls > shadePolls);
+    CHECK(cancelled.cancelled);
+    // And it stopped the band: an abandoned bake is the caller's cue to keep its
+    // previous maps, so what is left must not be a finished 8-texel band.
+    CHECK(cancelled.padding.texelsFilled < unpadded.texelsCovered);
+}
+
+TEST_CASE("a bake cancelled before it starts never reaches the padding stage") {
+    const Mesh low = quarterChart();
+    const Mesh high = flatTarget();
     const cyber::CancelToken cancel;
     cancel.setPoll([]() { return true; });
     const bake::BakeResult cancelled =
         bake::bake(low, high, bake::BakeMap::Position, params(8), nullptr, &cancel);
     CHECK(cancelled.cancelled);
+    CHECK(cancelled.padding.texelsFilled == 0);
+    CHECK(cancelled.padding.mode == bake::PaddingMode::None);
 }
 
 TEST_CASE("every map reports a padding record") {

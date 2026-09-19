@@ -2451,6 +2451,24 @@ TEST_CASE("capi writes an export bundle for a mesh pair") {
 
     cyber_bundle_result_free(result);
 
+    // A negative padding radius is refused by the BUNDLE entry point itself,
+    // with its own diagnostic, before a single map is baked -- not waved through
+    // to fail somewhere downstream with a different status and a message that
+    // names a different function. The diagnostic is asserted, not just the
+    // status, because "the request failed" is true of the downstream failure
+    // too and cannot tell the two apart.
+    {
+        CyberBundleParams negative = params;
+        negative.paddingRadius = -1;
+        CyberBundleResult* refused = reinterpret_cast<CyberBundleResult*>(0x1);
+        CHECK(cyber_export_bundle_write(low, high, preset, &negative, nullptr, nullptr, nullptr,
+                                        &refused) == CYBER_ERR_INVALID_ARG);
+        CHECK(refused == nullptr);
+        const std::string message = cyber_last_error();
+        CHECK(message.find("paddingRadius") != std::string::npos);
+        CHECK(message.find("cyber_export_bundle_write") != std::string::npos);
+    }
+
     // Null-argument contract: the output pointer is always cleared first.
     result = reinterpret_cast<CyberBundleResult*>(0x1);
     CHECK(cyber_export_bundle_write(low, nullptr, preset, &params, nullptr, nullptr, nullptr,
