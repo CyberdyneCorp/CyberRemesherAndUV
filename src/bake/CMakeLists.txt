@@ -2,6 +2,7 @@ add_library(cyber_bake STATIC
     src/bake.cpp
     src/border_padding.cpp
     src/curvature.cpp
+    src/map_catalog.cpp
 )
 add_library(cyber::bake ALIAS cyber_bake)
 

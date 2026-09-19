@@ -42,6 +42,7 @@ _EXAMPLE_SCRIPTS = [
     ("22_layout_robustness.py", "22_layout_robustness.png"),
     ("24_topology_guides.py", "24_topology_guides.png"),
     ("25_symmetry.py", "25_symmetry.png"),
+    ("26_bake_provider.py", "26_bake_provider.png"),
 ]
 
 # Generous: these run the real pipeline, and CI runners are slow.

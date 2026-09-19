@@ -10,7 +10,7 @@ remain normative. The delivery index is [epic #46](https://github.com/CyberdyneC
 |---|---|---|
 | Quad-cover remesh | Supported | C++ API, C ABI, CLI and Python. Validity and quality claims are corpus- and density-specific; do not read all-quads/manifold output as animation-ready topology. |
 | ZRemesher method | Experimental | Layout, guides, symmetry and best-of-two are exposed, but exact organic layout injection into final meshes remains unproven. It is not parity with commercial ZRemesher. |
-| UV atlas, baking, manual mesh edits | Supported engine capabilities | Exposed through the C ABI where declared in `cyber_capi.h`; consult the matching OpenSpec capability for guarantees. |
+| UV atlas, baking, manual mesh edits | Supported engine capabilities | Exposed through the C ABI where declared in `cyber_capi.h`; consult the matching OpenSpec capability for guarantees. An external map consumer drives baking through the `cyber_bake_provider_*` surface: it enumerates the maps this build produces, requests them into its own buffers with progress and cancellation, and receives the encoding, up axis, green-channel convention, padding record and id table alongside the pixels. A map outside the advertised set is refused by name, never substituted. |
 | Interactive retopology tools | Supported engine capabilities | Stroke gesture recognition, Target snapping, PolyPen-style face building, stroke-to-quad-strip, Contours (cross-section rings lofted into a tube), boundary grid/fan fill, knife cut, patch clone, loop edits, soft selection with surface glue and exact-border partial retopology. Reachable from C, Python and Swift — including stroke interpretation from Python and UV/bake from Swift, so either binding runs sculpt → topology → unwrap → bake end to end. Per-binding coverage is gated for both bindings by one shared parity check, not assumed. |
 | Swift package | Build-verified on macOS; XCFramework shipped | SwiftPM and ABI-parity lanes compile/check it. Since v0.9.0 a versioned arm64 device+simulator XCFramework is published and was validated on a signed physical iPad. Parity is now gated in both directions: every ABI entry point is bound or listed in `PENDING_REGISTRATIONS`. |
 | iPadOS / Android shells | Scaffold / cross-compile only | CI cross-compiles presets. iOS additionally has device+simulator XCFramework validation and bounded hardware smoke evidence (v0.9.0); Android does not. Neither shell is an application — they do not prove touch, GPU, or app-store behavior. |
@@ -49,7 +49,13 @@ isolation is tracked in [#51](https://github.com/CyberdyneCorp/CyberRemesherAndU
 Additive ABI changes increment the ABI minor; incompatible layouts require a
 new ABI major. The checked-in ABI manifest and retained v0.8 client test protect
 declarations, compiler layouts and guarded output buffers; the source of truth
-remains `capi/include/cyber_capi.h`. Every output-affecting claim needs a dated corpus/configuration,
+remains `capi/include/cyber_capi.h`. One documented exception to "appending to a
+struct is MAJOR": the bake-provider descriptors (`CyberBakeProviderMap`,
+`CyberBakeProviderRequest`, `CyberBakeProviderResult`) carry their own size as
+their first member and are passed one at a time by pointer, never as an array,
+so the library reads and writes only what a caller's stated size covers and
+appending to those is additive. The reasoning is stated in the header above
+them, under DESCRIPTOR SIZES, and does not extend to any other struct. Every output-affecting claim needs a dated corpus/configuration,
 and historical measurements stay in the research log. Report security issues
 privately through the repository's GitHub security-advisory channel; ordinary
 bugs and proposals belong in GitHub Issues. Contributions follow the repository

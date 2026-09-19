@@ -37,6 +37,7 @@
 #include <cyber_capi.h>
 
 #include "cyber/accel/backend.hpp"
+#include "cyber/bake/map_catalog.hpp"
 #include "cyber/core/export_preset.hpp"
 #include "cyber/core/io.hpp"
 #include "cyber/core/pipeline.hpp"
@@ -197,6 +198,9 @@ void printUsage() {
                  "  --padding <int>          texels of border padding grown outward\n"
                  "                           from every UV island (default 8; 0 off)\n"
                  "  --list-presets           print built-in export presets and exit\n"
+                 "  --list-bake-maps         print the bakeable map names, one per\n"
+                 "                           line, and exit -- the same set the C ABI\n"
+                 "                           advertises through cyber_bake_provider_*\n"
                  "  --verbose | --quiet      diagnostic detail / errors only\n"
                  "  --backend <name>         compute backend: cpu | metal | cuda |\n"
                  "                           opencl (default: best available)\n"
@@ -281,6 +285,17 @@ int parseArgs(int argc, char** argv, CliOptions& options, bool& exitEarly) {
         if (arg == "--list-presets") {
             for (const std::string& name : cyber::io::builtinPresetNames()) {
                 std::printf("%s\n", name.c_str());
+            }
+            exitEarly = true;
+            return kExitOk;
+        }
+        if (arg == "--list-bake-maps") {
+            // The bake module's catalogue, not a list written out here: it is
+            // what cyber_bake_provider_map_at advertises to an SDK consumer, and
+            // a CLI that printed its own copy would eventually print a different
+            // one.
+            for (const cyber::bake::MapInfo& info : cyber::bake::mapCatalog()) {
+                std::printf("%s\n", std::string(info.name).c_str());
             }
             exitEarly = true;
             return kExitOk;

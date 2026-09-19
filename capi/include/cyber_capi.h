@@ -89,10 +89,19 @@ typedef enum CyberStatus {
  * from the other direction. New states arrive as new int-valued fields or new
  * entry points instead.
  *
+ * ONE DOCUMENTED EXCEPTION to "appending to a struct is MAJOR": the three
+ * bake-provider descriptors near the end of this header carry their own size as
+ * their first member, and are passed one at a time by pointer and never as an
+ * array. Nothing strides them by sizeof, so the library can read and write only
+ * what the caller's stated size covers, and appending to THOSE three is
+ * additive. The reasoning is spelled out above them, under DESCRIPTOR SIZES.
+ * Do not extend the exception to another struct without extending that
+ * reasoning to it too.
+ *
  * Do not compare these numbers by hand: cyber_abi_check() applies the rule
  * above in one place, so every binding gets the same answer. */
 #define CYBER_ABI_VERSION_MAJOR 1
-#define CYBER_ABI_VERSION_MINOR 21
+#define CYBER_ABI_VERSION_MINOR 22
 
 /* The ABI this build implements. Cannot fail; either pointer may be NULL. */
 void cyber_abi_version(int* major, int* minor);
@@ -3099,6 +3108,173 @@ const char* cyber_bundle_result_warning(const CyberBundleResult* result, size_t 
 int cyber_bundle_result_unwrapped(const CyberBundleResult* result);
 int cyber_bundle_result_chart_count(const CyberBundleResult* result);
 float cyber_bundle_result_max_angle_distortion(const CyberBundleResult* result);
+
+/* ---- bake provider (engine-bindings, pipeline-bridge) -----------------
+ *
+ * The seam an external map consumer drives. `cyber_bake` is a bake CALL; this
+ * is a bake PROVIDER: a consumer asks what this build can produce, requests
+ * one of those maps into ITS OWN buffer, watches the progress, cancels if it
+ * wants to, and reads the encoding, up axis, green-channel convention, padding
+ * record and id table off the same result rather than out of band.
+ *
+ * It is the mirror image of CyberFieldEvaluator above. There the callbacks come
+ * from a volumetric engine and the samples flow in; here the callbacks come
+ * from the consumer and the pixels flow out. Neither side links the other.
+ *
+ * SYNCHRONOUS, deliberately: a request blocks its calling thread and reports
+ * progress from it, exactly as cyber_bake_field and cyber_export_bundle_write
+ * do. A consumer that wants a job puts the call on a thread it owns; handing
+ * back a handle to poll would duplicate a scheduler the consumer already has,
+ * and would wrap a cooperative cancel in an asynchronous one without making it
+ * any faster.
+ *
+ * DESCRIPTOR SIZES -- read this before adding a member. The three structs
+ * below carry `structSize` as their FIRST member, and the library reads an
+ * input member (and writes an output member) only when the caller's stated size
+ * covers it. That makes APPENDING TO THESE THREE STRUCTS ADDITIVE, which is the
+ * opposite of the rule stated at the top of this header for every other struct
+ * here. What makes it safe is that they are passed ONE AT A TIME BY POINTER and
+ * NEVER AS AN ARRAY, so nothing strides them by sizeof. Do not put one of these
+ * in an array, and do not give any other struct in this header a structSize
+ * unless the same is true of it. A stated size below the size of the layout
+ * published in ABI 1.22 is refused, naming both numbers. */
+
+/* Revision of the provider CONTRACT -- the meaning of the descriptors and the
+ * rules above -- as distinct from CYBER_ABI_VERSION_MINOR, which moves whenever
+ * any declaration in this header does. */
+#define CYBER_BAKE_PROVIDER_VERSION 1
+
+/* One advertised map: everything a consumer needs in order to decide whether it
+ * wants the map, and to size the buffer it will be written into, WITHOUT baking
+ * it first. Strings are static storage, valid for the process. */
+typedef struct CyberBakeProviderMap {
+    size_t structSize; /* set to sizeof(CyberBakeProviderMap) before the call */
+    int map;           /* a CyberBakeMap, as int (see the enumCode note in capi.cpp) */
+    /* Stable machine name -- mesh-io's export-preset vocabulary ("normal",
+     * "ao", "object-position", "material-id", ...), not a second spelling, so a
+     * consumer can join a preset's map list to this set directly. */
+    const char* name;
+    int channels; /* floats per texel: 1 or 3 */
+    /* The CyberEncodingBasis a bake of this map reports UNDER DEFAULT
+     * PARAMETERS. Not the authority: CYBER_BAKE_BENT_NORMAL reports the tangent
+     * or the object basis depending on CyberBakeParams::bentNormalSpace.
+     * CyberBakeProviderResult::encoding, filled per request, is. */
+    int encodingBasis;
+    /* "linear" or "srgb": whether the texels carry APPEARANCE (and want a
+     * transfer curve on the way to an 8-bit file) or DATA (where a gamma curve
+     * is a bug in every target app). A CYBER_ENCODING_ID_COLOR map is data of
+     * the strictest kind and is never colour-converted whatever this says. */
+    const char* colorSpace;
+    /* 1 when a CyberFieldEvaluator ALONE can produce this map, so a consumer
+     * holding a field and no Target sees the narrowed set before it asks. */
+    int fieldCapable;
+} CyberBakeProviderMap;
+
+/* How many maps this build produces. Never 0. */
+size_t cyber_bake_provider_map_count(void);
+
+/* The advertised map at `index`, in a stable order. Out-of-range index, NULL
+ * `out`, or a structSize below the ABI 1.22 layout is CYBER_ERR_INVALID_ARG. */
+CyberStatus cyber_bake_provider_map_at(size_t index, CyberBakeProviderMap* out);
+
+/* The advertised map whose `name` matches exactly. An unknown name is
+ * CYBER_ERR_INVALID_ARG, and cyber_last_error() lists the advertised set. */
+CyberStatus cyber_bake_provider_find_map(const char* name, CyberBakeProviderMap* out);
+
+/* The advertised names, comma-separated, for a consumer putting the set in
+ * front of a user. `field_only` non-zero restricts it to the maps a
+ * CyberFieldEvaluator alone can produce. Static storage, never NULL. */
+const char* cyber_bake_provider_map_list(int field_only);
+
+/* One bake request. Fill every member -- there is no defaulting call, because
+ * `structSize` is the compatibility mechanism and a memset to 0 plus the two
+ * meshes, the map and the buffers is a complete request.
+ *
+ * `params` MAY be NULL, which means cyber_default_bake_params. Every parameter
+ * cyber_bake validates is validated here identically, and the host's texel
+ * ceiling (cyber_set_max_bake_pixels) applies the same way.
+ *
+ * `field` MAY be NULL. When it is set, `high` may be NULL, and then only the
+ * maps cyber_bake_provider_map_list(1) advertises are producible -- a request
+ * for any other fails naming the map and that list.
+ *
+ * `progress` and `cancel` MAY each be NULL, and share `user`. Both are called
+ * from the CALLING thread, inside the request.
+ *
+ * `pixels` MAY be NULL, and that is the SIZING call: the request is validated
+ * in full and the sizes are reported, without casting a ray or writing a pixel.
+ * Otherwise `pixelCapacity` must be at least the reported pixelCount, or the
+ * request is refused naming both -- a short buffer is never filled partway.
+ *
+ * `idColors` MAY be NULL even for an id map; the result still reports the total
+ * so the consumer can allocate and ask again. */
+typedef struct CyberBakeProviderRequest {
+    size_t structSize;                /* set to sizeof(CyberBakeProviderRequest) before the call */
+    const CyberMesh* low;             /* the EditMesh; MUST carry UVs */
+    const CyberMesh* high;            /* the Target; NULL only with `field` set */
+    int map;                          /* a CyberBakeMap, as int */
+    const CyberBakeParams* params;    /* NULL = cyber_default_bake_params */
+    const CyberFieldEvaluator* field; /* optional */
+    CyberProgressCb progress;         /* optional */
+    CyberCancelCb cancel;             /* optional */
+    void* user;                       /* passed to both callbacks */
+    float* pixels;                    /* caller-owned; NULL = sizing call */
+    size_t pixelCapacity;             /* floats `pixels` can hold */
+    CyberIdColor* idColors;           /* caller-owned; optional */
+    size_t idColorCapacity;           /* rows `idColors` can hold */
+} CyberBakeProviderRequest;
+
+/* What the request produced. On a successful bake every member is filled. On
+ * the SIZING call only what a size question can answer is -- width, height,
+ * channels, pixelCount and normalGreenPlusY -- and `encoding`, `padding`,
+ * `texelsCovered` and `idColorCount` stay neutral, because no bake produced
+ * them. On any failure, including a cancel, nothing is written here and nothing
+ * is written into the caller's buffers.
+ *
+ * `structSize` comes back exactly as the caller set it, never as this build's
+ * size, so a caller that reads it back keeps its own layout's number. */
+typedef struct CyberBakeProviderResult {
+    size_t structSize; /* set to sizeof(CyberBakeProviderResult) before the call */
+    int width;
+    int height;
+    int channels;
+    size_t pixelCount;   /* width * height * channels: floats the map needs */
+    size_t idColorCount; /* TOTAL id rows, even when idColors could not hold them */
+    size_t texelsCovered;
+    CyberImageEncoding encoding; /* basis, up axis, bounds, distance scale */
+    CyberImagePadding padding;   /* radius applied, fill rule used, texels filled */
+    /* Normal-map green channel of what was produced: 1 = +Y (OpenGL -- Blender,
+     * Unity, glTF). This engine bakes +Y, so this is always 1; it is reported
+     * rather than left implicit because the alternative is a consumer reading
+     * the convention off a preset it may not have, or assuming. Flipping the
+     * channel for a -Y target app (DirectX, Unreal) is an output-side transform
+     * and belongs to whoever writes the file; mesh-io's presets own it. */
+    int normalGreenPlusY;
+    /* Which Target column an id map read: "material_id", "object_id",
+     * "group_id", "component" for the face-connected-component fallback, or
+     * "none". Empty for every other map, and never NULL on success. Points into
+     * a thread-local buffer valid until the next capi call on this thread --
+     * the same contract CyberHandoffInfo::producer has, so copy it if you keep
+     * it. */
+    const char* idSource;
+} CyberBakeProviderResult;
+
+/* Produces `request->map` into `request->pixels`, or reports the sizes when
+ * that is NULL. `out` is required in both cases.
+ *
+ * CYBER_ERR_INVALID_ARG: a NULL required pointer, a descriptor smaller than the
+ *   ABI 1.22 layout, a map outside the advertised set (the message names the map
+ *   and lists the set), a bake parameter outside its documented range, or a
+ *   pixel buffer smaller than pixelCount (the message names both capacities).
+ *   NEVER a neutral image -- a consumer silently handed flat grey where it asked
+ *   for curvature ships work that is subtly wrong instead of visibly broken.
+ * CYBER_ERR_RUNTIME: the request is over this host's bake texel ceiling.
+ * CYBER_ERR_EMPTY: the low-poly carries no UVs, or the Target no geometry.
+ * CYBER_ERR_CANCELLED: `cancel` reported cancellation. The caller's pixel and
+ *   id buffers are left EXACTLY as they were -- no partial map, no half-grown
+ *   padding band, no partial id table. */
+CyberStatus cyber_bake_provider_bake(const CyberBakeProviderRequest* request,
+                                     CyberBakeProviderResult* out);
 
 #ifdef __cplusplus
 } /* extern "C" */
