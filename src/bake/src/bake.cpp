@@ -14,6 +14,7 @@
 #include "cyber/accel/backend.hpp"
 #include "cyber/accel/primitives.hpp"
 #include "cyber/bake/curvature.hpp"
+#include "cyber/bake/map_catalog.hpp"
 #include "cyber/bake/tangent.hpp"
 #include "cyber/core/bvh.hpp"
 #include "cyber/core/io.hpp"
@@ -323,17 +324,13 @@ Image makeImage(int w, int h, int channels) {
     return img;
 }
 
+// Both of these read the map catalogue rather than a switch of their own: the
+// catalogue is what the C ABI's capability query advertises, and a consumer that
+// sizes its buffer from an advertised channel count the bake then disagrees with
+// writes off the end of it.
 int channelsFor(BakeMap map) {
-    switch (map) {
-        case BakeMap::AmbientOcclusion:
-        case BakeMap::Displacement:
-        case BakeMap::Curvature:
-        case BakeMap::Cavity:
-        case BakeMap::Thickness:
-            return 1;
-        default:
-            return 3;
-    }
+    const MapInfo* info = findMap(map);
+    return info == nullptr ? 3 : info->channels;
 }
 
 // The three maps whose cost is a hemisphere of rays per texel, as opposed to the
@@ -703,15 +700,8 @@ bool paramsUsable(BakeMap map, const BakeParams& params, bool useField) {
 // low-poly, a hit point, a vertex color — and have no field counterpart, so
 // they keep requiring the high-poly whatever is attached.
 bool fieldSupports(BakeMap map) {
-    switch (map) {
-        case BakeMap::Normal:
-        case BakeMap::AmbientOcclusion:
-        case BakeMap::Curvature:
-        case BakeMap::Cavity:
-            return true;
-        default:
-            return false;
-    }
+    const MapInfo* info = findMap(map);
+    return info != nullptr && info->fieldCapable;
 }
 
 // Where a hemisphere bake anchors its rays: the cage projection onto the

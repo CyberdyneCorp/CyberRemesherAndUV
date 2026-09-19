@@ -321,6 +321,25 @@ def main() -> int:
     r = run("--backend")
     check("--backend without a value exit 2", r.returncode == 2, str(r.returncode))
 
+    # --- bakeable map set ----------------------------------------------
+    # The CLI prints the same catalogue the C ABI's capability query advertises
+    # (cyber_bake_provider_map_*). A consumer that reads --bake's vocabulary out
+    # of the CLI and a consumer that reads it out of the ABI must get one list.
+    r = run("--list-bake-maps")
+    check("list-bake-maps exit 0", r.returncode == 0)
+    maps = r.stdout.split()
+    check("list-bake-maps non-empty", bool(maps), r.stdout)
+    check("list-bake-maps has no duplicates", len(set(maps)) == len(maps), r.stdout)
+    for expected in ("normal", "ao", "curvature", "material-id", "object-id"):
+        check(f"list-bake-maps names {expected}", expected in maps, r.stdout)
+    # Every printed name is one --bake documents, which is the property that
+    # makes the list usable rather than decorative: the help text enumerates the
+    # vocabulary and a name missing from it is a name nobody can discover.
+    usage = run("--help")
+    help_text = usage.stdout + usage.stderr
+    missing = [name for name in maps if name not in help_text]
+    check("list-bake-maps names are documented by --bake", not missing, str(missing))
+
     # --- export presets ------------------------------------------------
     r = run("--list-presets")
     check("list-presets exit 0", r.returncode == 0)

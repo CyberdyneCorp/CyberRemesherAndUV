@@ -13,6 +13,7 @@ add_executable(cyber_tests
     bake/test_id_maps.cpp
     bake/test_padding.cpp
     bake/test_border_padding.cpp
+    bake/test_map_catalog.cpp
     handoff/test_handoff.cpp
     quadrangulate/test_crossfield.cpp
     quadrangulate/test_field_quadrangulator.cpp
@@ -91,7 +92,8 @@ if(TARGET cyber_capi)
     target_sources(cyber_tests PRIVATE capi/test_capi.cpp capi/test_capi_abi.cpp
                                         capi/abi_clients/v0_8_client.cpp
                                         capi/test_capi_cache.cpp
-                                        capi/test_capi_isotropic.cpp)
+                                        capi/test_capi_isotropic.cpp
+                                        capi/test_capi_bake_provider.cpp)
     target_link_libraries(cyber_tests PRIVATE cyber_capi)
     # Some ABI promises live only in the header's prose (handle lifetimes), so
     # the capi cases read it and gate on what it says.
@@ -475,7 +477,7 @@ if(TARGET cyber_capi_shared AND Python3_FOUND)
                  test_unwrap_seams test_retopo_ops test_isotropic_remesh
                  test_reference_nan_guard test_zremesher_gates
                  test_zremesher_bindings test_abi_contract test_draw_surface
-                 test_retopo_feel)
+                 test_retopo_feel test_bake_provider)
         add_test(NAME python_${_pyt}
             COMMAND ${Python3_EXECUTABLE} ${_pydir}/${_pyt}.py)
         set_tests_properties(python_${_pyt} PROPERTIES

@@ -130,7 +130,7 @@ def version() -> str:
 #: The C ABI this binding was written against. Mirrors CYBER_ABI_VERSION_* in
 #: cyber_capi.h; ``check_abi()`` compares it against the loaded library.
 ABI_VERSION_MAJOR = 1
-ABI_VERSION_MINOR = 21
+ABI_VERSION_MINOR = 22
 
 
 def abi_version() -> tuple:
@@ -3810,6 +3810,224 @@ def bake(low: "Mesh", high: "Mesh", bake_map: int = BakeMap.NORMAL,
     if not out.value:
         raise CyberError(_ffi.STATUS_ERROR, _last_error() or "bake produced no image")
     return Image(out.value)
+
+
+# ---------------------------------------------------------------------------
+# Bake provider (engine-bindings, pipeline-bridge)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class BakeProviderMap:
+    """One map this build produces (mirror of ``CyberBakeProviderMap``).
+
+    Everything needed to decide whether you want the map and to size the buffer
+    it is written into, without baking it first.
+    """
+
+    #: A :class:`BakeMap`.
+    map: int
+    #: Stable machine name -- the same vocabulary an export preset uses
+    #: (``"normal"``, ``"ao"``, ``"object-position"``, ``"material-id"``, ...).
+    name: str
+    #: Floats per texel: 1 or 3.
+    channels: int
+    #: The :class:`EncodingBasis` a bake of this map reports UNDER DEFAULT
+    #: PARAMETERS. ``BakeMap.BENT_NORMAL`` reports the object basis when baked
+    #: in object space, so :attr:`BakeProviderResult.encoding` is the authority.
+    encoding_basis: int
+    #: ``"linear"`` or ``"srgb"``.
+    color_space: str
+    #: True when a :class:`FieldEvaluator` alone can produce this map.
+    field_capable: bool
+
+    @staticmethod
+    def _from_c(c: "_ffi.CyberBakeProviderMap") -> "BakeProviderMap":
+        return BakeProviderMap(
+            map=int(c.map),
+            name=(c.name or b"").decode("utf-8"),
+            channels=int(c.channels),
+            encoding_basis=int(c.encoding_basis),
+            color_space=(c.color_space or b"").decode("utf-8"),
+            field_capable=bool(c.field_capable),
+        )
+
+
+@dataclass(frozen=True)
+class BakeProviderResult:
+    """What a provider request produced (mirror of ``CyberBakeProviderResult``)."""
+
+    width: int
+    height: int
+    channels: int
+    #: ``width * height * channels``: floats the map needs.
+    pixel_count: int
+    #: Total distinct ids on the Target, even when fewer rows were returned.
+    id_color_count: int
+    #: Texels the UV layout covered.
+    texels_covered: int
+    #: What the pixels mean, including the id-to-colour table of an id map.
+    encoding: ImageEncoding
+    #: What the border-padding stage did.
+    padding: ImagePadding
+    #: 1 = +Y (OpenGL). This engine bakes +Y; reported so a consumer never has
+    #: to assume it.
+    normal_green_plus_y: int
+
+
+def bake_provider_maps() -> Tuple[BakeProviderMap, ...]:
+    """Every map this build produces, in a stable order."""
+    lib = _ffi.get_lib()
+    maps = []
+    for index in range(int(lib.cyber_bake_provider_map_count())):
+        entry = _ffi.CyberBakeProviderMap()
+        entry.struct_size = ctypes.sizeof(entry)
+        _check(lib.cyber_bake_provider_map_at(index, ctypes.byref(entry)))
+        maps.append(BakeProviderMap._from_c(entry))
+    return tuple(maps)
+
+
+def find_bake_provider_map(name: str) -> BakeProviderMap:
+    """The advertised map called ``name``; ``CyberError`` when there is none."""
+    entry = _ffi.CyberBakeProviderMap()
+    entry.struct_size = ctypes.sizeof(entry)
+    _check(_ffi.get_lib().cyber_bake_provider_find_map(
+        str(name).encode("utf-8"), ctypes.byref(entry)))
+    return BakeProviderMap._from_c(entry)
+
+
+def bake_provider_map_list(field_only: bool = False) -> str:
+    """The advertised names, comma-separated, as a diagnostic would list them."""
+    return (_ffi.get_lib().cyber_bake_provider_map_list(
+        1 if field_only else 0) or b"").decode("utf-8")
+
+
+def bake_provider_size(low: "Mesh", bake_map: int = BakeMap.NORMAL,
+                       params: Optional[BakeParams] = None,
+                       high: Optional["Mesh"] = None,
+                       field: Optional["FieldEvaluator"] = None) -> BakeProviderResult:
+    """Validate a request and report its size, WITHOUT baking anything.
+
+    The sizing half of the two-call convention: it casts no ray, so it is also
+    the cheap way to ask whether a request would be accepted at all.
+    """
+    return _bake_provider_call(low, bake_map, params, high, field, None, None, None)[1]
+
+
+def bake_provider_bake(low: "Mesh", bake_map: int = BakeMap.NORMAL,
+                       params: Optional[BakeParams] = None,
+                       high: Optional["Mesh"] = None,
+                       field: Optional["FieldEvaluator"] = None,
+                       progress: Optional[Callable[[float, str], None]] = None,
+                       cancel: Optional[Callable[[], bool]] = None,
+                       max_id_colors: int = 4096):
+    """Bake ``bake_map`` through the provider surface.
+
+    Returns ``(pixels, result)``: the row-major float buffer (an
+    ``(h, w, channels)`` ndarray when NumPy is available, otherwise a flat
+    tuple) and a :class:`BakeProviderResult` carrying the encoding, padding,
+    up axis, green-channel convention and id table.
+
+    ``high`` may be ``None`` only with a ``field``, and then only the maps
+    :func:`bake_provider_map_list` reports for ``field_only=True`` are
+    producible; asking for any other raises naming the map and that set.
+
+    On cancellation a ``CyberError`` with ``CANCELLED`` is raised and no
+    pixels are handed back -- a partial map is never returned.
+    """
+    return _bake_provider_call(low, bake_map, params, high, field, progress, cancel,
+                               int(max_id_colors))
+
+
+def _bake_provider_call(low, bake_map, params, high, field, progress, cancel, max_id_colors):
+    """Shared body of the sizing and the baking call (they differ by one member)."""
+    lib = _ffi.get_lib()
+    request = _ffi.CyberBakeProviderRequest()
+    request.struct_size = ctypes.sizeof(request)
+    request.low = low.handle
+    request.high = high.handle if high is not None else None
+    request.map = int(bake_map)
+    c_params = (params or BakeParams())._to_c()
+    request.params = ctypes.pointer(c_params)
+    request.field = ctypes.pointer(field._c_struct) if field is not None else None
+
+    result = _ffi.CyberBakeProviderResult()
+    result.struct_size = ctypes.sizeof(result)
+    if max_id_colors is None:
+        _check(lib.cyber_bake_provider_bake(ctypes.byref(request), ctypes.byref(result)))
+        return None, _bake_provider_result(lib, result, ())
+
+    def _progress_trampoline(fraction, stage_ptr, _user):
+        if progress is None:
+            return
+        try:
+            progress(float(fraction), stage_ptr.decode("utf-8", "replace") if stage_ptr else "")
+        except Exception:
+            pass  # Never let a Python exception cross back into C.
+
+    def _cancel_trampoline(_user):
+        if cancel is None:
+            return 0
+        try:
+            return 1 if cancel() else 0
+        except Exception:
+            return 0
+
+    progress_cb = _ffi.PROGRESS_CB(_progress_trampoline)
+    cancel_cb = _ffi.CANCEL_CB(_cancel_trampoline)
+    request.progress = progress_cb
+    request.cancel = cancel_cb
+
+    # Size first, then allocate exactly what the engine asked for. Two calls, so
+    # the buffer is never guessed at -- and the sizing call casts no ray.
+    sizing = _ffi.CyberBakeProviderResult()
+    sizing.struct_size = ctypes.sizeof(sizing)
+    _check(lib.cyber_bake_provider_bake(ctypes.byref(request), ctypes.byref(sizing)))
+
+    pixels = (ctypes.c_float * int(sizing.pixel_count))()
+    id_rows = (_ffi.CyberIdColor * max(1, max_id_colors))()
+    request.pixels = ctypes.cast(pixels, ctypes.POINTER(ctypes.c_float))
+    request.pixel_capacity = len(pixels)
+    request.id_colors = ctypes.cast(id_rows, ctypes.POINTER(_ffi.CyberIdColor))
+    request.id_color_capacity = len(id_rows)
+    status = lib.cyber_bake_provider_bake(ctypes.byref(request), ctypes.byref(result))
+    # The evaluator's own exception outranks the status, exactly as in
+    # bake_field: a callback that raised is the CAUSE and the status is a
+    # consequence of the NaN it substituted.
+    if field is not None:
+        pending = field._pending_error
+        field._pending_error = None
+        if pending is not None:
+            raise pending
+    _check(status)
+
+    rows = tuple(
+        IdColor(id=int(id_rows[i].id),
+                color=(int(id_rows[i].color[0]), int(id_rows[i].color[1]),
+                       int(id_rows[i].color[2])))
+        for i in range(min(int(result.id_color_count), len(id_rows)))
+    )
+    out = _bake_provider_result(lib, result, rows)
+    if HAVE_NUMPY:
+        array = _np.frombuffer(pixels, dtype=_np.float32).copy()
+        return array.reshape((out.height, out.width, out.channels)), out
+    return tuple(pixels), out
+
+
+def _bake_provider_result(lib, c_result, id_colors: Tuple[IdColor, ...]) -> BakeProviderResult:
+    del lib  # kept for symmetry with the other readers; the record is self-contained
+    source = (c_result.id_source or b"").decode("utf-8")
+    return BakeProviderResult(
+        width=int(c_result.width),
+        height=int(c_result.height),
+        channels=int(c_result.channels),
+        pixel_count=int(c_result.pixel_count),
+        id_color_count=int(c_result.id_color_count),
+        texels_covered=int(c_result.texels_covered),
+        encoding=ImageEncoding._from_c(c_result.encoding, source, id_colors),
+        padding=ImagePadding._from_c(c_result.padding),
+        normal_green_plus_y=int(c_result.normal_green_plus_y),
+    )
 
 
 # ---------------------------------------------------------------------------

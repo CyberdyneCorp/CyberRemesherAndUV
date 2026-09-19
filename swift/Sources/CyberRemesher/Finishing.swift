@@ -414,3 +414,191 @@ extension Mesh {
         return Image(owning: out)
     }
 }
+
+// MARK: - Bake provider
+
+/// One map this build produces, as the capability query reports it.
+///
+/// Everything a host needs in order to decide whether it wants the map, and to
+/// size the buffer it is written into, without baking it first.
+public struct BakeProviderMap: Sendable, Equatable {
+    /// The map to request.
+    public let map: BakeMap
+    /// Stable machine name — the same vocabulary an export preset uses
+    /// (`"normal"`, `"ao"`, `"object-position"`, `"material-id"`, …).
+    public let name: String
+    /// Floats per texel: 1 or 3.
+    public let channels: Int
+    /// The basis a bake of this map reports UNDER DEFAULT PARAMETERS.
+    /// `BakeMap.bentNormal` reports `.objectNormal` when baked in object space,
+    /// so `BakeProviderOutput.encoding` is the authority.
+    public let encodingBasis: EncodingBasis
+    /// `"linear"` or `"srgb"`.
+    public let colorSpace: String
+    /// True when a field evaluator alone can produce this map.
+    public let fieldCapable: Bool
+
+    init(_ c: CyberBakeProviderMap) {
+        map = BakeMap(rawValue: UInt32(bitPattern: c.map))
+        name = c.name.map { String(cString: $0) } ?? ""
+        channels = Int(c.channels)
+        encodingBasis = EncodingBasis(rawValue: UInt32(bitPattern: c.encodingBasis)) ?? .none
+        colorSpace = c.colorSpace.map { String(cString: $0) } ?? ""
+        fieldCapable = c.fieldCapable != 0
+    }
+}
+
+/// A map produced through the provider: the pixels plus everything needed to
+/// interpret them.
+public struct BakeProviderOutput: Sendable {
+    public let width: Int
+    public let height: Int
+    public let channels: Int
+    /// Row-major, `channels` per texel.
+    public let pixels: [Float]
+    public let encoding: ImageEncoding
+    public let padding: ImagePadding
+    /// Texels the UV layout covered.
+    public let texelsCovered: Int
+    /// 1 = +Y (OpenGL). This engine bakes +Y; reported so a host never has to
+    /// assume it or read it off a preset it may not have.
+    public let normalGreenPlusY: Int32
+}
+
+/// Progress and cancellation handed to one provider request. Passed to C as an
+/// opaque `user` pointer, which ARC cannot see, so `bakeThroughProvider` keeps
+/// it alive across the call with an explicit `withExtendedLifetime`.
+private final class BakeProviderCallbacks {
+    let progress: ((Float, String) -> Void)?
+    let cancel: (() -> Bool)?
+
+    init(progress: ((Float, String) -> Void)?, cancel: (() -> Bool)?) {
+        self.progress = progress
+        self.cancel = cancel
+    }
+}
+
+private func bakeProviderProgress(
+    _ fraction: Float, _ stage: UnsafePointer<CChar>?, _ user: UnsafeMutableRawPointer?
+) {
+    guard let user else { return }
+    let box = Unmanaged<BakeProviderCallbacks>.fromOpaque(user).takeUnretainedValue()
+    box.progress?(fraction, stage.map { String(cString: $0) } ?? "")
+}
+
+private func bakeProviderCancel(_ user: UnsafeMutableRawPointer?) -> Int32 {
+    guard let user else { return 0 }
+    let box = Unmanaged<BakeProviderCallbacks>.fromOpaque(user).takeUnretainedValue()
+    return (box.cancel?() ?? false) ? 1 : 0
+}
+
+/// The seam an external map consumer drives: ask what this build produces, then
+/// request one of those maps.
+public enum BakeProvider {
+    /// Every map this build produces, in a stable order.
+    public static var maps: [BakeProviderMap] {
+        var out: [BakeProviderMap] = []
+        for index in 0..<cyber_bake_provider_map_count() {
+            var entry = CyberBakeProviderMap()
+            entry.structSize = MemoryLayout<CyberBakeProviderMap>.size
+            guard cyber_bake_provider_map_at(index, &entry) == CYBER_OK else { continue }
+            out.append(BakeProviderMap(entry))
+        }
+        return out
+    }
+
+    /// The advertised map called `name`.
+    public static func map(named name: String) throws -> BakeProviderMap {
+        var entry = CyberBakeProviderMap()
+        entry.structSize = MemoryLayout<CyberBakeProviderMap>.size
+        try CyberError.check(cyber_bake_provider_find_map(name, &entry))
+        return BakeProviderMap(entry)
+    }
+
+    /// The advertised names, comma-separated, as a diagnostic lists them.
+    /// `fieldOnly` restricts it to the maps a field evaluator alone can produce.
+    public static func mapList(fieldOnly: Bool = false) -> String {
+        cyber_bake_provider_map_list(fieldOnly ? 1 : 0).map { String(cString: $0) } ?? ""
+    }
+}
+
+extension Mesh {
+    /// Bake a map from `high` onto this mesh through the provider surface.
+    ///
+    /// The receiver is the LOW-poly target of the bake — it supplies the UVs the
+    /// map is rasterized into, so unwrap before calling this.
+    ///
+    /// Pixels land in a buffer sized from the engine's own report, so nothing is
+    /// guessed at. A cancelled request throws `CyberError.cancelled` and hands
+    /// back no pixels; a map outside the advertised set throws naming the map
+    /// and the set, rather than returning a neutral image.
+    public func bakeThroughProvider(
+        from high: Mesh, map: BakeMap, parameters: BakeParameters = BakeParameters(),
+        maxIdColors: Int = 4096,
+        progress: ((Float, String) -> Void)? = nil,
+        cancel: (() -> Bool)? = nil
+    ) throws -> BakeProviderOutput {
+        var params = parameters.cValue
+        let callbacks = BakeProviderCallbacks(progress: progress, cancel: cancel)
+        let box = Unmanaged.passUnretained(callbacks).toOpaque()
+
+        var request = CyberBakeProviderRequest()
+        request.structSize = MemoryLayout<CyberBakeProviderRequest>.size
+        request.low = handle
+        request.high = high.handle
+        request.map = Int32(bitPattern: map.rawValue)
+        request.user = box
+        // Always installed: the trampolines read the box, which holds nil for
+        // whichever the caller left out. A conditional here would have to be an
+        // `if`, because Swift forms a C function pointer only from a direct
+        // reference to a `func`, and the branch buys nothing.
+        request.progress = bakeProviderProgress
+        request.cancel = bakeProviderCancel
+
+        let output = try withUnsafeMutablePointer(to: &params) { paramsPtr in
+            request.params = UnsafePointer(paramsPtr)
+
+            // Size first, then allocate exactly what the engine asked for. The
+            // sizing call validates the whole request and casts no ray.
+            var sizing = CyberBakeProviderResult()
+            sizing.structSize = MemoryLayout<CyberBakeProviderResult>.size
+            try CyberError.check(cyber_bake_provider_bake(&request, &sizing))
+
+            var pixels = [Float](repeating: 0, count: Int(sizing.pixelCount))
+            var idRows = [CyberIdColor](repeating: CyberIdColor(), count: max(1, maxIdColors))
+            var result = CyberBakeProviderResult()
+            result.structSize = MemoryLayout<CyberBakeProviderResult>.size
+
+            try pixels.withUnsafeMutableBufferPointer { pixelBuffer in
+                try idRows.withUnsafeMutableBufferPointer { idBuffer in
+                    request.pixels = pixelBuffer.baseAddress
+                    request.pixelCapacity = pixelBuffer.count
+                    request.idColors = idBuffer.baseAddress
+                    request.idColorCapacity = idBuffer.count
+                    try CyberError.check(cyber_bake_provider_bake(&request, &result))
+                }
+            }
+
+            let source = result.idSource.map { String(cString: $0) } ?? ""
+            let rows = (0..<min(Int(result.idColorCount), idRows.count)).map { index in
+                IdColor(id: idRows[index].id,
+                        color: (idRows[index].color.0, idRows[index].color.1,
+                                idRows[index].color.2))
+            }
+            return BakeProviderOutput(
+                width: Int(result.width), height: Int(result.height),
+                channels: Int(result.channels), pixels: pixels,
+                encoding: ImageEncoding(result.encoding, idSource: source, idColors: rows),
+                padding: ImagePadding(result.padding),
+                texelsCovered: Int(result.texelsCovered),
+                normalGreenPlusY: result.normalGreenPlusY)
+        }
+        // `callbacks` is reachable only through an UNMANAGED opaque pointer for
+        // the whole call, so ARC sees its last use at `passUnretained` above and
+        // may release it while the engine is still calling the trampolines --
+        // which would then resolve a freed object. Same guard, and the same
+        // reason, as ZRemesher.swift and Remesh.swift.
+        withExtendedLifetime(callbacks) {}
+        return output
+    }
+}

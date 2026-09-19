@@ -32,6 +32,7 @@
 #include "cyber/accel/backend.hpp"
 #include "cyber/bake/bake.hpp"
 #include "cyber/bake/field_evaluator.hpp"
+#include "cyber/bake/map_catalog.hpp"
 #include "cyber/core/export_preset.hpp"
 #include "cyber/core/io.hpp"
 #include "cyber/core/isotropic.hpp"
@@ -5215,6 +5216,24 @@ bool applyBakeEncodingParams(const CyberBakeParams& params, cyber::bake::BakePar
     return true;
 }
 
+// The POD-to-BakeParams marshalling every bake entry point does. Shared so that
+// cyber_bake, cyber_bake_field and cyber_bake_provider_bake accept and refuse
+// exactly the same parameter values -- "an entry point that validates parameters
+// must validate the new ones identically" is a spec rule, and three copies of a
+// validation are three chances to drift.
+bool applyBakeParams(const CyberBakeParams* params, cyber::bake::BakeParams& out, const char* who) {
+    if (params == nullptr) {
+        return true;  // the engine defaults `out` already holds
+    }
+    out.width = params->width;
+    out.height = params->height;
+    out.cageDistance = params->cageDistance;
+    out.aoSamples = params->aoSamples;
+    out.aoRadius = params->aoRadius;
+    out.curvatureRange = params->curvatureRange;
+    return applyBakeEncodingParams(*params, out, who);
+}
+
 bool bakePixelBudgetExceeded(const cyber::bake::BakeParams& params) {
     if (params.maxPixels == 0 || params.width <= 0 || params.height <= 0) {
         return false;
@@ -5251,16 +5270,8 @@ CyberStatus cyber_bake(const CyberMesh* low, const CyberMesh* high, CyberBakeMap
     }
     try {
         cyber::bake::BakeParams p;
-        if (params != nullptr) {
-            p.width = params->width;
-            p.height = params->height;
-            p.cageDistance = params->cageDistance;
-            p.aoSamples = params->aoSamples;
-            p.aoRadius = params->aoRadius;
-            p.curvatureRange = params->curvatureRange;
-            if (!applyBakeEncodingParams(*params, p, "cyber_bake")) {
-                return CYBER_ERR_INVALID_ARG;
-            }
+        if (!applyBakeParams(params, p, "cyber_bake")) {
+            return CYBER_ERR_INVALID_ARG;
         }
         p.maxPixels = static_cast<std::size_t>(cyber_max_bake_pixels());
         if (bakePixelBudgetExceeded(p)) {
@@ -6019,9 +6030,17 @@ private:
     CyberFieldEvaluator m_c;
 };
 
+// Reads the map catalogue rather than listing the four maps again: the
+// catalogue is what cyber_bake_provider_map_list(1) advertises, and an entry
+// point that disagreed with the advertised set would refuse a map a consumer had
+// just been told it could ask for.
 bool fieldCanServe(CyberBakeMap map) {
-    return map == CYBER_BAKE_NORMAL || map == CYBER_BAKE_AO || map == CYBER_BAKE_CURVATURE ||
-           map == CYBER_BAKE_CAVITY;
+    cyber::bake::BakeMap m{};
+    if (!toBakeMap(map, m)) {
+        return false;
+    }
+    const cyber::bake::MapInfo* info = cyber::bake::findMap(m);
+    return info != nullptr && info->fieldCapable;
 }
 
 }  // namespace
@@ -6098,16 +6117,8 @@ CyberStatus cyber_bake_field(const CyberMesh* low, const CyberMesh* high, CyberB
     try {
         const CallbackField adapter(*field);
         cyber::bake::BakeParams p;
-        if (params != nullptr) {
-            p.width = params->width;
-            p.height = params->height;
-            p.cageDistance = params->cageDistance;
-            p.aoSamples = params->aoSamples;
-            p.aoRadius = params->aoRadius;
-            p.curvatureRange = params->curvatureRange;
-            if (!applyBakeEncodingParams(*params, p, "cyber_bake_field")) {
-                return CYBER_ERR_INVALID_ARG;
-            }
+        if (!applyBakeParams(params, p, "cyber_bake_field")) {
+            return CYBER_ERR_INVALID_ARG;
         }
         p.maxPixels = static_cast<std::size_t>(cyber_max_bake_pixels());
         if (bakePixelBudgetExceeded(p)) {
@@ -6595,4 +6606,344 @@ int cyber_bundle_result_chart_count(const CyberBundleResult* result) {
 
 float cyber_bundle_result_max_angle_distortion(const CyberBundleResult* result) {
     return result != nullptr ? result->maxAngleDistortion : 0.0f;
+}
+
+// ---- bake provider -------------------------------------------------------
+//
+// The seam an external map consumer drives (engine-bindings spec, "Bake
+// provider surface for an external map consumer"; pipeline-bridge spec, "The
+// bake provider is a seam, not a dependency"). The mirror image of
+// CyberFieldEvaluator: there the callbacks come from a volumetric engine and
+// samples flow in, here they come from the consumer and pixels flow out.
+
+namespace {
+
+// The ABI 1.22 descriptor layouts, which are the FLOOR each descriptor is
+// accepted at. When a member is appended in a later minor these must NOT move --
+// freeze them to the literal byte counts then, because the entire point of the
+// mechanism is that a caller compiled against 1.22 keeps working unchanged.
+constexpr std::size_t kProviderMapFloor = sizeof(CyberBakeProviderMap);
+constexpr std::size_t kProviderRequestFloor = sizeof(CyberBakeProviderRequest);
+constexpr std::size_t kProviderResultFloor = sizeof(CyberBakeProviderResult);
+
+CyberStatus providerFloorCheck(std::size_t stated, std::size_t minimum, const char* who,
+                               const char* what) {
+    if (stated >= minimum) {
+        return CYBER_OK;
+    }
+    setError(std::string(who) + ": " + what + " structSize is " + std::to_string(stated) +
+             ", below this build's minimum of " + std::to_string(minimum) +
+             " (set it to sizeof(the struct) as your header declares it)");
+    return CYBER_ERR_INVALID_ARG;
+}
+
+// Takes only the bytes the caller says its descriptor has and leaves the rest
+// zero, which is the documented default of every member of these descriptors.
+// A caller compiled against an older header therefore gets those defaults
+// instead of whatever its stack held past the end of its struct.
+template <typename Descriptor>
+Descriptor readProviderDescriptor(const Descriptor& src) {
+    Descriptor dst{};
+    std::memcpy(&dst, &src, std::min(src.structSize, sizeof(Descriptor)));
+    dst.structSize = src.structSize;
+    return dst;
+}
+
+// The inverse: writes at most as far as the caller said its descriptor reaches,
+// so a member appended in a later minor is simply not written for an older
+// caller and never lands past the end of its allocation.
+template <typename Descriptor>
+void writeProviderDescriptor(Descriptor* dst, Descriptor filled) {
+    const std::size_t stated = dst->structSize;
+    filled.structSize = stated;
+    std::memcpy(dst, &filled, std::min(stated, sizeof(Descriptor)));
+}
+
+CyberBakeProviderMap toProviderMap(const cyber::bake::MapInfo& info) {
+    CyberBakeProviderMap out{};
+    out.structSize = sizeof(CyberBakeProviderMap);
+    out.map = static_cast<int>(info.map);
+    out.name = info.name.data();  // the catalogue holds string literals
+    out.channels = info.channels;
+    // Assigned rather than brace-initialised: naming one member of a struct
+    // whose others carry default member initializers is
+    // -Wmissing-field-initializers under GCC, and fatal here.
+    cyber::bake::BakeEncoding probe;
+    probe.basis = info.basis;
+    out.encodingBasis = toCEncoding(probe).basis;
+    out.colorSpace = info.srgb ? "srgb" : "linear";
+    out.fieldCapable = info.fieldCapable ? 1 : 0;
+    return out;
+}
+
+// What a validated request is going to do, so the entry point below reads as
+// "plan, refuse or bake" instead of one long ladder.
+struct ProviderPlan {
+    const cyber::bake::MapInfo* info = nullptr;
+    cyber::bake::BakeParams params;
+    bool targetless = false;  // a field evaluator standing in for the Target mesh
+};
+
+// The refusal the whole surface exists for: a map outside the set this build
+// advertises is NAMED, together with the set, and no image is produced. A
+// consumer silently handed flat grey where it asked for curvature ships work
+// that is subtly wrong rather than visibly broken.
+CyberStatus providerResolveMap(const CyberBakeProviderRequest& req, ProviderPlan& plan,
+                               const char* who) {
+    // Read as int, never through CyberBakeMap: loading an out-of-range value
+    // through an enum type is UB and UBSan reports it (see enumCode above).
+    const cyber::bake::MapInfo* info = nullptr;
+    for (const cyber::bake::MapInfo& candidate : cyber::bake::mapCatalog()) {
+        if (static_cast<int>(candidate.map) == req.map) {
+            info = &candidate;
+            break;
+        }
+    }
+    if (info == nullptr) {
+        setError(std::string(who) + ": map code " + std::to_string(req.map) +
+                 " is not one of the maps this build produces: " + cyber::bake::mapCatalogNames());
+        return CYBER_ERR_INVALID_ARG;
+    }
+    if (plan.targetless && !info->fieldCapable) {
+        setError(std::string(who) + ": map \"" + std::string(info->name) +
+                 "\" needs a Target mesh; with a field evaluator alone this build "
+                 "produces: " +
+                 cyber::bake::mapCatalogNames(true));
+        return CYBER_ERR_INVALID_ARG;
+    }
+    plan.info = info;
+    return CYBER_OK;
+}
+
+CyberStatus providerPlan(const CyberBakeProviderRequest& req, ProviderPlan& plan, const char* who) {
+    if (req.low == nullptr) {
+        setError(std::string(who) + ": the EditMesh (low) is required");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    const bool hasField = req.field != nullptr;
+    if (hasField && (req.field->distance == nullptr || req.field->gradient == nullptr ||
+                     req.field->occlusion == nullptr)) {
+        setError(std::string(who) + ": the field evaluator needs all three callbacks");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    if (req.high == nullptr && !hasField) {
+        setError(std::string(who) + ": the Target (high) is required without a field evaluator");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    plan.targetless = req.high == nullptr;
+    const CyberStatus resolved = providerResolveMap(req, plan, who);
+    if (resolved != CYBER_OK) {
+        return resolved;
+    }
+    if (!applyBakeParams(req.params, plan.params, who)) {
+        return CYBER_ERR_INVALID_ARG;
+    }
+    plan.params.maxPixels = static_cast<std::size_t>(cyber_max_bake_pixels());
+    if (bakePixelBudgetExceeded(plan.params)) {
+        setError(std::string(who) + ": requested " + std::to_string(plan.params.width) + " x " +
+                 std::to_string(plan.params.height) + " texels, over this host's bake ceiling of " +
+                 std::to_string(plan.params.maxPixels));
+        return CYBER_ERR_RUNTIME;
+    }
+    if (plan.params.width <= 0 || plan.params.height <= 0) {
+        setError(std::string(who) + ": width and height must be positive");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    return CYBER_OK;
+}
+
+// The geometry half of the result, which the SIZING call can answer without
+// casting a ray: the size a consumer has to allocate before it can ask for
+// pixels at all.
+CyberBakeProviderResult providerGeometry(const ProviderPlan& plan) {
+    CyberBakeProviderResult out{};
+    out.structSize = sizeof(CyberBakeProviderResult);
+    out.width = plan.params.width;
+    out.height = plan.params.height;
+    out.channels = plan.info->channels;
+    out.pixelCount = static_cast<std::size_t>(out.width) * static_cast<std::size_t>(out.height) *
+                     static_cast<std::size_t>(out.channels);
+    // This engine bakes +Y (OpenGL) and nothing else; reported so a consumer
+    // never has to assume it or read it off a preset it may not have.
+    out.normalGreenPlusY = 1;
+    out.idSource = "";
+    return out;
+}
+
+// Thread-local so the reported id source outlives the call without the result
+// owning a heap string -- the same contract CyberHandoffInfo::producer has.
+std::string& providerIdSourceSlot() {
+    thread_local std::string slot;
+    return slot;
+}
+
+// Runs the bake and publishes it into the caller's buffers. Nothing is written
+// into them until the bake has finished successfully: a cancelled or refused
+// request leaves them byte for byte as they were, because a consumer handed a
+// half-shaded map or a half-grown padding band has no way to tell.
+CyberStatus runProviderBake(const CyberBakeProviderRequest& req, const ProviderPlan& plan,
+                            CyberBakeProviderResult& result, CyberBakeProviderResult* out,
+                            const char* who) {
+    cyber::bake::BakeParams params = plan.params;
+    // Constructed unconditionally and attached only when the caller supplied an
+    // evaluator: the adapter is three pointers and a void*, so the alternative
+    // (an optional, or a branch around the whole call) costs more than it saves.
+    const CallbackField adapter(req.field != nullptr ? *req.field : CyberFieldEvaluator{});
+    if (req.field != nullptr) {
+        params.field = &adapter;
+    }
+
+    const cyber::CancelToken token;
+    const CyberCancelCb cancel = req.cancel;
+    void* const user = req.user;
+    // The poll, not only the progress-report path: a bake that reports rarely
+    // (a small map, a cheap map) would otherwise observe the cancel only at the
+    // next stage boundary, and "returns promptly" is the contract.
+    token.setPoll([cancel, user]() { return cancel != nullptr && cancel(user) != 0; });
+    cyber::ProgressSink sink = makeSink(req.progress, cancel, user, token);
+
+    const cyber::Mesh empty;
+    const cyber::bake::BakeResult baked =
+        cyber::bake::bake(req.low->mesh, req.high == nullptr ? empty : req.high->mesh,
+                          plan.info->map, params, &sink, &token);
+
+    if (baked.cancelled) {
+        setError(std::string(who) + ": cancelled");
+        return CYBER_ERR_CANCELLED;
+    }
+    // Before the empty-image case: a violated field contract also empties the
+    // image, and "the low-poly needs UVs" would point the host at its mesh when
+    // the fault is in its callbacks.
+    if (baked.fieldContractViolated) {
+        setError(std::string(who) + ": " + baked.fieldContractMessage);
+        return CYBER_ERR_INVALID_PARAM;
+    }
+    if (baked.image.pixels.size() != result.pixelCount) {
+        setError(std::string(who) +
+                 ": empty result (the EditMesh needs UVs and the Target geometry)");
+        return CYBER_ERR_EMPTY;
+    }
+
+    std::copy(baked.image.pixels.begin(), baked.image.pixels.end(), req.pixels);
+    result.encoding = toCEncoding(baked.encoding);
+    result.padding = toCPadding(baked.padding);
+    result.texelsCovered = baked.texelsCovered;
+    result.idColorCount = baked.encoding.idColors.size();
+    providerIdSourceSlot() = baked.encoding.idSource;
+    result.idSource = providerIdSourceSlot().c_str();
+    // The id table follows the two-call convention (fill what fits, report the
+    // total) where the pixels are refused outright when the buffer is short. The
+    // difference is that a consumer can compute the pixel count exactly from the
+    // capability query BEFORE it calls, so a short pixel buffer is a bug; the id
+    // count depends on the Target and is only knowable once the bake has run.
+    if (req.idColors != nullptr) {
+        const std::size_t rows = std::min(req.idColorCapacity, result.idColorCount);
+        for (std::size_t i = 0; i < rows; ++i) {
+            req.idColors[i] = toCIdColor(baked.encoding.idColors[i]);
+        }
+    }
+    writeProviderDescriptor(out, result);
+    clearError();
+    return CYBER_OK;
+}
+
+}  // namespace
+
+size_t cyber_bake_provider_map_count(void) { return cyber::bake::mapCatalog().size(); }
+
+CyberStatus cyber_bake_provider_map_at(size_t index, CyberBakeProviderMap* out) {
+    if (out == nullptr) {
+        setError("cyber_bake_provider_map_at: null argument");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    const CyberStatus sized =
+        providerFloorCheck(out->structSize, kProviderMapFloor, "cyber_bake_provider_map_at", "map");
+    if (sized != CYBER_OK) {
+        return sized;
+    }
+    const std::span<const cyber::bake::MapInfo> catalog = cyber::bake::mapCatalog();
+    if (index >= catalog.size()) {
+        setError("cyber_bake_provider_map_at: index " + std::to_string(index) +
+                 " is out of range; this build advertises " + std::to_string(catalog.size()) +
+                 " maps");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    writeProviderDescriptor(out, toProviderMap(catalog[index]));
+    clearError();
+    return CYBER_OK;
+}
+
+CyberStatus cyber_bake_provider_find_map(const char* name, CyberBakeProviderMap* out) {
+    if (name == nullptr || out == nullptr) {
+        setError("cyber_bake_provider_find_map: null argument");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    const CyberStatus sized = providerFloorCheck(out->structSize, kProviderMapFloor,
+                                                 "cyber_bake_provider_find_map", "map");
+    if (sized != CYBER_OK) {
+        return sized;
+    }
+    return guarded("cyber_bake_provider_find_map", CYBER_ERR_RUNTIME, [&]() -> CyberStatus {
+        const cyber::bake::MapInfo* info = cyber::bake::findMap(std::string_view(name));
+        if (info == nullptr) {
+            setError(
+                std::string("cyber_bake_provider_find_map: \"") + name +
+                "\" is not one of the maps this build produces: " + cyber::bake::mapCatalogNames());
+            return CYBER_ERR_INVALID_ARG;
+        }
+        writeProviderDescriptor(out, toProviderMap(*info));
+        clearError();
+        return CYBER_OK;
+    });
+}
+
+const char* cyber_bake_provider_map_list(int field_only) {
+    // Built once per process per list: the catalogue is constexpr, so the string
+    // cannot change, and a consumer is entitled to hold the pointer.
+    static const std::string all = cyber::bake::mapCatalogNames(false);
+    static const std::string fieldOnly = cyber::bake::mapCatalogNames(true);
+    return field_only != 0 ? fieldOnly.c_str() : all.c_str();
+}
+
+CyberStatus cyber_bake_provider_bake(const CyberBakeProviderRequest* request,
+                                     CyberBakeProviderResult* out) {
+    static constexpr const char* kWho = "cyber_bake_provider_bake";
+    if (request == nullptr || out == nullptr) {
+        setError(std::string(kWho) + ": null argument");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    CyberStatus sized =
+        providerFloorCheck(request->structSize, kProviderRequestFloor, kWho, "request");
+    if (sized != CYBER_OK) {
+        return sized;
+    }
+    sized = providerFloorCheck(out->structSize, kProviderResultFloor, kWho, "result");
+    if (sized != CYBER_OK) {
+        return sized;
+    }
+    return guarded(kWho, CYBER_ERR_RUNTIME, [&]() -> CyberStatus {
+        const CyberBakeProviderRequest req = readProviderDescriptor(*request);
+        ProviderPlan plan;
+        const CyberStatus planned = providerPlan(req, plan, kWho);
+        if (planned != CYBER_OK) {
+            return planned;
+        }
+        CyberBakeProviderResult result = providerGeometry(plan);
+        if (req.pixels == nullptr) {
+            // The SIZING call: everything validated, nothing baked. The encoding
+            // and padding records stay neutral because no bake produced them.
+            writeProviderDescriptor(out, result);
+            clearError();
+            return CYBER_OK;
+        }
+        if (req.pixelCapacity < result.pixelCount) {
+            setError(std::string(kWho) + ": pixel buffer holds " +
+                     std::to_string(req.pixelCapacity) + " floats, this map needs " +
+                     std::to_string(result.pixelCount) +
+                     " (width * height * channels); a short buffer is refused rather than "
+                     "filled partway");
+            return CYBER_ERR_INVALID_ARG;
+        }
+        return runProviderBake(req, plan, result, out, kWho);
+    });
 }

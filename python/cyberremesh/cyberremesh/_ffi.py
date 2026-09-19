@@ -685,6 +685,68 @@ class CyberFieldEvaluator(Structure):
     ]
 
 
+# -- bake provider (engine-bindings, pipeline-bridge) -----------------------
+#
+# The three descriptors carry ``struct_size`` as their FIRST member and are
+# passed one at a time by pointer, never as an array, which is what lets the
+# engine append a member later without breaking a caller compiled against this
+# layout. Always set it to ``ctypes.sizeof(the struct)``.
+
+BAKE_PROVIDER_VERSION = 1
+
+
+class CyberBakeProviderMap(Structure):
+    """Mirror of ``CyberBakeProviderMap`` in capi/include/cyber_capi.h."""
+
+    _fields_ = [
+        ("struct_size", c_size_t),
+        ("map", c_int32),
+        ("name", c_char_p),
+        ("channels", c_int32),
+        ("encoding_basis", c_int32),
+        ("color_space", c_char_p),
+        ("field_capable", c_int32),
+    ]
+
+
+class CyberBakeProviderRequest(Structure):
+    """Mirror of ``CyberBakeProviderRequest`` in capi/include/cyber_capi.h."""
+
+    _fields_ = [
+        ("struct_size", c_size_t),
+        ("low", c_void_p),
+        ("high", c_void_p),
+        ("map", c_int32),
+        ("params", POINTER(CyberBakeParams)),
+        ("field", POINTER(CyberFieldEvaluator)),
+        ("progress", PROGRESS_CB),
+        ("cancel", CANCEL_CB),
+        ("user", c_void_p),
+        ("pixels", POINTER(c_float)),
+        ("pixel_capacity", c_size_t),
+        ("id_colors", POINTER(CyberIdColor)),
+        ("id_color_capacity", c_size_t),
+    ]
+
+
+class CyberBakeProviderResult(Structure):
+    """Mirror of ``CyberBakeProviderResult`` in capi/include/cyber_capi.h."""
+
+    _fields_ = [
+        ("struct_size", c_size_t),
+        ("width", c_int32),
+        ("height", c_int32),
+        ("channels", c_int32),
+        ("pixel_count", c_size_t),
+        ("id_color_count", c_size_t),
+        ("texels_covered", c_size_t),
+        ("encoding", CyberImageEncoding),
+        ("padding", CyberImagePadding),
+        ("normal_green_plus_y", c_int32),
+        ("id_source", c_char_p),
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Library discovery
 # ---------------------------------------------------------------------------
@@ -1476,6 +1538,21 @@ def _declare(lib: ctypes.CDLL) -> None:
     lib.cyber_image_copy_pixels.restype = c_size_t
     lib.cyber_image_save_png.argtypes = [c_void_p, c_char_p]
     lib.cyber_image_save_png.restype = c_int32
+
+    # -- bake provider -------------------------------------------------------
+    lib.cyber_bake_provider_map_count.argtypes = []
+    lib.cyber_bake_provider_map_count.restype = c_size_t
+    lib.cyber_bake_provider_map_at.argtypes = [c_size_t, POINTER(CyberBakeProviderMap)]
+    lib.cyber_bake_provider_map_at.restype = c_int32
+    lib.cyber_bake_provider_find_map.argtypes = [c_char_p, POINTER(CyberBakeProviderMap)]
+    lib.cyber_bake_provider_find_map.restype = c_int32
+    lib.cyber_bake_provider_map_list.argtypes = [c_int32]
+    lib.cyber_bake_provider_map_list.restype = c_char_p
+    lib.cyber_bake_provider_bake.argtypes = [
+        POINTER(CyberBakeProviderRequest),
+        POINTER(CyberBakeProviderResult),
+    ]
+    lib.cyber_bake_provider_bake.restype = c_int32
 
     # -- Target snapper ------------------------------------------------------
     # CyberStatus cyber_snapper_create(const CyberMesh* target, CyberSnapper** out)

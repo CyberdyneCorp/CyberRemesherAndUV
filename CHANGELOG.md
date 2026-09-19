@@ -7,6 +7,68 @@
 
 ### Added
 
+- **A bake PROVIDER surface, so an external map consumer can ask this engine
+  for maps.** `cyber_bake` is a bake *call*; what a texture-painting stage such
+  as CyberTexel needs is something it can interrogate, drive with its own
+  progress bar and cancel button, and read metadata off without a second set of
+  lookups. This is the mirror image of `CyberFieldEvaluator`: there the
+  callbacks come from a volumetric engine and samples flow in, here they come
+  from the consumer and pixels flow out. Neither repository links the other.
+
+  - **Capability query.** `cyber_bake_provider_map_count` / `_map_at` /
+    `_find_map` / `_map_list` report the maps *this build* produces: the map
+    code, a stable machine name (mesh-io's export-preset vocabulary, so a
+    consumer can join the two lists), the channel count, the colour space, the
+    encoding basis a bake reports under default parameters, and whether a field
+    evaluator alone can produce it. A consumer sizes its buffer and builds its
+    UI from this, never from a hard-coded list.
+  - **Request.** `cyber_bake_provider_bake` takes one descriptor carrying the
+    EditMesh/Target pair, the map, the bake parameters, an optional
+    `CyberFieldEvaluator`, a progress callback, a cancel callback and their
+    shared `void* user`. Synchronous with a callback rather than a polled
+    handle: it matches `cyber_bake_field` and `cyber_export_bundle_write`, and
+    a consumer that wants a job puts the call on a thread it owns.
+  - **Caller-owned buffers, two-call sizing.** Pixels go into the consumer's
+    `float*` and the id-to-colour table into its `CyberIdColor*`. A request
+    with a null pixel buffer validates everything and reports the sizes
+    **without casting a ray**, so a consumer learns both what it must allocate
+    and whether the request would be accepted at all. A short pixel buffer is
+    refused naming both capacities, never filled partway — the consumer could
+    have computed that count exactly from the query. The **id table** is the
+    deliberate exception, because the number of ids is only knowable once the
+    bake has read the Target: a short (or absent) id buffer succeeds, is filled
+    to exactly the capacity stated and to no byte beyond it, and the result
+    reports the *total* so the consumer can allocate that many and ask again.
+  - **Metadata travels with the pixels**: the encoding basis, up axis, normal
+    green-channel convention, object-space bounding box, distance scale,
+    padding radius/rule/texels, id source and id table, and the covered-texel
+    count. Nothing about a map has to be documented out of band any more.
+  - **Descriptors carry their own size.** `structSize` is the first member of
+    all three, and the library reads and writes only what the caller's size
+    covers. A member appended later keeps its documented default for an older
+    caller, which makes these three structs the only ones in this ABI where
+    appending is additive — they are passed one at a time by pointer, never as
+    an array, which is what makes that safe.
+  - **A map this build cannot produce is refused BY NAME**, together with the
+    advertised set, and never substituted with a neutral image: a smart
+    material silently reading flat grey for curvature looks subtly wrong on a
+    new model instead of loudly broken. With a field evaluator and no Target
+    the producible set narrows to `normal`, `ao`, `curvature` and `cavity`, and
+    the capability query says so before the request rather than only in the
+    refusal afterwards.
+  - **Cancellation hands back nothing**: `CYBER_ERR_CANCELLED`, with the
+    consumer's pixel and id buffers left byte for byte as they were.
+
+  The advertised set is one table in `cyber::bake` — the C ABI's query, the
+  CLI's new `--list-bake-maps`, and `bake()`'s own channel and field decisions
+  all read it, so they cannot drift apart. Bound in Python
+  (`bake_provider_maps`, `bake_provider_size`, `bake_provider_bake`) and Swift
+  (`BakeProvider`, `Mesh.bakeThroughProvider`), and exercised headlessly by
+  `examples/26_bake_provider.py`.
+
+  ABI 1.22, additive: `CyberBakeProviderMap`, `CyberBakeProviderRequest`,
+  `CyberBakeProviderResult` and five entry points. Nothing existing moved.
+
 - **Baked maps are PADDED across their UV island borders, by extrapolation.** A
   baked map used to stop at the edge of each island, and everything downstream
   reaches past that edge: a bilinear tap at the border, mip generation, block

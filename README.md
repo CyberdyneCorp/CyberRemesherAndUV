@@ -676,6 +676,77 @@ through `cyber_image_padding` / `cyber_bundle_result_file_padding`,
 "padding": { "radius": 8, "mode": "extrapolate-unit", "texelsFilled": 625 }
 ```
 
+#### The bake provider: asking this engine for a map
+
+`cyber_bake` is a bake *call*. A texture-painting stage such as
+[CyberTexel](https://github.com/CyberdyneCorp/CyberTexel) — which deliberately
+ships no baker — needs a *provider*: something it can interrogate, drive with
+its own progress bar and cancel button, and read metadata off without a second
+set of lookups. That is the **bake provider surface**, and it is the mirror
+image of the field evaluator below: there the callbacks come from a volumetric
+engine and samples flow in; here they come from the consumer and pixels flow
+out. Neither side links the other.
+
+**Ask first.** The advertised set is what *this build* produces, so nothing is
+hard-coded on the consumer's side:
+
+```sh
+cyberremesh --list-bake-maps      # the same table the C ABI advertises
+```
+
+```python
+for entry in cyberremesh.bake_provider_maps():
+    print(entry.name, entry.channels, entry.color_space, entry.field_capable)
+```
+
+Each entry carries the map code, a stable machine name (the **same vocabulary an
+export preset uses**, so the two lists join directly), the channel count, the
+colour space, the encoding basis a bake reports under default parameters, and
+whether a field evaluator alone can produce it.
+
+**Then request, into your own buffer.** A request with no pixel buffer validates
+everything and reports the sizes **without casting a ray** — the cheap way to ask
+both "how much do I allocate" and "would this be accepted at all":
+
+```python
+sized = cyberremesh.bake_provider_size(low, BakeMap.OBJECT_POSITION, params, high=high)
+pixels, result = cyberremesh.bake_provider_bake(
+    low, BakeMap.OBJECT_POSITION, params, high=high,
+    progress=lambda fraction, stage: ui.set_progress(fraction),
+    cancel=lambda: ui.cancelled)
+# result carries the basis, up axis, green-channel convention, bounding box,
+# distance scale, padding record and id table — nothing is documented out of band.
+```
+
+Four rules are worth stating outright, because each is a decision:
+
+- **The buffers are yours, and the two short-buffer rules differ on purpose.** A
+  short *pixel* buffer is refused, naming both capacities — you could have
+  computed that count exactly from the capability query before calling, so a
+  short one is a bug worth surfacing. A short (or absent) *id table* is not: the
+  number of ids depends on the Target and is only knowable once the bake has
+  read it. That call succeeds, fills exactly the rows your stated capacity holds
+  and writes nothing past them, and reports the **total** in `id_color_count`,
+  so you allocate that many and ask again.
+- **A map this build cannot produce is refused BY NAME**, listing the advertised
+  set, and is never substituted with a neutral image. A smart material silently
+  reading flat grey for curvature looks subtly wrong on a new model instead of
+  loudly broken. Supplying a `CyberFieldEvaluator` in place of a Target narrows
+  the producible set to `normal`, `ao`, `curvature` and `cavity`, and the
+  capability query says so *before* the request.
+- **Cancellation hands back nothing.** The status is `CYBER_ERR_CANCELLED` and
+  the consumer's buffers are left byte for byte as they were — no half-shaded
+  map, no half-grown padding band.
+- **The descriptors carry their own size.** `structSize` is the first member of
+  each, and the library reads and writes only what the caller's size covers, so
+  a member appended later keeps its documented default for an older caller.
+  These are the only structs in this ABI where appending is additive; they are
+  passed one at a time by pointer, never as an array, which is what makes that
+  safe.
+
+`examples/26_bake_provider.py` drives the whole surface headlessly. The Swift
+equivalent is `BakeProvider.maps` and `Mesh.bakeThroughProvider`.
+
 **Cost:** the AO bake dominates a preset run — about 96% of it — and scales with
 texel count, so the default 2048² map set takes minutes on a desktop CPU. Use
 `--texture-size` (and `--ao-samples`) to trade resolution for time; parallelising
