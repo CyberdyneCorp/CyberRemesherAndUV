@@ -5207,7 +5207,85 @@ CyberImagePadding toCPadding(const cyber::bake::BakePadding& padding) {
     return out;
 }
 
-// The three enum-valued/finite members added in 0.8.0. An out-of-range enum is
+// ---- sized structs --------------------------------------------------------
+//
+// SIZED STRUCTS in cyber_capi.h: a struct whose first member is structSize is
+// read and written only as far as the caller's stated size reaches. One
+// mechanism for all five, so the parameter structs and the provider
+// descriptors cannot drift apart in how they treat an older or newer caller.
+
+namespace {
+
+// The ABI 2.0 layouts: the FLOOR each parameter struct is accepted at. Written
+// as "the end of the last 2.0 member" rather than sizeof, so appending a member
+// in a later 2.x does not move it and refuse the 2.0 callers this exists to
+// serve.
+constexpr std::size_t kBakeParamsFloor =
+    offsetof(CyberBakeParams, densityNormalization) + sizeof(int);
+constexpr std::size_t kBundleParamsFloor = offsetof(CyberBundleParams, udim) + sizeof(int);
+
+CyberStatus sizedFloorCheck(std::size_t stated, std::size_t minimum, const char* who,
+                            const char* what) {
+    if (stated >= minimum) {
+        return CYBER_OK;
+    }
+    setError(std::string(who) + ": " + what + " structSize is " + std::to_string(stated) +
+             ", below this build's minimum of " + std::to_string(minimum) +
+             " (set it to sizeof(the struct) as your header declares it)");
+    return CYBER_ERR_INVALID_ARG;
+}
+
+// Overlays only the bytes the caller says its struct has on `base`, which holds
+// the documented default of every member: zero for the provider descriptors,
+// the engine defaults for the parameter structs. A caller compiled against an
+// older header therefore gets those defaults instead of whatever its stack held
+// past the end of its struct, and a newer caller's extra members are ignored.
+template <typename Sized>
+Sized readSized(const Sized& src, Sized base) {
+    std::memcpy(&base, &src, std::min(src.structSize, sizeof(Sized)));
+    base.structSize = src.structSize;
+    return base;
+}
+
+// The inverse: writes at most as far as the caller said its struct reaches, so
+// a member appended in a later minor is simply not written for an older caller
+// and never lands past the end of its allocation. structSize comes back as the
+// caller set it.
+template <typename Sized>
+void writeSized(Sized* dst, Sized filled) {
+    const std::size_t stated = dst->structSize;
+    filled.structSize = stated;
+    std::memcpy(dst, &filled, std::min(stated, sizeof(Sized)));
+}
+
+}  // namespace
+
+// Every member of CyberBakeParams at its engine default: the base a sized read
+// overlays the caller's bytes on, and what cyber_default_bake_params writes.
+CyberBakeParams bakeParamsDefaults() {
+    const cyber::bake::BakeParams d;
+    CyberBakeParams p{};
+    p.structSize = sizeof(CyberBakeParams);
+    p.width = d.width;
+    p.height = d.height;
+    p.cageDistance = d.cageDistance;
+    p.aoSamples = d.aoSamples;
+    p.aoRadius = d.aoRadius;
+    p.curvatureRange = d.curvatureRange;
+    p.upAxis = d.upAxis == cyber::bake::UpAxis::ZUp ? CYBER_UP_AXIS_Z : CYBER_UP_AXIS_Y;
+    p.bentNormalSpace = d.bentNormalSpace == cyber::bake::NormalSpace::Object
+                            ? CYBER_BENT_NORMAL_OBJECT
+                            : CYBER_BENT_NORMAL_TANGENT;
+    p.thicknessScale = d.thicknessScale;
+    p.paddingRadius = d.paddingRadius;
+    copyPlacement(d.placement, p.placement);
+    p.densityNormalization = d.densityNormalization == cyber::bake::DensityNormalization::Relative
+                                 ? CYBER_DENSITY_RELATIVE
+                                 : CYBER_DENSITY_ABSOLUTE;
+    return p;
+}
+
+// The enum-valued and finite members. An out-of-range enum is
 // refused rather than folded to a default: a caller that meant z-up and typed 2
 // would otherwise get a y-up map with no diagnostic anywhere.
 bool applyBakeEncodingParams(const CyberBakeParams& params, cyber::bake::BakeParams& out,
@@ -5249,11 +5327,10 @@ bool applyBakeEncodingParams(const CyberBakeParams& params, cyber::bake::BakePar
     //
     // Checked ONLY for a map that reads a placement -- cyber::bake::bake()'s own
     // rule, asked of the engine rather than restated here. A map that reads no
-    // placement must not be refused because of whatever this field holds: these
-    // 16 floats were APPENDED to CyberBakeParams in ABI 1.23, so a caller that
-    // zero-fills the struct and assigns the members it knows -- exactly what a
-    // host written against 1.22 does -- would otherwise have every bake it ever
-    // made, of every map, start failing with an all-zero (singular) matrix.
+    // placement must not be refused because of whatever this field holds: a
+    // caller that zero-fills the struct instead of calling
+    // cyber_default_bake_params supplies an all-zero (singular) matrix, and the
+    // maps that never read a placement must not start failing because of it.
     for (std::size_t i = 0; i < out.placement.size(); ++i) {
         out.placement[i] = params.placement[i];
     }
@@ -5285,13 +5362,17 @@ bool applyBakeParams(const CyberBakeParams* params, cyber::bake::BakeParams& out
     if (params == nullptr) {
         return true;  // the engine defaults `out` already holds
     }
-    out.width = params->width;
-    out.height = params->height;
-    out.cageDistance = params->cageDistance;
-    out.aoSamples = params->aoSamples;
-    out.aoRadius = params->aoRadius;
-    out.curvatureRange = params->curvatureRange;
-    return applyBakeEncodingParams(*params, out, map, who);
+    if (sizedFloorCheck(params->structSize, kBakeParamsFloor, who, "CyberBakeParams") != CYBER_OK) {
+        return false;
+    }
+    const CyberBakeParams sized = readSized(*params, bakeParamsDefaults());
+    out.width = sized.width;
+    out.height = sized.height;
+    out.cageDistance = sized.cageDistance;
+    out.aoSamples = sized.aoSamples;
+    out.aoRadius = sized.aoRadius;
+    out.curvatureRange = sized.curvatureRange;
+    return applyBakeEncodingParams(sized, out, map, who);
 }
 
 bool bakePixelBudgetExceeded(const cyber::bake::BakeParams& params) {
@@ -5303,28 +5384,18 @@ bool bakePixelBudgetExceeded(const cyber::bake::BakeParams& params) {
     return width > params.maxPixels / height;
 }
 
-void cyber_default_bake_params(CyberBakeParams* params) {
+CyberStatus cyber_default_bake_params(CyberBakeParams* params) {
     if (params == nullptr) {
-        return;
+        setError("cyber_default_bake_params: null argument");
+        return CYBER_ERR_INVALID_ARG;
     }
-    const cyber::bake::BakeParams d;
-    params->width = d.width;
-    params->height = d.height;
-    params->cageDistance = d.cageDistance;
-    params->aoSamples = d.aoSamples;
-    params->aoRadius = d.aoRadius;
-    params->curvatureRange = d.curvatureRange;
-    params->upAxis = d.upAxis == cyber::bake::UpAxis::ZUp ? CYBER_UP_AXIS_Z : CYBER_UP_AXIS_Y;
-    params->bentNormalSpace = d.bentNormalSpace == cyber::bake::NormalSpace::Object
-                                  ? CYBER_BENT_NORMAL_OBJECT
-                                  : CYBER_BENT_NORMAL_TANGENT;
-    params->thicknessScale = d.thicknessScale;
-    params->paddingRadius = d.paddingRadius;
-    copyPlacement(d.placement, params->placement);
-    params->densityNormalization =
-        d.densityNormalization == cyber::bake::DensityNormalization::Relative
-            ? CYBER_DENSITY_RELATIVE
-            : CYBER_DENSITY_ABSOLUTE;
+    const CyberStatus sized = sizedFloorCheck(params->structSize, kBakeParamsFloor,
+                                              "cyber_default_bake_params", "CyberBakeParams");
+    if (sized != CYBER_OK) {
+        return sized;
+    }
+    writeSized(params, bakeParamsDefaults());
+    return CYBER_OK;
 }
 
 CyberStatus cyber_bake(const CyberMesh* low, const CyberMesh* high, CyberBakeMap map,
@@ -5479,8 +5550,7 @@ CyberStatus cyber_bake_udim(const CyberMesh* low, const CyberMesh* high, CyberBa
         // is the engine that knows the tile count, and it is the engine that
         // says WHICH of the two ceilings a request tripped.
         p.maxPixels = static_cast<std::size_t>(cyber_max_bake_pixels());
-        cyber::bake::UdimBakeResult result =
-            cyber::bake::bakeUdim(low->mesh, high->mesh, m, p);
+        cyber::bake::UdimBakeResult result = cyber::bake::bakeUdim(low->mesh, high->mesh, m, p);
         if (result.cancelled) {
             setError("cyber_bake_udim: cancelled");
             return CYBER_ERR_CANCELLED;
@@ -6651,39 +6721,55 @@ CyberStatus cyber_export_preset_set_resolution(CyberExportPreset* preset, int re
 
 /* ---- export bundles --------------------------------------------------- */
 
-void cyber_default_bundle_params(CyberBundleParams* params) {
-    if (params == nullptr) {
-        return;
-    }
-    params->meshPath = nullptr;
-    params->basename = nullptr;
+// Every member of CyberBundleParams at its engine default (meshPath and
+// basename NULL): the base a sized read overlays the caller's bytes on.
+CyberBundleParams bundleParamsDefaults() {
+    CyberBundleParams p{};
+    p.structSize = sizeof(CyberBundleParams);
+    p.meshPath = nullptr;
+    p.basename = nullptr;
 #ifdef CYBER_CAPI_WITH_EXPORTBUNDLE
     const cyber::exportbundle::BundleParams defaults;
-    params->cageDistance = defaults.cageDistance;
-    params->aoSamples = defaults.aoSamples;
-    params->aoRadius = defaults.aoRadius;
-    params->bentNormalSpace = defaults.bentNormalSpace == cyber::bake::NormalSpace::Object
-                                  ? CYBER_BENT_NORMAL_OBJECT
-                                  : CYBER_BENT_NORMAL_TANGENT;
-    params->thicknessScale = defaults.thicknessScale;
-    params->paddingRadius = defaults.paddingRadius;
-    copyPlacement(defaults.placement, params->placement);
-    params->densityNormalization =
+    p.cageDistance = defaults.cageDistance;
+    p.aoSamples = defaults.aoSamples;
+    p.aoRadius = defaults.aoRadius;
+    p.bentNormalSpace = defaults.bentNormalSpace == cyber::bake::NormalSpace::Object
+                            ? CYBER_BENT_NORMAL_OBJECT
+                            : CYBER_BENT_NORMAL_TANGENT;
+    p.thicknessScale = defaults.thicknessScale;
+    p.paddingRadius = defaults.paddingRadius;
+    copyPlacement(defaults.placement, p.placement);
+    p.densityNormalization =
         defaults.densityNormalization == cyber::bake::DensityNormalization::Relative
             ? CYBER_DENSITY_RELATIVE
             : CYBER_DENSITY_ABSOLUTE;
-    params->udim = defaults.udim ? 1 : 0;
+    p.udim = defaults.udim ? 1 : 0;
 #else
-    params->cageDistance = 0.1f;
-    params->aoSamples = 64;
-    params->aoRadius = 1.0f;
-    params->bentNormalSpace = CYBER_BENT_NORMAL_TANGENT;
-    params->thicknessScale = 2.0f;
-    params->paddingRadius = 8;
-    copyPlacement(cyber::bake::identityPlacement(), params->placement);
-    params->densityNormalization = CYBER_DENSITY_ABSOLUTE;
-    params->udim = 0;
+    p.cageDistance = 0.1f;
+    p.aoSamples = 64;
+    p.aoRadius = 1.0f;
+    p.bentNormalSpace = CYBER_BENT_NORMAL_TANGENT;
+    p.thicknessScale = 2.0f;
+    p.paddingRadius = 8;
+    copyPlacement(cyber::bake::identityPlacement(), p.placement);
+    p.densityNormalization = CYBER_DENSITY_ABSOLUTE;
+    p.udim = 0;
 #endif
+    return p;
+}
+
+CyberStatus cyber_default_bundle_params(CyberBundleParams* params) {
+    if (params == nullptr) {
+        setError("cyber_default_bundle_params: null argument");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    const CyberStatus sized = sizedFloorCheck(params->structSize, kBundleParamsFloor,
+                                              "cyber_default_bundle_params", "CyberBundleParams");
+    if (sized != CYBER_OK) {
+        return sized;
+    }
+    writeSized(params, bundleParamsDefaults());
+    return CYBER_OK;
 }
 
 CyberStatus cyber_export_bundle_write([[maybe_unused]] CyberMesh* low,
@@ -6712,48 +6798,54 @@ CyberStatus cyber_export_bundle_write([[maybe_unused]] CyberMesh* low,
             setError("cyber_export_bundle_write: null argument");
             return CYBER_ERR_INVALID_ARG;
         }
+        const CyberStatus floor = sizedFloorCheck(params->structSize, kBundleParamsFloor,
+                                                  "cyber_export_bundle_write", "CyberBundleParams");
+        if (floor != CYBER_OK) {
+            return floor;
+        }
+        const CyberBundleParams sized = readSized(*params, bundleParamsDefaults());
         cyber::exportbundle::BundleParams bundleParams;
         bundleParams.preset = preset->preset;
-        bundleParams.meshPath = std::filesystem::path(params->meshPath);
-        bundleParams.basename = params->basename != nullptr ? params->basename : "";
-        bundleParams.cageDistance = params->cageDistance;
-        bundleParams.aoSamples = params->aoSamples;
-        bundleParams.aoRadius = params->aoRadius;
+        bundleParams.meshPath = std::filesystem::path(sized.meshPath);
+        bundleParams.basename = sized.basename != nullptr ? sized.basename : "";
+        bundleParams.cageDistance = sized.cageDistance;
+        bundleParams.aoSamples = sized.aoSamples;
+        bundleParams.aoRadius = sized.aoRadius;
         // The bent-normal frame and the thickness scale take EXACTLY the
         // validation cyber_bake applies; a bundle is a batch of bakes, and a
         // parameter that is refused one map at a time cannot be waved through
         // because several maps were asked for at once.
-        if (params->bentNormalSpace != CYBER_BENT_NORMAL_TANGENT &&
-            params->bentNormalSpace != CYBER_BENT_NORMAL_OBJECT) {
+        if (sized.bentNormalSpace != CYBER_BENT_NORMAL_TANGENT &&
+            sized.bentNormalSpace != CYBER_BENT_NORMAL_OBJECT) {
             setError(
                 "cyber_export_bundle_write: bentNormalSpace must be "
                 "CYBER_BENT_NORMAL_TANGENT or CYBER_BENT_NORMAL_OBJECT");
             return CYBER_ERR_INVALID_ARG;
         }
-        if (!std::isfinite(params->thicknessScale) || params->thicknessScale < 0.0f) {
+        if (!std::isfinite(sized.thicknessScale) || sized.thicknessScale < 0.0f) {
             setError("cyber_export_bundle_write: thicknessScale must be finite and >= 0");
             return CYBER_ERR_INVALID_ARG;
         }
-        if (params->paddingRadius < 0) {
+        if (sized.paddingRadius < 0) {
             setError(
                 "cyber_export_bundle_write: paddingRadius must be >= 0 (0 disables "
                 "padding)");
             return CYBER_ERR_INVALID_ARG;
         }
-        if (params->densityNormalization != CYBER_DENSITY_ABSOLUTE &&
-            params->densityNormalization != CYBER_DENSITY_RELATIVE) {
+        if (sized.densityNormalization != CYBER_DENSITY_ABSOLUTE &&
+            sized.densityNormalization != CYBER_DENSITY_RELATIVE) {
             setError(
                 "cyber_export_bundle_write: densityNormalization must be "
                 "CYBER_DENSITY_ABSOLUTE or CYBER_DENSITY_RELATIVE");
             return CYBER_ERR_INVALID_ARG;
         }
         for (std::size_t i = 0; i < bundleParams.placement.size(); ++i) {
-            bundleParams.placement[i] = params->placement[i];
+            bundleParams.placement[i] = sized.placement[i];
         }
         // Only when this preset actually writes a map that reads a placement --
         // the same rule cyber_bake applies one map at a time, asked of the
         // engine rather than restated here. A preset with no such map must not
-        // be refused because of a field a 1.22-era caller never set.
+        // be refused because of a field a caller that zero-filled never set.
         if (cyber::exportbundle::presetReadsPlacement(bundleParams.preset) &&
             !cyber::bake::placementUsable(bundleParams.placement)) {
             setError(
@@ -6761,15 +6853,15 @@ CyberStatus cyber_export_bundle_write([[maybe_unused]] CyberMesh* low,
                 "upper-left 3x3 is invertible");
             return CYBER_ERR_INVALID_ARG;
         }
-        bundleParams.densityNormalization = params->densityNormalization == CYBER_DENSITY_RELATIVE
+        bundleParams.densityNormalization = sized.densityNormalization == CYBER_DENSITY_RELATIVE
                                                 ? cyber::bake::DensityNormalization::Relative
                                                 : cyber::bake::DensityNormalization::Absolute;
-        bundleParams.paddingRadius = params->paddingRadius;
-        bundleParams.bentNormalSpace = params->bentNormalSpace == CYBER_BENT_NORMAL_OBJECT
+        bundleParams.paddingRadius = sized.paddingRadius;
+        bundleParams.bentNormalSpace = sized.bentNormalSpace == CYBER_BENT_NORMAL_OBJECT
                                            ? cyber::bake::NormalSpace::Object
                                            : cyber::bake::NormalSpace::Tangent;
-        bundleParams.thicknessScale = params->thicknessScale;
-        bundleParams.udim = params->udim != 0;
+        bundleParams.thicknessScale = sized.thicknessScale;
+        bundleParams.udim = sized.udim != 0;
         // The host's texel ceiling, exactly as cyber_bake, cyber_bake_field and
         // cyber_bake_udim apply it. A bundle is a batch of bakes and a UDIM
         // bundle multiplies the exposure by the occupied-tile count, so the
@@ -6963,39 +7055,6 @@ constexpr std::size_t kProviderRequestFloor = sizeof(CyberBakeProviderRequest);
 constexpr std::size_t kProviderResultFloor =
     offsetof(CyberBakeProviderResult, idSource) + sizeof(const char*);
 
-CyberStatus providerFloorCheck(std::size_t stated, std::size_t minimum, const char* who,
-                               const char* what) {
-    if (stated >= minimum) {
-        return CYBER_OK;
-    }
-    setError(std::string(who) + ": " + what + " structSize is " + std::to_string(stated) +
-             ", below this build's minimum of " + std::to_string(minimum) +
-             " (set it to sizeof(the struct) as your header declares it)");
-    return CYBER_ERR_INVALID_ARG;
-}
-
-// Takes only the bytes the caller says its descriptor has and leaves the rest
-// zero, which is the documented default of every member of these descriptors.
-// A caller compiled against an older header therefore gets those defaults
-// instead of whatever its stack held past the end of its struct.
-template <typename Descriptor>
-Descriptor readProviderDescriptor(const Descriptor& src) {
-    Descriptor dst{};
-    std::memcpy(&dst, &src, std::min(src.structSize, sizeof(Descriptor)));
-    dst.structSize = src.structSize;
-    return dst;
-}
-
-// The inverse: writes at most as far as the caller said its descriptor reaches,
-// so a member appended in a later minor is simply not written for an older
-// caller and never lands past the end of its allocation.
-template <typename Descriptor>
-void writeProviderDescriptor(Descriptor* dst, Descriptor filled) {
-    const std::size_t stated = dst->structSize;
-    filled.structSize = stated;
-    std::memcpy(dst, &filled, std::min(stated, sizeof(Descriptor)));
-}
-
 CyberBakeProviderMap toProviderMap(const cyber::bake::MapInfo& info) {
     CyberBakeProviderMap out{};
     out.structSize = sizeof(CyberBakeProviderMap);
@@ -7115,9 +7174,8 @@ CyberBakeProviderResult providerGeometry(const ProviderPlan& plan) {
     // member after a sizing call would otherwise get the all-zero (singular)
     // matrix a value-initialised struct starts with. It is already known before
     // a ray is cast: it came in with the request.
-    copyPlacement(cyber::bake::mapReadsPlacement(plan.info->map)
-                      ? plan.params.placement
-                      : cyber::bake::identityPlacement(),
+    copyPlacement(cyber::bake::mapReadsPlacement(plan.info->map) ? plan.params.placement
+                                                                 : cyber::bake::identityPlacement(),
                   out.placement);
     return out;
 }
@@ -7196,7 +7254,7 @@ CyberStatus runProviderBake(const CyberBakeProviderRequest& req, const ProviderP
             req.idColors[i] = toCIdColor(baked.encoding.idColors[i]);
         }
     }
-    writeProviderDescriptor(out, result);
+    writeSized(out, result);
     clearError();
     return CYBER_OK;
 }
@@ -7211,7 +7269,7 @@ CyberStatus cyber_bake_provider_map_at(size_t index, CyberBakeProviderMap* out) 
         return CYBER_ERR_INVALID_ARG;
     }
     const CyberStatus sized =
-        providerFloorCheck(out->structSize, kProviderMapFloor, "cyber_bake_provider_map_at", "map");
+        sizedFloorCheck(out->structSize, kProviderMapFloor, "cyber_bake_provider_map_at", "map");
     if (sized != CYBER_OK) {
         return sized;
     }
@@ -7222,7 +7280,7 @@ CyberStatus cyber_bake_provider_map_at(size_t index, CyberBakeProviderMap* out) 
                  " maps");
         return CYBER_ERR_INVALID_ARG;
     }
-    writeProviderDescriptor(out, toProviderMap(catalog[index]));
+    writeSized(out, toProviderMap(catalog[index]));
     clearError();
     return CYBER_OK;
 }
@@ -7232,8 +7290,8 @@ CyberStatus cyber_bake_provider_find_map(const char* name, CyberBakeProviderMap*
         setError("cyber_bake_provider_find_map: null argument");
         return CYBER_ERR_INVALID_ARG;
     }
-    const CyberStatus sized = providerFloorCheck(out->structSize, kProviderMapFloor,
-                                                 "cyber_bake_provider_find_map", "map");
+    const CyberStatus sized =
+        sizedFloorCheck(out->structSize, kProviderMapFloor, "cyber_bake_provider_find_map", "map");
     if (sized != CYBER_OK) {
         return sized;
     }
@@ -7245,7 +7303,7 @@ CyberStatus cyber_bake_provider_find_map(const char* name, CyberBakeProviderMap*
                 "\" is not one of the maps this build produces: " + cyber::bake::mapCatalogNames());
             return CYBER_ERR_INVALID_ARG;
         }
-        writeProviderDescriptor(out, toProviderMap(*info));
+        writeSized(out, toProviderMap(*info));
         clearError();
         return CYBER_OK;
     });
@@ -7267,16 +7325,16 @@ CyberStatus cyber_bake_provider_bake(const CyberBakeProviderRequest* request,
         return CYBER_ERR_INVALID_ARG;
     }
     CyberStatus sized =
-        providerFloorCheck(request->structSize, kProviderRequestFloor, kWho, "request");
+        sizedFloorCheck(request->structSize, kProviderRequestFloor, kWho, "request");
     if (sized != CYBER_OK) {
         return sized;
     }
-    sized = providerFloorCheck(out->structSize, kProviderResultFloor, kWho, "result");
+    sized = sizedFloorCheck(out->structSize, kProviderResultFloor, kWho, "result");
     if (sized != CYBER_OK) {
         return sized;
     }
     return guarded(kWho, CYBER_ERR_RUNTIME, [&]() -> CyberStatus {
-        const CyberBakeProviderRequest req = readProviderDescriptor(*request);
+        const CyberBakeProviderRequest req = readSized(*request, CyberBakeProviderRequest{});
         ProviderPlan plan;
         const CyberStatus planned = providerPlan(req, plan, kWho);
         if (planned != CYBER_OK) {
@@ -7286,7 +7344,7 @@ CyberStatus cyber_bake_provider_bake(const CyberBakeProviderRequest* request,
         if (req.pixels == nullptr) {
             // The SIZING call: everything validated, nothing baked. The encoding
             // and padding records stay neutral because no bake produced them.
-            writeProviderDescriptor(out, result);
+            writeSized(out, result);
             clearError();
             return CYBER_OK;
         }

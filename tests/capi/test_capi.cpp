@@ -6,7 +6,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <cstdio>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -618,7 +620,8 @@ TEST_CASE("capi bakes one image per occupied UDIM tile") {
     REQUIRE(cyber_mesh_load_obj(objPath.string().c_str(), &high) == CYBER_OK);
 
     CyberBakeParams params{};
-    cyber_default_bake_params(&params);
+    params.structSize = sizeof params;
+    REQUIRE(cyber_default_bake_params(&params) == CYBER_OK);
     params.width = 16;
     params.height = 16;
 
@@ -661,7 +664,8 @@ TEST_CASE("capi names which texel ceiling a UDIM bake hit") {
     REQUIRE(cyber_mesh_load_obj(objPath.string().c_str(), &high) == CYBER_OK);
 
     CyberBakeParams params{};
-    cyber_default_bake_params(&params);
+    params.structSize = sizeof params;
+    REQUIRE(cyber_default_bake_params(&params) == CYBER_OK);
     params.width = 16;
     params.height = 16;
 
@@ -707,7 +711,8 @@ TEST_CASE("capi bakes a normal map onto a UV plane") {
     REQUIRE(cyber_mesh_load_obj(objPath.string().c_str(), &high) == CYBER_OK);
 
     CyberBakeParams params{};
-    cyber_default_bake_params(&params);
+    params.structSize = sizeof params;
+    REQUIRE(cyber_default_bake_params(&params) == CYBER_OK);
     params.width = 16;
     params.height = 16;
 
@@ -746,6 +751,96 @@ TEST_CASE("capi bakes a normal map onto a UV plane") {
     std::filesystem::remove(pngPath, ec);
 }
 
+TEST_CASE("capi parameter structs refuse an unset size and write nothing") {
+    // SIZED STRUCTS: a default call with no structSize must be LOUD, and must not
+    // guess -- the struct comes back exactly as it went in.
+    const std::size_t stated[] = {0, sizeof(CyberBakeParams) / 2};
+    for (const std::size_t size : stated) {
+        CAPTURE(size);
+        CyberBakeParams bake;
+        std::memset(&bake, 0xAB, sizeof bake);
+        bake.structSize = size;
+        const CyberBakeParams bakeBefore = bake;
+        CHECK(cyber_default_bake_params(&bake) == CYBER_ERR_INVALID_ARG);
+        CHECK(std::memcmp(&bake, &bakeBefore, sizeof bake) == 0);
+        const std::string message = cyber_last_error();
+        CHECK(message.find("structSize is " + std::to_string(size)) != std::string::npos);
+        CHECK(message.find("minimum") != std::string::npos);
+
+        CyberBundleParams bundle;
+        std::memset(&bundle, 0xAB, sizeof bundle);
+        bundle.structSize = size;
+        const CyberBundleParams bundleBefore = bundle;
+        CHECK(cyber_default_bundle_params(&bundle) == CYBER_ERR_INVALID_ARG);
+        CHECK(std::memcmp(&bundle, &bundleBefore, sizeof bundle) == 0);
+    }
+    CHECK(cyber_default_bake_params(nullptr) == CYBER_ERR_INVALID_ARG);
+    CHECK(cyber_default_bundle_params(nullptr) == CYBER_ERR_INVALID_ARG);
+}
+
+TEST_CASE("capi default params write no byte past the stated size") {
+    // The smallest size accepted is the end of the last 2.0 member, which sits
+    // below sizeof wherever the struct has trailing padding. Whatever lies
+    // between the two belongs to the caller and must come back untouched.
+    const std::size_t floor = offsetof(CyberBakeParams, densityNormalization) + sizeof(int);
+    CyberBakeParams params;
+    std::memset(&params, 0xEE, sizeof params);
+    params.structSize = floor;
+    REQUIRE(cyber_default_bake_params(&params) == CYBER_OK);
+    const auto* bytes = reinterpret_cast<const unsigned char*>(&params);
+    for (std::size_t i = floor; i < sizeof params; ++i) {
+        CAPTURE(i);
+        CHECK(bytes[i] == 0xEE);
+    }
+    CHECK(params.densityNormalization == CYBER_DENSITY_ABSOLUTE);  // the last member WAS written
+}
+
+TEST_CASE("capi serves a newer caller's larger parameter struct without touching its tail") {
+    // A caller compiled against a later 2.x header states a size LARGER than this
+    // build's layout. Its extra members are neither written by the default call
+    // nor read by the bake: this build only knows its own layout.
+    const std::filesystem::path objPath = writeUvPlaneObj();
+    CyberMesh* low = nullptr;
+    CyberMesh* high = nullptr;
+    REQUIRE(cyber_mesh_load_obj(objPath.string().c_str(), &low) == CYBER_OK);
+    REQUIRE(cyber_mesh_load_obj(objPath.string().c_str(), &high) == CYBER_OK);
+
+    struct NewerCaller {
+        CyberBakeParams params;
+        unsigned char futureMembers[64];
+    };
+    NewerCaller newer;
+    std::memset(&newer, 0xCD, sizeof newer);
+    newer.params.structSize = sizeof(NewerCaller);
+    REQUIRE(cyber_default_bake_params(&newer.params) == CYBER_OK);
+    CHECK(newer.params.structSize == sizeof(NewerCaller));  // left as the caller set it
+    for (const unsigned char byte : newer.futureMembers) {
+        CHECK(byte == 0xCD);
+    }
+    CHECK(newer.params.paddingRadius == 8);  // the known members did get their defaults
+
+    newer.params.width = 16;
+    newer.params.height = 16;
+    CyberImage* image = nullptr;
+    REQUIRE(cyber_bake(low, high, CYBER_BAKE_NORMAL, &newer.params, &image) == CYBER_OK);
+    CHECK(cyber_image_width(image) == 16);
+    cyber_image_free(image);
+
+    // And the floor holds on the bake path too, not only in the initialiser.
+    CyberBakeParams unsized = newer.params;
+    unsized.structSize = 0;
+    CyberImage* refused = nullptr;
+    CHECK(cyber_bake(low, high, CYBER_BAKE_NORMAL, &unsized, &refused) == CYBER_ERR_INVALID_ARG);
+    CHECK(refused == nullptr);
+    CHECK(std::string(cyber_last_error()).find("CyberBakeParams structSize is 0") !=
+          std::string::npos);
+
+    cyber_mesh_free(low);
+    cyber_mesh_free(high);
+    std::error_code ec;
+    std::filesystem::remove(objPath, ec);
+}
+
 TEST_CASE("capi exposes the object-space and ray-traced maps with their basis") {
     const std::filesystem::path objPath = writeUvPlaneObj();
     CyberMesh* low = nullptr;
@@ -754,7 +849,8 @@ TEST_CASE("capi exposes the object-space and ray-traced maps with their basis") 
     REQUIRE(cyber_mesh_load_obj(objPath.string().c_str(), &high) == CYBER_OK);
 
     CyberBakeParams params{};
-    cyber_default_bake_params(&params);
+    params.structSize = sizeof params;
+    REQUIRE(cyber_default_bake_params(&params) == CYBER_OK);
     params.width = 16;
     params.height = 16;
     CHECK(params.upAxis == CYBER_UP_AXIS_Y);
@@ -821,7 +917,8 @@ TEST_CASE("capi reports what the padding stage did, and honours a zero radius") 
     REQUIRE(cyber_mesh_load_obj(objPath.string().c_str(), &high) == CYBER_OK);
 
     CyberBakeParams params{};
-    cyber_default_bake_params(&params);
+    params.structSize = sizeof params;
+    REQUIRE(cyber_default_bake_params(&params) == CYBER_OK);
     CHECK(params.paddingRadius == 8);  // the documented default
     params.width = 16;
     params.height = 16;
@@ -862,7 +959,8 @@ TEST_CASE("capi produces the world-direction and uv-density maps with their meta
     REQUIRE(cyber_mesh_load_obj(objPath.string().c_str(), &high) == CYBER_OK);
 
     CyberBakeParams params{};
-    cyber_default_bake_params(&params);
+    params.structSize = sizeof params;
+    REQUIRE(cyber_default_bake_params(&params) == CYBER_OK);
     params.width = 16;
     params.height = 16;
     CHECK(params.densityNormalization == CYBER_DENSITY_ABSOLUTE);
@@ -961,7 +1059,8 @@ TEST_CASE("capi refuses a singular placement and an unknown density mode") {
     REQUIRE(cyber_mesh_load_obj(objPath.string().c_str(), &high) == CYBER_OK);
 
     CyberBakeParams params{};
-    cyber_default_bake_params(&params);
+    params.structSize = sizeof params;
+    REQUIRE(cyber_default_bake_params(&params) == CYBER_OK);
     params.width = 8;
     params.height = 8;
 
@@ -982,13 +1081,12 @@ TEST_CASE("capi refuses a singular placement and an unknown density mode") {
     CHECK(image == nullptr);
 
     // But ONLY for a map that reads the placement, which is the rule the engine
-    // itself applies and the reason a 1.23 library still serves a 1.22 caller.
-    // These 16 floats were APPENDED to CyberBakeParams: a host that zero-fills
-    // the struct and assigns the members it knows -- the documented way to write
-    // against 1.22 -- hands in an all-zero, and therefore singular, matrix. If
-    // that refused every bake, every map that predates the placement would stop
-    // working on upgrade.
+    // itself applies. A host that zero-fills the struct and assigns the members
+    // it knows, instead of calling cyber_default_bake_params, hands in an
+    // all-zero -- and therefore singular -- matrix. If that refused every bake,
+    // every map that never reads a placement would fail for a field it ignores.
     CyberBakeParams zeroed{};
+    zeroed.structSize = sizeof zeroed;
     zeroed.width = 8;
     zeroed.height = 8;
     zeroed.cageDistance = params.cageDistance;
@@ -1058,7 +1156,8 @@ TEST_CASE("capi exposes the id maps and the table that resolves their colours") 
     REQUIRE(cyber_mesh_from_indexed(&source, &high) == CYBER_OK);
 
     CyberBakeParams params{};
-    cyber_default_bake_params(&params);
+    params.structSize = sizeof params;
+    REQUIRE(cyber_default_bake_params(&params) == CYBER_OK);
     params.width = 16;
     params.height = 16;
 
@@ -1141,7 +1240,8 @@ TEST_CASE("capi refuses an out-of-range encoding parameter instead of defaulting
 
     const auto refused = [&](void (*mutate)(CyberBakeParams&), const char* fragment) {
         CyberBakeParams params{};
-        cyber_default_bake_params(&params);
+        params.structSize = sizeof params;
+        REQUIRE(cyber_default_bake_params(&params) == CYBER_OK);
         params.width = 8;
         params.height = 8;
         mutate(params);
@@ -2381,7 +2481,8 @@ TEST_CASE("capi bakes through a C field evaluator") {
     REQUIRE(cyber_mesh_load_obj(objPath.string().c_str(), &low) == CYBER_OK);
 
     CyberBakeParams params{};
-    cyber_default_bake_params(&params);
+    params.structSize = sizeof params;
+    REQUIRE(cyber_default_bake_params(&params) == CYBER_OK);
     params.width = 16;
     params.height = 16;
 
@@ -2442,7 +2543,8 @@ TEST_CASE("capi rejects a field whose gradient callback writes nothing") {
     REQUIRE(cyber_mesh_load_obj(objPath.string().c_str(), &low) == CYBER_OK);
 
     CyberBakeParams params{};
-    cyber_default_bake_params(&params);
+    params.structSize = sizeof params;
+    REQUIRE(cyber_default_bake_params(&params) == CYBER_OK);
     params.width = 8;
     params.height = 8;
 
@@ -2709,7 +2811,8 @@ TEST_CASE("capi writes an export bundle for a mesh pair") {
     REQUIRE(cyber_export_preset_set_resolution(preset, 16) == CYBER_OK);
 
     CyberBundleParams params{};
-    cyber_default_bundle_params(&params);
+    params.structSize = sizeof params;
+    REQUIRE(cyber_default_bundle_params(&params) == CYBER_OK);
     CHECK(params.aoSamples > 0);
     const std::string meshOut = (outDir / "plane.obj").string();
     params.meshPath = meshOut.c_str();
@@ -2813,7 +2916,8 @@ TEST_CASE("capi export bundle unwraps a low-poly that carries no UVs") {
     REQUIRE(cyber_export_preset_set_resolution(preset, 16) == CYBER_OK);
 
     CyberBundleParams params{};
-    cyber_default_bundle_params(&params);
+    params.structSize = sizeof params;
+    REQUIRE(cyber_default_bundle_params(&params) == CYBER_OK);
     const std::string meshOut = (outDir / "plane.ply").string();
     params.meshPath = meshOut.c_str();
     params.basename = "custom";
@@ -2898,7 +3002,8 @@ TEST_CASE("capi reports the bundle's id table beside every id map it wrote") {
     REQUIRE(cyber_export_preset_set_resolution(preset, 16) == CYBER_OK);
 
     CyberBundleParams params{};
-    cyber_default_bundle_params(&params);
+    params.structSize = sizeof params;
+    REQUIRE(cyber_default_bundle_params(&params) == CYBER_OK);
     const std::string meshOut = (outDir / "plane.obj").string();
     params.meshPath = meshOut.c_str();
     params.aoSamples = 4;
@@ -2941,7 +3046,8 @@ TEST_CASE("capi reports the bundle's id table beside every id map it wrote") {
     CHECK(sawRefusal);
 
     CyberBakeParams bakeParams{};
-    cyber_default_bake_params(&bakeParams);
+    bakeParams.structSize = sizeof bakeParams;
+    REQUIRE(cyber_default_bake_params(&bakeParams) == CYBER_OK);
     bakeParams.width = 16;
     bakeParams.height = 16;
     bakeParams.cageDistance = 0.2f;

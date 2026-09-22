@@ -67,9 +67,12 @@ typedef enum CyberStatus {
  *
  * COMPATIBILITY RULE: a library serves a client when the MAJORS are equal and
  * the library's MINOR is >= the client's. Minor releases are additive only, so
- * everything a 1.x client compiled against is still present in 1.y (y > x).
- * The reverse does not hold: a 1.2 client asking a 1.0 library for a 1.2 entry
- * point is refused, because the entry point genuinely is not there.
+ * everything an N.x client compiled against is still present in N.y (y > x).
+ * The reverse does not hold: an N.2 client asking an N.0 library for an N.2
+ * entry point is refused, because the entry point genuinely is not there. A
+ * client of a DIFFERENT major is refused outright, and the shared library's
+ * soname carries the major, so a binary linked against libcyber_capi.so.1 does
+ * not load libcyber_capi.so.2 at all.
  *
  * MAJOR (breaking) covers: any change to a struct's size or field order --
  * appending included, because in-params travel as arrays the caller strides by
@@ -89,19 +92,34 @@ typedef enum CyberStatus {
  * from the other direction. New states arrive as new int-valued fields or new
  * entry points instead.
  *
- * ONE DOCUMENTED EXCEPTION to "appending to a struct is MAJOR": the three
- * bake-provider descriptors near the end of this header carry their own size as
- * their first member, and are passed one at a time by pointer and never as an
- * array. Nothing strides them by sizeof, so the library can read and write only
- * what the caller's stated size covers, and appending to THOSE three is
- * additive. The reasoning is spelled out above them, under DESCRIPTOR SIZES.
- * Do not extend the exception to another struct without extending that
- * reasoning to it too.
+ * SIZED STRUCTS are the exception to "appending to a struct is MAJOR". A struct
+ * whose FIRST member is `size_t structSize` is passed one at a time by pointer
+ * and never as an array, so nothing strides it by sizeof, and the library reads
+ * an input member -- and writes an output member -- only where the caller's
+ * stated size covers it. Appending to a sized struct is therefore ADDITIVE. The
+ * sized structs are CyberBakeParams, CyberBundleParams and the three
+ * bake-provider descriptors (CyberBakeProviderMap, CyberBakeProviderRequest,
+ * CyberBakeProviderResult). For each:
+ *   - set structSize = sizeof(the struct) as YOUR header declares it, before any
+ *     call that reads or fills it;
+ *   - a member your size does not cover takes its documented default (the
+ *     engine default for the two parameter structs, zero for the descriptors);
+ *   - a size below the layout the struct was introduced with (ABI 2.0 for the
+ *     parameter structs, 1.22 for the descriptors) is CYBER_ERR_INVALID_ARG,
+ *     naming both sizes. That floor never moves;
+ *   - a size ABOVE this build's layout -- a caller compiled against a later
+ *     minor -- is served: the library reads what it knows and ignores the rest.
+ * Do not give another struct a structSize unless it, too, is never an array.
+ *
+ * ABI 2.0 exists because CyberBakeParams and CyberBundleParams grew by
+ * appending during the 1.x series without being sized. A host compiled against
+ * a shorter layout then had the library write past the end of its struct while
+ * cyber_abi_check told it the pairing was fine. They are sized from 2.0 on.
  *
  * Do not compare these numbers by hand: cyber_abi_check() applies the rule
  * above in one place, so every binding gets the same answer. */
-#define CYBER_ABI_VERSION_MAJOR 1
-#define CYBER_ABI_VERSION_MINOR 24
+#define CYBER_ABI_VERSION_MAJOR 2
+#define CYBER_ABI_VERSION_MINOR 0
 
 /* The ABI this build implements. Cannot fail; either pointer may be NULL. */
 void cyber_abi_version(int* major, int* minor);
@@ -2506,10 +2524,7 @@ typedef enum CyberDensityNormalization {
  * this engine's own convention (and glTF's); CYBER_UP_AXIS_Z re-expresses a
  * vector as (x, -z, y), which is what a z-up DCC reads. Tangent space has no up
  * axis, so it is ignored there. */
-typedef enum CyberUpAxis {
-    CYBER_UP_AXIS_Y = 0,
-    CYBER_UP_AXIS_Z = 1
-} CyberUpAxis;
+typedef enum CyberUpAxis { CYBER_UP_AXIS_Y = 0, CYBER_UP_AXIS_Z = 1 } CyberUpAxis;
 
 /* Frame CYBER_BAKE_BENT_NORMAL is expressed in. Tangent matches
  * CYBER_BAKE_NORMAL, so both drop into the same shader slot; object gives a
@@ -2519,19 +2534,20 @@ typedef enum CyberBentNormalSpace {
     CYBER_BENT_NORMAL_OBJECT = 1
 } CyberBentNormalSpace;
 
+/* A SIZED STRUCT (see the ABI block at the top): set structSize to
+ * sizeof(CyberBakeParams), then call cyber_default_bake_params, then change the
+ * members you care about. Every member below documents its default. */
 typedef struct CyberBakeParams {
-    int width; /* output resolution */
+    size_t structSize; /* set to sizeof(CyberBakeParams) before any call */
+    int width;         /* output resolution */
     int height;
     float cageDistance; /* rays start at surface + normal*cageDistance, cast inward 2x */
     int aoSamples;      /* hemisphere rays per texel for AO */
     float aoRadius;     /* an AO ray hit beyond this does not occlude */
     /* Curvature magnitude (1/length) saturating CURVATURE/CAVITY to full
-     * white/black. 0 = auto (95th percentile of |curvature| on the Target).
-     * Appended in 0.6.0 — always initialise via cyber_default_bake_params. */
+     * white/black. 0 = auto (95th percentile of |curvature| on the Target). */
     float curvatureRange;
-    /* Appended in 0.8.0 — always initialise via cyber_default_bake_params.
-     *
-     * upAxis: a CyberUpAxis. Default CYBER_UP_AXIS_Y. Read by OBJECT_NORMAL,
+    /* upAxis: a CyberUpAxis. Default CYBER_UP_AXIS_Y. Read by OBJECT_NORMAL,
      *   OBJECT_POSITION and BENT_NORMAL in object space; anything else is
      *   CYBER_ERR_INVALID_ARG.
      * bentNormalSpace: a CyberBentNormalSpace. Default
@@ -2542,17 +2558,13 @@ typedef struct CyberBakeParams {
     int upAxis;
     int bentNormalSpace;
     float thicknessScale;
-    /* Appended in 0.9.0 — always initialise via cyber_default_bake_params.
-     *
-     * paddingRadius: width in TEXELS of the band grown outward from every UV
+    /* paddingRadius: width in TEXELS of the band grown outward from every UV
      *   island before the map is returned, so a bilinear tap, a mip level or a
      *   compression block at the border reads baked values instead of the
      *   background. Default 8 (three mip levels, two 4x4 blocks). 0 disables
      *   padding; NEGATIVE is CYBER_ERR_INVALID_ARG. Read by every map. */
     int paddingRadius;
-    /* Appended in 0.9.0 — always initialise via cyber_default_bake_params.
-     *
-     * placement: the affine object->world matrix a host has applied to put the
+    /* placement: the affine object->world matrix a host has applied to put the
      *   asset in its scene, 4x4 ROW-MAJOR (m[row * 4 + column]). Default the
      *   IDENTITY. Read ONLY by CYBER_BAKE_WORLD_DIRECTION, which carries its
      *   normals by the INVERSE TRANSPOSE of the upper-left 3x3 -- a plain
@@ -2561,10 +2573,9 @@ typedef struct CyberBakeParams {
      *   linear part invertible; anything else is CYBER_ERR_INVALID_ARG rather
      *   than a substituted identity -- but ONLY for a map that reads a
      *   placement, so a bake of any other map is unaffected by whatever is
-     *   here. That matters because these 16 floats were APPENDED in ABI 1.23: a
-     *   caller that zero-fills this struct and assigns the members it knows
-     *   supplies an all-zero (singular) matrix, and checking it unconditionally
-     *   would break every map that predates the placement. The translation is
+     *   here: a caller that zero-fills this struct instead of calling
+     *   cyber_default_bake_params supplies an all-zero (singular) matrix, and
+     *   that must not break the maps that never read it. The translation is
      *   accepted and recorded but read by no map today: a direction is
      *   unaffected by it.
      * densityNormalization: a CyberDensityNormalization. Default
@@ -2578,11 +2589,11 @@ typedef struct CyberBakeParams {
  * picture of some numbers: an object-space position cannot be turned back into
  * a coordinate without the box it was rescaled over. */
 typedef enum CyberEncodingBasis {
-    CYBER_ENCODING_NONE = 0,          /* raw values (AO, color, curvature, cavity) */
-    CYBER_ENCODING_TANGENT_NORMAL,    /* direction in the texel's tangent frame, v*0.5+0.5 */
-    CYBER_ENCODING_OBJECT_NORMAL,     /* direction in object space (upAxis), v*0.5+0.5 */
-    CYBER_ENCODING_OBJECT_BOUNDS,     /* position rescaled over [boundsMin, boundsMax] */
-    CYBER_ENCODING_DISTANCE,          /* a length in model units, multiplied by `scale` */
+    CYBER_ENCODING_NONE = 0,       /* raw values (AO, color, curvature, cavity) */
+    CYBER_ENCODING_TANGENT_NORMAL, /* direction in the texel's tangent frame, v*0.5+0.5 */
+    CYBER_ENCODING_OBJECT_NORMAL,  /* direction in object space (upAxis), v*0.5+0.5 */
+    CYBER_ENCODING_OBJECT_BOUNDS,  /* position rescaled over [boundsMin, boundsMax] */
+    CYBER_ENCODING_DISTANCE,       /* a length in model units, multiplied by `scale` */
     /* An EXACT key, not a measurement: every covered texel holds one of the
      * colours cyber_image_id_color reports, verbatim. Never filter, resample
      * or colour-convert such a map; compare it at zero tolerance. */
@@ -2617,10 +2628,10 @@ typedef struct CyberImageEncoding {
  * after extrapolation, an id map is copied verbatim and never interpolated,
  * anything else is extrapolated as-is. */
 typedef enum CyberPaddingMode {
-    CYBER_PADDING_NONE = 0,  /* radius 0, or no covered texel to pad from */
-    CYBER_PADDING_NEAREST,   /* the nearest covered texel, copied VERBATIM */
-    CYBER_PADDING_EXTRAPOLATE,      /* the gradient off the island, continued */
-    CYBER_PADDING_EXTRAPOLATE_UNIT  /* continued, then renormalized to unit length */
+    CYBER_PADDING_NONE = 0,        /* radius 0, or no covered texel to pad from */
+    CYBER_PADDING_NEAREST,         /* the nearest covered texel, copied VERBATIM */
+    CYBER_PADDING_EXTRAPOLATE,     /* the gradient off the island, continued */
+    CYBER_PADDING_EXTRAPOLATE_UNIT /* continued, then renormalized to unit length */
 } CyberPaddingMode;
 
 /* What the padding stage did, reported with every map. A consumer of an id map
@@ -2647,8 +2658,11 @@ typedef struct CyberImageDensity {
     float mean;        /* texels per square model unit; 0 when nothing was defined */
 } CyberImageDensity;
 
-/* Fills params with the engine defaults. No-op on NULL. */
-void cyber_default_bake_params(CyberBakeParams* params);
+/* Fills params with the engine defaults, writing only as far as
+ * params->structSize reaches and leaving structSize as you set it. Set
+ * structSize first: NULL, or a size below the ABI 2.0 layout, is
+ * CYBER_ERR_INVALID_ARG naming both sizes, and the struct is left untouched. */
+CyberStatus cyber_default_bake_params(CyberBakeParams* params);
 
 /* Opaque baked image: row-major float pixels, `channels` per texel. Release
  * with cyber_image_free. */
@@ -2686,12 +2700,12 @@ CyberStatus cyber_udim_tiles(const CyberMesh* mesh, int* out_tiles, size_t capac
  * both would tell a host neither. */
 typedef enum CyberUdimRefusal {
     CYBER_UDIM_OK = 0,
-    CYBER_UDIM_PARAMETERS,          /* the rejection cyber_bake makes: no UVs, a
-                                     * parameter out of range, no Target */
-    CYBER_UDIM_NO_OCCUPIED_TILES,   /* the layout addresses no tile at all */
-    CYBER_UDIM_PER_TILE_CEILING,    /* width * height alone is over the ceiling */
-    CYBER_UDIM_AGGREGATE_CEILING,   /* one tile fits; this many do not */
-    CYBER_UDIM_FIELD_CONTRACT       /* a field evaluator broke its contract */
+    CYBER_UDIM_PARAMETERS,        /* the rejection cyber_bake makes: no UVs, a
+                                   * parameter out of range, no Target */
+    CYBER_UDIM_NO_OCCUPIED_TILES, /* the layout addresses no tile at all */
+    CYBER_UDIM_PER_TILE_CEILING,  /* width * height alone is over the ceiling */
+    CYBER_UDIM_AGGREGATE_CEILING, /* one tile fits; this many do not */
+    CYBER_UDIM_FIELD_CONTRACT     /* a field evaluator broke its contract */
 } CyberUdimRefusal;
 
 /* A whole UDIM bake: one image per occupied tile, in ascending tile order.
@@ -3055,8 +3069,9 @@ typedef struct CyberFieldEvaluator {
  * answer; every other map still needs the Target and returns
  * CYBER_ERR_INVALID_ARG with a NULL one.
  *
- * A separate entry point rather than a field on CyberBakeParams, deliberately:
- * growing that struct would break every caller that allocates it. */
+ * A separate entry point rather than a field on CyberBakeParams: the evaluator
+ * is a set of callbacks the host owns for the duration of the call, not a
+ * parameter value, and a NULL field keeps cyber_bake's behaviour exactly. */
 CyberStatus cyber_bake_field(const CyberMesh* low, const CyberMesh* high, CyberBakeMap map,
                              const CyberBakeParams* params, const CyberFieldEvaluator* field,
                              CyberImage** out);
@@ -3167,7 +3182,10 @@ CyberStatus cyber_export_preset_set_resolution(CyberExportPreset* preset, int re
 
 /* ---- export bundles --------------------------------------------------- */
 
+/* A SIZED STRUCT (see the ABI block at the top): set structSize to
+ * sizeof(CyberBundleParams), then call cyber_default_bundle_params. */
 typedef struct CyberBundleParams {
+    size_t structSize;    /* set to sizeof(CyberBundleParams) before any call */
     const char* meshPath; /* required; its extension wins over the preset's
                            * (an explicit output path is the user speaking
                            * last) and a mismatch comes back as a warning */
@@ -3176,29 +3194,26 @@ typedef struct CyberBundleParams {
     float cageDistance;   /* projection cage for every bake, in model units */
     int aoSamples;
     float aoRadius;
-    /* Appended in 0.8.0 — always initialise via cyber_default_bundle_params.
-     * A CyberBentNormalSpace and the THICKNESS scale, with the same defaults
+    /* A CyberBentNormalSpace and the THICKNESS scale, with the same defaults
      * and the same validation cyber_bake applies. The UP AXIS is not here: a
      * preset already declares the axis its target app expects
      * (CyberExportPresetInfo::upAxis), and that is what the bundle bakes in. */
     int bentNormalSpace;
     float thicknessScale;
-    /* Appended in 0.9.0 — always initialise via cyber_default_bundle_params.
-     * The border-padding radius in texels applied to every map the bundle
+    /* The border-padding radius in texels applied to every map the bundle
      * bakes, with the same default and the same validation cyber_bake
      * applies. */
     int paddingRadius;
-    /* Appended in 0.9.0 (ABI 1.23) — always initialise via
-     * cyber_default_bundle_params. The object->world PLACEMENT the bundle's
+    /* The object->world PLACEMENT the bundle's
      * world-direction map is baked with and the NORMALIZATION its UV density
      * map uses, with the same defaults and the same validation cyber_bake
      * applies -- the placement checked only when the preset writes a map that
-     * reads one, which is the same rule cyber_bake applies one map at a time. Neither is a preset's business: a placement describes where the
-     * asset sits in a scene, not what a target app expects. */
+     * reads one, which is the same rule cyber_bake applies one map at a time. Neither is a preset's
+     * business: a placement describes where the asset sits in a scene, not what a target app
+     * expects. */
     float placement[16];
     int densityNormalization;
-    /* Appended in 0.9.0 (ABI 1.24) -- always initialise via
-     * cyber_default_bundle_params. Non-zero bakes ONE FILE PER OCCUPIED UDIM
+    /* Non-zero bakes ONE FILE PER OCCUPIED UDIM
      * TILE of the low-poly's UV layout instead of one file per map, with the
      * tile number reaching the preset's `{udim}` naming token. Zero (the
      * default) writes the unit square, which IS tile 1001, so the two agree
@@ -3211,9 +3226,11 @@ typedef struct CyberBundleParams {
     int udim;
 } CyberBundleParams;
 
-/* Fills params with the engine defaults (meshPath and basename left NULL).
- * No-op on NULL. */
-void cyber_default_bundle_params(CyberBundleParams* params);
+/* Fills params with the engine defaults (meshPath and basename left NULL),
+ * under the same structSize rule as cyber_default_bake_params: set it first;
+ * NULL or a size below the ABI 2.0 layout is CYBER_ERR_INVALID_ARG and the
+ * struct is left untouched. */
+CyberStatus cyber_default_bundle_params(CyberBundleParams* params);
 
 /* What a bundle wrote. Opaque; release with cyber_bundle_result_free. */
 typedef struct CyberBundleResult CyberBundleResult;
@@ -3314,17 +3331,12 @@ float cyber_bundle_result_max_angle_distortion(const CyberBundleResult* result);
  * and would wrap a cooperative cancel in an asynchronous one without making it
  * any faster.
  *
- * DESCRIPTOR SIZES -- read this before adding a member. The three structs
- * below carry `structSize` as their FIRST member, and the library reads an
- * input member (and writes an output member) only when the caller's stated size
- * covers it. That makes APPENDING TO THESE THREE STRUCTS ADDITIVE, which is the
- * opposite of the rule stated at the top of this header for every other struct
- * here. What makes it safe is that they are passed ONE AT A TIME BY POINTER and
- * NEVER AS AN ARRAY, so nothing strides them by sizeof. Do not put one of these
- * in an array, and do not give any other struct in this header a structSize
- * unless the same is true of it. A stated size below the size of the layout
- * published in ABI 1.22 is refused, naming both numbers -- that floor does NOT
- * move when a member is appended later, which is the whole point of it. */
+ * DESCRIPTOR SIZES -- read this before adding a member. The three descriptors
+ * below are SIZED STRUCTS under the rule in the ABI block at the top of this
+ * header: set structSize first, appending to them is additive, never put one in
+ * an array. Their floor is the layout published in ABI 1.22, and a member your
+ * stated size does not cover reads as ZERO, which is the documented default of
+ * every descriptor member. */
 
 /* Revision of the provider CONTRACT -- the meaning of the descriptors and the
  * rules above -- as distinct from CYBER_ABI_VERSION_MINOR, which moves whenever
@@ -3377,7 +3389,8 @@ const char* cyber_bake_provider_map_list(int field_only);
  * `structSize` is the compatibility mechanism and a memset to 0 plus the two
  * meshes, the map and the buffers is a complete request.
  *
- * `params` MAY be NULL, which means cyber_default_bake_params. Every parameter
+ * `params` MAY be NULL, which means cyber_default_bake_params; otherwise it is
+ * read under its own structSize, exactly as cyber_bake reads it. Every parameter
  * cyber_bake validates is validated here, and the host's texel ceiling
  * (cyber_set_max_bake_pixels) applies the same way. The STATUS CODES are not
  * promised to be identical: this entry point is stricter in one place, and

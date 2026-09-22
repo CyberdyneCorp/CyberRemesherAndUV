@@ -114,7 +114,7 @@ def gate_the_soname_tracks_the_abi_major():
 
 
 def gate_the_minor_bump_serves_the_previous_minor():
-    """Every earlier 1.x minor is still served by the minor we ship today.
+    """Every earlier minor of this major is served; the previous major is not.
 
     That is the additive-only rule exercised on itself rather than asserted: a
     host compiled against any earlier minor -- before the entry points that
@@ -127,14 +127,25 @@ def gate_the_minor_bump_serves_the_previous_minor():
     stops meaning what it says.
     """
     major, minor = _header_abi()
-    assert major == 1, major
-    assert minor >= 1, "an additive-minor gate needs at least one earlier minor to check"
     for older in range(minor):
-        cyberremesh.check_abi(1, older)  # every earlier minor, still served
+        cyberremesh.check_abi(major, older)  # every earlier minor, still served
     print(
-        "PASS: ABI 1.%d still serves clients compiled against every earlier 1.x minor"
-        % minor
+        "PASS: ABI %d.%d serves clients compiled against every earlier %d.x minor"
+        % (major, minor, major)
     )
+
+    # The other half of the rule, and the only half there is to exercise at N.0:
+    # a client of the PREVIOUS major is refused, never served. 1.x clients are
+    # the reason 2.0 exists -- their bake and bundle structs are shorter than
+    # this library's, and serving them wrote past the end of their memory.
+    if major > 1:
+        try:
+            cyberremesh.check_abi(major - 1, 99)
+        except cyberremesh.CyberError as refused:
+            assert refused.status == _ffi.STATUS_INCOMPATIBLE_VERSION, refused.status
+        else:
+            raise AssertionError("a client of ABI %d.x was served by %d.%d" % (major - 1, major, minor))
+        print("PASS: ABI %d.%d refuses clients compiled against %d.x" % (major, minor, major - 1))
 
     limits = _ffi.CyberRemeshLimits()
     _ffi.get_lib().cyber_default_remesh_limits(ctypes.byref(limits))

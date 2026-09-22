@@ -512,9 +512,14 @@ class CyberIdColor(Structure):
 
 
 class CyberBakeParams(Structure):
-    """Mirror of ``CyberBakeParams`` in capi/include/cyber_capi.h."""
+    """Mirror of ``CyberBakeParams`` in capi/include/cyber_capi.h.
+
+    A SIZED STRUCT: ``struct_size`` must hold ``sizeof(CyberBakeParams)`` before
+    the library reads or fills it. The binding sets it; callers never see it.
+    """
 
     _fields_ = [
+        ("struct_size", c_size_t),
         ("width", c_int32),
         ("height", c_int32),
         ("cage_distance", c_float),
@@ -637,9 +642,10 @@ class CyberExportPresetMap(Structure):
 
 
 class CyberBundleParams(Structure):
-    """Mirror of ``CyberBundleParams``."""
+    """Mirror of ``CyberBundleParams``. A SIZED STRUCT, like ``CyberBakeParams``."""
 
     _fields_ = [
+        ("struct_size", c_size_t),
         ("mesh_path", c_char_p),
         ("basename", c_char_p),
         ("cage_distance", c_float),
@@ -783,7 +789,7 @@ class CyberBakeProviderResult(Structure):
 # to the unversioned developer symlink. It is NOT the project's major version --
 # it tracked that until 0.9.0, when every release was still 0.x and the soname
 # was therefore 0 for all of them.
-_SOVERSION = 1
+_SOVERSION = 2
 
 
 def _lib_filenames() -> List[str]:
@@ -1532,7 +1538,7 @@ def _declare(lib: ctypes.CDLL) -> None:
 
     # -- surface baking ------------------------------------------------------
     lib.cyber_default_bake_params.argtypes = [POINTER(CyberBakeParams)]
-    lib.cyber_default_bake_params.restype = None
+    lib.cyber_default_bake_params.restype = c_int32
     # CyberStatus cyber_bake(const CyberMesh* low, const CyberMesh* high,
     #                        CyberBakeMap map, const CyberBakeParams*, CyberImage** out)
     lib.cyber_bake.argtypes = [
@@ -2058,7 +2064,7 @@ def _declare_export_presets(lib: ctypes.CDLL) -> None:
     lib.cyber_export_preset_set_resolution.restype = c_int32
 
     lib.cyber_default_bundle_params.argtypes = [POINTER(CyberBundleParams)]
-    lib.cyber_default_bundle_params.restype = None
+    lib.cyber_default_bundle_params.restype = c_int32
     # CyberStatus cyber_export_bundle_write(low, high, preset, params,
     #                                       progress, cancel, user, out)
     lib.cyber_export_bundle_write.argtypes = [

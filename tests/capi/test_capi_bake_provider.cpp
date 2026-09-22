@@ -92,7 +92,8 @@ struct PlanePair {
 
 CyberBakeParams smallParams(int size = 8) {
     CyberBakeParams params{};
-    cyber_default_bake_params(&params);
+    params.structSize = sizeof params;
+    REQUIRE(cyber_default_bake_params(&params) == CYBER_OK);
     params.width = size;
     params.height = size;
     return params;

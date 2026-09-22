@@ -132,8 +132,8 @@ def version() -> str:
 
 #: The C ABI this binding was written against. Mirrors CYBER_ABI_VERSION_* in
 #: cyber_capi.h; ``check_abi()`` compares it against the loaded library.
-ABI_VERSION_MAJOR = 1
-ABI_VERSION_MINOR = 24
+ABI_VERSION_MAJOR = 2
+ABI_VERSION_MINOR = 0
 
 
 def abi_version() -> tuple:
@@ -3775,6 +3775,7 @@ class BakeParams:
 
     def _to_c(self) -> "_ffi.CyberBakeParams":
         return _ffi.CyberBakeParams(
+            struct_size=ctypes.sizeof(_ffi.CyberBakeParams),
             width=int(self.width),
             height=int(self.height),
             cage_distance=float(self.cage_distance),
@@ -4757,7 +4758,8 @@ def write_bundle(
     """
     lib = _ffi.get_lib()
     params = _ffi.CyberBundleParams()
-    lib.cyber_default_bundle_params(ctypes.byref(params))
+    params.struct_size = ctypes.sizeof(_ffi.CyberBundleParams)
+    _check(lib.cyber_default_bundle_params(ctypes.byref(params)))
     params.mesh_path = str(mesh_path).encode("utf-8")
     params.basename = basename.encode("utf-8") if basename else None
     if cage_distance is not None:

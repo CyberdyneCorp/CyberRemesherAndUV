@@ -10,7 +10,7 @@
 //! ```
 //!
 //! Cheap, and the failure it catches is otherwise silent: the engine's soname
-//! is `libcyber_capi.so.1` for every 1.x release, so a library from a different
+//! is `libcyber_capi.so.2` for every 2.x release, so a library from a different
 //! minor loads without complaint and fails later as behaviour.
 //!
 //! # Two rules that are not negotiable
@@ -36,7 +36,7 @@
 //! to the portable quadrangulator and returns genuinely different quads. The
 //! `require-quadcover` feature makes that a configure error, and [`solver`]
 //! answers at runtime. They catch different failures — the feature cannot see a
-//! *different* library being loaded, since the soname names every 1.x — so
+//! *different* library being loaded, since the soname names every 2.x — so
 //! neither alone is the guard.
 //!
 //! # Credit

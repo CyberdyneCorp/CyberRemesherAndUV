@@ -331,7 +331,8 @@ final class RetopologyWorkflowTests: XCTestCase {
         XCTAssertEqual(swiftAtlas.textureSize, atlas.textureSize)
 
         var bake = CyberBakeParams()
-        cyber_default_bake_params(&bake)
+        bake.structSize = MemoryLayout<CyberBakeParams>.size
+        XCTAssertEqual(cyber_default_bake_params(&bake), CYBER_OK)
         let swiftBake = BakeParameters()
         XCTAssertEqual(swiftBake.width, bake.width)
         XCTAssertEqual(swiftBake.cageDistance, bake.cageDistance)
