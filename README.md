@@ -1464,15 +1464,17 @@ wrong. The library never aborts, exits or logs on a mismatch, because it runs
 inside your process. Minor releases are additive only; the header states the
 full increment rules, including why appending an enumerator is *not* additive.
 `SOVERSION` carries the ABI major, so the soname changes when the surface breaks
-(`libcyber_capi.so.1`) rather than tracking the project's `0.x`.
+(`libcyber_capi.so.2` for ABI 2.x) rather than tracking the project's `0.x`.
 
 Every release and supported CTest toolchain compares
-[`capi/abi/cyber_capi-1.9.json`](capi/abi/cyber_capi-1.9.json) with a
+[`capi/abi/cyber_capi-2.0.json`](capi/abi/cyber_capi-2.0.json) with a
 compiler-measured manifest of this header. It records signatures, enum values,
-field types and padding—not merely `sizeof`—and compiles a retained v0.8 client
-surface against the current library. Extend the ABI with a new sibling entry
-point and a new parameter/report struct; never append fields to an existing
-caller-owned struct in an ABI minor.
+field types and padding—not merely `sizeof`. Extend the ABI with a new sibling
+entry point and a new parameter/report struct; never append fields to an
+existing caller-owned struct in an ABI minor — unless it is a **sized struct**
+(first member `size_t structSize`: `CyberBakeParams`, `CyberBundleParams` and the
+bake-provider descriptors), which the header's ABI block defines and which set
+`structSize = sizeof` before every call.
 
 Python: `cyberremesh.abi_version()` / `check_abi()`. Swift:
 `CyberRuntime.abiVersionComponents` / `CyberRuntime.checkABI()`.
