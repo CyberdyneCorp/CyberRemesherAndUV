@@ -303,6 +303,22 @@ TEST_CASE("hand-written one-triangle glTF imports (control for the malformed cas
     REQUIRE(result.value().mesh.vertexCount() == 3);
 }
 
+TEST_CASE("glTF primitive without indices imports as a sequential triangle list") {
+    // glTF 2.0: a primitive that omits "indices" draws its vertices in order.
+    // The index accessor stays declared in the document but nothing refers to
+    // it, so the importer must neither read it nor require it.
+    auto result = io::importMesh(writeGltf("triangle-unindexed.gltf", R"("indices": 1, )", ""));
+    REQUIRE(result.ok());
+    const Mesh& mesh = result.value().mesh;
+    REQUIRE(mesh.faceCount() == 1);
+    REQUIRE(mesh.vertexCount() == 3);
+    const std::vector<VertexId> corners = mesh.faceVertices(FaceId{0});
+    REQUIRE(corners.size() == 3);
+    CHECK(corners[0] == VertexId{0});
+    CHECK(corners[1] == VertexId{1});
+    CHECK(corners[2] == VertexId{2});
+}
+
 TEST_CASE("glTF with an out-of-range accessor index is a typed ParseError, not a crash") {
     // POSITION names accessor 99 against a two-accessor document.
     auto result =
