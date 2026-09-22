@@ -620,6 +620,20 @@
 - **ABI 1.17**, additive: two entry points and one report struct, nothing
   removed or reshaped, soname unchanged.
 
+### Fixed
+
+- **The nightly TSan lane had not compiled since 2026-09-13.** The glTF
+  face-budget preflight reads the index accessor's count through a
+  `std::optional`, and GCC 13 -- only under TSan, whose instrumentation changes
+  the inlining -- could not see that the read is guarded, reporting a
+  `-Wmaybe-uninitialized` that `-Werror` made fatal. Push CI stayed green, so
+  none of the mesh-map epic's threaded code (padding, UDIM, the provider's
+  progress callbacks) had run under TSan. Fixed without a suppression:
+  `AccessorReader` copies the two accessor fields it reads instead of holding a
+  reference into the model, and the index reader is assigned inside the branch
+  that checks it. The previously untested non-indexed path now has a test. The
+  lane builds and passes 4/4 with no races, 118 bake cases among them.
+
 ## [0.9.0] - 2026-09-15
 
 ### Added

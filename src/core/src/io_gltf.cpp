@@ -100,12 +100,12 @@ public:
                               static_cast<std::size_t>(components));
     }
 
-    [[nodiscard]] std::size_t count() const { return m_accessor.count; }
+    [[nodiscard]] std::size_t count() const { return m_count; }
     [[nodiscard]] std::size_t components() const { return m_components; }
 
     [[nodiscard]] float number(std::size_t i, std::size_t c) const {
         const unsigned char* p = m_data + i * m_stride;
-        switch (m_accessor.componentType) {
+        switch (m_componentType) {
             case TINYGLTF_COMPONENT_TYPE_FLOAT: {
                 float v;
                 std::memcpy(&v, p + c * 4, 4);
@@ -125,7 +125,7 @@ public:
 
     [[nodiscard]] std::uint32_t index(std::size_t i) const {
         const unsigned char* p = m_data + i * m_stride;
-        switch (m_accessor.componentType) {
+        switch (m_componentType) {
             case TINYGLTF_COMPONENT_TYPE_UNSIGNED_INT: {
                 std::uint32_t v;
                 std::memcpy(&v, p, 4);
@@ -146,12 +146,17 @@ public:
 private:
     AccessorReader(const tinygltf::Accessor& accessor, const unsigned char* data,
                    std::size_t stride, std::size_t components)
-        : m_accessor(accessor), m_data(data), m_stride(stride), m_components(components) {}
+        : m_count(accessor.count),
+          m_componentType(accessor.componentType),
+          m_data(data),
+          m_stride(stride),
+          m_components(components) {}
 
-    const tinygltf::Accessor& m_accessor;
-    const unsigned char* m_data;
-    std::size_t m_stride;
-    std::size_t m_components;
+    std::size_t m_count = 0;
+    int m_componentType = 0;
+    const unsigned char* m_data = nullptr;
+    std::size_t m_stride = 0;
+    std::size_t m_components = 0;
 };
 
 int findAttribute(const tinygltf::Primitive& prim, const char* name) {
@@ -199,10 +204,10 @@ Result<ImportedMesh> importGltf(const std::filesystem::path& path, const ImportO
             if (!positions) {
                 return invalidAccessor("POSITION", posAccessor);
             }
-            const std::optional<AccessorReader> indexReader =
-                prim.indices >= 0 ? AccessorReader::make(model, prim.indices, 1) : std::nullopt;
+            std::optional<AccessorReader> indexReader;
             std::size_t triangleCount = positions->count() / 3;
             if (prim.indices >= 0) {
+                indexReader = AccessorReader::make(model, prim.indices, 1);
                 if (!indexReader) {
                     return invalidAccessor("indices", prim.indices);
                 }
