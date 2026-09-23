@@ -598,6 +598,13 @@
   so neither binding's API changes; the Python loader looks for the `.2` soname.
   Pinned manifest: `capi/abi/cyber_capi-2.0.json`.
 
+  Swift's `CyberRuntime.abiVersionCompiledAgainst` now comes from the header's
+  version macros at compile time. It was a hand-kept `(1, 7)` that never moved
+  while the ABI went to 1.24 -- invisible because a 1.7 client is always served
+  by a 1.x library -- and 2.0 correctly refused it, which is how the iOS
+  consumer lane found it. A new Swift test fails on the first minor bump if the
+  two ever drift again.
+
 - **Every baked map's output now includes a padded band by default.** A host
   that relied on the background being untouched just outside an island sets
   `paddingRadius = 0` (`--padding 0`), which reproduces the previous output
