@@ -106,6 +106,10 @@ struct CliOptions {
     cyber::bake::PlacementMatrix placement = cyber::bake::identityPlacement();
     bool placementSet = false;
     std::string densityNormalization;
+    // Texels of output image a bake may hold in flight (--bake-working-set).
+    // 0 = no bound: every map baked whole. Signed so a typed negative reaches
+    // the range check instead of wrapping into a huge bound.
+    long long bakeWorkingSet = 0;
     remesh::Parameters params;
     std::string backend;  // empty = automatic best-first choice
     bool verbose = false;
@@ -212,6 +216,9 @@ void printUsage() {
                  "  --density <a|r>          uv-density normalization: absolute (default,\n"
                  "                           texels per square model unit) | relative (to\n"
                  "                           the map's own mean)\n"
+                 "  --bake-working-set <n>   texels of output a map bake may hold in\n"
+                 "                           flight; maps are baked in regions and\n"
+                 "                           streamed to disk (default 0: no bound)\n"
                  "  --list-presets           print built-in export presets and exit\n"
                  "  --list-bake-maps         print the bakeable map names, one per\n"
                  "                           line, and exit -- the same set the C ABI\n"
@@ -274,6 +281,10 @@ int validateBakeFlags(const CliOptions& options) {
     // --placement is NOT checked here: a placement is refused only for a map
     // that reads one, and which maps the run writes is not known until the
     // preset has been resolved. See the check beside that resolution.
+    if (options.bakeWorkingSet < 0) {
+        std::fprintf(stderr, "error: --bake-working-set must be >= 0 (0 means no bound)\n");
+        return kExitArgs;
+    }
     if (!options.densityNormalization.empty() && options.densityNormalization != "absolute" &&
         options.densityNormalization != "relative") {
         std::fprintf(stderr, "error: --density must be absolute or relative\n");
@@ -435,6 +446,10 @@ int parseArgs(int argc, char** argv, CliOptions& options, bool& exitEarly) {
                 return kExitArgs;
             }
             options.paddingRadiusSet = true;
+        } else if (arg == "--bake-working-set") {
+            if (!numeric("--bake-working-set", options.bakeWorkingSet)) {
+                return kExitArgs;
+            }
         } else if (arg == "--placement") {
             const auto v = next("--placement");
             if (!v) {
@@ -728,6 +743,15 @@ struct PresetOutcome {
         // 1001 for the mesh row and for a bake over the unit square, because
         // the unit square IS tile 1001.
         int udimTile = 1001;
+        // How the map was produced, region by region (--bake-working-set).
+        // Mirrors exportbundle::BundleRegions, which is not compiled into a
+        // build without presets.
+        struct Regions {
+            std::size_t count = 0;
+            int rows = 0;
+            int haloRows = 0;
+            std::size_t workingSetTexels = 0;
+        } regions;
     };
     std::vector<File> files;
     // The tiles the layout was found to occupy, reported BEFORE baking started.
@@ -882,6 +906,10 @@ void addPresetToReport(nlohmann::json& report, const PresetOutcome& outcome) {
             entry["encoding"] = encodingJson(file.encoding);
             entry["padding"] = paddingJson(file.padding);
             entry["udimTile"] = file.udimTile;
+            entry["regions"] = nlohmann::json{{"count", file.regions.count},
+                                              {"rows", file.regions.rows},
+                                              {"haloRows", file.regions.haloRows},
+                                              {"workingSetTexels", file.regions.workingSetTexels}};
         }
         report["outputs"].push_back(entry);
     }
@@ -1648,6 +1676,7 @@ int runCli(int argc, char** argv) {
         if (options.densityNormalization == "relative") {
             bundleParams.densityNormalization = cyber::bake::DensityNormalization::Relative;
         }
+        bundleParams.maxWorkingSetTexels = static_cast<std::size_t>(options.bakeWorkingSet);
         // Deliberately NOT UDIM-aware, and there is no flag for it: this
         // pipeline's low-poly is the mesh the remesher just produced, which
         // carries no UV layout, so writeBundle unwraps it -- and the automatic
@@ -1678,9 +1707,16 @@ int runCli(int argc, char** argv) {
         presetOutcome.udimTiles = bundle.udimTiles;
         presetOutcome.udimUnaddressableFaces = bundle.udimUnaddressableFaces;
         for (const auto& file : bundle.files) {
-            presetOutcome.files.push_back({file.path, file.kind, file.colorSpace, file.width,
-                                           file.height, file.encoding, file.padding,
-                                           file.udimTile});
+            presetOutcome.files.push_back({file.path,
+                                           file.kind,
+                                           file.colorSpace,
+                                           file.width,
+                                           file.height,
+                                           file.encoding,
+                                           file.padding,
+                                           file.udimTile,
+                                           {file.regions.regionCount, file.regions.regionRows,
+                                            file.regions.haloRows, file.regions.workingSetTexels}});
         }
     }
 #endif

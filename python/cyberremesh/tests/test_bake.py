@@ -79,6 +79,7 @@ def main() -> int:
         _gate_the_world_and_density_maps(obj.name)
         _gate_the_id_maps(obj.name)
         _gate_border_padding(obj.name)
+        _gate_regioned(obj.name)
         _gate_a_raising_evaluator_raises(obj.name)
         _gate_the_openness_rename_shim(obj.name)
         _gate_udim(obj.name)
@@ -309,6 +310,56 @@ def _gate_the_mesh_map_set(obj_path):
                 raise AssertionError("an out-of-range encoding parameter was accepted")
 
     print("PASS bake: the object-space and ray-traced maps carry a decodable encoding basis")
+
+
+def _gate_regioned(obj_path):
+    """A regioned bake streams bands that assemble into bake()'s own pixels.
+
+    surface-baking, "Regioned baking with a bounded working set": the rows
+    arrive ascending, once each, and the pixel-less result carries the region
+    facts and the metadata.
+    """
+    import numpy as np
+    from cyberremesh import BakeMap, BakeParams, Mesh, bake, bake_regions
+
+    assert BakeParams().max_working_set_texels == 0
+    quarter = tempfile.NamedTemporaryFile(suffix=".obj", delete=False, mode="w")
+    quarter.write(_QUARTER_UV_PLANE)
+    quarter.close()
+    try:
+        with Mesh.load_obj(quarter.name) as low, Mesh.load_obj(obj_path) as high:
+            for bake_map in (BakeMap.NORMAL, BakeMap.AO, BakeMap.UV_DENSITY):
+                params = BakeParams(width=32, height=32, padding_radius=4, ao_samples=4,
+                                    cage_distance=0.2,
+                                    max_working_set_texels=32 * (4 + 2 * 8))
+                with bake(low, high, bake_map, params) as whole:
+                    expected = whole.to_numpy()
+                bands = []
+                with bake_regions(low, high, bake_map,
+                                  lambda row, rows: bands.append((row, np.array(rows))),
+                                  params) as report:
+                    regions = report.regions
+                    assert regions.count == 8 and regions.rows == 4, regions
+                    assert regions.halo_rows == 8, regions
+                    assert regions.working_set_texels <= params.max_working_set_texels
+                    assert report.width == 32 and report.padding.radius == 4
+                assert [row for row, _ in bands] == list(range(0, 32, 4)), bands
+                assembled = np.concatenate([rows for _, rows in bands], axis=0)
+                assert np.array_equal(assembled, expected), bake_map
+
+            # A callback that raises stops the bake and the exception surfaces.
+            def boom(_row, _rows):
+                raise RuntimeError("stop here")
+            try:
+                bake_regions(low, high, BakeMap.NORMAL, boom,
+                             BakeParams(width=32, height=32, max_working_set_texels=32 * 20))
+            except RuntimeError as error:
+                assert "stop here" in str(error)
+            else:
+                raise AssertionError("a raising row callback did not stop the bake")
+    finally:
+        os.unlink(quarter.name)
+    print("PASS bake_regions: the bands assemble into bake()'s pixels")
 
 
 def _gate_border_padding(obj_path):

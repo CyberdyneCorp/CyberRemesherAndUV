@@ -440,6 +440,34 @@ def main() -> int:
         check("--padding 0 disables the stage",
               pad == {"radius": 0, "mode": "none", "texelsFilled": 0}, str(pad))
 
+    # --bake-working-set bakes every map in regions and streams it to disk; the
+    # files are the same bytes as an unbounded run and the report records the
+    # regions (surface-baking, "Regioned baking with a bounded working set").
+    ws_whole = tmp / "ws_whole"
+    ws_band = tmp / "ws_band"
+    ws_whole.mkdir()
+    ws_band.mkdir()
+    ws_report = ws_band / "w.json"
+    common = ("--input", str(sphere), "--target-quads", "300", "--bake", "normal,ao,uv-density",
+              "--texture-size", "64", "--ao-samples", "4", "--quiet")
+    r = run(*common, "--output", str(ws_whole / "w.obj"))
+    check("unbounded bake exit 0", r.returncode == 0, r.stderr)
+    # 64 wide: 8 rows of region plus 2 x 16 rows of halo at the default radius.
+    r = run(*common, "--output", str(ws_band / "w.obj"), "--bake-working-set", str(64 * 40),
+            "--report", str(ws_report))
+    check("--bake-working-set exit 0", r.returncode == 0, r.stderr)
+    for name in ("w_normal.png", "w_ao.png", "w_uv-density.png"):
+        check(f"--bake-working-set wrote {name} byte-identical to the unbounded run",
+              (ws_band / name).exists() and (ws_whole / name).exists()
+              and (ws_band / name).read_bytes() == (ws_whole / name).read_bytes(), name)
+    if ws_report.exists():
+        outputs = {o["kind"]: o for o in json.loads(ws_report.read_text()).get("outputs", [])}
+        regions = outputs["normal"].get("regions", {})
+        check("the report records the regions",
+              regions.get("count") == 8 and regions.get("rows") == 8
+              and regions.get("haloRows") == 16 and regions.get("workingSetTexels") == 64 * 40,
+              str(regions))
+
     # --- the colour-ID maps ---------------------------------------------
     id_dir = tmp / "idmaps"
     id_dir.mkdir()
@@ -559,6 +587,8 @@ def main() -> int:
     for bad_flag, bad_value, map_name in (("--thickness-scale", "-1", "thickness"),
                                           ("--bent-normal-space", "sideways", "bent-normal"),
                                           ("--padding", "-1", "normal"),
+                                          ("--bake-working-set", "-1", "normal"),
+                                          ("--bake-working-set", "lots", "normal"),
                                           ("--density", "sideways", "uv-density")):
         r = run("--input", str(sphere), "--output", str(maps_dir / "bad.obj"),
                 "--bake", map_name, "--texture-size", "16", "--ao-samples", "4",

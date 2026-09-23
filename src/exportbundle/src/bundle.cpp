@@ -1,11 +1,16 @@
 #include "cyber/exportbundle/bundle.hpp"
 
+#include <cstddef>
+#include <memory>
 #include <optional>
 #include <unordered_set>
+#include <utility>
+#include <vector>
 
 #include "cyber/bake/bake.hpp"
 #include "cyber/core/io.hpp"
 #include "cyber/imageio/image.hpp"
+#include "cyber/imageio/stream.hpp"
 #include "cyber/uv/atlas.hpp"
 
 namespace cyber::exportbundle {
@@ -101,18 +106,19 @@ ProgressSink mapSubrange(ProgressSink* progress, float done, float total) {
 
 // DirectX-style normal maps point green down. The bake always produces the
 // OpenGL convention, so the flip happens once, here, on the encoded texel.
-void flipGreen(bake::Image& image) {
-    if (image.channels < 2) {
+// Takes a span of texels so the whole-image writer and the band-streaming
+// writer run the SAME arithmetic.
+void flipGreen(float* pixels, std::size_t texels, int channels) {
+    if (channels < 2) {
         return;
     }
-    for (int y = 0; y < image.height; ++y) {
-        for (int x = 0; x < image.width; ++x) {
-            image.at(x, y, 1) = 1.0f - image.at(x, y, 1);
-        }
+    const auto stride = static_cast<std::size_t>(channels);
+    for (std::size_t i = 0; i < texels; ++i) {
+        pixels[i * stride + 1] = 1.0f - pixels[i * stride + 1];
     }
 }
 
-void encodeSrgb(bake::Image& image) {
+void encodeSrgb(float* pixels, std::size_t texels, int channels) {
     // Runs AFTER border padding, and io::linearToSrgb clamps into [0,1]. On a
     // colour map whose padded band continued past 1 that flattens the band into
     // exactly the plateau padding exists to avoid -- but only for the values
@@ -121,14 +127,78 @@ void encodeSrgb(bake::Image& image) {
     // verbatim), so this is the one place a band can still be flattened.
     //
     // Alpha, where present, stays linear by convention.
-    const int colorChannels = image.channels == 4 ? 3 : image.channels;
-    for (int y = 0; y < image.height; ++y) {
-        for (int x = 0; x < image.width; ++x) {
-            for (int c = 0; c < colorChannels; ++c) {
-                image.at(x, y, c) = io::linearToSrgb(image.at(x, y, c));
-            }
+    const auto stride = static_cast<std::size_t>(channels);
+    const std::size_t colorChannels = channels == 4 ? 3 : stride;
+    for (std::size_t i = 0; i < texels; ++i) {
+        for (std::size_t c = 0; c < colorChannels; ++c) {
+            pixels[i * stride + c] = io::linearToSrgb(pixels[i * stride + c]);
         }
     }
+}
+
+// How one map file is encoded on its way to disk, decided once from the preset
+// and shared by the whole-image and the band-streaming writers.
+struct MapWritePlan {
+    bool flipGreen = false;
+    bool srgb = false;
+    std::string writtenSpace = "linear";
+    imageio::ImageFormat format = imageio::ImageFormat::Png;
+};
+
+// The plan for one map file, with the warnings a declared-but-refused encoding
+// earns. Called once per FILE, as the whole-image writer always has, so a UDIM
+// set reports per tile what it reports per map.
+MapWritePlan planMapWrite(const ExportPreset& preset, const PresetMapEntry& entry,
+                          const std::filesystem::path& path, BundleResult& result) {
+    MapWritePlan plan;
+    plan.flipGreen = entry.map == PresetMap::Normal && preset.normalGreen == GreenChannel::MinusY;
+    // sRGB is an encoding for 8-bit containers. EXR stores float linear by
+    // convention, so a preset asking for sRGB there is reported, never applied
+    // silently in either direction.
+    if (entry.colorSpace == ColorSpace::Srgb) {
+        if (isIdMap(entry.map)) {
+            result.warnings.push_back(std::string("map '") + io::presetMapName(entry.map) +
+                                      "' is an id map, whose texels are exact keys; the "
+                                      "declared sRGB encoding would change every id's colour "
+                                      "and is not applied");
+        } else if (preset.textureFormat == "exr") {
+            result.warnings.push_back(std::string("map '") + io::presetMapName(entry.map) +
+                                      "' declares sRGB but the preset writes EXR; "
+                                      "written as linear float");
+        } else {
+            plan.srgb = true;
+            plan.writtenSpace = "srgb";
+        }
+    }
+    const std::string ext =
+        path.has_extension() ? path.extension().string().substr(1) : std::string();
+    if (!ext.empty() && ext != preset.textureFormat) {
+        result.warnings.push_back(std::string("map '") + io::presetMapName(entry.map) +
+                                  "' is named '." + ext + "' but the preset writes " +
+                                  preset.textureFormat + "; writing " + preset.textureFormat);
+    }
+    // The preset, not the file name, picks the container: the extension-
+    // dispatching saveImage() overload would otherwise switch the encoder
+    // behind the color-space policy chosen just above, writing sRGB bytes into
+    // a float EXR or clamping a float map into 8-bit PNG.
+    plan.format =
+        preset.textureFormat == "exr" ? imageio::ImageFormat::Exr : imageio::ImageFormat::Png;
+    return plan;
+}
+
+void applyWritePlan(const MapWritePlan& plan, float* pixels, std::size_t texels, int channels) {
+    if (plan.flipGreen) {
+        flipGreen(pixels, texels, channels);
+    }
+    if (plan.srgb) {
+        encodeSrgb(pixels, texels, channels);
+    }
+}
+
+// The region facts of a map baked whole: one region, no halo.
+BundleRegions wholeImageRegions(int width, int height) {
+    return BundleRegions{1, height, 0,
+                         static_cast<std::size_t>(width) * static_cast<std::size_t>(height)};
 }
 
 bool ensureUvs(Mesh& low, BundleResult& result, const CancelToken* cancel) {
@@ -171,51 +241,17 @@ bool isInsideDirectory(const std::filesystem::path& directory, const std::filesy
 bool writeMap(const ExportPreset& preset, const PresetMapEntry& entry, bake::Image image,
               const bake::BakeEncoding& encoding, const bake::BakePadding& padding, int udimTile,
               const std::filesystem::path& path, BundleResult& result) {
-    if (entry.map == PresetMap::Normal && preset.normalGreen == GreenChannel::MinusY) {
-        flipGreen(image);
-    }
-    // sRGB is an encoding for 8-bit containers. EXR stores float linear by
-    // convention, so a preset asking for sRGB there is reported, never applied
-    // silently in either direction.
-    std::string writtenSpace = "linear";
-    if (entry.colorSpace == ColorSpace::Srgb) {
-        if (isIdMap(entry.map)) {
-            result.warnings.push_back(std::string("map '") + io::presetMapName(entry.map) +
-                                      "' is an id map, whose texels are exact keys; the "
-                                      "declared sRGB encoding would change every id's colour "
-                                      "and is not applied");
-        } else if (preset.textureFormat == "exr") {
-            result.warnings.push_back(std::string("map '") + io::presetMapName(entry.map) +
-                                      "' declares sRGB but the preset writes EXR; "
-                                      "written as linear float");
-        } else {
-            encodeSrgb(image);
-            writtenSpace = "srgb";
-        }
-    }
-
-    const std::string ext =
-        path.has_extension() ? path.extension().string().substr(1) : std::string();
-    if (!ext.empty() && ext != preset.textureFormat) {
-        result.warnings.push_back(std::string("map '") + io::presetMapName(entry.map) +
-                                  "' is named '." + ext + "' but the preset writes " +
-                                  preset.textureFormat + "; writing " + preset.textureFormat);
-    }
-
-    const int width = image.width;
-    const int height = image.height;
-    // The preset, not the file name, picks the container: the extension-
-    // dispatching saveImage() overload would otherwise switch the encoder
-    // behind the color-space policy chosen just above, writing sRGB bytes into
-    // a float EXR or clamping a float map into 8-bit PNG.
-    const imageio::ImageFormat format =
-        preset.textureFormat == "exr" ? imageio::ImageFormat::Exr : imageio::ImageFormat::Png;
-    if (!imageio::saveImage(path.string(), image, format)) {
+    const MapWritePlan plan = planMapWrite(preset, entry, path, result);
+    applyWritePlan(plan, image.pixels.data(),
+                   static_cast<std::size_t>(image.width) * static_cast<std::size_t>(image.height),
+                   image.channels);
+    if (!imageio::saveImage(path.string(), image, plan.format)) {
         result.error = "cannot write map '" + path.string() + "'";
         return false;
     }
-    result.files.push_back(BundleFile{path.string(), io::presetMapName(entry.map), writtenSpace,
-                                      width, height, encoding, padding, udimTile});
+    result.files.push_back(BundleFile{
+        path.string(), io::presetMapName(entry.map), plan.writtenSpace, image.width, image.height,
+        encoding, padding, udimTile, wholeImageRegions(image.width, image.height)});
     return true;
 }
 
@@ -325,6 +361,7 @@ bake::BakeParams bakeParamsFor(const ExportPreset& preset, const BundleParams& p
     bakeParams.placement = params.placement;
     bakeParams.densityNormalization = params.densityNormalization;
     bakeParams.maxPixels = params.maxPixels;
+    bakeParams.maxWorkingSetTexels = params.maxWorkingSetTexels;
     bakeParams.upAxis = presetUpAxis(preset, result);
     return bakeParams;
 }
@@ -360,6 +397,142 @@ bool refusedBeforeWriting(const ExportPreset& preset, const BundleParams& params
         return true;
     }
     return false;
+}
+
+// Where one preset entry's files go: everything resolveMapPath needs.
+struct MapTarget {
+    const ExportPreset& preset;
+    const PresetMapEntry& entry;
+    const std::string& basename;
+    const std::filesystem::path& directory;
+    std::unordered_set<std::string>& written;
+};
+
+// One preset entry baked whole and written in one piece per file -- the path a
+// bundle with no working-set bound takes.
+bool writeWholeMaps(const Mesh& low, const Mesh& high, const MapTarget& target, bake::BakeMap map,
+                    const bake::BakeParams& bakeParams, bool udim, MapBakes& bakes,
+                    BundleResult& result, ProgressSink* progress, const CancelToken* cancel) {
+    if (!bakeMapSet(low, high, target.entry, map, bakeParams, udim, bakes, result, progress,
+                    cancel)) {
+        return false;
+    }
+    for (bake::UdimTileBake& tile : bakes) {
+        const std::filesystem::path path =
+            resolveMapPath(target.preset, target.entry, target.basename, tile.tile.number,
+                           target.directory, target.written, result);
+        if (path.empty() ||
+            !writeMap(target.preset, target.entry, std::move(tile.result.image),
+                      tile.result.encoding, tile.result.padding, tile.tile.number, path, result)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Receives a regioned bake's rows and streams them into one file per tile,
+// through the preset's green flip and colour encoding one band at a time --
+// the same plan, and the same arithmetic, the whole-image writer applies.
+class StreamingMapSink final : public bake::RegionSink {
+public:
+    StreamingMapSink(const MapTarget& target, std::vector<std::filesystem::path> paths,
+                     BundleResult& result)
+        : target_(target), paths_(std::move(paths)), result_(result) {}
+
+    bool consume(const bake::RegionRows& rows) override {
+        if (rows.rowBegin == 0 && !openNext(rows)) {
+            return false;
+        }
+        const std::size_t texels =
+            static_cast<std::size_t>(rows.rowCount) * static_cast<std::size_t>(rows.width);
+        band_.assign(rows.pixels, rows.pixels + texels * static_cast<std::size_t>(rows.channels));
+        applyWritePlan(plans_.back(), band_.data(), texels, rows.channels);
+        if (!writer_->writeRows(band_.data(), rows.rowCount)) {
+            return writeFailed();
+        }
+        if (rows.rowBegin + rows.rowCount == rows.height && !writer_->finish()) {
+            return writeFailed();
+        }
+        return true;
+    }
+
+    [[nodiscard]] const std::vector<MapWritePlan>& plans() const { return plans_; }
+
+private:
+    bool openNext(const bake::RegionRows& rows) {
+        const std::filesystem::path& path = paths_[plans_.size()];
+        plans_.push_back(planMapWrite(target_.preset, target_.entry, path, result_));
+        writer_ = imageio::ImageStreamWriter::open(path.string(), rows.width, rows.height,
+                                                   rows.channels, plans_.back().format);
+        return writer_ != nullptr || writeFailed();
+    }
+
+    bool writeFailed() {
+        result_.error = "cannot write map '" + paths_[plans_.size() - 1].string() + "'";
+        return false;
+    }
+
+    const MapTarget& target_;
+    std::vector<std::filesystem::path> paths_;
+    BundleResult& result_;
+    std::vector<MapWritePlan> plans_;
+    std::unique_ptr<imageio::ImageStreamWriter> writer_;
+    std::vector<float> band_;
+};
+
+// The bake's own failure, in the bundle's words. False when it did not fail.
+bool regionedBakeFailed(const bake::RegionedBakeResult& baked, PresetMap map,
+                        BundleResult& result) {
+    if (baked.cancelled) {
+        result.cancelled = true;
+        return true;
+    }
+    if (baked.refusal != bake::UdimRefusal::None) {
+        result.error = std::string("bake of map '") + io::presetMapName(map) +
+                       "' was refused: " + baked.refusalMessage;
+        return true;
+    }
+    if (baked.failure == bake::RegionFailure::Scratch) {
+        result.error = std::string("bake of map '") + io::presetMapName(map) +
+                       "' failed: " + baked.failureMessage;
+        return true;
+    }
+    // A sink failure has already written its own error.
+    return baked.failure != bake::RegionFailure::None;
+}
+
+// One preset entry baked in regions and streamed to its files -- the path a
+// bundle with a working-set bound takes. No map is ever held whole.
+bool streamMaps(const Mesh& low, const Mesh& high, const MapTarget& target, bake::BakeMap map,
+                const bake::BakeParams& bakeParams, bool udim, const bake::UdimLayout& layout,
+                BundleResult& result, ProgressSink* progress, const CancelToken* cancel) {
+    const std::vector<bake::UdimTile> tiles =
+        udim ? layout.tiles : std::vector<bake::UdimTile>{bake::UdimTile{}};
+    std::vector<std::filesystem::path> paths;
+    for (const bake::UdimTile& tile : tiles) {
+        paths.push_back(resolveMapPath(target.preset, target.entry, target.basename, tile.number,
+                                       target.directory, target.written, result));
+        if (paths.back().empty()) {
+            return false;
+        }
+    }
+    StreamingMapSink sink(target, paths, result);
+    const std::string scratch =
+        target.directory.empty() ? std::string(".") : target.directory.string();
+    const bake::RegionedBakeResult baked =
+        bake::bakeRegions(low, high, map, bakeParams, udim, sink, progress, cancel, scratch);
+    if (regionedBakeFailed(baked, target.entry.map, result)) {
+        return false;
+    }
+    const BundleRegions regions{baked.plan.regionCount, baked.plan.regionRows, baked.plan.haloRows,
+                                baked.plan.workingSetTexels};
+    for (std::size_t i = 0; i < baked.tiles.size(); ++i) {
+        const bake::RegionedTile& tile = baked.tiles[i];
+        result.files.push_back(BundleFile{paths[i].string(), io::presetMapName(target.entry.map),
+                                          sink.plans()[i].writtenSpace, tile.width, tile.height,
+                                          tile.encoding, tile.padding, tile.tile.number, regions});
+    }
+    return true;
 }
 
 }  // namespace
@@ -412,8 +585,8 @@ BundleResult writeBundle(Mesh& low, const Mesh& high, const BundleParams& params
         result.error = exported.error().message;
         return result;
     }
-    result.files.push_back(
-        BundleFile{params.meshPath.string(), "mesh", "", 0, 0, {}, {}, bake::udimTileNumber(0, 0)});
+    result.files.push_back(BundleFile{
+        params.meshPath.string(), "mesh", "", 0, 0, {}, {}, bake::udimTileNumber(0, 0), {}});
 
     const std::string basename =
         params.basename.empty() ? params.meshPath.stem().string() : params.basename;
@@ -438,20 +611,14 @@ BundleResult writeBundle(Mesh& low, const Mesh& high, const BundleParams& params
             return result;
         }
         ProgressSink mapProgress = mapSubrange(progress, done, total);
-        if (!bakeMapSet(low, high, entry, *map, bakeParams, params.udim, bakes, result,
-                        &mapProgress, cancel)) {
+        const MapTarget target{preset, entry, basename, directory, written};
+        const bool wrote = params.maxWorkingSetTexels == 0
+                               ? writeWholeMaps(low, high, target, *map, bakeParams, params.udim,
+                                                bakes, result, &mapProgress, cancel)
+                               : streamMaps(low, high, target, *map, bakeParams, params.udim,
+                                            layout, result, &mapProgress, cancel);
+        if (!wrote) {
             return result;
-        }
-        for (bake::UdimTileBake& tile : bakes) {
-            const std::filesystem::path path = resolveMapPath(
-                preset, entry, basename, tile.tile.number, directory, written, result);
-            if (path.empty()) {
-                return result;
-            }
-            if (!writeMap(preset, entry, std::move(tile.result.image), tile.result.encoding,
-                          tile.result.padding, tile.tile.number, path, result)) {
-                return result;
-            }
         }
         done += 1.0f;
         if (progress != nullptr) {

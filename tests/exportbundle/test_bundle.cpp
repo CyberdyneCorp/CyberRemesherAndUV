@@ -785,3 +785,100 @@ TEST_CASE("a bundle with no ceiling bakes whatever the preset asks for") {
     CHECK(result.files.size() == 5);
     fs::remove_all(dir);
 }
+
+// ---- regioned bundles (mesh-io, "Baked maps are writable one band at a time") -
+
+namespace {
+
+std::vector<char> fileBytes(const fs::path& path) {
+    std::ifstream f(path, std::ios::binary);
+    return std::vector<char>((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+}
+
+// Every map the presets can name, with the two encodings a band writer has to
+// reproduce per band: the DirectX green flip and sRGB.
+io::ExportPreset everyMapPreset(const std::string& textureFormat) {
+    io::ExportPreset preset = smallPreset("every", io::GreenChannel::MinusY);
+    preset.textureFormat = textureFormat;
+    preset.resolution = 40;
+    preset.namingPattern = "{basename}_{map}.{udim}.{ext}";
+    preset.maps.clear();
+    for (const io::PresetMap map :
+         {io::PresetMap::Normal, io::PresetMap::AmbientOcclusion, io::PresetMap::Curvature,
+          io::PresetMap::Cavity, io::PresetMap::Displacement, io::PresetMap::Color,
+          io::PresetMap::Position, io::PresetMap::ObjectNormal, io::PresetMap::ObjectPosition,
+          io::PresetMap::BentNormal, io::PresetMap::Thickness, io::PresetMap::MaterialId,
+          io::PresetMap::ObjectId, io::PresetMap::WorldDirection, io::PresetMap::UvDensity}) {
+        const bool srgb = map == io::PresetMap::Color || map == io::PresetMap::AmbientOcclusion;
+        preset.maps.push_back(io::PresetMapEntry{
+            map, srgb ? io::ColorSpace::Srgb : io::ColorSpace::Linear, io::presetMapName(map)});
+    }
+    return preset;
+}
+
+}  // namespace
+
+TEST_CASE("a bundle under a working-set bound writes the same files, band by band") {
+    for (const char* format : {"png", "exr"}) {
+        for (const bool udim : {false, true}) {
+            CAPTURE(format);
+            CAPTURE(udim);
+            const fs::path wholeDir = testDir("regioned_whole");
+            const fs::path bandDir = testDir("regioned_band");
+            const io::ExportPreset preset = everyMapPreset(format);
+
+            Mesh lowWhole = twoTileSurface(0.0f);
+            const Mesh high = twoTileSurface(0.02f);
+            bundle::BundleParams whole = paramsFor(preset, wholeDir);
+            whole.udim = udim;
+            whole.aoSamples = 8;
+            const bundle::BundleResult reference = bundle::writeBundle(lowWhole, high, whole);
+            REQUIRE(reference.ok);
+
+            Mesh lowBand = twoTileSurface(0.0f);
+            bundle::BundleParams banded = whole;
+            banded.meshPath = bandDir / "hero.obj";
+            banded.maxWorkingSetTexels = 40u * (6u + 2u * 16u);  // 6-row regions at radius 8
+            const bundle::BundleResult streamed = bundle::writeBundle(lowBand, high, banded);
+            REQUIRE(streamed.ok);
+            REQUIRE(streamed.files.size() == reference.files.size());
+            CHECK(streamed.warnings == reference.warnings);
+            for (std::size_t i = 1; i < streamed.files.size(); ++i) {
+                const bundle::BundleFile& a = reference.files[i];
+                const bundle::BundleFile& b = streamed.files[i];
+                CAPTURE(b.path);
+                CHECK(fs::path(a.path).filename() == fs::path(b.path).filename());
+                CHECK(fileBytes(a.path) == fileBytes(b.path));
+                CHECK(a.colorSpace == b.colorSpace);
+                CHECK(a.udimTile == b.udimTile);
+                CHECK(a.padding.texelsFilled == b.padding.texelsFilled);
+                CHECK(a.encoding.densityMean == b.encoding.densityMean);
+                CHECK(a.regions.regionCount == 1);
+                CHECK(b.regions.regionCount == 7);
+                CHECK(b.regions.regionRows == 6);
+                CHECK(b.regions.haloRows == 16);
+                CHECK(b.regions.workingSetTexels <= banded.maxWorkingSetTexels);
+            }
+            // The scratch next to the output is gone.
+            for (const auto& entry : fs::directory_iterator(bandDir)) {
+                CHECK(entry.path().extension() != ".scratch");
+            }
+            fs::remove_all(wholeDir);
+            fs::remove_all(bandDir);
+        }
+    }
+}
+
+TEST_CASE("a regioned bundle honours cooperative cancellation") {
+    const fs::path dir = testDir("regioned_cancel");
+    Mesh low = makeSurface(0.0f);
+    const Mesh high = makeSurface(0.02f);
+    bundle::BundleParams params = paramsFor(smallPreset("t", io::GreenChannel::PlusY), dir);
+    params.maxWorkingSetTexels = 32u * 20u;
+    CancelToken cancel;
+    cancel.requestCancel();
+    const bundle::BundleResult result = bundle::writeBundle(low, high, params, nullptr, &cancel);
+    CHECK(result.cancelled);
+    CHECK_FALSE(result.ok);
+    fs::remove_all(dir);
+}

@@ -116,10 +116,16 @@ typedef enum CyberStatus {
  * a shorter layout then had the library write past the end of its struct while
  * cyber_abi_check told it the pairing was fine. They are sized from 2.0 on.
  *
+ * ABI 2.1 is the first minor to rely on that promise: it APPENDS
+ * maxWorkingSetTexels to both parameter structs (and adds cyber_bake_regions,
+ * cyber_image_regions and cyber_bundle_result_file_regions). A 2.0 caller's
+ * stated size stops before the new member, so it is neither read nor written
+ * for that caller, which gets the default.
+ *
  * Do not compare these numbers by hand: cyber_abi_check() applies the rule
  * above in one place, so every binding gets the same answer. */
 #define CYBER_ABI_VERSION_MAJOR 2
-#define CYBER_ABI_VERSION_MINOR 0
+#define CYBER_ABI_VERSION_MINOR 1
 
 /* The ABI this build implements. Cannot fail; either pointer may be NULL. */
 void cyber_abi_version(int* major, int* minor);
@@ -2583,6 +2589,20 @@ typedef struct CyberBakeParams {
      *   CYBER_ERR_INVALID_ARG. */
     float placement[16];
     int densityNormalization;
+    /* --- appended in ABI 2.1 (additive: this struct is sized) --------------
+     * maxWorkingSetTexels: bound on the texels of OUTPUT image a REGIONED bake
+     *   (cyber_bake_regions) holds in flight at once -- one region plus a halo
+     *   of max(2 * paddingRadius, 1) rows above and below it. Default 0: no
+     *   bound, the whole image is one region. It NEVER refuses a bake: a bound
+     *   below one row plus its halo yields one-row regions and
+     *   cyber_image_regions reports the working set actually held. It is NOT
+     *   the texel ceiling (cyber_set_max_bake_pixels), which bounds the OUTPUT
+     *   and is applied as before. Read only by cyber_bake_regions; the entry
+     *   points that return a whole image (cyber_bake, cyber_bake_udim,
+     *   cyber_bake_field, cyber_bake_provider_bake) hold the whole output by
+     *   construction and do not read it. A 2.0 caller, whose structSize stops
+     *   before this member, gets the default. */
+    uint64_t maxWorkingSetTexels;
 } CyberBakeParams;
 
 /* What the numbers in a baked image MEAN. An encoded map without its basis is a
@@ -2760,6 +2780,17 @@ CyberStatus cyber_image_density(const CyberImage* image, CyberImageDensity* out)
  * direction back into object space with what it reads here. NULL argument is
  * CYBER_ERR_INVALID_ARG. */
 CyberStatus cyber_image_placement(const CyberImage* image, float out_matrix[16]);
+
+/* How `image` was produced, region by region (ABI 2.1). An image returned whole
+ * by cyber_bake and its siblings reports ONE region of its full height, no
+ * halo, and a working set of width * height. An image returned by
+ * cyber_bake_regions reports the plan it ran: the rows per region, the halo
+ * each assembly window overlapped its region by, the number of regions, and the
+ * texels of output image held in flight at most. Any out pointer may be NULL;
+ * a NULL image is CYBER_ERR_INVALID_ARG. */
+CyberStatus cyber_image_regions(const CyberImage* image, uint64_t* out_region_count,
+                                int* out_region_rows, int* out_halo_rows,
+                                uint64_t* out_working_set_texels);
 
 /* ---- id-to-colour table (CYBER_ENCODING_ID_COLOR maps) ----------------
  *
@@ -3076,6 +3107,54 @@ CyberStatus cyber_bake_field(const CyberMesh* low, const CyberMesh* high, CyberB
                              const CyberBakeParams* params, const CyberFieldEvaluator* field,
                              CyberImage** out);
 
+/* ---- regioned baking (surface-baking, "Regioned baking with a bounded
+ * working set"; ABI 2.1) ---------------------------------------------------
+ *
+ * Receives one band of FINISHED output rows: `row_count` rows starting at output
+ * row `row_begin`, `row_count * width * channels` floats, row-major. The pointer
+ * is valid only for the duration of the call. Rows arrive in ascending order,
+ * each output row exactly once. Return 0 to continue; any other value abandons
+ * the bake with CYBER_ERR_IO. */
+typedef int (*CyberBakeRowsCb)(int row_begin, int row_count, int width, int channels,
+                               const float* rows, void* user);
+
+/* Bakes `map` in REGIONS of the output and hands each finished band to `rows`,
+ * so the whole output is never held in memory. The assembled rows are
+ * IDENTICAL, texel for texel, to what cyber_bake (or cyber_bake_field, when
+ * `field` is given) returns for the same request -- padded band and globally
+ * normalized quantities included.
+ *
+ * params->maxWorkingSetTexels bounds the texels of output image in flight; 0
+ * bakes the whole image as one region. The host's texel ceiling
+ * (cyber_set_max_bake_pixels) bounds the OUTPUT exactly as cyber_bake applies
+ * it, and every parameter cyber_bake validates is validated identically.
+ *
+ * `field` is optional (NULL bakes from `high`) and is the evaluator
+ * cyber_bake_field takes, with the same rule for a NULL `high`.
+ *
+ * A bake of more than one region shades every texel once into a scratch file in
+ * `scratch_dir` (NULL: the system temporary directory -- point it at the disk
+ * you are writing the map to, since a RAM-backed /tmp defeats the bound) and
+ * removes it before returning. Progress and cancellation behave as in
+ * cyber_export_bundle_write; cancellation is polled inside each region.
+ *
+ * On success *out receives a CyberImage carrying the map's metadata -- size,
+ * channels, encoding, padding, density, placement, id table, region facts --
+ * and NO PIXELS: they went to `rows`. cyber_image_copy_pixels copies nothing
+ * from it and cyber_image_save_png fails on it.
+ *
+ * Status: CYBER_ERR_INVALID_ARG for a NULL required argument or a parameter out
+ * of range; CYBER_ERR_EMPTY when the low-poly has no UVs; CYBER_ERR_RUNTIME
+ * over the texel ceiling; CYBER_ERR_INVALID_PARAM when a field evaluator broke
+ * its contract; CYBER_ERR_IO when `rows` returned non-zero or the scratch file
+ * could not be written; CYBER_ERR_CANCELLED on a cooperative cancel. *out is
+ * left NULL on every failure. */
+CyberStatus cyber_bake_regions(const CyberMesh* low, const CyberMesh* high, CyberBakeMap map,
+                               const CyberBakeParams* params, const CyberFieldEvaluator* field,
+                               CyberBakeRowsCb rows, CyberProgressCb progress,
+                               CyberCancelCb cancel, void* user, const char* scratch_dir,
+                               CyberImage** out);
+
 /* ---- conform ---------------------------------------------------------- */
 
 typedef struct CyberConformReport {
@@ -3224,6 +3303,14 @@ typedef struct CyberBundleParams {
      * be written to one path, each overwriting the last, while the report listed
      * them all. */
     int udim;
+    /* --- appended in ABI 2.1 (additive: this struct is sized) --------------
+     * The working-set bound every map is baked under, in texels of output
+     * image held in flight (see CyberBakeParams::maxWorkingSetTexels). Default
+     * 0: every map baked whole, exactly as before. Non-zero bakes each map in
+     * regions and STREAMS it to its file band by band; the files are
+     * byte-identical either way. The regioned bake's scratch file is created
+     * beside meshPath and removed before the call returns. Never refuses. */
+    uint64_t maxWorkingSetTexels;
 } CyberBundleParams;
 
 /* Fills params with the engine defaults (meshPath and basename left NULL),
@@ -3289,6 +3376,15 @@ CyberStatus cyber_bundle_result_file_padding(const CyberBundleResult* result, si
  * Out-of-range index is CYBER_ERR_INVALID_ARG. */
 CyberStatus cyber_bundle_result_file_udim_tile(const CyberBundleResult* result, size_t index,
                                                int* out_tile);
+
+/* How the map at `index` was produced, region by region -- the record
+ * cyber_image_regions returns for a baked image (ABI 2.1). A map written whole
+ * reports one region; the mesh entry reports zeros. Any out pointer may be
+ * NULL; an out-of-range index is CYBER_ERR_INVALID_ARG. */
+CyberStatus cyber_bundle_result_file_regions(const CyberBundleResult* result, size_t index,
+                                             uint64_t* out_region_count, int* out_region_rows,
+                                             int* out_halo_rows,
+                                             uint64_t* out_working_set_texels);
 
 /* The id-to-colour table of the map at `index` — the same record
  * cyber_image_id_source / cyber_image_id_color return for a directly baked

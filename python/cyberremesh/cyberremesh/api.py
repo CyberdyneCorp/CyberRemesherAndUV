@@ -11,7 +11,7 @@ import ctypes
 import math
 import warnings
 from dataclasses import dataclass
-from typing import Callable, List, Optional, Sequence, Tuple
+from typing import Any, Callable, List, Optional, Sequence, Tuple
 
 from . import _ffi
 
@@ -133,7 +133,7 @@ def version() -> str:
 #: The C ABI this binding was written against. Mirrors CYBER_ABI_VERSION_* in
 #: cyber_capi.h; ``check_abi()`` compares it against the loaded library.
 ABI_VERSION_MAJOR = 2
-ABI_VERSION_MINOR = 0
+ABI_VERSION_MINOR = 1
 
 
 def abi_version() -> tuple:
@@ -3772,6 +3772,13 @@ class BakeParams:
     placement: Tuple[float, ...] = IDENTITY_PLACEMENT
     #: A :class:`DensityNormalization` for ``BakeMap.UV_DENSITY``.
     density_normalization: int = DensityNormalization.ABSOLUTE
+    #: Texels of OUTPUT image a :func:`bake_regions` bake holds in flight: one
+    #: region plus a halo of ``max(2 * padding_radius, 1)`` rows above and
+    #: below. 0 = no bound (one region). Never refuses: a bound too small for
+    #: one row plus its halo gives one-row regions and :attr:`Image.regions`
+    #: reports what was held. Not the texel ceiling, which bounds the OUTPUT.
+    #: The whole-image bakes (:func:`bake` and friends) do not read it.
+    max_working_set_texels: int = 0
 
     def _to_c(self) -> "_ffi.CyberBakeParams":
         return _ffi.CyberBakeParams(
@@ -3788,7 +3795,37 @@ class BakeParams:
             padding_radius=int(self.padding_radius),
             placement=_placement_to_c(self.placement),
             density_normalization=int(self.density_normalization),
+            max_working_set_texels=int(self.max_working_set_texels),
         )
+
+
+@dataclass(frozen=True)
+class ImageRegions:
+    """How a map was produced, region by region (ABI 2.1).
+
+    A map baked whole reports one region of its full height, no halo, and a
+    working set of ``width * height``. A bundle's mesh entry reports zeros.
+    """
+
+    #: Number of regions.
+    count: int
+    #: Output rows per region (the last may be shorter).
+    rows: int
+    #: Rows each assembly window overlapped its region by, above and below.
+    halo_rows: int
+    #: Texels of output image held in flight at most.
+    working_set_texels: int
+
+
+def _regions_from(read) -> "ImageRegions":
+    count = ctypes.c_uint64()
+    rows = ctypes.c_int32()
+    halo = ctypes.c_int32()
+    working = ctypes.c_uint64()
+    _check(read(ctypes.byref(count), ctypes.byref(rows), ctypes.byref(halo),
+                ctypes.byref(working)))
+    return ImageRegions(count=int(count.value), rows=int(rows.value),
+                        halo_rows=int(halo.value), working_set_texels=int(working.value))
 
 
 class Image:
@@ -3862,6 +3899,12 @@ class Image:
         _check(_ffi.get_lib().cyber_image_placement(self.handle, out))
         return tuple(float(value) for value in out)
 
+    @property
+    def regions(self) -> ImageRegions:
+        """How this map was produced, region by region."""
+        lib = _ffi.get_lib()
+        return _regions_from(lambda *out: lib.cyber_image_regions(self.handle, *out))
+
     def save_png(self, path: str) -> None:
         """Write the map to an 8-bit PNG (tonemapped)."""
         _check(_ffi.get_lib().cyber_image_save_png(self.handle, str(path).encode("utf-8")))
@@ -3910,6 +3953,105 @@ def bake(low: "Mesh", high: "Mesh", bake_map: int = BakeMap.NORMAL,
     status = lib.cyber_bake(
         low.handle, high.handle, int(bake_map), ctypes.byref(c_params), ctypes.byref(out)
     )
+    _check(status)
+    if not out.value:
+        raise CyberError(_ffi.STATUS_ERROR, _last_error() or "bake produced no image")
+    return Image(out.value)
+
+
+# ---------------------------------------------------------------------------
+# Regioned baking (surface-baking, "Regioned baking with a bounded working set")
+# ---------------------------------------------------------------------------
+
+
+def _callback_trampolines(progress, cancel):
+    """The progress and cancel trampolines every streaming call shares."""
+
+    def _progress(fraction, stage_ptr, _user):
+        if progress is None:
+            return
+        try:
+            stage = stage_ptr.decode("utf-8", "replace") if stage_ptr else ""
+            progress(float(fraction), stage)
+        except Exception:
+            pass  # never let a Python exception cross back into C
+
+    def _cancel(_user):
+        if cancel is None:
+            return 0
+        try:
+            return 1 if cancel() else 0
+        except Exception:
+            return 0
+
+    return _ffi.PROGRESS_CB(_progress), _ffi.CANCEL_CB(_cancel)
+
+
+def bake_regions(low: "Mesh", high: Optional["Mesh"], bake_map: int,
+                 on_rows: Callable[[int, Any], None],
+                 params: Optional[BakeParams] = None,
+                 field: Optional["FieldEvaluator"] = None,
+                 progress: Optional[Callable[[float, str], None]] = None,
+                 cancel: Optional[Callable[[], bool]] = None,
+                 scratch_dir: Optional[str] = None) -> Image:
+    """Bake ``bake_map`` in REGIONS, handing each finished band to ``on_rows``.
+
+    The whole output is never held: ``params.max_working_set_texels`` bounds the
+    texels in flight. ``on_rows(row_begin, rows)`` receives the bands in
+    ascending order, each output row exactly once; ``rows`` is a
+    ``(row_count, width, channels)`` float32 ndarray when numpy is available
+    and a flat list of floats otherwise, and is only valid during the call
+    (copy it to keep it). The assembled rows equal :func:`bake`'s pixels (or
+    :func:`bake_field`'s when ``field`` is given) texel for texel.
+
+    Returns an :class:`Image` carrying the map's metadata -- encoding, padding,
+    density, id table, :attr:`Image.regions` -- and NO pixels. An exception
+    raised by ``on_rows`` stops the bake and is re-raised here. A bake of more
+    than one region spills to a scratch file in ``scratch_dir`` (default: the
+    system temporary directory; point it at the disk you are writing to).
+    """
+    if params is None:
+        params = BakeParams()
+    c_params = params._to_c()
+    raised: List[BaseException] = []
+
+    def _rows(row_begin, row_count, width, channels, rows_ptr, _user):
+        try:
+            count = int(row_count) * int(width) * int(channels)
+            if HAVE_NUMPY:
+                view = _np.ctypeslib.as_array(rows_ptr, shape=(count,))
+                band = view.reshape((int(row_count), int(width), int(channels)))
+            else:
+                band = [float(rows_ptr[i]) for i in range(count)]
+            on_rows(int(row_begin), band)
+            return 0
+        except BaseException as exc:  # noqa: BLE001 - re-raised after the call
+            raised.append(exc)
+            return 1
+
+    rows_cb = _ffi.BAKE_ROWS_CB(_rows)
+    progress_cb, cancel_cb = _callback_trampolines(progress, cancel)
+    out = ctypes.c_void_p()
+    status = _ffi.get_lib().cyber_bake_regions(
+        low.handle,
+        high.handle if high is not None else None,
+        int(bake_map),
+        ctypes.byref(c_params),
+        ctypes.byref(field._c_struct) if field is not None else None,
+        rows_cb,
+        progress_cb,
+        cancel_cb,
+        None,
+        str(scratch_dir).encode("utf-8") if scratch_dir else None,
+        ctypes.byref(out),
+    )
+    pending = field._pending_error if field is not None else None
+    if field is not None:
+        field._pending_error = None
+    if raised or pending is not None:
+        if out.value:
+            _ffi.get_lib().cyber_image_free(ctypes.c_void_p(out.value))
+        raise raised[0] if raised else pending
     _check(status)
     if not out.value:
         raise CyberError(_ffi.STATUS_ERROR, _last_error() or "bake produced no image")
@@ -4697,6 +4839,8 @@ class BundleFile:
     #: 1001 for the mesh row and for any map baked over the unit square, because
     #: the unit square IS tile 1001.
     udim_tile: int = 1001
+    #: How the map was produced, region by region. Zeros for the mesh entry.
+    regions: ImageRegions = ImageRegions(count=0, rows=0, halo_rows=0, working_set_texels=0)
 
 
 @dataclass(frozen=True)
@@ -4738,6 +4882,7 @@ def write_bundle(
     udim: bool = False,
     progress: Optional[Callable[[float, str], None]] = None,
     cancel: Optional[Callable[[], bool]] = None,
+    max_working_set_texels: Optional[int] = None,
 ) -> BundleResult:
     """Write ``preset``'s export bundle: the mesh plus one baked map per entry.
 
@@ -4779,6 +4924,10 @@ def write_bundle(
     if density_normalization is not None:
         params.density_normalization = int(density_normalization)
     params.udim = 1 if udim else 0
+    if max_working_set_texels is not None:
+        # Bake every map in regions and stream it to its file; the files are
+        # byte-identical to an unbounded bundle's.
+        params.max_working_set_texels = int(max_working_set_texels)
 
     def _progress_trampoline(fraction, stage_ptr, _user):
         if progress is None:
@@ -4848,6 +4997,8 @@ def write_bundle(
                                                    tuple(colors)),
                     padding=ImagePadding._from_c(padding),
                     udim_tile=int(tile.value),
+                    regions=_regions_from(
+                        lambda *o, i=i: lib.cyber_bundle_result_file_regions(out, i, *o)),
                 )
             )
         messages: List[str] = []

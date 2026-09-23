@@ -401,6 +401,12 @@ public struct BakeParameters: Sendable {
     public var placement: [Float]
     /// How `BakeMap.uvDensity` normalizes its values.
     public var densityNormalization: DensityNormalization
+    /// Texels of OUTPUT image a `bakeRegions` bake holds in flight: one region
+    /// plus a halo of `max(2 * paddingRadius, 1)` rows above and below. 0 = no
+    /// bound (one region). Never refuses: a bound below one row plus its halo
+    /// gives one-row regions and `Image.regions` reports what was held. Not the
+    /// texel ceiling, which bounds the OUTPUT. `bake` does not read it.
+    public var maxWorkingSetTexels: UInt64
 
     public init() {
         let defaults = defaultBakeParams()
@@ -419,6 +425,7 @@ public struct BakeParameters: Sendable {
         densityNormalization =
             DensityNormalization(rawValue: UInt32(bitPattern: defaults.densityNormalization))
             ?? .absolute
+        maxWorkingSetTexels = defaults.maxWorkingSetTexels
     }
 
     /// Built member by member from the engine's own defaults rather than with
@@ -439,8 +446,21 @@ public struct BakeParameters: Sendable {
         out.paddingRadius = paddingRadius
         writePlacement(placement, into: &out.placement)
         out.densityNormalization = Int32(bitPattern: densityNormalization.rawValue)
+        out.maxWorkingSetTexels = maxWorkingSetTexels
         return out
     }
+}
+
+/// How a map was produced, region by region. A map baked whole reports one
+/// region of its full height, no halo, and a working set of width * height.
+public struct ImageRegions: Sendable, Equatable {
+    public let count: UInt64
+    /// Output rows per region (the last may be shorter).
+    public let rows: Int
+    /// Rows each assembly window overlapped its region by, above and below.
+    public let haloRows: Int
+    /// Texels of output image held in flight at most.
+    public let workingSetTexels: UInt64
 }
 
 /// A `CyberBakeParams` holding the engine defaults. The struct is SIZED, so its
@@ -513,6 +533,17 @@ public final class Image {
         return status == CYBER_OK ? out : identityPlacement
     }
 
+    /// How this map was produced, region by region.
+    public var regions: ImageRegions {
+        var count: UInt64 = 0
+        var rows: Int32 = 0
+        var halo: Int32 = 0
+        var workingSet: UInt64 = 0
+        _ = cyber_image_regions(handle, &count, &rows, &halo, &workingSet)
+        return ImageRegions(count: count, rows: Int(rows), haloRows: Int(halo),
+                            workingSetTexels: workingSet)
+    }
+
     /// Pixels as floats, row-major, `channels` per texel.
     public func pixels() -> [Float] {
         let needed = cyber_image_copy_pixels(handle, nil, 0)
@@ -542,6 +573,104 @@ extension Mesh {
         var out: OpaquePointer?
         try CyberError.check(
             cyber_bake(handle, high.handle, CyberBakeMap(rawValue: map.rawValue), &params, &out))
+        guard let out else { throw CyberError.outOfMemory }
+        return Image(owning: out)
+    }
+}
+
+// MARK: - Regioned baking
+
+/// One band of a regioned bake's finished output rows.
+public struct BakeRows {
+    /// First output row the band holds.
+    public let rowBegin: Int
+    public let rowCount: Int
+    public let width: Int
+    public let channels: Int
+    /// `rowCount * width * channels` floats, row-major.
+    public let pixels: [Float]
+}
+
+/// Carries the Swift closures through the C `user` pointer for `bakeRegions`,
+/// and remembers a thrown error so it can be rethrown after the C call unwinds.
+private final class RegionCallbacks {
+    let onRows: (BakeRows) throws -> Void
+    let progress: ((Float, String) -> Void)?
+    let cancel: (() -> Bool)?
+    var error: Error?
+
+    init(onRows: @escaping (BakeRows) throws -> Void, progress: ((Float, String) -> Void)?,
+         cancel: (() -> Bool)?) {
+        self.onRows = onRows
+        self.progress = progress
+        self.cancel = cancel
+    }
+}
+
+private func regionRows(
+    _ rowBegin: Int32, _ rowCount: Int32, _ width: Int32, _ channels: Int32,
+    _ rows: UnsafePointer<Float>?, _ user: UnsafeMutableRawPointer?
+) -> Int32 {
+    guard let user, let rows else { return 1 }
+    let box = Unmanaged<RegionCallbacks>.fromOpaque(user).takeUnretainedValue()
+    let count = Int(rowCount) * Int(width) * Int(channels)
+    let band = BakeRows(rowBegin: Int(rowBegin), rowCount: Int(rowCount), width: Int(width),
+                        channels: Int(channels),
+                        pixels: Array(UnsafeBufferPointer(start: rows, count: count)))
+    do {
+        try box.onRows(band)
+        return 0
+    } catch {
+        box.error = error
+        return 1
+    }
+}
+
+private func regionProgress(
+    _ fraction: Float, _ stage: UnsafePointer<CChar>?, _ user: UnsafeMutableRawPointer?
+) {
+    guard let user else { return }
+    let box = Unmanaged<RegionCallbacks>.fromOpaque(user).takeUnretainedValue()
+    box.progress?(fraction, stage.map { String(cString: $0) } ?? "")
+}
+
+private func regionCancel(_ user: UnsafeMutableRawPointer?) -> Int32 {
+    guard let user else { return 0 }
+    let box = Unmanaged<RegionCallbacks>.fromOpaque(user).takeUnretainedValue()
+    return (box.cancel?() ?? false) ? 1 : 0
+}
+
+extension Mesh {
+    /// Bake a map from `high` in REGIONS, handing each finished band to
+    /// `onRows` in ascending order, each output row exactly once, so the whole
+    /// output is never held in memory (`parameters.maxWorkingSetTexels` bounds
+    /// what is in flight). The assembled rows equal `bake(from:map:)`'s pixels.
+    ///
+    /// Returns an `Image` carrying the metadata -- encoding, padding, density,
+    /// id table, `regions` -- and NO pixels. An error thrown by `onRows` stops
+    /// the bake and is rethrown. A bake of more than one region spills to a
+    /// scratch file in `scratchDirectory` (default: the system temporary
+    /// directory; point it at the disk the map is written to).
+    public func bakeRegions(
+        from high: Mesh, map: BakeMap, parameters: BakeParameters = BakeParameters(),
+        scratchDirectory: String? = nil,
+        progress: ((Float, String) -> Void)? = nil, cancel: (() -> Bool)? = nil,
+        onRows: @escaping (BakeRows) throws -> Void
+    ) throws -> Image {
+        var params = parameters.cValue
+        let box = RegionCallbacks(onRows: onRows, progress: progress, cancel: cancel)
+        var out: OpaquePointer?
+        let status = withExtendedLifetime(box) { () -> CyberStatus in
+            let user = Unmanaged.passUnretained(box).toOpaque()
+            return cyber_bake_regions(
+                handle, high.handle, CyberBakeMap(rawValue: map.rawValue), &params, nil,
+                regionRows, regionProgress, regionCancel, user, scratchDirectory, &out)
+        }
+        if let error = box.error {
+            if let out { cyber_image_free(out) }
+            throw error
+        }
+        try CyberError.check(status)
         guard let out else { throw CyberError.outOfMemory }
         return Image(owning: out)
     }
