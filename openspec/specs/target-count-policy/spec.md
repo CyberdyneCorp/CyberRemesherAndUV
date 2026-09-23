@@ -1,7 +1,15 @@
 # target-count-policy Specification
 
 ## Purpose
-TBD - created by archiving change add-target-count-reporting. Update Purpose after archive.
+Making a quad remesher's target count observable and bounded. `targetQuadCount`
+is a request, not an exact-count guarantee: pure-quad expansion, constrained
+islands and a count that does not respond monotonically to spacing all move the
+achieved count away from it. This capability reports what the pipeline actually
+calibrated against, every attempt it retained and why the run stopped, per run
+and per island, so a host can tell an infeasible request from a solver failure
+instead of re-running expensive remeshes blindly. It also defines the opt-in
+bounded calibration policy, under which output validity always outranks count
+proximity.
 ## Requirements
 ### Requirement: Observable bounded target-count calibration
 
