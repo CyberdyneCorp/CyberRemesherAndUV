@@ -33,20 +33,29 @@
     twice, a multi-region bake shades each texel once into a **sparse scratch
     file** (rows no chart touches are not stored), removed on every exit.
   - **Cancellation inside a region** — polled every 2048 shaded texels per
-    worker, every 1024 rasterized faces, per scratch row and between padding
-    rings — and **smooth progress**: the rasterized and field paths now report
-    per texel like the ray-traced ones.
+    worker, every 1024 rasterized faces, between padding rings, per band of the
+    finalize pass and per region of assembly — and **smooth progress**: the
+    rasterized and field paths now report per texel like the ray-traced ones,
+    and the finalize pass reports per band.
+  - **Memory follows the bound, not the output.** A fully shaded 16384² normal
+    map (3 GiB of output floats) baked under a 1 M-texel bound peaked at about
+    120 MiB of process growth; `tests/cli/test_cli.py` checks that
+    quadrupling the output under one bound does not move the peak.
   - **Streaming PNG/EXR writers** (`imageio::ImageStreamWriter`), byte-identical
     to the one-shot writers at every band size; an export bundle with a
     working-set bound streams every map through the preset's green flip and
     sRGB encoding band by band, writing the same bytes as an unbounded bundle.
+    A cancelled or failed map is removed, never left truncated.
   - Entry points: `bake::bakeRegions()`; C ABI **2.1** (additive: members
     appended to the sized `CyberBakeParams` / `CyberBundleParams`, whose 2.0
     floors do not move) with `cyber_bake_regions`, `cyber_image_regions`,
     `cyber_bundle_result_file_regions`; Python `bake_regions`,
     `BakeParams.max_working_set_texels`, `write_bundle(max_working_set_texels=)`,
     `Image.regions`; Swift `Mesh.bakeRegions(from:map:parameters:...)`,
-    `BakeParameters.maxWorkingSetTexels`, `Image.regions`. Pinned manifest:
+    `BakeParameters.maxWorkingSetTexels`, `Image.regions` (Swift binds no
+    bundle writer, so the bundle bound is C, C++, Python and CLI only). The
+    image a regioned bake returns carries no pixels; saving it is refused with
+    `CYBER_ERR_INVALID_ARG`. Pinned manifest:
     `capi/abi/cyber_capi-2.1.json`.
 
 - **UDIM-aware baking** (#91): one map per occupied tile, with the rays cast

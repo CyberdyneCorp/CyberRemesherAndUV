@@ -1,8 +1,10 @@
 #include "cyber/exportbundle/bundle.hpp"
 
 #include <cstddef>
+#include <filesystem>
 #include <memory>
 #include <optional>
+#include <system_error>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -458,6 +460,19 @@ public:
 
     [[nodiscard]] const std::vector<MapWritePlan>& plans() const { return plans_; }
 
+    // The bake was cancelled or failed: remove every file this map opened, the
+    // one cut off mid-stream included. An unbounded bundle writes a map only
+    // after its bake succeeded, so an abandoned map leaves no file there
+    // either -- and a truncated PNG whose header claims the full size must
+    // never be left where a finished map is expected.
+    void abandon() {
+        writer_.reset();  // closed first: an open file cannot be removed everywhere
+        for (std::size_t i = 0; i < plans_.size(); ++i) {
+            std::error_code ignored;
+            std::filesystem::remove(paths_[i], ignored);
+        }
+    }
+
 private:
     bool openNext(const bake::RegionRows& rows) {
         const std::filesystem::path& path = paths_[plans_.size()];
@@ -522,6 +537,7 @@ bool streamMaps(const Mesh& low, const Mesh& high, const MapTarget& target, bake
     const bake::RegionedBakeResult baked =
         bake::bakeRegions(low, high, map, bakeParams, udim, sink, progress, cancel, scratch);
     if (regionedBakeFailed(baked, target.entry.map, result)) {
+        sink.abandon();
         return false;
     }
     const BundleRegions regions{baked.plan.regionCount, baked.plan.regionRows, baked.plan.haloRows,

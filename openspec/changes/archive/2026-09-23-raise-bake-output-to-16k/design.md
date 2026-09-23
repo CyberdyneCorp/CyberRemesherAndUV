@@ -162,11 +162,13 @@ does not move.
 ### Cancellation and progress
 
 Polled every 2048 shaded texels (per worker on the ray-traced path), every 1024 rasterized
-faces, per scratch row, and between padding rings. Each of these is bounded by the region,
-the window or the mesh, never by the output: that is the stated latency. Progress: the shade
-pass takes `[0, 0.9]` of the bar, split by rows across the set's regions, with the existing
-1% texel step inside each region (now also on the rasterized and field paths); finalize and
-assembly take `[0.9, 1]`, reported per region.
+faces, between padding rings, before each finalize band and before each assembly window.
+Each of these is bounded by the region, the window or the mesh, never by the output: that is
+the stated latency. (The scratch file's own row reads and writes do not poll; a band's I/O is
+one unit.) Progress: the shade pass takes `[0, 0.8]` of the bar, split by rows across the
+set's regions, with the existing 1% texel step inside each region (now also on the
+rasterized and field paths); each image's finalize pass (per band) and assembly (per region)
+share its slice of `[0.8, 1]`, so the bar stays monotone across a UDIM set.
 
 ## Risks / Trade-offs
 

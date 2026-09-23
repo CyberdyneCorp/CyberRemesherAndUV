@@ -246,6 +246,14 @@ def check_bundle_regioned(tmpdir: str) -> None:
             band = write_bundle(low, high, preset, os.path.join(band_dir, "plane.obj"),
                                 ao_samples=4, cage_distance=0.2,
                                 max_working_set_texels=64 * 40)
+            # A negative bound is refused, not wrapped by ctypes to "no bound".
+            try:
+                write_bundle(low, high, preset, os.path.join(band_dir, "neg.obj"),
+                             max_working_set_texels=-1)
+            except ValueError as error:
+                assert "max_working_set_texels" in str(error), error
+            else:
+                raise AssertionError("write_bundle accepted a negative working-set bound")
     assert len(whole.files) == len(band.files), (whole.files, band.files)
     for a, b in zip(whole.files, band.files):
         if a.kind == "mesh":

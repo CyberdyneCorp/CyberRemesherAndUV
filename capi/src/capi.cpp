@@ -5775,6 +5775,13 @@ CyberStatus cyber_image_save_png(const CyberImage* image, const char* path) {
         setError("cyber_image_save_png: null argument");
         return CYBER_ERR_INVALID_ARG;
     }
+    if (image->image.pixels.empty()) {
+        // The metadata image cyber_bake_regions returns: its rows went to the
+        // host's callback, so there is nothing here to encode.
+        setError("cyber_image_save_png: the image carries no pixels (a regioned bake hands its "
+                 "rows to the row callback)");
+        return CYBER_ERR_INVALID_ARG;
+    }
     try {
         if (!cyber::imageio::saveImage(std::string(path), image->image,
                                        cyber::imageio::ImageFormat::Png)) {

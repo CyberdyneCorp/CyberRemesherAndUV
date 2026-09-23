@@ -3795,8 +3795,21 @@ class BakeParams:
             padding_radius=int(self.padding_radius),
             placement=_placement_to_c(self.placement),
             density_normalization=int(self.density_normalization),
-            max_working_set_texels=int(self.max_working_set_texels),
+            max_working_set_texels=_working_set(self.max_working_set_texels),
         )
+
+
+def _working_set(texels) -> int:
+    """A working-set bound as the C ABI's unsigned 64-bit field.
+
+    Refuses a negative bound, as the CLI's ``--bake-working-set`` does: ctypes
+    would otherwise wrap ``-1`` to 2**64 - 1, silently meaning "no bound".
+    """
+    value = int(texels)
+    if value < 0:
+        raise ValueError("max_working_set_texels must be >= 0 (0 = no bound), got {0}"
+                         .format(value))
+    return value
 
 
 @dataclass(frozen=True)
@@ -3906,7 +3919,11 @@ class Image:
         return _regions_from(lambda *out: lib.cyber_image_regions(self.handle, *out))
 
     def save_png(self, path: str) -> None:
-        """Write the map to an 8-bit PNG (tonemapped)."""
+        """Write the map to an 8-bit PNG (tonemapped).
+
+        Raises :class:`CyberError` for the pixel-less image :func:`bake_regions`
+        returns: its rows went to the ``on_rows`` callback.
+        """
         _check(_ffi.get_lib().cyber_image_save_png(self.handle, str(path).encode("utf-8")))
 
     def to_numpy(self):
@@ -4927,7 +4944,7 @@ def write_bundle(
     if max_working_set_texels is not None:
         # Bake every map in regions and stream it to its file; the files are
         # byte-identical to an unbounded bundle's.
-        params.max_working_set_texels = int(max_working_set_texels)
+        params.max_working_set_texels = _working_set(max_working_set_texels)
 
     def _progress_trampoline(fraction, stage_ptr, _user):
         if progress is None:

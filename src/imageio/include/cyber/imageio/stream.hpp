@@ -43,8 +43,9 @@ public:
     [[nodiscard]] virtual bool writeRows(const float* rows, int count) = 0;
 
     // Completes the file. False when fewer than `height` rows were written or
-    // on an I/O failure; a writer destroyed without finish() leaves an
-    // incomplete file, exactly as an abandoned bake leaves no map.
+    // on an I/O failure. A writer destroyed without finish() closes an
+    // INCOMPLETE file and does not remove it: the caller that abandoned the
+    // write owns that (the export bundle removes an abandoned map's files).
     [[nodiscard]] virtual bool finish() = 0;
 };
 

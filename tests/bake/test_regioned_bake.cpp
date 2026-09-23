@@ -1,6 +1,7 @@
 #include <doctest.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -271,8 +272,17 @@ TEST_CASE("the halo is twice the padding radius and at least the derivative foot
     bake::BakeParams p;
     p.paddingRadius = 8;
     CHECK(bake::regionHaloRows(p) == 16);
+    // The published floor (cyber_capi.h, BakeParams::max_working_set_texels):
+    // max(2 * radius, 1). Stated as the literal so a change to the constant is a
+    // change to the contract, not a silent re-derivation of it.
     p.paddingRadius = 0;
-    CHECK(bake::regionHaloRows(p) == bake::kDerivativeFootprintTexels);
+    CHECK(bake::regionHaloRows(p) == 1);
+    p.maxWorkingSetTexels = 64u * 4u;
+    p.width = 64;
+    p.height = 64;
+    const bake::RegionPlan plan = bake::planRegions(p);
+    CHECK(plan.regionRows == 2);
+    CHECK(plan.haloRows == 1);
 }
 
 TEST_CASE("a working-set bound plans regions; zero plans one") {
@@ -413,9 +423,24 @@ TEST_CASE("a regioned UDIM set equals bakeUdim, relative mean over the whole set
         const bake::UdimBakeResult whole = bake::bakeUdim(low, high, map, p);
         REQUIRE(whole.tiles.size() == 2);
         Assembling sink;
-        const bake::RegionedBakeResult regioned = bake::bakeRegions(low, high, map, p, true, sink);
+        std::vector<float> seen;
+        ProgressSink progress([&seen](float value, std::string_view) { seen.push_back(value); });
+        const bake::RegionedBakeResult regioned =
+            bake::bakeRegions(low, high, map, p, true, sink, &progress);
         REQUIRE(regioned.tiles.size() == 2);
         REQUIRE(sink.images.size() == 2);
+        // Each tile's finalize and assembly passes share its slice of the bar.
+        // The sink swallows a report below its best, so a mapping that ran
+        // backwards from one tile to the next would show as tile two's passes
+        // never moving the bar: count the steps after shading.
+        CHECK(seen.back() == 1.0f);
+        std::size_t steps = 0;
+        for (std::size_t i = 1; i < seen.size(); ++i) {
+            if (seen[i - 1] >= 0.8f && seen[i] > seen[i - 1]) {
+                ++steps;
+            }
+        }
+        CHECK(steps + 1 >= 2u * 2u * regioned.plan.regionCount);
         for (std::size_t t = 0; t < 2; ++t) {
             CHECK(sink.images[t].tile.number == whole.tiles[t].tile.number);
             CHECK(sink.images[t].image.pixels == whole.tiles[t].result.image.pixels);
@@ -505,8 +530,11 @@ TEST_CASE("the working set is bounded while the output is not") {
         REQUIRE(regioned.tiles.size() == 1);
         CHECK(regioned.plan.boundReached);
         CHECK(regioned.plan.workingSetTexels <= bound);
-        // Measured, not planned: no buffer of output texels was larger.
+        // Measured, not planned: no buffer of output texels was larger -- and
+        // the largest one, an interior assembly window of a region plus both
+        // halos, WAS held, so the measurement is not under-reporting.
         CHECK(regioned.peakTexelsInFlight <= bound);
+        CHECK(regioned.peakTexelsInFlight == regioned.plan.workingSetTexels);
         CHECK(regioned.peakTexelsInFlight * 5 < 256u * 256u);
         CHECK(sink.ordered);
         CHECK(sink.images.front().nextRow == 256);
@@ -517,9 +545,12 @@ TEST_CASE("the working set is bounded while the output is not") {
 TEST_CASE("8192 and 16384 outputs of every map type are produced under a small working set") {
     // A chart of a few dozen texels, placed so that it straddles region
     // boundaries, at 8192 and 16384 square. The output is 64 M and 256 M
-    // texels; the working set is a 64-row window. Nothing here holds the output:
-    // the sink counts rows and checks they are finite, and the peak buffer
-    // is measured.
+    // texels; the working set is a 256-row window. Nothing here holds the
+    // output: the sink counts rows and checks they are finite, and the peak
+    // buffer is measured (and must reach the window, or the measurement would
+    // be under-reporting). The chart is sparse, so most regions are synthesised
+    // neutral rows; tests/cli/test_cli.py measures the process's resident set
+    // on a FULLY covered map under the same kind of bound.
     Mesh low = emptyWithUv();
     const float c = 0.5f;
     const float e = 0.002f;
@@ -544,6 +575,7 @@ TEST_CASE("8192 and 16384 outputs of every map type are produced under a small w
             CHECK(sink.ordered);
             CHECK(sink.finite);
             CHECK(regioned.peakTexelsInFlight <= bound);
+            CHECK(regioned.peakTexelsInFlight == regioned.plan.workingSetTexels);
         }
     }
 }
@@ -580,9 +612,9 @@ TEST_CASE("a cancelled regioned bake stops inside the first region and emits not
         CHECK(regioned.cancelled);
         CHECK(regioned.tiles.empty());
         CHECK(sink.rowsSeen == 0);
-        // Region one's shading owns [0, 0.45] of the bar; the bake never
+        // Region one's shading owns [0, 0.4] of the bar; the bake never
         // finished it.
-        CHECK(lastSeen < 0.45f);
+        CHECK(lastSeen < 0.4f);
     }
 }
 
@@ -604,11 +636,135 @@ TEST_CASE("regioned progress is finer than one report per region and monotone") 
         // Region one's shading slice alone carries several distinct values.
         std::vector<float> inFirst;
         for (const float v : seen) {
-            if (v > 0.0f && v < 0.9f / 4.0f && (inFirst.empty() || inFirst.back() != v)) {
+            if (v > 0.0f && v < 0.8f / 4.0f && (inFirst.empty() || inFirst.back() != v)) {
                 inFirst.push_back(v);
             }
         }
         CHECK(inFirst.size() >= 3);
+    }
+}
+
+TEST_CASE("field-sampled regioned progress is reported per texel, not per region") {
+    const BumpField field;
+    const Mesh low = editMesh();
+    const Mesh noTarget;
+    bake::BakeParams p = params(96, 4, boundFor(96, 4, 24));  // four regions
+    p.field = &field;
+    for (const bake::BakeMap map : {bake::BakeMap::Normal, bake::BakeMap::Curvature}) {
+        CAPTURE(static_cast<int>(map));
+        std::vector<float> seen;
+        ProgressSink progress([&seen](float value, std::string_view) { seen.push_back(value); });
+        Counting sink;
+        const bake::RegionedBakeResult regioned =
+            bake::bakeRegions(low, noTarget, map, p, false, sink, &progress);
+        REQUIRE(regioned.tiles.size() == 1);
+        REQUIRE(regioned.plan.regionCount == 4);
+        CHECK(std::is_sorted(seen.begin(), seen.end()));
+        std::vector<float> inFirst;
+        for (const float v : seen) {
+            if (v > 0.0f && v < 0.8f / 4.0f && (inFirst.empty() || inFirst.back() != v)) {
+                inFirst.push_back(v);
+            }
+        }
+        CHECK(inFirst.size() >= 3);
+    }
+}
+
+namespace {
+
+// Bakes `map` in four regions at `padding` and raises the cancel on the first progress
+// report inside (lo, hi). Returns what happened AFTER the cancel was raised:
+// further progress reports and rows handed to the sink.
+struct AfterCancel {
+    bool cancelled = false;
+    bool raised = false;
+    int reports = 0;
+    std::size_t rowsBefore = 0;
+    std::size_t rows = 0;
+    int regionRows = 0;
+};
+
+AfterCancel cancelInside(bake::BakeMap map, int padding, float lo, float hi) {
+    const Mesh low = editMesh();
+    const Mesh high = target();
+    const bake::BakeParams p = params(96, padding, boundFor(96, padding, 24));
+    CancelToken cancel;
+    AfterCancel after;
+    Counting sink;
+    ProgressSink progress([&](float value, std::string_view) {
+        if (after.raised) {
+            ++after.reports;
+        } else if (value > lo && value < hi) {
+            after.raised = true;
+            after.rowsBefore = sink.rowsSeen;
+            cancel.requestCancel();
+        }
+    });
+    const bake::RegionedBakeResult regioned =
+        bake::bakeRegions(low, high, map, p, false, sink, &progress, &cancel);
+    after.cancelled = regioned.cancelled;
+    after.rows = sink.rowsSeen - after.rowsBefore;
+    after.regionRows = regioned.plan.regionRows;
+    return after;
+}
+
+}  // namespace
+
+TEST_CASE("a regioned bake polls cancellation every 1024 rasterized faces") {
+    // A region's rasterization walks every face of the EditMesh before a texel
+    // is shaded. Counted with a token that never cancels: the polls taken
+    // before shading reports its first texel include one per 1024 faces.
+    Mesh low = emptyWithUv();
+    addSheet(low, Sheet{0, 1, 0, 1, 0.05f, 0.95f, 0.05f, 0.95f, 64, false}, lowHeight);
+    REQUIRE(low.faceCapacity() == 4096);
+    const Mesh high = target();
+    CancelToken cancel;
+    std::atomic<int> polls{0};
+    cancel.setPoll([&polls] {
+        polls.fetch_add(1, std::memory_order_relaxed);
+        return false;
+    });
+    int pollsAtFirstReport = -1;
+    ProgressSink progress([&](float, std::string_view) {
+        if (pollsAtFirstReport < 0) {
+            pollsAtFirstReport = polls.load(std::memory_order_relaxed);
+        }
+    });
+    Counting sink;
+    const bake::RegionedBakeResult regioned =
+        bake::bakeRegions(low, high, bake::BakeMap::Normal, params(64, 2, boundFor(64, 2, 16)),
+                          false, sink, &progress, &cancel);
+    REQUIRE(regioned.tiles.size() == 1);
+    CHECK(pollsAtFirstReport >= 4096 / 1024);
+}
+
+TEST_CASE("a regioned bake polls cancellation per band of the finalize pass") {
+    // Shading owns [0, 0.8]; the finalize pass reports each band inside
+    // (0.8, 0.9]. A cancel raised on its first band is seen before the next:
+    // no further band reports and no row reaches the sink.
+    for (const bake::BakeMap map : {bake::BakeMap::Normal, bake::BakeMap::UvDensity}) {
+        CAPTURE(static_cast<int>(map));
+        const AfterCancel after = cancelInside(map, 4, 0.81f, 0.89f);
+        REQUIRE(after.raised);
+        CHECK(after.cancelled);
+        CHECK(after.reports == 0);
+        CHECK(after.rows == 0);
+    }
+}
+
+TEST_CASE("a regioned bake polls cancellation per region of the assembly pass") {
+    // Assembly reports each region inside (0.9, 1] after emitting it. A cancel
+    // raised on the first region's report is seen before the second region is
+    // read: nothing more reaches the sink. At padding radius 0, so the padding
+    // stage's own ring polls cannot stand in for the assembly pass's.
+    for (const bake::BakeMap map : {bake::BakeMap::Normal, bake::BakeMap::AmbientOcclusion}) {
+        CAPTURE(static_cast<int>(map));
+        const AfterCancel after = cancelInside(map, 0, 0.91f, 0.99f);
+        REQUIRE(after.raised);
+        CHECK(after.cancelled);
+        CHECK(after.reports == 0);
+        CHECK(after.rows == 0);
+        CHECK(after.rowsBefore == static_cast<std::size_t>(after.regionRows));
     }
 }
 
@@ -630,6 +786,33 @@ TEST_CASE("the texel ceiling bounds the output of a regioned bake, the bound nev
     CHECK(regioned.refusal == bake::UdimRefusal::None);
     CHECK_FALSE(regioned.plan.boundReached);
     CHECK(sink.rowsSeen == 64u);
+}
+
+TEST_CASE("a regioned UDIM set is held to the aggregate texel ceiling") {
+    Mesh low = editMesh();
+    auto* uv = low.cornerAttributes().find<Vec2>(cyber::io::kUvAttribute);
+    for (Index f = 36; f < low.faceCapacity(); ++f) {
+        for (const LoopId l : low.faceLoops(FaceId{f})) {
+            (*uv)[l.value].x += 1.0f;
+        }
+    }
+    const Mesh high = target();
+    bake::BakeParams p = params(32, 4, boundFor(32, 4, 4));
+    p.maxPixels = 2u * 32u * 32u - 1u;  // each tile fits; the two-tile set does not
+    Counting sink;
+    CHECK(bake::bakeUdim(low, high, bake::BakeMap::Normal, p).refusal ==
+          bake::UdimRefusal::AggregateCeiling);
+    const bake::RegionedBakeResult regioned =
+        bake::bakeRegions(low, high, bake::BakeMap::Normal, p, true, sink);
+    CHECK(regioned.refusal == bake::UdimRefusal::AggregateCeiling);
+    CHECK_FALSE(regioned.refusalMessage.empty());
+    CHECK(sink.rowsSeen == 0);
+    // Not UDIM: one image, which fits.
+    CHECK(bake::bakeRegions(low, high, bake::BakeMap::Normal, p, false, sink).refusal ==
+          bake::UdimRefusal::None);
+    p.maxPixels = 2u * 32u * 32u;
+    CHECK(bake::bakeRegions(low, high, bake::BakeMap::Normal, p, true, sink).refusal ==
+          bake::UdimRefusal::None);
 }
 
 TEST_CASE("a regioned bake refuses exactly what bake() refuses") {

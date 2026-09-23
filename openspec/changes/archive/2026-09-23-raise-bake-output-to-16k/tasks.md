@@ -32,7 +32,7 @@
 - [x] 5.2 CLI: `--bake-working-set`, region facts in the JSON report
 - [x] 5.3 C ABI 2.1: appended members with engine defaults (floors unchanged), `cyber_bake_regions`, `cyber_image_regions`, `cyber_bundle_result_file_regions`; manifest regenerated and repinned
 - [x] 5.4 Python: `max_working_set_texels`, `bake_regions`, region facts
-- [x] 5.5 Swift: the same surface
+- [x] 5.5 Swift: the same surface for bakes (Swift binds no bundle writer, so there is no bundle bound to add)
 
 ## 6. Tests
 

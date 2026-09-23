@@ -864,10 +864,22 @@ emits. Point `scratch_dir` at the disk you are writing to: a RAM-backed `/tmp`
 defeats the bound. The bundle puts it beside its output.
 
 Cancellation is polled **inside** each region — every 2048 shaded texels per
-worker, every 1024 rasterized faces, every scratch row and between padding rings
-— so its latency is bounded by the working set or the mesh, never by the output.
-Progress moves per texel inside a region rather than once per region. PNG and EXR
-are written band by band, byte-identical to the one-shot writers.
+worker, every 1024 rasterized faces, between padding rings, per band of the
+finalize pass and per region of assembly — so its latency is bounded by the
+working set or the mesh, never by the output. Progress moves per texel inside a
+region rather than once per region (shading owns the first 80% of the bar; the
+finalize and assembly passes report per band and per region in the rest). PNG
+and EXR are written band by band, byte-identical to the one-shot writers; a
+bundle that is cancelled or fails mid-map removes that map's files rather than
+leave a truncated one.
+
+The bound is in texels of **output** image, not bytes: with the per-texel
+shading frames and padding state of the region in flight, the process holds
+roughly 100-150 bytes per texel of the bound, all of it proportional to the
+bound and none to the output. Measured: a fully shaded 16384² normal map (3 GiB of
+output floats) under a 1 M-texel bound peaked at about 120 MiB above the
+process's baseline. The image `bake_regions` returns carries the map's metadata
+and **no pixels** (they went to your callback): `save_png` on it is refused.
 
 #### The bake provider: asking this engine for a map
 

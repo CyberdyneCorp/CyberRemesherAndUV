@@ -62,6 +62,24 @@ final class RegionedBakeTests: XCTestCase {
         }
     }
 
+    /// The report carries no pixels, so saving it is refused rather than read
+    /// past its empty buffer -- a one-channel map used to crash the process.
+    func testSavingThePixelLessReportThrows() throws {
+        let low = try quarterQuad(name: "png_low", z: 0)
+        let high = try quarterQuad(name: "png_high", z: 0.02)
+        var params = BakeParameters()
+        params.width = 32
+        params.height = 32
+        params.maxWorkingSetTexels = 32 * 20
+        for map in [BakeMap.ambientOcclusion, BakeMap.normal] {
+            let report = try low.bakeRegions(from: high, map: map, parameters: params) { _ in }
+            let path = NSTemporaryDirectory() + "cyber_swift_regions_report.png"
+            try? FileManager.default.removeItem(atPath: path)
+            XCTAssertThrowsError(try report.savePNG(to: path))
+            XCTAssertFalse(FileManager.default.fileExists(atPath: path))
+        }
+    }
+
     func testAThrowingRowHandlerStopsTheBakeAndIsRethrown() throws {
         let low = try quarterQuad(name: "stop_low", z: 0)
         let high = try quarterQuad(name: "stop_high", z: 0.02)

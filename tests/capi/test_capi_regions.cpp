@@ -197,6 +197,14 @@ TEST_CASE("capi regioned bake equals cyber_bake, band by band") {
         CHECK(cyber_image_width(report) == 48);
         CHECK(cyber_image_channels(report) == cyber_image_channels(whole));
         CHECK(cyber_image_copy_pixels(report, nullptr, 0) == 0u);
+        // ...and nothing to encode: refused, never read past its empty buffer
+        // (a one-channel map used to be expanded to RGB from it and crash).
+        const std::filesystem::path png =
+            std::filesystem::temp_directory_path() / "cyber_capi_regions_report.png";
+        std::filesystem::remove(png);
+        CHECK(cyber_image_save_png(report, png.string().c_str()) == CYBER_ERR_INVALID_ARG);
+        CHECK(std::string(cyber_last_error()).find("no pixels") != std::string::npos);
+        CHECK_FALSE(std::filesystem::exists(png));
         CyberImagePadding a{};
         CyberImagePadding b{};
         REQUIRE(cyber_image_padding(whole, &a) == CYBER_OK);

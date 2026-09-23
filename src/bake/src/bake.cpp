@@ -292,9 +292,8 @@ void rasterizeTriangle(const UvTriangle& tri, const RasterGrid& grid, std::vecto
         for (int px = x0; px <= x1; ++px) {
             const Vec2 s{(static_cast<float>(px) + 0.5f) / width,
                          1.0f - (static_cast<float>(py) + 0.5f) / height};
-            const std::array<float, 3> bc =
-                barycentric({s.x, s.y, 0}, {uv[0].x, uv[0].y, 0}, {uv[1].x, uv[1].y, 0},
-                            {uv[2].x, uv[2].y, 0});
+            const std::array<float, 3> bc = barycentric(
+                {s.x, s.y, 0}, {uv[0].x, uv[0].y, 0}, {uv[1].x, uv[1].y, 0}, {uv[2].x, uv[2].y, 0});
             // Inside test: the clamped barycentric must reproduce the point.
             const Vec2 rebuilt = uv[0] * bc[0] + uv[1] * bc[1] + uv[2] * bc[2];
             if (std::fabs(rebuilt.x - s.x) > 1e-4f || std::fabs(rebuilt.y - s.y) > 1e-4f) {
@@ -2423,8 +2422,8 @@ private:
             ProgressSink sub =
                 progress_ == nullptr
                     ? ProgressSink{}
-                    : progress_->subrange(kShadeShare * setFraction(index, rows.begin),
-                                          kShadeShare * setFraction(index, rows.end), "bake");
+                    : progress_->subrange(kShadeEnd * setFraction(index, rows.begin),
+                                          kShadeEnd * setFraction(index, rows.end), "bake");
             if (!shadeRegion(image, rows, &sub)) {
                 return false;
             }
@@ -2494,36 +2493,49 @@ private:
         if (ctx_.map == BakeMap::UvDensity) {
             image.report.encoding.densityMean = densityMean_.value();
         }
-        const float curvatureRange = fieldCurvatureRange(image.fieldSamples, ctx_.params);
-        const bool rewrite = rewritesScratch(image);
-        detail::PadRangeAccumulator range(channels_);
-        Image rows;
-        std::vector<std::uint8_t> coverage;
+        FinalizeState state{fieldCurvatureRange(image.fieldSamples, ctx_.params),
+                            rewritesScratch(image),
+                            detail::PadRangeAccumulator(channels_),
+                            Image{},
+                            {}};
         for (const RowRange& band : regions()) {
             if (cancelled()) {
                 return false;
             }
-            if (!image.scratch->stores(band.begin, band.end)) {
-                continue;  // neutral rows: nothing covered, nothing to normalize
+            // A band with no covered texel holds neutral rows: nothing to
+            // normalize and nothing in the clamp range.
+            if (image.scratch->stores(band.begin, band.end) && !finalizeBand(image, band, state)) {
+                return false;
             }
-            if (!image.scratch->read(band.begin, band.count(), rows, coverage)) {
-                return fail(RegionFailure::Scratch, "cannot read the regioned bake's scratch file");
-            }
-            noteInFlight(rows);
-            normalize(image, rows, coverage, curvatureRange);
-            for (std::size_t i = 0; i < coverage.size(); ++i) {
-                if (coverage[i] != 0) {
-                    range.add(rows.pixels.data() + i * static_cast<std::size_t>(channels_));
-                }
-            }
-            if (rewrite && !image.scratch->write(band.begin, rows, coverage)) {
-                return fail(RegionFailure::Scratch,
-                            "cannot write the regioned bake's scratch file");
-            }
+            reportAfterShading(indexOf(image), Pass::Finalize, band.end);
         }
         image.fieldSamples = {};  // the one per-texel buffer outside the bound
-        image.padRange = range.finish(image.report.encoding);
+        image.padRange = state.range.finish(image.report.encoding);
         return true;
+    }
+
+    // What the finalize pass carries from band to band.
+    struct FinalizeState {
+        float curvatureRange;
+        bool rewrite;
+        detail::PadRangeAccumulator range;
+        Image rows;                          // one band, reused
+        std::vector<std::uint8_t> coverage;  // its coverage bytes
+    };
+
+    bool finalizeBand(RegionedImage& image, RowRange band, FinalizeState& state) {
+        if (!image.scratch->read(band.begin, band.count(), state.rows, state.coverage)) {
+            return fail(RegionFailure::Scratch, "cannot read the regioned bake's scratch file");
+        }
+        noteInFlight(state.rows);
+        normalize(image, state.rows, state.coverage, state.curvatureRange);
+        for (std::size_t i = 0; i < state.coverage.size(); ++i) {
+            if (state.coverage[i] != 0) {
+                state.range.add(state.rows.pixels.data() + i * static_cast<std::size_t>(channels_));
+            }
+        }
+        return !state.rewrite || image.scratch->write(band.begin, state.rows, state.coverage) ||
+               fail(RegionFailure::Scratch, "cannot write the regioned bake's scratch file");
     }
 
     // ---- pass 3: assemble ---------------------------------------------------
@@ -2557,10 +2569,7 @@ private:
             if (!emit(image, rows.begin, window, rows.begin - top, rows.count())) {
                 return false;
             }
-            if (progress_ != nullptr) {
-                progress_->report(kShadeShare + (1.0f - kShadeShare) * setFraction(index, rows.end),
-                                  "bake");
-            }
+            reportAfterShading(index, Pass::Assemble, rows.end);
         }
         image.report.padding.texelsFilled = filled;
         image.report.padding.mode =
@@ -2604,7 +2613,29 @@ private:
                                              std::to_string(rowBegin + count - 1));
     }
 
-    static constexpr float kShadeShare = 0.9f;
+    // The two passes that follow shading. Each image runs both before the next
+    // image starts, so they share that image's slice of the bar.
+    enum class Pass { Finalize, Assemble };
+
+    // Progress once row `row` of image `index` has been through `pass`: the
+    // image's slice of [kShadeEnd, 1], its first half the finalize pass and its
+    // second half assembly, so the bar stays monotone across a UDIM set.
+    void reportAfterShading(std::size_t index, Pass pass, int row) {
+        if (progress_ == nullptr) {
+            return;
+        }
+        const float passBegin = pass == Pass::Assemble ? 1.0f : 0.0f;
+        const float rowFraction = static_cast<float>(row) / static_cast<float>(ctx_.params.height);
+        const float within = (passBegin + rowFraction) / 2.0f;
+        const float image =
+            (static_cast<float>(index) + within) / static_cast<float>(images_.size());
+        progress_->report(kShadeEnd + (1.0f - kShadeEnd) * image, "bake");
+    }
+
+    // Shading dominates the cost and reports per texel inside [0, kShadeEnd];
+    // the finalize pass (one read of the scratch) reports per band and assembly
+    // per region inside the rest.
+    static constexpr float kShadeEnd = 0.8f;
 
     const BakeContext& ctx_;
     RegionPlan plan_;

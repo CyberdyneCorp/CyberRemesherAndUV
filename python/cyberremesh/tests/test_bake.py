@@ -346,6 +346,29 @@ def _gate_regioned(obj_path):
                 assert [row for row, _ in bands] == list(range(0, 32, 4)), bands
                 assembled = np.concatenate([rows for _, rows in bands], axis=0)
                 assert np.array_equal(assembled, expected), bake_map
+                # The returned image carries no pixels: saving it is refused,
+                # never a read past its empty buffer (a 1-channel AO map used
+                # to crash the process here).
+                with bake_regions(low, high, bake_map, lambda _r, _b: None,
+                                  params) as report:
+                    png = os.path.join(tempfile.gettempdir(), "cyber_regioned_report.png")
+                    try:
+                        report.save_png(png)
+                    except cyberremesh.CyberError as error:
+                        assert "no pixels" in str(error), error
+                    else:
+                        raise AssertionError("save_png accepted a pixel-less image")
+
+            # A negative bound is refused rather than wrapped to "no bound".
+            for bad in (lambda: BakeParams(max_working_set_texels=-1)._to_c(),
+                        lambda: bake_regions(low, high, BakeMap.NORMAL, lambda _r, _b: None,
+                                             BakeParams(max_working_set_texels=-1))):
+                try:
+                    bad()
+                except ValueError as error:
+                    assert "max_working_set_texels" in str(error), error
+                else:
+                    raise AssertionError("a negative working-set bound was accepted")
 
             # A callback that raises stops the bake and the exception surfaces.
             def boom(_row, _rows):

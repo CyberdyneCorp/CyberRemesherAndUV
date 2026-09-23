@@ -2831,7 +2831,8 @@ int cyber_image_channels(const CyberImage* image);
  * `max_floats`; returns the number of floats written. Pass out=NULL to query
  * the required count. */
 size_t cyber_image_copy_pixels(const CyberImage* image, float* out, size_t max_floats);
-/* Writes the image to an 8-bit PNG (tonemapped). */
+/* Writes the image to an 8-bit PNG (tonemapped). An image without pixels --
+ * the one cyber_bake_regions returns -- is CYBER_ERR_INVALID_ARG. */
 CyberStatus cyber_image_save_png(const CyberImage* image, const char* path);
 
 /* ---- auto-routed seam paths (uv-editing) -----------------------------
@@ -3141,7 +3142,8 @@ typedef int (*CyberBakeRowsCb)(int row_begin, int row_count, int width, int chan
  * On success *out receives a CyberImage carrying the map's metadata -- size,
  * channels, encoding, padding, density, placement, id table, region facts --
  * and NO PIXELS: they went to `rows`. cyber_image_copy_pixels copies nothing
- * from it and cyber_image_save_png fails on it.
+ * from it (and reports a required count of 0), and cyber_image_save_png refuses
+ * it with CYBER_ERR_INVALID_ARG.
  *
  * Status: CYBER_ERR_INVALID_ARG for a NULL required argument or a parameter out
  * of range; CYBER_ERR_EMPTY when the low-poly has no UVs; CYBER_ERR_RUNTIME

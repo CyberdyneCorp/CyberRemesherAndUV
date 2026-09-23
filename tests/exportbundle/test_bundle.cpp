@@ -131,7 +131,13 @@ TEST_CASE("the DirectX preset flips the normal map's green channel") {
     const fs::path dxDir = testDir("green_dx");
     Mesh lowGl = makeSurface(0.0f);
     Mesh lowDx = makeSurface(0.0f);
-    const Mesh high = makeSurface(0.02f);
+    // Tilted against the low surface in both axes, so the tangent-space normal
+    // leans whichever way the unwrap orients the chart and its green is well
+    // away from 0.5 -- the flip's fixed point, where a missing flip would still
+    // sum to full scale.
+    const std::vector<Vec3> steep = {{0, 0, 0.02f}, {1, 0, 0.32f}, {1, 1, 0.62f}, {0, 1, 0.32f}};
+    const std::vector<std::vector<Index>> quad = {{0, 1, 2, 3}};
+    const Mesh high = Mesh::fromIndexed(steep, quad);
 
     REQUIRE(bundle::writeBundle(lowGl, high,
                                 paramsFor(smallPreset("gl", io::GreenChannel::PlusY), glDir))
@@ -144,6 +150,7 @@ TEST_CASE("the DirectX preset flips the normal map's green channel") {
     const int dx = firstGreen(dxDir / "hero_normal.png");
     REQUIRE(gl >= 0);
     REQUIRE(dx >= 0);
+    CHECK(std::abs(gl - 128) > 10);
     // The flip is exactly 1 - g, so the two must sum to full scale.
     REQUIRE(gl + dx == doctest::Approx(255).epsilon(0.01));
     fs::remove_all(glDir);
@@ -816,6 +823,56 @@ io::ExportPreset everyMapPreset(const std::string& textureFormat) {
     return preset;
 }
 
+// A Target over both tiles' charts that is NOT flat and NOT uncoloured: bumps
+// that tilt the baked normals (so the green channel moves off 0.5 and the
+// DirectX flip changes bytes) and vertex colours in the mid range (where the sRGB
+// curve moves every value). On flat, black geometry both encodings are the
+// identity and a band writer that skipped them would go unnoticed.
+Mesh bumpyColouredTarget() {
+    constexpr int kColumns = 34;
+    constexpr int kRows = 14;
+    std::vector<Vec3> p;
+    for (int j = 0; j <= kRows; ++j) {
+        for (int i = 0; i <= kColumns; ++i) {
+            const float x = -0.2f + 3.4f * static_cast<float>(i) / kColumns;
+            const float y = -0.2f + 1.4f * static_cast<float>(j) / kRows;
+            p.push_back(Vec3{x, y, 0.02f + 0.06f * std::sin(4.0f * x) * std::cos(5.0f * y)});
+        }
+    }
+    std::vector<std::vector<Index>> faces;
+    for (int j = 0; j < kRows; ++j) {
+        for (int i = 0; i < kColumns; ++i) {
+            const auto at = [](int col, int row) {
+                return static_cast<Index>(row * (kColumns + 1) + col);
+            };
+            faces.push_back({at(i, j), at(i + 1, j), at(i + 1, j + 1), at(i, j + 1)});
+        }
+    }
+    Mesh mesh = Mesh::fromIndexed(p, faces);
+    auto& colors = mesh.vertexAttributes().create<Vec3>(io::kColorAttribute);
+    colors.resize(mesh.vertexCapacity());
+    for (Index v = 0; v < mesh.vertexCapacity(); ++v) {
+        const Vec3 q = mesh.position(cyber::VertexId{v});
+        colors[v] = Vec3{0.1f + 0.25f * q.x, 0.2f + 0.4f * q.y, 0.35f};
+    }
+    return mesh;
+}
+
+// How many covered texels of a written 8-bit map have channel `c` away from
+// `neutral` by more than `margin` (in 0..1 units).
+std::size_t texelsAwayFrom(const fs::path& path, int c, float neutral, float margin) {
+    const auto loaded = cyber::imageio::loadPng(path.string());
+    REQUIRE(loaded.has_value());
+    const auto ch = static_cast<std::size_t>(loaded->channels);
+    std::size_t count = 0;
+    for (std::size_t i = 0; i * ch < loaded->pixels.size(); ++i) {
+        if (std::fabs(loaded->pixels[i * ch + static_cast<std::size_t>(c)] - neutral) > margin) {
+            ++count;
+        }
+    }
+    return count;
+}
+
 }  // namespace
 
 TEST_CASE("a bundle under a working-set bound writes the same files, band by band") {
@@ -828,7 +885,7 @@ TEST_CASE("a bundle under a working-set bound writes the same files, band by ban
             const io::ExportPreset preset = everyMapPreset(format);
 
             Mesh lowWhole = twoTileSurface(0.0f);
-            const Mesh high = twoTileSurface(0.02f);
+            const Mesh high = bumpyColouredTarget();
             bundle::BundleParams whole = paramsFor(preset, wholeDir);
             whole.udim = udim;
             whole.aoSamples = 8;
@@ -859,6 +916,18 @@ TEST_CASE("a bundle under a working-set bound writes the same files, band by ban
                 CHECK(b.regions.haloRows == 16);
                 CHECK(b.regions.workingSetTexels <= banded.maxWorkingSetTexels);
             }
+            // The fixture really exercises the per-band encodings: the flipped
+            // normal map's green and the sRGB colour map's values are not the
+            // fixed points of either transform.
+            if (std::string(format) == "png") {
+                // Tile 1001 in both modes: the unit square IS that tile.
+                const fs::path normal = wholeDir / "hero_normal.1001.png";
+                const fs::path color = wholeDir / "hero_color.1001.png";
+                REQUIRE(fs::exists(normal));
+                REQUIRE(fs::exists(color));
+                CHECK(texelsAwayFrom(normal, 1, 0.5f, 0.05f) > 20u);
+                CHECK(texelsAwayFrom(color, 0, 0.0f, 0.1f) > 20u);
+            }
             // The scratch next to the output is gone.
             for (const auto& entry : fs::directory_iterator(bandDir)) {
                 CHECK(entry.path().extension() != ".scratch");
@@ -867,6 +936,39 @@ TEST_CASE("a bundle under a working-set bound writes the same files, band by ban
             fs::remove_all(bandDir);
         }
     }
+}
+
+TEST_CASE("a regioned bundle cancelled mid-stream leaves no partial map") {
+    // The map file is opened at its first band and written band by band. A
+    // cancel raised once it exists -- i.e. part-way through assembly -- must not
+    // leave the truncated file behind (its PNG header claims the full size).
+    const fs::path dir = testDir("regioned_cancel_mid");
+    Mesh low = makeSurface(0.0f);
+    const Mesh high = makeSurface(0.02f);
+    io::ExportPreset preset = smallPreset("t", io::GreenChannel::PlusY);
+    preset.resolution = 64;
+    bundle::BundleParams params = paramsFor(preset, dir);
+    params.maxWorkingSetTexels = 64u * 40u;  // several regions per map
+    const fs::path firstMap = dir / "hero_normal.png";
+    CancelToken cancel;
+    bool sawPartial = false;
+    cyber::ProgressSink progress([&](float, std::string_view) {
+        if (!sawPartial && fs::exists(firstMap)) {
+            sawPartial = true;
+            cancel.requestCancel();
+        }
+    });
+    const bundle::BundleResult result = bundle::writeBundle(low, high, params, &progress, &cancel);
+    REQUIRE(sawPartial);
+    CHECK(result.cancelled);
+    CHECK_FALSE(result.ok);
+    CHECK_FALSE(fs::exists(firstMap));
+    for (const auto& entry : fs::directory_iterator(dir)) {
+        CAPTURE(entry.path());
+        CHECK(entry.path().extension() != ".png");
+        CHECK(entry.path().extension() != ".scratch");
+    }
+    fs::remove_all(dir);
 }
 
 TEST_CASE("a regioned bundle honours cooperative cancellation") {

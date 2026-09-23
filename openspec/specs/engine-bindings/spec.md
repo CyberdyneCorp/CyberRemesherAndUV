@@ -621,8 +621,14 @@ identically by the regioned bake, and the host's texel ceiling SHALL apply to it
 The entry points that return a whole image accept the working-set bound and do not read it,
 because their result is the whole output by construction.
 
-Python and Swift SHALL expose the same regioned bake and the working-set bound on bakes and
-bundles, setting `structSize` themselves.
+Python and Swift SHALL expose the same regioned bake and the working-set bound on bakes,
+setting `structSize` themselves. Python SHALL also expose the bound on bundles; Swift binds no
+bundle writer at all, so it has none to extend. A binding whose integer type can hold a
+negative bound SHALL refuse one rather than let it wrap to the unsigned "no bound" range.
+
+The image a regioned bake returns carries the map's metadata and NO pixels. Every entry point
+that encodes an image's pixels SHALL refuse such an image with `CYBER_ERR_INVALID_ARG` and
+never read past its empty buffer.
 
 #### Scenario: A 2.0 caller gets the default working-set bound
 - **WHEN** a caller states the ABI 2.0 size of `CyberBakeParams` or `CyberBundleParams`
@@ -635,4 +641,12 @@ bundles, setting `structSize` themselves.
 #### Scenario: The bindings stream a regioned bake
 - **WHEN** the Python or Swift binding runs a regioned bake
 - **THEN** it SHALL deliver the rows in ascending order and the assembled map SHALL equal the ordinary bake
+
+#### Scenario: Saving a regioned bake's image is refused
+- **WHEN** a host saves the image a regioned bake returned, for a one-, three- or four-channel map
+- **THEN** the save SHALL fail with `CYBER_ERR_INVALID_ARG`, SHALL write no file, and the process SHALL NOT crash
+
+#### Scenario: A negative bound is refused by the binding
+- **WHEN** the Python binding is given a negative working-set bound for a bake or a bundle
+- **THEN** it SHALL raise before calling the engine rather than bake with no bound
 

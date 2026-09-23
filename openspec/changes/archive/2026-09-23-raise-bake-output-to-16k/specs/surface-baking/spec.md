@@ -17,7 +17,10 @@ hold even one row plus its halo SHALL be honoured as far as it can be — one-ro
 with the working set actually held REPORTED so the host can see its bound was unreachable.
 The Target-side data every bake builds once (the acceleration structure, the Target's
 normals and curvature field) scales with the MESH, not the output, and SHALL NOT be counted
-in the working set.
+in the working set. The bound is stated in texels of OUTPUT image; the per-texel shading
+frames and padding state of the region in flight are proportional to the same bound (not to
+the output) and are not separately counted, so the process's memory SHALL scale with the
+bound and the mesh and SHALL NOT grow with the output size under a fixed bound.
 
 **Region boundaries SHALL be invisible.** The assembled output of a regioned bake SHALL be
 identical, texel for texel, to the unregioned bake of the same request, for every map type,
@@ -65,14 +68,19 @@ cancellation, failure — and a scratch write failure SHALL abandon the bake wit
 failure rather than emit a partial map.
 
 **Cancellation SHALL stop within a region.** A regioned bake SHALL poll cancellation inside
-each region: at least every 2048 shaded texels on each worker, every 1024 rasterized faces,
-every scratch row read or written, and between padding rings. Its latency SHALL therefore be
+each region and inside each of its passes: at least every 2048 shaded texels on each worker,
+every 1024 faces of a region's rasterization walk, between padding rings, before each band
+of the finalize pass (one read, and possibly one rewrite, of a region's worth of scratch
+rows), and before each region's assembly window is read. Its latency SHALL therefore be
 bounded by the work of one of those units — proportional to the working set or the mesh,
 and never to the output size or to the number of regions. A cancelled regioned bake SHALL
 emit no further rows and SHALL report the cancellation.
 
 **Progress SHALL stay smooth.** Progress SHALL be reported inside each region's shading at
 the same texel step an ordinary bake uses, so a regioned bake does not step once per region.
+Shading SHALL own `[0, 0.8]` of the bar; each image's finalize pass SHALL then report once
+per band and its assembly once per region inside `[0.8, 1]`, so the bar also moves while the
+scratch is re-read. It SHALL be monotone across a UDIM set.
 
 Regioning SHALL be available for every map type, for an ordinary bake and for a UDIM set,
 and SHALL honour the projection cage, the texel ceiling, progress reporting and cooperative
@@ -110,6 +118,18 @@ cancellation exactly as the unregioned bake does.
 #### Scenario: A cancelled regioned bake stops inside a region
 - **WHEN** cancellation is requested while the first region of a many-region bake is being shaded
 - **THEN** the bake SHALL stop before that region's shading completes, SHALL emit no rows, and SHALL report the cancellation
+
+#### Scenario: Cancellation is seen within one unit of every later pass
+- **WHEN** cancellation is requested on the finalize pass's first band, or on the report that follows the first assembled region
+- **THEN** the bake SHALL make no further progress report, SHALL hand no further row to the consumer, and SHALL report the cancellation
+
+#### Scenario: The rasterization walk polls cancellation
+- **WHEN** a region is rasterized from an EditMesh of N faces
+- **THEN** cancellation SHALL be polled at least N / 1024 times before the region's first texel is shaded
+
+#### Scenario: A process under a fixed bound does not grow with the output
+- **WHEN** fully shaded maps of two output sizes, one four times the texels of the other, are baked under the same working-set bound
+- **THEN** the larger bake's peak resident memory SHALL stay below half its output's float size and SHALL NOT grow by more than a quarter of the added output
 
 #### Scenario: Progress is finer than one step per region
 - **WHEN** a regioned bake reports progress
