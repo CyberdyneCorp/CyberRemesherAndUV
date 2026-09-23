@@ -109,3 +109,14 @@ file, its region count, region height, halo and the working set held.
 - **WHEN** `cyber` runs a preset export with `--bake-working-set` set far below one map's texel count
 - **THEN** the export SHALL succeed, the map files SHALL equal those of the same run without the flag, and the report SHALL list more than one region per map
 
+### Requirement: Count outcomes in the machine-readable report
+
+The CLI JSON report SHALL include requested/effective/calibrated/final counts,
+per-island outcomes, retained attempt, and termination reason.
+
+#### Scenario: Host records a miss
+
+- **WHEN** a bounded target-count request misses tolerance
+- **THEN** the report SHALL identify the miss without treating the run as a
+  cancellation or a pipeline error
+

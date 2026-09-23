@@ -20,4 +20,6 @@
 
 - [x] 4.1 Add C++/C ABI and Swift regression tests for mixed arities, shared
       and unused vertices, source-buffer mutation, and malformed descriptors.
-- [ ] 4.2 Run native, ABI, Swift, and strict OpenSpec gates.
+- [x] 4.2 Run native, ABI, Swift, and strict OpenSpec gates.
+      Run on release/0.10.0 (2026-09-23): 50/50 ctest including the ABI
+      manifest and binding-parity gates, 42/42 swift test, openspec strict.

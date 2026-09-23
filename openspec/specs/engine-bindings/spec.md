@@ -81,6 +81,14 @@ Python and Swift bindings SHALL be version-locked to the engine release and cove
 
 The gate SHALL be a runnable check in the test suite, not a convention: `tests/packaging/test_swift_abi_parity.py` (ctest case `swift_abi_parity`) fails when a Swift source references a C symbol the header does not declare or declares with a different arity, and per-surface parity checks in the Python test suite fail when a header symbol is added without being bound. A capability the ABI exposes but the bindings do not SHALL be recorded as a pending registration, so the gap is visible rather than assumed absent.
 
+The gate SHALL run in BOTH directions. Checking only that a binding references nothing absent from the header cannot detect an entry point no binding reaches, which is the drift that occurred: a mobile host held the complete stroke grammar and none of the operations that apply a recognized gesture. Every declared `cyber_*` entry point SHALL therefore be bound in each binding or listed in that binding's checked-in pending-registration list, and an unlisted, unbound entry point SHALL fail CI.
+
+The header -> binding direction SHALL be one shared check applied to every binding, not a per-binding copy, so the checks cannot drift apart the way the bindings did. It SHALL run without a built engine, so it covers the lanes where the library does not load. A symbol named only in a comment or string literal SHALL NOT count as bound.
+
+A pending registration SHALL be rejected when the header no longer declares the entry point, and SHALL be rejected when the binding already binds it, so the list can be read as an accurate statement of what is missing without being re-checked.
+
+A host embedding the library on a mobile platform SHALL be able to reach the retopology surface end to end through Swift: Target snapping, face and strip construction, contours, boundary fill, surface cut, patch clone, loop operations and guided remeshing — and SHALL be able to finish an asset: UV unwrapping and baking. The desktop Python binding SHALL reach the same drawing surface, including stroke interpretation, so the gesture path has regression coverage on the harness that can run it.
+
 #### Scenario: Surface drift is caught
 - **WHEN** an ABI entry point is added without a matching Python or Swift wrapper
 - **THEN** the parity check SHALL fail naming the missing wrapper
@@ -88,6 +96,26 @@ The gate SHALL be a runnable check in the test suite, not a convention: `tests/p
 #### Scenario: The gate is executable
 - **WHEN** the test suite runs on any platform, including those without a Swift toolchain
 - **THEN** the source-level parity gate SHALL run as an ordinary test case and fail on a symbol mismatch
+
+#### Scenario: An unbound entry point is not silently tolerated
+- **WHEN** a declared `cyber_*` entry point is bound by neither the Swift sources nor that binding's pending-registration list
+- **THEN** the parity gate SHALL fail naming that entry point
+
+#### Scenario: A mobile host can apply a recognized gesture
+- **WHEN** a Swift host interprets a stroke as a build action and applies it
+- **THEN** the corresponding retopology entry point and a Target snapper SHALL both be reachable from Swift
+
+#### Scenario: Python has the same gate
+- **WHEN** a declared entry point is bound by no Python source and not registered as pending
+- **THEN** the Python parity gate SHALL fail naming it, without needing the engine library to load
+
+#### Scenario: A registration for a bound entry point is rejected
+- **WHEN** a binding's pending-registration list names an entry point that binding already binds
+- **THEN** the gate SHALL fail naming it, so the list stays an accurate statement of what is missing
+
+#### Scenario: One binding runs the whole workflow
+- **WHEN** a Swift host snaps to a Target, builds a contour tube, unwraps it and bakes a normal map
+- **THEN** every step SHALL be reachable from Swift without calling the C ABI directly
 
 ### Requirement: Automatic UV atlas binding
 The C ABI and Python bindings SHALL expose the automatic UV atlas so a caller can, in one call, generate a packed UV atlas for a mesh and read back its quality. The C symbols SHALL always be declared (stable ABI) even in a build without the UV module, returning a runtime error there rather than being absent.
@@ -649,4 +677,156 @@ never read past its empty buffer.
 #### Scenario: A negative bound is refused by the binding
 - **WHEN** the Python binding is given a negative working-set bound for a bake or a bundle
 - **THEN** it SHALL raise before calling the engine rather than bake with no bound
+
+### Requirement: The ABI carries its own version, distinct from the engine's
+
+This elaborates the one-line promise already in "Full-surface C ABI facade"
+("The ABI SHALL carry a runtime-queryable semantic version; minor releases SHALL
+be additive only") into a contract with testable scenarios. That sentence had no
+implementation: the only version an embedder could read was the ENGINE's, which
+moves for quality work that changes no declaration.
+
+The ABI version SHALL be distinct from the engine's semantic version and SHALL
+be declared in the public header as preprocessor constants, so that a consumer
+vendoring the source — or generating bindings from the header — obtains it
+without reading the build system. It SHALL be major.minor with no patch
+component, because no change to the linkable surface is neither additive nor
+breaking.
+
+A library SHALL serve a client when the majors are equal and the library's minor
+is at least the client's. That rule SHALL be implemented once, inside the
+engine, and exposed as an entry point, so that every binding reaches the same
+verdict rather than reimplementing the comparison. A mismatch SHALL be reported
+as a status code with both versions retrievable; the library SHALL NOT abort,
+exit or log, because it runs inside a host process.
+
+The shared library's SONAME SHALL carry the ABI major, not the project major.
+
+Appending an enumerator to an existing enum SHALL NOT be treated as an additive
+minor change: an unfixed C enum's value range is inferred from its enumerators,
+so handing a client a value outside the range it compiled against is undefined
+on the client's side.
+
+#### Scenario: ABI version query
+
+- **WHEN** a client compiled against ABI 1.x loads a 1.y (y > x) library
+- **THEN** all 1.x entry points SHALL work unchanged, and the compatibility
+  check SHALL report success
+
+#### Scenario: A newer client is refused by an older library
+
+- **WHEN** a client compiled against a LATER ABI minor than the library
+  implements asks the library to serve it
+- **THEN** the check SHALL fail with both versions named, because the entry
+  points the client compiled against are genuinely absent
+
+#### Scenario: The two versions are independent
+
+- **WHEN** the engine's behaviour changes without altering any declaration
+- **THEN** the engine version SHALL move and the ABI version SHALL NOT, and a
+  matching ABI SHALL NOT be taken as a promise of identical output
+
+### Requirement: ABI declarations are machine-checked beyond byte layout
+
+The release and CTest gates SHALL compare the public C header with a checked-in
+ABI manifest. The manifest SHALL record exported function and callback
+signatures, enum values and representation, and every concrete struct's field
+identity, source type, offset, field size, aggregate size and alignment.
+Compiler-measured layout SHALL be validated on each supported packaging
+toolchain. A source-level type change or a field added in existing padding SHALL
+be reported even when the aggregate `sizeof` is unchanged.
+
+The project SHALL compile and run a previous-release client surface against the
+current library. That client SHALL use its historical declarations rather than
+including the current header, and SHALL exercise both ordinary calls and
+guarded output buffers.
+
+#### Scenario: A same-sized type change is rejected
+
+- **WHEN** a pointer pointee type changes while its pointer-sized field and
+  aggregate layout remain the same
+- **THEN** manifest validation SHALL fail
+
+#### Scenario: A field consumes trailing padding
+
+- **WHEN** a field is introduced in previously unused trailing padding
+- **THEN** manifest validation SHALL fail even if `sizeof` is unchanged
+
+#### Scenario: An old client uses the new library
+
+- **WHEN** the client translation unit is compiled from the retained v0.8.0
+  declarations and linked with the current shared library
+- **THEN** it SHALL load a mesh, use array/out-param APIs without damaging
+  guard bytes, and complete successfully
+
+### Requirement: Element-id staleness is detectable, not only documented
+
+The ABI SHALL expose a monotone counter per mesh handle that changes whenever
+that handle's element ids may have been reassigned, so that a host holding
+id-keyed state can verify it rather than infer from documentation which
+operations preserve ids.
+
+The counter SHALL follow the same distinction the element-id rules draw: an
+operation that only moves vertex positions SHALL NOT change it, and an operation
+that may create, destroy or rewire elements SHALL change it. It SHALL be a hint
+in the SAFE direction only — it may change when ids in fact survived, never the
+reverse — so equal values prove ids are valid while differing values only
+require the host not to assume. A clone SHALL carry its source's value, because
+a clone's ids are the source's ids.
+
+#### Scenario: A positions-only edit preserves the counter
+
+- **WHEN** an operation moves vertex positions without changing topology
+- **THEN** the counter SHALL be unchanged, so caller-side annotations survive
+
+#### Scenario: A rebuild changes the counter
+
+- **WHEN** an operation reassigns element ids, such as subdivision
+- **THEN** the counter SHALL change, and SHALL never return to an earlier value
+
+### Requirement: A callback is named for the value it returns
+
+Where the engine asks a host for a quantity through a callback, the override
+point SHALL be named for what it RETURNS, not for the quantity's inverse or a
+related term, so that an implementer following the name computes the value the
+engine consumes. Where a name is frozen by the ABI and cannot be corrected, the
+polarity SHALL be stated in the documentation a consumer reads when choosing the
+operation, not only at the callback's own declaration.
+
+#### Scenario: An implementer following the name is correct
+
+- **WHEN** a host implements the ambient-occlusion callback from its name alone
+- **THEN** the value it computes SHALL be the one the bake consumes, so the
+  resulting map is not inverted
+
+### Requirement: Bulk indexed polygon exchange
+
+The C ABI SHALL import a mesh from a copying packed-XYZ and CSR polygon
+descriptor and SHALL export authored polygon offsets and indices without
+triangulating them. The import SHALL reject malformed counts, non-finite
+coordinates, non-monotonic offsets, faces with fewer than three corners, and
+out-of-range indices without publishing a partial output handle.
+
+#### Scenario: Mixed polygon round trip
+
+- **WHEN** a host imports shared-vertex triangles, quads, and n-gons
+- **THEN** authored polygon arities and connectivity SHALL be returned by the
+  bulk export
+
+#### Scenario: Invalid descriptor
+
+- **WHEN** a host supplies invalid offsets, indices, or coordinates
+- **THEN** import SHALL fail and leave its output pointer unchanged
+
+### Requirement: Count outcomes are available to embedded hosts
+
+The C ABI and supported language bindings SHALL expose an additive count policy
+and count outcome report so a host can decide whether to retry without parsing
+diagnostic text. Existing parameter/report layouts SHALL remain unchanged.
+
+#### Scenario: ABI-compatible count policy
+
+- **WHEN** a host compiled against the existing remesh parameters invokes the
+  existing entry point
+- **THEN** it SHALL remain binary compatible and receive existing behavior
 
