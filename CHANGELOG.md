@@ -565,6 +565,46 @@
 
 ### Changed
 
+- **BREAKING -- C ABI 2.0; the shared library is now `libcyber_capi.so.2`.**
+  0.9.0 shipped ABI 1.16, where `CyberBakeParams` had 6 members and
+  `CyberBundleParams` 5. This cycle appended 6 to each, and new values to
+  `CyberBakeMap`, while moving only the ABI minor -- both of which the header's
+  own rules class as breaking. The consequence was concrete: a C host compiled
+  against 0.9.0 that picked up a newer `libcyber_capi.so.1` had
+  `cyber_default_bake_params` write 84 bytes past the end of its struct, and
+  `cyber_bake` read them back as parameters, while `cyber_abi_check(1, 16)`
+  reported the pairing as compatible. A 1.x binary now fails loudly instead: it
+  does not load the `.so.2`, and `cyber_abi_check(1, x)` refuses it.
+
+  `CyberBakeParams` and `CyberBundleParams` are now **sized structs**: their
+  first member is `size_t structSize`, and the library reads -- and
+  `cyber_default_*_params` writes -- only as far as the caller's stated size
+  reaches, with the engine default for anything it does not cover. Appending a
+  bake option is therefore additive from here on and will not need another
+  major. The header states one rule for all five sized structs (these two plus
+  the bake-provider descriptors) instead of a single documented exception.
+
+  **Migrating a C/C++ caller** is two lines per struct, then a recompile:
+
+  ```c
+  CyberBakeParams params;
+  params.structSize = sizeof params;                           /* new */
+  if (cyber_default_bake_params(&params) != CYBER_OK) { ... }  /* now returns a status */
+  ```
+
+  `cyber_default_bake_params` and `cyber_default_bundle_params` return
+  `CyberStatus` and refuse a `NULL` struct or an unset size by name rather than
+  silently doing nothing. The Python and Swift bindings set the size themselves,
+  so neither binding's API changes; the Python loader looks for the `.2` soname.
+  Pinned manifest: `capi/abi/cyber_capi-2.0.json`.
+
+  Swift's `CyberRuntime.abiVersionCompiledAgainst` now comes from the header's
+  version macros at compile time. It was a hand-kept `(1, 7)` that never moved
+  while the ABI went to 1.24 -- invisible because a 1.7 client is always served
+  by a 1.x library -- and 2.0 correctly refused it, which is how the iOS
+  consumer lane found it. A new Swift test fails on the first minor bump if the
+  two ever drift again.
+
 - **Every baked map's output now includes a padded band by default.** A host
   that relied on the background being untouched just outside an island sets
   `paddingRadius = 0` (`--padding 0`), which reproduces the previous output

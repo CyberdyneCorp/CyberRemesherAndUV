@@ -46,16 +46,25 @@ isolation is tracked in [#51](https://github.com/CyberdyneCorp/CyberRemesherAndU
 
 ## Release and contribution policy
 
-Additive ABI changes increment the ABI minor; incompatible layouts require a
-new ABI major. The checked-in ABI manifest and retained v0.8 client test protect
-declarations, compiler layouts and guarded output buffers; the source of truth
-remains `capi/include/cyber_capi.h`. One documented exception to "appending to a
-struct is MAJOR": the bake-provider descriptors (`CyberBakeProviderMap`,
-`CyberBakeProviderRequest`, `CyberBakeProviderResult`) carry their own size as
-their first member and are passed one at a time by pointer, never as an array,
-so the library reads and writes only what a caller's stated size covers and
-appending to those is additive. The reasoning is stated in the header above
-them, under DESCRIPTOR SIZES, and does not extend to any other struct. Every output-affecting claim needs a dated corpus/configuration,
+The C ABI is **2.0** (soname `libcyber_capi.so.2`). Additive changes increment
+the ABI minor; incompatible layouts require a new ABI major, and a client of a
+different major is refused -- by the loader and by `cyber_abi_check` -- rather
+than served. 2.0 exists because `CyberBakeParams` and `CyberBundleParams` grew by
+appending during the 1.x series, which let a newer library write past the end of
+an older caller's struct; see the 0.10.0 CHANGELOG for the two-line migration.
+The checked-in ABI manifest (`capi/abi/cyber_capi-2.0.json`) protects
+declarations, compiler layouts and guarded output buffers; the retained v0.8
+client test only proves that a separate process loads the shared library, and
+cross-major compatibility is not claimed. The source of truth remains
+`capi/include/cyber_capi.h`.
+
+**Sized structs** are the one exception to "appending to a struct is MAJOR":
+`CyberBakeParams`, `CyberBundleParams` and the three bake-provider descriptors
+carry `size_t structSize` as their first member and are passed one at a time by
+pointer, never as an array. Set it to `sizeof` the struct before any call; the
+library reads and writes only what that size covers, a member it does not cover
+takes its documented default, and appending to these structs is additive. The
+rule is stated once, in the ABI block at the top of the header. Every output-affecting claim needs a dated corpus/configuration,
 and historical measurements stay in the research log. Report security issues
 privately through the repository's GitHub security-advisory channel; ordinary
 bugs and proposals belong in GitHub Issues. Contributions follow the repository

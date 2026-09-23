@@ -403,8 +403,7 @@ public struct BakeParameters: Sendable {
     public var densityNormalization: DensityNormalization
 
     public init() {
-        var defaults = CyberBakeParams()
-        cyber_default_bake_params(&defaults)
+        let defaults = defaultBakeParams()
         width = defaults.width
         height = defaults.height
         cageDistance = defaults.cageDistance
@@ -423,12 +422,11 @@ public struct BakeParameters: Sendable {
     }
 
     /// Built member by member from the engine's own defaults rather than with
-    /// the memberwise initializer: `CyberBakeParams` has been appended to in
-    /// three releases now, and a positional initializer stops compiling on each
-    /// one while this does not.
+    /// the memberwise initializer: `CyberBakeParams` is a sized struct that
+    /// grows by appending, and a positional initializer stops compiling on
+    /// every append while this does not.
     var cValue: CyberBakeParams {
-        var out = CyberBakeParams()
-        cyber_default_bake_params(&out)
+        var out = defaultBakeParams()
         out.width = width
         out.height = height
         out.cageDistance = cageDistance
@@ -443,6 +441,17 @@ public struct BakeParameters: Sendable {
         out.densityNormalization = Int32(bitPattern: densityNormalization.rawValue)
         return out
     }
+}
+
+/// A `CyberBakeParams` holding the engine defaults. The struct is SIZED, so its
+/// size is stated before the library fills it; once it is, the call cannot be
+/// refused, and a refusal here would mean the library broke its own contract.
+func defaultBakeParams() -> CyberBakeParams {
+    var params = CyberBakeParams()
+    params.structSize = MemoryLayout<CyberBakeParams>.size
+    let status = cyber_default_bake_params(&params)
+    precondition(status == CYBER_OK, "cyber_default_bake_params refused a sized struct")
+    return params
 }
 
 /// A baked float image. Owns its engine handle; released in `deinit`.

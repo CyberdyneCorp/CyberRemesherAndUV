@@ -6,7 +6,7 @@
 //! The bindings are GENERATED, never checked in: a copy in the repository is a
 //! copy that can disagree with the header beside it, and the disagreement is
 //! silent because our soname does not move between minor releases --
-//! `libcyber_capi.so.1` names every 1.x. `build.rs` regenerates them whenever
+//! `libcyber_capi.so.2` names every 2.x. `build.rs` regenerates them whenever
 //! the header, the top-level `CMakeLists.txt` or anything under `cmake/`
 //! changes.
 //!

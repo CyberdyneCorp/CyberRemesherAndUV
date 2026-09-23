@@ -51,8 +51,12 @@ public enum CyberRuntime {
         String(cString: cyber_seamless_solver())
     }
 
-    /// The ABI this Swift package was written against.
-    public static let abiVersionCompiledAgainst = (major: 1, minor: 7)
+    /// The ABI this Swift package was compiled against: the version macros of
+    /// the `cyber_capi.h` it was built with, read at compile time. Not a
+    /// hand-kept copy -- one stayed at 1.7 while the header moved to 1.24, and
+    /// nothing noticed, because a 1.7 client is always served by a 1.x library.
+    public static let abiVersionCompiledAgainst =
+        (major: Int(CYBER_ABI_VERSION_MAJOR), minor: Int(CYBER_ABI_VERSION_MINOR))
 
     /// Throw if the loaded library cannot serve this package's compiled ABI.
     public static func checkABI() throws {

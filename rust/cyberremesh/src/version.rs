@@ -63,7 +63,7 @@ pub fn abi() -> (i32, i32) {
 /// that is easy to get backwards.
 ///
 /// Call it at startup. It is cheap, and the failure it catches is otherwise
-/// silent: our soname is `libcyber_capi.so.1` for every 1.x release, so a
+/// silent: our soname is `libcyber_capi.so.2` for every 2.x release, so a
 /// library from a different minor loads without complaint.
 pub fn check_abi() -> Result<()> {
     // SAFETY: two plain integers, no handle, no out-parameter.
@@ -92,8 +92,8 @@ pub enum Solver {
 ///
 /// This is the LOAD-TIME half of a pair. The `require-quadcover` feature is the
 /// build-time half, turning a missing dependency into a configure error — and
-/// it cannot see a *different* `libcyber_capi.so.1` being loaded later, because
-/// the soname names every 1.x release. Neither alone is the guard.
+/// it cannot see a *different* `libcyber_capi.so.2` being loaded later, because
+/// the soname names every 2.x release. Neither alone is the guard.
 pub fn solver() -> Solver {
     // SAFETY: returns a static NUL-terminated string, never null.
     let raw = unsafe { sys::cyber_seamless_solver() };

@@ -78,7 +78,7 @@ TEST_CASE("a v0.8-era client header links to this library without overwriting ou
 
 TEST_CASE("a client compiled against an earlier ABI minor is served, a later one is refused") {
     // THIS IS THE SPEC'S "Scenario: ABI version query", now expressible: a
-    // client compiled against 1.x loading a 1.y (y > x) library keeps working.
+    // client compiled against N.x loading an N.y (y > x) library keeps working.
     // The library is the y side; the argument is the x the client compiled with.
     CHECK(cyber_abi_check(CYBER_ABI_VERSION_MAJOR, CYBER_ABI_VERSION_MINOR) == CYBER_OK);
     for (int older = 0; older <= CYBER_ABI_VERSION_MINOR; ++older) {
@@ -94,6 +94,16 @@ TEST_CASE("a client compiled against an earlier ABI minor is served, a later one
     // "newer is fine" for a breaking change.
     CHECK(cyber_abi_check(CYBER_ABI_VERSION_MAJOR + 1, 0) == CYBER_ERR_INCOMPATIBLE_VERSION);
     CHECK(cyber_abi_check(CYBER_ABI_VERSION_MAJOR - 1, 0) == CYBER_ERR_INCOMPATIBLE_VERSION);
+}
+
+TEST_CASE("clients of the 1.x ABI are refused by 2.0, not served") {
+    // 0.9.0 shipped ABI 1.16 and 1.24 was the last 1.x. Their CyberBakeParams and
+    // CyberBundleParams are SHORTER than 2.0's, and serving them is the bug 2.0
+    // exists to end: the library wrote past the end of the caller's struct while
+    // this very check reported the pairing as compatible.
+    CHECK(cyber_abi_check(1, 16) == CYBER_ERR_INCOMPATIBLE_VERSION);
+    CHECK(cyber_abi_check(1, 24) == CYBER_ERR_INCOMPATIBLE_VERSION);
+    CHECK(cyber_abi_check(2, 0) == CYBER_OK);
 }
 
 TEST_CASE("a refused ABI check names both versions and leaves a message") {
