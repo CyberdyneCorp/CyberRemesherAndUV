@@ -117,6 +117,28 @@ TEST_CASE("PNG rejects invalid arguments") {
     CHECK_FALSE(cyber::imageio::writePng(path, 1, 1, 3, nullptr));
 }
 
+TEST_CASE("saveImage refuses an image whose pixels do not fill its shape") {
+    // The pixel-less metadata image a regioned bake returns carries a size and
+    // no buffer. Both encoders read width * height * channels floats, so it is
+    // refused up front -- the one-channel PNG path used to expand it to RGB and
+    // read past the empty buffer.
+    for (const int channels : {1, 3, 4}) {
+        CAPTURE(channels);
+        cyber::bake::Image image;
+        image.width = 64;
+        image.height = 64;
+        image.channels = channels;
+        const std::string png = tempPath("cyber_imageio_empty.png");
+        const std::string exr = tempPath("cyber_imageio_empty.exr");
+        CHECK_FALSE(cyber::imageio::saveImage(png, image, cyber::imageio::ImageFormat::Png));
+        CHECK_FALSE(cyber::imageio::saveImage(exr, image, cyber::imageio::ImageFormat::Exr));
+        image.pixels.assign(static_cast<std::size_t>(64 * 64 * channels) - 1u, 0.5f);
+        CHECK_FALSE(cyber::imageio::saveImage(png, image, cyber::imageio::ImageFormat::Png));
+        image.pixels.push_back(0.5f);
+        CHECK(cyber::imageio::saveImage(png, image, cyber::imageio::ImageFormat::Png));
+    }
+}
+
 TEST_CASE("an id map's colours reach the file byte for byte") {
     // The claim a colour-ID map lives or dies on (surface-baking spec,
     // "Material ID and object ID maps"): the written file must survive an

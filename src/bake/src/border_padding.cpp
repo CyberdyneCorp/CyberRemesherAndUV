@@ -50,10 +50,14 @@ enum class PadState : std::uint8_t {
 
 class BorderPadder {
 public:
-    BorderPadder(Image& image, const std::vector<PadCoord>& covered, const BakeEncoding& encoding)
+    // `range` null: measure the clamp range over this image's covered texels.
+    // Otherwise the given range is used as it stands.
+    BorderPadder(Image& image, const std::vector<PadCoord>& covered, const BakeEncoding& encoding,
+                 const PadRange* range, PadRows counted)
         : image_(image),
           channels_(static_cast<std::size_t>(image.channels)),
-          state_(pixelCount(image), PadState::Empty) {
+          state_(pixelCount(image), PadState::Empty),
+          counted_(counted) {
         // A map with more channels than PadTexel holds would be written out of
         // bounds by read()/write(). Refuse the whole stage instead: the map
         // ships unpadded and reports PaddingMode::None, which is visibly wrong
@@ -65,19 +69,30 @@ public:
         for (const PadCoord& tx : covered) {
             state_[index(tx.x, tx.y)] = PadState::Covered;
         }
-        measureRange(encoding);
+        seedFrontier();
+        if (range == nullptr) {
+            measureRange(encoding);
+        } else {
+            min_ = range->min;
+            max_ = range->max;
+        }
     }
 
     [[nodiscard]] bool hasCoverage() const { return usable_ && covered_; }
 
     // Grows the band by one texel. Returns the number of texels filled; zero
     // means the image is fully covered and no further ring can add anything.
-    std::size_t growRing(PaddingMode mode) {
+    // `counted` receives how many of them lie in the counted rows.
+    std::size_t growRing(PaddingMode mode, std::size_t& counted) {
         collectCandidates();
+        counted = 0;
         for (const std::size_t at : candidates_) {
             const int x = static_cast<int>(at % static_cast<std::size_t>(image_.width));
             const int y = static_cast<int>(at / static_cast<std::size_t>(image_.width));
             write(x, y, fill(x, y, mode));
+            if (y >= counted_.begin && y < counted_.end) {
+                ++counted;
+            }
         }
         for (const std::size_t at : candidates_) {
             state_[at] = PadState::Covered;
@@ -139,35 +154,30 @@ private:
     // thickness would go negative. Maps whose encoding guarantees nothing
     // (a position in model units, a signed displacement) leave this infinite and
     // are bounded by the compounding limit alone.
+    //
+    // Measured by PadRangeAccumulator, which the regioned path uses to measure
+    // the same range over a whole image it never holds at once.
     void measureRange(const BakeEncoding& encoding) {
-        PadTexel low;
-        PadTexel high;
-        low.fill(std::numeric_limits<float>::infinity());
-        high.fill(-std::numeric_limits<float>::infinity());
+        PadRangeAccumulator accumulator(image_.channels);
+        for (const std::size_t at : frontier_) {
+            accumulator.add(image_.pixels.data() + at * channels_);
+        }
+        const PadRange range = accumulator.finish(encoding);
+        min_ = range.min;
+        max_ = range.max;
+    }
+
+    // The first ring's frontier: the covered texels in RASTER order -- the
+    // order the whole band is then built in, and the reason it does not depend
+    // on the order the rasteriser happened to emit texels.
+    void seedFrontier() {
         for (int y = 0; y < image_.height; ++y) {
             for (int x = 0; x < image_.width; ++x) {
-                if (state_[index(x, y)] != PadState::Covered) {
-                    continue;
-                }
-                covered_ = true;
-                // The first ring's frontier, in RASTER order -- the order the
-                // whole band is then built in, and the reason it does not
-                // depend on the order the rasteriser happened to emit texels.
-                frontier_.push_back(index(x, y));
-                const PadTexel value = read(x, y);
-                for (std::size_t c = 0; c < channels_; ++c) {
-                    low[c] = std::fmin(low[c], value[c]);
-                    high[c] = std::fmax(high[c], value[c]);
+                if (state_[index(x, y)] == PadState::Covered) {
+                    covered_ = true;
+                    frontier_.push_back(index(x, y));
                 }
             }
-        }
-        if (!covered_) {
-            return;
-        }
-        for (std::size_t c = 0; c < channels_; ++c) {
-            const float span = high[c] - low[c];
-            min_[c] = std::fmax(low[c] - span, encoding.valueMin);
-            max_[c] = std::fmin(high[c] + span, encoding.valueMax);
         }
     }
 
@@ -278,11 +288,66 @@ private:
     std::vector<std::size_t> candidates_;
     PadTexel min_{};
     PadTexel max_{};
+    PadRows counted_;
     bool usable_ = false;
     bool covered_ = false;
 };
 
+PadOutcome runPadding(BorderPadder& padder, int radius, EncodingBasis basis,
+                      const CancelToken* cancel) {
+    PadOutcome out;
+    out.padding.radius = radius;
+    if (!padder.hasCoverage()) {
+        return out;
+    }
+    const PaddingMode mode = paddingModeFor(basis);
+    for (int ring = 0; ring < radius; ++ring) {
+        if (cancel != nullptr && cancel->isCancelled()) {
+            out.cancelled = true;
+            return out;
+        }
+        std::size_t counted = 0;
+        const std::size_t filled = padder.growRing(mode, counted);
+        if (filled == 0) {
+            break;  // the image is fully covered; further rings cannot add one
+        }
+        out.padding.texelsFilled += counted;
+    }
+    if (out.padding.texelsFilled > 0) {
+        out.padding.mode = mode;
+    }
+    return out;
+}
+
 }  // namespace
+
+PadRangeAccumulator::PadRangeAccumulator(int channels)
+    : channels_(std::min(kMaxChannels, static_cast<std::size_t>(std::max(0, channels)))) {
+    low_.fill(std::numeric_limits<float>::infinity());
+    high_.fill(-std::numeric_limits<float>::infinity());
+}
+
+void PadRangeAccumulator::add(const float* texel) {
+    covered_ = true;
+    for (std::size_t c = 0; c < channels_; ++c) {
+        low_[c] = std::fmin(low_[c], texel[c]);
+        high_[c] = std::fmax(high_[c], texel[c]);
+    }
+}
+
+PadRange PadRangeAccumulator::finish(const BakeEncoding& encoding) const {
+    PadRange range;
+    range.covered = covered_;
+    if (!covered_) {
+        return range;
+    }
+    for (std::size_t c = 0; c < channels_; ++c) {
+        const float span = high_[c] - low_[c];
+        range.min[c] = std::fmax(low_[c] - span, encoding.valueMin);
+        range.max[c] = std::fmin(high_[c] + span, encoding.valueMax);
+    }
+    return range;
+}
 
 PaddingMode paddingModeFor(EncodingBasis basis) {
     switch (basis) {
@@ -318,31 +383,25 @@ PaddingMode paddingModeFor(EncodingBasis basis) {
 
 PadOutcome padBorders(Image& image, const std::vector<PadCoord>& covered,
                       const BakeEncoding& encoding, int radius, const CancelToken* cancel) {
-    PadOutcome out;
-    out.padding.radius = radius;
     if (radius <= 0 || image.pixels.empty() || covered.empty()) {
+        PadOutcome out;
+        out.padding.radius = radius;
         return out;
     }
-    BorderPadder padder(image, covered, encoding);
-    if (!padder.hasCoverage()) {
+    BorderPadder padder(image, covered, encoding, nullptr, PadRows{0, image.height});
+    return runPadding(padder, radius, encoding.basis, cancel);
+}
+
+PadOutcome padBorders(Image& image, const std::vector<PadCoord>& covered,
+                      const BakeEncoding& encoding, int radius, const CancelToken* cancel,
+                      const PadRange& range, PadRows counted) {
+    if (radius <= 0 || image.pixels.empty() || covered.empty() || !range.covered) {
+        PadOutcome out;
+        out.padding.radius = radius;
         return out;
     }
-    const PaddingMode mode = paddingModeFor(encoding.basis);
-    for (int ring = 0; ring < radius; ++ring) {
-        if (cancel != nullptr && cancel->isCancelled()) {
-            out.cancelled = true;
-            return out;
-        }
-        const std::size_t filled = padder.growRing(mode);
-        if (filled == 0) {
-            break;  // the image is fully covered; further rings cannot add one
-        }
-        out.padding.texelsFilled += filled;
-    }
-    if (out.padding.texelsFilled > 0) {
-        out.padding.mode = mode;
-    }
-    return out;
+    BorderPadder padder(image, covered, encoding, &range, counted);
+    return runPadding(padder, radius, encoding.basis, cancel);
 }
 
 }  // namespace cyber::bake::detail

@@ -188,6 +188,68 @@ def handoff_ply(major: int, minor: int) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _instrumented() -> bool:
+    """True for a sanitizer build, whose shadow memory and quarantine make the
+    process's resident set say nothing about what the engine holds."""
+    data = BINARY.read_bytes()
+    return b"__asan_init" in data or b"__tsan_init" in data or b"__msan_init" in data
+
+
+def _peak_rss_mb(*args: str) -> int:
+    """Peak resident set of one CLI run, in MiB, measured in a fresh child."""
+    probe = ("import resource, subprocess, sys\n"
+             "r = subprocess.run(sys.argv[1:], capture_output=True)\n"
+             "peak = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss\n"
+             "print(r.returncode, peak if sys.platform == 'darwin' else peak * 1024)\n")
+    out = subprocess.run([sys.executable, "-c", probe, str(BINARY), *args],
+                         capture_output=True, text=True, timeout=300)
+    code, peak = out.stdout.split()
+    check(f"memory probe run exits 0 (texture size {args[-1]})", code == "0", out.stderr)
+    return int(peak) >> 20
+
+
+def check_bounded_bake_memory(sphere: Path, tmp: Path) -> None:
+    """The bound holds the process's memory, not just the engine's own count.
+
+    surface-baking, "Regioned baking with a bounded working set": the whole
+    output is never held. peakTexelsInFlight is the engine's self-report; this
+    measures the resident set of the real process, fully shaded maps included,
+    under one bound at two output sizes. Quadrupling the output adds 144 MiB of
+    float texels alone (and far more of per-texel frames) to a bake that holds
+    it; under the bound the peak must not follow.
+    """
+    try:
+        import resource  # noqa: F401  (POSIX only)
+    except ImportError:
+        print("  skip: bounded-bake memory (no resource module on this platform)")
+        return
+    if LAUNCHER or _instrumented():
+        print("  skip: bounded-bake memory (emulated or sanitizer build)")
+        return
+    mem = tmp / "mem"
+    mem.mkdir()
+    bound = str(4096 * 48)  # 16-row regions at 4096, 64-row regions at 2048
+
+    def peak(size: int, *extra: str) -> int:
+        return _peak_rss_mb("--input", str(sphere), "--target-quads", "300", "--bake", "normal",
+                            "--quiet", "--output", str(mem / f"m{size}.obj"),
+                            *extra, "--texture-size", str(size))
+
+    whole_2048 = peak(2048)
+    band_2048 = peak(2048, "--bake-working-set", bound)
+    band_4096 = peak(4096, "--bake-working-set", bound)
+    output_mb = {size: size * size * 3 * 4 >> 20 for size in (2048, 4096)}
+    print(f"  peak RSS MiB: whole@2048={whole_2048} band@2048={band_2048} band@4096={band_4096}")
+    # The measurement can see a whole map: an unbounded bake holds at least it.
+    check("an unbounded 2048 bake's peak exceeds its output",
+          whole_2048 > output_mb[2048], f"{whole_2048} MiB")
+    check("a bounded 4096 bake never holds half its output",
+          band_4096 < output_mb[4096] // 2, f"{band_4096} MiB of {output_mb[4096]}")
+    check("quadrupling the output under one bound barely moves the peak",
+          band_4096 < band_2048 + (output_mb[4096] - output_mb[2048]) // 4,
+          f"{band_2048} -> {band_4096} MiB")
+
+
 def main() -> int:
     tmp = Path(tempfile.mkdtemp(prefix="cyber_cli_"))
     sphere = tmp / "sphere.obj"
@@ -440,6 +502,36 @@ def main() -> int:
         check("--padding 0 disables the stage",
               pad == {"radius": 0, "mode": "none", "texelsFilled": 0}, str(pad))
 
+    # --bake-working-set bakes every map in regions and streams it to disk; the
+    # files are the same bytes as an unbounded run and the report records the
+    # regions (surface-baking, "Regioned baking with a bounded working set").
+    ws_whole = tmp / "ws_whole"
+    ws_band = tmp / "ws_band"
+    ws_whole.mkdir()
+    ws_band.mkdir()
+    ws_report = ws_band / "w.json"
+    common = ("--input", str(sphere), "--target-quads", "300", "--bake", "normal,ao,uv-density",
+              "--texture-size", "64", "--ao-samples", "4", "--quiet")
+    r = run(*common, "--output", str(ws_whole / "w.obj"))
+    check("unbounded bake exit 0", r.returncode == 0, r.stderr)
+    # 64 wide: 8 rows of region plus 2 x 16 rows of halo at the default radius.
+    r = run(*common, "--output", str(ws_band / "w.obj"), "--bake-working-set", str(64 * 40),
+            "--report", str(ws_report))
+    check("--bake-working-set exit 0", r.returncode == 0, r.stderr)
+    for name in ("w_normal.png", "w_ao.png", "w_uv-density.png"):
+        check(f"--bake-working-set wrote {name} byte-identical to the unbounded run",
+              (ws_band / name).exists() and (ws_whole / name).exists()
+              and (ws_band / name).read_bytes() == (ws_whole / name).read_bytes(), name)
+    if ws_report.exists():
+        outputs = {o["kind"]: o for o in json.loads(ws_report.read_text()).get("outputs", [])}
+        regions = outputs["normal"].get("regions", {})
+        check("the report records the regions",
+              regions.get("count") == 8 and regions.get("rows") == 8
+              and regions.get("haloRows") == 16 and regions.get("workingSetTexels") == 64 * 40,
+              str(regions))
+
+    check_bounded_bake_memory(sphere, tmp)
+
     # --- the colour-ID maps ---------------------------------------------
     id_dir = tmp / "idmaps"
     id_dir.mkdir()
@@ -559,6 +651,8 @@ def main() -> int:
     for bad_flag, bad_value, map_name in (("--thickness-scale", "-1", "thickness"),
                                           ("--bent-normal-space", "sideways", "bent-normal"),
                                           ("--padding", "-1", "normal"),
+                                          ("--bake-working-set", "-1", "normal"),
+                                          ("--bake-working-set", "lots", "normal"),
                                           ("--density", "sideways", "uv-density")):
         r = run("--input", str(sphere), "--output", str(maps_dir / "bad.obj"),
                 "--bake", map_name, "--texture-size", "16", "--ao-samples", "4",

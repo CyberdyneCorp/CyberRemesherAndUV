@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -20,6 +21,7 @@
 #include "cyber/core/bvh.hpp"
 #include "cyber/core/io.hpp"
 #include "cyber/imageio/load.hpp"
+#include "region_scratch.hpp"
 
 namespace cyber::bake {
 
@@ -163,9 +165,17 @@ bool isFinite(Vec2 v) { return std::isfinite(v.x) && std::isfinite(v.y); }
 bool isFinite(Vec3 v) { return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z); }
 
 // One texel to shade: pixel coord plus the interpolated low-poly frame.
+//
+// `px`/`py` are the texel's GLOBAL coordinates in the output image, and `row` is
+// the row it occupies in the image being written -- the same as `py` for an
+// ordinary bake, `py - regionBegin` for a region of a regioned one. Everything a
+// texel's VALUE depends on (the per-texel AO rotation above all) reads the
+// global pair, which is what keeps a regioned bake identical to an unregioned
+// one; only the image write reads `row`.
 struct Texel {
     int px = 0;
     int py = 0;
+    int row = 0;
     Vec3 position;
     Vec3 normal;
     Vec3 tangent;
@@ -203,8 +213,29 @@ float uvAreaRatio(const std::array<Vec3, 3>& pos, const std::array<Vec2, 3>& uv)
     return std::isfinite(ratio) && ratio > 0.0f ? ratio : 0.0f;
 }
 
+// A half-open range of output rows, [begin, end). The whole image for an
+// ordinary bake; one region for a regioned one.
+struct RowRange {
+    int begin = 0;
+    int end = 0;
+
+    [[nodiscard]] int count() const { return end - begin; }
+};
+
+// Faces between two cancellation polls in the rasteriser. A region's
+// rasterization walks every face of the EditMesh, so without a poll a cancel
+// would wait for the whole walk.
+constexpr Index kRasterCancelStride = 1024;
+
 // Rasterizes the low-poly UV layout into covered texels carrying their
 // interpolated 3D frame. Faces are fan-triangulated on the corners.
+//
+// Only texels whose row lies in `rows` are emitted, and a sub-triangle whose
+// pixel box misses `rows` is rejected before any per-texel work. Clipping
+// changes WHICH texels are produced, never their values: the frame and ratio
+// are properties of the sub-triangle, and the texels a range keeps come out in
+// the same relative order they would in a whole-image pass, so a pixel two
+// faces cover keeps the same last writer.
 //
 // `tileOrigin` is the UDIM tile's UV origin, subtracted from every corner so the
 // tile's own square becomes the unit square this rasteriser has always worked
@@ -212,88 +243,121 @@ float uvAreaRatio(const std::array<Vec3, 3>& pos, const std::array<Vec2, 3>& uv)
 // clipped, which is what confines a tile's output to its own content. An origin
 // of (0, 0) is the ORDINARY bake and is bit-identical to one: subtracting 0.0f
 // is the identity in IEEE 754.
+// One fan sub-triangle of the EditMesh: its corners' positions, vertex normals
+// and tile-local UVs.
+struct UvTriangle {
+    std::array<Vec3, 3> pos;
+    std::array<Vec3, 3> nrm;
+    std::array<Vec2, 3> uv;
+};
+
+// The output-image grid a rasterization writes into, and the rows it keeps.
+struct RasterGrid {
+    int width = 0;
+    int height = 0;
+    RowRange rows;
+};
+
+// Appends the texels of `tri` whose rows lie in `grid.rows`.
+void rasterizeTriangle(const UvTriangle& tri, const RasterGrid& grid, std::vector<Texel>& texels) {
+    const std::array<Vec3, 3>& pos = tri.pos;
+    const std::array<Vec3, 3>& nrm = tri.nrm;
+    const std::array<Vec2, 3>& uv = tri.uv;
+    const auto width = static_cast<float>(grid.width);
+    const auto height = static_cast<float>(grid.height);
+
+    // Pixel bounding box from the triangle's UVs (V flipped).
+    float minU = 1e30f, maxU = -1e30f, minV = 1e30f, maxV = -1e30f;
+    for (const Vec2& t : uv) {
+        minU = std::fmin(minU, t.x);
+        maxU = std::fmax(maxU, t.x);
+        minV = std::fmin(minV, t.y);
+        maxV = std::fmax(maxV, t.y);
+    }
+    const int x0 = std::max(0, static_cast<int>(std::floor(minU * width)));
+    const int x1 = std::min(grid.width - 1, static_cast<int>(std::ceil(maxU * width)));
+    const int y0 = std::max(grid.rows.begin, static_cast<int>(std::floor((1.0f - maxV) * height)));
+    const int y1 = std::min(grid.rows.end - 1, static_cast<int>(std::ceil((1.0f - minV) * height)));
+    if (y0 > y1) {
+        return;  // nothing of this sub-triangle lies in the kept rows
+    }
+
+    const Vec3 tangent = faceTangent(pos[0], pos[1], pos[2], uv[0], uv[1], uv[2],
+                                     normalized(nrm[0] + nrm[1] + nrm[2]));
+    // Measured once per sub-triangle rather than per texel: it is a property
+    // of the triangle, and every texel it covers shares it.
+    const float ratio = uvAreaRatio(pos, uv);
+
+    for (int py = y0; py <= y1; ++py) {
+        for (int px = x0; px <= x1; ++px) {
+            const Vec2 s{(static_cast<float>(px) + 0.5f) / width,
+                         1.0f - (static_cast<float>(py) + 0.5f) / height};
+            const std::array<float, 3> bc = barycentric(
+                {s.x, s.y, 0}, {uv[0].x, uv[0].y, 0}, {uv[1].x, uv[1].y, 0}, {uv[2].x, uv[2].y, 0});
+            // Inside test: the clamped barycentric must reproduce the point.
+            const Vec2 rebuilt = uv[0] * bc[0] + uv[1] * bc[1] + uv[2] * bc[2];
+            if (std::fabs(rebuilt.x - s.x) > 1e-4f || std::fabs(rebuilt.y - s.y) > 1e-4f) {
+                continue;
+            }
+            Texel texel;
+            texel.px = px;
+            texel.py = py;
+            texel.row = py - grid.rows.begin;
+            texel.position = pos[0] * bc[0] + pos[1] * bc[1] + pos[2] * bc[2];
+            texel.normal = normalized(nrm[0] * bc[0] + nrm[1] * bc[1] + nrm[2] * bc[2]);
+            texel.tangent = normalized(tangent - texel.normal * dot(texel.normal, tangent));
+            texel.bitangent = cross(texel.normal, texel.tangent);
+            texel.uvAreaRatio = ratio;
+            texels.push_back(texel);
+        }
+    }
+}
+
+// The sub-triangle (loops[0], loops[i - 1], loops[i]) of a face, with its UVs
+// moved into the tile's own unit square. Nullopt when a corner is not finite:
+// a glTF TEXCOORD_0 accessor holding NaN, say, poisons the whole sub-triangle
+// -- fmin/fmax silently ignore NaN, so the bbox would collapse to the finite
+// corners, and the inside test is a `>` comparison that a NaN passes, so every
+// texel in that bbox would be accepted and written as NaN.
+std::optional<UvTriangle> fanTriangle(const Mesh& mesh, const std::vector<Vec3>& vnormals,
+                                      const std::vector<Vec2>& uvByLoop,
+                                      const std::vector<LoopId>& loops, std::size_t i,
+                                      Vec2 tileOrigin) {
+    const std::array<LoopId, 3> corners{loops[0], loops[i - 1], loops[i]};
+    UvTriangle tri;
+    for (std::size_t k = 0; k < 3; ++k) {
+        const VertexId v = mesh.loopVertex(corners[k]);
+        tri.pos[k] = mesh.position(v);
+        tri.nrm[k] = vnormals[v.value];
+        tri.uv[k] = uvByLoop[corners[k].value] - tileOrigin;
+        if (!isFinite(tri.uv[k]) || !isFinite(tri.pos[k])) {
+            return std::nullopt;
+        }
+    }
+    return tri;
+}
+
 std::vector<Texel> rasterize(const Mesh& mesh, const std::vector<Vec3>& vnormals,
                              const std::vector<Vec2>& uvByLoop, int width, int height,
-                             Vec2 tileOrigin) {
+                             Vec2 tileOrigin, RowRange rows, const CancelToken* cancel) {
     std::vector<Texel> texels;
-    const auto sampleUv = [width, height](int px, int py) {
-        return Vec2{(static_cast<float>(px) + 0.5f) / static_cast<float>(width),
-                    1.0f - (static_cast<float>(py) + 0.5f) / static_cast<float>(height)};
-    };
-
+    const RasterGrid grid{width, height, rows};
     for (Index fi = 0; fi < mesh.faceCapacity(); ++fi) {
+        // The caller reads the token again after the walk, so an early return
+        // here is seen as the cancellation it is.
+        if (cancel != nullptr && fi % kRasterCancelStride == 0 && cancel->isCancelled()) {
+            return texels;
+        }
         const FaceId f{fi};
         if (!mesh.isAlive(f)) {
             continue;
         }
         const std::vector<LoopId> loops = mesh.faceLoops(f);
         for (std::size_t i = 2; i < loops.size(); ++i) {
-            const std::array<LoopId, 3> tri{loops[0], loops[i - 1], loops[i]};
-            std::array<Vec3, 3> pos;
-            std::array<Vec3, 3> nrm;
-            std::array<Vec2, 3> uv;
-            for (int k = 0; k < 3; ++k) {
-                const VertexId v = mesh.loopVertex(tri[static_cast<std::size_t>(k)]);
-                pos[static_cast<std::size_t>(k)] = mesh.position(v);
-                nrm[static_cast<std::size_t>(k)] = vnormals[v.value];
-                uv[static_cast<std::size_t>(k)] =
-                    uvByLoop[tri[static_cast<std::size_t>(k)].value] - tileOrigin;
-            }
-            // A non-finite corner (a glTF TEXCOORD_0 accessor holding NaN, say)
-            // poisons the whole sub-triangle: fmin/fmax silently ignore NaN, so
-            // the bbox below collapses to the finite corners, and the inside
-            // test is a `>` comparison that a NaN passes — every texel in that
-            // bbox would be accepted and written as NaN.
-            if (!isFinite(uv[0]) || !isFinite(uv[1]) || !isFinite(uv[2]) || !isFinite(pos[0]) ||
-                !isFinite(pos[1]) || !isFinite(pos[2])) {
-                continue;
-            }
-
-            const Vec3 tangent = faceTangent(pos[0], pos[1], pos[2], uv[0], uv[1], uv[2],
-                                             normalized(nrm[0] + nrm[1] + nrm[2]));
-            // Measured once per sub-triangle rather than per texel: it is a
-            // property of the triangle, and every texel it covers shares it.
-            const float ratio = uvAreaRatio(pos, uv);
-
-            // Pixel bounding box from the triangle's UVs (V flipped).
-            float minU = 1e30f, maxU = -1e30f, minV = 1e30f, maxV = -1e30f;
-            for (const Vec2& t : uv) {
-                minU = std::fmin(minU, t.x);
-                maxU = std::fmax(maxU, t.x);
-                minV = std::fmin(minV, t.y);
-                maxV = std::fmax(maxV, t.y);
-            }
-            const int x0 =
-                std::max(0, static_cast<int>(std::floor(minU * static_cast<float>(width))));
-            const int x1 =
-                std::min(width - 1, static_cast<int>(std::ceil(maxU * static_cast<float>(width))));
-            const int y0 = std::max(
-                0, static_cast<int>(std::floor((1.0f - maxV) * static_cast<float>(height))));
-            const int y1 =
-                std::min(height - 1,
-                         static_cast<int>(std::ceil((1.0f - minV) * static_cast<float>(height))));
-
-            for (int py = y0; py <= y1; ++py) {
-                for (int px = x0; px <= x1; ++px) {
-                    const Vec2 s = sampleUv(px, py);
-                    const std::array<float, 3> bc =
-                        barycentric({s.x, s.y, 0}, {uv[0].x, uv[0].y, 0}, {uv[1].x, uv[1].y, 0},
-                                    {uv[2].x, uv[2].y, 0});
-                    // Inside test: the clamped barycentric must reproduce the point.
-                    const Vec2 rebuilt = uv[0] * bc[0] + uv[1] * bc[1] + uv[2] * bc[2];
-                    if (std::fabs(rebuilt.x - s.x) > 1e-4f || std::fabs(rebuilt.y - s.y) > 1e-4f) {
-                        continue;
-                    }
-                    Texel texel;
-                    texel.px = px;
-                    texel.py = py;
-                    texel.position = pos[0] * bc[0] + pos[1] * bc[1] + pos[2] * bc[2];
-                    texel.normal = normalized(nrm[0] * bc[0] + nrm[1] * bc[1] + nrm[2] * bc[2]);
-                    texel.tangent = normalized(tangent - texel.normal * dot(texel.normal, tangent));
-                    texel.bitangent = cross(texel.normal, texel.tangent);
-                    texel.uvAreaRatio = ratio;
-                    texels.push_back(texel);
-                }
+            const std::optional<UvTriangle> tri =
+                fanTriangle(mesh, vnormals, uvByLoop, loops, i, tileOrigin);
+            if (tri.has_value()) {
+                rasterizeTriangle(*tri, grid, texels);
             }
         }
     }
@@ -1030,10 +1094,10 @@ void shadeRayTraced(BakeResult& result, const std::vector<Texel>& texels, const 
         return;
     }
     for (std::size_t i = 0; i < texels.size(); ++i) {
-        result.image.at(texels[i].px, texels[i].py, 0) = shaded[i].x;
+        result.image.at(texels[i].px, texels[i].row, 0) = shaded[i].x;
         if (rgb) {
-            result.image.at(texels[i].px, texels[i].py, 1) = shaded[i].y;
-            result.image.at(texels[i].px, texels[i].py, 2) = shaded[i].z;
+            result.image.at(texels[i].px, texels[i].row, 1) = shaded[i].y;
+            result.image.at(texels[i].px, texels[i].row, 2) = shaded[i].z;
         }
     }
 }
@@ -1218,12 +1282,17 @@ void shadeFromMesh(BakeResult& result, const std::vector<Texel>& texels, const M
     }
     const Bvh& bvh = target.bvh;
     const bool rgb = channelsFor(map) == 3;
+    // Per texel, like the ray-traced path: one cage ray is cheap, but a 16K
+    // region is hundreds of millions of them, and a bar that moves only at the
+    // end of a region is the step a regioned bake must not take.
+    TexelProgress reporter(progress, texels.size());
 
     for (std::size_t i = 0; i < texels.size(); ++i) {
         if (cancel != nullptr && i % kCancelStride == 0 && cancel->isCancelled()) {
             result.cancelled = true;
             return;
         }
+        reporter.step();
         const Texel& tx = texels[i];
 
         // Primary projection ray from the cage inward along the surface normal.
@@ -1233,10 +1302,10 @@ void shadeFromMesh(BakeResult& result, const std::vector<Texel>& texels, const M
         const bool valid = hit.has_value() && hit->t <= 2.0f * params.cageDistance;
 
         const Vec3 shaded = shadeRasterTexel(*sources, tx, hit, valid, map, params);
-        result.image.at(tx.px, tx.py, 0) = shaded.x;
+        result.image.at(tx.px, tx.row, 0) = shaded.x;
         if (rgb) {
-            result.image.at(tx.px, tx.py, 1) = shaded.y;
-            result.image.at(tx.px, tx.py, 2) = shaded.z;
+            result.image.at(tx.px, tx.row, 1) = shaded.y;
+            result.image.at(tx.px, tx.row, 2) = shaded.z;
         }
     }
 }
@@ -1439,23 +1508,54 @@ FieldHit traceField(GuardedField& field, const Texel& tx, const BakeParams& para
     return {};
 }
 
+// Whether a field-sampled bake of `map` takes its curvature range from its own
+// sampled texels -- a percentile over the WHOLE IMAGE, and therefore a quantity
+// a regioned bake cannot take one region at a time.
+bool fieldAutoRange(BakeMap map, const BakeParams& params) {
+    return (map == BakeMap::Curvature || map == BakeMap::Cavity) && !(params.curvatureRange > 0.0f);
+}
+
+// The auto range of a field-sampled curvature map, from every sample the image
+// took. Order-independent: the percentile sorts its samples first.
+float fieldCurvatureRange(const std::vector<float>& samples, const BakeParams& params) {
+    return params.curvatureRange > 0.0f ? params.curvatureRange : curvatureScale(samples);
+}
+
 // The field shading pass. Only the four maps fieldSupports() covers reach here.
-void shadeFromField(BakeResult& result, const std::vector<Texel>& texels,
-                    const FieldEvaluator& rawField, BakeMap map, const BakeParams& params,
-                    const CancelToken* cancel) {
-    GuardedField field(rawField);
+//
+// `deferred`, when set on an auto-ranged curvature map, receives the RAW
+// samples and the image keeps the raw curvature in channel 0: the range is a
+// percentile over the whole image, so a regioned bake gathers every region's
+// samples and encodes once it has them all (see encodeDeferredCurvature).
+// A violated field contract abandons the bake: a host's broken callback must
+// not come back as a plausible map.
+void abandonForContract(BakeResult& result, const GuardedField& field) {
+    result.fieldContractViolated = true;
+    result.fieldContractMessage = field.message();
+    result.image = Image{};
+    result.texelsCovered = 0;
+}
+
+// The field path's first phase: one sphere trace per texel, plus the raw
+// curvature sample a curvature map reads. False when the bake was cancelled or
+// the field broke its contract; `result` then says which.
+bool traceFieldTexels(BakeResult& result, const std::vector<Texel>& texels, GuardedField& field,
+                      BakeMap map, const BakeParams& params, ProgressSink* progress,
+                      const CancelToken* cancel, std::vector<FieldHit>& hits,
+                      std::vector<float>& samples) {
     const bool curvatureMap = map == BakeMap::Curvature || map == BakeMap::Cavity;
     // Central-difference step for the evaluator's curvature default, tied to the
     // cage the same way the trace tolerance is.
     const float curvatureStep = std::fmax(1e-5f, params.cageDistance * 0.01f);
-
-    std::vector<FieldHit> hits(texels.size());
-    std::vector<float> samples(curvatureMap ? texels.size() : 0, 0.0f);
+    TexelProgress reporter(progress, texels.size());
+    hits.assign(texels.size(), FieldHit{});
+    samples.assign(curvatureMap ? texels.size() : 0, 0.0f);
     for (std::size_t i = 0; i < texels.size(); ++i) {
         if (cancel != nullptr && i % kCancelStride == 0 && cancel->isCancelled()) {
             result.cancelled = true;
-            return;
+            return false;
         }
+        reporter.step();
         hits[i] = traceField(field, texels[i], params);
         if (curvatureMap && hits[i].valid) {
             samples[i] = field.curvature(hits[i].position, curvatureStep);
@@ -1464,19 +1564,32 @@ void shadeFromField(BakeResult& result, const std::vector<Texel>& texels,
         // means every later sample is being taken from a field we have already
         // caught misbehaving, and there is no point paying for them.
         if (field.violated()) {
-            result.fieldContractViolated = true;
-            result.fieldContractMessage = field.message();
-            result.image = Image{};
-            result.texelsCovered = 0;
-            return;
+            abandonForContract(result, field);
+            return false;
         }
     }
+    return true;
+}
 
+void shadeFromField(BakeResult& result, const std::vector<Texel>& texels,
+                    const FieldEvaluator& rawField, BakeMap map, const BakeParams& params,
+                    ProgressSink* progress, const CancelToken* cancel,
+                    std::vector<float>* deferred) {
+    GuardedField field(rawField);
+    std::vector<FieldHit> hits;
+    std::vector<float> samples;
+    if (!traceFieldTexels(result, texels, field, map, params, progress, cancel, hits, samples)) {
+        return;
+    }
+
+    const bool defer = deferred != nullptr && fieldAutoRange(map, params);
+    if (defer) {
+        deferred->insert(deferred->end(), samples.begin(), samples.end());
+    }
     // Without a Target mesh there is no vertex curvature field to take the
     // auto range from, so it comes from the sampled texels through the same
     // percentile helper the mesh path uses.
-    const float curvatureRange =
-        params.curvatureRange > 0.0f ? params.curvatureRange : curvatureScale(samples);
+    const float curvatureRange = defer ? 0.0f : fieldCurvatureRange(samples, params);
 
     for (std::size_t i = 0; i < texels.size(); ++i) {
         const Texel& tx = texels[i];
@@ -1489,28 +1602,26 @@ void shadeFromField(BakeResult& result, const std::vector<Texel>& texels,
                                   dot(hit.normal, tx.normal)};
                     encoded = tn * 0.5f + Vec3{0.5f, 0.5f, 0.5f};
                 }
-                result.image.at(tx.px, tx.py, 0) = encoded.x;
-                result.image.at(tx.px, tx.py, 1) = encoded.y;
-                result.image.at(tx.px, tx.py, 2) = encoded.z;
+                result.image.at(tx.px, tx.row, 0) = encoded.x;
+                result.image.at(tx.px, tx.row, 1) = encoded.y;
+                result.image.at(tx.px, tx.row, 2) = encoded.z;
                 break;
             }
             case BakeMap::AmbientOcclusion: {
                 const Vec3 n = hit.valid ? hit.normal : tx.normal;
                 const Vec3 p = hit.valid ? hit.position : tx.position;
-                result.image.at(tx.px, tx.py, 0) =
+                result.image.at(tx.px, tx.row, 0) =
                     field.openness(p + n * params.aoBias, n, params.aoRadius);
                 if (field.violated()) {
-                    result.fieldContractViolated = true;
-                    result.fieldContractMessage = field.message();
-                    result.image = Image{};
-                    result.texelsCovered = 0;
+                    abandonForContract(result, field);
                     return;
                 }
                 break;
             }
             default: {  // Curvature | Cavity — fieldSupports() gates the rest out
-                result.image.at(tx.px, tx.py, 0) =
-                    encodeCurvature(samples[i], curvatureRange, map == BakeMap::Cavity);
+                result.image.at(tx.px, tx.row, 0) =
+                    defer ? samples[i]
+                          : encodeCurvature(samples[i], curvatureRange, map == BakeMap::Cavity);
                 break;
             }
         }
@@ -1589,14 +1700,31 @@ void prepareContext(BakeContext& ctx) {
 // because that is all the padding stage wants and because a whole set's worth of
 // Texels would not fit where a set's worth of coordinates does: a Texel carries a
 // frame (some sixty bytes), a coordinate carries two ints.
-void shadeTile(const BakeContext& ctx, Vec2 tileOrigin, BakeResult& result,
+//
+// `rows` is the range of output rows to shade -- the whole image for an ordinary
+// bake -- and `result.image` is allocated for exactly those rows. `deferred` is
+// shadeFromField's: non-null only on the regioned path.
+// A region no texel lands in holds nothing but the neutral background, so the
+// regioned path (`deferred` non-null) leaves its image EMPTY rather than
+// allocate and fill one only to spill nothing: the scratch synthesises neutral
+// rows on read.
+void shadeTile(const BakeContext& ctx, Vec2 tileOrigin, RowRange rows, BakeResult& result,
                std::vector<detail::PadCoord>& covered, ProgressSink* progress,
-               const CancelToken* cancel) {
+               const CancelToken* cancel, std::vector<float>* deferred = nullptr) {
     result.encoding = ctx.encoding;
-    const std::vector<Texel> texels = rasterize(ctx.lowPoly, ctx.lowNormals, ctx.uvs,
-                                                ctx.params.width, ctx.params.height, tileOrigin);
+    const std::vector<Texel> texels =
+        rasterize(ctx.lowPoly, ctx.lowNormals, ctx.uvs, ctx.params.width, ctx.params.height,
+                  tileOrigin, rows, cancel);
+    if (cancel != nullptr && cancel->isCancelled()) {
+        result.cancelled = true;
+        return;
+    }
+    covered.clear();
+    if (texels.empty() && deferred != nullptr) {
+        return;
+    }
     result.texelsCovered = texels.size();
-    result.image = makeImage(ctx.params.width, ctx.params.height, channelsFor(ctx.map));
+    result.image = makeImage(ctx.params.width, rows.count(), channelsFor(ctx.map));
     const std::array<float, 3> padding = neutralPadding(ctx.map, ctx.params);
     for (int y = 0; y < result.image.height; ++y) {
         for (int x = 0; x < result.image.width; ++x) {
@@ -1607,7 +1735,8 @@ void shadeTile(const BakeContext& ctx, Vec2 tileOrigin, BakeResult& result,
     }
 
     if (ctx.useField) {
-        shadeFromField(result, texels, *ctx.params.field, ctx.map, ctx.params, cancel);
+        shadeFromField(result, texels, *ctx.params.field, ctx.map, ctx.params, progress, cancel,
+                       deferred);
     } else {
         shadeFromMesh(result, texels, ctx.highPoly, ctx.target,
                       ctx.raster.has_value() ? &ctx.raster.value() : nullptr, ctx.map, ctx.params,
@@ -1619,7 +1748,7 @@ void shadeTile(const BakeContext& ctx, Vec2 tileOrigin, BakeResult& result,
     covered.clear();
     covered.reserve(texels.size());
     for (const Texel& tx : texels) {
-        covered.push_back(detail::PadCoord{tx.px, tx.py});
+        covered.push_back(detail::PadCoord{tx.px, tx.row});
     }
 }
 
@@ -1823,6 +1952,18 @@ UdimLayout udimTiles(const Mesh& mesh) {
 
 namespace {
 
+// The two refusal sentences bakeUdim and bakeRegions share, so a host reads the
+// same words whichever entry point refused it.
+std::string noOccupiedTilesMessage(bool hasUvs) {
+    return hasUvs ? "the EditMesh's UV layout occupies no addressable UDIM tile (u must be 0..9 "
+                    "and v 0..999 for the 1001 + u + 10*v numbering)"
+                  : "the EditMesh carries no UV layout, so it occupies no UDIM tile";
+}
+
+constexpr const char* kParametersRefusal =
+    "the bake was refused: a parameter is outside its documented range, or the Target "
+    "carries no faces and no field evaluator can answer this map";
+
 // Which ceiling, if either, a UDIM request trips. Separated from paramsUsable's
 // silent rejection because a UDIM refusal has to NAME which of the two it hit:
 // "this tile is too big" and "this many tiles of this size are too many" are
@@ -1884,7 +2025,8 @@ bool shadeAllTiles(const BakeContext& ctx, UdimBakeResult& out,
         const UdimTile& tile = out.tiles[i].tile;
         ProgressSink tileProgress = tileSubrange(progress, i, out.tiles.size());
         shadeTile(ctx, Vec2{static_cast<float>(tile.u), static_cast<float>(tile.v)},
-                  out.tiles[i].result, covered[i], &tileProgress, cancel);
+                  RowRange{0, ctx.params.height}, out.tiles[i].result, covered[i], &tileProgress,
+                  cancel);
         const BakeResult& shaded = out.tiles[i].result;
         if (shaded.cancelled) {
             out.cancelled = true;
@@ -1974,7 +2116,8 @@ BakeResult bake(const Mesh& lowPoly, const Mesh& highPoly, BakeMap map, const Ba
     BakeContext context(lowPoly, highPoly, *uvs, map, params, useField);
     prepareContext(context);
     std::vector<detail::PadCoord> covered;
-    shadeTile(context, Vec2{0.0f, 0.0f}, result, covered, progress, cancel);
+    shadeTile(context, Vec2{0.0f, 0.0f}, RowRange{0, params.height}, result, covered, progress,
+              cancel);
     if (result.cancelled) {
         return result;
     }
@@ -2005,11 +2148,7 @@ UdimBakeResult bakeUdim(const Mesh& lowPoly, const Mesh& highPoly, BakeMap map,
     out.layout = udimTiles(lowPoly);
     if (out.layout.tiles.empty()) {
         out.refusal = UdimRefusal::NoOccupiedTiles;
-        out.refusalMessage =
-            uvs == nullptr
-                ? "the EditMesh carries no UV layout, so it occupies no UDIM tile"
-                : "the EditMesh's UV layout occupies no addressable UDIM tile (u must be 0..9 "
-                  "and v 0..999 for the 1001 + u + 10*v numbering)";
+        out.refusalMessage = noOccupiedTilesMessage(uvs != nullptr);
         return out;
     }
 
@@ -2023,9 +2162,7 @@ UdimBakeResult bakeUdim(const Mesh& lowPoly, const Mesh& highPoly, BakeMap map,
     }
     if (!bakeInputsUsable(highPoly, uvs, map, params, useField)) {
         out.refusal = UdimRefusal::Parameters;
-        out.refusalMessage =
-            "the bake was refused: a parameter is outside its documented range, or the Target "
-            "carries no faces and no field evaluator can answer this map";
+        out.refusalMessage = kParametersRefusal;
         return out;
     }
 
@@ -2058,6 +2195,510 @@ UdimBakeResult bakeUdim(const Mesh& lowPoly, const Mesh& highPoly, BakeMap map,
         }
     }
 
+    if (progress != nullptr) {
+        progress->report(1.0f, "bake");
+    }
+    return out;
+}
+
+// ---- regioned baking ------------------------------------------------------
+//
+// Three passes over the same regions of every image in the set:
+//
+//   1. SHADE. Each region's rows are rasterized, shaded once and spilled to a
+//      scratch file with a coverage byte per texel. The quantities normalized
+//      over the whole image or set are gathered as the regions finish.
+//   2. FINALIZE. A streaming pass over each image's scratch applies the
+//      deferred normalizations (the whole set's density mean, the whole
+//      image's field curvature range) and measures the padded band's clamp
+//      range over the FINAL covered values.
+//   3. ASSEMBLE. Each region is read back with a halo above and below, padded
+//      against the whole-image clamp range, and only its own rows are emitted.
+//
+// Shading once is the point of the scratch: the padding clamp range needs every
+// covered texel's final value before the first band can be padded, and getting
+// it any other way means shading the whole image twice -- which doubles the
+// cost of exactly the maps (a hemisphere of rays per texel) that dominate.
+
+int regionHaloRows(const BakeParams& params) {
+    return std::max(2 * std::max(0, params.paddingRadius), kDerivativeFootprintTexels);
+}
+
+RegionPlan planRegions(const BakeParams& params) {
+    RegionPlan plan;
+    if (params.width <= 0 || params.height <= 0) {
+        return plan;
+    }
+    const auto width = static_cast<std::size_t>(params.width);
+    const auto height = static_cast<std::size_t>(params.height);
+    const auto halo = static_cast<std::size_t>(regionHaloRows(params));
+    std::size_t rows = height;
+    if (params.maxWorkingSetTexels != 0) {
+        const std::size_t fit = params.maxWorkingSetTexels / width;
+        // A bound that holds the whole image is one region with no overlap. A
+        // bound below one row plus two halos yields one-row regions: honoured as
+        // far as it can be, never refused.
+        rows = fit >= height
+                   ? height
+                   : std::clamp<std::size_t>(fit > 2 * halo ? fit - 2 * halo : 0, 1, height);
+    }
+    plan.regionRows = static_cast<int>(rows);
+    plan.regionCount = (height + rows - 1) / rows;
+    if (plan.regionCount == 1) {
+        plan.workingSetTexels = width * height;  // one region: no overlap exists
+    } else {
+        plan.haloRows = static_cast<int>(halo);
+        plan.workingSetTexels = width * std::min(height, rows + 2 * halo);
+    }
+    plan.boundReached =
+        params.maxWorkingSetTexels == 0 || plan.workingSetTexels <= params.maxWorkingSetTexels;
+    return plan;
+}
+
+namespace {
+
+// Everything one output image of a regioned bake accumulates between passes.
+struct RegionedImage {
+    UdimTile tile;
+    Vec2 origin;
+    std::unique_ptr<detail::RegionScratch> scratch;
+    RegionedTile report;
+    // The raw samples of a field-sampled, auto-ranged curvature map: the range
+    // is a percentile over the WHOLE image. Empty otherwise.
+    std::vector<float> fieldSamples;
+    detail::PadRange padRange;
+};
+
+class RegionedBaker {
+public:
+    RegionedBaker(const BakeContext& ctx, const RegionPlan& plan, RegionSink& sink,
+                  ProgressSink* progress, const CancelToken* cancel, RegionedBakeResult& out)
+        : ctx_(ctx),
+          plan_(plan),
+          sink_(sink),
+          progress_(progress),
+          cancel_(cancel),
+          out_(out),
+          channels_(channelsFor(ctx.map)) {}
+
+    // The whole bake for `tiles`. False when it was refused, cancelled or failed;
+    // `out` then says which.
+    bool run(const std::vector<UdimTile>& tiles, const std::string& scratchDirectory) {
+        images_.resize(tiles.size());
+        for (std::size_t i = 0; i < tiles.size(); ++i) {
+            images_[i].tile = tiles[i];
+            images_[i].origin =
+                Vec2{static_cast<float>(tiles[i].u), static_cast<float>(tiles[i].v)};
+            images_[i].report = tileReport(tiles[i]);
+        }
+        if (plan_.regionCount == 1 && images_.size() == 1) {
+            return bakeInMemory(images_.front());
+        }
+        for (RegionedImage& image : images_) {
+            if (!createScratch(image, scratchDirectory) || !shadeImage(image)) {
+                return false;
+            }
+        }
+        for (RegionedImage& image : images_) {
+            if (!finalizeImage(image) || !assembleImage(image)) {
+                return false;
+            }
+        }
+        for (RegionedImage& image : images_) {
+            out_.tiles.push_back(image.report);
+        }
+        return true;
+    }
+
+private:
+    [[nodiscard]] RegionedTile tileReport(const UdimTile& tile) const {
+        RegionedTile report;
+        report.tile = tile;
+        report.width = ctx_.params.width;
+        report.height = ctx_.params.height;
+        report.channels = channels_;
+        report.encoding = ctx_.encoding;
+        report.padding.radius = ctx_.params.paddingRadius;
+        return report;
+    }
+
+    [[nodiscard]] std::vector<RowRange> regions() const {
+        std::vector<RowRange> ranges;
+        for (int y = 0; y < ctx_.params.height; y += plan_.regionRows) {
+            ranges.push_back(RowRange{y, std::min(ctx_.params.height, y + plan_.regionRows)});
+        }
+        return ranges;
+    }
+
+    [[nodiscard]] bool cancelled() {
+        if (cancel_ != nullptr && cancel_->isCancelled()) {
+            out_.cancelled = true;
+            return true;
+        }
+        return false;
+    }
+
+    bool fail(RegionFailure failure, std::string message) {
+        out_.failure = failure;
+        out_.failureMessage = std::move(message);
+        return false;
+    }
+
+    void noteInFlight(const Image& image) {
+        const std::size_t texels =
+            static_cast<std::size_t>(image.width) * static_cast<std::size_t>(image.height);
+        out_.peakTexelsInFlight = std::max(out_.peakTexelsInFlight, texels);
+    }
+
+    // Where row `row` of image `index` sits in the whole set, as a fraction.
+    [[nodiscard]] float setFraction(std::size_t index, int row) const {
+        const auto total =
+            static_cast<float>(images_.size()) * static_cast<float>(ctx_.params.height);
+        return (static_cast<float>(index) * static_cast<float>(ctx_.params.height) +
+                static_cast<float>(row)) /
+               total;
+    }
+
+    [[nodiscard]] std::size_t indexOf(const RegionedImage& image) const {
+        return static_cast<std::size_t>(&image - images_.data());
+    }
+
+    // A shade result's refusals, as the whole bake's.
+    bool acceptShaded(const BakeResult& shaded) {
+        if (shaded.cancelled) {
+            out_.cancelled = true;
+            return false;
+        }
+        if (shaded.fieldContractViolated) {
+            out_.refusal = UdimRefusal::FieldContract;
+            out_.refusalMessage = shaded.fieldContractMessage;
+            return false;
+        }
+        return true;
+    }
+
+    // One region, one image: the whole-image pipeline, handed on as one band.
+    bool bakeInMemory(RegionedImage& image) {
+        BakeResult result;
+        std::vector<detail::PadCoord> covered;
+        shadeTile(ctx_, image.origin, RowRange{0, ctx_.params.height}, result, covered, progress_,
+                  cancel_);
+        if (!acceptShaded(result)) {
+            return false;
+        }
+        DensityMean mean;
+        if (ctx_.map == BakeMap::UvDensity) {
+            accumulateDensity(result.image, mean);
+        }
+        if (!finishTile(ctx_, mean.value(), result, covered, cancel_)) {
+            out_.cancelled = true;
+            return false;
+        }
+        noteInFlight(result.image);
+        image.report.encoding = result.encoding;
+        image.report.padding = result.padding;
+        image.report.texelsCovered = result.texelsCovered;
+        image.report.fieldUndefinedSamples = result.fieldUndefinedSamples;
+        if (!emit(image, 0, result.image, 0, ctx_.params.height)) {
+            return false;
+        }
+        out_.tiles.push_back(image.report);
+        return true;
+    }
+
+    bool createScratch(RegionedImage& image, const std::string& directory) {
+        std::string error;
+        image.scratch =
+            detail::RegionScratch::create(directory, ctx_.params.width, ctx_.params.height,
+                                          channels_, neutralPadding(ctx_.map, ctx_.params), error);
+        return image.scratch != nullptr || fail(RegionFailure::Scratch, error);
+    }
+
+    // ---- pass 1: shade ------------------------------------------------------
+
+    bool shadeImage(RegionedImage& image) {
+        const std::size_t index = indexOf(image);
+        for (const RowRange& rows : regions()) {
+            ProgressSink sub =
+                progress_ == nullptr
+                    ? ProgressSink{}
+                    : progress_->subrange(kShadeEnd * setFraction(index, rows.begin),
+                                          kShadeEnd * setFraction(index, rows.end), "bake");
+            if (!shadeRegion(image, rows, &sub)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    bool shadeRegion(RegionedImage& image, RowRange rows, ProgressSink* progress) {
+        BakeResult shaded;
+        std::vector<detail::PadCoord> covered;
+        shadeTile(ctx_, image.origin, rows, shaded, covered, progress, cancel_,
+                  &image.fieldSamples);
+        if (!acceptShaded(shaded)) {
+            return false;
+        }
+        if (shaded.image.pixels.empty()) {
+            return true;  // no texel here: neutral rows, synthesised on read
+        }
+        noteInFlight(shaded.image);
+        image.report.texelsCovered += shaded.texelsCovered;
+        image.report.fieldUndefinedSamples += shaded.fieldUndefinedSamples;
+        // In region order and raster order within each region: the order the
+        // whole-image bake walks, so the double sum is the same sum.
+        if (ctx_.map == BakeMap::UvDensity) {
+            accumulateDensity(shaded.image, densityMean_);
+        }
+        std::vector<std::uint8_t> coverage(
+            static_cast<std::size_t>(ctx_.params.width) * static_cast<std::size_t>(rows.count()),
+            0);
+        for (const detail::PadCoord& texel : covered) {
+            coverage[static_cast<std::size_t>(texel.y) *
+                         static_cast<std::size_t>(ctx_.params.width) +
+                     static_cast<std::size_t>(texel.x)] = 1;
+        }
+        return image.scratch->write(rows.begin, shaded.image, coverage) ||
+               fail(RegionFailure::Scratch, "cannot write the regioned bake's scratch file");
+    }
+
+    // ---- pass 2: finalize ---------------------------------------------------
+
+    // The per-texel normalization deferred until the whole image (or set) was
+    // shaded. Applied in place to one band of scratch rows.
+    void normalize(RegionedImage& image, Image& rows, const std::vector<std::uint8_t>& coverage,
+                   float curvatureRange) const {
+        if (ctx_.map == BakeMap::UvDensity) {
+            applyDensity(rows, densityMean_.value(), ctx_.params.densityNormalization);
+            return;
+        }
+        if (image.fieldSamples.empty()) {
+            return;
+        }
+        const bool cavity = ctx_.map == BakeMap::Cavity;
+        for (std::size_t i = 0; i < coverage.size(); ++i) {
+            if (coverage[i] != 0) {
+                rows.pixels[i] = encodeCurvature(rows.pixels[i], curvatureRange, cavity);
+            }
+        }
+    }
+
+    [[nodiscard]] bool rewritesScratch(const RegionedImage& image) const {
+        return !image.fieldSamples.empty() ||
+               (ctx_.map == BakeMap::UvDensity &&
+                ctx_.params.densityNormalization == DensityNormalization::Relative);
+    }
+
+    bool finalizeImage(RegionedImage& image) {
+        if (ctx_.map == BakeMap::UvDensity) {
+            image.report.encoding.densityMean = densityMean_.value();
+        }
+        FinalizeState state{fieldCurvatureRange(image.fieldSamples, ctx_.params),
+                            rewritesScratch(image),
+                            detail::PadRangeAccumulator(channels_),
+                            Image{},
+                            {}};
+        for (const RowRange& band : regions()) {
+            if (cancelled()) {
+                return false;
+            }
+            // A band with no covered texel holds neutral rows: nothing to
+            // normalize and nothing in the clamp range.
+            if (image.scratch->stores(band.begin, band.end) && !finalizeBand(image, band, state)) {
+                return false;
+            }
+            reportAfterShading(indexOf(image), Pass::Finalize, band.end);
+        }
+        image.fieldSamples = {};  // the one per-texel buffer outside the bound
+        image.padRange = state.range.finish(image.report.encoding);
+        return true;
+    }
+
+    // What the finalize pass carries from band to band.
+    struct FinalizeState {
+        float curvatureRange;
+        bool rewrite;
+        detail::PadRangeAccumulator range;
+        Image rows;                          // one band, reused
+        std::vector<std::uint8_t> coverage;  // its coverage bytes
+    };
+
+    bool finalizeBand(RegionedImage& image, RowRange band, FinalizeState& state) {
+        if (!image.scratch->read(band.begin, band.count(), state.rows, state.coverage)) {
+            return fail(RegionFailure::Scratch, "cannot read the regioned bake's scratch file");
+        }
+        noteInFlight(state.rows);
+        normalize(image, state.rows, state.coverage, state.curvatureRange);
+        for (std::size_t i = 0; i < state.coverage.size(); ++i) {
+            if (state.coverage[i] != 0) {
+                state.range.add(state.rows.pixels.data() + i * static_cast<std::size_t>(channels_));
+            }
+        }
+        return !state.rewrite || image.scratch->write(band.begin, state.rows, state.coverage) ||
+               fail(RegionFailure::Scratch, "cannot write the regioned bake's scratch file");
+    }
+
+    // ---- pass 3: assemble ---------------------------------------------------
+
+    bool assembleImage(RegionedImage& image) {
+        const std::size_t index = indexOf(image);
+        const int height = ctx_.params.height;
+        std::size_t filled = 0;
+        Image window;
+        std::vector<std::uint8_t> coverage;
+        for (const RowRange& rows : regions()) {
+            if (cancelled()) {
+                return false;
+            }
+            const int top = std::max(0, rows.begin - plan_.haloRows);
+            const int bottom = std::min(height, rows.end + plan_.haloRows);
+            if (!image.scratch->read(top, bottom - top, window, coverage)) {
+                return fail(RegionFailure::Scratch, "cannot read the regioned bake's scratch file");
+            }
+            noteInFlight(window);
+            // A window with no covered texel has no band to grow.
+            const detail::PadOutcome padded =
+                image.scratch->stores(top, bottom)
+                    ? padWindow(image, window, coverage, PadRows{rows.begin - top, rows.end - top})
+                    : detail::PadOutcome{};
+            if (padded.cancelled) {
+                out_.cancelled = true;
+                return false;
+            }
+            filled += padded.padding.texelsFilled;
+            if (!emit(image, rows.begin, window, rows.begin - top, rows.count())) {
+                return false;
+            }
+            reportAfterShading(index, Pass::Assemble, rows.end);
+        }
+        image.report.padding.texelsFilled = filled;
+        image.report.padding.mode =
+            filled > 0 ? detail::paddingModeFor(image.report.encoding.basis) : PaddingMode::None;
+        return true;
+    }
+
+    using PadRows = detail::PadRows;
+
+    detail::PadOutcome padWindow(const RegionedImage& image, Image& window,
+                                 const std::vector<std::uint8_t>& coverage, PadRows counted) {
+        std::vector<detail::PadCoord> covered;
+        const auto width = static_cast<std::size_t>(window.width);
+        for (std::size_t i = 0; i < coverage.size(); ++i) {
+            if (coverage[i] != 0) {
+                covered.push_back(
+                    detail::PadCoord{static_cast<int>(i % width), static_cast<int>(i / width)});
+            }
+        }
+        return detail::padBorders(window, covered, image.report.encoding, ctx_.params.paddingRadius,
+                                  cancel_, image.padRange, counted);
+    }
+
+    // Hands rows [first, first + count) of `buffer` to the sink as output rows
+    // starting at `rowBegin`.
+    bool emit(const RegionedImage& image, int rowBegin, const Image& buffer, int first, int count) {
+        RegionRows rows;
+        rows.tile = image.tile;
+        rows.width = ctx_.params.width;
+        rows.height = ctx_.params.height;
+        rows.channels = channels_;
+        rows.rowBegin = rowBegin;
+        rows.rowCount = count;
+        rows.pixels = buffer.pixels.data() + static_cast<std::size_t>(first) *
+                                                 static_cast<std::size_t>(buffer.width) *
+                                                 static_cast<std::size_t>(channels_);
+        rows.encoding = &image.report.encoding;
+        return sink_.consume(rows) ||
+               fail(RegionFailure::Sink, "the region sink refused rows " +
+                                             std::to_string(rowBegin) + ".." +
+                                             std::to_string(rowBegin + count - 1));
+    }
+
+    // The two passes that follow shading. Each image runs both before the next
+    // image starts, so they share that image's slice of the bar.
+    enum class Pass { Finalize, Assemble };
+
+    // Progress once row `row` of image `index` has been through `pass`: the
+    // image's slice of [kShadeEnd, 1], its first half the finalize pass and its
+    // second half assembly, so the bar stays monotone across a UDIM set.
+    void reportAfterShading(std::size_t index, Pass pass, int row) {
+        if (progress_ == nullptr) {
+            return;
+        }
+        const float passBegin = pass == Pass::Assemble ? 1.0f : 0.0f;
+        const float rowFraction = static_cast<float>(row) / static_cast<float>(ctx_.params.height);
+        const float within = (passBegin + rowFraction) / 2.0f;
+        const float image =
+            (static_cast<float>(index) + within) / static_cast<float>(images_.size());
+        progress_->report(kShadeEnd + (1.0f - kShadeEnd) * image, "bake");
+    }
+
+    // Shading dominates the cost and reports per texel inside [0, kShadeEnd];
+    // the finalize pass (one read of the scratch) reports per band and assembly
+    // per region inside the rest.
+    static constexpr float kShadeEnd = 0.8f;
+
+    const BakeContext& ctx_;
+    RegionPlan plan_;
+    RegionSink& sink_;
+    ProgressSink* progress_;
+    const CancelToken* cancel_;
+    RegionedBakeResult& out_;
+    int channels_;
+    std::vector<RegionedImage> images_;
+    DensityMean densityMean_;  // over the WHOLE set
+};
+
+// The refusals bakeRegions shares with bake() and bakeUdim(), in bakeUdim's
+// order and words. Returns true with `out` carrying the refusal.
+bool regionedRefusal(const Mesh& lowPoly, const Mesh& highPoly, BakeMap map,
+                     const BakeParams& params, bool udim, bool useField,
+                     const std::vector<UdimTile>& tiles, RegionedBakeResult& out) {
+    const auto* uvs = lowPoly.cornerAttributes().find<Vec2>(io::kUvAttribute);
+    if (tiles.empty()) {
+        out.refusal = UdimRefusal::NoOccupiedTiles;
+        out.refusalMessage = noOccupiedTilesMessage(uvs != nullptr);
+        return true;
+    }
+    const UdimCeiling ceiling = udimCeiling(params, udim ? tiles.size() : 1);
+    if (ceiling.refusal != UdimRefusal::None) {
+        out.refusal = ceiling.refusal;
+        out.refusalMessage = ceiling.message;
+        return true;
+    }
+    if (!bakeInputsUsable(highPoly, uvs, map, params, useField)) {
+        out.refusal = UdimRefusal::Parameters;
+        out.refusalMessage = kParametersRefusal;
+        return true;
+    }
+    return false;
+}
+
+}  // namespace
+
+RegionedBakeResult bakeRegions(const Mesh& lowPoly, const Mesh& highPoly, BakeMap map,
+                               const BakeParams& params, bool udim, RegionSink& sink,
+                               ProgressSink* progress, const CancelToken* cancel,
+                               const std::string& scratchDirectory) {
+    RegionedBakeResult out;
+    const bool useField = params.field != nullptr && fieldSupports(map);
+    out.layout = udimTiles(lowPoly);
+    const std::vector<UdimTile> tiles = udim ? out.layout.tiles : std::vector<UdimTile>{UdimTile{}};
+    if (regionedRefusal(lowPoly, highPoly, map, params, udim, useField, tiles, out)) {
+        return out;
+    }
+    out.plan = planRegions(params);
+
+    // ONE context for the whole set, exactly as bakeUdim builds it: one BVH,
+    // one set of Target normals, one curvature field, one object-space box, one
+    // id table -- whole-mesh quantities, and therefore the same in every region.
+    const auto* uvs = lowPoly.cornerAttributes().find<Vec2>(io::kUvAttribute);
+    BakeContext context(lowPoly, highPoly, *uvs, map, params, useField);
+    prepareContext(context);
+    RegionedBaker baker(context, out.plan, sink, progress, cancel, out);
+    if (!baker.run(tiles, scratchDirectory)) {
+        out.tiles.clear();  // never a partial set dressed as a whole one
+        return out;
+    }
     if (progress != nullptr) {
         progress->report(1.0f, "bake");
     }

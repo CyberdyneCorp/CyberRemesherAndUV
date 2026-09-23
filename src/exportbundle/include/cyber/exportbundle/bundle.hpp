@@ -77,6 +77,24 @@ struct BundleParams {
     // a UDIM bundle multiplies the exposure by the occupied-tile count, so a
     // ceiling that stopped a single 8K map has to stop ten of them too.
     std::size_t maxPixels = 0;
+    // The working-set bound every map is baked under (surface-baking,
+    // "Regioned baking with a bounded working set"), in texels of output image
+    // held in flight. 0 (the default) bakes each map whole and writes it in one
+    // piece, exactly as before. Non-zero bakes each map in regions and STREAMS
+    // it to its file band by band, through the preset's green flip and colour
+    // encoding, so no map is ever held whole; the files are byte-identical
+    // either way. The regioned bake's scratch file lives beside the mesh, on
+    // the disk the bundle is written to. It never refuses a bundle.
+    std::size_t maxWorkingSetTexels = 0;
+};
+
+// How one map file was produced, region by region. A map baked whole reports
+// one region of its full height with no halo; the mesh entry reports zeros.
+struct BundleRegions {
+    std::size_t regionCount = 0;
+    int regionRows = 0;
+    int haloRows = 0;
+    std::size_t workingSetTexels = 0;
 };
 
 struct BundleFile {
@@ -98,6 +116,8 @@ struct BundleFile {
     // unit square IS tile 1001 -- a report row therefore names a tile whether or
     // not the bundle was UDIM-aware.
     int udimTile = 1001;
+    // How the map was produced, region by region.
+    BundleRegions regions;
 };
 
 struct BundleResult {

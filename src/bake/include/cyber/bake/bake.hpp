@@ -283,10 +283,25 @@ struct BakeParams {
     // over the Target, which is scale-independent and keeps one pinched vertex
     // from flattening the map to mid-gray. Finite (a negative value is auto too).
     float curvatureRange = 0.0f;
-    // Exact ceiling on output texels. Zero disables it. This is intentionally
-    // separate from dimensions: an image can be tall, wide or square while a
-    // host's allocation budget is about their product.
+    // Exact ceiling on OUTPUT texels: the width * height of the map this request
+    // produces (per tile, and in aggregate for a UDIM set). Zero disables it.
+    // Intentionally separate from dimensions: an image can be tall, wide or
+    // square while a host's budget is about their product.
+    //
+    // It bounds the OUTPUT, not the memory a bake holds in flight -- that is
+    // maxWorkingSetTexels, below, and the two are deliberately separate: a host
+    // that asked for a 16K map and has the disk for it is not refused because
+    // the working set would not fit.
     std::size_t maxPixels = 0;
+    // Bound on the texels of output image a REGIONED bake (bakeRegions) holds in
+    // flight at once: one region plus its halo (see regionHaloRows). Zero means
+    // no bound -- the whole output is one region, bit-identical to bake(). It
+    // NEVER refuses: a bound below one row plus two halos yields one-row regions
+    // and RegionPlan reports the working set actually held. The whole-image
+    // entry points (bake, bakeUdim) hold the whole output by construction and do
+    // not read it. The Target-side structures (BVH, Target normals, curvature
+    // field) scale with the mesh, not the output, and are not counted.
+    std::size_t maxWorkingSetTexels = 0;
     // Axis convention for the object-space maps (ObjectNormal, ObjectPosition,
     // and BentNormal when bentNormalSpace is Object). Default y-up: the
     // engine's own convention. Recorded in BakeResult::encoding.
@@ -465,5 +480,123 @@ struct UdimBakeResult {
 [[nodiscard]] UdimBakeResult bakeUdim(const Mesh& lowPoly, const Mesh& highPoly, BakeMap map,
                                       const BakeParams& params, ProgressSink* progress = nullptr,
                                       const CancelToken* cancel = nullptr);
+
+// ---- regioned baking (surface-baking spec, "Regioned baking with a bounded
+// working set") ---------------------------------------------------------------
+//
+// A bake produced in full-width horizontal REGIONS whose finished rows are
+// handed to a RegionSink in ascending order, each row exactly once, so the whole
+// output never exists in memory. The assembled rows equal bake()/bakeUdim()'s
+// image texel for texel, padded band and global normalizations included.
+
+// How far a screen-space derivative reaches: the neighbouring texel. No map in
+// this engine takes one today (curvature and cavity read the Target's curvature
+// field at the cage hit), but the overlap is declared and honoured so that a
+// derivative bake added later inherits a correct one instead of a region-local
+// derivative that shows as a line on every seam.
+inline constexpr int kDerivativeFootprintTexels = 1;
+
+// The rows each assembly window overlaps its region by, above and below:
+// max(2 * paddingRadius, kDerivativeFootprintTexels). TWICE the padding radius,
+// because continuing a gradient reads the covered neighbour and the texel beyond
+// it, so a band texel k rings out depends on texels up to 2k away.
+[[nodiscard]] int regionHaloRows(const BakeParams& params);
+
+// How a request divides into regions, answerable without baking.
+struct RegionPlan {
+    int regionRows = 0;  // rows per region (the last may be shorter)
+    int haloRows = 0;    // overlap above and below each assembly window
+    std::size_t regionCount = 0;
+    // Peak texels of output image in flight: the tallest assembly window times
+    // the width. Equal to width * height for a one-region bake.
+    std::size_t workingSetTexels = 0;
+    // False when maxWorkingSetTexels was below one row plus two halos, so the
+    // working set held exceeds the bound. Reported, never refused.
+    bool boundReached = true;
+};
+
+// The plan for ONE image of `params`' size. A degenerate size plans nothing.
+[[nodiscard]] RegionPlan planRegions(const BakeParams& params);
+
+// One band of finished output rows.
+struct RegionRows {
+    UdimTile tile;   // 1001 for an ordinary bake
+    int width = 0;   // the full output width
+    int height = 0;  // the full output height
+    int channels = 0;
+    int rowBegin = 0;               // first output row held
+    int rowCount = 0;               // rows held
+    const float* pixels = nullptr;  // rowCount * width * channels floats, row-major
+    // The map's final encoding record, as the whole-image bake reports it.
+    const BakeEncoding* encoding = nullptr;
+};
+
+// Where a regioned bake's rows go. An abstract class rather than a callback so
+// an implementation can carry state (an open file, a row counter) and so the C
+// ABI can wrap its own callback in one.
+class RegionSink {
+public:
+    RegionSink() = default;
+    RegionSink(const RegionSink&) = delete;
+    RegionSink& operator=(const RegionSink&) = delete;
+    RegionSink(RegionSink&&) = delete;
+    RegionSink& operator=(RegionSink&&) = delete;
+    virtual ~RegionSink() = default;
+
+    // Receives rows in ascending order, each output row exactly once, tiles in
+    // layout order. Returning false abandons the bake (an I/O failure, say).
+    [[nodiscard]] virtual bool consume(const RegionRows& rows) = 0;
+};
+
+// What one output image of a regioned bake reported: everything a BakeResult
+// carries except the pixels, which went to the sink.
+struct RegionedTile {
+    UdimTile tile;
+    int width = 0;
+    int height = 0;
+    int channels = 0;
+    BakeEncoding encoding;
+    BakePadding padding;
+    std::size_t texelsCovered = 0;
+    std::size_t fieldUndefinedSamples = 0;
+};
+
+// Why a regioned bake produced no output beyond a refusal or a cancellation.
+enum class RegionFailure {
+    None,
+    Sink,     // the sink returned false
+    Scratch,  // the scratch storage could not be created, written or read
+};
+
+struct RegionedBakeResult {
+    UdimLayout layout;  // filled even on a refusal, as bakeUdim's is
+    // One entry per baked image, in layout order. Empty on a refusal, a
+    // cancellation or a failure.
+    std::vector<RegionedTile> tiles;
+    UdimRefusal refusal = UdimRefusal::None;
+    std::string refusalMessage;
+    bool cancelled = false;
+    RegionFailure failure = RegionFailure::None;
+    std::string failureMessage;
+    RegionPlan plan;
+    // Measured, not planned: the largest number of output-image texels held in
+    // one buffer at any point of the bake.
+    std::size_t peakTexelsInFlight = 0;
+};
+
+// Bakes `map` in regions. `udim` false bakes the unit square (tile 1001) as
+// bake() does; true bakes every occupied tile as bakeUdim() does, sharing one
+// Target context and one density mean across the set. Every parameter bake()
+// validates is validated identically, and the texel ceiling bounds the output.
+//
+// A set of more than one region shades each texel ONCE into scratch storage in
+// `scratchDirectory` (the system temporary directory when empty) and assembles
+// from it; the scratch is removed on every exit. Progress: the shading takes
+// [0, 0.9] split by rows, per texel inside each region; assembly takes [0.9, 1].
+[[nodiscard]] RegionedBakeResult bakeRegions(const Mesh& lowPoly, const Mesh& highPoly, BakeMap map,
+                                             const BakeParams& params, bool udim, RegionSink& sink,
+                                             ProgressSink* progress = nullptr,
+                                             const CancelToken* cancel = nullptr,
+                                             const std::string& scratchDirectory = {});
 
 }  // namespace cyber::bake

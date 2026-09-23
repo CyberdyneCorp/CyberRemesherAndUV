@@ -1,6 +1,7 @@
 add_library(cyber_imageio STATIC
     src/png.cpp
     src/exr.cpp
+    src/stream.cpp
     src/zip.cpp
     src/image.cpp
     src/load.cpp

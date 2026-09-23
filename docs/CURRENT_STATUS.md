@@ -46,13 +46,13 @@ isolation is tracked in [#51](https://github.com/CyberdyneCorp/CyberRemesherAndU
 
 ## Release and contribution policy
 
-The C ABI is **2.0** (soname `libcyber_capi.so.2`). Additive changes increment
+The C ABI is **2.1** (soname `libcyber_capi.so.2`; 2.1 appended `maxWorkingSetTexels` to the sized parameter structs and added the regioned bake). Additive changes increment
 the ABI minor; incompatible layouts require a new ABI major, and a client of a
 different major is refused -- by the loader and by `cyber_abi_check` -- rather
 than served. 2.0 exists because `CyberBakeParams` and `CyberBundleParams` grew by
 appending during the 1.x series, which let a newer library write past the end of
 an older caller's struct; see the 0.10.0 CHANGELOG for the two-line migration.
-The checked-in ABI manifest (`capi/abi/cyber_capi-2.0.json`) protects
+The checked-in ABI manifest (`capi/abi/cyber_capi-2.1.json`) protects
 declarations, compiler layouts and guarded output buffers; the retained v0.8
 client test only proves that a separate process loads the shared library, and
 cross-major compatibility is not claimed. The source of truth remains

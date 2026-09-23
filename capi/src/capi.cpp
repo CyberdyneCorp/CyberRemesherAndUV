@@ -5050,6 +5050,15 @@ struct CyberImage {
     cyber::bake::Image image;
     cyber::bake::BakeEncoding encoding;
     cyber::bake::BakePadding padding;
+    // Set by cyber_bake_regions, whose image carries no pixels. Left empty
+    // (count 0) by every whole-image entry point, which cyber_image_regions
+    // reads as "one region, the whole image".
+    struct Regions {
+        uint64_t count = 0;
+        int rows = 0;
+        int halo = 0;
+        uint64_t workingSet = 0;
+    } regions;
 };
 
 // Shared by cyber_bake and cyber_bake_field so both entry points accept exactly
@@ -5282,7 +5291,17 @@ CyberBakeParams bakeParamsDefaults() {
     p.densityNormalization = d.densityNormalization == cyber::bake::DensityNormalization::Relative
                                  ? CYBER_DENSITY_RELATIVE
                                  : CYBER_DENSITY_ABSOLUTE;
+    // ABI 2.1. What a 2.0 caller, whose structSize stops before it, reads as.
+    p.maxWorkingSetTexels = static_cast<uint64_t>(d.maxWorkingSetTexels);
     return p;
+}
+
+// A 64-bit C bound as a host-sized one. A bound a 32-bit size_t cannot hold is
+// larger than any image that host can address, so it saturates rather than
+// wrapping into a small one.
+std::size_t toSizeBound(uint64_t value) {
+    return value > std::numeric_limits<std::size_t>::max() ? std::numeric_limits<std::size_t>::max()
+                                                           : static_cast<std::size_t>(value);
 }
 
 // The enum-valued and finite members. An out-of-range enum is
@@ -5372,6 +5391,9 @@ bool applyBakeParams(const CyberBakeParams* params, cyber::bake::BakeParams& out
     out.aoSamples = sized.aoSamples;
     out.aoRadius = sized.aoRadius;
     out.curvatureRange = sized.curvatureRange;
+    // Any value is valid (0 = no bound; a bound too small is honoured as far
+    // as it can be and reported), so there is nothing to refuse here.
+    out.maxWorkingSetTexels = toSizeBound(sized.maxWorkingSetTexels);
     return applyBakeEncodingParams(sized, out, map, who);
 }
 
@@ -5656,6 +5678,49 @@ CyberStatus cyber_image_placement(const CyberImage* image, float out_matrix[16])
     return CYBER_OK;
 }
 
+namespace {
+
+// The four region facts through optional out pointers, shared by the image and
+// the bundle readers so both hand back the same record.
+void writeRegionFacts(uint64_t count, int rows, int halo, uint64_t workingSet, uint64_t* out_count,
+                      int* out_rows, int* out_halo, uint64_t* out_working) {
+    if (out_count != nullptr) {
+        *out_count = count;
+    }
+    if (out_rows != nullptr) {
+        *out_rows = rows;
+    }
+    if (out_halo != nullptr) {
+        *out_halo = halo;
+    }
+    if (out_working != nullptr) {
+        *out_working = workingSet;
+    }
+}
+
+}  // namespace
+
+CyberStatus cyber_image_regions(const CyberImage* image, uint64_t* out_region_count,
+                                int* out_region_rows, int* out_halo_rows,
+                                uint64_t* out_working_set_texels) {
+    if (image == nullptr) {
+        setError("cyber_image_regions: null argument");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    const CyberImage::Regions& r = image->regions;
+    if (r.count == 0) {  // a whole-image bake: one region, no halo
+        const uint64_t texels =
+            static_cast<uint64_t>(image->image.width) * static_cast<uint64_t>(image->image.height);
+        writeRegionFacts(1, image->image.height, 0, texels, out_region_count, out_region_rows,
+                         out_halo_rows, out_working_set_texels);
+    } else {
+        writeRegionFacts(r.count, r.rows, r.halo, r.workingSet, out_region_count, out_region_rows,
+                         out_halo_rows, out_working_set_texels);
+    }
+    clearError();
+    return CYBER_OK;
+}
+
 CyberStatus cyber_image_padding(const CyberImage* image, CyberImagePadding* out) {
     if (image == nullptr || out == nullptr) {
         setError("cyber_image_padding: null argument");
@@ -5708,6 +5773,13 @@ size_t cyber_image_copy_pixels(const CyberImage* image, float* out, size_t max_f
 CyberStatus cyber_image_save_png(const CyberImage* image, const char* path) {
     if (image == nullptr || path == nullptr) {
         setError("cyber_image_save_png: null argument");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    if (image->image.pixels.empty()) {
+        // The metadata image cyber_bake_regions returns: its rows went to the
+        // host's callback, so there is nothing here to encode.
+        setError("cyber_image_save_png: the image carries no pixels (a regioned bake hands its "
+                 "rows to the row callback)");
         return CYBER_ERR_INVALID_ARG;
     }
     try {
@@ -6505,6 +6577,147 @@ CyberStatus cyber_bake_field(const CyberMesh* low, const CyberMesh* high, CyberB
     }
 }
 
+// ---- regioned baking (ABI 2.1) --------------------------------------------
+
+namespace {
+
+// Hands each finished band to the host's row callback. A non-zero return is the
+// host asking to stop, which abandons the bake as an I/O failure.
+class CallbackRowSink final : public cyber::bake::RegionSink {
+public:
+    CallbackRowSink(CyberBakeRowsCb rows, void* user) : rows_(rows), user_(user) {}
+
+    bool consume(const cyber::bake::RegionRows& rows) override {
+        return rows_(rows.rowBegin, rows.rowCount, rows.width, rows.channels, rows.pixels, user_) ==
+               0;
+    }
+
+private:
+    CyberBakeRowsCb rows_;
+    void* user_;
+};
+
+// The status and message a regioned bake that produced no result comes back
+// with. The refusal words are the engine's own.
+CyberStatus regionedStatus(const cyber::bake::RegionedBakeResult& baked) {
+    const char* who = "cyber_bake_regions: ";
+    if (baked.cancelled) {
+        setError(std::string(who) + "cancelled");
+        return CYBER_ERR_CANCELLED;
+    }
+    switch (baked.refusal) {
+        case cyber::bake::UdimRefusal::None:
+            break;
+        case cyber::bake::UdimRefusal::FieldContract:
+            setError(who + baked.refusalMessage);
+            return CYBER_ERR_INVALID_PARAM;
+        case cyber::bake::UdimRefusal::PerTileCeiling:
+        case cyber::bake::UdimRefusal::AggregateCeiling:
+            setError(who + baked.refusalMessage);
+            return CYBER_ERR_RUNTIME;
+        case cyber::bake::UdimRefusal::Parameters:
+        case cyber::bake::UdimRefusal::NoOccupiedTiles:
+            setError(std::string(who) +
+                     "empty result (the low-poly needs UVs and the Target geometry)");
+            return CYBER_ERR_EMPTY;
+    }
+    setError(std::string(who) + (baked.failure == cyber::bake::RegionFailure::Sink
+                                     ? "the row callback asked to stop"
+                                     : baked.failureMessage));
+    return CYBER_ERR_IO;
+}
+
+// The pixel-less image a successful regioned bake returns.
+std::unique_ptr<CyberImage> regionedImage(const cyber::bake::RegionedBakeResult& baked) {
+    const cyber::bake::RegionedTile& tile = baked.tiles.front();
+    auto handle = std::make_unique<CyberImage>();
+    handle->image.width = tile.width;
+    handle->image.height = tile.height;
+    handle->image.channels = tile.channels;
+    handle->encoding = tile.encoding;
+    handle->padding = tile.padding;
+    handle->regions.count = static_cast<uint64_t>(baked.plan.regionCount);
+    handle->regions.rows = baked.plan.regionRows;
+    handle->regions.halo = baked.plan.haloRows;
+    handle->regions.workingSet = static_cast<uint64_t>(baked.plan.workingSetTexels);
+    return handle;
+}
+
+// cyber_bake_regions's argument checks, with cyber_bake_field's rule for a NULL
+// Target.
+bool regionedArgumentsUsable(const CyberMesh* low, const CyberMesh* high, CyberBakeMap map,
+                             const CyberFieldEvaluator* field, CyberBakeRowsCb rows,
+                             CyberImage** out) {
+    if (low == nullptr || rows == nullptr || out == nullptr ||
+        (high == nullptr && field == nullptr)) {
+        setError("cyber_bake_regions: null argument");
+        return false;
+    }
+    if (field != nullptr &&
+        (field->distance == nullptr || field->gradient == nullptr || field->occlusion == nullptr)) {
+        setError("cyber_bake_regions: null argument");
+        return false;
+    }
+    if (high == nullptr && !fieldCanServe(map)) {
+        setError(
+            "cyber_bake_regions: this map needs a Target mesh (only normal, ao, curvature "
+            "and cavity can be answered by a field alone)");
+        return false;
+    }
+    return true;
+}
+
+}  // namespace
+
+CyberStatus cyber_bake_regions(const CyberMesh* low, const CyberMesh* high, CyberBakeMap map,
+                               const CyberBakeParams* params, const CyberFieldEvaluator* field,
+                               CyberBakeRowsCb rows, CyberProgressCb progress, CyberCancelCb cancel,
+                               void* user, const char* scratch_dir, CyberImage** out) {
+    if (out != nullptr) {
+        *out = nullptr;
+    }
+    if (!regionedArgumentsUsable(low, high, map, field, rows, out)) {
+        return CYBER_ERR_INVALID_ARG;
+    }
+    try {
+        cyber::bake::BakeMap m{};
+        if (!toBakeMap(map, m)) {
+            setError("cyber_bake_regions: unknown map type");
+            return CYBER_ERR_INVALID_ARG;
+        }
+        cyber::bake::BakeParams p;
+        if (!applyBakeParams(params, p, m, "cyber_bake_regions")) {
+            return CYBER_ERR_INVALID_ARG;
+        }
+        p.maxPixels = static_cast<std::size_t>(cyber_max_bake_pixels());
+        std::optional<CallbackField> adapter;
+        if (field != nullptr) {
+            adapter.emplace(*field);
+            p.field = &adapter.value();
+        }
+        const cyber::CancelToken token;
+        token.setPoll([cancel, user]() { return cancel != nullptr && cancel(user) != 0; });
+        cyber::ProgressSink sink = makeSink(progress, cancel, user, token);
+        CallbackRowSink rowSink(rows, user);
+        const cyber::Mesh empty;
+        const cyber::bake::RegionedBakeResult baked = cyber::bake::bakeRegions(
+            low->mesh, high == nullptr ? empty : high->mesh, m, p, false, rowSink, &sink, &token,
+            scratch_dir == nullptr ? std::string() : std::string(scratch_dir));
+        if (baked.tiles.empty()) {
+            return regionedStatus(baked);
+        }
+        clearError();
+        *out = regionedImage(baked).release();
+        return CYBER_OK;
+    } catch (const std::exception& e) {
+        setError(std::string("cyber_bake_regions: ") + e.what());
+        return CYBER_ERR_RUNTIME;
+    } catch (...) {
+        setError("cyber_bake_regions: unknown error");
+        return CYBER_ERR_RUNTIME;
+    }
+}
+
 CyberStatus cyber_conform(CyberMesh* edit, const CyberMesh* new_target, float threshold,
                           CyberConformReport* report, uint32_t* out_flagged, size_t max_flagged) {
     // Moves every live vertex of the EditMesh, so it goes through runMeshEdit
@@ -6565,6 +6778,11 @@ struct CyberBundleResult {
         // The UDIM tile this file holds. 1001 for the mesh entry and for every
         // map of a non-UDIM bundle, because the unit square IS tile 1001.
         int udimTile = 1001;
+        // Region facts (ABI 2.1); zeros for the mesh entry.
+        uint64_t regionCount = 0;
+        int regionRows = 0;
+        int haloRows = 0;
+        uint64_t workingSetTexels = 0;
     };
     std::vector<File> files;
     std::vector<std::string> warnings;
@@ -6744,6 +6962,7 @@ CyberBundleParams bundleParamsDefaults() {
             ? CYBER_DENSITY_RELATIVE
             : CYBER_DENSITY_ABSOLUTE;
     p.udim = defaults.udim ? 1 : 0;
+    p.maxWorkingSetTexels = static_cast<uint64_t>(defaults.maxWorkingSetTexels);
 #else
     p.cageDistance = 0.1f;
     p.aoSamples = 64;
@@ -6754,6 +6973,7 @@ CyberBundleParams bundleParamsDefaults() {
     copyPlacement(cyber::bake::identityPlacement(), p.placement);
     p.densityNormalization = CYBER_DENSITY_ABSOLUTE;
     p.udim = 0;
+    p.maxWorkingSetTexels = 0;
 #endif
     return p;
 }
@@ -6862,6 +7082,7 @@ CyberStatus cyber_export_bundle_write([[maybe_unused]] CyberMesh* low,
                                            : cyber::bake::NormalSpace::Tangent;
         bundleParams.thicknessScale = sized.thicknessScale;
         bundleParams.udim = sized.udim != 0;
+        bundleParams.maxWorkingSetTexels = toSizeBound(sized.maxWorkingSetTexels);
         // The host's texel ceiling, exactly as cyber_bake, cyber_bake_field and
         // cyber_bake_udim apply it. A bundle is a batch of bakes and a UDIM
         // bundle multiplies the exposure by the occupied-tile count, so the
@@ -6895,7 +7116,11 @@ CyberStatus cyber_export_bundle_write([[maybe_unused]] CyberMesh* low,
                                      .padding = toCPadding(file.padding),
                                      .idSource = file.encoding.idSource,
                                      .idColors = file.encoding.idColors,
-                                     .udimTile = file.udimTile});
+                                     .udimTile = file.udimTile,
+                                     .regionCount = file.regions.regionCount,
+                                     .regionRows = file.regions.regionRows,
+                                     .haloRows = file.regions.haloRows,
+                                     .workingSetTexels = file.regions.workingSetTexels});
         }
         handle->warnings = result.warnings;
         handle->unwrapped = result.unwrapped;
@@ -6974,6 +7199,24 @@ CyberStatus cyber_bundle_result_file_udim_tile(const CyberBundleResult* result, 
         return CYBER_ERR_INVALID_ARG;
     }
     *out_tile = result->files[index].udimTile;
+    clearError();
+    return CYBER_OK;
+}
+
+CyberStatus cyber_bundle_result_file_regions(const CyberBundleResult* result, size_t index,
+                                             uint64_t* out_region_count, int* out_region_rows,
+                                             int* out_halo_rows, uint64_t* out_working_set_texels) {
+    if (result == nullptr) {
+        setError("cyber_bundle_result_file_regions: null argument");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    if (index >= result->files.size()) {
+        setError("cyber_bundle_result_file_regions: index out of range");
+        return CYBER_ERR_INVALID_ARG;
+    }
+    const CyberBundleResult::File& file = result->files[index];
+    writeRegionFacts(file.regionCount, file.regionRows, file.haloRows, file.workingSetTexels,
+                     out_region_count, out_region_rows, out_halo_rows, out_working_set_texels);
     clearError();
     return CYBER_OK;
 }

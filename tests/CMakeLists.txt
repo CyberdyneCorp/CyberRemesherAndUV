@@ -16,6 +16,7 @@ add_executable(cyber_tests
     bake/test_border_padding.cpp
     bake/test_map_catalog.cpp
     bake/test_udim.cpp
+    bake/test_regioned_bake.cpp
     handoff/test_handoff.cpp
     quadrangulate/test_crossfield.cpp
     quadrangulate/test_field_quadrangulator.cpp
@@ -86,7 +87,7 @@ endif()
 if(TARGET cyber_imageio)
     # test_load: imageio PNG reader; test_texture_bake: bake's texture color
     # source (uses imageio's LoadedImage) — both need cyber_imageio linked.
-    target_sources(cyber_tests PRIVATE imageio/test_imageio.cpp imageio/test_load.cpp
+    target_sources(cyber_tests PRIVATE imageio/test_imageio.cpp imageio/test_image_stream.cpp imageio/test_load.cpp
                                         imageio/test_load_general.cpp bake/test_texture_bake.cpp)
     target_link_libraries(cyber_tests PRIVATE cyber_imageio)
 endif()
@@ -95,7 +96,8 @@ if(TARGET cyber_capi)
                                         capi/abi_clients/v0_8_client.cpp
                                         capi/test_capi_cache.cpp
                                         capi/test_capi_isotropic.cpp
-                                        capi/test_capi_bake_provider.cpp)
+                                        capi/test_capi_bake_provider.cpp
+                                        capi/test_capi_regions.cpp)
     target_link_libraries(cyber_tests PRIVATE cyber_capi)
     # Some ABI promises live only in the header's prose (handle lifetimes), so
     # the capi cases read it and gate on what it says.

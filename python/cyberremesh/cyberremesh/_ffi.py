@@ -532,6 +532,8 @@ class CyberBakeParams(Structure):
         ("padding_radius", c_int32),
         ("placement", c_float * 16),
         ("density_normalization", c_int32),
+        # ABI 2.1, appended: the regioned bake's working-set bound.
+        ("max_working_set_texels", c_uint64),
     ]
 
 
@@ -657,6 +659,8 @@ class CyberBundleParams(Structure):
         ("placement", c_float * 16),
         ("density_normalization", c_int32),
         ("udim", c_int32),
+        # ABI 2.1, appended: bake and stream every map under this bound.
+        ("max_working_set_texels", c_uint64),
     ]
 
 
@@ -693,6 +697,10 @@ PROGRESS_CB = CFUNCTYPE(None, c_float, c_char_p, c_void_p)
 CANCEL_CB = CFUNCTYPE(c_int32, c_void_p)
 # void (*)(const char* message, void* user) — the guidance "loud" channel.
 WARNING_CB = CFUNCTYPE(None, c_char_p, c_void_p)
+# int (*)(int row_begin, int row_count, int width, int channels,
+#         const float* rows, void* user) — one band of a regioned bake; return
+# non-zero to stop the bake.
+BAKE_ROWS_CB = CFUNCTYPE(c_int32, c_int32, c_int32, c_int32, c_int32, POINTER(c_float), c_void_p)
 
 # Field evaluator callbacks (CyberFieldEvaluator). Every instance MUST be kept
 # alive by the Python side for as long as the bake runs: ctypes does not own
@@ -2032,6 +2040,27 @@ def _declare_bridge(lib: ctypes.CDLL) -> None:
         POINTER(c_void_p),
     ]
     lib.cyber_bake_field.restype = c_int32
+    # CyberStatus cyber_bake_regions(low, high, map, params, field, rows, progress,
+    #                                cancel, user, scratch_dir, out)   (ABI 2.1)
+    lib.cyber_bake_regions.argtypes = [
+        c_void_p,
+        c_void_p,
+        c_int32,
+        POINTER(CyberBakeParams),
+        POINTER(CyberFieldEvaluator),
+        BAKE_ROWS_CB,
+        PROGRESS_CB,
+        CANCEL_CB,
+        c_void_p,
+        c_char_p,
+        POINTER(c_void_p),
+    ]
+    lib.cyber_bake_regions.restype = c_int32
+    # CyberStatus cyber_image_regions(image, count, rows, halo, working_set)
+    lib.cyber_image_regions.argtypes = [
+        c_void_p, POINTER(c_uint64), POINTER(c_int32), POINTER(c_int32), POINTER(c_uint64),
+    ]
+    lib.cyber_image_regions.restype = c_int32
     # CyberStatus cyber_conform(edit, new_target, threshold, report, out_flagged, max)
     lib.cyber_conform.argtypes = [
         c_void_p,
@@ -2098,6 +2127,11 @@ def _declare_export_presets(lib: ctypes.CDLL) -> None:
     lib.cyber_bundle_result_file_padding.restype = c_int32
     lib.cyber_bundle_result_file_udim_tile.argtypes = [c_void_p, c_size_t, POINTER(c_int32)]
     lib.cyber_bundle_result_file_udim_tile.restype = c_int32
+    lib.cyber_bundle_result_file_regions.argtypes = [
+        c_void_p, c_size_t, POINTER(c_uint64), POINTER(c_int32), POINTER(c_int32),
+        POINTER(c_uint64),
+    ]
+    lib.cyber_bundle_result_file_regions.restype = c_int32
     lib.cyber_bundle_result_file_id_source.argtypes = [c_void_p, c_size_t]
     lib.cyber_bundle_result_file_id_source.restype = c_char_p
     lib.cyber_bundle_result_file_id_color_count.argtypes = [c_void_p, c_size_t]

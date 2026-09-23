@@ -47,9 +47,26 @@ bool hasExrExtension(const std::string& path) {
     return ext == ".exr";
 }
 
+// The pixel buffer holds exactly width * height * channels floats. Both
+// encoders read that many through a raw pointer, so an image whose buffer is
+// shorter -- the pixel-less metadata image a regioned bake returns, or any
+// hand-built one -- must be refused here rather than read past its end.
+bool pixelsMatchShape(const cyber::bake::Image& image) {
+    if (image.width <= 0 || image.height <= 0 || image.channels <= 0) {
+        return false;
+    }
+    const std::size_t expected = static_cast<std::size_t>(image.width) *
+                                 static_cast<std::size_t>(image.height) *
+                                 static_cast<std::size_t>(image.channels);
+    return image.pixels.size() == expected;
+}
+
 }  // namespace
 
 bool saveImage(const std::string& path, const cyber::bake::Image& image, ImageFormat format) {
+    if (!pixelsMatchShape(image)) {
+        return false;
+    }
     if (format == ImageFormat::Exr) {
         return writeExr(path, image.width, image.height, image.channels, image.pixels.data());
     }
