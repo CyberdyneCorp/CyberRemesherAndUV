@@ -14,4 +14,4 @@ __all__ = [
     "load_obj",
     "save_obj",
 ]
-__version__ = "0.9.0"
+__version__ = "0.10.0"
