@@ -7,6 +7,48 @@
 
 ### Added
 
+- **Bake output up to 16384² through a regioned path with a bounded working set**
+  (#92). Every map type can be baked in full-width horizontal regions whose
+  finished rows are handed on in ascending order, each exactly once, so a map
+  larger than memory never exists whole.
+
+  - **Two bounds, stated apart.** The texel ceiling keeps its check and is
+    restated to bound the **output**. A new **working-set bound**
+    (`BakeParams::maxWorkingSetTexels`, `BundleParams::maxWorkingSetTexels`,
+    `--bake-working-set`) bounds the texels of output held **in flight** and
+    **never refuses**: a bound too small for one row plus its halo gives
+    one-row regions and the working set actually held is reported
+    (`RegionPlan`, `cyber_image_regions`, the report's `regions` block).
+  - **Region boundaries are invisible**: the assembled output equals the
+    unregioned bake texel for texel, padded band and encoding record included,
+    for every map, ordinary and UDIM. Shading reads global texel coordinates
+    only; every neighbourhood stage runs over a window overlapped by a halo of
+    `max(2 * paddingRadius, 1)` rows — **twice** the padding radius, because the
+    extrapolating band reads two texels out per ring (a halo of `radius`, which
+    an earlier draft of this change proposed, is caught by the tests).
+  - **Whole-image quantities stay whole-image.** The relative UV-density mean
+    (whole set), the padded band's compounding clamp range (whole image), and a
+    field-sampled curvature auto-range (whole image) are measured over the
+    whole output before any region is emitted. To do that without shading
+    twice, a multi-region bake shades each texel once into a **sparse scratch
+    file** (rows no chart touches are not stored), removed on every exit.
+  - **Cancellation inside a region** — polled every 2048 shaded texels per
+    worker, every 1024 rasterized faces, per scratch row and between padding
+    rings — and **smooth progress**: the rasterized and field paths now report
+    per texel like the ray-traced ones.
+  - **Streaming PNG/EXR writers** (`imageio::ImageStreamWriter`), byte-identical
+    to the one-shot writers at every band size; an export bundle with a
+    working-set bound streams every map through the preset's green flip and
+    sRGB encoding band by band, writing the same bytes as an unbounded bundle.
+  - Entry points: `bake::bakeRegions()`; C ABI **2.1** (additive: members
+    appended to the sized `CyberBakeParams` / `CyberBundleParams`, whose 2.0
+    floors do not move) with `cyber_bake_regions`, `cyber_image_regions`,
+    `cyber_bundle_result_file_regions`; Python `bake_regions`,
+    `BakeParams.max_working_set_texels`, `write_bundle(max_working_set_texels=)`,
+    `Image.regions`; Swift `Mesh.bakeRegions(from:map:parameters:...)`,
+    `BakeParameters.maxWorkingSetTexels`, `Image.regions`. Pinned manifest:
+    `capi/abi/cyber_capi-2.1.json`.
+
 - **UDIM-aware baking** (#91): one map per occupied tile, with the rays cast
   against the **whole** mesh.
 

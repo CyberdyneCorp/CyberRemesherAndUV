@@ -811,6 +811,64 @@ The UV packer targets the unit square, which is tile 1001; a multi-tile layout i
 authored or arrives with an imported mesh, and baking reads whatever tiles the
 layout occupies with no packing step in between.
 
+#### Maps larger than memory: regioned baking
+
+Output resolution goes to **16384 per dimension**, for every map type, without
+the whole map ever existing in memory. A 16384² RGB float map is ~3 GB; a
+regioned bake holds one horizontal **region** of it at a time and hands the
+finished rows on, ascending, each row exactly once.
+
+There are **two bounds**, and they mean different things:
+
+- the **texel ceiling** (`cyber_set_max_bake_pixels`, `BakeParams::maxPixels`)
+  bounds the **output** — the `width * height` a request produces. It refuses.
+- the **working-set bound** (`maxWorkingSetTexels` on the bake and bundle
+  parameters; `--bake-working-set` on the CLI) bounds the texels of output held
+  **in flight**. It **never refuses**: a smaller bound means more, smaller
+  regions, and a bound too small for one row plus its halo gives one-row regions
+  and reports the working set actually held. A host that asked for a 16K map and
+  has the disk for it is not refused because the working set would not fit.
+
+```python
+params = cyberremesh.BakeParams(width=16384, height=16384,
+                                max_working_set_texels=16384 * 1024)
+report = cyberremesh.bake_regions(low, high, cyberremesh.BakeMap.AO,
+                                  lambda row, rows: sink.write(row, rows), params,
+                                  scratch_dir="/Volumes/Work/tmp")
+report.regions        # ImageRegions(count=17, rows=992, halo_rows=16, ...)
+
+cyberremesh.write_bundle(low, high, preset, "out/hero.obj",
+                         max_working_set_texels=16384 * 1024)   # streams PNG/EXR
+```
+
+**Region boundaries are invisible**: the assembled rows are identical, texel for
+texel, to the unregioned bake. Two things make that true. Every texel is shaded
+from its **global** coordinates and whole-mesh context (the per-texel AO
+rotation included), and every stage that reads a texel's **neighbourhood** runs
+over a window that overlaps its region by a **halo** of
+`max(2 * paddingRadius, 1)` rows. The padded band needs **twice** its radius,
+because continuing a gradient reads the covered neighbour *and* the texel beyond
+it; the one-texel floor is the footprint of a screen-space derivative, which no
+map takes today (curvature and cavity read the Target's curvature field at the
+cage hit) but which a future derivative bake inherits correctly.
+
+**Whole-image quantities are computed over the whole image**, never per region
+— per region, each would be a different number and the map would step in
+brightness at every seam while every region looked right: the **relative
+UV-density mean** (over the whole UDIM set), the padded band's **clamp range**,
+and a **field-sampled curvature auto-range** (a percentile, so it keeps one float
+per covered texel unless you set a curvature range). To get them without shading
+twice, a bake of more than one region shades every texel **once** into a sparse
+**scratch file** — rows no chart touches are not stored — then measures, pads and
+emits. Point `scratch_dir` at the disk you are writing to: a RAM-backed `/tmp`
+defeats the bound. The bundle puts it beside its output.
+
+Cancellation is polled **inside** each region — every 2048 shaded texels per
+worker, every 1024 rasterized faces, every scratch row and between padding rings
+— so its latency is bounded by the working set or the mesh, never by the output.
+Progress moves per texel inside a region rather than once per region. PNG and EXR
+are written band by band, byte-identical to the one-shot writers.
+
 #### The bake provider: asking this engine for a map
 
 `cyber_bake` is a bake *call*. A texture-painting stage such as
@@ -1434,8 +1492,8 @@ the same build tree, `add_subdirectory()` also exposes the `cyber::*` targets
 There are **two** version numbers and they answer different questions.
 
 ```c
-#define CYBER_ABI_VERSION_MAJOR 1     /* the SHAPE of cyber_capi.h */
-#define CYBER_ABI_VERSION_MINOR 12
+#define CYBER_ABI_VERSION_MAJOR 2     /* the SHAPE of cyber_capi.h */
+#define CYBER_ABI_VERSION_MINOR 1
 
 void       cyber_abi_version(int* major, int* minor);
 CyberStatus cyber_abi_check(int compiled_major, int compiled_minor);
@@ -1467,7 +1525,7 @@ full increment rules, including why appending an enumerator is *not* additive.
 (`libcyber_capi.so.2` for ABI 2.x) rather than tracking the project's `0.x`.
 
 Every release and supported CTest toolchain compares
-[`capi/abi/cyber_capi-2.0.json`](capi/abi/cyber_capi-2.0.json) with a
+[`capi/abi/cyber_capi-2.1.json`](capi/abi/cyber_capi-2.1.json) with a
 compiler-measured manifest of this header. It records signatures, enum values,
 field types and padding—not merely `sizeof`. Extend the ABI with a new sibling
 entry point and a new parameter/report struct; never append fields to an
