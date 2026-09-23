@@ -36,9 +36,12 @@
 
 ## Open decision
 
-- [ ] Whether a slide from an open-border edge should move the whole border row
+- [x] Whether a slide from an open-border edge should move the whole border row
       (Blender's behaviour) rather than the single edge `edgeLoopFrom` returns.
       Kept consistent with the tag-loop gesture for now; see design.md.
+      DECIDED for 0.10.0: the current behaviour stands. The spec delta promises
+      no border-row slide; Blender's behaviour is a possible future option, not
+      an unfinished part of this change.
 
 ## Session handoff
 

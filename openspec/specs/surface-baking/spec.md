@@ -36,13 +36,6 @@ The bake SHALL use a projection cage derived from the EditMesh, editable with th
 - **WHEN** the user double-taps a cage vertex and enters a distance
 - **THEN** that vertex's cage offset SHALL change independently of the brush falloff
 
-### Requirement: Component links and selective baking
-When Target and EditMesh have multiple components, the user SHALL be able to draw explicit high→low component links so each EditMesh component bakes only from its linked Target components; drawing an X over a component SHALL bake that component alone. Unlinked components SHALL use nearest-surface matching by default.
-
-#### Scenario: Linked components do not bleed
-- **WHEN** two overlapping Target components are linked to distinct EditMesh components
-- **THEN** each EditMesh component's maps SHALL contain only its linked source's detail
-
 ### Requirement: Bake correctness and preview
 Because retopo, UVs, and bake share one scene, bakes SHALL be free of scale mismatches and tangent-basis inconsistencies by construction: the tangent basis used for baking SHALL be identical to the one exported with the mesh. The viewport SHALL preview bake results on the EditMesh with a repositionable preview light (Move action).
 
@@ -71,7 +64,7 @@ for, so a region influences the range in proportion to the area it covers and
 not to the number of vertices sitting on it.
 
 Curvature baking SHALL follow the same rules as the other map types: the same
-cage projection, component links, output resolution up to 16384² (through the regioned path where the output exceeds the working set),
+cage projection, output resolution up to 16384² (through the regioned path where the output exceeds the working set),
 GPU dispatch with progress reporting and cancellation, and PNG/EXR output.
 
 #### Scenario: Curvature bake distinguishes edges from crevices
@@ -981,4 +974,61 @@ cancellation exactly as the unregioned bake does.
 #### Scenario: Progress is finer than one step per region
 - **WHEN** a regioned bake reports progress
 - **THEN** it SHALL report several increasing values inside each region's shading rather than one per region
+
+### Requirement: A field evaluator's returns are validated at the boundary
+
+A field evaluator is host-supplied code, so the bake SHALL validate what its
+callbacks return rather than propagating it. The validation SHALL distinguish
+two classes, separated by whether a CORRECT field can produce the value.
+
+A CONTRACT VIOLATION — a NaN distance, a non-finite gradient, a non-finite
+curvature, or an openness outside [0,1] beyond float tolerance — SHALL abandon
+the whole bake and report which callback failed and where. It SHALL NOT be
+sanitized into a usable value: a substituted default conceals the host's defect
+and returns an image indistinguishable from a measured one.
+
+A LEGITIMATELY UNDEFINED sample — an infinite distance, which is the ordinary
+"nothing here" answer from a field covering a bounded region, or a zero-length
+gradient, which is what a signed distance field has on its medial axis — SHALL
+end the march for that texel only. That texel SHALL take the same neutral value
+an un-hit cage ray produces, and such samples SHALL be counted on the result so
+a host can see how much of its field the bake could not reach.
+
+Callback out-params SHALL NOT be pre-seeded with a value that could pass
+validation, so that a callback which returns without writing is detected rather
+than read as a measurement.
+
+#### Scenario: A broken callback fails the bake
+
+- **WHEN** an evaluator returns a NaN distance, a non-finite gradient, or an
+  openness far outside [0,1]
+- **THEN** the bake SHALL fail, naming the callback, and SHALL produce no image
+
+#### Scenario: An undefined sample is a counted miss
+
+- **WHEN** an evaluator returns an infinite distance or a zero-length gradient
+- **THEN** that texel SHALL take its neutral value, the sample SHALL be counted,
+  and the bake SHALL succeed
+
+#### Scenario: A well-behaved field is unaffected
+
+- **WHEN** an evaluator honours its contract
+- **THEN** the baked pixels SHALL be unchanged by the validation
+
+### Requirement: Component link model
+The system SHALL provide a component-link model over the EditMesh and the Target, where a component is a connected face set: explicit high→low links from an EditMesh component to one or more Target components, a per-component "bake alone" flag (the drawing-X gesture), and source resolution that returns a component's explicit links when it has any and otherwise the single nearest Target component. The model SHALL be serializable with the document's cage state.
+
+The bake stage does NOT yet apply this model: every EditMesh component is baked against the whole Target, so an unlinked component, a linked one and one flagged to bake alone all produce the same maps today. Applying the resolved links to a bake — and exposing link editing through the C ABI and the bindings — is tracked in #103. Until then no map type SHALL claim link-restricted sampling, and a new map SHALL introduce no link-specific exception, so that when links are applied they reach every map on the same terms.
+
+#### Scenario: An explicit link wins over the nearest surface
+- **WHEN** an EditMesh component has an explicit link to a Target component that is not the nearest one
+- **THEN** resolving its source SHALL return the linked component and report the resolution as explicit
+
+#### Scenario: An unlinked component falls back to the nearest Target component
+- **WHEN** an EditMesh component has no explicit link
+- **THEN** resolving its source SHALL return the single nearest Target component and report the resolution as the fallback
+
+#### Scenario: A bake does not yet honour links
+- **WHEN** a bake runs on an EditMesh whose components carry explicit links
+- **THEN** every component SHALL be baked against the whole Target, exactly as if no links existed, and nothing in the bake's output or report SHALL suggest otherwise
 

@@ -21,7 +21,10 @@
       learn it -- and the fallback to the portable quadrangulator is silent and
       changes the output. Found by an embedder writing a type to report it and
       finding nothing could construct it.
-- [ ] F7. Peak-bounded parsing for the formats that declare their counts.
+- [x] F7. Peak-bounded parsing for the formats that declare their counts.
+      RESOLVED AS NOT BUILT (0.10.0): the mesh-io delta already states the
+      honest bound -- the ceiling limits the returned mesh, not the peak parse --
+      so the spec promises nothing this leaves undone.
       DEFERRED: the ceiling bounds the RESULT, which is the useful boundary
       (loading is the cheap half; the pipeline is where the cost is), and a
       peak bound is a per-format change to five importers.

@@ -5,6 +5,23 @@
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-09-23
+
+**The mesh-map release.** This engine is now the baker for
+[CyberTexel](https://github.com/CyberdyneCorp/CyberTexel) (epic #86). It adds
+eight new map types, border padding, UDIM, output up to 16384² with a bounded
+working set, and a C interface a map consumer can drive, plus the retopology
+work in Contours, Auto Relax, loop slide and interactive symmetry.
+
+**The released C ABI is 2.1**, soname `libcyber_capi.so.2`. This is a breaking
+release for C/C++ callers of the shared library. See *Changed → BREAKING* for
+the reason and the two-line migration. The Python and Swift bindings are
+unaffected.
+
+The *ABI 1.17 … 1.24, additive* notes below record each change as it merged.
+Those minors never shipped on their own: they were folded into ABI 2.0, which is
+the first ABI any release carries after 1.16.
+
 ### Added
 
 - **Bake output up to 16384² through a regioned path with a bounded working set**

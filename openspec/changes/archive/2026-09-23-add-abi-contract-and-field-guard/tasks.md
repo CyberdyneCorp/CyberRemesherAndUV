@@ -42,6 +42,9 @@
       re-raises it — instead of substituting `0.0`, which satisfies
       `|d| <= epsilon` and reported a hit at the cage origin.
 - [x] B6. Hostile-field tests, each verified to FAIL with its guard reverted.
-- [ ] B7. Lipschitz-violation detection (a sign flip between consecutive
+- [x] B7. Lipschitz-violation detection (a sign flip between consecutive
       samples). DEFERRED: speculative, and the header already states the bound
       cannot be enforced.
+      RESOLVED AS NOT BUILT (0.10.0): nothing in this change's spec delta
+      promises detection, and the header's statement that the bound cannot be
+      enforced stands as the contract.

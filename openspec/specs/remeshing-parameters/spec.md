@@ -8,25 +8,21 @@ what it clamped, and no parameter is inert — one that cannot change the output
 is a bug, not a placeholder, so it is either wired through or rejected.
 ## Requirements
 ### Requirement: Canonical parameter set
-The remesher SHALL expose exactly these user-facing parameters, defined once in a single source of truth consumed by GUI, CLI, and network entry points:
 
-| Parameter | Type | Default | Valid range |
-|---|---|---|---|
-| targetQuadCount | int | 50 000 | 100 – 2 000 000 |
-| edgeScale | float | 1.0 | 0.5 – 4.0 |
-| sharpEdgeDegrees | float | 90.0 | 30.0 – 180.0 |
-| smoothNormalDegrees | float | 0.0 | 0.0 – 180.0 |
-| adaptivity | float | 1.0 | 0.0 – 1.0 |
-| pureQuads | bool | false | — |
-| holeFillMaxBoundary | int | 64 | 0 (never fill) – 10 000 |
-| smallPatchPolicy | enum | keep-largest | keep-largest \| keep-all \| min-faces(N) |
-| quadMethod | enum | quad-cover | quad-cover \| field-aligned \| instant-meshes \| integer |
-
-`quadMethod` is the extractor selector rather than a solver parameter, so it lives on the entry-point structs (`CyberRemeshParams.quadMethod`, `RemeshParams.quad_method`) rather than in the shared `Parameters` struct; the default is `quad-cover`, degrading to `field-aligned` where no seamless-UV solver is present (see `remeshing-pipeline`).
+The canonical parameter set SHALL retain all existing defaults and add an
+optional target-count policy only through an additive sibling configuration
+surface. The policy SHALL state tolerance and maximum attempts, both validated
+before the pipeline begins; omitting it SHALL preserve current behavior.
 
 #### Scenario: Defaults applied
+
 - **WHEN** a remesh is invoked with no explicit parameters
-- **THEN** the engine SHALL run with exactly the defaults above
+- **THEN** the engine SHALL run with exactly the existing documented defaults
+
+#### Scenario: Omitted policy preserves defaults
+
+- **WHEN** a caller uses the existing remesh entry point without a count policy
+- **THEN** the output and two-attempt calibration behavior SHALL remain unchanged
 
 ### Requirement: Validation at every entry point
 Every entry point SHALL validate parameters against the canonical ranges before the pipeline starts: out-of-range numeric values SHALL be clamped with a user-visible warning naming the parameter, original value, and clamped value; non-numeric or type-mismatched values SHALL be rejected with a typed error. No entry point SHALL forward unvalidated values to the engine.

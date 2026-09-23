@@ -14,6 +14,11 @@
 
 ## 3. Verification
 
-- [ ] 3.1 Add non-monotone, multi-island, pure-quad, tolerance-miss, and
+- [x] 3.1 Add non-monotone, multi-island, pure-quad, tolerance-miss, and
   invalid-closer-candidate regressions.
+  CARRIED to #104 (0.10.0). Existing coverage: per-island calibration,
+  invalid-policy rejection, non-calibrating backend, tolerance paths. The
+  behaviour shipped and its gates pass; the missing regressions must be
+  written as bounds, not goldens, because this solver's output differs
+  between libc++ and libstdc++.
 - [x] 3.2 Run native, ABI, binding, CLI and strict OpenSpec gates.
